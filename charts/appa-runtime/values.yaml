@@ -1,8 +1,8 @@
 # Shared OpenAPPA runtime. One replica: the trajectory log is SQLite.
 
 image:
-  repository: ghcr.io/archestra-ai/appa-runtime
-  # Empty uses the chart appVersion.
+  repository: europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-runtime
+  # Empty uses v<appVersion>.
   tag: ""
   pullPolicy: IfNotPresent
   digest: ""

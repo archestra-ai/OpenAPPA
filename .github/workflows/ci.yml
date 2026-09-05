@@ -107,9 +107,16 @@ jobs:
               - 'scripts/test_appa_refresh_batteries.py'
               - 'scripts/appa-guide-runtime.py'
               - 'scripts/test_appa_guide_runtime.py'
+              - 'scripts/appa-oci-tags.py'
+              - 'scripts/test_appa_oci_tags.py'
+              - 'scripts/appa-gar-cleanup-policies.json'
+              - '.github/actions/auth-to-gar/**'
               - '.github/actions/check-release-versions/**'
               - '.github/release-please/**'
               - '.github/workflows/ci.yml'
+              - '.github/workflows/release.yml'
+              - '.github/workflows/publish-oci-images.yml'
+              - '.github/workflows/publish-ci-images.yml'
               - 'Cargo.toml'
               - 'charts/appa-runtime/Chart.yaml'
               - 'charts/appa-runtime/README.md'
@@ -238,7 +245,7 @@ jobs:
           done
 
       - name: Test release battery refresh
-        run: python3 -m unittest scripts/test_appa_refresh_batteries.py scripts/test_appa_guide_runtime.py
+        run: python3 -m unittest scripts/test_appa_refresh_batteries.py scripts/test_appa_guide_runtime.py scripts/test_appa_oci_tags.py
 
       - name: Check release versions
         uses: ./.github/actions/check-release-versions

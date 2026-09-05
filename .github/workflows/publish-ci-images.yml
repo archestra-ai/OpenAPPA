@@ -1,0 +1,130 @@
+name: Publish CI images
+
+# Rolling tags for appa-public. These are not releases. A new digest is
+# attached to sha-/main/latest on each image-changing push; GAR
+# deletes those prefixes after 30 days and keeps the last ten versions.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: publish-ci-images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Changed Paths
+    # Release commits attach rolling tags in the release build itself.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      !startsWith(github.event.head_commit.message, 'chore(main): release ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      images: ${{ steps.filter.outputs.images }}
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            images:
+              - 'appa-runtime/**'
+              - 'appa-runtime-api/**'
+              - 'appa-engine/**'
+              - 'appa-eventlog/**'
+              - 'appa-policy/**'
+              - 'appa-builtin/**'
+              - 'appa-adapter-kagent/**'
+              - 'appa-adapter-claude-code/**'
+              - 'appa-example-agent/**'
+              - 'appa-agent-python/**'
+              - 'integrations/kagent/**'
+              - 'integrations/claude-code/**'
+              - 'integrations/appa-guide/**'
+              - 'batteries/**'
+              - 'scripts/appa-oci-tags.py'
+              - 'scripts/appa-gar-cleanup-policies.json'
+              - 'scripts/appa-refresh-batteries.py'
+              - 'scripts/appa-guide-runtime.py'
+              - '.github/actions/auth-to-gar/**'
+              - '.github/workflows/publish-oci-images.yml'
+              - '.github/workflows/publish-ci-images.yml'
+              - '.github/workflows/release.yml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.dockerignore'
+              - 'Dockerfile'
+
+  tags:
+    name: Resolve rolling tags
+    needs: changes
+    if: needs.changes.outputs.images == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      tags: ${{ steps.resolve.outputs.tags }}
+      source_commit: ${{ steps.resolve.outputs.source_commit }}
+      version_label: ${{ steps.resolve.outputs.version_label }}
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Resolve rolling tags
+        id: resolve
+        env:
+          EVENT: ${{ github.event_name }}
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref }}
+        run: |
+          if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::source commit must be a full SHA"
+            exit 1
+          fi
+          args=(rolling --event "$EVENT" --sha "$SHA" --ref "$REF")
+          mapfile -t tags < <(python3 scripts/appa-oci-tags.py "${args[@]}")
+          if [ "${#tags[@]}" -eq 0 ]; then
+            echo "::error::no rolling tags to publish"
+            exit 1
+          fi
+          {
+            echo "tags<<EOF"
+            printf '%s\n' "${tags[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "source_commit=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "version_label=${tags[0]}" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish rolling images
+    needs: tags
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/publish-oci-images.yml
+    with:
+      tags: ${{ needs.tags.outputs.tags }}
+      source_commit: ${{ needs.tags.outputs.source_commit }}
+      version_label: ${{ needs.tags.outputs.version_label }}
+      checkout_ref: ${{ needs.tags.outputs.source_commit }}
+      immutable: false
+    secrets:
+      APPA_GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}

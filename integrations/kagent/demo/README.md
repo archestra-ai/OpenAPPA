@@ -19,7 +19,7 @@ chart:
 ```sh
 APPA_VERSION=0.12.0 # x-release-please-version
 helm upgrade --install appa-kagent-demo \
-  oci://ghcr.io/archestra-ai/charts/appa-kagent-demo \
+  oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-kagent-demo \
   --version "$APPA_VERSION" -n kagent \
   --set-string runtime.url=http://appa-runtime.appa.svc.cluster.local:18787 \
   --set-string modelConfig.name=default-model-config \

@@ -2,7 +2,7 @@
 
 `appa-adapter-kagent` is the Rust codec crate, a workspace crate compiled into `appa-runtime`. The runtime selects it through its closed `Adapter` enum ([appa-runtime/src/main.rs](../../appa-runtime/src/main.rs)) as `appa_adapter_kagent::codec()`.
 
-The agent side wraps the kagent ADK runtimes and takes its names from them. The `appa-kagent-adk` python package (plugin + entrypoint) builds as the `ghcr.io/archestra-ai/appa-kagent-adk` image from its [Dockerfile](appa-kagent-adk/Dockerfile). The `appa-kagent-adk-go` Go module (plugin + runtime main) builds as the `ghcr.io/archestra-ai/appa-kagent-adk-go` image from its [Dockerfile](appa-kagent-adk-go/Dockerfile). The release workflow publishes both images, and three more, at the release version ([Delivery units](#delivery-units)). Operators can also build them from source. The crate name never names an image.
+The agent side wraps the kagent ADK runtimes and takes its names from them. The `appa-kagent-adk` python package (plugin + entrypoint) builds as the `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk` image from its [Dockerfile](appa-kagent-adk/Dockerfile). The `appa-kagent-adk-go` Go module (plugin + runtime main) builds as the `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk-go` image from its [Dockerfile](appa-kagent-adk-go/Dockerfile). The release workflow publishes both images, and three more, at the immutable `v<version>` tag ([Delivery units](#delivery-units)). Operators can also build them from source. The crate name never names an image.
 
 Both images read `APPA_RUNTIME_URL`, both emit the same adapter wire, and the one codec crate parses it.
 
@@ -141,7 +141,7 @@ kind: Harness
 spec:
   kagent: {}
   workload:
-    image: ghcr.io/archestra-ai/appa-kagent-adk@sha256:<digest>
+    image: europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk@sha256:<digest>
   env:
     - name: APPA_RUNTIME_URL
       value: http://appa-runtime.appa-system:8787
@@ -572,9 +572,9 @@ appa-kagent-demo release
 
 Every unit lives in this repository.
 
-[release.yml](../../.github/workflows/release.yml) publishes five images to `ghcr.io/archestra-ai` at the release version. `appa-runtime` and `appa-kagent-adk` publish for `linux/amd64` and `linux/arm64`. `appa-kagent-adk-go`, `appa-demo-tools`, and `appa-demo-mocks` publish for `linux/amd64`. Each build attaches an SBOM and provenance. The workflow publishes both Helm charts as OCI artifacts and GitHub release assets. It also tags `golang-adk` on the `appa-kagent-adk-go` digest for kagent 0.9.12.
+[release.yml](../../.github/workflows/release.yml) publishes five images to `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public` at the immutable `v<version>` tag. `appa-runtime` and `appa-kagent-adk` publish for `linux/amd64` and `linux/arm64`. `appa-kagent-adk-go`, `appa-demo-tools`, and `appa-demo-mocks` publish for `linux/amd64`. Each build attaches an SBOM and provenance. The workflow publishes both Helm charts as OCI artifacts under `charts/` with unprefixed SemVer tags, and as GitHub release assets. It also tags `golang-adk` on the `appa-kagent-adk-go` digest for kagent 0.9.12. Image-changing CI pushes rolling `sha-`, `pr-`, `main`, and `latest` tags to the same registry; those prefixes are garbage-collected after 30 days.
 
-Every Dockerfile pins each `FROM` and `COPY --from` base by digest, with the tag beside it for the reader. The image jobs in [ci.yml](../../.github/workflows/ci.yml) build all five on a pull request that can break them, including native arm64 checks for the runtime and Python adapter. They push none. No workflow scans the images.
+Every Dockerfile pins each `FROM` and `COPY --from` base by digest, with the tag beside it for the reader. The image jobs in [ci.yml](../../.github/workflows/ci.yml) build all five on a pull request that can break them, including native arm64 checks for the runtime and Python adapter. They push none. [publish-ci-images.yml](../../.github/workflows/publish-ci-images.yml) publishes the rolling tags. No workflow scans the images.
 
 ## Verification matrix
 

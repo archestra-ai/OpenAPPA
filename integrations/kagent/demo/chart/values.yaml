@@ -16,7 +16,7 @@ runtime:
 # through local command adapters; the service never owns runtime resources.
 mocks:
   image:
-    repository: ghcr.io/archestra-ai/appa-demo-mocks
+    repository: europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-demo-mocks
     tag: ""
     pullPolicy: IfNotPresent
   # Seconds a change-board consult waits for a member's ruling before it
@@ -26,7 +26,7 @@ mocks:
 
 tools:
   image:
-    repository: ghcr.io/archestra-ai/appa-demo-tools
+    repository: europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-demo-tools
     tag: ""
     pullPolicy: IfNotPresent
 

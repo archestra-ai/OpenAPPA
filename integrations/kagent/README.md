@@ -67,8 +67,8 @@ helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-c
 APPA_VERSION=0.12.0 # x-release-please-version
 helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
-  --set controller.agentImage.registry=ghcr.io \
-  --set controller.agentImage.repository=archestra-ai/appa-kagent-adk \
+  --set controller.agentImage.registry=europe-west1-docker.pkg.dev \
+  --set controller.agentImage.repository=friendly-path-465518-r6/appa-public/appa-kagent-adk \
   --set providers.default=openAI \
   --set-string providers.openAI.apiKey="$OPENAI_API_KEY" \
   --set k8s-agent.enabled=false \
@@ -83,10 +83,10 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --set cilium-debug-agent.enabled=false \
   --force-conflicts \
   --wait --timeout 10m \
-  --set controller.agentImage.tag="$APPA_VERSION"
+  --set controller.agentImage.tag="v$APPA_VERSION"
 
 # 3. Install appa
-helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
+helm upgrade --install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
   --version "$APPA_VERSION" -n appa --create-namespace \
   --set persistence.enabled=true \
   --set appaGuide.enabled=true \
@@ -95,7 +95,7 @@ helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runti
 
 # 4. Install the demo fixtures
 helm upgrade --install appa-kagent-demo \
-  oci://ghcr.io/archestra-ai/charts/appa-kagent-demo \
+  oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-kagent-demo \
   --version "$APPA_VERSION" -n kagent \
   --set-string runtime.url=http://appa-runtime.appa.svc.cluster.local:18787 \
   --set-string modelConfig.name=default-model-config \

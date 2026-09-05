@@ -4,7 +4,7 @@ description: >-
   carry the version release-please holds. The tag and the compiled CARGO_PKG_VERSION
   are concatenated into the plugin artifact URL every shipped binary fetches, so a
   disagreement between them ships binaries that request a URL which does not exist.
-  The charts resolve image tags to appVersion, and the operator guides spell an
+  The charts resolve image tags to v<appVersion>, and the operator guides spell an
   image tag a reader pastes, so a disagreement names images no release published.
 
 inputs:

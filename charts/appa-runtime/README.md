@@ -4,15 +4,15 @@ Shared OpenAPPA runtime for a Kubernetes cluster. One replica. Agents
 that set `APPA_RUNTIME_URL` to this Service, with `APPA_ENABLED=true`,
 are gated by the policy in the ConfigMap.
 
-The image of this chart version is `ghcr.io/archestra-ai/appa-runtime:0.12.0`. # x-release-please-version
+The image of this chart version is `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-runtime:v0.12.0`. # x-release-please-version
 
 ## Install
 
-Install a released chart from GHCR after setting `APPA_VERSION` to an
-OpenAPPA release that contains the chart:
+Install a released chart from Artifact Registry after setting
+`APPA_VERSION` to an OpenAPPA release that contains the chart:
 
 ```sh
-helm install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
+helm install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
   --version "$APPA_VERSION" --namespace appa --create-namespace
 ```
 
@@ -31,7 +31,7 @@ checkout.
 The chart can install the configuring kagent Agent with the runtime:
 
 ```sh
-helm install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
+helm install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
   --version "$APPA_VERSION" --namespace appa --create-namespace \
   --set appaGuide.enabled=true \
   --set appaGuide.namespace=kagent
@@ -41,10 +41,6 @@ The option is off by default because the runtime chart also supports
 clusters without kagent. The target namespace, kagent model config, and
 tool-server name are configurable under `appaGuide`. An empty
 `appaGuide.skill.ref` pins the skill to the chart's `v<appVersion>` tag.
-
-GHCR packages start private. An organization owner must make the
-`charts/appa-runtime` package public after its first publish before an
-anonymous OCI install can pull it.
 
 The runtime binds the pod network directly. Point agents at:
 
