@@ -78,7 +78,7 @@ pub enum ManifestError {
         host: Host,
         field: &'static str,
     },
-    #[error("{path}: a {host} adapter declares `{field}`")]
+    #[error("{path}: a {host} adapter must declare `{field}`, and this one does not")]
     MissingField {
         path: PathBuf,
         host: Host,

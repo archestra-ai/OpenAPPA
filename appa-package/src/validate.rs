@@ -31,6 +31,13 @@ pub enum PackageError {
         #[source]
         source: io::Error,
     },
+    #[error("{manifest} declares `{field}` as `{declared}`, which is not {wanted}")]
+    WrongKind {
+        manifest: PathBuf,
+        field: &'static str,
+        declared: String,
+        wanted: Kind,
+    },
     #[error("{manifest} declares `{field}` as `{declared}`, which resolves outside the package")]
     EscapingPath {
         manifest: PathBuf,
@@ -81,16 +88,16 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
     let contained = Contained::new(dir, &manifest_path);
     match &package.role {
         Role::Battery(battery) => {
-            let policy = contained.resolve(&battery.policy, "battery.policy")?;
+            let policy = contained.resolve(&battery.policy, "battery.policy", Kind::File)?;
             for helper in &battery.helpers {
-                contained.resolve(helper, "battery.helpers")?;
+                contained.resolve(helper, "battery.helpers", Kind::File)?;
             }
             check_policy(&policy, &battery.namespaces, &battery.helpers)?;
         }
         Role::Adapter(adapter) => {
-            contained.resolve(adapter.default_policy(), "adapter.default_policy")?;
+            contained.resolve(adapter.default_policy(), "adapter.default_policy", Kind::File)?;
             if let crate::package::Adapter::ClaudeCode { plugin_dir, .. } = adapter {
-                contained.resolve(plugin_dir, "adapter.plugin_dir")?;
+                contained.resolve(plugin_dir, "adapter.plugin_dir", Kind::Directory)?;
             }
         }
     }
@@ -113,7 +120,7 @@ impl Contained {
         }
     }
 
-    fn resolve(&self, declared: &RelativePath, field: &'static str) -> Result<PathBuf, PackageError> {
+    fn resolve(&self, declared: &RelativePath, field: &'static str, kind: Kind) -> Result<PathBuf, PackageError> {
         let resolved =
             self.root
                 .join(declared.as_path())
@@ -124,14 +131,45 @@ impl Contained {
                     declared: declared.to_string(),
                     source,
                 })?;
-        match resolved.starts_with(&self.root) {
-            true => Ok(resolved),
-            false => Err(PackageError::EscapingPath {
+        if !resolved.starts_with(&self.root) {
+            return Err(PackageError::EscapingPath {
                 manifest: self.manifest.clone(),
                 field,
                 declared: declared.to_string(),
+            });
+        }
+        // A field names one kind of thing. A helper that is a directory and a
+        // plugin tree that is a file both pass containment and fail at use, so
+        // the package is refused here rather than at someone's deployment.
+        let found = match resolved.is_dir() {
+            true => Kind::Directory,
+            false => Kind::File,
+        };
+        match found == kind {
+            true => Ok(resolved),
+            false => Err(PackageError::WrongKind {
+                manifest: self.manifest.clone(),
+                field,
+                declared: declared.to_string(),
+                wanted: kind,
             }),
         }
+    }
+}
+
+/// What a declared path names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    File,
+    Directory,
+}
+
+impl std::fmt::Display for Kind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::File => "a file",
+            Self::Directory => "a directory",
+        })
     }
 }
 
@@ -479,6 +517,44 @@ mod tests {
         ));
 
         validate_package(directory.path()).expect("a helper may read a named token");
+    }
+
+    /// A declared path names one kind of thing. Containment alone accepts a
+    /// helper that is a directory and a plugin tree that is a file: both resolve
+    /// inside the package and both fail at the deployment that trusted them.
+    #[test]
+    fn a_declared_path_of_the_wrong_kind_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("appa-package.toml"), BATTERY_MANIFEST).unwrap();
+        fs::write(directory.path().join("appa.toml"), BATTERY_POLICY).unwrap();
+        fs::create_dir(directory.path().join("audience-source.py")).unwrap();
+
+        assert!(matches!(
+            validate_package(directory.path()),
+            Err(PackageError::WrongKind {
+                field: "battery.helpers",
+                ..
+            })
+        ));
+
+        let adapter = tempfile::tempdir().unwrap();
+        fs::write(
+            adapter.path().join("appa-package.toml"),
+            "schema = 1\nname = \"claude-code\"\ndescription = \"Claude Code adapter\"\n\n\
+             [adapter]\nhost = \"claude-code\"\nprotocol = 1\ndefault_policy = \"default.appa.toml\"\n\
+             plugin_dir = \"plugin\"\nplugin = \"appa-runtime\"\n",
+        )
+        .unwrap();
+        fs::write(adapter.path().join("default.appa.toml"), "[policy]\nversion = 2\n").unwrap();
+        fs::write(adapter.path().join("plugin"), "not a tree").unwrap();
+
+        assert!(matches!(
+            validate_package(adapter.path()),
+            Err(PackageError::WrongKind {
+                field: "adapter.plugin_dir",
+                ..
+            })
+        ));
     }
 
     #[test]
