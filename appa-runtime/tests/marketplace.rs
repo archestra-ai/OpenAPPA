@@ -208,3 +208,119 @@ fn copy_tree(source: &Path, destination: &Path) {
         }
     }
 }
+
+/// A fragment that validates loads.
+///
+/// `appa-package` states what a distributed fragment may carry and
+/// `appa-runtime`'s config loader states what any include may carry, in two
+/// crates that cannot depend on each other. Every rule one of them learns is a
+/// chance for them to disagree, and the disagreement that matters has one
+/// direction: a package that validates and then will not load breaks a
+/// deployment that trusted the marketplace.
+///
+/// The converse is deliberately false. A battery is a fragment someone else
+/// wrote and a deployment installed, so the marketplace refuses what the loader
+/// merely tolerates from a file the operator wrote themselves — a `url` binding
+/// reaching an endpoint the deployment did not choose is the plain case. Those
+/// are the `!validates && loads` rows below, and each one is a decision rather
+/// than a gap.
+///
+/// The rows are crafted to sit on each rule's edge. The shipped batteries sit
+/// in the middle of every rule and would agree whatever the rules were.
+#[test]
+fn a_battery_that_validates_loads() {
+    const HELPER: &str = "audience-source.py";
+    let body = |declarations: &str, externals: &str| format!("[policy]\nversion = 2\n\n{declarations}\n{externals}");
+    let tool = "[[policy.tool]]\nname = \"mcp/probe/read\"\ndelta = {}\n";
+    let command = format!("[externals.audience.probe]\ncommand = [\"python3\", \"{HELPER}\"]\n");
+
+    // Each row carries whether the marketplace accepts it, so a validator that
+    // refused everything would fail here rather than satisfy the implication
+    // vacuously.
+    let accepted = true;
+    let refused = false;
+    let fragments = [
+        ("a plain battery", accepted, body(tool, "")),
+        ("a battery that runs its helper", accepted, body(tool, &command)),
+        (
+            "a provider credential",
+            accepted,
+            body(tool, &format!("{command}token_env = \"APPA_PROVIDER_PROBE\"\n")),
+        ),
+        (
+            "a credential outside the provider namespace",
+            refused,
+            body(tool, &format!("{command}token_env = \"PROBE_TOKEN\"\n")),
+        ),
+        // Stricter than the loader on purpose: both of these load, and neither
+        // belongs in a fragment a deployment installed from a marketplace.
+        (
+            "a url binding",
+            refused,
+            body(tool, "[externals.audience.probe]\nurl = \"http://127.0.0.1:9/x\"\n"),
+        ),
+        (
+            "a builtin binding",
+            refused,
+            body(tool, "[externals.audience.probe]\nbuiltin = \"llm\"\n"),
+        ),
+        (
+            "a root-only external setting",
+            refused,
+            body(tool, "[externals]\ntimeout_ms = 5000\n"),
+        ),
+        (
+            "a root-only policy section",
+            refused,
+            body(&format!("{tool}\n[policy.audience]\nteam = []\n"), ""),
+        ),
+        (
+            "a top-level table only a root carries",
+            refused,
+            format!("[deployment]\nname = \"x\"\n{}", body(tool, "")),
+        ),
+        ("no policy version", refused, format!("[policy]\n\n{tool}")),
+        (
+            "a declaration without a name",
+            refused,
+            body("[[policy.tool]]\ndelta = {}\n", ""),
+        ),
+    ];
+
+    for (what, expected, fragment) in fragments {
+        let package = tempfile::tempdir().expect("a temp dir is creatable");
+        std::fs::write(
+            package.path().join("appa-package.toml"),
+            "schema = 1\nname = \"probe\"\ndescription = \"a fragment on a rule's edge\"\n\n[battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n",
+        )
+        .expect("the manifest is writable");
+        std::fs::write(package.path().join("appa.toml"), &fragment).expect("the policy is writable");
+        std::fs::write(package.path().join(HELPER), "print('{}')\n").expect("the helper is writable");
+
+        let validates = validate_package(package.path()).is_ok();
+        let loads = loads_beside_a_root(package.path());
+
+        assert_eq!(
+            validates, expected,
+            "{what}: the marketplace changed its mind about this"
+        );
+        assert!(
+            !validates || loads,
+            "{what}: the package validates and then does not load"
+        );
+    }
+}
+
+/// Whether a deployment holding this package beside its root config loads.
+fn loads_beside_a_root(package: &Path) -> bool {
+    let deployment = tempfile::tempdir().expect("a temp dir is creatable");
+    let installed = deployment.path().join("probe");
+    copy_tree(package, &installed);
+    let root = deployment.path().join("appa.toml");
+    std::fs::write(
+        &root,
+        "include = [\"probe/appa.toml\"]\n[policy]\nversion = 2\n\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+    )
+    .expect("the root config is writable");
+    Config::load(&root).is_ok()
+}
