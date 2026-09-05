@@ -353,6 +353,8 @@ approval on apply, patch, delete, Helm upgrade, and Helm uninstall.
   `k8s_apply_manifest`; kagent tools 0.2.1 cannot merge-patch CRDs. Wait
   for the new pod and verify its startup log and Agent conditions. For a
   Helm-owned Agent, propose the equivalent Helm values change instead.
+  The protection request itself is not approval. End the first turn with
+  the proposal and wait for a separate approval message before any mutation.
 - **Protect all Agents**: inventory every declarative Agent first. Skip
   `appa-guide`. Group Agents by intended runtime and list them in the
   proposal. Preserve every Agent's complete spec and environment list.

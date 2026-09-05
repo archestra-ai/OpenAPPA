@@ -38,7 +38,9 @@ def test_the_dashboard_opens_every_seeded_demo_case(browser_context):
         page.close()
 
 
-@pytest.mark.skipif(not os.environ.get("APPA_QUICKSTART_AGENT"), reason="quickstart chart row only")
+@pytest.mark.skipif(
+    not os.environ.get("APPA_QUICKSTART_AGENT"), reason="quickstart chart row only"
+)
 def test_the_chart_runtime_gates_the_quickstart_agent(browser_context, shots_dir: str):
     agent = os.environ["APPA_QUICKSTART_AGENT"]
     page = browser_context.new_page()
@@ -60,6 +62,7 @@ def test_init_completes_the_full_read_only_inventory(chat: Chat, shots_dir: str)
     chat.shot(shots_dir, "guide-init")
     assert "Error in plugin" not in body
     assert not chat.confirmation_shown(), "read-only init does not require review"
+    details = chat.tool_details()
     for observed in [
         "appa-runtime",
         "demo-tools",
@@ -67,7 +70,7 @@ def test_init_completes_the_full_read_only_inventory(chat: Chat, shots_dir: str)
         "batter",
         "release-manager",
     ]:
-        assert observed.lower() in body.lower(), f"init reports {observed}"
+        assert observed.lower() in details.lower(), f"init observes {observed}"
 
 
 def test_diagnose_reports_runtime_policy_agents_and_tools(chat: Chat, shots_dir: str):

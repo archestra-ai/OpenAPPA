@@ -41,6 +41,11 @@ cd integrations/kagent/e2e/ui
 APPA_UI_E2E=1 uv run --with playwright --with "pytest>=8" --with pytest-rerunfailures pytest -v .
 ```
 
+Run the guide row from `integrations/kagent/e2e` with
+`./run-matrix.sh guide ui`. It creates an ungated fixture Agent, verifies
+init, diagnosis, rejected reload and battery actions, protects the fixture,
+checks its resulting environment, and removes it.
+
 Real model turns run tens of seconds each; the whole matrix takes
 5–25 minutes. `APPA_UI_SHOTS` names the screenshot directory;
 `APPA_UI_REPLY_TIMEOUT` (seconds) stretches the reply wait for slow

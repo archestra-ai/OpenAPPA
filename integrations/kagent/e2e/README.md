@@ -48,6 +48,7 @@ cd integrations/kagent/e2e
 ./run-matrix.sh python a2a     # svc/cluster-ops on 127.0.0.1:18089
 ./run-matrix.sh go ui          # APPA_AGENT=cluster-ops-go
 ./run-matrix.sh go a2a         # svc/cluster-ops-go on 127.0.0.1:18090
+./run-matrix.sh guide ui       # appa-guide lifecycle plus an Agent migration
 ./run-matrix.sh all            # every row that runs today, in sequence
 ```
 
