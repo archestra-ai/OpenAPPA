@@ -12,6 +12,18 @@ use serde::Deserialize;
 pub struct Config {
     policy: PolicyFile,
     pub externals: Externals,
+    /// Deployment knobs that describe this machine's reporting posture, not its policy.
+    /// Deliberately outside [`PolicyFile`]: changing one must not move the policy file key
+    /// that every session's opening binds to.
+    pub reporting: Reporting,
+}
+
+/// What this deployment reports about itself, and to whom.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Reporting {
+    /// May an agent send a report on its own, through the `yell` tool? Off unless the
+    /// deployment says otherwise, so an upgrade never starts an agent reporting.
+    pub agent_yell: bool,
 }
 
 /// The runtime's own environment namespace: its wiring (`APPA_CONFIG`, `APPA_DB`,
@@ -519,6 +531,17 @@ struct RawConfig {
     appa_composed: Option<RawComposedMetadata>,
     policy: toml::Value,
     externals: RawExternals,
+    /// Root-file only, and stripped before the composed document is rendered, so it never
+    /// reaches [`PolicyFile::bytes`]. See [`Config::load`].
+    #[serde(default)]
+    reporting: RawReporting,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReporting {
+    #[serde(default)]
+    agent_yell: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -688,11 +711,24 @@ impl Config {
             )?;
         }
 
+        // The knob is this machine's, not the policy's. It is read from the root file's own
+        // parse and dropped from the composed document, so the stored text — and with it the
+        // policy file key every opening binds to — is byte-identical whether or not the
+        // deployment set it. Carrying the value forward explicitly is what keeps it from
+        // reverting to the default when the composed text is parsed back.
+        let reporting = Reporting {
+            agent_yell: root.reporting.agent_yell,
+        };
+        document
+            .as_table_mut()
+            .expect("RawConfig parsed the root as a table")
+            .remove("reporting");
+
         let composed = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
         let raw: RawConfig = toml::from_str(&composed).map_err(|source| ConfigError::UnparsablePolicy { source })?;
         add_composed_metadata(&mut document, &raw.externals, &origins)?;
         let stored = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
-        Config::validate_composed(stored, raw, origins, |var| std::env::var(var).ok())
+        Config::validate_composed(stored, raw, reporting, origins, |var| std::env::var(var).ok())
     }
 
     /// The configuration of a host that composes its policy in memory
@@ -705,7 +741,7 @@ impl Config {
         let text = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
         let raw: RawConfig = toml::from_str(&text).map_err(|source| ConfigError::UnparsablePolicy { source })?;
         let origins = root_command_origins(&raw, Path::new("."))?;
-        Config::validate_composed(text, raw, origins, |var| std::env::var(var).ok())
+        Config::validate_composed(text, raw, Reporting::default(), origins, |var| std::env::var(var).ok())
     }
 
     pub fn policy_file(&self) -> &PolicyFile {
@@ -725,12 +761,13 @@ impl Config {
             .into_iter()
             .map(|key| (key, source_dir.to_path_buf()))
             .collect();
-        Config::validate_composed(text, raw, origins, lookup)
+        Config::validate_composed(text, raw, Reporting::default(), origins, lookup)
     }
 
     fn validate_composed(
         text: String,
         raw: RawConfig,
+        reporting: Reporting,
         origins: BTreeMap<String, PathBuf>,
         lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<Config, ConfigError> {
@@ -762,6 +799,7 @@ impl Config {
         };
         Ok(Config {
             policy: PolicyFile::new(text.into_bytes(), raw.policy),
+            reporting,
             externals: Externals {
                 timeout: Duration::from_millis(timeout_ms),
                 review_timeout: Duration::from_millis(review_timeout_ms),
@@ -2338,6 +2376,70 @@ mod tests {
                 "{field} is root-only"
             );
         }
+    }
+
+    fn reporting_config(dir: &std::path::Path, table: &str) -> Config {
+        let path = dir.join("appa.toml");
+        std::fs::write(
+            &path,
+            format!("[policy]\nversion=2\n[externals]\ntimeout_ms=5000\nmax_body_bytes=65536\n{table}"),
+        )
+        .expect("the configuration is written");
+        Config::load(&path).expect("the configuration loads")
+    }
+
+    #[test]
+    fn agent_yell_is_off_unless_the_deployment_says_otherwise() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        assert!(
+            !reporting_config(dir.path(), "").reporting.agent_yell,
+            "a file with no [reporting] table never starts an agent reporting"
+        );
+        assert!(!reporting_config(dir.path(), "[reporting]\n").reporting.agent_yell);
+        assert!(
+            !reporting_config(dir.path(), "[reporting]\nagent_yell=false\n")
+                .reporting
+                .agent_yell
+        );
+    }
+
+    /// The knob survives composition. The composed text is parsed back a second time, and
+    /// reading the value from that parse instead of carrying it forward would silently
+    /// return it to the default.
+    #[test]
+    fn agent_yell_survives_the_second_parse() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        assert!(
+            reporting_config(dir.path(), "[reporting]\nagent_yell=true\n")
+                .reporting
+                .agent_yell
+        );
+    }
+
+    /// The whole reason the table is stripped before the document is rendered: a machine's
+    /// reporting posture is not part of the policy every session's opening binds to.
+    #[test]
+    fn the_reporting_table_does_not_move_the_policy_file_key() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let without = reporting_config(dir.path(), "");
+        let with = reporting_config(dir.path(), "[reporting]\nagent_yell=true\n");
+        assert_eq!(
+            without.policy_file().bytes(),
+            with.policy_file().bytes(),
+            "the composed policy bytes are identical either way"
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_under_reporting_is_refused() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(
+            &path,
+            "[policy]\nversion=2\n[externals]\ntimeout_ms=5000\nmax_body_bytes=65536\n[reporting]\nagent_yel=true\n",
+        )
+        .expect("the configuration is written");
+        assert!(matches!(Config::load(&path), Err(ConfigError::Unparsable { .. })));
     }
 
     #[test]

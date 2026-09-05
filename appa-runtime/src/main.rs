@@ -87,7 +87,7 @@ struct Args {
 
 /// The adapter surface this binary can serve. The one place harness
 /// names appear in this crate: each variant maps to one codec crate.
-#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Adapter {
     ClaudeCode,
     Kagent,
@@ -183,6 +183,9 @@ pub(crate) fn binary_digest(path: &Path) -> io::Result<String> {
 struct AppState {
     runtime: Arc<Runtime>,
     codec: Codec,
+    /// Which harness this process serves. A report names it, because the same policy behaves
+    /// differently under a harness that declares its spawns and one that does not.
+    adapter: Adapter,
     config: PathBuf,
     battery_dirs: Vec<PathBuf>,
     batteries: Arc<RwLock<crate::batteries::BatteriesResponse>>,
@@ -283,6 +286,57 @@ async fn status(
     }
 }
 
+/// What `appa yell` asks this process to build. The runtime assembles and measures the whole
+/// document, so the CLI never holds an unclassified byte of a session.
+#[derive(serde::Deserialize)]
+struct ReportRequestBody {
+    message: String,
+    /// Replace the names the deployment chose with report-local tokens. The classification is
+    /// the same either way; only the naming differs.
+    ///
+    /// Required, with no default: this is the question a person was asked, and a request that
+    /// does not carry their answer has no business getting either kind of report.
+    pseudonymize: bool,
+}
+
+/// One finished `openappa.yell.v1` document.
+///
+/// The listener is loopback-only, and that is the whole of this endpoint's access control —
+/// the same boundary `/reload` and `/mcp` already stand behind. Be exact about what it is
+/// worth: it separates this machine from the network, not one local process from another. A
+/// process that can reach this port can read the recently active trajectory. What it answers
+/// still leaves the machine only when a person chooses to send it.
+async fn report(
+    State(state): State<AppState>,
+    body: Result<axum::Json<ReportRequestBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Vec<u8>, (axum::http::StatusCode, String)> {
+    let refuse = |status, message: String| (status, message);
+    let body = body
+        .map_err(|error| refuse(axum::http::StatusCode::BAD_REQUEST, error.body_text()))?
+        .0;
+    let message = crate::yell::YellMessage::new(&body.message)
+        .map_err(|refusal| refuse(axum::http::StatusCode::BAD_REQUEST, refusal.to_string()))?;
+    let request = crate::yell::ReportRequest {
+        message,
+        author: crate::yell::Author::Cli,
+        mode: match body.pseudonymize {
+            true => crate::yell::Mode::Pseudonymized,
+            false => crate::yell::Mode::Baseline,
+        },
+        // A caller here names no trajectory: it gets whichever one was recently active, or
+        // nothing. That narrows the endpoint — no session can be asked for by name — without
+        // making it a per-caller boundary. The recently active trajectory may well belong to
+        // someone else's session on this machine, and loopback is the only thing between them.
+        selection: None,
+        harness: state.adapter,
+    };
+    state
+        .runtime
+        .report(request)
+        .map(|finished| finished.plain)
+        .map_err(|oversize| refuse(axum::http::StatusCode::PAYLOAD_TOO_LARGE, oversize.to_string()))
+}
+
 /// Run the internal daemon command from arguments supplied by the public CLI.
 pub fn run_from<I, T>(args: I) -> ExitCode
 where
@@ -343,6 +397,7 @@ async fn serve(args: Args) -> ExitCode {
     let state = AppState {
         runtime: Arc::clone(&runtime),
         codec: args.adapter.codec(),
+        adapter: args.adapter,
         config: config_path,
         batteries: Arc::new(RwLock::new(crate::batteries::snapshot(&battery_dirs))),
         battery_dirs,
@@ -353,6 +408,7 @@ async fn serve(args: Args) -> ExitCode {
         .route("/binary-fingerprint", get(binary_fingerprint))
         .route("/policy-key", get(policy_key))
         .route("/status", get(status))
+        .route("/report", post(report))
         .route("/reload", post(reload))
         .route_layer(axum::middleware::from_fn(loopback_management_only));
     let app = axum::Router::new()

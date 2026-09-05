@@ -1,6 +1,7 @@
 //! The hook dispatcher: one typed `HookEvent` in, one `HookDecision`
 //! out.
 
+use appa_engine::value::DispatchId as EngineDispatchId;
 use appa_runtime_api::{Actor, Codec, HookDecision, HookEvent, ParseRefusal, ProposedCall, Ruling, TrajectoryId};
 
 use crate::api::{
@@ -13,28 +14,94 @@ use crate::api::{
 /// non-2xx status makes the hook command exit 2, which blocks the
 /// action — hooks fail closed.
 pub async fn answer(runtime: &Runtime, codec: &Codec, body: &[u8]) -> (u16, serde_json::Value) {
+    use crate::events::{HookKind, HookOutcome};
+
+    // Every way a hook can end leaves exactly one entry, including the three that never
+    // reach the dispatcher. Those are the answers a reader is most likely to be confused
+    // by: nothing happened, and the trajectory's facts say nothing about why. None of them
+    // has an actor yet, so they are recorded deployment-wide.
     let event = match (codec.parse)(body) {
         Ok(Some(event)) => event,
-        Ok(None) => return (200, serde_json::json!({})),
-        Err(ParseRefusal::Unreadable { detail }) => return (400, serde_json::json!({ "error": detail })),
-        Err(ParseRefusal::Malformed { detail }) => return (409, serde_json::json!({ "error": detail })),
+        Ok(None) => {
+            runtime.record(None, bare_hook(HookKind::Ignored, HookOutcome::Ignored, None));
+            return (200, serde_json::json!({}));
+        }
+        Err(ParseRefusal::Unreadable { detail }) => {
+            runtime.record(None, bare_hook(HookKind::Unparsable, HookOutcome::Unreadable, None));
+            return (400, serde_json::json!({ "error": detail }));
+        }
+        Err(ParseRefusal::Malformed { detail }) => {
+            runtime.record(None, bare_hook(HookKind::Unparsable, HookOutcome::Malformed, None));
+            return (409, serde_json::json!({ "error": detail }));
+        }
     };
+    let root = hook_root(&event).clone();
     if let HookEvent::ToolCall { actor, call, .. } = &event {
-        match runtime.opened_among(&actor.root, &(codec.names_children)(actor, call)) {
+        let early = match runtime.opened_among(&actor.root, &(codec.names_children)(actor, call)) {
             Ok(Some(child)) => {
                 tracing::debug!(root = %actor.root.0, child = %child.0, "a call names a family child's transcript");
-                return (200, (codec.render)(&event, &deny(NAMED_TRANSCRIPT.to_string())));
+                Some((200, deny(NAMED_TRANSCRIPT.to_string())))
             }
-            Ok(None) => {}
-            Err(error) => return (409, (codec.render)(&event, &refuse(error.to_string()))),
+            Ok(None) => None,
+            Err(error) => Some((409, refuse(error.to_string()))),
+        };
+        if let Some((status, decision)) = early {
+            let (outcome, offers) = hook_result(&decision);
+            runtime.record(
+                Some(&root),
+                crate::events::RuntimeEvent::Hook {
+                    event: HookKind::ToolCall,
+                    tool: Some(call.tool.clone()),
+                    dispatch: None,
+                    outcome,
+                    offers,
+                },
+            );
+            return (status, (codec.render)(&event, &decision));
         }
     }
-    let decision = handle(runtime, event.clone()).await;
-    let status = match decision {
+    let handled = handle_internal(runtime, event.clone()).await;
+    runtime.record(Some(&root), handled.event);
+    let status = match handled.decision {
         HookDecision::Refuse { .. } => 409,
         _ => 200,
     };
-    (status, (codec.render)(&event, &decision))
+    (status, (codec.render)(&event, &handled.decision))
+}
+
+/// A hook that ended before an actor existed, so there is nothing to attribute it to.
+fn bare_hook(
+    event: crate::events::HookKind,
+    outcome: crate::events::HookOutcome,
+    tool: Option<String>,
+) -> crate::events::RuntimeEvent {
+    crate::events::RuntimeEvent::Hook {
+        event,
+        tool,
+        dispatch: None,
+        outcome,
+        offers: Vec::new(),
+    }
+}
+
+/// The trajectory an entry belongs to. A child's events are kept under its own id, as the
+/// engine's facts are: a report about a subagent should not have to be found under its parent.
+/// The root this event's diagnostic entry is filed under.
+///
+/// The *root*, never the acting trajectory: the event log is keyed by family, because that is
+/// the unit a report is about and the unit its per-list bound must apply to. Filing a
+/// subagent's hooks under the subagent would put them outside the family's own account and
+/// leave `recent_root` naming something no log can be read for.
+fn hook_root(event: &HookEvent) -> &TrajectoryId {
+    match event {
+        HookEvent::SessionStart { root } => root,
+        HookEvent::ChildStart { root, .. } | HookEvent::ChildEnd { root, .. } => root,
+        HookEvent::Prompt { actor, .. }
+        | HookEvent::TurnEnd { actor }
+        | HookEvent::ToolCall { actor, .. }
+        | HookEvent::ToolResult { actor, .. }
+        | HookEvent::SpawnResult { actor, .. } => &actor.root,
+    }
 }
 
 /// A subagent's words reach its parent through the checked return only; a call that
@@ -42,10 +109,83 @@ pub async fn answer(runtime: &Runtime, codec: &Codec, body: &[u8]) -> (u16, serd
 const NAMED_TRANSCRIPT: &str = "this call names a subagent's transcript or output file; a subagent's words \
                                 reach this session only through its checked return";
 
+/// Dispatch one typed event to its session and fold the outcome into one decision.
+///
+/// The wrapper every adapter, `replay`, and the MCP endpoint calls: it drops the diagnostic
+/// entry that [`handle_internal`] also builds. Only `answer` — the one path a live harness
+/// reaches — keeps it.
+pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
+    handle_internal(runtime, event).await.decision
+}
+
+/// One dispatched hook: the decision the adapters render, and the entry the runtime keeps
+/// about it.
+///
+/// The two travel together because the dispatch id belongs to exactly one of them.
+/// `HookDecision` is the public adapter wire type and carries no id — an adapter must not
+/// see one — but a diagnostic that cannot tie a hook to the dispatch it opened cannot be
+/// correlated with the trajectory's own facts. So the id is picked up here, where the
+/// release is still in scope, and never crosses the adapter boundary.
+pub(crate) struct Handled {
+    pub(crate) decision: HookDecision,
+    pub(crate) event: crate::events::RuntimeEvent,
+}
+
+pub(crate) async fn handle_internal(runtime: &Runtime, event: HookEvent) -> Handled {
+    let (kind, tool) = hook_shape(&event);
+    let mut dispatch = None;
+    let decision = dispatch_event(runtime, event, &mut dispatch).await;
+    let (outcome, offers) = hook_result(&decision);
+    Handled {
+        event: crate::events::RuntimeEvent::Hook {
+            event: kind,
+            tool,
+            dispatch,
+            outcome,
+            offers,
+        },
+        decision,
+    }
+}
+
+/// Which hook this is, and the tool it names where it names one.
+fn hook_shape(event: &HookEvent) -> (crate::events::HookKind, Option<String>) {
+    use crate::events::HookKind;
+    match event {
+        HookEvent::SessionStart { .. } => (HookKind::SessionStart, None),
+        HookEvent::Prompt { .. } => (HookKind::Prompt, None),
+        HookEvent::TurnEnd { .. } => (HookKind::TurnEnd, None),
+        HookEvent::ToolCall { call, .. } => (HookKind::ToolCall, Some(call.tool.clone())),
+        HookEvent::ToolResult { call, .. } => (HookKind::ToolResult, Some(call.tool.clone())),
+        HookEvent::ChildStart { .. } => (HookKind::ChildStart, None),
+        HookEvent::ChildEnd { .. } => (HookKind::ChildEnd, None),
+        HookEvent::SpawnResult { call, .. } => (HookKind::SpawnResult, Some(call.tool.clone())),
+    }
+}
+
+/// How it was answered. `offers` are the remedy ids a block named, so a report can say
+/// which way out was on the table.
+fn hook_result(decision: &HookDecision) -> (crate::events::HookOutcome, Vec<String>) {
+    use crate::events::HookOutcome;
+    match decision {
+        HookDecision::Ack | HookDecision::Context { .. } | HookDecision::ChildReturn { .. } => {
+            (HookOutcome::Acked, Vec::new())
+        }
+        HookDecision::AllowCall { .. } => (HookOutcome::Allowed, Vec::new()),
+        HookDecision::PassControl => (HookOutcome::PassControl, Vec::new()),
+        HookDecision::DenyCall { offers, .. } => (
+            HookOutcome::Denied,
+            offers.iter().map(|offered| offered.id.clone()).collect(),
+        ),
+        HookDecision::Block { .. } | HookDecision::ReplaceOutput { .. } => (HookOutcome::Blocked, Vec::new()),
+        HookDecision::Refuse { .. } => (HookOutcome::Refused, Vec::new()),
+    }
+}
+
 /// Dispatch one typed event to its session and fold the outcome into
 /// one decision. The dispatcher holds nothing between calls; every id
 /// it needs is in the event or in the runtime's persistence.
-pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
+async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Option<EngineDispatchId>) -> HookDecision {
     match event {
         HookEvent::SessionStart { root } => match open_or_reopen(runtime, &root) {
             Ok(_) => match runtime.live(&root, &root) {
@@ -111,7 +251,13 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             })
             .await
             {
-                Ok(ToolCallDecision::Allow { spawn }) => HookDecision::AllowCall { spawn },
+                Ok(ToolCallDecision::Allow {
+                    spawn,
+                    dispatch: opened,
+                }) => {
+                    *dispatch = Some(opened);
+                    HookDecision::AllowCall { spawn }
+                }
                 Ok(ToolCallDecision::Deny {
                     feedback,
                     offers,

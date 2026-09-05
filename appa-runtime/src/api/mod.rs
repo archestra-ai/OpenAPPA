@@ -23,6 +23,7 @@ use crate::config::Config;
 use crate::elicit::Elicitation;
 use crate::engine::{EngineRefusal, Liveness, PolicyEngine, RuntimeEngine};
 use crate::external::{ConsultGates, ExternalServices};
+use crate::yell;
 use appa_eventlog::{Backend, Log, LogStore};
 
 /// One remedy offer as it is quoted and carried.
@@ -60,6 +61,10 @@ struct Vouch {
 pub(crate) enum ToolCallDecision {
     Allow {
         spawn: Option<SpawnBinding>,
+        /// The dispatch this release opened. Never reaches an adapter — `HookDecision` is
+        /// the wire type and carries no id — but the hook dispatcher needs it to tie a
+        /// recorded event to the fact the same call produced.
+        dispatch: appa_engine::value::DispatchId,
     },
     Deny {
         feedback: String,
@@ -288,8 +293,10 @@ impl EventError {
 impl From<EngineRefusal> for EventError {
     fn from(refusal: EngineRefusal) -> EventError {
         match refusal {
-            EngineRefusal::UntrustedLog { detail } => EventError::UntrustedLog(detail),
-            EngineRefusal::OpeningMismatch { detail } => EventError::PolicyUnavailable(detail),
+            // The class is for a report; this conversion is the local error path, which
+            // keeps the operator-facing detail.
+            EngineRefusal::UntrustedLog { detail, .. } => EventError::UntrustedLog(detail),
+            EngineRefusal::OpeningMismatch { detail, .. } => EventError::PolicyUnavailable(detail),
             EngineRefusal::Invariant { detail } => EventError::EngineInvariant(detail),
             EngineRefusal::Ended => EventError::TrajectoryEnded,
             EngineRefusal::DispatchClosed => EventError::UnknownDispatch,
@@ -422,6 +429,7 @@ impl Prepared {
                 executing: std::sync::Mutex::new(std::collections::BTreeSet::new()),
                 permits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 prompted: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+                events: std::sync::Mutex::new(crate::events::EventLog::default()),
                 gates: self.gates,
                 named_spawns: std::sync::atomic::AtomicBool::new(false),
             }),
@@ -440,6 +448,9 @@ struct Inner {
     /// `Stop` hook for a turn the user interrupted, so the prompt is the only sign the
     /// previous turn is over; the next tool call or turn end settles what it left behind.
     prompted: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    /// What this runtime did, as opposed to what the engine decided: bounded, in this
+    /// process, and gone on restart. A diagnostic only — see [`crate::events`].
+    events: std::sync::Mutex<crate::events::EventLog>,
     /// The gates every process-costing consult of this runtime passes; deployment reloads
     /// clone them, so old and new snapshots contend on the same permits.
     gates: ConsultGates,
@@ -453,6 +464,19 @@ pub(crate) fn acting_trajectory(actor: &Actor) -> &TrajectoryId {
 }
 
 impl Runtime {
+    /// Note one thing this runtime did. Infallible and best-effort by construction: a
+    /// diagnostic must never fail a decision the engine has already made, and the lock is
+    /// held only for the insert.
+    ///
+    /// `root` is the family's root, never the acting trajectory. The log is keyed by family
+    /// because that is the unit a report is about and the unit the per-list bound applies to;
+    /// filing a subagent's event under the subagent would put it outside its own family's
+    /// account and leave [`crate::events::EventLog::recent_root`] naming an id no log reads
+    /// for. `None` is for what happens before any family is known.
+    pub(crate) fn record(&self, root: Option<&TrajectoryId>, event: crate::events::RuntimeEvent) {
+        self.inner.record(root, event);
+    }
+
     /// Settle which contracts may release a spawn. Called once by the binary, for the
     /// adapter it serves, before the runtime is shared; the default is `Wildcard`.
     pub fn with_spawn_coverage(self, coverage: SpawnCoverage) -> Runtime {
@@ -471,6 +495,52 @@ impl Inner {
         } else {
             SpawnCoverage::Wildcard
         }
+    }
+
+    /// Note a failed store operation as a closed class.
+    ///
+    /// Takes the *typed* error, deliberately. Every one of these errors carries free text —
+    /// a root id, a path, a `rusqlite` message — and the call sites below convert them to
+    /// strings a line later. Classifying after that conversion would mean reading prose, so
+    /// the class is taken here, where the variant is still a variant.
+    fn note_store_error<'a>(
+        &self,
+        root: Option<&TrajectoryId>,
+        operation: crate::events::StoreOperation,
+        error: impl Into<appa_eventlog::StoreErrorClass> + 'a,
+    ) {
+        self.record(
+            root,
+            crate::events::RuntimeEvent::StoreError {
+                operation,
+                class: error.into(),
+            },
+        );
+    }
+
+    /// See [`Runtime::record`]. Lives here because a `Session` holds the `Inner`, not the
+    /// `Runtime`, and the consults worth timing happen inside a session.
+    pub(crate) fn record(&self, root: Option<&TrajectoryId>, event: crate::events::RuntimeEvent) {
+        self.events
+            .lock()
+            .expect("the event mutex is never poisoned: no panic runs while it is held")
+            .record(root, event);
+    }
+
+    /// See [`crate::events::EventLog::events`].
+    pub(crate) fn events(&self, root: &TrajectoryId) -> crate::events::Events {
+        self.events
+            .lock()
+            .expect("the event mutex is never poisoned: no panic runs while it is held")
+            .events(root)
+    }
+
+    /// See [`crate::events::EventLog::recent_root`].
+    pub(crate) fn recent_root(&self, window: std::time::Duration) -> crate::events::Recent {
+        self.events
+            .lock()
+            .expect("the event mutex is never poisoned: no panic runs while it is held")
+            .recent_root(window)
     }
 
     fn deployment(&self) -> Arc<Deployment> {
@@ -541,6 +611,7 @@ impl Inner {
     pub(super) fn log(&self, root: &TrajectoryId) -> Result<Log, EventError> {
         self.store
             .log(&crate::engine::engine_id(root))
+            .inspect_err(|error| self.note_store_error(Some(root), crate::events::StoreOperation::Read, error))
             .map_err(|error| match error {
                 appa_eventlog::ReadError::UnknownRoot { .. } => EventError::UnknownTrajectory,
                 appa_eventlog::ReadError::Undecodable(detail) => EventError::UntrustedLog(detail),
@@ -627,6 +698,15 @@ impl Runtime {
             changed,
             "reloaded the serving deployment"
         );
+        // Deployment-wide: a reload belongs to no trajectory, and every trajectory alive
+        // across it needs to see that its policy moved under it.
+        self.record(
+            None,
+            crate::events::RuntimeEvent::Reload {
+                policy_key: key.clone(),
+                changed,
+            },
+        );
         Ok(Reloaded {
             policy_key: key,
             policy_identity: identity,
@@ -646,6 +726,10 @@ impl Runtime {
             .inner
             .store
             .create_root(opening, deployment.config.policy_file().bytes())
+            .inspect_err(|error| {
+                self.inner
+                    .note_store_error(Some(&id), crate::events::StoreOperation::Open, error)
+            })
             .map_err(|error| match error {
                 appa_eventlog::CreateError::AlreadyExists { .. } => EventError::TrajectoryExists,
                 error => EventError::Storage(error.to_string()),
@@ -661,6 +745,10 @@ impl Runtime {
             .inner
             .store
             .has_root(&crate::engine::engine_id(root))
+            .inspect_err(|error| {
+                self.inner
+                    .note_store_error(Some(root), crate::events::StoreOperation::Read, error)
+            })
             .map_err(|error| EventError::Storage(error.to_string()))?;
         if !known {
             return Err(EventError::UnknownTrajectory);
@@ -759,6 +847,112 @@ impl Runtime {
                 None
             }
         }
+    }
+
+    /// One finished `openappa.yell.v1` document, ready to write and to send.
+    ///
+    /// Assembling here rather than in the CLI is what keeps the size loop honest: only a
+    /// finished, gzipped document can be measured against the receiver's limits, and only this
+    /// process can rebuild a smaller export. So an oversized report is built again from the
+    /// source under half the counts — never trimmed as a document, which would leave its token
+    /// numbering full of holes — until it fits.
+    pub(crate) fn report(&self, request: yell::ReportRequest) -> Result<yell::Finished, yell::Oversize> {
+        let report_id = yell::ReportId::generate();
+        let origin = yell::Origin::new(request.author, request.mode);
+        let mut budget = yell::Budget::default();
+        loop {
+            let projection = self.projection(request.selection.clone(), request.mode, budget);
+            let (facts, events) = projection.counts();
+            let report = yell::Report::serving(
+                report_id.clone(),
+                origin,
+                request.message.clone(),
+                request.harness,
+                projection,
+            );
+            match report.finalize() {
+                Ok(finished) => return Ok(finished),
+                // Nothing left to drop: the message, the build and the policy are the whole
+                // document, and they are over the limit on their own.
+                Err(oversize) if facts + events == 0 => return Err(oversize),
+                Err(_) => {
+                    budget = yell::Budget {
+                        facts: Some(facts / 2),
+                        events: Some(events / 2),
+                    }
+                }
+            }
+        }
+    }
+
+    /// One trajectory's decisions, stripped for a report that leaves this machine.
+    ///
+    /// A read like [`Runtime::audit`]: it gates nothing and appends nothing. Unlike an audit
+    /// it survives a log the engine refuses — a refused log is the very thing worth reporting
+    /// — and carries the refusal as a closed class instead of the facts a view would have
+    /// given. What may leave is decided in [`crate::yell::tables`], never here.
+    pub(crate) fn projection(
+        &self,
+        selection: yell::Selection,
+        mode: yell::Mode,
+        budget: yell::Budget,
+    ) -> yell::Projection {
+        let deployment = self.inner.deployment();
+        // Every path below that has no trajectory to show still says what the rules are, from
+        // the policy this deployment serves now. A report with no facts is still a report about
+        // a policy, and "the runtime would not give me my session" is a thing worth yelling.
+        let serving = || policy_section(deployment.config.policy_file().bytes());
+        let root = match selection {
+            Some(root) => root,
+            None => match yell::resolve(self.inner.recent_root(yell::RECENT_WINDOW)) {
+                Ok(root) => root,
+                Err(omitted_reason) => return yell::Projection::rules_only(serving(), mode, omitted_reason),
+            },
+        };
+        let yelling = Some(root.clone());
+        let Ok(log) = self.inner.log(&root) else {
+            // The store error is already recorded as a runtime event by `Inner::log`.
+            return yell::Projection::rules_only(serving(), mode, yell::OmittedReason::LogUnavailable);
+        };
+        // The policy is what names the trust ranks, and the view is what names the parents.
+        // Neither is required: without them the facts still export, with the fields a reader
+        // cannot be given left empty and the refusal said out loud.
+        let policy = self.inner.resolve_policy(&deployment, &log).ok();
+        let rebuilt = policy.as_ref().map(|policy| policy.engine().rebuild_view(&log));
+        let replay_refused = match &rebuilt {
+            Some(Err(refusal)) => Some(refusal.class()),
+            _ => None,
+        };
+        let view = rebuilt.and_then(Result::ok);
+        let trust_chain = policy
+            .as_ref()
+            .map(|policy| {
+                policy
+                    .engine()
+                    .registry()
+                    .trust_chain()
+                    .names()
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Which tool spellings the deployment itself chose. Without a policy nothing is
+        // vouched, which is the safe end: every tool name is then a token.
+        let vouched = policy
+            .as_ref()
+            .map(|policy| policy.engine().vouched_tools())
+            .unwrap_or_default();
+        let source = yell::Source {
+            facts: log.facts(),
+            events: self.inner.events(&root),
+            trust_chain,
+            policy: policy_section(log.policy_file()),
+            vouched,
+            parents: yell::branches(log.facts(), view.as_ref(), policy.as_ref()),
+            replay_refused,
+            yelling,
+        };
+        yell::build(source, mode, budget)
     }
 
     /// Execute one surfaced remedy offer by its id.
@@ -1215,6 +1409,19 @@ fn compile_policy(config: &Config) -> Result<appa_policy::Config, OpenError> {
     let text = toml::to_string(config.policy_file().value())
         .map_err(|error| OpenError::UnsupportedPolicy(format!("the policy table does not serialize: {error}")))?;
     appa_policy::Config::from_toml_str(&text).map_err(|error| OpenError::Policy(Box::new(error)))
+}
+
+/// The `[policy]` table of a stored policy file, with the key of the bytes it came from.
+///
+/// A trajectory's own bytes rather than the deployment's current ones wherever there is a
+/// trajectory: the log pins its policy file, so a reload since the session opened does not
+/// rewrite the rules a report explains. The key comes from the same bytes, so the document and
+/// its fingerprint are one snapshot.
+fn policy_section(bytes: &[u8]) -> Option<(toml::Value, String)> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let composed: toml::Value = toml::from_str(text).ok()?;
+    let document = composed.get("policy")?.clone();
+    Some((document, crate::engine::policy_file_key(bytes)))
 }
 
 fn compile_stored_policy(bytes: &[u8]) -> Result<appa_policy::Config, String> {
