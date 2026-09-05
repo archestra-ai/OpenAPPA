@@ -104,18 +104,6 @@ fn excluded_from_staging(name: &std::ffi::OsStr) -> bool {
     name == "__pycache__" || name.ends_with(".pyc") || name.ends_with(".pyo") || name == PACKAGE_MANIFEST
 }
 
-// The canonical tree digest lives in `appa-package`: it names a package
-// directory in the marketplace as well as a staged bundle, and the marketplace
-// crate may not depend on this one. Re-exported here so this module stays the
-// one name the staging path and the bundle installer read.
-// `build.rs` includes this file and reads only `canonical_tree_digest`; the
-// rest of the digest vocabulary is re-exported for the bundle installer.
-#[allow(unused_imports)]
-pub use appa_package::tree::{
-    EntryKind, MAX_ENTRIES, MAX_UNCOMPRESSED_BYTES, StagedEntry, TreeDigestError, absorb_field, canonical_tree_digest,
-    walk,
-};
-
 #[cfg(test)]
 mod tests {
     use super::*;

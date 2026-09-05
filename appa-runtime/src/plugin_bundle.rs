@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub use crate::plugin_layout::stage_repository;
-use crate::plugin_layout::{
+use appa_package::tree::{
     EntryKind, MAX_ENTRIES, MAX_UNCOMPRESSED_BYTES, TreeDigestError, absorb_field, canonical_tree_digest, walk,
 };
 
