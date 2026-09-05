@@ -1,0 +1,9 @@
+schema = 1
+name = "slack"
+description = "Rules for the claude.ai Slack connector, all 19 of its tools: read, search, send, and canvases, plus the slack audience source."
+
+[battery]
+policy = "appa.toml"
+hosts = ["claude-code"]
+namespaces = ["claude_ai_Slack"]
+helpers = ["audience-source.py"]

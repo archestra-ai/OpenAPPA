@@ -122,7 +122,7 @@ fn the_kagent_chart_consumes_this_skill_package() {
 fn the_claude_plugin_has_no_second_source_copy() {
     assert!(
         !repo_root()
-            .join("integrations/claude-code/plugin/skills/appa-guide")
+            .join("marketplace/adapters/claude-code/plugin/skills/appa-guide")
             .exists(),
         "the Claude plugin materializes the canonical skill at staging time; a source copy would drift"
     );

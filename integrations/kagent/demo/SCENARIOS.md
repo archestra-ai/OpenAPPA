@@ -4,7 +4,7 @@ These scenarios show OpenAPPA gating a real kagent declarative agent.
 They are the openappa.com/playground cases in cluster-ops terms: a
 gated agent operates a Kubernetes cluster through the demo toolset
 (`demo_tools.py`), and every proposed flow crosses `appa-runtime`
-under the example policy (`../examples/kagent.appa.toml`).
+under the example policy (`marketplace/adapters/kagent/default.appa.toml`).
 
 The integration suite in [../tests/](../tests/) runs these scenarios,
 and eighteen more, as twenty-two tests.

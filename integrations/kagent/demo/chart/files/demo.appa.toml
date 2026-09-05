@@ -2,7 +2,7 @@
 # integration carries, on one gated cluster-ops fleet.
 #
 # This is the shared-runtime variant of the example policy
-# (`../examples/kagent.appa.toml`): the same cluster-ops toolset, plus
+# (`marketplace/adapters/kagent/default.appa.toml`): the same cluster-ops toolset, plus
 # real sanitizers over `[externals.llm]`, the delegated log-analyst
 # child, and the human-review authority. Serve it from one
 # `appa-runtime` that every agent pod reaches, so a parent and its

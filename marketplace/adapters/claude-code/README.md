@@ -184,7 +184,7 @@ all follow it:
 bundle=$(mktemp -d)
 rmdir "$bundle"
 scripts/appa-stage-plugin-bundle.sh "$bundle"
-cp integrations/claude-code/examples/claude-code.appa.toml appa.toml
+cp marketplace/adapters/claude-code/default.appa.toml appa.toml
 nohup cargo run --bin appa -- runtime --config appa.toml --db appa.db --listen 127.0.0.1:8788 >appa-runtime.log 2>&1 &
 APPA_GATE=1 APPA_RUNTIME_URL=http://127.0.0.1:8788 claude --plugin-dir "$bundle/plugin"
 ```
@@ -208,7 +208,7 @@ reading a file narrows its content to the session, and writing a file
 releases content to the outside world.
 
 ```sh
-uv run integrations/claude-code/live-gate-check.py
+uv run marketplace/adapters/claude-code/live-gate-check.py
 ```
 
 It judges the gate the way a user does, on what reached the disk. One
@@ -288,7 +288,7 @@ checkout of this repository:
 {
   "statusLine": {
     "type": "command",
-    "command": "/path/to/OpenAPPA/integrations/claude-code/plugin/statusline.sh"
+    "command": "/path/to/OpenAPPA/marketplace/adapters/claude-code/plugin/statusline.sh"
   }
 }
 ```
@@ -300,7 +300,7 @@ absolute path:
 {
   "statusLine": {
     "type": "command",
-    "command": "\"C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File \"C:/path/to/OpenAPPA/integrations/claude-code/plugin/statusline.ps1\""
+    "command": "\"C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File \"C:/path/to/OpenAPPA/marketplace/adapters/claude-code/plugin/statusline.ps1\""
   }
 }
 ```
@@ -317,7 +317,7 @@ every statusline refresh:
 {
   "statusLine": {
     "type": "command",
-    "command": "input=$(cat); printf '%s' \"$input\" | npx -y @owloops/claude-powerline@1.4.0; printf '%s' \"$input\" | /path/to/OpenAPPA/integrations/claude-code/plugin/statusline.sh"
+    "command": "input=$(cat); printf '%s' \"$input\" | npx -y @owloops/claude-powerline@1.4.0; printf '%s' \"$input\" | /path/to/OpenAPPA/marketplace/adapters/claude-code/plugin/statusline.sh"
   }
 }
 ```

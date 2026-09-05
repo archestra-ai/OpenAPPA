@@ -90,7 +90,7 @@ A new host chooses one of the two shapes: build the envelope in-process, as kage
 Inspect the Claude Code integration on GitHub for a complete reference:
 
 - **Adapter**: [`appa-adapter-claude-code`](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-claude-code) — derives the canonical tool id and spawn-ness from Claude Code's raw tool spellings, and carries the client-side codec `appa hook` uses to translate Claude Code's hook JSON to the envelope and the decision back.
-- **Claude Code Hooks Plugin**: [`integrations/claude-code`](https://github.com/archestra-ai/OpenAPPA/tree/main/integrations/claude-code) — client-side harness configuration (`hooks.json`, the `appa hook` invocation, and MCP registration).
+- **Claude Code Hooks Plugin**: [`marketplace/adapters/claude-code`](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/adapters/claude-code) — client-side harness configuration (`hooks.json`, the `appa hook` invocation, and MCP registration).
 
 ### Smoke-Test Checklist
 

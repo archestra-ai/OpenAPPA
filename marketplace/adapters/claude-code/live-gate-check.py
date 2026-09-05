@@ -16,7 +16,7 @@ that is down blocks both sessions, not one.
 Needs the `claude` CLI on PATH and logged in, and the `appa` binary. It
 spends the machine's Claude usage, so it runs by hand:
 
-    uv run integrations/claude-code/live-gate-check.py
+    uv run marketplace/adapters/claude-code/live-gate-check.py
 """
 
 from __future__ import annotations

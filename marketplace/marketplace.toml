@@ -1,0 +1,36 @@
+# The OpenAPPA marketplace: every adapter and battery this repository ships,
+# each with the digest of its package tree.
+#
+# A digest names the package directory as it sits here, its own manifest
+# included. `appa-runtime/tests/marketplace.rs` recomputes every one of them
+# and reports the lines to write back when a package has changed.
+schema = 1
+name = "appa"
+
+[packages.adapter.claude-code]
+path = "adapters/claude-code"
+digest = "sha256:d71493382c941a37474156413f591f50e02267ed1fe5e95d90027ed2426764d4"
+
+[packages.adapter.kagent]
+path = "adapters/kagent"
+digest = "sha256:7aa2433704aee3ec20c7f7876983530074fe2f5ffec1c8ba0b0667a4b8c1bb85"
+
+[packages.battery.claude-code]
+path = "batteries/claude-code"
+digest = "sha256:4d9eb8395d10e0a350bafa502dfd16d825c977b8e3c07f7d25d4a0c1bd8ad01d"
+
+[packages.battery.github]
+path = "batteries/github"
+digest = "sha256:dae7dcfb2471acea87df1d1797ee498fbaa7caa8e726d4abc0837f7a6e2b76a8"
+
+[packages.battery.google-workspace]
+path = "batteries/google-workspace"
+digest = "sha256:c53c8fa59dba02c93261a695fd7aa3d37d4427867a44ee4594acd8c6b5a6d8e3"
+
+[packages.battery.grain]
+path = "batteries/grain"
+digest = "sha256:1d72dcd5bd5ac7e5920044079f8129017734793108f002872085788dd1a8f211"
+
+[packages.battery.slack]
+path = "batteries/slack"
+digest = "sha256:9d6b610d196d354d536704eed82488bfd88f4fa1be41ae8a2914d5fd9d5c52ad"

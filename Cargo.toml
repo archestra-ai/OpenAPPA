@@ -5,6 +5,7 @@ members = [
     "appa-agent-python",
     "appa-builtin",
     "appa-engine",
+    "appa-package",
     "appa-eventlog",
     "appa-policy",
     "appa-adapter-claude-code",
@@ -73,6 +74,7 @@ tokio-util = { version = "0.7", default-features = false }
 appa-engine = { path = "appa-engine" }
 appa-eventlog = { path = "appa-eventlog" }
 appa-policy = { path = "appa-policy" }
+appa-package = { path = "appa-package" }
 appa-runtime-api = { path = "appa-runtime-api" }
 appa-runtime = { package = "appa", path = "appa-runtime" }
 appa-example-agent = { path = "appa-example-agent" }

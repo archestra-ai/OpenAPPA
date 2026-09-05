@@ -91,6 +91,7 @@ dependencies = [
  "appa-builtin",
  "appa-engine",
  "appa-eventlog",
+ "appa-package",
  "appa-policy",
  "appa-runtime-api",
  "axum",
@@ -217,6 +218,17 @@ dependencies = [
 [[package]]
 name = "appa-module-fixture-bad"
 version = "0.0.0"
+
+[[package]]
+name = "appa-package"
+version = "0.8.0"
+dependencies = [
+ "serde",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "toml",
+]
 
 [[package]]
 name = "appa-policy"

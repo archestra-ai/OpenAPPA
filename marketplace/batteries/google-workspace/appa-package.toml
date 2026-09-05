@@ -1,0 +1,9 @@
+schema = 1
+name = "google-workspace"
+description = "The google-workspace audience source, which builds audiences from the Workspace directory. It carries no tool rules yet."
+
+[battery]
+policy = "appa.toml"
+hosts = ["claude-code"]
+namespaces = ["google-workspace"]
+helpers = ["audience-source.py"]

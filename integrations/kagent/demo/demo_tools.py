@@ -3,7 +3,7 @@
 A small MCP server (streamable HTTP) exposing ten cluster-ops tools,
 each of which the demo policy names
 (`integrations/kagent/demo/chart/files/demo.appa.toml`). The example
-policy (`integrations/kagent/examples/kagent.appa.toml`) names seven of
+policy (`marketplace/adapters/kagent/default.appa.toml`) names seven of
 them and `ask_user`, so under it the runtime refuses `lookup_runbook`,
 `scale_deployment` and `rollback_deployment` at the `ToolCall` hook.
 The data is canned so every scenario replays exactly. The hazards are

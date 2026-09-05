@@ -33,6 +33,7 @@ jobs:
       chart: ${{ steps.filter.outputs.chart }}
       integration: ${{ steps.filter.outputs.integration }}
       e2e: ${{ steps.filter.outputs.e2e }}
+      marketplace: ${{ steps.filter.outputs.marketplace }}
     steps:
       # A pull request reads its file list from the API and needs no
       # checkout. Every other event diffs with git and needs the history.
@@ -53,18 +54,21 @@ jobs:
             python: &python
               - 'integrations/kagent/appa-kagent-adk/**'
               - 'integrations/kagent/tests/**'
-              - 'integrations/kagent/fixtures/**'
+              - 'marketplace/adapters/kagent/fixtures/**'
               - '.github/workflows/ci.yml'
             go:
               - 'integrations/kagent/appa-kagent-adk-go/**'
-              - 'integrations/kagent/fixtures/**'
+              - 'marketplace/adapters/kagent/fixtures/**'
               - '.github/workflows/ci.yml'
             chart:
               - 'integrations/kagent/demo/chart/**'
               - '.github/workflows/ci.yml'
+            marketplace:
+              - 'marketplace/**'
+              - '.github/workflows/ci.yml'
             integration: &integration
               - *python
-              - 'integrations/kagent/examples/**'
+              - 'marketplace/adapters/kagent/**'
               - 'integrations/kagent/demo/demo_tools.py'
               - 'integrations/kagent/demo/mocks/**'
               - 'integrations/kagent/demo/chart/files/**'
@@ -88,12 +92,11 @@ jobs:
               - 'appa-agent-python/**'
               - 'bench/**'
               - 'website-chat-playground/**'
-              - 'batteries/**'
               - 'website/content/docs/contracts.md'
               # The published image compiles a digest of the plugin
               # tree into the binary; these are the rest of the roots
               # appa-runtime/src/plugin_layout.rs maps.
-              - 'integrations/claude-code/**'
+              - 'marketplace/**'
               - 'integrations/appa-guide/**'
               # The root ignore file shapes the quickstart build context.
               - '.dockerignore'
@@ -111,19 +114,19 @@ jobs:
 
       - name: Check plugin shell syntax
         run: |
-          sh -n integrations/claude-code/plugin/hooks/ensure-runtime.sh \
-            integrations/claude-code/plugin/hooks/hook.sh \
-            integrations/claude-code/plugin/hooks/appa-paths.sh \
-            integrations/claude-code/plugin/statusline.sh \
+          sh -n marketplace/adapters/claude-code/plugin/hooks/ensure-runtime.sh \
+            marketplace/adapters/claude-code/plugin/hooks/hook.sh \
+            marketplace/adapters/claude-code/plugin/hooks/appa-paths.sh \
+            marketplace/adapters/claude-code/plugin/statusline.sh \
             scripts/appa-stage-plugin-bundle.sh \
             scripts/appa-install.sh \
             scripts/appa-install-test.sh
 
       - name: Lint plugin shell scripts
         run: |
-          shellcheck -x -s sh integrations/claude-code/plugin/hooks/ensure-runtime.sh \
-            integrations/claude-code/plugin/hooks/hook.sh \
-            integrations/claude-code/plugin/hooks/appa-paths.sh \
+          shellcheck -x -s sh marketplace/adapters/claude-code/plugin/hooks/ensure-runtime.sh \
+            marketplace/adapters/claude-code/plugin/hooks/hook.sh \
+            marketplace/adapters/claude-code/plugin/hooks/appa-paths.sh \
             scripts/appa-stage-plugin-bundle.sh \
             scripts/appa-install.sh \
             scripts/appa-install-test.sh
@@ -136,9 +139,9 @@ jobs:
         run: |
           $failed = $false
           foreach ($script in @(
-            "integrations/claude-code/plugin/hooks/hook.ps1",
-            "integrations/claude-code/plugin/hooks/appa-paths.ps1",
-            "integrations/claude-code/plugin/statusline.ps1"
+            "marketplace/adapters/claude-code/plugin/hooks/hook.ps1",
+            "marketplace/adapters/claude-code/plugin/hooks/appa-paths.ps1",
+            "marketplace/adapters/claude-code/plugin/statusline.ps1"
           )) {
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$errors) | Out-Null
@@ -151,19 +154,46 @@ jobs:
 
       - name: Validate plugin JSON
         run: |
-          jq -e .hooks integrations/claude-code/plugin/hooks/hooks.json >/dev/null
-          jq -e .hooks integrations/claude-code/plugin/hooks/hooks.windows.json >/dev/null
-          jq -e .plugins .claude-plugin/marketplace.json >/dev/null
-          jq -e .plugins integrations/claude-code/.claude-plugin/marketplace.json >/dev/null
-
-      - name: Test battery externals
-        run: |
-          for dir in $(dirname batteries/test_*.py batteries/*/test_*.py | sort -u); do
-            python3 -m unittest discover -s "$dir" -p 'test_*.py'
-          done
+          jq -e .hooks marketplace/adapters/claude-code/plugin/hooks/hooks.json >/dev/null
+          jq -e .hooks marketplace/adapters/claude-code/plugin/hooks/hooks.windows.json >/dev/null
+          jq -e .plugins marketplace/adapters/claude-code/.claude-plugin/marketplace.json >/dev/null
 
       - name: Check release versions
         uses: ./.github/actions/check-release-versions
+
+  marketplace-checks:
+    name: Marketplace Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: changes
+    if: needs.changes.outputs.marketplace == 'true'
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Rust
+        run: rustup show
+
+      - name: Manifest tests
+        run: cargo test -p appa-package --locked
+
+      # Every package validates, every recorded digest is still the digest of
+      # the directory it names, and no package directory goes unnamed. A digest
+      # that drifted from its package is the one failure that must not reach a
+      # release, so it fails the build rather than being regenerated silently.
+      - name: Marketplace against the packages it describes
+        run: cargo test -p appa --locked --test marketplace
+
+      # A package ships the externals its policy binds, and their tests sit
+      # beside them.
+      - name: Test package helpers
+        run: |
+          for dir in $(dirname marketplace/*/test_*.py marketplace/*/*/test_*.py | sort -u); do
+            python3 -m unittest discover -s "$dir" -p 'test_*.py'
+          done
 
   installer-checks:
     name: Installer Checks (${{ matrix.os }})

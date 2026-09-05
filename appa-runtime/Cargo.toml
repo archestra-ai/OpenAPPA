@@ -20,6 +20,7 @@ appa-adapter-kagent = { path = "../appa-adapter-kagent" }
 appa-builtin = { path = "../appa-builtin" }
 appa-engine = { workspace = true }
 appa-eventlog = { workspace = true }
+appa-package = { workspace = true }
 appa-policy = { workspace = true }
 appa-runtime-api = { path = "../appa-runtime-api" }
 # `query` decodes the statusline's one GET parameter (`/status`).
@@ -55,7 +56,10 @@ rig-agent = { version = "0.42", default-features = false }
 # Depended on only to name the crypto provider; see the workspace manifest.
 rustls = { workspace = true }
 
+# `build.rs` includes `src/plugin_layout.rs`, which re-exports the canonical
+# tree digest from the marketplace crate.
 [build-dependencies]
+appa-package = { workspace = true }
 sha2 = { workspace = true }
 tar = "0.4"
 

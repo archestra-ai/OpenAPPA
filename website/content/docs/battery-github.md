@@ -9,7 +9,7 @@ breadcrumb: GitHub
 
 The GitHub battery covers the MCP server's default profile, repository, issue, pull-request, and user-search tools. It assumes repositories are public.
 
-[View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/batteries/github).
+[View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/github).
 
 ## Tool behavior
 

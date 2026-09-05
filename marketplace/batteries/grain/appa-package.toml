@@ -1,0 +1,9 @@
+schema = 1
+name = "grain"
+description = "Rules for the Grain MCP server: meetings, transcripts, notes, deals, clips, stories, collections, and workspace admin."
+
+[battery]
+policy = "appa.toml"
+hosts = ["claude-code"]
+namespaces = ["claude_ai_Grain"]
+helpers = []

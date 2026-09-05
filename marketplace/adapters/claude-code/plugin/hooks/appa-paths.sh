@@ -2,7 +2,7 @@
 # deployment it materializes, with the absolute paths that init resolved and no
 # environment fallback at all.
 #
-# This copy exists so `claude --plugin-dir integrations/claude-code/plugin` and
+# This copy exists so `claude --plugin-dir marketplace/adapters/claude-code/plugin` and
 # live-gate-check.py keep working against a checkout, where nothing has been
 # rendered yet.
 # The same precedence the PowerShell copy applies: an explicit value, then the

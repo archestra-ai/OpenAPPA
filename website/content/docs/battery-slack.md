@@ -9,7 +9,7 @@ breadcrumb: Slack
 
 The Slack battery covers all 19 tools in the claude.ai Slack connector. Writes require trusted data bounded to `internal`.
 
-[View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/batteries/slack).
+[View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/slack).
 
 ## Tool behavior
 
