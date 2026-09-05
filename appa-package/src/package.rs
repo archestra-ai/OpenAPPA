@@ -95,13 +95,6 @@ pub enum Adapter {
 }
 
 impl Adapter {
-    pub fn host(&self) -> Host {
-        match self {
-            Self::ClaudeCode { .. } => Host::ClaudeCode,
-            Self::Kagent { .. } => Host::Kagent,
-        }
-    }
-
     pub fn default_policy(&self) -> &RelativePath {
         match self {
             Self::ClaudeCode { default_policy, .. } | Self::Kagent { default_policy, .. } => default_policy,
@@ -171,6 +164,7 @@ impl Package {
         })
     }
 
+    #[cfg(test)]
     pub fn battery(&self) -> Option<&Battery> {
         match &self.role {
             Role::Battery(battery) => Some(battery),
@@ -178,6 +172,7 @@ impl Package {
         }
     }
 
+    #[cfg(test)]
     pub fn adapter(&self) -> Option<&Adapter> {
         match &self.role {
             Role::Adapter(adapter) => Some(adapter),

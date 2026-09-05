@@ -137,6 +137,10 @@ pub fn walk(root: &Path) -> Result<Vec<StagedEntry>, TreeDigestError> {
 /// A staged relative path as the canonical digest encodes it: UTF-8 with `/`
 /// separators on every platform. The bundle is ASCII filenames, so a path that
 /// cannot be spelled this way is refused rather than normalized.
+///
+/// A backslash inside a component is refused with the rest: this platform reads
+/// `a\\b` as one name and Windows reads it as two, so a tree holding one would
+/// digest to two different answers and stop naming a package.
 fn portable_relative_path(relative: &Path) -> Result<String, TreeDigestError> {
     let unportable = || TreeDigestError::UnportablePath {
         path: relative.to_path_buf(),
@@ -144,7 +148,13 @@ fn portable_relative_path(relative: &Path) -> Result<String, TreeDigestError> {
     let mut parts = Vec::new();
     for component in relative.components() {
         match component {
-            std::path::Component::Normal(part) => parts.push(part.to_str().ok_or_else(unportable)?),
+            std::path::Component::Normal(part) => {
+                let part = part.to_str().ok_or_else(unportable)?;
+                if part.contains('\\') {
+                    return Err(unportable());
+                }
+                parts.push(part);
+            }
             _ => return Err(unportable()),
         }
     }
@@ -311,6 +321,21 @@ mod tests {
             clean,
             "running the tests must not move a package's digest"
         );
+    }
+
+    /// The digest names one tree on every platform. A backslash inside a file
+    /// name does not survive that: this platform reads it as one name and
+    /// Windows reads it as a separator, so the same package would digest to two
+    /// answers and stop naming anything.
+    #[test]
+    fn a_backslash_in_a_name_is_not_a_portable_path() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a\\b"), "x").unwrap();
+
+        assert!(matches!(
+            canonical_tree_digest(directory.path()),
+            Err(TreeDigestError::UnportablePath { .. })
+        ));
     }
 
     #[test]

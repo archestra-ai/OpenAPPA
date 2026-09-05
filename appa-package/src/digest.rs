@@ -47,10 +47,6 @@ impl TreeDigest {
     pub fn of_tree(root: &Path) -> Result<Self, TreeDigestError> {
         tree::canonical_tree_digest(root).map(Self)
     }
-
-    pub fn bytes(&self) -> [u8; 32] {
-        self.0
-    }
 }
 
 impl fmt::Display for TreeDigest {
