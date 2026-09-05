@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.11.1...v0.12.0) (2026-09-05)
+
+
+### Features
+
+* **kagent:** keep demo fixtures off the runtime chart ([#226](https://github.com/archestra-ai/OpenAPPA/issues/226)) ([2e7b664](https://github.com/archestra-ai/OpenAPPA/commit/2e7b664ff27ae45d0eab92b9023fa0d74d236e8d))
+
 ## [0.11.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.11.0...v0.11.1) (2026-09-05)
 
 

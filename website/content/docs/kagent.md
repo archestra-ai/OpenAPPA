@@ -17,7 +17,7 @@ controller:
   agentImage:
     registry: ghcr.io
     repository: archestra-ai/appa-kagent-adk
-    tag: 0.11.1 # x-release-please-version
+    tag: 0.12.0 # x-release-please-version
 ```
 
 The plugin image replaces kagent's Python Agent image. It stays inert until an Agent sets both variables:
@@ -80,7 +80,7 @@ Then install kagent. This block does not modify `OPENAI_API_KEY` and stops befor
 
 ```sh
 : "${OPENAI_API_KEY:?Set OPENAI_API_KEY before installing kagent}"
-APPA_VERSION=0.11.1 # x-release-please-version
+APPA_VERSION=0.12.0 # x-release-please-version
 
 helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-crds \
   --version 0.9.12 -n kagent --create-namespace --force-conflicts
@@ -114,7 +114,7 @@ The appa plugin preserves stock behavior when `APPA_ENABLED` is absent or `false
 Now install the runtime. kagent can reconcile `appa-guide` against the model and tool server from step 1:
 
 ```sh
-APPA_VERSION=0.11.1 # x-release-please-version
+APPA_VERSION=0.12.0 # x-release-please-version
 helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
   --version "$APPA_VERSION" -n appa --create-namespace \
   --set persistence.enabled=true \
@@ -129,7 +129,7 @@ The runtime listens at `http://appa-runtime.appa.svc.cluster.local:18787`. The s
 ### 3. Install the demo Agents
 
 ```sh
-APPA_VERSION=0.11.1 # x-release-please-version
+APPA_VERSION=0.12.0 # x-release-please-version
 helm upgrade --install appa-kagent-demo \
   oci://ghcr.io/archestra-ai/charts/appa-kagent-demo \
   --version "$APPA_VERSION" -n kagent \
@@ -185,7 +185,7 @@ If you already run kagent, install the remote runtime before changing the Agent 
 Deploy one policy runtime for the agents you want to protect:
 
 ```sh
-APPA_VERSION=0.11.1 # x-release-please-version
+APPA_VERSION=0.12.0 # x-release-please-version
 helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
   --version "$APPA_VERSION" \
   --namespace appa --create-namespace \
