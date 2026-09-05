@@ -236,7 +236,7 @@ ROLLBACK = "roll back the checkout-api deployment; if it is blocked, execute the
 
 
 def test_the_remote_change_board_approves_and_the_rollback_runs(agent, board):
-    """A URL authority backed by people out of band: the consult parks at
+    """An Authority backed by people out of band: the consult parks at
     the change board while the task runs, a member rules on the board's
     own channel, and the ruling authorizes the exact call. The task never
     suspends — the person is on the remote side, not the A2A caller."""

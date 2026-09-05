@@ -52,6 +52,13 @@ The runtime binds the pod network directly. Point agents at:
 http://appa-runtime.appa.svc.cluster.local:18787
 ```
 
+## Demo fixtures
+
+`appa-kagent-demo` is a separate fixture-only chart. It points its Agents
+at this Service and supplies an inert policy template for `appa-guide` to
+review. It does not install a runtime, serving policy, persistence,
+provider configuration, ModelConfig, or second `appa-guide`.
+
 ## Persistence
 
 Off by default. The trajectory log and a writable batteries overlay

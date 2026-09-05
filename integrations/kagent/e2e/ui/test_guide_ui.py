@@ -39,20 +39,21 @@ def test_the_dashboard_opens_every_seeded_demo_case(browser_context):
         page.close()
 
 
-@pytest.mark.skipif(
-    not os.environ.get("APPA_QUICKSTART_AGENT"), reason="quickstart chart row only"
-)
-def test_the_chart_runtime_gates_the_quickstart_agent(browser_context, shots_dir: str):
-    agent = os.environ["APPA_QUICKSTART_AGENT"]
+def test_the_fixture_agent_uses_the_shared_chart_runtime(
+    browser_context, shots_dir: str
+):
+    agent = os.environ.get("APPA_DEMO_AGENT", "cluster-ops")
     page = browser_context.new_page()
     try:
         page.goto(f"{BASE}/agents/{NAMESPACE}/{agent}/chat", wait_until="networkidle")
         chat = Chat(page)
-        chat.send("List pods in the kagent namespace.")
+        chat.send("List the pods in the shop namespace.")
         body = chat.wait_idle(timeout_s=300)
-        chat.shot(shots_dir, "quickstart-agent")
+        chat.shot(shots_dir, "fixture-agent")
         assert "Error in plugin" not in body
-        assert "cluster-ops" in body or "appa-guide" in body
+        details = chat.tool_details()
+        assert "list_pods" in details
+        assert "checkout-api" in details or "payments" in details
     finally:
         page.close()
 
@@ -67,6 +68,7 @@ def test_init_completes_the_full_read_only_inventory(chat: Chat, shots_dir: str)
     for observed in [
         "appa-runtime",
         "demo-tools",
+        "appa-kagent-demo-policy",
         "kagent-tool-server",
         "batter",
         "release-manager",

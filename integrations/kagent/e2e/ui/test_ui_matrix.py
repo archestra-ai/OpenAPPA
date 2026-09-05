@@ -267,7 +267,7 @@ ROLLBACK = "roll back the checkout-api deployment; if it is blocked, execute the
 
 
 def test_the_remote_change_board_approves_and_the_rollback_runs(chat, board, shots_dir):
-    """A URL authority backed by people out of band: the runtime parks its
+    """An Authority backed by people out of band: the runtime parks its
     consult at the change board, a member rules on the board's own
     channel, and the ruling authorizes the exact call. No kagent card:
     the person is on the remote side."""

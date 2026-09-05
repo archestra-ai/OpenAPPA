@@ -26,41 +26,37 @@ Then, from this directory:
 
 ```sh
 ./kind-up.sh                              # the cluster, and the images into it
-OPENROUTER_API_KEY=… ./install.sh         # kagent 0.9.12, then the demo chart
+OPENROUTER_API_KEY=… ./install.sh         # kagent, runtime chart, fixture chart
 ./run-a2a.sh                              # all 18 A2A cases
 ```
 
 `kind-up.sh` keeps a cluster that already carries the name and leaves it
 as the current kubectl context. `install.sh` installs kagent with the
-agent image pointed at the loaded `appa-kagent-adk:ci`, turns off
-the UI, ten sample agents and three bundled tool charts, and installs the
-demo chart without the guide, go cell or seed Job. It waits for
-`appa-runtime`, `demo-tools` and the three agent Deployments the kagent
-controller compiles. `run-a2a.sh` port-forwards the parent agent and the
-mocks, runs every case with two reruns, and exits with pytest's status.
+agent image pointed at the loaded `appa-kagent-adk:ci` and turns off
+the UI, ten sample agents, and three bundled tool charts. It creates an
+e2e ModelConfig, installs the production runtime chart with the rendered
+demo policy, then installs the fixture-only demo chart without the Go
+cell or seed Job. It waits for `appa-runtime`, both demo Deployments, and
+the three Agent Deployments the kagent controller compiles.
+`run-a2a.sh` port-forwards the parent Agent and the mocks, runs every
+case with two reruns, and exits with pytest's status.
 
 Each script reads its settings from the environment
-(`APPA_E2E_NAMESPACE`, `APPA_E2E_IMAGE_TAG`, `APPA_E2E_MODEL`,
-`APPA_E2E_BASE_URL`, and the rest at the top of each
-file). `KIND_CLUSTER` names the cluster, `KAGENT_VERSION` the kagent
+(`APPA_E2E_NAMESPACE`, `APPA_E2E_RUNTIME_NAMESPACE`,
+`APPA_E2E_IMAGE_TAG`, `APPA_E2E_MODEL`, `APPA_E2E_BASE_URL`, and the
+rest at the top of each file). `KIND_CLUSTER` names the cluster, `KAGENT_VERSION` the kagent
 chart. `APPA_E2E_PRUNE_DAEMON_IMAGES=1` drops the daemon copies of the
 images after the load, which a 14 GB CI runner needs.
 
 ## The model
 
-One key and one endpoint serve both models the stack calls: the agents'
-model, through the ModelConfig, and the model the policy's sanitizers
-consult, through `[externals.llm]`. `install.sh` sets
-`openai.model`/`openai.baseUrl` and `llm.model`/`llm.url` to the same
-pair, so any OpenAI-compatible endpoint works. The default matches the
-public playground: `openai/gpt-5.6-luna` through OpenRouter.
+One key and endpoint serve the Agents through the e2e ModelConfig. The
+demo sanitizers are deterministic mock policy services and consume no
+model credential. The default Agent model matches the public playground:
+`openai/gpt-5.6-luna` through OpenRouter.
 
-Two properties decide whether a model can run the matrix. The agents
-call tools, so the model must support function calling. The runtime
-asks its sanitizer consult for a `json_schema` answer, so the model
-must support structured outputs, or `configured_default` fails on a
-clean no-answer. The default model id advertises both on OpenRouter,
-and the first live run is what confirms it.
+The Agent model must support function calling. Sanitizer support and
+structured model output are not prerequisites for this matrix.
 
 ## In CI
 

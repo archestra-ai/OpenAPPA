@@ -746,7 +746,8 @@ jobs:
   # The steps below own the runner. The scripts under e2e/ci own the stack:
   #   kind-up.sh    loads the four `:ci` images into the cluster. It keeps
   #                 the cluster the action above creates.
-  #   install.sh    installs kagent and the demo chart, then waits for rollout.
+  #   install.sh    installs kagent, the runtime chart and the fixture chart,
+  #                 then waits for rollout.
   #   run-a2a.sh    port-forwards the agent and the mocks, runs the cases,
   #                 and writes the model and the timings to the step summary.
   # Each script reads the environment this job exports. e2e/ci/README.md
@@ -769,12 +770,13 @@ jobs:
       KIND_CLUSTER: appa-e2e
       KAGENT_VERSION: "0.9.12"
       APPA_E2E_NAMESPACE: kagent
+      APPA_E2E_RUNTIME_NAMESPACE: appa
       APPA_E2E_IMAGE_TAG: ci
       # The load leaves each image in the daemon and in the cluster node,
       # so the script drops the daemon copy.
       APPA_E2E_PRUNE_DAEMON_IMAGES: "1"
-      # One endpoint serves the agents and the policy's sanitizers. This is
-      # the same model and endpoint as the public playground.
+      # The Agent model uses the same endpoint as the public playground.
+      # Demo sanitizers are deterministic mock policy services.
       APPA_E2E_MODEL: openai/gpt-5.6-luna
       APPA_E2E_BASE_URL: https://openrouter.ai/api/v1
     steps:
@@ -844,7 +846,7 @@ jobs:
       - name: Load the images into the cluster
         run: bash integrations/kagent/e2e/ci/kind-up.sh
 
-      - name: Install kagent and the demo chart
+      - name: Install kagent, runtime and demo fixtures
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: bash integrations/kagent/e2e/ci/install.sh
@@ -866,10 +868,12 @@ jobs:
         run: |
           mkdir -p "$DIAGNOSTICS_DIR"
           kubectl get pods -A -o wide > "$DIAGNOSTICS_DIR/pods.txt" 2>&1 || true
-          kubectl describe pods -n "$APPA_E2E_NAMESPACE" > "$DIAGNOSTICS_DIR/describe.txt" 2>&1 || true
-          for pod in $(kubectl get pods -n "$APPA_E2E_NAMESPACE" -o name || true); do
-            kubectl logs -n "$APPA_E2E_NAMESPACE" "$pod" --all-containers --tail=2000 \
-              > "$DIAGNOSTICS_DIR/${pod##*/}.log" 2>&1 || true
+          for namespace in "$APPA_E2E_RUNTIME_NAMESPACE" "$APPA_E2E_NAMESPACE"; do
+            kubectl describe pods -n "$namespace" > "$DIAGNOSTICS_DIR/describe-$namespace.txt" 2>&1 || true
+            for pod in $(kubectl get pods -n "$namespace" -o name || true); do
+              kubectl logs -n "$namespace" "$pod" --all-containers --tail=2000 \
+                > "$DIAGNOSTICS_DIR/$namespace-${pod##*/}.log" 2>&1 || true
+            done
           done
           df -h /
 

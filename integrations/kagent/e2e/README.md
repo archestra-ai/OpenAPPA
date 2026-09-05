@@ -9,7 +9,7 @@ Three dimensions, every combination a row:
   the A2A protocol alone ([a2a/](a2a/)).
 
 Every row runs the same eighteen conversations with a real model against
-the shared `appa-runtime` on the demo policy: the allowed read, the
+the dedicated `appa-runtime` release on the demo policy: the allowed read, the
 exfiltration ask, the agent's own remedies under configured and chat
 steering, a forged offer, the human-review authority both ways, the
 per-call annotator, the release window in and out of window, the remote
@@ -29,8 +29,8 @@ after audience narrowing.
 | main `52cc4de2` | B2-py, B2-go | python (google-adk 2.8.0), go (adk/v2 v2.1.0 binary, kagent main locks v2.2.0) | dashboard, A2A | not run |
 
 The cell ids are the plan's ([../IMPLEMENTATION.md](../IMPLEMENTATION.md)).
-Only the kagent v0.9.12 rows run: the demo chart installs into a
-v0.9.12 cluster and runs both runtime cells on it. The v0.10 rows name
+Only the kagent v0.9.12 rows run: the runtime and fixture charts install
+into a v0.9.12 cluster and run both runtime cells on it. The v0.10 rows name
 the same eighteen cases on that release line's stack, and no run of
 them exists. Local matrix runs assume a running stack. The scripts under
 `e2e/ci` provision the A-py A2A row.
@@ -38,7 +38,7 @@ them exists. Local matrix runs assume a running stack. The scripts under
 ## Run
 
 The stack from [../demo/README.md](../demo/README.md): the kind cluster
-with the demo chart, the dashboard port-forwarded to `127.0.0.1:8901`,
+with the runtime and fixture charts, the dashboard at `127.0.0.1:8901`,
 the mocks' side channel to `127.0.0.1:8081`, and the agent under test
 port-forwarded for the A2A driver.
 

@@ -4,6 +4,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 namespace=${APPA_NAMESPACE:-kagent}
+model_config=${APPA_MODEL_CONFIG:-default-model-config}
+runtime_url=${APPA_RUNTIME_URL:-http://appa-runtime.appa.svc.cluster.local:18787}
 target=appa-guide-e2e-fixture
 created=false
 
@@ -25,7 +27,7 @@ spec:
   description: Fixture Agent for appa-guide migration.
   declarative:
     systemMessage: List Kubernetes pods when asked.
-    modelConfig: appa-demo-model
+    modelConfig: $model_config
     tools:
       - type: McpServer
         mcpServer:
@@ -47,11 +49,12 @@ kubectl wait agent/"$target" -n "$namespace" --for=condition=Ready=True --timeou
     pytest -v test_guide_ui.py
 )
 
-kubectl get agent "$target" -n "$namespace" -o json | jq -e '
+kubectl get agent "$target" -n "$namespace" -o json | jq -e \
+  --arg model "$model_config" --arg runtime "$runtime_url" '
   .spec.description == "Fixture Agent for appa-guide migration." and
   .spec.type == "Declarative" and
   .spec.declarative.systemMessage == "List Kubernetes pods when asked." and
-  .spec.declarative.modelConfig == "appa-demo-model" and
+  .spec.declarative.modelConfig == $model and
   (.spec.declarative.tools == [{
     "type": "McpServer",
     "mcpServer": {
@@ -63,5 +66,5 @@ kubectl get agent "$target" -n "$namespace" -o json | jq -e '
   (.spec.declarative.deployment.env as $env |
     any($env[]; .name == "EXISTING_SETTING" and .value == "preserve-me") and
     any($env[]; .name == "APPA_ENABLED" and .value == "true") and
-    any($env[]; .name == "APPA_RUNTIME_URL" and (.value | endswith(":18787"))))
+    any($env[]; .name == "APPA_RUNTIME_URL" and .value == $runtime))
 ' >/dev/null

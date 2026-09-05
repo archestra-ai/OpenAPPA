@@ -44,29 +44,33 @@ The host-neutral `appa-guide` skill routes to a Claude Code or kagent reference.
 
 These commands require Helm 4 because upgrades reclaim chart-owned fields with server-side apply.
 
-### Deploy kagent with OpenAPPA
+### Install kagent with appa plugin
 
-Install the CRDs and remote runtime before the kagent controller uses the OpenAPPA adapter image:
+Install the CRDs and kagent controller before appa creates its configuring Agent:
+
+Set your provider credential first. Replace the placeholder; do not run this line unchanged:
 
 ```sh
+export OPENAI_API_KEY="<your-api-key>"
+```
+
+Then run the complete install:
+
+```sh
+: "${OPENAI_API_KEY:?Set OPENAI_API_KEY before installing kagent}"
+
 # 1. Install kagent CRDs
 helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-crds \
   --version 0.9.12 -n kagent --create-namespace --force-conflicts
 
-# 2. Install the remote runtime
+# 2. Install kagent with the appa plugin image
 APPA_VERSION=0.11.1 # x-release-please-version
-helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
-  --version "$APPA_VERSION" -n appa --create-namespace \
-  --set persistence.enabled=true \
-  --set appaGuide.enabled=true \
-  --set appaGuide.namespace=kagent \
-  --force-conflicts --wait --timeout 10m
-
-# 3. Install kagent controller with the OpenAPPA adapter image
 helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
   --set controller.agentImage.registry=ghcr.io \
   --set controller.agentImage.repository=archestra-ai/appa-kagent-adk \
+  --set providers.default=openAI \
+  --set-string providers.openAI.apiKey="$OPENAI_API_KEY" \
   --set k8s-agent.enabled=false \
   --set kgateway-agent.enabled=false \
   --set istio-agent.enabled=false \
@@ -80,9 +84,25 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --force-conflicts \
   --wait --timeout 10m \
   --set controller.agentImage.tag="$APPA_VERSION"
+
+# 3. Install appa
+helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
+  --version "$APPA_VERSION" -n appa --create-namespace \
+  --set persistence.enabled=true \
+  --set appaGuide.enabled=true \
+  --set appaGuide.namespace=kagent \
+  --force-conflicts --wait --timeout 10m
+
+# 4. Install the demo fixtures
+helm upgrade --install appa-kagent-demo \
+  oci://ghcr.io/archestra-ai/charts/appa-kagent-demo \
+  --version "$APPA_VERSION" -n kagent \
+  --set-string runtime.url=http://appa-runtime.appa.svc.cluster.local:18787 \
+  --set-string modelConfig.name=default-model-config \
+  --force-conflicts --wait --timeout 10m
 ```
 
-The stock agents are not part of this quickstart and require a separate provider Secret such as `kagent-openai`. These flags disable them while retaining the controller, dashboard, and tool services used below.
+The stock agents are not part of this quickstart. These flags disable them while retaining the controller, dashboard, and tool services. The provider values create the `default-model-config` and credential used by `appa-guide` and the demo Agents.
 
 ### Gate an agent
 
@@ -116,22 +136,9 @@ helm upgrade --install appa-runtime ../../charts/appa-runtime -n kagent \
 
 Point any declarative Agent at `http://appa-runtime.kagent.svc.cluster.local:18787`. `GET /batteries` on that Service lists the batteries bundled with this release. The `appa-guide` skill translates matched declarations to exact kagent tool names, writes the policy ConfigMap under the kagent Approve / Reject card, and hot-reloads the policy. With persistence enabled, `appa-guide` can also inspect, verify, and refresh upstream batteries from published releases without rebuilding containers.
 
-### Deploy the Interactive Demo
+### Open the interactive demo
 
-Deploy the demo chart with your OpenRouter API key:
-
-```sh
-APPA_VERSION=0.11.1 # x-release-please-version
-helm upgrade --install appa-kagent-demo \
-  "https://github.com/archestra-ai/OpenAPPA/releases/download/v${APPA_VERSION}/appa-kagent-demo-${APPA_VERSION}.tgz" \
-  -n kagent \
-  --set-string openai.apiKey="$OPENAI_API_KEY" \
-  --set agents.go.enabled=false \
-  --force-conflicts \
-  --wait --timeout 10m
-```
-
-The chart sets `APPA_ENABLED=true` on every agent it renders, so the demo fleet is gated on install.
+The fixture chart sets `APPA_ENABLED=true` on every Agent it renders and points each one at the runtime owned by `appa-runtime`.
 
 Port-forward the kagent dashboard:
 
@@ -141,7 +148,7 @@ kubectl port-forward -n kagent svc/kagent-ui 8901:8080
 
 Open [http://localhost:8901](http://localhost:8901) to explore 16 pre-seeded demonstration chats showcasing data exfiltration blocks, untrusted ingress quarantine, human-in-the-loop approvals, and multi-agent delegation.
 
-Open `http://localhost:8901/agents/kagent/appa-guide/chat` and say `init` to inspect the installed tools and propose the fleet policy. The agent waits for chat approval before it requests the enforced approval card.
+Open `http://localhost:8901/agents/kagent/appa-guide/chat` and say `init`. The guide verifies the demo's inert policy template and proposes the fleet policy. It waits for chat approval before requesting the enforced approval card; the demo chart never writes serving policy itself.
 
 ## Building from Source
 

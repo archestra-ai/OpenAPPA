@@ -71,66 +71,39 @@ expect_env() {
   fi
 }
 
-# The defaults render the Python cell and the guide agent, and the policy
-# declares both children by their wire spelling.
+# The defaults render only demo-owned fixtures. appa-runtime owns the
+# runtime, serving policy, persistence, provider configuration, and guide.
 must_render kagent
-expect 2 '/opt/appa/batteries'
-expect 0 '/var/lib/appa/batteries'
-expect 1 "image: ghcr.io/archestra-ai/appa-runtime:${app_version}$"
-expect 1 '0\.0\.0\.0:18787'
-expect 1 '^            - "appa-runtime\.kagent\.svc\.cluster\.local:18787"$'
-expect 1 'containerPort: 18787'
-expect 1 'port: 18787, targetPort: runtime'
-expect 1 '^          startupProbe:$'
-expect 3 '^          readinessProbe:$'
-expect 3 'path: /health, port: runtime'
-expect 1 'fsGroup: 65532'
-expect 0 'name: migrate-data-ownership'
-expect 0 '18789|appa-runtime-relay|name: relay'
-expect 4 '^kind: Agent$'
-expect_env 1 APPA_CONFIG /etc/appa/demo.appa.toml
-expect 1 '^  name: appa-guide$'
-expect 1 "^        ref: \"v${app_version}\"$"
-expect 1 '/skills/appa-guide/references/kagent\.md'
-expect 1 'with offset 1 and limit 0. Follow'
-expect 1 'all read-only inspection and present the proposal without asking whether'
-expect 1 'your first tool call must be skills'
-expect 1 'has no label-selector argument. Fetch the appa-runtime-'
-expect 1 'Run every inspection call sequentially, never in parallel'
-expect 1 'until the full init checklist and comparison are complete'
-expect 1 'Inventory Agents across all namespaces with output json'
-expect 1 'execute_remedy_plan with its exact offer id'
-expect 1 'copy pod_name and namespace from the same'
-expect 1 'with k8s_apply_manifest over its complete observed spec'
-expect 1 'A request to protect an Agent is not approval'
-expect 1 'Never copy status or server-owned metadata'
-expect 1 'request itself is never approval'
-expect 1 'Never claim all'
-expect 1 '^            - name: APPA_GUIDE_RUNTIME_URL$'
-expect 1 'mountPath: /var/run/appa/identity'
-expect 1 'path: pod-name'
+expect 2 '^kind: Deployment$'
+expect 2 '^kind: Service$'
+expect 1 '^kind: RemoteMCPServer$'
+expect 3 '^kind: Agent$'
+expect 0 '^kind: PersistentVolumeClaim$'
+expect 0 '^kind: ModelConfig$'
+expect 0 '^kind: Secret$'
+expect 0 '^  name: appa-runtime$'
+expect 0 '^  name: appa-runtime-policy$'
+expect 0 '^  name: appa-guide$'
+expect 0 "image: ghcr.io/archestra-ai/appa-runtime:${app_version}$"
+expect 0 '/opt/appa/batteries|/var/lib/appa|APPA_CONFIG|APPA_GUIDE_RUNTIME_URL'
+expect 1 '^  name: appa-kagent-demo-policy$'
+expect 1 '^    app.kubernetes.io/component: policy-template$'
+expect 2 '^  name: appa-demo-mocks$'
+expect 1 "image: ghcr.io/archestra-ai/appa-demo-mocks:${app_version}$"
+expect 1 "image: ghcr.io/archestra-ai/appa-demo-tools:${app_version}$"
+expect 1 '^        runAsNonRoot: true$'
+expect 1 '^            readOnlyRootFilesystem: true$'
+expect 5 'http://appa-demo-mocks\.kagent\.svc\.cluster\.local:8081/'
 expect 1 '^    name = "skills"$'
 expect 1 '^    name = "kagent__NS__log_analyst"$'
 expect 1 '^    name = "kagent__NS__log_analyst_go"$'
 
-# Persistence adds the writable lookup path. An existing claim is used
-# without rendering a second claim.
-must_render kagent --set runtime.persistence.enabled=true \
-  --set runtime.persistence.existingClaim=team-appa \
-  --set runtime.persistence.migrateOwnership=true
-expect 2 '/var/lib/appa/batteries'
-expect 2 '/var/lib/appa/release-batteries'
-expect 1 'name: migrate-data-ownership'
-expect 1 'claimName: "team-appa"'
-expect 0 '^kind: PersistentVolumeClaim$'
-
-# Every rendered agent carries the gate knob beside the runtime URL.
-# The runtime image is a drop-in replacement for the stock kagent image
-# and runs ungated until APPA_ENABLED reads true, and this is a gated
-# demo, so every agent sets it.
-expect_env 4 APPA_ENABLED true
-expect_env 4 APPA_RUNTIME_URL http://appa-runtime.kagent.svc.cluster.local:18787
+# Every rendered Agent uses the one explicitly selected shared runtime.
+expect_env 3 APPA_ENABLED true
+expect_env 3 APPA_RUNTIME_URL http://appa-runtime.appa.svc.cluster.local:18787
 expect 1 'never call ask_user'
+must_render kagent --set-string runtime.url=https://policy.example.test
+expect_env 3 APPA_RUNTIME_URL https://policy.example.test
 
 # A name that repeats another agent name fails the render, the fixed
 # cluster-ops and release-manager included.
@@ -142,16 +115,10 @@ must_refuse 'agent names collide' kagent --set agents.go.enabled=true --set agen
 
 # Enabling the Go cell adds its three optional agents.
 must_render kagent --set agents.go.enabled=true
-expect 7 '^kind: Agent$'
-expect_env 7 APPA_RUNTIME_URL http://appa-runtime.kagent.svc.cluster.local:18787
+expect 6 '^kind: Agent$'
+expect_env 6 APPA_RUNTIME_URL http://appa-runtime.appa.svc.cluster.local:18787
 expect 2 'never call ask_user'
 
-# The guide agent is its own switch, and it leaves the collision set: it
-# takes no value-derived name.
-must_render kagent --set guide.enabled=false
-expect 3 '^kind: Agent$'
-expect 0 '^  name: appa-guide$'
-expect_env 3 APPA_RUNTIME_URL http://appa-runtime.kagent.svc.cluster.local:18787
 must_render kagent --set agents.go.enabled=false --set agents.childName=release-manager-go
 must_refuse 'agent names collide' kagent --set agents.go.enabled=false --set agents.childName=log-analyst-go
 
@@ -164,37 +131,28 @@ must_refuse 'agents.go.childName is required' kagent --set agents.go.childName=n
 must_refuse 'schema' kagent --set agents.childName=Log-Analyst
 must_refuse 'schema' kagent --set agents.childName=123
 
-# Scalar-looking names render quoted wherever an object consumes them:
-# a numeric release namespace, a numeric ModelConfig name (an integer
-# after --set), and children named 123 and null.
+# Scalar-looking names render quoted wherever an object consumes them.
 must_render 123 --set-string agents.childName=123 --set-string agents.go.childName=null \
-  --set agents.go.enabled=true --set modelConfig.name=123 --set openai.apiKey=k
+  --set agents.go.enabled=true --set-string modelConfig.name=123
 expect 0 ': 123$'
 expect 0 ': null$'
 expect "$(count '^kind: ')" '^  namespace: "123"$'
-# The child Agent, the Secret, the ModelConfig, the parent's agent-tool
-# reference and the runtime's secretKeyRef.
-expect 5 'name: "123"$'
+# The child Agent and the parent's agent-tool reference.
+expect 2 'name: "123"$'
 # The go child Agent and the go parent's agent-tool reference.
 expect 2 'name: "null"$'
-expect 7 '^    modelConfig: "123"$'
-expect 1 '^  apiKeySecret: "123"$'
+expect 6 '^    modelConfig: "123"$'
 expect 1 '^    name = "123__NS__123"$'
 expect 1 '^    name = "123__NS__null"$'
 
-# The model profile the policy's sanitizers consult. Defaults use OpenAI's
-# endpoint. One override reaches both the agents' ModelConfig and that profile.
-must_render kagent
-expect 1 '^    model = "gpt-4.1-mini"$'
-expect 0 '^    url = "https://openrouter.ai/api/v1"$'
-expect 0 '^    baseUrl: '
-must_render kagent --set-string openai.baseUrl=https://openrouter.ai/api/v1 \
-  --set-string llm.url=https://openrouter.ai/api/v1 --set-string llm.model=vendor/model:free
-expect 1 '^    baseUrl: "https://openrouter.ai/api/v1"$'
-expect 1 '^    url = "https://openrouter.ai/api/v1"$'
-expect 1 '^    model = "vendor/model:free"$'
+# Required external references fail before Kubernetes sees an unusable Agent.
+must_refuse "missing property 'url'" kagent --set runtime.url=null
+must_refuse 'schema' kagent --set-string runtime.url=appa-runtime.appa:18787
+must_refuse 'schema' kagent --set-string modelConfig.name=Default
 
-# A missing sanitizer model fails the render.
-must_refuse 'llm.model is required' kagent --set llm.model=null
+# Removed ownership knobs fail loudly instead of becoming ignored values.
+must_refuse "additional properties 'guide' not allowed" kagent --set guide.enabled=false
+must_refuse "additional properties 'openai' not allowed" kagent --set-string openai.apiKey=placeholder
+must_refuse "additional properties 'image' not allowed" kagent --set runtime.image.repository=example.invalid/runtime
 
 echo "render-test: every case passed"
