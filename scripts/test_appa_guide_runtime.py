@@ -56,17 +56,20 @@ class GuideRuntimeTests(unittest.TestCase):
                 },
             }
 
-        identity = {"APPA_GUIDE_POD_NAME": "appa-runtime-abc", "APPA_GUIDE_POD_NAMESPACE": "appa"}
-        with mock.patch.dict(guide.os.environ, identity):
-            inspected = guide.annotate_command(consult("appa-guide-inspect"))
-            self.assertEqual(inspected["answer"]["requires"]["attention"], [])
-            for command in guide.MUTATING_COMMANDS:
-                annotated = guide.annotate_command(consult(command))
-                self.assertEqual(annotated["answer"]["requires"]["attention"], ["human-approval"])
-            with self.assertRaisesRegex(ValueError, "not this appa-runtime pod"):
-                guide.annotate_command(consult("appa-guide-inspect", pod_name="lookalike-pod"))
-            with self.assertRaisesRegex(ValueError, "not an appa-guide runtime operation"):
-                guide.annotate_command(consult("curl -s http://127.0.0.1/reload"))
+        with tempfile.TemporaryDirectory() as directory:
+            identity = Path(directory)
+            (identity / "pod-name").write_text("appa-runtime-abc\n", encoding="utf-8")
+            (identity / "namespace").write_text("appa\n", encoding="utf-8")
+            with mock.patch.object(guide, "IDENTITY_DIR", identity):
+                inspected = guide.annotate_command(consult("appa-guide-inspect"))
+                self.assertEqual(inspected["answer"]["requires"]["attention"], [])
+                for command in guide.MUTATING_COMMANDS:
+                    annotated = guide.annotate_command(consult(command))
+                    self.assertEqual(annotated["answer"]["requires"]["attention"], ["human-approval"])
+                with self.assertRaisesRegex(ValueError, "not this appa-runtime pod"):
+                    guide.annotate_command(consult("appa-guide-inspect", pod_name="lookalike-pod"))
+                with self.assertRaisesRegex(ValueError, "not an appa-guide runtime operation"):
+                    guide.annotate_command(consult("curl -s http://127.0.0.1/reload"))
 
     def test_inspection_reports_the_current_and_pending_release_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

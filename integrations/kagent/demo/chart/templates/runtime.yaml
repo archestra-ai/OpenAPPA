@@ -59,14 +59,6 @@ spec:
               {{- end }}
             - name: APPA_GUIDE_RUNTIME_URL
               value: http://127.0.0.1:18787
-            - name: APPA_GUIDE_POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: APPA_GUIDE_POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
             - name: APPA_LLM_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -75,6 +67,7 @@ spec:
           volumeMounts:
             - { name: policy, mountPath: /etc/appa, readOnly: true }
             - { name: data, mountPath: /var/lib/appa }
+            - { name: runtime-identity, mountPath: /var/run/appa/identity, readOnly: true }
         - name: relay
           image: {{ .Values.relay.image.repository }}:{{ .Values.relay.image.tag }}
           imagePullPolicy: {{ .Values.relay.image.pullPolicy }}
@@ -105,6 +98,11 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
+        - name: runtime-identity
+          downwardAPI:
+            items:
+              - { path: pod-name, fieldRef: { fieldPath: metadata.name } }
+              - { path: namespace, fieldRef: { fieldPath: metadata.namespace } }
 ---
 apiVersion: v1
 kind: Service

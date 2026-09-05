@@ -1,5 +1,5 @@
-{{- if or (hasKey .Values.env "APPA_BATTERIES_DIR") (hasKey .Values.env "APPA_CONFIG") (hasKey .Values.env "APPA_GUIDE_POD_NAME") (hasKey .Values.env "APPA_GUIDE_POD_NAMESPACE") }}
-{{- fail "env.APPA_BATTERIES_DIR, env.APPA_CONFIG, APPA_GUIDE_POD_NAME, and APPA_GUIDE_POD_NAMESPACE are reserved; the chart derives them" }}
+{{- if or (hasKey .Values.env "APPA_BATTERIES_DIR") (hasKey .Values.env "APPA_CONFIG") }}
+{{- fail "env.APPA_BATTERIES_DIR and env.APPA_CONFIG are reserved; the chart derives them" }}
 {{- end }}
 apiVersion: apps/v1
 kind: Deployment
@@ -108,14 +108,6 @@ spec:
               {{- else }}
               value: /opt/appa/batteries
               {{- end }}
-            - name: APPA_GUIDE_POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: APPA_GUIDE_POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}
@@ -156,6 +148,9 @@ spec:
               mountPath: /var/lib/appa
             - name: tmp
               mountPath: /tmp
+            - name: runtime-identity
+              mountPath: /var/run/appa/identity
+              readOnly: true
         - name: relay
           image: {{ include "appa-runtime.relayImage" . }}
           imagePullPolicy: {{ .Values.relay.image.pullPolicy }}
@@ -197,6 +192,15 @@ spec:
           emptyDir: {}
         - name: relay-tmp
           emptyDir: {}
+        - name: runtime-identity
+          downwardAPI:
+            items:
+              - path: pod-name
+                fieldRef:
+                  fieldPath: metadata.name
+              - path: namespace
+                fieldRef:
+                  fieldPath: metadata.namespace
         - name: data
           {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:

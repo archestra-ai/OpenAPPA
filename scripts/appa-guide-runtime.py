@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 RUNTIME_URL = os.environ.get("APPA_GUIDE_RUNTIME_URL", "http://127.0.0.1:8787").rstrip("/")
 REFRESH = "/usr/local/bin/appa-refresh-batteries"
 CANDIDATE = Path(os.environ.get("APPA_GUIDE_REFRESH_CANDIDATE", "/var/lib/appa/.appa-guide-refresh-candidate"))
+IDENTITY_DIR = Path("/var/run/appa/identity")
 STABLE_TAG = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 MUTATING_COMMANDS = {
     "appa-guide-reload",
@@ -85,8 +86,8 @@ def annotate_command(request: dict) -> dict:
     command = arguments.get("command") if isinstance(arguments, dict) else None
     pod_name = arguments.get("pod_name") if isinstance(arguments, dict) else None
     namespace = arguments.get("namespace") if isinstance(arguments, dict) else None
-    expected_pod = os.environ.get("APPA_GUIDE_POD_NAME")
-    expected_namespace = os.environ.get("APPA_GUIDE_POD_NAMESPACE")
+    expected_pod = optional_text(IDENTITY_DIR / "pod-name")
+    expected_namespace = optional_text(IDENTITY_DIR / "namespace")
     if not expected_pod or not expected_namespace:
         raise ValueError("runtime pod identity is not configured")
     if pod_name != expected_pod or namespace != expected_namespace:
