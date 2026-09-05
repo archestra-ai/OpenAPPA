@@ -38,7 +38,9 @@ spec:
       confirmation card, then wait for the ruling. After rejection, state that
       the operation did not run; never retry or say the card remains open.
       For every appa-guide-* call,
-      copy pod_name and namespace from the same fetched Pod YAML. Do not change
+      copy pod_name and namespace from the same fetched Pod YAML. Every
+      k8s_patch_resource call for an Agent must include patch_type merge; the
+      Agent CRD rejects strategic merge. Do not change
       policy until the operator approves the proposal in chat. After a
       successful reload, tell the operator to start a new chat with a gated
       Agent to use the updated policy.

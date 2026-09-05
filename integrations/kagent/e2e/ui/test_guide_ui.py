@@ -116,5 +116,8 @@ def test_the_guide_protects_an_existing_agent_after_two_approvals(
     assert chat.decide("Approve"), "the Agent patch reaches the operator"
     body = chat.wait_idle(timeout_s=360)
     chat.shot(shots_dir, "guide-protect-agent")
-    assert "APPA_ENABLED" in body
-    assert "APPA_RUNTIME_URL" in body
+    details = chat.tool_details()
+    assert "APPA_ENABLED" in details
+    assert "APPA_RUNTIME_URL" in details
+    assert "patch_type" in details and "merge" in details
+    assert "failed" not in body.lower()
