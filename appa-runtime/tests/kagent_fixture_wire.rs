@@ -1,6 +1,6 @@
 //! The shared kagent fixture, read by the runtime the way `/hook` reads it.
 //!
-//! `integrations/kagent/fixtures/wire-events.jsonl` is the one sample of the
+//! `marketplace/adapters/kagent/fixtures/wire-events.jsonl` is the one sample of the
 //! canonical wire the two plugin lanes and the runtime agree on: the Python and
 //! Go suites render it, and this suite admits it. Every line goes through
 //! `WireEvent::read` and the served kagent adapter, so a plugin that changes the
@@ -8,7 +8,7 @@
 
 use appa_runtime_api::{AdapterName, CanonicalTool, HookEvent, OutcomeBody, ToolOutcome, WireEvent};
 
-const FIXTURES: &str = include_str!("../../integrations/kagent/fixtures/wire-events.jsonl");
+const FIXTURES: &str = include_str!("../../marketplace/adapters/kagent/fixtures/wire-events.jsonl");
 
 /// One fixture line: the case name the plugin lanes use, and the posted bytes.
 struct Posted {

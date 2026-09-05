@@ -36,7 +36,7 @@ appa init claude-code
 The result does not depend on the working directory. It replaces an existing APPA plugin instead of stacking
 another copy, deploys the same `appa` build for its internal `runtime` command, creates `clappa`, installs the
 statusline unless Claude already has a custom one, preserves an existing policy,
-and starts the runtime. The [Claude Code integration guide](../integrations/claude-code/README.md)
+and starts the runtime. The [Claude Code integration guide](../marketplace/adapters/claude-code/README.md)
 covers the complete flow.
 
 ## Development quickstart
@@ -82,7 +82,7 @@ start. An authority may stay unbound and then returns no answer; every
 other registered name needs its entry, and an entry no declaration
 registers refuses to start.
 
-`integrations/claude-code/examples/claude-code.appa.toml` is a
+`marketplace/adapters/claude-code/default.appa.toml` is a
 complete starting point: it releases every built-in Claude Code tool
 with the neutral annotation and marks the web tools' results
 suspicious. Pass its path directly to `--config`.
@@ -124,7 +124,7 @@ inside the session — the session's own commands are blocked too.
 
 The Claude Code integration — the plugin, the statusline, the example
 policies, and the install and uninstall instructions — lives in
-[`integrations/claude-code/`](../integrations/claude-code/README.md).
+[`marketplace/adapters/claude-code/`](../marketplace/adapters/claude-code/README.md).
 
 ### 5. See it work
 

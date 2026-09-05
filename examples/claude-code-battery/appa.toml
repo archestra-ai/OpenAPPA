@@ -1,8 +1,8 @@
 # Compose complete Claude Code and Slack battery configurations.
 
 include = [
-  "../../batteries/claude-code/appa.toml",
-  "../../batteries/slack/appa.toml",
+  "../../marketplace/batteries/claude-code/appa.toml",
+  "../../marketplace/batteries/slack/appa.toml",
 ]
 
 [policy]
@@ -39,7 +39,7 @@ max_body_bytes = 1048576
 builtin = "hitl"
 
 [externals.audience.slack]
-command = ["python3", "../../batteries/slack/audience-source.py"]
+command = ["python3", "../../marketplace/batteries/slack/audience-source.py"]
 token_env = "APPA_PROVIDER_SLACK_TOKEN"   # the one variable this command inherits
 
 # Root contracts run before every included battery. This local rule bypasses

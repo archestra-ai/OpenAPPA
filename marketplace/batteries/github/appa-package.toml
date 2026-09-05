@@ -1,0 +1,9 @@
+schema = 1
+name = "github"
+description = "Rules for the GitHub MCP server with its default tool sets: profile, repositories, issues, pull requests, and user search, plus the github audience source."
+
+[battery]
+policy = "appa.toml"
+hosts = ["claude-code"]
+namespaces = ["github"]
+helpers = ["audience-source.py"]

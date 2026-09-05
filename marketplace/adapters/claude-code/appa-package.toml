@@ -1,0 +1,10 @@
+schema = 1
+name = "claude-code"
+description = "Gates a Claude Code session's flows through the appa-runtime process: every prompt, tool call, tool result, and child return is checked before it proceeds."
+
+[adapter]
+host = "claude-code"
+protocol = 1
+default_policy = "default.appa.toml"
+plugin_dir = "plugin"
+plugin = "appa-runtime"

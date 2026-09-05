@@ -19,7 +19,7 @@
 # every start after it.
 set -u
 
-# shellcheck source=integrations/claude-code/plugin/hooks/appa-paths.sh
+# shellcheck source=marketplace/adapters/claude-code/plugin/hooks/appa-paths.sh
 . "$(dirname "$0")/appa-paths.sh"
 
 # APPA_RUNTIME_URL keeps both of its jobs: the URL a client talks to, and the

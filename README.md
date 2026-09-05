@@ -91,7 +91,7 @@ Plain `claude` sessions stay untouched.
 
 Setup, upgrade and uninstall: [Claude Code
 integration](https://openappa.com/claude-code) ·
-[`integrations/claude-code`](integrations/claude-code/README.md).
+[`marketplace/adapters/claude-code`](marketplace/adapters/claude-code/README.md).
 
 ## Status
 

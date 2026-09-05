@@ -12,7 +12,7 @@ case "$0" in
   */*) appa_hooks_dir=${0%/*} ;;
   *) appa_hooks_dir=. ;;
 esac
-# shellcheck source=integrations/claude-code/plugin/hooks/appa-paths.sh
+# shellcheck source=marketplace/adapters/claude-code/plugin/hooks/appa-paths.sh
 . "$appa_hooks_dir/appa-paths.sh"
 
 exec "$APPA_BIN" hook --url "${APPA_RUNTIME_URL:-$APPA_ENDPOINT}" "$@"

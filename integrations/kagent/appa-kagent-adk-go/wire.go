@@ -7,7 +7,7 @@
 // that carries another pair. This file owns the event shape and the
 // decision envelope on the go side and imports no ADK code, so the wire
 // stays testable against the shared fixtures
-// (integrations/kagent/fixtures/wire-events.jsonl) without an agent
+// (marketplace/adapters/kagent/fixtures/wire-events.jsonl) without an agent
 // runtime.
 //
 // Ids are the harness's own: root_id is the ADK session id of the
