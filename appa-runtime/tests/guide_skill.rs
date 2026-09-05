@@ -198,7 +198,7 @@ fn kagent_guidance_requires_the_shared_runtime_and_direct_port() {
     assert!(website.contains("http://appa-runtime.appa.svc.cluster.local:18787"));
     assert!(website.contains("appaGuide.enabled=true"));
     assert!(website.contains("appa-kagent-adk"));
-    assert!(website.contains("archestra-ai/golang-adk"));
+    assert!(website.contains("friendly-path-465518-r6/appa-public/golang-adk"));
 }
 
 #[test]
