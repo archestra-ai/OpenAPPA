@@ -9,6 +9,7 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-env-changed=APPA_PLUGIN_SHA256");
     println!("cargo:rerun-if-env-changed=APPA_RELEASE_REF");
+    println!("cargo:rerun-if-env-changed=APPA_YELL_ENDPOINT");
 
     let crate_root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo sets CARGO_MANIFEST_DIR"));
     let repository = crate_root.parent().expect("appa-runtime is inside the repository");
@@ -49,8 +50,10 @@ fn main() {
     if let Some(reference) = release {
         assert!(!reference.trim().is_empty(), "APPA_RELEASE_REF must not be empty");
         let digest = release_plugin_digest();
+        let endpoint = release_yell_endpoint();
         println!("cargo:rustc-env=APPA_RELEASE_REF={reference}");
         println!("cargo:rustc-env=APPA_PLUGIN_SHA256={digest}");
+        println!("cargo:rustc-env=APPA_YELL_ENDPOINT={endpoint}");
         return;
     }
 
@@ -82,6 +85,27 @@ fn release_plugin_digest() -> String {
         "APPA_PLUGIN_SHA256 must be 64 hexadecimal characters, got {digest:?}"
     );
     digest
+}
+
+/// Where a release binary sends `appa yell` reports.
+///
+/// A build without one resolves an empty endpoint and refuses to send, which is
+/// right for a development build and silent for a released one: the feature
+/// would ship inert, and the person who learns that is someone whose report
+/// went nowhere. So a release build is refused here instead.
+fn release_yell_endpoint() -> String {
+    let Some(endpoint) = env::var("APPA_YELL_ENDPOINT").ok() else {
+        panic!(
+            "a release build (APPA_RELEASE_REF is set) requires APPA_YELL_ENDPOINT, \
+             the URL of the receiver that `appa yell` posts to"
+        );
+    };
+    let endpoint = endpoint.trim().to_owned();
+    assert!(
+        endpoint.starts_with("https://"),
+        "APPA_YELL_ENDPOINT must be an https URL, got {endpoint:?}"
+    );
+    endpoint
 }
 
 fn plugin_is_dirty(repository: &Path) -> bool {

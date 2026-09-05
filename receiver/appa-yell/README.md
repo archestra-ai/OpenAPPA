@@ -57,6 +57,18 @@ accepted path — storage, idempotency, and the signature check as deployed — 
 the smoke test in `smoke.py`, which the deploy workflow runs against the real
 endpoint.
 
+## How a binary finds this endpoint
+
+`APPA_YELL_ENDPOINT` is compiled in. A release build requires it —
+`appa-runtime/build.rs` refuses to produce one without it, because a binary
+that cannot send refuses silently and the feature would ship inert. The value
+is the `endpoint` output of the `appa-yell` Terraform root, set as a
+repository variable of that name; the release workflow passes it through.
+
+A development build has none, resolves an empty endpoint, and refuses to send.
+`APPA_YELL_ENDPOINT` in the environment overrides the compiled value at run
+time, which is how a test points at a local receiver.
+
 ## Who owns what
 
 Terraform, in a root of its own in the infra repository, owns the bucket and
