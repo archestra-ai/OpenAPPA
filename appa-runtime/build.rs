@@ -57,6 +57,13 @@ fn main() {
         return;
     }
 
+    // Emitted rather than left unset. `option_env!` reads the environment the
+    // build ran in, so a shell that exports APPA_YELL_ENDPOINT to point a test
+    // at a local receiver would otherwise bake that address into the binary.
+    // A development build carries no endpoint because this says so, not because
+    // the variable happened to be absent. The runtime override is unaffected.
+    println!("cargo:rustc-env=APPA_YELL_ENDPOINT=");
+
     match (commit, dirty) {
         (Some(commit), false) => {
             println!("cargo:rustc-env=APPA_BUILD_COMMIT={commit}");
@@ -93,17 +100,36 @@ fn release_plugin_digest() -> String {
 /// right for a development build and silent for a released one: the feature
 /// would ship inert, and the person who learns that is someone whose report
 /// went nowhere. So a release build is refused here instead.
+///
+/// The check is the client's own, not a cheaper approximation of it. Anything
+/// `Receiver::parse` refuses would ship just as inert as no endpoint at all, so
+/// a prefix test here would let the gate pass and the binary stay silent —
+/// `https://user:secret@host/` is a URL that starts with `https://` and that the
+/// client will not send to.
 fn release_yell_endpoint() -> String {
-    let Some(endpoint) = env::var("APPA_YELL_ENDPOINT").ok() else {
+    // An unset repository variable still reaches the build as an empty string,
+    // so both spellings of "missing" have to answer with the same instruction.
+    let present = env::var("APPA_YELL_ENDPOINT")
+        .ok()
+        .map(|endpoint| endpoint.trim().to_owned())
+        .filter(|endpoint| !endpoint.is_empty());
+    let Some(endpoint) = present else {
         panic!(
             "a release build (APPA_RELEASE_REF is set) requires APPA_YELL_ENDPOINT, \
              the URL of the receiver that `appa yell` posts to"
         );
     };
-    let endpoint = endpoint.trim().to_owned();
+
+    let parsed = url::Url::parse(&endpoint)
+        .unwrap_or_else(|error| panic!("APPA_YELL_ENDPOINT must be a URL, got {endpoint:?}: {error}"));
     assert!(
-        endpoint.starts_with("https://"),
-        "APPA_YELL_ENDPOINT must be an https URL, got {endpoint:?}"
+        parsed.scheme() == "https",
+        "APPA_YELL_ENDPOINT must be https, got {endpoint:?}"
+    );
+    assert!(
+        parsed.username().is_empty() && parsed.password().is_none(),
+        "APPA_YELL_ENDPOINT must carry no credentials; a receiver needs none, and the host shown \
+         to a person approving a send would not be the host reached"
     );
     endpoint
 }

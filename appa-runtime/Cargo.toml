@@ -64,6 +64,9 @@ rustls = { workspace = true }
 [build-dependencies]
 sha2 = { workspace = true }
 tar = "0.4"
+# The release gate checks the compiled yell endpoint the way the client parses
+# it. A prefix test would pass URLs the client then refuses.
+url = "2"
 
 [dev-dependencies]
 # The fail points the orchestration tests drive. A dev-dependency, so they are
