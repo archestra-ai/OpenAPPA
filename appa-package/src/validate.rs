@@ -195,7 +195,7 @@ impl std::fmt::Display for Kind {
 /// a package that validates here must load there, so a fragment refused at
 /// someone's deployment is refused at the package instead.
 const INCLUDABLE_TABLES: [&str; 2] = ["policy", "externals"];
-const INCLUDABLE_POLICY_FIELDS: [&str; 5] = ["version", "tool", "annotator", "authority", "sanitizer"];
+pub const INCLUDABLE_POLICY_FIELDS: [&str; 5] = ["version", "tool", "annotator", "authority", "sanitizer"];
 /// Those of them that are arrays of named declarations.
 const DECLARATION_ARRAYS: [&str; 4] = ["tool", "annotator", "authority", "sanitizer"];
 
@@ -329,7 +329,7 @@ fn check_externals(
 
 /// The external kinds an included file may bind. A battery is an included
 /// fragment, so this is exactly the set the config loader accepts from one.
-const BINDABLE_KINDS: [&str; 5] = ["authorities", "sanitizers", "annotators", "audience", "identity"];
+pub const BINDABLE_KINDS: [&str; 5] = ["authorities", "sanitizers", "annotators", "audience", "identity"];
 
 /// One binding of one external. A battery runs the programs it ships and
 /// nothing else: the `command` shape naming a declared helper is the only one
