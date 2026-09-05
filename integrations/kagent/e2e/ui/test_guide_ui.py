@@ -102,8 +102,15 @@ def test_an_explicit_reload_reaches_a_review_card_and_rejection_stops_it(
 
 def test_battery_refresh_reaches_review_before_writing(chat: Chat, shots_dir: str):
     chat.send(
-        "Refresh batteries. Inspect current and available versions, then proceed to the first required "
-        "confirmation card. Do not approve it for me."
+        "Refresh batteries. Inspect current and available versions, propose the exact refresh check, "
+        "and wait for my chat approval before changing anything."
+    )
+    proposal = chat.wait_idle(timeout_s=360)
+    assert "batter" in proposal.lower()
+    assert not chat.confirmation_shown(), "inspection and proposal make no change"
+
+    chat.send(
+        "Approve the exact refresh check. Open its confirmation card; do not approve it for me."
     )
     assert chat.decide("Reject"), "the first battery state change reaches the operator"
     body = chat.wait_idle(timeout_s=360)
