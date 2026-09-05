@@ -12,6 +12,12 @@ name: Deploy appa-yell
 # Required repository secrets: APPA_YELL_GCP_SERVICE_ACCOUNT,
 # APPA_YELL_GCP_WORKLOAD_IDENTITY_PROVIDER (a deploy identity of its own, not
 # appa-demo's). Required repository variable: APPA_YELL_ENDPOINT.
+#
+# The deploy identity is bound to *this file at this path on main* — Google
+# checks the `job_workflow_ref` claim, because every workflow on a ref mints
+# the same subject and one of them being trusted would trust all of them. So
+# renaming or moving this file revokes its own credentials, and the fix is in
+# the infra repository, not here.
 
 on:
   workflow_dispatch:
