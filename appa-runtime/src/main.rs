@@ -72,14 +72,6 @@ struct Args {
     verbose: u8,
 }
 
-fn require_loopback(addr: &SocketAddr) -> Result<(), String> {
-    if addr.ip().is_loopback() {
-        Ok(())
-    } else {
-        Err(format!("refusing to listen on non-loopback address {addr}"))
-    }
-}
-
 /// The adapter surface this binary can serve. The one place harness
 /// names appear in this crate: each variant maps to one codec crate.
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -305,10 +297,6 @@ async fn serve(args: Args) -> ExitCode {
 
     let config_path = args.config.unwrap_or_else(|| PathBuf::from("appa.toml"));
 
-    if let Err(refusal) = require_loopback(&args.listen) {
-        eprintln!("appa runtime: {refusal}");
-        return ExitCode::FAILURE;
-    }
     match ensure_default_config(&config_path) {
         Ok(true) => tracing::info!(path = %config_path.display(), "created default configuration"),
         Ok(false) => {}
@@ -404,11 +392,16 @@ mod tests {
     }
 
     #[test]
-    fn a_non_loopback_listen_address_is_refused() {
-        assert!(require_loopback(&"127.0.0.1:8787".parse().expect("parses")).is_ok());
-        assert!(require_loopback(&"[::1]:8787".parse().expect("parses")).is_ok());
-        assert!(require_loopback(&"0.0.0.0:8787".parse().expect("parses")).is_err());
-        assert!(require_loopback(&"192.168.1.10:8787".parse().expect("parses")).is_err());
+    fn the_runtime_defaults_to_loopback_and_accepts_an_explicit_non_loopback_address() {
+        let default = Args::try_parse_from(["appa runtime"]).expect("the default runtime command parses");
+        assert_eq!(default.listen, "127.0.0.1:8787".parse().expect("the default parses"));
+
+        let shared = Args::try_parse_from(["appa runtime", "--listen", "0.0.0.0:18787"])
+            .expect("an explicit shared-runtime address parses");
+        assert_eq!(
+            shared.listen,
+            "0.0.0.0:18787".parse().expect("the shared address parses")
+        );
     }
 
     #[test]

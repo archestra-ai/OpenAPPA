@@ -46,11 +46,10 @@ GHCR packages start private. An organization owner must make the
 `charts/appa-runtime` package public after its first publish before an
 anonymous OCI install can pull it.
 
-The runtime binds loopback inside the pod. A relay sidecar is the
-cluster address. Point agents at:
+The runtime binds the pod network directly. Point agents at:
 
 ```text
-http://appa-runtime.appa.svc.cluster.local:18789
+http://appa-runtime.appa.svc.cluster.local:18787
 ```
 
 ## Persistence
@@ -116,9 +115,11 @@ the live key during template rendering; a concurrent later write wins.
 
 ## Network access
 
-Without a NetworkPolicy, any pod that can reach the Service can call
-`/hook`, `/mcp`, `/health`, and `/batteries`. Administrative routes stay
-loopback-only. Restrict callers by enabling the chart policy and listing
+Without a NetworkPolicy, any pod that can reach the Service can call every
+runtime route. This includes `/hook`, `/mcp`, `/health`, `/batteries`,
+`/reload`, `/status`, `/policy-key`, and `/binary-fingerprint`. Treat the
+Service as trusted internal infrastructure. Restrict callers by enabling
+the chart policy and listing
 Kubernetes `NetworkPolicyPeer` objects:
 
 ```yaml

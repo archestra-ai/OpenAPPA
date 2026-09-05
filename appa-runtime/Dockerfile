@@ -2,8 +2,8 @@
 #
 # The image carries the `appa` binary and the batteries of this release
 # at `/opt/appa/batteries`. A deployment mounts policy at
-# `APPA_CONFIG` and the trajectory log at `APPA_DB`. The process still
-# binds loopback only; a relay in front of it gives it a cluster address.
+# `APPA_CONFIG` and the trajectory log at `APPA_DB`. The shared runtime
+# listens on every interface so Docker and Kubernetes can reach it directly.
 #
 #   docker build -f appa-runtime/Dockerfile -t appa-runtime .
 #   (build context: the repository root)
@@ -54,5 +54,6 @@ ENV APPA_DB=/var/lib/appa/appa.db
 ENV APPA_BATTERIES_DIR=/opt/appa/batteries
 ENV APPA_GUIDE_RUNTIME_URL=http://127.0.0.1:18787
 WORKDIR /var/lib/appa
+EXPOSE 18787
 ENTRYPOINT ["/usr/local/bin/appa"]
-CMD ["runtime", "--adapter", "kagent", "--listen", "127.0.0.1:18787"]
+CMD ["runtime", "--adapter", "kagent", "--listen", "0.0.0.0:18787"]

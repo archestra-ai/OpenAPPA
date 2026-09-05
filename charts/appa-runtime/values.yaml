@@ -41,11 +41,10 @@ securityContext:
 
 service:
   type: ClusterIP
-  port: 18789
+  port: 18787
 
-# The relay accepts /hook, /mcp, /health, and /batteries. Enable this
-# policy with at least one NetworkPolicyPeer to restrict which pods can
-# reach those routes.
+# Enable this policy with at least one NetworkPolicyPeer to restrict which
+# pods can reach the runtime Service.
 networkPolicy:
   enabled: false
   ingress: []
@@ -60,29 +59,6 @@ resources:
 nodeSelector: {}
 tolerations: []
 affinity: {}
-
-# The runtime binds loopback. The relay is the cluster address.
-relay:
-  image:
-    repository: nginxinc/nginx-unprivileged
-    tag: 1.27-alpine
-    digest: sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0
-    pullPolicy: IfNotPresent
-  securityContext:
-    runAsNonRoot: true
-    runAsUser: 101
-    runAsGroup: 101
-    allowPrivilegeEscalation: false
-    readOnlyRootFilesystem: true
-    capabilities:
-      drop:
-        - ALL
-  resources:
-    requests:
-      cpu: 25m
-      memory: 32Mi
-    limits:
-      memory: 64Mi
 
 # Policy ConfigMap mounted at /etc/appa. Empty contents use the packaged
 # appa-guide bootstrap policy. Set existingConfigMap to use a ConfigMap you manage.

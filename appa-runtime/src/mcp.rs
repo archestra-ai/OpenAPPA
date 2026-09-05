@@ -13,8 +13,8 @@ use std::sync::Arc;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
 use rmcp::service::{RequestContext, RoleServer};
-use rmcp::transport::streamable_http_server::StreamableHttpService;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 
 use crate::api::{LabelSpelling, OfferId, RemedyArguments, RemedyOutcome, Runtime};
@@ -141,7 +141,7 @@ pub fn service(runtime: Arc<Runtime>) -> StreamableHttpService<RemedyService, Lo
     StreamableHttpService::new(
         move || Ok(RemedyService::new(Arc::clone(&runtime))),
         Arc::new(sessions),
-        Default::default(),
+        StreamableHttpServerConfig::default().disable_allowed_hosts(),
     )
 }
 
@@ -167,6 +167,29 @@ mod tests {
             .expect("the deployment opens"),
         ));
         assert_eq!(service.get_info().server_info.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[tokio::test]
+    async fn the_mcp_service_accepts_a_kubernetes_service_host() {
+        let directory = tempfile::tempdir().expect("a temp dir is creatable");
+        let service = service(std::sync::Arc::new(
+            Runtime::open(config(), directory.path().join("appa.db"), None).expect("the deployment opens"),
+        ));
+
+        let response = service
+            .handle(
+                axum::http::Request::builder()
+                    .uri("/mcp")
+                    .header("host", "appa-runtime.appa.svc.cluster.local:18787")
+                    .body(axum::body::Body::empty())
+                    .expect("the MCP request is valid"),
+            )
+            .await;
+
+        assert!(
+            response.status() != axum::http::StatusCode::FORBIDDEN,
+            "the Kubernetes Service Host header is not rejected by rmcp"
+        );
     }
 
     fn config() -> Config {
