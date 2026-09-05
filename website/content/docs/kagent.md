@@ -17,7 +17,7 @@ controller:
   agentImage:
     registry: ghcr.io
     repository: archestra-ai/appa-kagent-adk
-    tag: 0.11.0 # x-release-please-version
+    tag: 0.11.1 # x-release-please-version
 ```
 
 The image replaces kagent's Python Agent image. It stays inert until an Agent sets both variables:
@@ -80,7 +80,7 @@ helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-c
 Install the remote policy runtime before any Agent enables OpenAPPA:
 
 ```sh
-APPA_VERSION=0.11.0 # x-release-please-version
+APPA_VERSION=0.11.1 # x-release-please-version
 helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
   --version "$APPA_VERSION" -n appa --create-namespace \
   --set persistence.enabled=true \
@@ -192,7 +192,7 @@ If you already run kagent, install the remote runtime before changing the Agent 
 Deploy one policy runtime for the agents you want to protect:
 
 ```sh
-APPA_VERSION=0.11.0 # x-release-please-version
+APPA_VERSION=0.11.1 # x-release-please-version
 helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
   --version "$APPA_VERSION" \
   --namespace appa --create-namespace \
@@ -314,7 +314,7 @@ The same chat is the ongoing control surface for OpenAPPA operations. Examples i
 The scenario fleet has its own runtime policy and mock authorities. Install it in a separate test cluster from the quickstart runtime:
 
 ```sh
-APPA_VERSION=0.11.0 # x-release-please-version
+APPA_VERSION=0.11.1 # x-release-please-version
 helm upgrade --install appa-kagent-demo \
   "https://github.com/archestra-ai/OpenAPPA/releases/download/v${APPA_VERSION}/appa-kagent-demo-${APPA_VERSION}.tgz" \
   -n kagent \

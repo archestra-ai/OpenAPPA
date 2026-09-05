@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.11.0...v0.11.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* **kagent:** report init inventory accurately ([#224](https://github.com/archestra-ai/OpenAPPA/issues/224)) ([ec82083](https://github.com/archestra-ai/OpenAPPA/commit/ec820834b63d4d4cf8d6923853ce6b3ce03873f0))
+
 ## [0.11.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.10.0...v0.11.0) (2026-09-05)
 
 

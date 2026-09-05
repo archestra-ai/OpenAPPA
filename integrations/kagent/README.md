@@ -54,7 +54,7 @@ helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-c
   --version 0.9.12 -n kagent --create-namespace --force-conflicts
 
 # 2. Install the remote runtime
-APPA_VERSION=0.11.0 # x-release-please-version
+APPA_VERSION=0.11.1 # x-release-please-version
 helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
   --version "$APPA_VERSION" -n appa --create-namespace \
   --set persistence.enabled=true \
@@ -121,7 +121,7 @@ Point any declarative Agent at `http://appa-runtime.kagent.svc.cluster.local:187
 Deploy the demo chart with your OpenRouter API key:
 
 ```sh
-APPA_VERSION=0.11.0 # x-release-please-version
+APPA_VERSION=0.11.1 # x-release-please-version
 helm upgrade --install appa-kagent-demo \
   "https://github.com/archestra-ai/OpenAPPA/releases/download/v${APPA_VERSION}/appa-kagent-demo-${APPA_VERSION}.tgz" \
   -n kagent \
