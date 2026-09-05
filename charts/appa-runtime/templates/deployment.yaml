@@ -21,7 +21,6 @@ spec:
         {{- if not .Values.config.existingConfigMap }}
         checksum/policy: {{ include "appa-runtime.managedPolicy" . | sha256sum | quote }}
         {{- end }}
-        checksum/relay: {{ .Files.Get "files/relay.conf" | sha256sum | quote }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -87,7 +86,9 @@ spec:
             - --db
             - /var/lib/appa/appa.db
             - --listen
-            - 127.0.0.1:18787
+            - 0.0.0.0:18787
+            - --mcp-allowed-host
+            - {{ printf "%s.%s.svc.cluster.local:%v" (include "appa-runtime.fullname" .) .Release.Namespace .Values.service.port | quote }}
             {{- if .Values.persistence.enabled }}
             - --batteries-dir
             - /var/lib/appa/batteries
@@ -118,27 +119,25 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          ports:
+            - name: runtime
+              containerPort: 18787
+              protocol: TCP
           startupProbe:
-            exec:
-              command:
-                - python3
-                - -c
-                - 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:18787/health", timeout=2).read()'
+            httpGet:
+              path: /health
+              port: runtime
             failureThreshold: 30
             periodSeconds: 2
           readinessProbe:
-            exec:
-              command:
-                - python3
-                - -c
-                - 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:18787/health", timeout=2).read()'
+            httpGet:
+              path: /health
+              port: runtime
             periodSeconds: 5
           livenessProbe:
-            exec:
-              command:
-                - python3
-                - -c
-                - 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:18787/health", timeout=2).read()'
+            httpGet:
+              path: /health
+              port: runtime
             periodSeconds: 20
           volumeMounts:
             - name: policy
@@ -148,47 +147,24 @@ spec:
               mountPath: /var/lib/appa
             - name: tmp
               mountPath: /tmp
-        - name: relay
-          image: {{ include "appa-runtime.relayImage" . }}
-          imagePullPolicy: {{ .Values.relay.image.pullPolicy }}
-          securityContext:
-            {{- toYaml .Values.relay.securityContext | nindent 12 }}
-          ports:
-            - name: relay
-              containerPort: 18789
-              protocol: TCP
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: relay
-            periodSeconds: 5
-          resources:
-            {{- toYaml .Values.relay.resources | nindent 12 }}
-          volumeMounts:
-            - name: relay
-              mountPath: /etc/nginx/conf.d
+            - name: runtime-identity
+              mountPath: /var/run/appa/identity
               readOnly: true
-            - name: relay-cache
-              mountPath: /var/cache/nginx
-            - name: relay-run
-              mountPath: /var/run
-            - name: relay-tmp
-              mountPath: /tmp
       volumes:
         - name: policy
           configMap:
             name: {{ include "appa-runtime.configMapName" . }}
-        - name: relay
-          configMap:
-            name: {{ include "appa-runtime.fullname" . }}-relay
         - name: tmp
           emptyDir: {}
-        - name: relay-cache
-          emptyDir: {}
-        - name: relay-run
-          emptyDir: {}
-        - name: relay-tmp
-          emptyDir: {}
+        - name: runtime-identity
+          downwardAPI:
+            items:
+              - path: pod-name
+                fieldRef:
+                  fieldPath: metadata.name
+              - path: namespace
+                fieldRef:
+                  fieldPath: metadata.namespace
         - name: data
           {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:

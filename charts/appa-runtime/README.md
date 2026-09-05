@@ -26,15 +26,30 @@ An unreleased checkout can name an image tag that is not published yet.
 Set `image.repository` and `image.tag` to the image built from that
 checkout.
 
+## appa-guide
+
+The chart can install the configuring kagent Agent with the runtime:
+
+```sh
+helm install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
+  --version "$APPA_VERSION" --namespace appa --create-namespace \
+  --set appaGuide.enabled=true \
+  --set appaGuide.namespace=kagent
+```
+
+The option is off by default because the runtime chart also supports
+clusters without kagent. The target namespace, kagent model config, and
+tool-server name are configurable under `appaGuide`. An empty
+`appaGuide.skill.ref` pins the skill to the chart's `v<appVersion>` tag.
+
 GHCR packages start private. An organization owner must make the
 `charts/appa-runtime` package public after its first publish before an
 anonymous OCI install can pull it.
 
-The runtime binds loopback inside the pod. A relay sidecar is the
-cluster address. Point agents at:
+The runtime binds the pod network directly. Point agents at:
 
 ```text
-http://appa-runtime.appa.svc.cluster.local:18789
+http://appa-runtime.appa.svc.cluster.local:18787
 ```
 
 ## Persistence
@@ -101,8 +116,10 @@ the live key during template rendering; a concurrent later write wins.
 ## Network access
 
 Without a NetworkPolicy, any pod that can reach the Service can call
-`/hook`, `/mcp`, `/health`, and `/batteries`. Administrative routes stay
-loopback-only. Restrict callers by enabling the chart policy and listing
+`/hook`, `/mcp`, `/health`, and `/batteries`. The runtime returns `403` on
+`/reload`, `/status`, `/policy-key`, and `/binary-fingerprint` unless the
+network peer is loopback. Treat the Service as trusted internal
+infrastructure. Restrict callers by enabling the chart policy and listing
 Kubernetes `NetworkPolicyPeer` objects:
 
 ```yaml

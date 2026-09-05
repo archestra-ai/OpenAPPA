@@ -1,5 +1,5 @@
 {{- include "appa-demo.requireDistinctAgentNames" . -}}
-# The gated fleet: two declarative agents on the OpenAPPA runtime image
+# The gated fleet: declarative Agents on the OpenAPPA adapter image
 # (kagent's controller.agentImage), pointing at the shared runtime.
 # APPA_ENABLED is the gate knob of that image, and it is off by default.
 # This is a gated demo, so every agent below sets it to "true".
@@ -79,7 +79,7 @@ metadata:
     {{- include "appa-demo.labels" . | nindent 4 }}
 spec:
   type: Declarative
-  description: The cluster-ops demo agent, gated by OpenAPPA through the runtime image.
+  description: The cluster-ops demo Agent, gated through the remote OpenAPPA runtime.
   declarative:
     systemMessage: |
       You are the cluster operations agent for this cluster. There is
@@ -98,7 +98,8 @@ spec:
       otherwise accept the change. If the operator steers you to a
       different remedy in chat, follow the operator. After the remedy,
       retry the original call, and say in one sentence which remedy you
-      took. If a remedy fails, report the failure and stop.
+      took. If a block offers no remedy, report the refusal and stop;
+      never call ask_user. If a remedy fails, report the failure and stop.
     modelConfig: {{ .Values.modelConfig.name | quote }}
     tools:
       - type: McpServer

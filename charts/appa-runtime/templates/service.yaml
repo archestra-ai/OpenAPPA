@@ -10,7 +10,7 @@ spec:
   selector:
     {{- include "appa-runtime.selectorLabels" . | nindent 4 }}
   ports:
-    - name: relay
+    - name: runtime
       port: {{ .Values.service.port }}
-      targetPort: relay
+      targetPort: runtime
       protocol: TCP

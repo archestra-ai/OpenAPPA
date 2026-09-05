@@ -20,8 +20,11 @@ guess its content.
   `# Claude Code` section below. Do not call `Read` to load the
   reference.
 - **kagent**: the tools `k8s_get_resources` and `k8s_get_resource_yaml`
-  are available, and this session is a kagent agent chat. Read
-  `/skills/appa-guide/references/kagent.md` and follow it.
+  are available, and this session is a kagent agent chat. Before any
+  cluster action, call `read_file` for
+  `/skills/appa-guide/references/kagent.md` with `offset: 1` and
+  `limit: 0`. This exact call reads through end of file. Follow the
+  complete result.
 - Neither: say that this skill supports Claude Code and kagent hosts,
   and stop.
 
@@ -41,6 +44,10 @@ battery refresh, health audit, Agent protection, or runtime upgrade, as
 that case. If the operator chooses `adjust` without describing the change,
 ask what they want OpenAPPA to do differently.
 
+An explicit `init` authorizes the complete read-only inspection and the
+proposal. Do not ask whether to continue before the proposal. Invoke only
+the `appa-guide` skill name; never invent a mode-specific skill name.
+
 ## Rules that apply on every host
 
 - The root config is the operator's source of truth. Root tool rules run
@@ -55,6 +62,13 @@ ask what they want OpenAPPA to do differently.
 - Read before proposing. Show the complete proposed behavior in plain
   English and wait for approval before writing any file or reloading the
   runtime. Ask for approval again if a correction changes that behavior.
+- An initial request for a change is not approval to execute it. End the
+  first turn with the proposal. Act only after a later message approves
+  that exact proposal.
+- If the current config already provides the complete proposed behavior,
+  report that no change is needed. Do not ask for approval, write, or
+  reload an unchanged config. Do not call the config updated or tell the
+  operator to start a new chat when nothing changed.
 - Make the smallest change that achieves the request. Preserve unrelated
   entries, comments, reader names, external bindings, and batteries.
 - Use short sentences. Explain what data stays private, what can leave

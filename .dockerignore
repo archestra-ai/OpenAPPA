@@ -1,4 +1,4 @@
-# Keep the build context to the crates the Dockerfile copies.
+# Keep the runtime image build context to the crates its Dockerfile copies.
 .git
 target
 **/target

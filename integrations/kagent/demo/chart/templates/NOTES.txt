@@ -31,6 +31,6 @@ No model key was given. Add it in the dashboard: Models → {{ .Values.modelConf
 soon as that Secret exists. (Or: helm upgrade ... --set openai.apiKey=...)
 {{- end }}
 
-Prerequisite (once per cluster): kagent 0.9.12 installed with its agent
-image set to the OpenAPPA runtime image, so every declarative agent is
+Prerequisite (once per cluster): kagent 0.9.12 installed with its Python
+Agent image set to appa-kagent-adk, so every enabled declarative Agent is
 gated — see the chart README.
