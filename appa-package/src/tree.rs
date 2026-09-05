@@ -194,14 +194,6 @@ fn absorb_file(hasher: &mut Sha256, path: &Path) -> Result<(), TreeDigestError> 
     Ok(())
 }
 
-/// What a Python interpreter leaves behind next to a package's helpers. It is
-/// generated, it is never distributed — staging drops it on the way into a
-/// bundle — and running the tests must not change what a package digests to.
-fn generated(name: &std::ffi::OsStr) -> bool {
-    let name = name.to_string_lossy();
-    name == "__pycache__" || name.ends_with(".pyc") || name.ends_with(".pyo")
-}
-
 fn collect(root: &Path, directory: &Path, entries: &mut Vec<StagedEntry>) -> Result<(), TreeDigestError> {
     let read = |source: io::Error| TreeDigestError::Read {
         path: directory.to_path_buf(),
@@ -209,9 +201,6 @@ fn collect(root: &Path, directory: &Path, entries: &mut Vec<StagedEntry>) -> Res
     };
     for entry in fs::read_dir(directory).map_err(read)? {
         let entry = entry.map_err(read)?;
-        if generated(&entry.file_name()) {
-            continue;
-        }
         let absolute = entry.path();
         let relative = absolute
             .strip_prefix(root)
@@ -296,30 +285,6 @@ mod tests {
         assert_ne!(
             canonical_tree_digest(first.path()).unwrap(),
             canonical_tree_digest(second.path()).unwrap()
-        );
-    }
-
-    #[test]
-    fn a_python_cache_does_not_change_what_a_package_digests_to() {
-        let directory = tempfile::tempdir().unwrap();
-        fs::write(directory.path().join("audience-source.py"), "print()").unwrap();
-        let clean = canonical_tree_digest(directory.path()).unwrap();
-
-        fs::create_dir(directory.path().join("__pycache__")).unwrap();
-        fs::write(
-            directory
-                .path()
-                .join("__pycache__")
-                .join("audience-source.cpython-313.pyc"),
-            "compiled",
-        )
-        .unwrap();
-        fs::write(directory.path().join("stray.pyc"), "compiled").unwrap();
-
-        assert_eq!(
-            canonical_tree_digest(directory.path()).unwrap(),
-            clean,
-            "running the tests must not move a package's digest"
         );
     }
 

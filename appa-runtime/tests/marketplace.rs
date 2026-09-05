@@ -6,7 +6,9 @@
 //! packages are files; a deployment checks the same digests against what it
 //! fetched.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use appa_package::{Marketplace, TreeDigest, validate_package};
 
@@ -44,12 +46,19 @@ fn every_package_the_marketplace_names_validates() {
     }
 }
 
-/// The recorded digest is the digest of the directory. When this fails, the
-/// package changed and its digest did not: the message carries the lines to
-/// write back.
+/// The recorded digest is the digest of the package's committed content, which
+/// is what a deployment fetches and digests in turn. It is read out of Git
+/// rather than off the working tree, because a working tree also holds what the
+/// tests left behind — a `__pycache__` beside a battery's helper is not part of
+/// the package, and never reaches the archive a deployment resolves. When this
+/// fails, the package changed and its digest did not: the message carries the
+/// lines to write back.
 #[test]
-fn every_recorded_digest_is_the_digest_of_its_package() {
-    let root = marketplace_root();
+fn every_recorded_digest_is_the_digest_of_its_committed_package() {
+    let exported = tempfile::tempdir().expect("a temp dir is creatable");
+    export_committed(exported.path());
+    let root = exported.path().join("marketplace");
+
     let drifted: Vec<String> = manifest()
         .packages
         .iter()
@@ -67,6 +76,37 @@ fn every_recorded_digest_is_the_digest_of_its_package() {
         "marketplace.toml records a digest for a package that has since changed:\n  {}",
         drifted.join("\n  ")
     );
+}
+
+/// The marketplace subtree as `HEAD` holds it. `git archive` is how the build
+/// script already reads committed content, and how a deployment will receive a
+/// generation.
+fn export_committed(destination: &Path) {
+    let archive = Command::new("git")
+        .arg("-C")
+        .arg(repository())
+        .args(["archive", "--format=tar", "HEAD", "--", "marketplace"])
+        .output()
+        .expect("git runs");
+    assert!(
+        archive.status.success(),
+        "git archive failed: {}",
+        String::from_utf8_lossy(&archive.stderr)
+    );
+    let mut extract = Command::new("tar")
+        .arg("-x")
+        .arg("-C")
+        .arg(destination)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("tar runs");
+    extract
+        .stdin
+        .take()
+        .expect("tar takes its input")
+        .write_all(&archive.stdout)
+        .expect("the archive is written");
+    assert!(extract.wait().expect("tar finishes").success(), "tar failed");
 }
 
 /// A package directory that no entry names would ship unauthenticated, so the
