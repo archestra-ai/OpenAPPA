@@ -120,6 +120,7 @@ expect 0 '^kind: PersistentVolumeClaim$'
 # demo, so every agent sets it.
 expect_env 4 APPA_ENABLED true
 expect_env 4 APPA_RUNTIME_URL http://appa-runtime.kagent.svc.cluster.local:18787
+expect 1 'never call ask_user'
 
 # A name that repeats another agent name fails the render, the fixed
 # cluster-ops and release-manager included.
@@ -133,6 +134,7 @@ must_refuse 'agent names collide' kagent --set agents.go.enabled=true --set agen
 must_render kagent --set agents.go.enabled=true
 expect 7 '^kind: Agent$'
 expect_env 7 APPA_RUNTIME_URL http://appa-runtime.kagent.svc.cluster.local:18787
+expect 2 'never call ask_user'
 
 # The guide agent is its own switch, and it leaves the collision set: it
 # takes no value-derived name.

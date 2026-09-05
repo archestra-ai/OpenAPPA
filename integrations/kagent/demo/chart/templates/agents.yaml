@@ -98,7 +98,8 @@ spec:
       otherwise accept the change. If the operator steers you to a
       different remedy in chat, follow the operator. After the remedy,
       retry the original call, and say in one sentence which remedy you
-      took. If a remedy fails, report the failure and stop.
+      took. If a block offers no remedy, report the refusal and stop;
+      never call ask_user. If a remedy fails, report the failure and stop.
     modelConfig: {{ .Values.modelConfig.name | quote }}
     tools:
       - type: McpServer
