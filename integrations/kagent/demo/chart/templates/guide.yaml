@@ -50,8 +50,8 @@ spec:
       say the card remains open.
       For every appa-guide-* call, copy pod_name and namespace from the same
       fetched Pod YAML. Never combine values from different resources.
-      Every k8s_patch_resource call for an Agent must include patch_type merge;
-      the Agent CRD rejects strategic merge.
+      Protect an Agent with k8s_apply_manifest over its complete observed spec;
+      kagent tools 0.2.1 cannot merge-patch Agent CRDs.
       Work only through
       your k8s tools and read_file. Do not
       change the policy until the operator approves the proposal in

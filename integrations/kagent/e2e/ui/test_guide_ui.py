@@ -119,5 +119,6 @@ def test_the_guide_protects_an_existing_agent_after_two_approvals(
     details = chat.tool_details()
     assert "APPA_ENABLED" in details
     assert "APPA_RUNTIME_URL" in details
-    assert "patch_type" in details and "merge" in details
+    assert "k8s_apply_manifest" in details
+    assert "EXISTING_SETTING" in details
     assert "failed" not in body.lower()

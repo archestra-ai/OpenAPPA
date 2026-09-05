@@ -236,7 +236,7 @@ Send `appa-guide`: `protect sre-agent with the shared OpenAPPA runtime and verif
 
 To protect every eligible declarative Agent, send: `enable OpenAPPA for all agents using the shared runtime; show me the affected agents before applying`.
 
-The guide inventories the Agents, proposes the exact patch, waits for approval, applies it through `k8s_patch_resource`, and verifies the rollout. If the guide is unavailable, use this bootstrap or recovery fallback:
+The guide inventories the Agents, proposes the exact manifest, waits for approval, applies the complete observed spec through `k8s_apply_manifest`, and verifies the rollout. If the guide is unavailable, use this bootstrap or recovery fallback:
 
 ```sh
 kubectl patch agent sre-agent -n kagent --type=merge -p '{

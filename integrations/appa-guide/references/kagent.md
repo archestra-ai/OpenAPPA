@@ -348,13 +348,15 @@ approval on apply, patch, delete, Helm upgrade, and Helm uninstall.
 
 - **Protect one Agent**: read its complete environment list. Preserve every
   existing entry. Add or replace `APPA_ENABLED=true` and the selected
-  `APPA_RUNTIME_URL`. Apply with `k8s_patch_resource` and
-  `patch_type: merge`. The Agent CRD does not support strategic merge.
-  Wait for the new pod and verify its startup log and Agent conditions.
+  `APPA_RUNTIME_URL`. Build a complete Agent manifest from the observed
+  metadata name, namespace, and full spec. Apply it with
+  `k8s_apply_manifest`; kagent tools 0.2.1 cannot merge-patch CRDs. Wait
+  for the new pod and verify its startup log and Agent conditions. For a
+  Helm-owned Agent, propose the equivalent Helm values change instead.
 - **Protect all Agents**: inventory every declarative Agent first. Skip
   `appa-guide`. Group Agents by intended runtime and list them in the
-  proposal. Preserve every Agent's complete environment list. Patch one at
-  a time with `patch_type: merge` after approval. Verify every rollout.
+  proposal. Preserve every Agent's complete spec and environment list.
+  Apply one complete manifest at a time after approval. Verify every rollout.
   Stop on the first failure; do not leave the remaining result unreported.
 - **Install the demo fleet**: discover the active OpenAPPA release version
   with `helm_get_release`. Install the matching public
