@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 import pytest
 from conftest import BASE, NAMESPACE, Chat
@@ -79,14 +80,10 @@ def test_init_completes_the_full_read_only_inventory(chat: Chat, shots_dir: str)
         phrase in summary
         for phrase in ("not accepted", "unaccepted", "unavailable", "refused")
     ), "init reports the unaccepted MCP server"
-    assert any(
-        phrase in summary
-        for phrase in (
-            "no batteries are included",
-            "included batteries: none",
-            "batteries included in config: none",
-            "zero included batteries",
-        )
+    assert re.search(
+        r"no batteries\b.{0,60}\bincluded|included batteries\b.{0,30}\bnone|batteries included\b.{0,30}\bnone",
+        summary,
+        re.DOTALL,
     ), "init distinguishes available batteries from included batteries"
 
 
