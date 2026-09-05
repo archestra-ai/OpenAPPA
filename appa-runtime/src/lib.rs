@@ -13,6 +13,7 @@ pub mod plugin_bundle;
 pub mod replay;
 #[path = "main.rs"]
 pub mod runtime_cli;
+pub(crate) mod telemetry;
 pub mod tls;
 
 mod builtins;

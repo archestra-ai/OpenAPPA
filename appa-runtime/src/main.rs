@@ -301,12 +301,10 @@ where
 }
 
 async fn serve(args: Args) -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level(args.verbose))),
-        )
-        .init();
+    let level = tracing_subscriber::EnvFilter::try_from_default_env()
+        .map(|filter| filter.to_string())
+        .unwrap_or_else(|_| log_level(args.verbose).to_string());
+    let telemetry = crate::telemetry::Telemetry::init(&level);
 
     let config_path = args.config.unwrap_or_else(|| PathBuf::from("appa.toml"));
 
@@ -377,12 +375,36 @@ async fn serve(args: Args) -> ExitCode {
         listen = %args.listen,
         "appa-runtime serving /hook, /mcp, /health, and /batteries; management routes require loopback"
     );
-    match axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await {
+    let exit = match axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+    {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("appa runtime: server failed: {error}");
             ExitCode::FAILURE
         }
+    };
+    telemetry.shutdown();
+    exit
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("SIGTERM handling is available");
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                let _ = result;
+            }
+            _ = terminate.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 

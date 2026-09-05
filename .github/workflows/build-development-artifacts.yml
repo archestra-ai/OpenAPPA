@@ -1,0 +1,89 @@
+name: Build OpenAPPA Development Artifacts
+
+on:
+  pull_request:
+    types:
+      - labeled
+      - synchronize
+
+permissions: {}
+
+concurrency:
+  group: "openappa-development-${{ github.event.pull_request.number }}"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Linux development artifacts
+    if: >-
+      ${{ github.event.pull_request.head.repo.full_name == github.repository &&
+          ((github.event.action == 'labeled' && github.event.label.name == 'build-development-artifacts') ||
+           (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'build-development-artifacts'))) }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: write # Publish the opt-in development prerelease and its immutable assets.
+    steps:
+      - name: Checkout the reviewed PR commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Resolve development release
+        id: release
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          short_sha=${HEAD_SHA:0:12}
+          release_ref="dev-pr-${PR_NUMBER}-${short_sha}"
+          echo "release_ref=${release_ref}" >> "$GITHUB_OUTPUT"
+          echo "version=${release_ref#dev-}" >> "$GITHUB_OUTPUT"
+
+      - name: Stage plugin and build runtime
+        env:
+          APPA_RELEASE_REF: ${{ steps.release.outputs.release_ref }}
+        run: |
+          mkdir -p dist
+          sh scripts/appa-stage-plugin-bundle.sh staged
+          version=$(cargo metadata --locked --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "appa") | .version')
+          tar -C staged -czf "dist/appa-plugin-${version}.tar.gz" .
+          cp "dist/appa-plugin-${version}.tar.gz" "dist/appa-plugin-${APPA_RELEASE_REF}.tar.gz"
+          plugin_sha256=$(sha256sum "dist/appa-plugin-${version}.tar.gz" | cut -d' ' -f1)
+          APPA_PLUGIN_SHA256="$plugin_sha256" cargo build --release --locked --package appa
+          mkdir -p package
+          cp target/release/appa package/appa
+          chmod 755 package/appa
+          tar -C package -czf "dist/appa-x86_64-unknown-linux-gnu.tar.gz" appa
+          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
+
+      - name: Publish immutable development prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RELEASE_REF: ${{ steps.release.outputs.release_ref }}
+        run: |
+          gh release create "$RELEASE_REF" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$HEAD_SHA" \
+            --title "OpenAPPA ${RELEASE_REF}" \
+            --notes "Development artifacts for PR #${PR_NUMBER} at ${HEAD_SHA}. Not a supported release." \
+            --prerelease
+
+      - name: Publish usage summary
+        env:
+          RELEASE_REF: ${{ steps.release.outputs.release_ref }}
+        run: |
+          {
+            echo "### OpenAPPA development build"
+            echo
+            echo "Release: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_REF}"
+            echo
+            echo '```dockerfile'
+            echo "ARG APPA_VERSION=${RELEASE_REF}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
