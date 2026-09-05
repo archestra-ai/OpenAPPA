@@ -50,6 +50,12 @@ fi
 
 APPA_LISTEN="127.0.0.1:8787"
 
+if [[ -v APPA_CONFIG_CONTENTS ]]; then
+  mkdir -p "${APPA_DATA_DIR:-/.kagent}"
+  export APPA_CONFIG="${APPA_DATA_DIR:-/.kagent}/appa.toml"
+  printf '%s' "${APPA_CONFIG_CONTENTS}" >"${APPA_CONFIG}"
+fi
+
 echo "quickstart: APPA_ENABLED is true. This pod starts the bundled appa runtime on ${APPA_LISTEN} (policy: ${APPA_CONFIG})" >&2
 appa runtime --adapter kagent --listen "${APPA_LISTEN}" --config "${APPA_CONFIG}" --db "${APPA_DB}" &
 runtime_pid=$!

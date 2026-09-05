@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Installs kagent and the demo chart on the current cluster, in the
-# shape the live A2A matrix needs: the images kind-up.sh loaded, no go cell,
-# no seed job, and one OpenAI-compatible endpoint for both the agents
-# and the policy's sanitizers. It waits for every pod the subset drives.
+# shape the live A2A matrix needs: the images kind-up.sh loaded, no UI,
+# guide, go cell, seed job, or unused tool server, and one OpenAI-compatible
+# endpoint for both the agents and the policy's sanitizers. It waits for
+# every pod the subset drives.
 #
 #   OPENROUTER_API_KEY=… ./install.sh
 #
@@ -34,9 +35,8 @@ if [ -z "$key" ]; then
   exit 1
 fi
 
-# kagent ships ten sample agents, a docs tool and a grafana tool, all on
-# by default. Each sample agent runs the agent image and asks for a
-# Secret this install never renders, so the subset turns them off.
+# kagent ships ten sample agents and three tool charts, all on by default.
+# The A2A matrix uses none of them, so this install turns them off.
 extras=(
   k8s-agent
   kgateway-agent
@@ -50,6 +50,7 @@ extras=(
   cilium-debug-agent
   grafana-mcp
   querydoc
+  kagent-tools
 )
 disable=()
 for extra in "${extras[@]}"; do
@@ -70,15 +71,19 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --set controller.agentImage.repository=library/appa-kagent-quickstart \
   --set-string controller.agentImage.tag="$tag" \
   --set controller.agentImage.pullPolicy=Never \
+  --set ui.replicas=0 \
   "${disable[@]}" \
   --wait --timeout 10m
 
 # An empty reasoningEffort leaves reasoning_effort out of every
 # request. The fill answers gpt-5.6 on chat completions, and other
 # models refuse the field.
+# The matrix proves that an unanswered consult expires. Two seconds keeps
+# that behavior while avoiding the chart's 25-second operator window in CI.
 echo "== helm install appa-kagent-demo, model $model at $base_url"
 helm upgrade --install appa-kagent-demo "$chart" -n "$namespace" \
   --set agents.go.enabled=false \
+  --set guide.enabled=false \
   --set seed.enabled=false \
   --set-string runtime.reasoningEffort="" \
   --set-string openai.apiKey="$key" \
@@ -86,6 +91,7 @@ helm upgrade --install appa-kagent-demo "$chart" -n "$namespace" \
   --set-string openai.baseUrl="$base_url" \
   --set-string llm.model="$model" \
   --set-string llm.url="$base_url" \
+  --set mocks.approvalWindowSeconds=2 \
   --set runtime.image.repository=docker.io/library/appa-kagent-quickstart \
   --set-string runtime.image.tag="$tag" \
   --set runtime.image.pullPolicy=Never \

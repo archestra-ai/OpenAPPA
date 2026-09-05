@@ -3,11 +3,13 @@
 The demo is a Helm chart, [chart/](chart/). It installs a gated
 `cluster-ops` fleet with a delegated `log-analyst` and a
 `release-manager` the policy never names, so every delegation to it is
-denied. It also installs the go twins of all three (`cluster-ops-go`,
-`log-analyst-go`, `release-manager-go`). The shared `appa-runtime` runs
+denied. Optional Go twins (`cluster-ops-go`, `log-analyst-go`, and
+`release-manager-go`) are disabled by default. The shared `appa-runtime` runs
 in one pod with its relay and mock externals. The chart adds the demo
 tools and pre-seeds every demo case as a real chat in the kagent
 dashboard.
+
+The commands below require Helm 4 because upgrades reclaim chart-owned fields with server-side apply.
 
 Install it into any cluster that runs kagent 0.9.12 on the OpenAPPA
 runtime image. Two inputs are yours: the images ([chart/README.md](chart/README.md)) and the model key. Install
@@ -25,11 +27,29 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
   --set controller.agentImage.registry=ghcr.io \
   --set controller.agentImage.repository=archestra-ai/appa-kagent-quickstart \
-  --set controller.agentImage.tag=0.8.0 --wait # x-release-please-version
+  --set k8s-agent.enabled=false \
+  --set kgateway-agent.enabled=false \
+  --set istio-agent.enabled=false \
+  --set promql-agent.enabled=false \
+  --set observability-agent.enabled=false \
+  --set argo-rollouts-agent.enabled=false \
+  --set helm-agent.enabled=false \
+  --set cilium-policy-agent.enabled=false \
+  --set cilium-manager-agent.enabled=false \
+  --set cilium-debug-agent.enabled=false \
+  --force-conflicts \
+  --wait --timeout 10m \
+  --set controller.agentImage.tag=0.10.0 # x-release-please-version
 
 # the demo
-helm upgrade --install appa-kagent-demo ./integrations/kagent/demo/chart \
-  -n kagent --set openai.apiKey="$OPENROUTER_API_KEY" --wait
+APPA_VERSION=0.10.0 # x-release-please-version
+helm upgrade --install appa-kagent-demo \
+  "https://github.com/archestra-ai/OpenAPPA/releases/download/v${APPA_VERSION}/appa-kagent-demo-${APPA_VERSION}.tgz" \
+  -n kagent \
+  --set-string openai.apiKey="$OPENAI_API_KEY" \
+  --set agents.go.enabled=false \
+  --force-conflicts \
+  --wait --timeout 10m
 kubectl -n kagent port-forward svc/kagent-ui 8901:8080
 ```
 
@@ -50,12 +70,11 @@ and the chat can steer it to accept the change.
 That one `controller.agentImage` value puts every python-runtime
 declarative agent in the cluster on the quickstart image. Every
 `runtime: go` agent runs on the `golang-adk` name that kagent derives
-from it. kagent's stock sample agents (k8s, helm, istio, cilium,
-observability, …) start on the quickstart image with no agent changes,
-and the image ships with the gate off: each one serves exactly what the
-stock kagent runtime serves and starts no `appa-runtime`. The demo
-agents set `APPA_ENABLED` themselves and point at the shared runtime,
-so a parent and its delegated child land in one trajectory.
+from it. kagent's stock sample agents (k8s, helm, istio, cilium, and
+observability) are disabled because the demo does not use them and they
+require a separate provider Secret. The demo agents set `APPA_ENABLED`
+themselves and point at the shared runtime, so a parent and its delegated
+child land in one trajectory.
 
 The bundled runtime loads the packaged policy
 ([../examples/kagent.appa.toml](../examples/kagent.appa.toml)). That

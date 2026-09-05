@@ -21,7 +21,7 @@ guess its content.
   reference.
 - **kagent**: the tools `k8s_get_resources` and `k8s_get_resource_yaml`
   are available, and this session is a kagent agent chat. Read
-  `references/kagent.md` and follow it.
+  `/skills/appa-guide/references/kagent.md` and follow it.
 - Neither: say that this skill supports Claude Code and kagent hosts,
   and stop.
 
@@ -35,8 +35,11 @@ Use one mode:
 
 If the request already makes the mode clear, start there. Otherwise show
 these two choices in one short message and wait. Do not run both modes
-together. If the operator chooses `adjust` without describing the
-change, ask what they want OpenAPPA to do differently.
+together. Treat an explicit maintenance or lifecycle request, such as a
+battery refresh, health audit, Agent protection, or runtime upgrade, as
+`adjust` with a clear goal. Do not ask the operator to select a mode in
+that case. If the operator chooses `adjust` without describing the change,
+ask what they want OpenAPPA to do differently.
 
 ## Rules that apply on every host
 

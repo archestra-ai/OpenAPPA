@@ -23,7 +23,7 @@ fn the_router_routes_by_host_and_carries_the_shared_rules() {
     assert!(router.starts_with("---\n"), "the router keeps its frontmatter");
     assert!(router.contains("name: appa-guide"));
     assert!(router.contains("references/claude-code.md"));
-    assert!(router.contains("references/kagent.md"));
+    assert!(router.contains("/skills/appa-guide/references/kagent.md"));
     assert!(
         router.contains("k8s_get_resources"),
         "the router detects the kagent host"
@@ -78,9 +78,17 @@ fn the_kagent_reference_carries_the_full_flow() {
         "__NS__",
         "Approve/Reject card",
         "/reload",
+        "/batteries",
+        "APPA_CONFIG_CONTENTS",
+        "appa-refresh-batteries --check",
+        "Replace only `name`",
+        "PersistentVolumeClaim",
         "kubelet syncs",
         "Read-only fallback",
         "Approve, or tell me what to change.",
+        "## Cluster operations",
+        "helm_upgrade",
+        "Protect all Agents",
     ] {
         assert!(reference.contains(marker), "the kagent flow names {marker:?}");
     }
@@ -100,10 +108,17 @@ fn the_kagent_chart_consumes_this_skill_package() {
         guide.contains("gitRefs"),
         "the agent attaches the skill through git refs"
     );
-    for tool in ["k8s_get_resources", "k8s_apply_manifest", "k8s_execute_command"] {
+    for tool in [
+        "k8s_get_resources",
+        "k8s_apply_manifest",
+        "k8s_patch_resource",
+        "k8s_execute_command",
+        "helm_upgrade",
+    ] {
         assert!(guide.contains(tool), "the guide agent carries {tool}");
     }
     assert!(guide.contains("APPA_RUNTIME_URL"));
+    assert!(guide.contains("/skills/appa-guide/references/kagent.md"));
 
     let values = fs::read_to_string(chart.join("values.yaml")).expect("the chart values exist");
     assert!(values.contains("integrations/appa-guide"));
@@ -111,7 +126,7 @@ fn the_kagent_chart_consumes_this_skill_package() {
     let policy = fs::read_to_string(chart.join("files/demo.appa.toml")).expect("the demo policy exists");
     assert!(policy.contains("name = \"k8s_apply_manifest\""));
     assert!(policy.contains("attention = [\"human-approval\"]"));
-    assert!(policy.contains("name = \"appa-guide\""));
+    assert!(policy.contains("name = \"skills\""));
     assert!(
         !policy.contains("name = \"bash\""),
         "the unused skill helpers stay undeclared"

@@ -1,0 +1,16 @@
+apiVersion: v2
+name: appa-runtime
+description: Shared OpenAPPA runtime for a Kubernetes cluster. One process gates every agent that points at it.
+type: application
+version: 0.10.0 # x-release-please-version
+# The released version. The release workflow publishes the image at that
+# version, and release-please bumps this line to it.
+appVersion: "0.10.0" # x-release-please-version
+kubeVersion: ">=1.28.0-0"
+keywords: [openappa, appa, policy, agents]
+home: https://openappa.com
+sources:
+  - https://github.com/archestra-ai/OpenAPPA
+maintainers:
+  - name: Archestra
+    url: https://github.com/archestra-ai/OpenAPPA

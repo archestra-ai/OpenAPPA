@@ -94,6 +94,10 @@ export function TableOfContents({ items }: { items: TocItem[] }) {
   return (
     <aside className="toc">
       <div className="toc-inner">
+        <div className="toc-doc-tools">
+          <McpPanel />
+          <CurlPanel />
+        </div>
         {items.length > 0 && (
           <>
             <div className="toc-title">On this page</div>
@@ -117,8 +121,6 @@ export function TableOfContents({ items }: { items: TocItem[] }) {
             </nav>
           </>
         )}
-        <McpPanel />
-        <CurlPanel />
       </div>
     </aside>
   );

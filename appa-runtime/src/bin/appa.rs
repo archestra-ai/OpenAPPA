@@ -18,8 +18,20 @@ enum Command {
         #[arg(long, env = "APPA_CONFIG")]
         config: Option<PathBuf>,
 
+        #[arg(
+            long = "batteries-dir",
+            env = "APPA_BATTERIES_DIR",
+            value_delimiter = ':',
+            action = clap::ArgAction::Append
+        )]
+        batteries_dir: Vec<PathBuf>,
+
         #[arg(long, value_enum, default_value_t = Adapter::ClaudeCode)]
         adapter: Adapter,
+
+        /// Exit unsuccessfully unless the complete configuration loads.
+        #[arg(long)]
+        check: bool,
     },
 
     /// Initialize OpenAPPA for an agent harness.
@@ -99,10 +111,20 @@ fn main() -> ExitCode {
             let config = config.unwrap_or_else(appa_runtime::init::installed_config_path);
             appa_runtime::replay::main(&config, modules_dir, verbose, &paths)
         }
-        Command::Describe { config, adapter } => {
+        Command::Describe {
+            config,
+            batteries_dir,
+            adapter,
+            check,
+        } => {
             let config = config.unwrap_or_else(appa_runtime::init::installed_config_path);
-            print!("{}", appa_runtime::describe::render(&config, adapter.as_str()));
-            ExitCode::SUCCESS
+            let description = appa_runtime::describe::render(&config, &batteries_dir, adapter.as_str());
+            print!("{description}");
+            if check && !appa_runtime::describe::is_loadable(&config, &batteries_dir) {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Command::Init {
             harness: Harness::ClaudeCode { plugin_source },

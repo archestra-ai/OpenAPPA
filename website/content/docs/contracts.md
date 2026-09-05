@@ -151,7 +151,7 @@ OpenAPPA selects the contract before it validates that contract's `parameters` s
 
 ### Annotators
 
-Every released tool call carries one complete annotation: the `delta` its result contributes, the `requires` it must meet, and the effects it emits. A `[[tool]]` entry usually writes that annotation statically. Where the right contract depends on the call itself — a file path, a recipient, a command line — the entry names a registered **annotator** instead, and the annotator answers the complete annotation for each proposed call. An annotator's answers name literal readers only — never a symbolic audience.
+Every released tool call carries one complete annotation: the `delta` its result contributes, the `requires` it must meet, and the effects it emits. A `[[tool]]` entry usually writes that annotation statically. Where the right contract depends on the call itself — a file path, a recipient, a command line — the entry names a registered **annotator** instead, and the annotator answers the complete annotation for each proposed call. An answer writes an audience exactly as a declaration does — `public`, `self`, `internal`, an `@` mention, or a literal reader — inside the mandate's `audiences`.
 
 An `[[annotator]]` declares three things. Its optional `hint` explains the policy vocabulary. Its `inputs` select call data. Its **mandate** bounds every answer. A `[[tool]]` routes through it with `annotator = "<name>"`. That tool entry writes no `delta`, `requires`, or `effects` because the annotator produces all three. Annotator names are opaque non-empty strings and can contain dots.
 
@@ -195,7 +195,7 @@ This form does not need a tool parameter schema. It does not need a `description
 name      = "classify-customer"
 inputs    = { subject = "$tool_call.arguments.customer_id" }
 ranks     = ["suspicious", "trusted"]
-audiences = ["finance", "support"]             # The readers a restricted audience answer may name
+audiences = ["finance", "support"]             # The audiences a restricted answer may name
 hint      = "finance may read billing records. support may read records assigned to a support case."
 
 [[tool]]
@@ -234,7 +234,7 @@ A root `[[annotator]]` declaration replaces one included Annotator with the same
 | Key | Bounds | Omitted |
 |---|---|---|
 | `ranks` | The trust ranks an answer may write in `delta.trust` and `requires.trust`. | Every rank in the trust chain. |
-| `audiences` | The literal readers a restricted audience answer may name. `public` is always admissible and is never listed as a reader; a symbolic audience — `self`, `internal`, or a mention — is never admissible. An empty list closes the mandate to `public` answers only. | Every reader the policy writes. |
+| `audiences` | The audiences a restricted answer may name, each spelled as a declaration spells it: `self`, `internal`, an `@` mention, or a literal reader. `public` is always admissible and is never listed. An empty list closes the mandate to `public` answers only. | Every audience the policy writes: `self`, `internal`, every `[[audience.group]]`, and every reader a declaration names. |
 | `marks` | The attention marks an answer may require. | Every mark an authority names under `permits.attention`. |
 | `effects` | The effect kinds an answer may emit or check in history. | Every effect kind the policy declares. |
 
@@ -300,7 +300,7 @@ The consult declaration carries the hint, input names, and resolved mandate. Its
 | `declaration.hint` | The deployer's optional instruction for policy-specific classification. It grants nothing outside the mandate. |
 | `declaration.inputs` | The declared input names. Empty when the annotator reads the complete call. |
 | `declaration.trust_ranks` | The mandate's trust ranks, least-trusted first. A trust value must name one of these. |
-| `declaration.audiences` | The mandate's readers. A restricted audience value may name these only. |
+| `declaration.audiences` | The mandate's audiences. A restricted audience value lists these only. |
 | `declaration.attention_marks` | The mandate's attention marks. An attention value must name these only. |
 | `declaration.effects` | The mandate's effect kinds. An `emits` or history value must name these only. |
 | `artifact.args` | The data the input mapping selected, under the declared input names. Without a mapping, the complete call: `name`, `description` when declared, and `arguments`. |
@@ -322,7 +322,7 @@ Response, from an endpoint or a command:
 
 `version` must match the consult. `answer` is exactly one object with exactly three keys: `delta`, `requires`, and `emits`. `requires` always carries its `history` and `attention` arrays, even empty; every other leaf is optional and means the identity when omitted. A model builtin answers the same object without the envelope.
 
-OpenAPPA rejects a `null` anywhere, an unknown key anywhere, an empty `audience` object, a duplicate `emits` kind, and any value outside the mandate. `delta.audience` and the audience leaves of `requires` are `"public"` or a list of the mandate's readers, and never a symbolic audience. `requires.audience` is an object with `contains`, `within`, or both. Each `history` entry is one object with one key: `{"contains": "<effect>"}` or `{"excludes": "<effect>"}`. A rejected answer is no answer: the call does not run, nothing is recorded, and the call can be proposed again.
+OpenAPPA rejects a `null` anywhere, an unknown key anywhere, an empty `audience` object, a duplicate `emits` kind, and any value outside the mandate. `delta.audience` and the audience leaves of `requires` are `"public"` or a list of the mandate's audiences in the [written-list grammar](#audiences): at most one of `self` and `internal`, no repeated entry, and never `public` inside a list. A symbolic entry stays symbolic, and its membership is read per act exactly as for a written declaration. `requires.audience` is an object with `contains`, `within`, or both. Each `history` entry is one object with one key: `{"contains": "<effect>"}` or `{"excludes": "<effect>"}`. A rejected answer is no answer: the call does not run, nothing is recorded, and the call can be proposed again.
 
 ### Deployment coverage
 

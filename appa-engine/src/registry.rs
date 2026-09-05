@@ -10,7 +10,8 @@ use crate::authority::{Authority, DeclaredTransition, Hint, Sanitizer};
 use crate::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec, ToolAnnotation, ToolDeclaration};
 use crate::fact::EffectKind;
 use crate::label::{
-    Audience, DeclaredAudience, Evaluation, Expansions, GroupRef, MembershipContext, ReaderId, SymbolicAtom, Trust,
+    Audience, AudienceSpelling, ChainAudience, Clause, DeclaredAudience, Evaluation, Expansions, GroupRef,
+    MembershipContext, ReaderId, SymbolicAtom, Trust,
 };
 use crate::names::{AnnotatorName, AuthorityName, MarkName, SanitizerName, TagName};
 use crate::value::{ToolDeclarationId, ToolName};
@@ -246,18 +247,140 @@ impl TrustChain {
     }
 }
 
+/// The audience vocabulary an Annotator's answers may draw on: the built-in chain words, group
+/// references, and literal readers, each admissible on its own. A vocabulary, not a union —
+/// both chain words may be listed — and `public` is never a member: it is always admissible. A
+/// produced audience is admitted when every atom of every clause is a member; a symbolic
+/// member stays symbolic in the label exactly as a declaration writing it would, so membership
+/// is the act's question, never the annotation's. On the wire it is its entry list, so a
+/// vocabulary that arrives as data passes the same grammar a written one does.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<String>", into = "Vec<String>")]
+pub struct AudienceVocabulary {
+    chain: BTreeSet<ChainAudience>,
+    groups: BTreeSet<GroupRef>,
+    readers: BTreeSet<ReaderId>,
+}
+
+impl TryFrom<Vec<String>> for AudienceVocabulary {
+    type Error = AudienceSpelling;
+
+    fn try_from(list: Vec<String>) -> Result<AudienceVocabulary, AudienceSpelling> {
+        AudienceVocabulary::parse_entries(&list)
+    }
+}
+
+impl From<AudienceVocabulary> for Vec<String> {
+    fn from(vocabulary: AudienceVocabulary) -> Vec<String> {
+        vocabulary.entries().collect()
+    }
+}
+
+impl AudienceVocabulary {
+    /// One written vocabulary list, entry by entry. `public` is refused — always admissible,
+    /// never listed — and so are a placeholder, which belongs to a call argument, and a
+    /// repeated entry. An empty list is the vocabulary that admits `public` alone.
+    pub fn parse_entries(list: &[String]) -> Result<AudienceVocabulary, AudienceSpelling> {
+        let mut vocabulary = AudienceVocabulary::default();
+        for entry in list {
+            if entry.starts_with('$') {
+                return Err(AudienceSpelling::Placeholder(entry.clone()));
+            }
+            match crate::names::AudienceArgument::parse(entry) {
+                Some(crate::names::AudienceArgument::Public) => return Err(AudienceSpelling::PublicListed),
+                Some(crate::names::AudienceArgument::Chain(level)) => {
+                    if !vocabulary.chain.insert(level) {
+                        return Err(AudienceSpelling::Duplicate(entry.clone()));
+                    }
+                }
+                Some(crate::names::AudienceArgument::Group(group)) => {
+                    if !vocabulary.groups.insert(group) {
+                        return Err(AudienceSpelling::Duplicate(entry.clone()));
+                    }
+                }
+                Some(crate::names::AudienceArgument::Reader(reader)) => {
+                    if !vocabulary.readers.insert(reader) {
+                        return Err(AudienceSpelling::Duplicate(entry.clone()));
+                    }
+                }
+                None => return Err(AudienceSpelling::Unknown(entry.clone())),
+            }
+        }
+        Ok(vocabulary)
+    }
+
+    /// The whole built-in chain: what an omitted bound admits before the policy's own names.
+    fn whole_chain() -> AudienceVocabulary {
+        AudienceVocabulary {
+            chain: BTreeSet::from([ChainAudience::Self_, ChainAudience::Internal]),
+            ..AudienceVocabulary::default()
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.chain.is_empty() && self.groups.is_empty() && self.readers.is_empty()
+    }
+
+    /// The canonical spellings, as a policy writes them: the chain words in chain order, then
+    /// the group references (named, then source-qualified), then the readers. The one
+    /// rendering the consult declaration, the policy identity, and a description all use.
+    pub fn entries(&self) -> impl Iterator<Item = String> + '_ {
+        self.chain
+            .iter()
+            .map(|level| level.as_str().to_string())
+            .chain(self.groups.iter().map(ToString::to_string))
+            .chain(self.readers.iter().map(|reader| reader.as_str().to_string()))
+    }
+
+    pub(crate) fn group_atoms(&self) -> impl Iterator<Item = SymbolicAtom> + '_ {
+        self.groups.iter().cloned().map(SymbolicAtom::Group)
+    }
+
+    /// Whether every atom of one clause is a member: the one admission test for a produced
+    /// audience, the same at the runtime's answer seam and in the engine's check.
+    pub fn permits_clause(&self, clause: &Clause) -> bool {
+        clause.chain().is_none_or(|level| self.chain.contains(&level))
+            && clause.groups().all(|group| self.groups.contains(group))
+            && clause.readers().iter().all(|reader| self.readers.contains(reader))
+    }
+
+    fn add_clause(&mut self, clause: &Clause) {
+        self.chain.extend(clause.chain());
+        self.groups.extend(clause.groups().cloned());
+        self.readers.extend(clause.readers().iter().cloned());
+    }
+
+    fn add_declared(&mut self, audience: &DeclaredAudience) {
+        if let DeclaredAudience::Union(clause) = audience {
+            self.add_clause(clause);
+        }
+    }
+
+    fn add_audience(&mut self, audience: &Audience) {
+        for clause in audience.clauses() {
+            self.add_clause(clause);
+        }
+    }
+
+    fn extend(&mut self, other: &AudienceVocabulary) {
+        self.chain.extend(other.chain.iter().copied());
+        self.groups.extend(other.groups.iter().cloned());
+        self.readers.extend(other.readers.iter().cloned());
+    }
+}
+
 /// A registered Annotator: the boundary the policy routes per-call annotation through, named by
 /// declarations that carry `annotator = "..."` instead of static semantics. Each optional field
 /// narrows the vocabulary its produced annotations may draw on; an omitted field is the whole
-/// policy vocabulary — every chain rank, every literal reader the policy writes, every declared
-/// attention mark, every declared effect kind.
+/// policy vocabulary — every chain rank, the whole audience chain with every group and every
+/// literal reader the policy writes, every declared attention mark, every declared effect kind.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnnotatorDeclaration {
     pub name: AnnotatorName,
     #[serde(default)]
     pub trust: Option<BTreeSet<Trust>>,
     #[serde(default)]
-    pub audiences: Option<BTreeSet<ReaderId>>,
+    pub audiences: Option<AudienceVocabulary>,
     #[serde(default)]
     pub marks: Option<BTreeSet<MarkName>>,
     #[serde(default)]
@@ -268,11 +391,11 @@ pub struct AnnotatorDeclaration {
 /// every omitted bound resolved to the whole policy vocabulary at load. The engine holds the
 /// answer to it at the check and again on replay; the runtime restates it to the Annotator so an
 /// implementation knows the vocabulary before it answers. `public` is always an admissible
-/// audience state — the reader set names who a restricted answer may include.
+/// audience state — the audience vocabulary names what a restricted answer may draw on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnnotatorMandate {
     trust: BTreeSet<Trust>,
-    audiences: BTreeSet<ReaderId>,
+    audiences: AudienceVocabulary,
     marks: BTreeSet<MarkName>,
     effects: BTreeSet<EffectKind>,
 }
@@ -282,8 +405,8 @@ impl AnnotatorMandate {
         self.trust.iter().copied()
     }
 
-    pub fn audiences(&self) -> impl Iterator<Item = &ReaderId> {
-        self.audiences.iter()
+    pub fn audiences(&self) -> &AudienceVocabulary {
+        &self.audiences
     }
 
     pub fn marks(&self) -> impl Iterator<Item = &MarkName> {
@@ -298,8 +421,8 @@ impl AnnotatorMandate {
         self.trust.contains(&trust)
     }
 
-    pub(crate) fn permits_reader(&self, reader: &ReaderId) -> bool {
-        self.audiences.contains(reader)
+    pub(crate) fn permits_clause(&self, clause: &Clause) -> bool {
+        self.audiences.permits_clause(clause)
     }
 
     pub(crate) fn permits_mark(&self, mark: &MarkName) -> bool {
@@ -725,7 +848,7 @@ pub enum ToolKind {
 #[derive(Clone, Debug)]
 pub struct Registry {
     trust_chain: TrustChain,
-    audience_readers: BTreeSet<ReaderId>,
+    audience_vocabulary: AudienceVocabulary,
     tools: BTreeMap<ToolName, Vec<(ToolMatcher, ToolDeclaration)>>,
     provider_run: BTreeMap<ToolName, ToolAnnotation>,
     /// The wildcard declaration, when the policy writes one: the Annotated declaration every
@@ -753,7 +876,7 @@ impl Registry {
         profile: crate::profile::DeploymentProfile,
     ) -> Result<Registry, LoadError> {
         config.trust_chain.validate()?;
-        let audience_readers = configured_audience_readers(&config, &profile);
+        let audience_vocabulary = configured_audience_vocabulary(&config, &profile);
         let audience = validated_audience_registry(&config.audience)?;
         for clause in profile.starting_label().audience.clauses() {
             check_literal(clause.readers(), || "starting label".to_string())?;
@@ -804,7 +927,7 @@ impl Registry {
                 check_rank(&config.trust_chain, Some(*rank), context)?;
             }
             if let Some(audiences) = &annotator.audiences {
-                check_literal(audiences, context)?;
+                check_routable(&audience, audiences.group_atoms(), context)?;
             }
             let name = annotator.name.clone();
             if annotator_declarations.insert(name.clone(), annotator).is_some() {
@@ -1011,7 +1134,7 @@ impl Registry {
             .map(|(name, declaration)| {
                 let mandate = AnnotatorMandate {
                     trust: declaration.trust.unwrap_or_else(|| every_rank.clone()),
-                    audiences: declaration.audiences.unwrap_or_else(|| audience_readers.clone()),
+                    audiences: declaration.audiences.unwrap_or_else(|| audience_vocabulary.clone()),
                     marks: declaration.marks.unwrap_or_else(|| attention_marks.clone()),
                     effects: declaration.effects.unwrap_or_else(|| effect_kinds.clone()),
                 };
@@ -1021,7 +1144,7 @@ impl Registry {
 
         Ok(Registry {
             trust_chain: config.trust_chain,
-            audience_readers,
+            audience_vocabulary,
             tools,
             provider_run,
             wildcard,
@@ -1054,10 +1177,11 @@ impl Registry {
         &self.trust_chain
     }
 
-    /// The closed audience vocabulary written by this policy. `public` is the reserved
-    /// unrestricted state; the remaining entries are literal reader IDs, in stable order.
-    pub fn audiences(&self) -> impl Iterator<Item = &str> {
-        std::iter::once("public").chain(self.audience_readers.iter().map(ReaderId::as_str))
+    /// The closed audience vocabulary of this policy. `public` is the reserved unrestricted
+    /// state; the remaining entries are the chain words, the groups, and the literal readers
+    /// the policy writes, in canonical order.
+    pub fn audiences(&self) -> impl Iterator<Item = String> + '_ {
+        std::iter::once("public".to_string()).chain(self.audience_vocabulary.entries())
     }
 
     /// The one classification every name lookup derives from. An exact declaration always wins;
@@ -1419,62 +1543,57 @@ fn check_hint(hint: Option<&Hint>, context: impl Fn() -> String) -> Result<(), L
     }
 }
 
-/// Every literal reader the loaded policy writes, across every audience-bearing declaration —
-/// an annotator's explicit audience bound included. Annotators choose from this vocabulary;
-/// call arguments are evidence, not a source of new policy labels. Groups and placeholders are
-/// deliberately absent because their members are resolved per operation rather than declared by
-/// the policy.
-fn configured_audience_readers(
+/// The whole audience vocabulary the loaded policy knows: the built-in chain, every configured
+/// named audience, and every group reference and literal reader written across every
+/// audience-bearing declaration — an annotator's explicit audience bound included. Annotators
+/// choose from this vocabulary; call arguments are evidence, not a source of new policy labels,
+/// which is why placeholders are absent.
+fn configured_audience_vocabulary(
     config: &RegistryConfig,
     profile: &crate::profile::DeploymentProfile,
-) -> BTreeSet<ReaderId> {
-    fn add_audience(readers: &mut BTreeSet<ReaderId>, audience: &Audience) {
-        for clause in audience.clauses() {
-            readers.extend(clause.readers().iter().cloned());
-        }
-    }
-
-    fn add_declared(readers: &mut BTreeSet<ReaderId>, audience: &DeclaredAudience) {
-        if let DeclaredAudience::Union(clause) = audience {
-            readers.extend(clause.readers().iter().cloned());
-        }
-    }
-
-    let mut readers = BTreeSet::new();
-    add_audience(&mut readers, &profile.starting_label().audience);
+) -> AudienceVocabulary {
+    let mut vocabulary = AudienceVocabulary::whole_chain();
+    vocabulary.groups.extend(
+        config
+            .audience
+            .groups
+            .iter()
+            .map(|group| GroupRef::Named(group.name.clone())),
+    );
+    vocabulary.add_audience(&profile.starting_label().audience);
     for declaration in &config.tools {
         let Some(tool) = declaration.declared() else {
             continue;
         };
         if let Some(audience) = &tool.delta.audience {
-            add_declared(&mut readers, audience);
+            vocabulary.add_declared(audience);
         }
-        {
-            let requirements = &tool.requires.label.audience;
-            for requirement in requirements {
-                match requirement {
-                    AudienceRequirement::Includes(RecipientSpec::Static(audience))
-                    | AudienceRequirement::Cap(audience) => add_declared(&mut readers, audience),
-                    AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => {}
+        for requirement in &tool.requires.label.audience {
+            match requirement {
+                AudienceRequirement::Includes(RecipientSpec::Static(audience)) | AudienceRequirement::Cap(audience) => {
+                    vocabulary.add_declared(audience)
                 }
+                AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => {}
             }
         }
     }
     for annotator in &config.annotators {
-        readers.extend(annotator.audiences.iter().flatten().cloned());
+        if let Some(bound) = &annotator.audiences {
+            vocabulary.extend(bound);
+        }
     }
     for authority in &config.authorities {
         if let Some(audience) = &authority.mandate.reader_ceiling {
-            add_declared(&mut readers, audience);
+            vocabulary.add_declared(audience);
         }
     }
     for sanitizer in &config.sanitizers {
         if let DeclaredTransition::Audience { from_includes, to } = &sanitizer.transition {
-            add_declared(&mut readers, from_includes);
-            add_declared(&mut readers, to);
+            vocabulary.add_declared(from_includes);
+            vocabulary.add_declared(to);
         }
     }
-    readers
+    vocabulary
 }
 
 #[cfg(test)]
@@ -1527,6 +1646,33 @@ mod tests {
             audiences: None,
             marks: None,
             effects: None,
+        }
+    }
+
+    fn vocabulary(entries: &[&str]) -> AudienceVocabulary {
+        AudienceVocabulary::parse_entries(&entries.iter().map(|entry| entry.to_string()).collect::<Vec<_>>())
+            .expect("a fixture vocabulary parses")
+    }
+
+    /// Named audiences served by one `slack` source: `@<handle>` for each handle.
+    fn slack_groups(handles: &[&str]) -> crate::audience::AudienceConfig {
+        crate::audience::AudienceConfig {
+            sources: vec![crate::audience::SourceRegistration {
+                provider: "slack".to_string(),
+                templates: vec![crate::audience::SelectorTemplate::new("user-group/<handle>")],
+            }],
+            groups: handles
+                .iter()
+                .map(|handle| crate::audience::NamedAudience {
+                    name: crate::names::GroupName::new(*handle),
+                    within: None,
+                    from: vec![SelectorSpec {
+                        provider: "slack".to_string(),
+                        selector: format!("user-group/{handle}"),
+                    }],
+                })
+                .collect(),
+            ..crate::audience::AudienceConfig::default()
         }
     }
 
@@ -1585,7 +1731,7 @@ mod tests {
 
         assert_eq!(
             registry.audiences().collect::<Vec<_>>(),
-            ["public", "partner", "private"]
+            ["public", "self", "internal", "partner", "private"]
         );
     }
 
@@ -1830,15 +1976,177 @@ mod tests {
             Err(LoadError::RankOutOfChain { rank: 9, .. })
         ));
 
-        let mut cfg = base();
-        cfg.annotators = vec![AnnotatorDeclaration {
-            audiences: Some(BTreeSet::from([ReaderId::new("@team")])),
+        // A group in an audience bound routes at load like a group anywhere else in the policy:
+        // a named audience must be configured, a source-qualified selector must match a
+        // registered template. Chain words and readers are always meaningful.
+        let bound = |entries: &[&str]| AnnotatorDeclaration {
+            audiences: Some(vocabulary(entries)),
             ..annotator("classifier")
-        }];
+        };
+        let mut cfg = base();
+        cfg.annotators = vec![bound(&["@team"])];
         assert!(matches!(
             Registry::build_covered(cfg),
-            Err(LoadError::NonLiteralReader { reader, .. }) if reader == "@team"
+            Err(LoadError::UnroutableAudience {
+                fault: Unroutable::UnknownGroup(name),
+                ..
+            }) if name.as_str() == "team"
         ));
+        let mut cfg = base();
+        cfg.audience = slack_groups(&["team"]);
+        cfg.annotators = vec![bound(&["@slack:channel/eng"])];
+        assert!(matches!(
+            Registry::build_covered(cfg),
+            Err(LoadError::UnroutableAudience { .. })
+        ));
+        let mut cfg = base();
+        cfg.audience = slack_groups(&["team"]);
+        cfg.annotators = vec![bound(&["self", "internal", "@team", "@slack:user-group/eng", "alice"])];
+        let registry = Registry::build_covered(cfg).expect("a routable symbolic bound loads");
+        assert_eq!(
+            registry
+                .annotator_mandate(&AnnotatorName::new("classifier"))
+                .expect("classifier is registered")
+                .audiences()
+                .entries()
+                .collect::<Vec<_>>(),
+            ["self", "internal", "@team", "@slack:user-group/eng", "alice"]
+        );
+    }
+
+    #[test]
+    fn an_audience_vocabulary_lists_admissible_spellings_only() {
+        let parsed = |entries: &[&str]| {
+            AudienceVocabulary::parse_entries(&entries.iter().map(|entry| entry.to_string()).collect::<Vec<_>>())
+        };
+        assert_eq!(parsed(&[]), Ok(AudienceVocabulary::default()));
+        assert_eq!(
+            parsed(&["internal", "self"]).map(|vocabulary| vocabulary.entries().collect::<Vec<_>>()),
+            Ok(vec!["self".to_string(), "internal".to_string()])
+        );
+        assert_eq!(parsed(&["public"]), Err(AudienceSpelling::PublicListed));
+        assert_eq!(parsed(&["$to"]), Err(AudienceSpelling::Placeholder("$to".to_string())));
+        assert_eq!(parsed(&[""]), Err(AudienceSpelling::Unknown(String::new())));
+        assert_eq!(parsed(&["@"]), Err(AudienceSpelling::Unknown("@".to_string())));
+        for repeated in [
+            ["self", "self"],
+            ["@team", "@team"],
+            ["alice", "alice"],
+            ["a@CORP.example", "a@corp.example"],
+        ] {
+            assert_eq!(
+                parsed(&repeated),
+                Err(AudienceSpelling::Duplicate(repeated[1].to_string())),
+                "{repeated:?}"
+            );
+        }
+    }
+
+    /// A vocabulary arriving as data is its entry list and passes the written grammar: the
+    /// derived field shape never bypasses `parse_entries`.
+    #[test]
+    fn an_audience_vocabulary_round_trips_as_its_entry_list_and_is_validated_on_the_way_in() {
+        let vocabulary =
+            AudienceVocabulary::parse_entries(&["@team".to_string(), "alice".to_string(), "internal".to_string()])
+                .expect("a fixture vocabulary parses");
+        let wire = serde_json::to_value(&vocabulary).expect("serializes");
+        assert_eq!(wire, serde_json::json!(["internal", "@team", "alice"]));
+        assert_eq!(
+            serde_json::from_value::<AudienceVocabulary>(wire).expect("its own rendering deserializes"),
+            vocabulary
+        );
+        for refused in [
+            serde_json::json!(["public"]),
+            serde_json::json!(["alice", "alice"]),
+            serde_json::json!(["$to"]),
+            serde_json::json!({"chain": [], "groups": [], "readers": ["public"]}),
+        ] {
+            assert!(
+                serde_json::from_value::<AudienceVocabulary>(refused.clone()).is_err(),
+                "{refused} is refused on the way in"
+            );
+        }
+    }
+
+    #[test]
+    fn an_omitted_audience_bound_admits_every_surface_the_policy_writes() {
+        let mut reads = tool("read");
+        reads.delta.audience = Some(DeclaredAudience::restricted([ReaderId::new("insider")]));
+        let mut sends = tool("send");
+        sends.requires.label.audience = vec![
+            AudienceRequirement::Includes(RecipientSpec::Static(DeclaredAudience::Union(
+                crate::label::Clause::new(
+                    [],
+                    [GroupRef::Source {
+                        provider: "slack".to_string(),
+                        selector: "user-group/oncall".to_string(),
+                    }],
+                    [],
+                )
+                .unwrap(),
+            ))),
+            AudienceRequirement::Cap(DeclaredAudience::restricted([ReaderId::new("partner")])),
+        ];
+        let officer = Authority {
+            name: AuthorityName::new("officer"),
+            mandate: Mandate {
+                reader_ceiling: Some(DeclaredAudience::restricted([ReaderId::new("auditor")])),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        let redact = Sanitizer {
+            name: SanitizerName::new("redact"),
+            on: SanitizerPoints {
+                input: false,
+                output: true,
+            },
+            transition: DeclaredTransition::Audience {
+                from_includes: DeclaredAudience::restricted([ReaderId::new("hr")]),
+                to: DeclaredAudience::restricted([ReaderId::new("desk")]),
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        let mut cfg = base();
+        cfg.audience = slack_groups(&["team", "unreferenced"]);
+        cfg.tools = vec![
+            ToolDeclaration::Declared(reads),
+            ToolDeclaration::Declared(sends),
+            annotated("shell", "open"),
+        ];
+        cfg.annotators = vec![
+            annotator("open"),
+            AnnotatorDeclaration {
+                audiences: Some(vocabulary(&["support"])),
+                ..annotator("narrow")
+            },
+        ];
+        cfg.authorities = vec![officer];
+        cfg.sanitizers = vec![redact];
+        let registry = Registry::build_covered(cfg).expect("the surfaces load");
+        let open = registry
+            .annotator_mandate(&AnnotatorName::new("open"))
+            .expect("open is registered");
+        // The whole chain, every configured named audience (referenced or not), every group
+        // reference and reader a declaration, a bound, a ceiling, or a transition writes.
+        assert_eq!(
+            open.audiences().entries().collect::<Vec<_>>(),
+            [
+                "self",
+                "internal",
+                "@team",
+                "@unreferenced",
+                "@slack:user-group/oncall",
+                "auditor",
+                "desk",
+                "hr",
+                "insider",
+                "partner",
+                "support",
+            ]
+        );
     }
 
     #[test]
@@ -1853,7 +2161,7 @@ mod tests {
             annotator("classifier"),
             AnnotatorDeclaration {
                 trust: Some(BTreeSet::from([Trust::new(0)])),
-                audiences: Some(BTreeSet::from([ReaderId::new("support")])),
+                audiences: Some(vocabulary(&["support"])),
                 marks: Some(BTreeSet::from([MarkName::new("reviewed")])),
                 effects: Some(BTreeSet::from([EffectKind::new("audit.log")])),
                 ..annotator("narrow")
@@ -1867,8 +2175,8 @@ mod tests {
         assert_eq!(open.trust_ranks().collect::<Vec<_>>(), [Trust::new(0), Trust::new(1)]);
         // The whole vocabulary includes what another annotator's explicit bound declares.
         assert_eq!(
-            open.audiences().map(ReaderId::as_str).collect::<Vec<_>>(),
-            ["insider", "support"]
+            open.audiences().entries().collect::<Vec<_>>(),
+            ["self", "internal", "insider", "support"]
         );
         assert_eq!(
             open.marks().map(MarkName::as_str).collect::<Vec<_>>(),
@@ -1883,10 +2191,7 @@ mod tests {
             .annotator_mandate(&AnnotatorName::new("narrow"))
             .expect("narrow is registered");
         assert_eq!(narrow.trust_ranks().collect::<Vec<_>>(), [Trust::new(0)]);
-        assert_eq!(
-            narrow.audiences().map(ReaderId::as_str).collect::<Vec<_>>(),
-            ["support"]
-        );
+        assert_eq!(narrow.audiences().entries().collect::<Vec<_>>(), ["support"]);
         assert_eq!(narrow.marks().map(MarkName::as_str).collect::<Vec<_>>(), ["reviewed"]);
         assert_eq!(
             narrow.effects().cloned().collect::<BTreeSet<_>>(),

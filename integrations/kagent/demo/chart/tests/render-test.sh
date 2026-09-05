@@ -70,39 +70,51 @@ expect_env() {
   fi
 }
 
-# The defaults render both cells and the guide agent, and the policy
+# The defaults render the Python cell and the guide agent, and the policy
 # declares both children by their wire spelling.
 must_render kagent
-expect 7 '^kind: Agent$'
+expect 2 '/opt/appa/batteries'
+expect 0 '/var/lib/appa/batteries'
+expect 4 '^kind: Agent$'
+expect_env 1 APPA_CONFIG /etc/appa/demo.appa.toml
 expect 1 '^  name: appa-guide$'
+expect 1 '/skills/appa-guide/references/kagent\.md'
+expect 1 '^    name = "skills"$'
 expect 1 '^    name = "kagent__NS__log_analyst"$'
 expect 1 '^    name = "kagent__NS__log_analyst_go"$'
+
+# Persistence adds the writable lookup path. An existing claim is used
+# without rendering a second claim.
+must_render kagent --set runtime.persistence.enabled=true \
+  --set runtime.persistence.existingClaim=team-appa
+expect 2 '/var/lib/appa/batteries'
+expect 2 '/var/lib/appa/release-batteries'
+expect 1 'claimName: "team-appa"'
+expect 0 '^kind: PersistentVolumeClaim$'
 
 # Every rendered agent carries the gate knob beside the runtime URL.
 # The runtime image is a drop-in replacement for the stock kagent image
 # and runs ungated until APPA_ENABLED reads true, and this is a gated
 # demo, so every agent sets it.
-expect_env 7 APPA_ENABLED true
-expect 7 '^        - name: APPA_RUNTIME_URL$'
+expect_env 4 APPA_ENABLED true
+expect 4 '^        - name: APPA_RUNTIME_URL$'
 
 # A name that repeats another agent name fails the render, the fixed
 # cluster-ops and release-manager included.
 must_refuse 'agent names collide' kagent --set agents.childName=release-manager
-must_refuse 'agent names collide' kagent --set agents.childName=cluster-ops-go
+must_refuse 'agent names collide' kagent --set agents.go.enabled=true --set agents.childName=cluster-ops-go
 must_refuse 'agent names collide' kagent --set agents.go.childName=log-analyst
-must_refuse 'agent names collide' kagent --set agents.go.name=cluster-ops
-must_refuse 'agent names collide' kagent --set agents.go.undeclaredName=release-manager
+must_refuse 'agent names collide' kagent --set agents.go.enabled=true --set agents.go.name=cluster-ops
+must_refuse 'agent names collide' kagent --set agents.go.enabled=true --set agents.go.undeclaredName=release-manager
 
-# Without the go cell, agents.go.name and agents.go.undeclaredName leave
-# the set. agents.go.childName stays: the policy declares both children
-# in any case, and the runtime refuses a duplicate tool contract.
-must_render kagent --set agents.go.enabled=false --set agents.childName=cluster-ops-go
-expect 4 '^kind: Agent$'
+# Enabling the Go cell adds its three optional agents.
+must_render kagent --set agents.go.enabled=true
+expect 7 '^kind: Agent$'
 
 # The guide agent is its own switch, and it leaves the collision set: it
 # takes no value-derived name.
 must_render kagent --set guide.enabled=false
-expect 6 '^kind: Agent$'
+expect 3 '^kind: Agent$'
 expect 0 '^  name: appa-guide$'
 must_render kagent --set agents.go.enabled=false --set agents.childName=release-manager-go
 must_refuse 'agent names collide' kagent --set agents.go.enabled=false --set agents.childName=log-analyst-go
@@ -120,7 +132,7 @@ must_refuse 'schema' kagent --set agents.childName=123
 # a numeric release namespace, a numeric ModelConfig name (an integer
 # after --set), and children named 123 and null.
 must_render 123 --set-string agents.childName=123 --set-string agents.go.childName=null \
-  --set modelConfig.name=123 --set openai.apiKey=k
+  --set agents.go.enabled=true --set modelConfig.name=123 --set openai.apiKey=k
 expect 0 ': 123$'
 expect 0 ': null$'
 expect "$(count '^kind: ')" '^  namespace: "123"$'
@@ -134,14 +146,10 @@ expect 1 '^  apiKeySecret: "123"$'
 expect 1 '^    name = "123__NS__123"$'
 expect 1 '^    name = "123__NS__null"$'
 
-# The model profile the policy's sanitizers consult. The defaults name
-# the playground model and endpoint. One override reaches both the agents'
-# ModelConfig and that profile.
+# The model profile the policy's sanitizers consult. Defaults use OpenAI's
+# endpoint. One override reaches both the agents' ModelConfig and that profile.
 must_render kagent
-expect 1 '^    model = "openai/gpt-5.6-luna"$'
-expect 1 '^    url = "https://openrouter.ai/api/v1"$'
-expect 1 '^    baseUrl: "https://openrouter.ai/api/v1"$'
-must_render kagent --set-string openai.baseUrl= --set-string llm.url=
+expect 1 '^    model = "gpt-4.1-mini"$'
 expect 0 '^    url = "https://openrouter.ai/api/v1"$'
 expect 0 '^    baseUrl: '
 must_render kagent --set-string openai.baseUrl=https://openrouter.ai/api/v1 \

@@ -78,7 +78,7 @@ use crate::api::OutcomeBody;
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
 use crate::consult::{
     AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, HistoryEntry,
-    Requirement, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
+    Requirement, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
 };
 use appa_runtime_api::{OfferedRemedy, OfferedReturn};
 
@@ -169,6 +169,9 @@ pub enum ExternalRequest {
 
 /// A typed external answer. `None`/`Abstain` mean the external gave
 /// no usable answer; that stays runtime-side and grants nothing.
+// One consult's transient answer, never stored in bulk: an annotation's declared audiences
+// outsize the other variants and that is fine.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExternalEvidence {
     Authority {
@@ -1759,7 +1762,7 @@ impl RuntimeEngine {
                 .trust_ranks()
                 .filter_map(|trust| chain.name_of(trust).map(str::to_string))
                 .collect(),
-            audiences: mandate.audiences().map(|reader| reader.as_str().to_string()).collect(),
+            audiences: mandate.audiences().clone(),
             attention_marks: mandate.marks().map(|mark| mark.as_str().to_string()).collect(),
             effects: mandate.effects().map(|kind| kind.as_str().to_string()).collect(),
         }
@@ -1767,7 +1770,8 @@ impl RuntimeEngine {
 
     /// The produced semantics a decoded answer pins for one call; the declaration's own
     /// metadata is not restated. `from_wire` confined every leaf to the declared mandate
-    /// vocabulary, so reading it back against the policy cannot fail.
+    /// vocabulary and already read each audience as the declared audience it spells, so
+    /// reading a rank back against the policy cannot fail.
     fn produced_annotation(&self, answer: &AnnotationAnswer) -> ProducedAnnotation {
         let chain = self.engine.registry().trust_chain();
         let rank = |name: &str| {
@@ -1775,23 +1779,19 @@ impl RuntimeEngine {
                 .rank_of(name)
                 .expect("a decoded annotation answer names declared ranks")
         };
-        let declared = |audience: &WireAudience| match audience {
-            WireAudience::Public => DeclaredAudience::Public,
-            WireAudience::Readers(readers) => DeclaredAudience::restricted(readers.iter().map(ReaderId::new)),
-        };
         let mut requirements = Vec::new();
         if let Some(required) = &answer.required_audience {
             if let Some(includes) = &required.includes {
-                requirements.push(AudienceRequirement::Includes(RecipientSpec::Static(declared(includes))));
+                requirements.push(AudienceRequirement::Includes(RecipientSpec::Static(includes.clone())));
             }
             if let Some(cap) = &required.cap {
-                requirements.push(AudienceRequirement::Cap(declared(cap)));
+                requirements.push(AudienceRequirement::Cap(cap.clone()));
             }
         }
         ProducedAnnotation {
             delta: Delta {
                 trust: answer.delta_trust.as_deref().map(rank),
-                audience: answer.delta_audience.as_ref().map(declared),
+                audience: answer.delta_audience.clone(),
             },
             emits: EffectSet::new(answer.emits.iter().map(|kind| EffectKind::new(kind.as_str())))
                 .expect("a decoded annotation answer holds no duplicate effect"),
@@ -3126,7 +3126,7 @@ mod tests {
         Resolution, ReturnBounds, RuntimeEngine, SanitizerSubject, TrajectoryId, audience_wire, block_feedback,
         engine_id, remedy_instruction, remedy_lines, terminal_safe,
     };
-    use crate::consult::{AnnotationAnswer, HistoryEntry, RequiredAudienceAnswer, SanitizerPoint, WireAudience};
+    use crate::consult::{AnnotationAnswer, HistoryEntry, RequiredAudienceAnswer, SanitizerPoint};
     use appa_engine::check::{Gap, RawBlock};
     use appa_engine::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec};
     use appa_engine::fact::{EffectKind, EffectSet};
@@ -3268,7 +3268,7 @@ mod tests {
 
         let answer = AnnotationAnswer {
             delta_trust: Some("trusted".to_string()),
-            delta_audience: Some(WireAudience::Public),
+            delta_audience: Some(DeclaredAudience::Public),
             required_trust: None,
             required_audience: None,
             history: Vec::new(),
@@ -3393,11 +3393,11 @@ mod tests {
 
         let answer = || AnnotationAnswer {
             delta_trust: Some("suspicious".to_string()),
-            delta_audience: Some(WireAudience::Public),
+            delta_audience: Some(DeclaredAudience::Public),
             required_trust: Some("trusted".to_string()),
             required_audience: Some(RequiredAudienceAnswer {
-                includes: Some(WireAudience::Readers(vec!["support".to_string()])),
-                cap: Some(WireAudience::Public),
+                includes: Some(DeclaredAudience::restricted([ReaderId::new("support")])),
+                cap: Some(DeclaredAudience::Public),
             }),
             history: vec![HistoryEntry::Excludes("send".to_string())],
             attention: Vec::new(),

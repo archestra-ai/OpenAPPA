@@ -18,8 +18,9 @@ concurrency:
   cancel-in-progress: ${{ github.event.action != 'labeled' }}
 
 jobs:
-  # Each kagent job below runs only when its own inputs change. The other
-  # jobs stay unconditional because they cover the whole workspace.
+  # Each job runs only when its own inputs change. Skipped required
+  # checks still pass, so a docs-only pull request does not wait on
+  # Rust, macOS, Windows, or image builds.
   changes:
     name: Changed Paths
     runs-on: ubuntu-latest
@@ -33,6 +34,11 @@ jobs:
       chart: ${{ steps.filter.outputs.chart }}
       integration: ${{ steps.filter.outputs.integration }}
       e2e: ${{ steps.filter.outputs.e2e }}
+      rust: ${{ steps.filter.outputs.rust }}
+      plugin: ${{ steps.filter.outputs.plugin }}
+      installer: ${{ steps.filter.outputs.installer }}
+      corp: ${{ steps.filter.outputs.corp }}
+      agentthreatbench: ${{ steps.filter.outputs.agentthreatbench }}
     steps:
       # A pull request reads its file list from the API and needs no
       # checkout. Every other event diffs with git and needs the history.
@@ -61,7 +67,65 @@ jobs:
               - '.github/workflows/ci.yml'
             chart:
               - 'integrations/kagent/demo/chart/**'
+              - 'charts/appa-runtime/**'
               - '.github/workflows/ci.yml'
+            rust: &rust
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - '**/Cargo.lock'
+              - 'rustfmt.toml'
+              - '.github/workflows/ci.yml'
+              - 'appa-runtime/**'
+              - 'appa-runtime-api/**'
+              - 'appa-engine/**'
+              - 'appa-eventlog/**'
+              - 'appa-policy/**'
+              - 'appa-builtin/**'
+              - 'appa-adapter-kagent/**'
+              - 'appa-adapter-claude-code/**'
+              - 'appa-example-agent/**'
+              - 'appa-agent-python/**'
+              - 'website-chat-playground/**'
+              - 'bench/corp-agent/**'
+              - 'bench/corp-systems/**'
+              - 'bench/corp/policies/**'
+              - 'examples/**'
+              - 'batteries/**'
+              - 'integrations/claude-code/**'
+              - 'integrations/appa-guide/**'
+              - 'integrations/kagent/fixtures/**'
+              - 'website/content/docs/contracts.md'
+            plugin:
+              - 'integrations/claude-code/plugin/**'
+              - 'integrations/claude-code/.claude-plugin/**'
+              - '.claude-plugin/**'
+              - 'batteries/**'
+              - 'scripts/appa-stage-plugin-bundle.sh'
+              - 'scripts/appa-install.sh'
+              - 'scripts/appa-install-test.sh'
+              - 'scripts/appa-refresh-batteries.py'
+              - 'scripts/test_appa_refresh_batteries.py'
+              - '.github/actions/check-release-versions/**'
+              - '.github/release-please/**'
+              - '.github/workflows/ci.yml'
+              - 'Cargo.toml'
+              - 'charts/appa-runtime/Chart.yaml'
+              - 'charts/appa-runtime/README.md'
+              - 'integrations/kagent/demo/chart/Chart.yaml'
+              - 'integrations/kagent/demo/chart/README.md'
+              - 'integrations/kagent/demo/README.md'
+              - 'website/content/docs/kagent.md'
+              - 'integrations/kagent/README.md'
+            installer:
+              - 'scripts/appa-install.sh'
+              - 'scripts/appa-install-test.sh'
+              - '.github/workflows/ci.yml'
+            corp:
+              - 'bench/corp/**'
+              - '.github/workflows/ci.yml'
+            agentthreatbench:
+              - *rust
+              - 'bench/agentthreatbench/**'
             integration: &integration
               - *python
               - 'integrations/kagent/examples/**'
@@ -84,6 +148,10 @@ jobs:
             e2e:
               - *integration
               - 'integrations/kagent/**'
+              # Markdown in this tree does not change an image or the
+              # A2A suite. Plugin Checks still reads the annotated
+              # operator guides.
+              - '!integrations/kagent/**/*.md'
               - 'appa-example-agent/**'
               - 'appa-agent-python/**'
               - 'bench/**'
@@ -95,11 +163,14 @@ jobs:
               # appa-runtime/src/plugin_layout.rs maps.
               - 'integrations/claude-code/**'
               - 'integrations/appa-guide/**'
+              - 'scripts/appa-refresh-batteries.py'
               # The root ignore file shapes the quickstart build context.
               - '.dockerignore'
 
   plugin-checks:
     name: Plugin Checks
+    needs: changes
+    if: needs.changes.outputs.plugin == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -162,11 +233,16 @@ jobs:
             python3 -m unittest discover -s "$dir" -p 'test_*.py'
           done
 
+      - name: Test release battery refresh
+        run: python3 -m unittest scripts/test_appa_refresh_batteries.py
+
       - name: Check release versions
         uses: ./.github/actions/check-release-versions
 
   installer-checks:
     name: Installer Checks (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.installer == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -185,8 +261,16 @@ jobs:
       - name: Installer cases
         run: sh scripts/appa-install-test.sh
 
-  rust-checks:
-    name: Rust Checks
+  # Rust toolchain checks, split so cargo clippy and cargo test run in
+  # parallel instead of serializing ~11 min on one runner. `cargo check`
+  # is omitted: clippy --all-targets is a superset. Each rust-cache key is
+  # per job: clippy and test write different target/ trees, so they must
+  # not share one entry. A job that runs on main seeds the key later PRs
+  # restore.
+  rust-lint:
+    name: Rust Lint
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -198,21 +282,87 @@ jobs:
 
       - name: Setup Rust
         run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: rust-lint
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Rust formatting
         run: cargo fmt --all --check
 
-      - name: Rust check
-        run: cargo check --workspace --locked
-
       - name: Rust lint
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  rust-tests:
+    name: Rust Tests
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # init_cli copies and hashes the test binary many times. Debug metadata
+    # adds no signal in CI and makes each of those full-file operations larger.
+    env:
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Rust
+        run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: rust-tests
+          env-vars: CARGO_PROFILE_TEST_DEBUG
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Rust tests
         run: cargo test --workspace --locked
 
+  # Stable-named gate so a required check named "Rust Checks" still
+  # covers the split jobs. Both jobs skipped is success: their paths
+  # did not change.
+  rust-checks:
+    name: Rust Checks
+    runs-on: ubuntu-latest
+    if: always() && !cancelled()
+    needs: [changes, rust-lint, rust-tests]
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check rust job results
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          LINT_RESULT: ${{ needs.rust-lint.result }}
+          TESTS_RESULT: ${{ needs.rust-tests.result }}
+        run: |
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "::error::Changed Paths failed ($CHANGES_RESULT)."
+            exit 1
+          fi
+          if [ "$LINT_RESULT" != "success" ] && [ "$LINT_RESULT" != "skipped" ]; then
+            echo "::error::Rust lint failed ($LINT_RESULT)."
+            exit 1
+          fi
+          if [ "$TESTS_RESULT" != "success" ] && [ "$TESTS_RESULT" != "skipped" ]; then
+            echo "::error::Rust tests failed ($TESTS_RESULT)."
+            exit 1
+          fi
+          if [ "$LINT_RESULT" != "$TESTS_RESULT" ]; then
+            echo "::error::Rust lint and tests disagreed (lint: $LINT_RESULT, tests: $TESTS_RESULT)."
+            exit 1
+          fi
+
   replay-examples:
     name: Replay Examples
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -224,6 +374,11 @@ jobs:
 
       - name: Setup Rust
         run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Every directory under examples/tests is one policy and one trace file.
       # The test suite pins them too; this runs the command line end to end,
@@ -238,6 +393,8 @@ jobs:
 
   macos-deployment-checks:
     name: macOS Deployment Checks
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -249,6 +406,11 @@ jobs:
 
       - name: Setup Rust
         run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Only what is platform-specific here: the config and data directory
       # rules, the process ownership check init stops a runtime with, and the
@@ -264,6 +426,8 @@ jobs:
 
   windows-deployment-checks:
     name: Windows Deployment Checks
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -275,6 +439,11 @@ jobs:
 
       - name: Setup Rust
         run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build runtime
         run: cargo build --locked --package appa
@@ -328,6 +497,8 @@ jobs:
 
   python-binding-checks:
     name: Python Binding Checks
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -340,6 +511,11 @@ jobs:
       - name: Setup Rust
         run: rustup show
 
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Setup uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
@@ -350,6 +526,8 @@ jobs:
 
   corp-benchmark-checks:
     name: Corporate Benchmark Checks
+    needs: changes
+    if: needs.changes.outputs.corp == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -369,6 +547,8 @@ jobs:
 
   agentthreatbench-checks:
     name: AgentThreatBench Checks
+    needs: changes
+    if: needs.changes.outputs.agentthreatbench == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -474,16 +654,22 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Lint the chart render script
-        run: shellcheck -s sh integrations/kagent/demo/chart/tests/render-test.sh
+      - name: Lint the chart render scripts
+        run: |
+          shellcheck -s sh integrations/kagent/demo/chart/tests/render-test.sh \
+            charts/appa-runtime/tests/render-test.sh
 
-      - name: Lint the demo chart
-        run: helm lint integrations/kagent/demo/chart
+      - name: Lint the charts
+        run: |
+          helm lint integrations/kagent/demo/chart
+          helm lint charts/appa-runtime
 
       # The name-collision refusal and the quoting of scalar-looking names
       # run only where something renders the chart, so this job does.
-      - name: Render the demo chart
-        run: sh integrations/kagent/demo/chart/tests/render-test.sh
+      - name: Render the charts
+        run: |
+          sh integrations/kagent/demo/chart/tests/render-test.sh
+          sh charts/appa-runtime/tests/render-test.sh
 
   # The deterministic A2A matrix: the real runtime, the real plugin, the real
   # kagent executor, mock externals and a scripted model. No cluster, no key.
@@ -504,9 +690,12 @@ jobs:
         run: rustup show
 
       # The suite drives a real appa runtime, so this job builds the binary
-      # and caches the build. The other Rust jobs build without a cache.
+      # and caches the build under the default job key. Lint, tests, replay,
+      # and the Python bindings each have their own rust-cache entry.
       - name: Cache the Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build the runtime binary
         run: cargo build --package appa --locked
@@ -585,22 +774,25 @@ jobs:
       APPA_E2E_MODEL: openai/gpt-5.6-luna
       APPA_E2E_BASE_URL: https://openrouter.ai/api/v1
     steps:
+      # Standard runners ship about 25 GB of unused toolchains. Delete them
+      # in the background; no OpenAPPA build reads these paths.
+      - name: Reclaim disk space (background)
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup &
+
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 1
 
-      # The runner has 14 GB of disk. The quickstart image is copied three
-      # times: into BuildKit, into the daemon, then into the kind node.
-      - name: Free runner disk space
-        run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
-          sudo docker image prune --all --force
-          df -h /
-
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Test the quickstart entrypoint
+        run: |
+          shellcheck -s bash integrations/kagent/appa-kagent-quickstart/entrypoint.sh
+          shellcheck -s sh integrations/kagent/appa-kagent-quickstart/test-entrypoint.sh
+          sh integrations/kagent/appa-kagent-quickstart/test-entrypoint.sh
 
       # These three builds read the cache the images job writes. They never
       # write it: two jobs writing one scope in one run overwrite each other.
@@ -683,8 +875,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # The five published images build here on every change that can break
-  # them. Publishing itself happens in release.yml.
+  # All six published images get an amd64 build here on every change
+  # that can break them. Publishing itself happens in release.yml.
   #
   # The quickstart image compiles the runtime in release mode with no cargo
   # cache inside the build, so the timeout allows a cold four-core build.
@@ -695,25 +887,60 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
+      # Match the e2e job: reclaim unused runner toolchains while checkout
+      # and Buildx setup proceed.
+      - name: Reclaim disk space (background)
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup &
+
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Free runner disk space
-        run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
-          sudo docker image prune --all --force
-          df -h /
-
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
+      - name: Build the shared runtime image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: appa-runtime/Dockerfile
+          tags: appa-runtime:ci
+          push: false
+          load: true
+          cache-from: type=gha,scope=appa-runtime
+          cache-to: type=gha,mode=min,scope=appa-runtime
+
+      - name: Smoke-test the shared runtime image
+        run: |
+          docker run --detach --name appa-runtime-ci \
+            --volume "$PWD/charts/appa-runtime/files/appa.toml:/etc/appa/appa.toml:ro" \
+            appa-runtime:ci
+          trap 'docker rm --force appa-runtime-ci >/dev/null 2>&1 || true' EXIT
+          healthy=false
+          for _ in $(seq 1 60); do
+            if docker exec appa-runtime-ci python3 -c \
+              'import urllib.request; urllib.request.urlopen("http://127.0.0.1:18787/health", timeout=2).read()'; then
+              healthy=true
+              break
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' appa-runtime-ci)" != true ]; then
+              docker logs appa-runtime-ci
+              exit 1
+            fi
+            sleep 1
+          done
+          if [ "$healthy" != true ]; then
+            docker logs appa-runtime-ci
+            exit 1
+          fi
+          docker exec appa-runtime-ci python3 -c \
+            'import json, urllib.request; body=json.load(urllib.request.urlopen("http://127.0.0.1:18787/batteries", timeout=2)); assert any(item["name"] == "slack" for item in body["batteries"])'
+
       # One cache scope per image: a shared scope keeps only the last build.
-      # The quickstart exports the final stage alone. Its builder stage
-      # recompiles on any change under integrations, so a full export of it
-      # would spend the repository cache quota for nothing.
+      # The quickstart exports the final stage alone to limit cache use. Its
+      # Rust builder now changes only when an actual build input changes.
       - name: Build the quickstart image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -759,3 +986,49 @@ jobs:
           push: false
           cache-from: type=gha,scope=appa-demo-mocks
           cache-to: type=gha,mode=max,scope=appa-demo-mocks
+
+  # The two multi-platform release images also build on the same native
+  # arm64 runner type the release workflow uses. No first arm build waits
+  # until after a release tag exists.
+  shared-images-arm-build:
+    name: Shared Images Build (arm64)
+    needs: changes
+    if: needs.changes.outputs.e2e == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      # The native arm runner has the same unused toolchain payload. Reclaim
+      # it while checkout and Buildx setup proceed.
+      - name: Reclaim disk space (background)
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup &
+
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Build the shared runtime image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: appa-runtime/Dockerfile
+          platforms: linux/arm64
+          tags: appa-runtime:ci-arm64
+          push: false
+          cache-from: type=gha,scope=appa-runtime-arm64
+          cache-to: type=gha,mode=min,scope=appa-runtime-arm64
+
+      - name: Build the quickstart image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: integrations/kagent/appa-kagent-quickstart/Dockerfile
+          platforms: linux/arm64
+          tags: appa-kagent-quickstart:ci-arm64
+          push: false
+          cache-from: type=gha,scope=appa-kagent-quickstart-arm64
+          cache-to: type=gha,mode=min,scope=appa-kagent-quickstart-arm64

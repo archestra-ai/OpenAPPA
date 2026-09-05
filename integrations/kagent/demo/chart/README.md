@@ -1,9 +1,9 @@
 # appa-kagent-demo
 
 OpenAPPA on kagent, as a demo you can install in any cluster.
-The chart deploys a gated `cluster-ops` fleet of six agents:
-`cluster-ops`, its delegated `log-analyst`, a `release-manager` the
-policy never names, and their go twins. It deploys the shared
+The chart deploys a gated `cluster-ops` fleet of three agents:
+`cluster-ops`, its delegated `log-analyst`, and a `release-manager` the
+policy never names. Optional Go twins are disabled by default. It deploys the shared
 `appa-runtime` in one pod with its relay and mock externals, and the
 demo tools. It pre-seeds every demo case as a real chat in the
 dashboard (sixteen captured transcripts).
@@ -13,12 +13,12 @@ after install.
 
 ## Prerequisites
 
-kagent 0.9.12 with its agent image set to the OpenAPPA runtime image.
+Helm 4 and kagent 0.9.12 with its agent image set to the OpenAPPA runtime image.
 That one value puts every declarative python agent in the cluster on
 the OpenAPPA image. Go agents run the Go image under the name kagent
 derives. Both images ship with the gate off, so every gated agent sets
 `APPA_ENABLED=true` beside `APPA_RUNTIME_URL` — the chart sets both on
-every agent it renders, the fleet's six and `appa-guide`. Agents kagent
+every agent it renders, the default fleet's three and `appa-guide`. Agents kagent
 routes to `<tag>-full` stay uncovered. The release workflow publishes
 both runtime images at the release version ([Images](#images)). Set this
 tag to the same version as the chart's `appVersion`:
@@ -30,21 +30,40 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
   --set controller.agentImage.registry=ghcr.io \
   --set controller.agentImage.repository=archestra-ai/appa-kagent-quickstart \
-  --set controller.agentImage.tag=0.8.0 --wait # x-release-please-version
+  --set k8s-agent.enabled=false \
+  --set kgateway-agent.enabled=false \
+  --set istio-agent.enabled=false \
+  --set promql-agent.enabled=false \
+  --set observability-agent.enabled=false \
+  --set argo-rollouts-agent.enabled=false \
+  --set helm-agent.enabled=false \
+  --set cilium-policy-agent.enabled=false \
+  --set cilium-manager-agent.enabled=false \
+  --set cilium-debug-agent.enabled=false \
+  --force-conflicts \
+  --wait --timeout 10m \
+  --set controller.agentImage.tag=0.10.0 # x-release-please-version
 ```
+
+The disabled stock agents are not part of the demo and require their own provider Secret. The controller, dashboard, and tool services remain enabled.
 
 ## Install
 
 ```sh
-helm upgrade --install appa-kagent-demo ./integrations/kagent/demo/chart \
-  -n kagent --set openai.apiKey="$OPENROUTER_API_KEY" --wait
+APPA_VERSION=0.10.0 # x-release-please-version
+helm upgrade --install appa-kagent-demo \
+  "https://github.com/archestra-ai/OpenAPPA/releases/download/v${APPA_VERSION}/appa-kagent-demo-${APPA_VERSION}.tgz" \
+  -n kagent \
+  --set-string openai.apiKey="$OPENAI_API_KEY" \
+  --set agents.go.enabled=false \
+  --force-conflicts \
+  --wait --timeout 10m
 ```
 
 Leave `openai.apiKey` unset to paste the key in the dashboard instead
 (Models → appa-demo-model → Edit); the pods start once the Secret exists.
 `helm upgrade` re-runs the seed Job, which is idempotent.
-The defaults match the public playground: `openai/gpt-5.6-luna` through
-`https://openrouter.ai/api/v1`.
+The default is `gpt-4.1-mini` through the OpenAI API.
 
 The policy names the delegated children by their wire spelling,
 `<namespace>__NS__<child>` with hyphens as underscores
@@ -79,15 +98,15 @@ structured outputs.
 
 | Value | Default | Meaning |
 |---|---|---|
-| `openai.apiKey` | `""` | The OpenRouter key; lands in the Secret named after the ModelConfig. |
-| `openai.model` | `openai/gpt-5.6-luna` | The agents' model. |
+| `openai.apiKey` | `""` | The OpenAI key; lands in the Secret named after the ModelConfig. |
+| `openai.model` | `gpt-4.1-mini` | The agents' model. |
 | `openai.existingSecret` | `""` | Use an existing Secret with `OPENAI_API_KEY` instead. |
-| `openai.baseUrl` | `https://openrouter.ai/api/v1` | The OpenAI-compatible endpoint for the agents' model. |
+| `openai.baseUrl` | `""` | Optional OpenAI-compatible endpoint for the agents' model. |
 | `runtime.image.*` | `ghcr.io/archestra-ai/appa-kagent-quickstart:<appVersion>` | The runtime image (also the agents' image, via kagent). Published at each release version. |
-| `runtime.reasoningEffort` | `none` | Fills `reasoning_effort` for the OpenAI model when the CRD cannot. |
+| `runtime.reasoningEffort` | `""` | Optionally fills `reasoning_effort` for the OpenAI model when the CRD cannot. |
 | `runtime.persistence.enabled` | `false` | Keep trajectories on a PersistentVolume. |
-| `llm.model` | `openai/gpt-5.6-luna` | The model the policy's sanitizers consult (`[externals.llm]`). |
-| `llm.url` | `https://openrouter.ai/api/v1` | The OpenAI-compatible endpoint for that model. |
+| `llm.model` | `gpt-4.1-mini` | The model the policy's sanitizers consult (`[externals.llm]`). |
+| `llm.url` | `""` | Optional OpenAI-compatible endpoint for that model. |
 | `mocks.approvalWindowSeconds` | `25` | How long the change board waits for a ruling, inside the policy's `externals.timeout_ms` (30 s). |
 | `seed.enabled` | `true` | Replay the showcase chats into `cluster-ops` after install. The go twin gets none. |
 | `seed.controllerUrl` | `""` | The kagent controller the seed Job posts to. Empty means `kagent-controller` in the release namespace. |
@@ -108,7 +127,7 @@ the controller compile it again.
 ## What is inside
 
 ```
-six agents (cluster-ops, log-analyst, release-manager, and their go twins)
+three agents (cluster-ops, log-analyst, and release-manager; optional Go twins)
                                   ──APPA_RUNTIME_URL──▶ Service appa-runtime:18789
                                                         │ pod appa-runtime
                                                         ├─ relay (nginx)     :18789 → 127.0.0.1:18787, Host rewritten
@@ -128,12 +147,14 @@ so the relay and the mocks are its sidecars (the plan's
 
 ## Images
 
-The release workflow publishes five images to `ghcr.io/archestra-ai`
-at the release version, for `linux/amd64`: `appa-kagent-quickstart`,
-`appa-kagent-adk`, `appa-kagent-adk-go`, `appa-demo-tools` and
-`appa-demo-mocks`. It also publishes `golang-adk` at that version, on
-the same digest as `appa-kagent-adk-go`. kagent's controller derives
-the go runtime image under that name.
+The release workflow publishes six images to `ghcr.io/archestra-ai` at
+the release version: `appa-runtime`, `appa-kagent-quickstart`,
+`appa-kagent-adk`, `appa-kagent-adk-go`, `appa-demo-tools`, and
+`appa-demo-mocks`. The first two support `linux/amd64` and
+`linux/arm64`. The other four support `linux/amd64`. It also publishes
+`golang-adk` at that version, on the same digest as
+`appa-kagent-adk-go`. kagent's controller derives the Go runtime image
+under that name.
 
 The chart's image defaults name `appa-kagent-quickstart`,
 `appa-demo-tools` and `appa-demo-mocks` in that registry, at the
@@ -150,7 +171,10 @@ docker build -t appa-demo-tools:dev integrations/kagent/demo
 docker build -t appa-demo-mocks:dev integrations/kagent/demo/mocks
 docker build -t golang-adk:dev integrations/kagent/appa-kagent-adk-go   # the go cell: kagent derives this name
 kind load docker-image appa-kagent-quickstart:dev appa-demo-tools:dev appa-demo-mocks:dev golang-adk:dev --name <cluster>
-helm upgrade --install appa-kagent-demo ./integrations/kagent/demo/chart -n kagent \
+APPA_VERSION=0.10.0 # x-release-please-version
+helm upgrade --install appa-kagent-demo \
+  "https://github.com/archestra-ai/OpenAPPA/releases/download/v${APPA_VERSION}/appa-kagent-demo-${APPA_VERSION}.tgz" \
+  -n kagent \
   --set openai.apiKey="$OPENAI_API_KEY" \
   --set runtime.image.repository=docker.io/library/appa-kagent-quickstart --set runtime.image.tag=dev --set runtime.image.pullPolicy=Never \
   --set tools.image.repository=docker.io/library/appa-demo-tools --set tools.image.tag=dev --set tools.image.pullPolicy=Never \

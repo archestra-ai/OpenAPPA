@@ -8,7 +8,7 @@ use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
 use axum::extract::State;
@@ -50,6 +50,17 @@ struct Args {
 
     #[arg(long, env = "APPA_MODULES_DIR")]
     modules_dir: Option<PathBuf>,
+
+    /// Directories of bundled batteries, in lookup order. First directory
+    /// that contains `batteries/<name>/appa.toml`'s `<name>` wins. Colon
+    /// separated when set through `APPA_BATTERIES_DIR`.
+    #[arg(
+        long = "batteries-dir",
+        env = "APPA_BATTERIES_DIR",
+        value_delimiter = ':',
+        action = clap::ArgAction::Append
+    )]
+    batteries_dir: Vec<PathBuf>,
 
     #[arg(long, default_value = "127.0.0.1:8787")]
     listen: SocketAddr,
@@ -168,6 +179,9 @@ struct AppState {
     runtime: Arc<Runtime>,
     codec: Codec,
     config: PathBuf,
+    battery_dirs: Vec<PathBuf>,
+    batteries: Arc<RwLock<crate::batteries::BatteriesResponse>>,
+    reload_gate: Arc<tokio::sync::Mutex<()>>,
     executable: Option<ExecutableAtStart>,
 }
 
@@ -218,11 +232,28 @@ fn health_answer(stale: bool, pid: u32) -> String {
     if stale { format!("stale {pid}") } else { "ok".to_owned() }
 }
 
+async fn batteries(State(state): State<AppState>) -> axum::Json<crate::batteries::BatteriesResponse> {
+    let catalog = state
+        .batteries
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    axum::Json(catalog)
+}
+
 async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (axum::http::StatusCode, String)> {
-    let config = Config::load(&state.config)
+    let _reload = state.reload_gate.lock().await;
+    let config = Config::load_from(&state.config, &state.battery_dirs)
         .map_err(|error| (axum::http::StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
     match state.runtime.reload(config) {
-        Ok(reloaded) => Ok(axum::Json(reloaded)),
+        Ok(reloaded) => {
+            let catalog = crate::batteries::snapshot(&state.battery_dirs);
+            *state
+                .batteries
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = catalog;
+            Ok(axum::Json(reloaded))
+        }
         Err(refusal) => {
             tracing::warn!(%refusal, "the reload was refused; the running deployment keeps serving");
             Err((axum::http::StatusCode::UNPROCESSABLE_ENTITY, refusal.to_string()))
@@ -284,7 +315,14 @@ async fn serve(args: Args) -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    let config = match Config::load(&config_path) {
+    let battery_dirs = match crate::batteries::prepare(&args.batteries_dir) {
+        Ok(dirs) => dirs,
+        Err(error) => {
+            eprintln!("appa runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let config = match Config::load_from(&config_path, &battery_dirs) {
         Ok(config) => config,
         Err(error) => {
             eprintln!("appa runtime: {error}");
@@ -303,12 +341,16 @@ async fn serve(args: Args) -> ExitCode {
         runtime: Arc::clone(&runtime),
         codec: args.adapter.codec(),
         config: config_path,
+        batteries: Arc::new(RwLock::new(crate::batteries::snapshot(&battery_dirs))),
+        battery_dirs,
+        reload_gate: Arc::new(tokio::sync::Mutex::new(())),
         executable: ExecutableAtStart::of_this_process(),
     };
     let app = axum::Router::new()
         .route("/health", get(health))
         .route("/binary-fingerprint", get(binary_fingerprint))
         .route("/policy-key", get(policy_key))
+        .route("/batteries", get(batteries))
         .route("/status", get(status))
         .route("/hook", post(hook))
         .route("/reload", post(reload))
@@ -324,7 +366,7 @@ async fn serve(args: Args) -> ExitCode {
     };
     tracing::info!(
         listen = %args.listen,
-        "appa-runtime serving /hook, /mcp, /status, /reload, /health, /binary-fingerprint, and /policy-key"
+        "appa-runtime serving /hook, /mcp, /status, /reload, /health, /binary-fingerprint, /policy-key, and /batteries"
     );
     let exit = match axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
