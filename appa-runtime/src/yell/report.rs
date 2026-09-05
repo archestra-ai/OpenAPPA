@@ -372,11 +372,14 @@ pub(crate) fn write(finished: Finished, directory: &Path) -> Result<Written, Wri
         directory: directory.to_path_buf(),
         source,
     };
-    let held = tempfile::Builder::new()
-        .prefix("appa-yell-")
-        .permissions(directory_permissions())
-        .tempdir_in(directory)
-        .map_err(refuse)?;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("appa-yell-");
+    // Mode bits are the whole guarantee on Unix. Windows has none to set here, and
+    // `Permissions` cannot be built from nothing, so the per-user temporary
+    // directory is the protection there.
+    #[cfg(unix)]
+    builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
+    let held = builder.tempdir_in(directory).map_err(refuse)?;
     let path = held.path().join("report.json");
     let mut file = std::fs::OpenOptions::new();
     file.write(true).create_new(true);
@@ -389,20 +392,6 @@ pub(crate) fn write(finished: Finished, directory: &Path) -> Result<Written, Wri
         path: held.keep().join("report.json"),
         finished,
     })
-}
-
-fn directory_permissions() -> std::fs::Permissions {
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::PermissionsExt::from_mode(0o700)
-    }
-    #[cfg(not(unix))]
-    {
-        // Windows has no mode bits here; the per-user temporary directory is the protection.
-        std::fs::metadata(std::env::temp_dir())
-            .map(|metadata| metadata.permissions())
-            .unwrap_or_else(|_| std::fs::Permissions::from_readonly(false))
-    }
 }
 
 #[cfg(test)]
