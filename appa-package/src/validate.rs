@@ -56,6 +56,10 @@ pub enum PackageError {
         #[source]
         source: toml::de::Error,
     },
+    #[error("{policy} declares `{field}`, which a deployment reads only from its own root config")]
+    PolicyTopLevel { policy: PathBuf, field: String },
+    #[error("{policy} declares `policy.{field}`, which an included fragment does not carry")]
+    PolicyField { policy: PathBuf, field: String },
     #[error("{policy} declares `include`, which only a deployment root declares")]
     PolicyInclude { policy: PathBuf },
     #[error("{policy} declares `externals.{key}`, which only a deployment root declares")]
@@ -177,6 +181,13 @@ impl std::fmt::Display for Kind {
 // The battery's policy
 // ---------------------------------------------------------------------------
 
+/// The top-level tables an included fragment may carry, and the `[policy]`
+/// fields it may declare. Both sets are the config loader's (`compose_include`):
+/// a package that validates here must load there, so a fragment refused at
+/// someone's deployment is refused at the package instead.
+const INCLUDABLE_TABLES: [&str; 2] = ["policy", "externals"];
+const INCLUDABLE_POLICY_FIELDS: [&str; 5] = ["version", "tool", "annotator", "authority", "sanitizer"];
+
 /// A battery is a fragment a deployment includes, not a deployment: it neither
 /// includes further files nor sets the root-only externals, it runs only its own
 /// declared helpers, and it names only contracts in the namespaces it declares.
@@ -190,10 +201,55 @@ fn check_policy(policy: &Path, namespaces: &[Namespace], helpers: &[RelativePath
         source,
     })?;
 
+    // Named on its own because it is the mistake a battery author makes: a
+    // battery is included, and cannot include in turn.
     if document.get("include").is_some() {
         return Err(PackageError::PolicyInclude {
             policy: policy.to_path_buf(),
         });
+    }
+    let top_level = document.as_table().ok_or_else(|| PackageError::PolicyTopLevel {
+        policy: policy.to_path_buf(),
+        field: "the document is not a table".to_owned(),
+    })?;
+    for field in top_level.keys() {
+        if !INCLUDABLE_TABLES.contains(&field.as_str()) {
+            return Err(PackageError::PolicyTopLevel {
+                policy: policy.to_path_buf(),
+                field: field.clone(),
+            });
+        }
+    }
+    // The loader reads the fragment's version to check it against the root's.
+    // Which root it will meet is not knowable here; that it declares a version
+    // at all, as an integer, is.
+    let declared = top_level
+        .get("policy")
+        .and_then(Value::as_table)
+        .ok_or_else(|| PackageError::PolicyTopLevel {
+            policy: policy.to_path_buf(),
+            field: "policy".to_owned(),
+        })?;
+    if declared.get("version").and_then(Value::as_integer).is_none() {
+        return Err(PackageError::PolicyField {
+            policy: policy.to_path_buf(),
+            field: "version".to_owned(),
+        });
+    }
+    for (field, value) in declared {
+        if !INCLUDABLE_POLICY_FIELDS.contains(&field.as_str()) {
+            return Err(PackageError::PolicyField {
+                policy: policy.to_path_buf(),
+                field: field.clone(),
+            });
+        }
+        // The loader appends each of these to the root's own array.
+        if field != "version" && !value.is_array() {
+            return Err(PackageError::PolicyField {
+                policy: policy.to_path_buf(),
+                field: field.clone(),
+            });
+        }
     }
 
     if let Some(externals) = document.get("externals") {
@@ -555,6 +611,45 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// A package that validates must load. Each of these is a fragment the
+    /// config loader refuses when a deployment includes it, so the package is
+    /// refused first, where the author can still see it.
+    #[test]
+    fn a_fragment_the_loader_would_refuse_is_refused_here() {
+        let head = "[policy]\nversion = 2\n\n";
+        for (body, what) in [
+            (
+                "[deployment]\nname = \"mine\"\n\n",
+                "a top-level table only a root carries",
+            ),
+            (
+                "[policy.audience]\ncustomer = []\n\n",
+                "a policy field only a root carries",
+            ),
+            ("[policy.identity]\nme = []\n\n", "another root-only policy field"),
+        ] {
+            let directory = battery(&BATTERY_POLICY.replace(head, &format!("{head}{body}")));
+            assert!(
+                matches!(
+                    validate_package(directory.path()),
+                    Err(PackageError::PolicyTopLevel { .. } | PackageError::PolicyField { .. })
+                ),
+                "accepted {what}"
+            );
+        }
+
+        for version in ["", "version = \"2\"\n"] {
+            let directory = battery(&BATTERY_POLICY.replace("version = 2\n", version));
+            assert!(
+                matches!(
+                    validate_package(directory.path()),
+                    Err(PackageError::PolicyField { .. } | PackageError::PolicyTopLevel { .. })
+                ),
+                "accepted a fragment whose version is {version:?}"
+            );
+        }
     }
 
     #[test]

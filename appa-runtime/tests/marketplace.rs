@@ -10,7 +10,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use appa_package::{Marketplace, TreeDigest, validate_package};
+use appa_package::{Host, Marketplace, Role, TreeDigest, validate_package};
+use appa_runtime::config::Config;
 
 fn repository() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -140,4 +141,70 @@ fn every_package_directory_is_named_by_the_marketplace() {
         unlisted.is_empty(),
         "a package directory the marketplace does not name: {unlisted:?}"
     );
+}
+
+/// A battery that validates is a battery a deployment can include. The two
+/// checks are written in crates that cannot depend on each other — the
+/// validator states what a fragment may carry, the config loader enforces it —
+/// so this composes each battery into the root config of every host it declares
+/// and loads the result. A rule one of them learns and the other does not shows
+/// up here as a battery that validates and will not load.
+#[test]
+fn every_battery_composes_into_each_host_it_declares() {
+    let root = marketplace_root();
+    let manifest = manifest();
+    let default_policy = |host: Host| {
+        manifest
+            .packages
+            .iter()
+            .find_map(
+                |entry| match validate_package(&root.join(entry.path.as_str())).ok()?.role {
+                    Role::Adapter(adapter) if adapter.host() == host => {
+                        Some(root.join(entry.path.as_str()).join(adapter.default_policy().as_str()))
+                    }
+                    _ => None,
+                },
+            )
+            .unwrap_or_else(|| panic!("the marketplace ships no adapter for {host}"))
+    };
+
+    for entry in &manifest.packages {
+        let directory = root.join(entry.path.as_str());
+        let Role::Battery(battery) = validate_package(&directory).expect("the package validates").role else {
+            continue;
+        };
+        for host in &battery.hosts {
+            // A deployment holds the package beside its root config and
+            // includes it by a relative path, which is the only shape the
+            // loader accepts. The composition is that arrangement.
+            let composed = tempfile::tempdir().expect("a temp dir is creatable");
+            let installed = composed.path().join(entry.name.as_str());
+            copy_tree(&directory, &installed);
+            let seed = std::fs::read_to_string(default_policy(*host)).expect("the adapter ships its default policy");
+            let path = composed.path().join("appa.toml");
+            std::fs::write(
+                &path,
+                format!("include = [\"{}/{}\"]\n{seed}", entry.name, battery.policy),
+            )
+            .expect("the composed config is writable");
+
+            Config::load(&path)
+                .unwrap_or_else(|error| panic!("{} validates but does not compose into {host}: {error}", entry.path));
+        }
+    }
+}
+
+/// One package directory, as a deployment would hold it.
+fn copy_tree(source: &Path, destination: &Path) {
+    std::fs::create_dir_all(destination).expect("the destination is creatable");
+    for entry in std::fs::read_dir(source).expect("the package directory reads") {
+        let entry = entry.expect("the directory entry reads");
+        let target = destination.join(entry.file_name());
+        match entry.file_type().expect("the entry has a type").is_dir() {
+            true => copy_tree(&entry.path(), &target),
+            false => {
+                std::fs::copy(entry.path(), target).expect("the file copies");
+            }
+        }
+    }
 }
