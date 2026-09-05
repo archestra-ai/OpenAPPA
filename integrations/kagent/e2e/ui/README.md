@@ -8,15 +8,15 @@ the chat steering it to accept the change instead, the chat steering it
 to take no remedy, a forged offer id, the policy's human-review
 authority answered both ways through kagent's Approve/Reject card, the
 per-call annotator, the human-less release-window authority in and out
-of window, the remote change board (a URL authority backed by people
+of window, the remote change board (an Authority backed by people
 out of band) approving, denying, and staying silent, cross-pod
 delegation, a delegation the policy never names (denied at the spawn),
 both gated untrusted ingress sources, and a public-sink attempt after
 audience narrowing.
 
-Nothing here is mocked except the tool DATA: the model is a real LLM,
-every gate decision is the live shared `appa-runtime`, and every remedy
-the agent takes is a real `execute_remedy_plan` execution. Only the two
+The model, plugins, runtime decisions, and remedy executions are real.
+The demo tool data and external policy answers are deterministic fixtures.
+Only the two
 human-review cases click a card — the person's answer is the `oncall`
 authority's ruling. Nine of the other sixteen cases assert that no
 card appears. Those are the exfiltration ask, the three steered
@@ -29,9 +29,9 @@ is the matrix index across kagent versions, runtime plugins and drivers.
 ## Requirements
 
 The full demo stack from [../../demo/README.md](../../demo/README.md):
-the kind cluster with the gated images, the shared runtime on the
-matrix policy (`chart/files/demo.appa.toml`) with the model key set, the mock
-externals on the runtime's loopback, and the UI port-forwarded
+the kind cluster with the gated images, the dedicated runtime chart on
+the matrix policy (`chart/files/demo.appa.toml`), the fixture-only demo
+chart with its separate mock Service, and the UI port-forwarded
 (default `http://127.0.0.1:8901`, override with `APPA_UI_URL`).
 
 ## Run
@@ -42,9 +42,10 @@ APPA_UI_E2E=1 uv run --with playwright --with "pytest>=8" --with pytest-rerunfai
 ```
 
 Run the guide row from `integrations/kagent/e2e` with
-`./run-matrix.sh guide ui`. It creates an ungated fixture Agent, verifies
-init, diagnosis, rejected reload and battery actions, protects the fixture,
-checks its resulting environment, and removes it.
+`./run-matrix.sh guide ui`. It verifies the fixture chart Agent uses the
+shared runtime. It also creates an ungated migration fixture, verifies
+init, diagnosis, rejected reload and battery actions, protects the
+fixture, checks its resulting environment, and removes it.
 
 Real model turns run tens of seconds each; the whole matrix takes
 5–25 minutes. `APPA_UI_SHOTS` names the screenshot directory;

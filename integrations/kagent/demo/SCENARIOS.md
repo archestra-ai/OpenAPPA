@@ -116,11 +116,11 @@ the chat. The two matrices in `../e2e/` cover both steerings and both
 answers, in the dashboard and over A2A
 ([IMPLEMENTATION.md](../IMPLEMENTATION.md#human-review)).
 
-## A remote change board — a URL authority backed by people
+## A remote change board — an Authority backed by people
 
-This scenario runs on the demo chart's policy
-([chart/files/demo.appa.toml](chart/files/demo.appa.toml)). The
-example policy names no change board.
+This scenario runs after appa-guide applies the demo chart's policy
+template ([chart/files/demo.appa.toml](chart/files/demo.appa.toml)) to
+the shared runtime. The example policy names no change board.
 
 `rollback_deployment` requires `attention = ["change-approval"]`, which
 the `change-board` authority grants — a URL external

@@ -31,12 +31,10 @@ Four components, all deterministic and logged to stdout:
   The window (--approval-window, default 25s) must sit inside the
   policy's externals.timeout_ms, so an unanswered consult is a clean
   no-answer and never a transport error.
-- POST /sanitize — the derivation both demo sanitizers can bind to.
-  Answers the consulted body with the demo's secret values redacted and
-  the lines that address the reader removed. The demo chart binds its
-  sanitizers to `builtin = "llm"` and never reaches this endpoint; the
-  integration suite (`../../tests/`) binds them here instead,
-  so its sanitized-remedy cases run without a model.
+- POST /sanitize — the derivation both demo sanitizers bind to. Answers
+  the consulted body with the demo's secret values redacted and the lines
+  that address the reader removed. The chart policy and integration suite
+  use the same deterministic implementation without a second model.
 
 Run: python3 mock_externals.py [--host H] [--port P] [--verbose]
 """

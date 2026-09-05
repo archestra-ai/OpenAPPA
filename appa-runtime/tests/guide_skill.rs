@@ -102,6 +102,11 @@ fn the_kagent_reference_carries_the_full_flow() {
         "server not yet attached to an Agent",
         "appa-guide-refresh-check",
         "kagent 0.9.12 sends `k8s_execute_command.command` as one executable",
+        "untrusted proposal input",
+        "public `appa-kagent-demo` OCI chart",
+        "must own only its",
+        "Never use a live ConfigMap as the",
+        "copied `command` binding",
     ] {
         assert!(reference.contains(marker), "the kagent flow names {marker:?}");
     }
@@ -117,9 +122,11 @@ fn the_kagent_reference_carries_the_full_flow() {
 }
 
 #[test]
-fn the_kagent_chart_consumes_this_skill_package() {
-    let chart = repo_root().join("integrations/kagent/demo/chart");
-    let guide = fs::read_to_string(chart.join("templates/guide.yaml")).expect("the chart renders the guide agent");
+fn only_the_runtime_chart_consumes_this_skill_package() {
+    let root = repo_root();
+    let chart = root.join("charts/appa-runtime");
+    let guide =
+        fs::read_to_string(chart.join("templates/appa-guide.yaml")).expect("the runtime chart renders the guide agent");
     assert!(
         guide.contains("gitRefs"),
         "the agent attaches the skill through git refs"
@@ -138,10 +145,18 @@ fn the_kagent_chart_consumes_this_skill_package() {
     assert!(guide.contains("offset 1") && guide.contains("limit 0"));
     assert!(guide.contains("without asking whether"));
 
-    let values = fs::read_to_string(chart.join("values.yaml")).expect("the chart values exist");
+    let values = fs::read_to_string(chart.join("values.yaml")).expect("the runtime chart values exist");
     assert!(values.contains("integrations/appa-guide"));
 
-    let policy = fs::read_to_string(chart.join("files/demo.appa.toml")).expect("the demo policy exists");
+    let demo = root.join("integrations/kagent/demo/chart");
+    assert!(
+        !demo.join("templates/guide.yaml").exists(),
+        "the fixture chart must not create a second appa-guide"
+    );
+    let demo_values = fs::read_to_string(demo.join("values.yaml")).expect("the demo values exist");
+    assert!(!demo_values.contains("integrations/appa-guide"));
+
+    let policy = fs::read_to_string(demo.join("files/demo.appa.toml")).expect("the demo policy exists");
     assert!(policy.contains("name = \"k8s_apply_manifest\""));
     assert!(policy.contains("attention = [\"human-approval\"]"));
     assert!(policy.contains("name = \"skills\""));
@@ -184,6 +199,51 @@ fn kagent_guidance_requires_the_shared_runtime_and_direct_port() {
     assert!(website.contains("appaGuide.enabled=true"));
     assert!(website.contains("appa-kagent-adk"));
     assert!(website.contains("archestra-ai/golang-adk"));
+}
+
+#[test]
+fn the_website_quickstart_is_copy_safe_and_dependency_ordered() {
+    let website = fs::read_to_string(repo_root().join("website/content/docs/kagent.md")).expect("read website guide");
+    let quickstart = website
+        .split("## Quickstart")
+        .nth(1)
+        .expect("the guide has a Quickstart")
+        .split("## Protect existing agents")
+        .next()
+        .expect("the Quickstart ends before existing-Agent guidance");
+
+    for heading in [
+        "### 1. Install kagent with appa plugin",
+        "### 2. Install appa",
+        "### 3. Install the demo Agents",
+    ] {
+        assert!(quickstart.contains(heading), "the Quickstart carries {heading:?}");
+    }
+
+    let crds = quickstart
+        .find("helm upgrade --install kagent-crds")
+        .expect("CRDs install");
+    let kagent = quickstart
+        .find("helm upgrade --install kagent oci://")
+        .expect("kagent install");
+    let runtime = quickstart
+        .find("helm upgrade --install appa-runtime")
+        .expect("runtime install");
+    let demo = quickstart
+        .find("helm upgrade --install appa-kagent-demo")
+        .expect("demo install");
+    assert!(crds < kagent && kagent < runtime && runtime < demo);
+
+    let install_block = quickstart
+        .split("```sh")
+        .skip(1)
+        .map(|rest| rest.split("```").next().expect("a shell block closes"))
+        .find(|block| block.contains("helm upgrade --install kagent oci://"))
+        .expect("the kagent install has one copyable shell block");
+    assert!(install_block.contains("helm upgrade --install kagent-crds"));
+    assert!(install_block.contains("${OPENAI_API_KEY:?"));
+    assert!(!install_block.contains("<your-api-key>"));
+    assert!(!quickstart.contains("quickstart-ops"));
 }
 
 #[test]

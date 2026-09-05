@@ -1,9 +1,8 @@
 # The integration suite's policy: the demo policy, deterministic.
 #
-# A copy of `../demo/chart/files/demo.appa.toml` with three
-# differences, and no others. Every contract, delta, requirement,
-# authority and sanitizer is the demo's, so what this suite proves is
-# what the demo deployment enforces.
+# A test projection of `../demo/chart/files/demo.appa.toml`. Every
+# cluster-ops contract, delta, requirement, Authority, and sanitizer is
+# the demo's. Four deployment-only differences follow.
 #
 # 1. The two agent-tool contracts name the one child this suite builds,
 #    `kagent__NS__log_analyst`, under the wire spelling kagent
@@ -12,10 +11,11 @@
 #    entry is gone. The undeclared agent stays undeclared: the parent
 #    lists `kagent__NS__release_manager` as a tool, no contract names
 #    it, and every delegation to it is denied at the spawn.
-# 2. Both sanitizers bind to the mock's `/sanitize` endpoint instead of
-#    `builtin = "llm"`, and `[externals.llm]` is gone. The derivation is
-#    then deterministic and the suite needs no model and no API key.
-# 3. The consult timeouts are the harness's, not a deployment's.
+# 2. The appa-guide tool declarations and command binding are absent.
+#    This local suite creates no configuring Agent.
+# 3. The command adapters use this process's Python executable and the
+#    mock's loopback URL instead of the runtime image path and Service DNS.
+# 4. The consult timeouts are the harness's, not a deployment's.
 #
 # `@@MOCK_PORT@@` is the loopback port the mock externals process took;
 # `conftest.py` renders it before the runtime starts.
@@ -207,22 +207,22 @@ max_body_bytes = 65536
 [externals.authorities.oncall]
 builtin = "hitl"
 
-# The mock externals (demo/mocks/) answer every registered component on
-# the runtime's loopback — a url binding takes cleartext http to
-# loopback only.
+# The same fixed command transport as the chart policy, pointed at the
+# test process on loopback. HTTP 404 and 504 bodies are written back so
+# the runtime classifies them as consult no-answers, not transport faults.
 [externals.annotators.runbook-readers]
-url = "http://127.0.0.1:@@MOCK_PORT@@/annotate"
+command = ["@@PYTHON@@", "-c", "import sys, urllib.error, urllib.request; request = urllib.request.Request(sys.argv[1], data=sys.stdin.buffer.read(), headers={'Content-Type': 'application/json'})\ntry:\n    sys.stdout.buffer.write(urllib.request.urlopen(request, timeout=9).read())\nexcept urllib.error.HTTPError as error:\n    sys.stdout.buffer.write(error.read())", "http://127.0.0.1:@@MOCK_PORT@@/annotate"]
 
 [externals.authorities.release-window]
-url = "http://127.0.0.1:@@MOCK_PORT@@/authorize"
+command = ["@@PYTHON@@", "-c", "import sys, urllib.error, urllib.request; request = urllib.request.Request(sys.argv[1], data=sys.stdin.buffer.read(), headers={'Content-Type': 'application/json'})\ntry:\n    sys.stdout.buffer.write(urllib.request.urlopen(request, timeout=9).read())\nexcept urllib.error.HTTPError as error:\n    sys.stdout.buffer.write(error.read())", "http://127.0.0.1:@@MOCK_PORT@@/authorize"]
 
 # Parks each consult until a board member rules on the mock's side
 # channel; unanswered within the consult window is a clean no-answer.
 [externals.authorities.change-board]
-url = "http://127.0.0.1:@@MOCK_PORT@@/approve"
+command = ["@@PYTHON@@", "-c", "import sys, urllib.error, urllib.request; request = urllib.request.Request(sys.argv[1], data=sys.stdin.buffer.read(), headers={'Content-Type': 'application/json'})\ntry:\n    sys.stdout.buffer.write(urllib.request.urlopen(request, timeout=9).read())\nexcept urllib.error.HTTPError as error:\n    sys.stdout.buffer.write(error.read())", "http://127.0.0.1:@@MOCK_PORT@@/approve"]
 
 [externals.sanitizers.strip-secret-values]
-url = "http://127.0.0.1:@@MOCK_PORT@@/sanitize"
+command = ["@@PYTHON@@", "-c", "import sys, urllib.error, urllib.request; request = urllib.request.Request(sys.argv[1], data=sys.stdin.buffer.read(), headers={'Content-Type': 'application/json'})\ntry:\n    sys.stdout.buffer.write(urllib.request.urlopen(request, timeout=9).read())\nexcept urllib.error.HTTPError as error:\n    sys.stdout.buffer.write(error.read())", "http://127.0.0.1:@@MOCK_PORT@@/sanitize"]
 
 [externals.sanitizers.strip-instructions]
-url = "http://127.0.0.1:@@MOCK_PORT@@/sanitize"
+command = ["@@PYTHON@@", "-c", "import sys, urllib.error, urllib.request; request = urllib.request.Request(sys.argv[1], data=sys.stdin.buffer.read(), headers={'Content-Type': 'application/json'})\ntry:\n    sys.stdout.buffer.write(urllib.request.urlopen(request, timeout=9).read())\nexcept urllib.error.HTTPError as error:\n    sys.stdout.buffer.write(error.read())", "http://127.0.0.1:@@MOCK_PORT@@/sanitize"]

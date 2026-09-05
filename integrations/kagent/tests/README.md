@@ -162,11 +162,9 @@ the right turn.
 
 ## The policy
 
-[policy.appa.toml](policy.appa.toml) is
-[../demo/chart/files/demo.appa.toml](../demo/chart/files/demo.appa.toml)
-with three differences and no others, each commented in the file: the
-agent-tool contract names this suite's one child, both sanitizers bind
-to the mock's `/sanitize` instead of `builtin = "llm"` (and
-`[externals.llm]` is gone), and the consult timeouts are the harness's.
-`@@MOCK_PORT@@` is rendered with the mock's loopback port before the
-runtime starts.
+[policy.appa.toml](policy.appa.toml) is a test projection of
+[../demo/chart/files/demo.appa.toml](../demo/chart/files/demo.appa.toml).
+It names only this suite's Python child, omits appa-guide declarations,
+points the same command adapters at a loopback process, and selects
+shorter harness timeouts. Each difference is commented in the file.
+`@@PYTHON@@` and `@@MOCK_PORT@@` are rendered before the runtime starts.

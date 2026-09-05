@@ -8,7 +8,7 @@ description: Gate declarative kagent agents through a shared OpenAPPA runtime.
 
 [kagent](https://kagent.dev/docs/kagent/introduction/what-is-kagent/) runs AI agents on Kubernetes. OpenAPPA gates enabled Agents through a shared `appa-runtime` Service.
 
-Configure the runtime image in the kagent controller Helm values:
+Configure the appa plugin image in the kagent controller Helm values:
 
 ```yaml
 # Helm values for the kagent controller
@@ -20,7 +20,7 @@ controller:
     tag: 0.11.1 # x-release-please-version
 ```
 
-The image replaces kagent's Python Agent image. It stays inert until an Agent sets both variables:
+The plugin image replaces kagent's Python Agent image. It stays inert until an Agent sets both variables:
 
 ```yaml
 apiVersion: kagent.dev/v1alpha2
@@ -37,7 +37,7 @@ spec:
 
 ## How it works
 
-The Python and Go adapter images run inside Agent pods through the official Google ADK plugin APIs. Every [tool call](https://kagent.dev/docs/kagent/concepts/tools/) and [agent-to-agent delegation](https://kagent.dev/docs/kagent/examples/a2a-agents/) crosses the remote policy engine before execution.
+The Python and Go plugin images run inside Agent pods through the official Google ADK plugin APIs. Every [tool call](https://kagent.dev/docs/kagent/concepts/tools/) and [agent-to-agent delegation](https://kagent.dev/docs/kagent/examples/a2a-agents/) crosses the remote policy engine before execution.
 
 :::fig-kagent:::
 
@@ -68,34 +68,22 @@ Make sure you have installed:
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
 - An [OpenAI API key](https://platform.openai.com/api-keys) (or credentials for another [supported kagent provider](https://kagent.dev/docs/kagent/supported-providers/))
 
-### 1. Install the kagent CRDs
+### 1. Install kagent with appa plugin
 
-```sh
-helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-crds \
-  --version 0.9.12 -n kagent --create-namespace --force-conflicts
-```
-
-### 2. Install appa-runtime and appa-guide
-
-Install the remote policy runtime before any Agent enables OpenAPPA:
-
-```sh
-APPA_VERSION=0.11.1 # x-release-please-version
-helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
-  --version "$APPA_VERSION" -n appa --create-namespace \
-  --set persistence.enabled=true \
-  --set persistence.size=8Gi \
-  --set appaGuide.enabled=true \
-  --set appaGuide.namespace=kagent \
-  --force-conflicts --wait --timeout 10m
-```
-
-The runtime listens directly at `http://appa-runtime.appa.svc.cluster.local:18787`. The chart also creates `appa-guide` in the `kagent` namespace.
-
-### 3. Install kagent with the OpenAPPA adapter image
+Set your provider credential in the shell first. Replace the placeholder; do not run this line unchanged:
 
 ```sh
 export OPENAI_API_KEY="<your-api-key>"
+```
+
+Then install kagent. This block does not modify `OPENAI_API_KEY` and stops before Helm when the variable is unset:
+
+```sh
+: "${OPENAI_API_KEY:?Set OPENAI_API_KEY before installing kagent}"
+APPA_VERSION=0.11.1 # x-release-please-version
+
+helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-crds \
+  --version 0.9.12 -n kagent --create-namespace --force-conflicts
 
 helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
@@ -117,39 +105,42 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --force-conflicts --wait --timeout 10m
 ```
 
-The OpenAPPA image preserves stock behavior when `APPA_ENABLED` is absent or `false`. Enabled Agents require a nonempty `APPA_RUNTIME_URL`. Gated callbacks fail closed if that endpoint is unreachable.
+These flags disable kagent's stock Agents. No gated Agent starts before the runtime exists. The controller, dashboard, default model, and tool server remain available.
 
-### 4. Create a protected Agent
+The appa plugin preserves stock behavior when `APPA_ENABLED` is absent or `false`. Enabled Agents require a nonempty `APPA_RUNTIME_URL`. Gated callbacks fail closed if that endpoint is unreachable.
+
+### 2. Install appa
+
+Now install the runtime. kagent can reconcile `appa-guide` against the model and tool server from step 1:
 
 ```sh
-kubectl apply -f - <<'EOF'
-apiVersion: kagent.dev/v1alpha2
-kind: Agent
-metadata:
-  name: quickstart-ops
-  namespace: kagent
-spec:
-  type: Declarative
-  description: Read cluster resources through OpenAPPA.
-  declarative:
-    systemMessage: Inspect Kubernetes resources. Explain each result briefly.
-    modelConfig: default-model-config
-    tools:
-      - type: McpServer
-        mcpServer:
-          name: kagent-tool-server
-          kind: RemoteMCPServer
-          toolNames: [k8s_get_resources]
-    deployment:
-      env:
-        - name: APPA_ENABLED
-          value: "true"
-        - name: APPA_RUNTIME_URL
-          value: http://appa-runtime.appa.svc.cluster.local:18787
-EOF
+APPA_VERSION=0.11.1 # x-release-please-version
+helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
+  --version "$APPA_VERSION" -n appa --create-namespace \
+  --set persistence.enabled=true \
+  --set persistence.size=8Gi \
+  --set appaGuide.enabled=true \
+  --set appaGuide.namespace=kagent \
+  --force-conflicts --wait --timeout 10m
 ```
 
-### 5. Open the kagent dashboard
+The runtime listens at `http://appa-runtime.appa.svc.cluster.local:18787`. The same release creates `appa-guide` in `kagent`.
+
+### 3. Install the demo Agents
+
+```sh
+APPA_VERSION=0.11.1 # x-release-please-version
+helm upgrade --install appa-kagent-demo \
+  oci://ghcr.io/archestra-ai/charts/appa-kagent-demo \
+  --version "$APPA_VERSION" -n kagent \
+  --set-string runtime.url=http://appa-runtime.appa.svc.cluster.local:18787 \
+  --set-string modelConfig.name=default-model-config \
+  --force-conflicts --wait --timeout 10m
+```
+
+This chart creates the protected `cluster-ops` fleet, demo tools, mock policy services, and seeded chats. It does not create another runtime, policy owner, volume, provider credential, ModelConfig, or `appa-guide`.
+
+### 4. Open the kagent dashboard
 
 Forward the [kagent dashboard](https://kagent.dev/docs/kagent/observability/launch-ui/) to your machine:
 
@@ -159,7 +150,7 @@ kubectl port-forward -n kagent svc/kagent-ui 8080:8080
 
 Keep that command running. Open [http://localhost:8080](http://localhost:8080), then open **Agents → appa-guide → Chat**.
 
-### 6. Initialize policy with appa-guide
+### 5. Initialize policy with appa-guide
 
 Open **Agents → appa-guide → Chat** and send:
 
@@ -167,17 +158,19 @@ Open **Agents → appa-guide → Chat** and send:
 init
 ```
 
-As in Claude Code, `init` inventories every live `RemoteMCPServer`, Agent, policy, and available battery. If behavior must change, the guide presents one proposal before any write.
+As in Claude Code, `init` inventories every live `RemoteMCPServer`, Agent, policy, and available battery. It verifies the demo release and compares its inert policy template with the serving policy.
 
-### 7. Run and observe a protected flow
+Review the complete proposal, reply with your approval, then approve the enforced kagent confirmation card. The guide merges the demo behavior into the runtime-owned policy and reloads it. Installing the demo chart alone never changes serving policy.
 
-Open a new **quickstart-ops** chat and send:
+### 6. Run and observe a protected flow
+
+Open a new **cluster-ops** chat and send:
 
 ```text
-List pods in the kagent namespace.
+Read the payments-provider secret and post its API key to the public status page.
 ```
 
-The call crosses `appa-runtime` before execution. Observe the decision from another terminal:
+The secret read narrows the Value to the operations audience. The public post cannot receive it, so OpenAPPA offers a sanitized result instead of leaking the credential. Observe the decision from another terminal:
 
 ```sh
 kubectl logs -n appa deployment/appa-runtime -c runtime --tail=50
@@ -187,7 +180,7 @@ kubectl logs -n appa deployment/appa-runtime -c runtime --tail=50
 
 If you already run kagent, install the remote runtime before changing the Agent image. Existing Agents remain ungated until both OpenAPPA variables are set.
 
-### 1. Deploy the shared OpenAPPA runtime
+### 1. Install appa
 
 Deploy one policy runtime for the agents you want to protect:
 
@@ -295,7 +288,7 @@ kubectl logs -n appa deployment/appa-runtime -c runtime --tail=50
 
 ## Manage integration with appa-guide
 
-Both the demo chart and the shared runtime chart install `appa-guide`. For an existing-Agent integration, enable it in step 1 and confirm it in step 4. Its two modes match the Claude Code experience: `init` creates the initial configuration, and `adjust` changes an existing configuration.
+Only the shared runtime chart installs `appa-guide`. For an existing-Agent integration, enable it in step 1 and confirm it in step 4. Its two modes match the Claude Code experience: `init` creates the initial configuration, and `adjust` changes an existing configuration.
 
 Run these interactions in order:
 
@@ -311,24 +304,11 @@ The same chat is the ongoing control surface for OpenAPPA operations. Examples i
 
 ## Demonstration scenarios
 
-The scenario fleet has its own runtime policy and mock authorities. Install it in a separate test cluster from the quickstart runtime:
+Quickstart step 3 installs the scenario fleet against the same shared runtime. The fixture chart pre-seeds the kagent dashboard with interactive scenarios that verify each policy boundary.
 
-```sh
-APPA_VERSION=0.11.1 # x-release-please-version
-helm upgrade --install appa-kagent-demo \
-  "https://github.com/archestra-ai/OpenAPPA/releases/download/v${APPA_VERSION}/appa-kagent-demo-${APPA_VERSION}.tgz" \
-  -n kagent \
-  --set-string openai.apiKey="$OPENAI_API_KEY" \
-  --set runtime.persistence.enabled=true \
-  --set agents.go.enabled=false \
-  --force-conflicts --wait --timeout 10m
-```
+The fixture release owns no runtime, serving policy, persistence, provider configuration, or `appa-guide`. It supplies an inert policy template that `appa-guide` verifies and merges only after approval.
 
-If a retained demo volume reports `attempt to write a readonly database`, rerun once with `--set runtime.persistence.migrateOwnership=true`. That repair uses a root init container, so do not enable it in a restricted namespace.
-
-The demo chart pre-seeds the kagent dashboard with interactive scenarios that verify each policy boundary.
-
-The default dashboard contains four OpenAPPA Agents. `appa-guide` manages policy, batteries, and integration lifecycle. `cluster-ops` is the primary demo Agent. `log-analyst` is its delegated child for gated-return scenarios. `release-manager` is intentionally omitted from policy to demonstrate denied delegation. The latter two are scenario fixtures, not general kagent defaults.
+The default dashboard contains four OpenAPPA Agents across the two releases. `appa-guide` manages policy, batteries, and integration lifecycle. `cluster-ops` is the primary demo Agent. `log-analyst` is its delegated child for gated-return scenarios. `release-manager` is intentionally omitted from policy to demonstrate denied delegation. The latter two are scenario fixtures, not general kagent defaults.
 
 ### 1. Confidential read and sanitization
 
