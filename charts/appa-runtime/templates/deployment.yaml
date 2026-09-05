@@ -87,6 +87,8 @@ spec:
             - /var/lib/appa/appa.db
             - --listen
             - 0.0.0.0:18787
+            - --mcp-allowed-host
+            - {{ printf "%s.%s.svc.cluster.local:%v" (include "appa-runtime.fullname" .) .Release.Namespace .Values.service.port | quote }}
             {{- if .Values.persistence.enabled }}
             - --batteries-dir
             - /var/lib/appa/batteries

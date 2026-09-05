@@ -77,8 +77,12 @@ expect 2 '/opt/appa/batteries'
 expect 0 '/var/lib/appa/batteries'
 expect 1 'image: ghcr.io/archestra-ai/appa-runtime:0\.10\.0$'
 expect 1 '0\.0\.0\.0:18787'
+expect 1 '^            - "appa-runtime\.kagent\.svc\.cluster\.local:18787"$'
 expect 1 'containerPort: 18787'
 expect 1 'port: 18787, targetPort: runtime'
+expect 1 '^          startupProbe:$'
+expect 3 '^          readinessProbe:$'
+expect 3 'path: /health, port: runtime'
 expect 1 'fsGroup: 65532'
 expect 0 'name: migrate-data-ownership'
 expect 0 '18789|appa-runtime-relay|name: relay'
@@ -107,7 +111,8 @@ expect 1 '^    name = "kagent__NS__log_analyst_go"$'
 # Persistence adds the writable lookup path. An existing claim is used
 # without rendering a second claim.
 must_render kagent --set runtime.persistence.enabled=true \
-  --set runtime.persistence.existingClaim=team-appa
+  --set runtime.persistence.existingClaim=team-appa \
+  --set runtime.persistence.migrateOwnership=true
 expect 2 '/var/lib/appa/batteries'
 expect 2 '/var/lib/appa/release-batteries'
 expect 1 'name: migrate-data-ownership'

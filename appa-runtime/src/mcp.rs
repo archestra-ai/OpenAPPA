@@ -136,12 +136,24 @@ const SESSION_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// MCP service served at `/mcp`.
 pub fn service(runtime: Arc<Runtime>) -> StreamableHttpService<RemedyService, LocalSessionManager> {
+    service_with_allowed_hosts(runtime, &[])
+}
+
+pub fn service_with_allowed_hosts(
+    runtime: Arc<Runtime>,
+    allowed_hosts: &[String],
+) -> StreamableHttpService<RemedyService, LocalSessionManager> {
     let mut sessions = LocalSessionManager::default();
     sessions.session_config.keep_alive = Some(runtime.review_timeout() + SESSION_GRACE);
+    let config = if allowed_hosts.is_empty() {
+        StreamableHttpServerConfig::default()
+    } else {
+        StreamableHttpServerConfig::default().with_allowed_hosts(allowed_hosts.iter().cloned())
+    };
     StreamableHttpService::new(
         move || Ok(RemedyService::new(Arc::clone(&runtime))),
         Arc::new(sessions),
-        StreamableHttpServerConfig::default().disable_allowed_hosts(),
+        config,
     )
 }
 
@@ -172,9 +184,12 @@ mod tests {
     #[tokio::test]
     async fn the_mcp_service_accepts_a_kubernetes_service_host() {
         let directory = tempfile::tempdir().expect("a temp dir is creatable");
-        let service = service(std::sync::Arc::new(
-            Runtime::open(config(), directory.path().join("appa.db"), None).expect("the deployment opens"),
-        ));
+        let service = service_with_allowed_hosts(
+            std::sync::Arc::new(
+                Runtime::open(config(), directory.path().join("appa.db"), None).expect("the deployment opens"),
+            ),
+            &["appa-runtime.appa.svc.cluster.local:18787".to_string()],
+        );
 
         let response = service
             .handle(
@@ -190,6 +205,17 @@ mod tests {
             response.status() != axum::http::StatusCode::FORBIDDEN,
             "the Kubernetes Service Host header is not rejected by rmcp"
         );
+
+        let refused = service
+            .handle(
+                axum::http::Request::builder()
+                    .uri("/mcp")
+                    .header("host", "attacker.example:18787")
+                    .body(axum::body::Body::empty())
+                    .expect("the hostile MCP request is syntactically valid"),
+            )
+            .await;
+        assert_eq!(refused.status(), axum::http::StatusCode::FORBIDDEN);
     }
 
     fn config() -> Config {

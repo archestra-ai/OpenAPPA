@@ -23,7 +23,7 @@ spec:
       securityContext:
         fsGroup: 65532
         fsGroupChangePolicy: OnRootMismatch
-      {{- if .Values.runtime.persistence.enabled }}
+      {{- if and .Values.runtime.persistence.enabled .Values.runtime.persistence.migrateOwnership }}
       initContainers:
         - name: migrate-data-ownership
           image: {{ include "appa-demo.image" (dict "image" .Values.runtime.image "root" .) }}
@@ -55,6 +55,8 @@ spec:
             - /var/lib/appa/appa.db
             - --listen
             - 0.0.0.0:18787
+            - --mcp-allowed-host
+            - {{ printf "appa-runtime.%s.svc.cluster.local:18787" .Release.Namespace | quote }}
             {{- if .Values.runtime.persistence.enabled }}
             - --batteries-dir
             - /var/lib/appa/batteries
@@ -84,6 +86,16 @@ spec:
                   key: OPENAI_API_KEY
           ports:
             - { name: runtime, containerPort: 18787 }
+          startupProbe:
+            httpGet: { path: /health, port: runtime }
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet: { path: /health, port: runtime }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: runtime }
+            periodSeconds: 20
           volumeMounts:
             - { name: policy, mountPath: /etc/appa, readOnly: true }
             - { name: data, mountPath: /var/lib/appa }

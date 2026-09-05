@@ -115,11 +115,11 @@ the live key during template rendering; a concurrent later write wins.
 
 ## Network access
 
-Without a NetworkPolicy, any pod that can reach the Service can call every
-runtime route. This includes `/hook`, `/mcp`, `/health`, `/batteries`,
-`/reload`, `/status`, `/policy-key`, and `/binary-fingerprint`. Treat the
-Service as trusted internal infrastructure. Restrict callers by enabling
-the chart policy and listing
+Without a NetworkPolicy, any pod that can reach the Service can call
+`/hook`, `/mcp`, `/health`, and `/batteries`. The runtime returns `403` on
+`/reload`, `/status`, `/policy-key`, and `/binary-fingerprint` unless the
+network peer is loopback. Treat the Service as trusted internal
+infrastructure. Restrict callers by enabling the chart policy and listing
 Kubernetes `NetworkPolicyPeer` objects:
 
 ```yaml
