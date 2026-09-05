@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs the complete live A2A matrix against the installed demo stack: all
-# seventeen cases, on the real model, through the parent agent. It
+# eighteen cases, on the real model, through the parent agent. It
 # port-forwards the parent Service and the mocks, runs the matrix, and
 # appends the model and the timings to
 # $GITHUB_STEP_SUMMARY when a runner sets it. It exits with pytest's
@@ -63,7 +63,7 @@ forward appa-demo-mocks "$mock_port" 8081
 wait_for_url "$mock_url/healthz" "the mocks"
 wait_for_url "$agent_url" "$agent"
 
-echo "== all seventeen A2A cases on $model at $base_url"
+echo "== all eighteen A2A cases on $model at $base_url"
 started=$(date +%s)
 status=0
 (

@@ -214,7 +214,7 @@ APPA_INTEGRATION=1 uv run --project integrations/kagent/appa-kagent-adk \
 ```
 
 ### End-to-End Verification Matrices
-The matrices run 17 conversations with a real model against a live cluster.
+The matrices run 18 conversations with a real model against a live cluster.
 They need the demo stack above, the dashboard on `127.0.0.1:8901`, the mocks'
 side channel on `127.0.0.1:8081`, and the agent under test port-forwarded for
 the A2A driver. `run-matrix.sh` sets each matrix's env gate and its

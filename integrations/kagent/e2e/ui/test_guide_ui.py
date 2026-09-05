@@ -38,6 +38,22 @@ def test_the_dashboard_opens_every_seeded_demo_case(browser_context):
         page.close()
 
 
+@pytest.mark.skipif(not os.environ.get("APPA_QUICKSTART_AGENT"), reason="quickstart chart row only")
+def test_the_chart_runtime_gates_the_quickstart_agent(browser_context, shots_dir: str):
+    agent = os.environ["APPA_QUICKSTART_AGENT"]
+    page = browser_context.new_page()
+    try:
+        page.goto(f"{BASE}/agents/{NAMESPACE}/{agent}/chat", wait_until="networkidle")
+        chat = Chat(page)
+        chat.send("List pods in the kagent namespace.")
+        body = chat.wait_idle(timeout_s=300)
+        chat.shot(shots_dir, "quickstart-agent")
+        assert "Error in plugin" not in body
+        assert "cluster-ops" in body or "appa-guide" in body
+    finally:
+        page.close()
+
+
 def test_init_completes_the_full_read_only_inventory(chat: Chat, shots_dir: str):
     chat.send("init")
     body = chat.wait_idle(timeout_s=360)
