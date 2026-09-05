@@ -107,12 +107,6 @@ pub fn canonical_tree_digest(root: &Path) -> Result<[u8; 32], TreeDigestError> {
 pub fn walk(root: &Path) -> Result<Vec<StagedEntry>, TreeDigestError> {
     let mut entries = Vec::new();
     collect(root, root, &mut entries)?;
-    if entries.len() > MAX_ENTRIES {
-        return Err(TreeDigestError::Oversized {
-            path: root.to_path_buf(),
-            reason: format!("it holds more than {MAX_ENTRIES} entries"),
-        });
-    }
     let mut total = 0u64;
     for entry in entries.iter().filter(|entry| entry.kind == EntryKind::File) {
         let length = fs::metadata(&entry.absolute)
@@ -201,6 +195,15 @@ fn collect(root: &Path, directory: &Path, entries: &mut Vec<StagedEntry>) -> Res
     };
     for entry in fs::read_dir(directory).map_err(read)? {
         let entry = entry.map_err(read)?;
+        // The cap bounds the walk itself, not only its answer: a checkout that
+        // has accumulated a large generated directory is refused as it is read,
+        // rather than after it has been enumerated into memory.
+        if entries.len() >= MAX_ENTRIES {
+            return Err(TreeDigestError::Oversized {
+                path: root.to_path_buf(),
+                reason: format!("it holds more than {MAX_ENTRIES} entries"),
+            });
+        }
         let absolute = entry.path();
         let relative = absolute
             .strip_prefix(root)

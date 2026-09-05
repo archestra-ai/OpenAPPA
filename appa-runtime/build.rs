@@ -43,7 +43,7 @@ fn main() {
         repository
     };
     plugin_layout::stage_repository(identity_source, &staged).expect("stage the plugin source for build identity");
-    let digest = plugin_layout::canonical_tree_digest(&staged).expect("digest the staged plugin source");
+    let digest = appa_package::tree::canonical_tree_digest(&staged).expect("digest the staged plugin source");
     println!("cargo:rustc-env=APPA_PLUGIN_TREE_SHA256={}", hex(&digest));
 
     if let Some(reference) = release {

@@ -60,6 +60,8 @@ pub enum PackageError {
     PolicyTopLevel { policy: PathBuf, field: String },
     #[error("{policy} declares `policy.{field}`, which an included fragment does not carry")]
     PolicyField { policy: PathBuf, field: String },
+    #[error("{policy} declares a `policy.{kind}` without a name")]
+    PolicyUnnamedDeclaration { policy: PathBuf, kind: &'static str },
     #[error("{policy} declares `include`, which only a deployment root declares")]
     PolicyInclude { policy: PathBuf },
     #[error("{policy} declares `externals.{key}`, which only a deployment root declares")]
@@ -187,6 +189,8 @@ impl std::fmt::Display for Kind {
 /// someone's deployment is refused at the package instead.
 const INCLUDABLE_TABLES: [&str; 2] = ["policy", "externals"];
 const INCLUDABLE_POLICY_FIELDS: [&str; 5] = ["version", "tool", "annotator", "authority", "sanitizer"];
+/// Those of them that are arrays of named declarations.
+const DECLARATION_ARRAYS: [&str; 4] = ["tool", "annotator", "authority", "sanitizer"];
 
 /// A battery is a fragment a deployment includes, not a deployment: it neither
 /// includes further files nor sets the root-only externals, it runs only its own
@@ -263,6 +267,7 @@ fn check_policy(policy: &Path, namespaces: &[Namespace], helpers: &[RelativePath
         .iter()
         .flat_map(|namespace| ["mcp", "host", "agent"].map(|family| format!("{family}/{namespace}/")))
         .collect();
+    check_named(policy, &document)?;
     for contract in declared_contracts(&document) {
         if !covered.iter().any(|prefix| contract.starts_with(prefix)) {
             return Err(PackageError::PolicyForeignContract {
@@ -351,21 +356,46 @@ fn runs_a_declared_helper(command: &Value, helpers: &[RelativePath]) -> bool {
     }
 }
 
-/// The tool contract names a policy declares, under the `[policy]` table a
-/// battery writes and at the top level a bare fragment would.
+/// Every declaration in the fragment carries a name.
+///
+/// A declaration whose `name` is missing or is not a string is an error rather
+/// than an entry to skip: the loader appends it verbatim and its own typed read
+/// then fails, so passing over it here would validate a battery that cannot
+/// load. This says nothing about what the names are — an annotator or an
+/// authority is named by an identifier, and only a tool is named by a contract.
+fn check_named(policy: &Path, document: &Value) -> Result<(), PackageError> {
+    for kind in DECLARATION_ARRAYS {
+        for declaration in declarations(document, kind) {
+            if declaration.get("name").and_then(Value::as_str).is_none() {
+                return Err(PackageError::PolicyUnnamedDeclaration {
+                    policy: policy.to_path_buf(),
+                    kind,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The tool contract names a policy declares. Only `[[policy.tool]]` names a
+/// contract; the other declaration arrays name annotators, authorities and
+/// sanitizers, which are identifiers and belong to no namespace.
 fn declared_contracts(document: &Value) -> Vec<String> {
-    let arrays = [
-        document.get("policy").and_then(|policy| policy.get("tool")),
-        document.get("tool"),
-    ];
-    arrays
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_array)
-        .flatten()
+    declarations(document, "tool")
         .filter_map(|tool| tool.get("name").and_then(Value::as_str))
         .map(str::to_owned)
         .collect()
+}
+
+/// One kind of declaration array under the `[policy]` table every includable
+/// fragment writes them in.
+fn declarations<'a>(document: &'a Value, kind: &str) -> impl Iterator<Item = &'a Value> {
+    document
+        .get("policy")
+        .and_then(|policy| policy.get(kind))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
 }
 
 #[cfg(test)]
@@ -648,6 +678,29 @@ mod tests {
                     Err(PackageError::PolicyField { .. } | PackageError::PolicyTopLevel { .. })
                 ),
                 "accepted a fragment whose version is {version:?}"
+            );
+        }
+    }
+
+    /// A declaration without a name is not an entry to skip past. The loader
+    /// appends it verbatim and its own typed read then fails, so a battery that
+    /// validated here would refuse to load at whoever included it.
+    #[test]
+    fn a_declaration_without_a_name_is_refused() {
+        for declaration in [
+            "[[policy.tool]]\ndelta = {}\n",
+            "[[policy.tool]]\nname = 7\ndelta = {}\n",
+            "[[policy.annotator]]\ndelta = {}\n",
+            "[[policy.sanitizer]]\nname = true\n",
+        ] {
+            let directory = battery(&format!("{BATTERY_POLICY}\n{declaration}"));
+
+            assert!(
+                matches!(
+                    validate_package(directory.path()),
+                    Err(PackageError::PolicyUnnamedDeclaration { .. })
+                ),
+                "accepted {declaration}"
             );
         }
     }
