@@ -105,6 +105,7 @@ structured outputs.
 | `runtime.image.*` | `ghcr.io/archestra-ai/appa-runtime:<appVersion>` | The shared runtime image. Published at each release version. |
 | `runtime.reasoningEffort` | `""` | Optionally fills `reasoning_effort` for the OpenAI model when the CRD cannot. |
 | `runtime.persistence.enabled` | `false` | Keep trajectories on a PersistentVolume. |
+| `runtime.persistence.migrateOwnership` | `false` | Run a one-time root init container to repair a retained PVC owned by another UID. Keep this off on fresh or restricted deployments. |
 | `llm.model` | `gpt-4.1-mini` | The model the policy's sanitizers consult (`[externals.llm]`). |
 | `llm.url` | `""` | Optional OpenAI-compatible endpoint for that model. |
 | `mocks.approvalWindowSeconds` | `25` | How long the change board waits for a ruling, inside the policy's `externals.timeout_ms` (30 s). |

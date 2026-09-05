@@ -166,6 +166,8 @@ jobs:
               - 'integrations/claude-code/**'
               - 'integrations/appa-guide/**'
               - 'scripts/appa-refresh-batteries.py'
+              - 'scripts/appa-guide-runtime.py'
+              - 'scripts/test_appa_guide_runtime.py'
               # The root ignore file shapes the runtime build context.
               - '.dockerignore'
 

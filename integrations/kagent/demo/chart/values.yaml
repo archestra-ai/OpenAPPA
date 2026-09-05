@@ -36,6 +36,9 @@ runtime:
     # Keep trajectories and a writable batteries overlay across restarts.
     # The appa-guide skill refreshes the release battery layer only when this is on.
     enabled: false
+    # One-time repair for a retained PVC whose files use a different UID.
+    # This adds a root init container; leave it off on fresh installs.
+    migrateOwnership: false
     size: 1Gi
     storageClass: ""
     existingClaim: ""

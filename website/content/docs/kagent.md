@@ -117,7 +117,7 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --force-conflicts --wait --timeout 10m
 ```
 
-The OpenAPPA image preserves stock behavior when `APPA_ENABLED` is absent or `false`. Enabled Agents require a reachable `APPA_RUNTIME_URL` and fail closed otherwise.
+The OpenAPPA image preserves stock behavior when `APPA_ENABLED` is absent or `false`. Enabled Agents require a nonempty `APPA_RUNTIME_URL`. Gated callbacks fail closed if that endpoint is unreachable.
 
 ### 4. Create a protected Agent
 
@@ -206,9 +206,24 @@ helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runti
 
 Agents reach this runtime at `http://appa-runtime.appa.svc.cluster.local:18787`. The runtime stores its trajectory log on the persistent volume and reads policy from `appa-runtime-policy`. The same release installs `appa-guide` in `kagent`.
 
-With `appa-guide` already available, send: `install or upgrade the shared OpenAPPA runtime with persistent battery storage`.
+### 2. Prepare previously enabled Agents
 
-### 2. Update the kagent controller image
+Before changing the controller image, inspect every Agent that already has `APPA_ENABLED=true`. Add the remote URL while preserving its complete environment list:
+
+```sh
+kubectl edit agent <agent-name> -n <agent-namespace>
+```
+
+```yaml
+- name: APPA_ENABLED
+  value: "true"
+- name: APPA_RUNTIME_URL
+  value: http://appa-runtime.appa.svc.cluster.local:18787
+```
+
+The new adapter refuses an enabled Agent with no URL. Updating the URL first prevents a rollout from replacing a previously running pod with a refused one.
+
+### 3. Update the kagent controller image
 
 ```sh
 helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
@@ -221,7 +236,9 @@ helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
 
 The image preserves stock behavior until an Agent enables OpenAPPA. On kagent 0.9.12, Go Agents use the published `golang-adk` alias at the same tag.
 
-### 3. Confirm appa-guide
+After this rollout, use `appa-guide` for later runtime and controller upgrades. Before this point, its write tools are not guaranteed to be gated.
+
+### 4. Confirm appa-guide
 
 The runtime chart installed the configuring Agent against its bootstrap policy. Wait for kagent to accept it and finish its rollout:
 
@@ -230,27 +247,16 @@ kubectl wait agent/appa-guide -n kagent \
   --for=condition=Ready=True --timeout=5m
 ```
 
-### 4. Wire existing agents to the runtime
+### 5. Wire existing agents to the runtime
 
 Send `appa-guide`: `protect sre-agent with the shared OpenAPPA runtime and verify its rollout`.
 
 To protect every eligible declarative Agent, send: `enable OpenAPPA for all agents using the shared runtime; show me the affected agents before applying`.
 
-The guide inventories the Agents, proposes the exact manifest, waits for approval, applies the complete observed spec through `k8s_apply_manifest`, and verifies the rollout. If the guide is unavailable, use this bootstrap or recovery fallback:
+The guide inventories the Agents, proposes the exact manifest, waits for approval, applies the complete observed spec through `k8s_apply_manifest`, and verifies the rollout. If the guide is unavailable, edit the complete resource and preserve every existing environment entry:
 
 ```sh
-kubectl patch agent sre-agent -n kagent --type=merge -p '{
-  "spec": {
-    "declarative": {
-      "deployment": {
-        "env": [
-          {"name": "APPA_ENABLED", "value": "true"},
-          {"name": "APPA_RUNTIME_URL", "value": "http://appa-runtime.appa.svc.cluster.local:18787"}
-        ]
-      }
-    }
-  }
-}'
+kubectl edit agent sre-agent -n kagent
 ```
 
 | Mode | `APPA_ENABLED` | `APPA_RUNTIME_URL` | Gating Behavior |
@@ -260,7 +266,7 @@ kubectl patch agent sre-agent -n kagent --type=merge -p '{
 
 Invalid values for `APPA_ENABLED` fail container startup immediately. `APPA_ENABLED=true` without a nonempty runtime URL also refuses startup.
 
-### 5. Confirm the gate
+### 6. Confirm the gate
 
 The kagent controller automatically rolls the agent deployment when the manifest changes. Check the rollout status and startup logs:
 
@@ -277,7 +283,7 @@ APPA_ENABLED is true. This agent runs gated by the OpenAPPA runtime at http://ap
 
 If the runtime is unreachable, tool calls stop fail-closed before execution.
 
-### 6. Finish setup and exercise the policy
+### 7. Finish setup and exercise the policy
 
 Open **Agents → appa-guide → Chat** and send `init`. Review and approve the proposed behavior and the kagent confirmation card. The guide installs applicable batteries, reloads the runtime, and verifies the integration.
 
@@ -289,7 +295,7 @@ kubectl logs -n appa deployment/appa-runtime -c runtime --tail=50
 
 ## Manage integration with appa-guide
 
-Both the demo chart and the shared runtime chart install `appa-guide`. For an existing-Agent integration, enable it in step 2 and confirm it in step 3. Its two modes match the Claude Code experience: `init` creates the initial configuration, and `adjust` changes an existing configuration.
+Both the demo chart and the shared runtime chart install `appa-guide`. For an existing-Agent integration, enable it in step 1 and confirm it in step 4. Its two modes match the Claude Code experience: `init` creates the initial configuration, and `adjust` changes an existing configuration.
 
 Run these interactions in order:
 

@@ -101,7 +101,7 @@ spec:
           value: http://appa-runtime.appa.svc.cluster.local:18787
 ```
 
-An Agent with `APPA_ENABLED=true` refuses to start without a reachable remote runtime. It never falls back to ungated execution.
+An Agent with `APPA_ENABLED=true` refuses startup when `APPA_RUNTIME_URL` is empty. It can report Ready before contacting that URL. If the runtime is unreachable, the first gated callback fails and no tool runs; the Agent never falls back to ungated execution.
 
 ### Deploy a shared cluster-wide runtime
 
