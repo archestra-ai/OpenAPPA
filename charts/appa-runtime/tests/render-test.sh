@@ -94,6 +94,7 @@ must_contain 'copy pod_name and namespace from the same fetched Pod YAML'
 must_contain 'with k8s_apply_manifest over its complete observed spec'
 must_contain 'A request to protect an Agent'
 must_contain 'Never copy status'
+must_contain 'request itself'
 
 must_render --set appaGuide.enabled=true --set appaGuide.namespace=platform \
   --set appaGuide.skill.ref=main --set appaGuide.modelConfig=platform-model

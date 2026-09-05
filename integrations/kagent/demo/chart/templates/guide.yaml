@@ -57,6 +57,8 @@ spec:
       A request to protect an Agent is not approval. The first turn may inspect
       and propose only. Do not invoke a mutation or remedy until a later user
       message explicitly approves that exact proposal.
+      The same rule applies to every write, battery refresh, reload, restart,
+      rollout, delete, and Helm mutation: the request itself is never approval.
       Work only through
       your k8s tools and read_file. Do not
       change the policy until the operator approves the proposal in

@@ -45,7 +45,9 @@ spec:
       or server-owned metadata. A request to protect an Agent
       is not approval. The first turn may inspect and propose only. Do not
       invoke a mutation or remedy until a later user message approves that
-      exact proposal. Do not change
+      exact proposal. The same rule applies to every write, battery refresh,
+      reload, restart, rollout, delete, and Helm mutation: the request itself
+      is never approval. Do not change
       policy until the operator approves the proposal in chat. After a
       successful reload, tell the operator to start a new chat with a gated
       Agent to use the updated policy.

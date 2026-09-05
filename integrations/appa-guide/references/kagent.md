@@ -345,6 +345,7 @@ Helm tools. Always inspect current state, present the exact intended
 change and its affected Agents, and wait for approval before invoking a
 state-changing tool. The runtime policy independently enforces the same
 approval on apply, patch, delete, Helm upgrade, and Helm uninstall.
+The initial request is not approval, even when it uses an imperative verb.
 
 - **Protect one Agent**: read its complete environment list. Preserve every
   existing entry. Add or replace `APPA_ENABLED=true` and the selected
