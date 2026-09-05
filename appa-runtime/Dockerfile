@@ -2,10 +2,11 @@
 #
 # The image carries the `appa` binary and the batteries of this release
 # at `/opt/appa/batteries`. A deployment mounts policy at
-# `APPA_CONFIG` and the trajectory log at `APPA_DB`. The process still
-# binds loopback only; a relay in front of it gives it a cluster address.
+# `APPA_CONFIG` and the trajectory log at `APPA_DB`. The shared runtime
+# listens on every interface so Docker and Kubernetes can reach it directly.
 #
 #   docker build -f appa-runtime/Dockerfile -t appa-runtime .
+#   docker run -e APPA_MCP_ALLOWED_HOST=localhost:18787,127.0.0.1:18787 -p 18787:18787 appa-runtime
 #   (build context: the repository root)
 #
 # Each FROM pins its base image by digest. The tag beside the digest names the version.
@@ -42,12 +43,18 @@ RUN groupadd --system --gid 65532 appa \
 COPY --from=builder --chown=appa:appa /build/target/release/appa /usr/local/bin/appa
 COPY --chown=appa:appa batteries /opt/appa/batteries
 COPY --chown=appa:appa scripts/appa-refresh-batteries.py /usr/local/bin/appa-refresh-batteries
-RUN chmod 0755 /usr/local/bin/appa-refresh-batteries
+COPY --chown=appa:appa scripts/appa-guide-runtime.py /opt/appa/appa-guide-runtime
+RUN chmod 0755 /usr/local/bin/appa-refresh-batteries /opt/appa/appa-guide-runtime \
+    && for operation in inspect reload refresh-check refresh-stage refresh-commit refresh-rollback command-annotator; do \
+         ln -s /opt/appa/appa-guide-runtime "/usr/local/bin/appa-guide-${operation}"; \
+       done
 
 USER 65532:65532
 ENV APPA_CONFIG=/etc/appa/appa.toml
 ENV APPA_DB=/var/lib/appa/appa.db
 ENV APPA_BATTERIES_DIR=/opt/appa/batteries
+ENV APPA_GUIDE_RUNTIME_URL=http://127.0.0.1:18787
 WORKDIR /var/lib/appa
+EXPOSE 18787
 ENTRYPOINT ["/usr/local/bin/appa"]
-CMD ["runtime", "--adapter", "kagent", "--listen", "127.0.0.1:18787"]
+CMD ["runtime", "--adapter", "kagent", "--listen", "0.0.0.0:18787"]

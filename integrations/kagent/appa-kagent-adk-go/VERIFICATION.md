@@ -11,9 +11,9 @@ against the locked sources on disk:
 That baseline is the one `go.mod` locks. The plan names the image
 built from it for every go cell, and only cell A-go runs. On cell A-go
 (kagent v0.9.12) the image runs under the `golang-adk` name the
-controller derives from `controller.agentImage`. The demo matrix rows
-for that cell record 17/17 before the port of the child return, and no
-run after it exists ([../e2e/README.md](../e2e/README.md)). No
+controller derives from `controller.agentImage`. Both demo matrix rows
+for that cell pass 18/18 after the per-parent child-return work
+([../e2e/README.md](../e2e/README.md)). No
 matrix row runs cell B1-go (v0.10.0-rc4) or cell B2-go (kagent main,
 adk/v2 v2.2.0). This file does not verify the B2 baseline or its
 configuration semantics.

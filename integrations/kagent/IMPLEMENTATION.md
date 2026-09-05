@@ -195,41 +195,6 @@ Harness.spec.workload.image = appa-kagent-adk-go@sha256:…
                            ▼  POST $APPA_RUNTIME_URL/hook
 ```
 
-## Quickstart option
-
-The quickstart is optional and orthogonal to everything above — same plugins, same wire, same codec, same python runtime layer as `appa-kagent-adk`. Skipping it changes nothing. It exists so one operator can gate one agent in minutes, with no separate `appa-runtime` deployment.
-
-`appa-kagent-quickstart` is one python-only image. It bundles the python runtime layer (`appa-kagent-adk`), `appa-runtime`, and the release batteries on the stock kagent app image. The entrypoint starts `appa-runtime` on `127.0.0.1:8787` with the policy `APPA_CONFIG` names, by default the packaged example policy. When `APPA_CONFIG_CONTENTS` is present, it writes that complete policy into the agent data directory first. It sets `APPA_RUNTIME_URL` to the loopback runtime and execs `appa-kagent-adk`. A pod that arrives with `APPA_RUNTIME_URL` already set does not start the bundled runtime and execs `appa-kagent-adk` against that shared `appa-runtime`.
-
-The demo uses the image both ways. It is the kagent `controller.agentImage` for the fleet, set on the kagent install as the chart prerequisite. It is also the container of the shared runtime pod, run as `appa runtime`. As the agent image it keeps the stock args, port, and readiness contract. The bundled runtime serves `/mcp` too, so remedy plans execute the same way.
-
-Set `controller.agentImage` to it for the python agents. Go agents use `appa-kagent-adk-go` under the name kagent derives on v0.9.12 (`…/golang-adk:<tag>`). That image reads `APPA_RUNTIME_URL` from the agent env or its own image env.
-
-```text
-quickstart — one pod, nothing else to deploy
-
-helm controller.agentImage = appa-kagent-quickstart
-     (python agents. Go agents use the go image)
-        ▼
-┌─ agent pod · runtime: python ─────────────────────────┐
-│  entrypoint: APPA_RUNTIME_URL set → exec              │
-│    appa-kagent-adk against that shared appa-runtime.  │
-│    else start appa-runtime on 127.0.0.1:8787, then    │
-│    exec appa-kagent-adk                               │
-│                                                       │
-│  kagent python runtime + AppaPluginKagent             │
-│    │  POST http://127.0.0.1:8787/hook                 │
-│    ▼                                                  │
-│  appa-runtime · policy · Engine · appa.db — pod-local │
-└───────────────────────────────────────────────────────┘
-```
-
-Quickstart limits:
-
-- Trajectory state and `appa.db` live in the pod and die with it.
-- A parent and a called agent run as two pods. With two bundled runtimes, the `child_start` of the child reaches a runtime that saw no spawn. That runtime refuses it (`SpawnNotTaken`), and the child fails closed. Cross-workload delegation needs one `appa-runtime` that both reach: set `APPA_RUNTIME_URL` on both agents, and neither pod starts its bundled runtime. The demo chart sets it on all six agents, so every pod runs against the shared runtime pod.
-- The bundled runtime loads one policy file, `APPA_CONFIG` (default: the packaged example). `APPA_CONFIG_CONTENTS` gives each Agent a complete configurable policy and rolls its pod when that source changes.
-
 ## Runtime adapters
 
 ### Python — `AppaPluginKagent` on google-adk (verified)
@@ -431,7 +396,7 @@ Three kagent-specific notes:
 
 - **Timeout budget.** The plugin `/hook` client timeout must exceed the runtime consult budget. Otherwise a slow annotator — endpoint, command, or model builtin — becomes a spurious fail-closed block. ADK has no callback timeout, so kagent carries no fail-open hazard. A slow consult costs latency, bounded upstream by A2A client patience.
 - **Tool naming and coverage.** An annotation pins to the canonical digest under the tool name as ADK dispatches it. The `[[tool]]` entries and mandates must match that spelling for every toolset. Two spellings, verified on a live cluster: an MCP tool crosses under its plain name. An agent tool crosses as `<namespace>__NS__<agent name>` with underscores. The wildcard entry (`name = "*"`) is the recommended first posture for a fleet. CRD-declared toolsets produce a long tail the policy never names in advance. No tooling generates `[[tool]]` entries. Write them from the `Agent` and `RemoteMCPServer` resources by hand. The reserved `execute_remedy_plan` needs no entry — the runtime recognizes its own tool first.
-- **Builtin provisioning.** Model-builtin annotators execute in the `appa-runtime` deployment ([appa-runtime/src/external.rs](../../appa-runtime/src/external.rs)). A `builtin = "llm"` entry needs `[externals.llm]` and model egress from the runtime pod. A `builtin = "claude-code"` entry needs the claude CLI where the runtime runs. The quickstart inherits the same needs, because it bundles the runtime.
+- **Builtin provisioning.** Model-builtin annotators execute in the `appa-runtime` deployment ([appa-runtime/src/external.rs](../../appa-runtime/src/external.rs)). A `builtin = "llm"` entry needs `[externals.llm]` and model egress from the runtime pod. A `builtin = "claude-code"` entry needs the claude CLI where the runtime runs. The dedicated runtime release owns those dependencies.
 
 ## Wire and codec
 
@@ -449,7 +414,7 @@ The runtime enforces four orderings at event admission. Every driver of this wir
 
 1. **Audience narrowing is deny-then-accept, never allow-then-narrow.** A proposal whose `delta.audience` would narrow the trajectory answers `deny_call` and offers to accept the narrowing. An ops-only read into a public trajectory is one. The call proceeds only after `execute_remedy_plan` accepts it and the agent proposes the call again, through the normal gate. Scenario scripts expect that two-step, not a plain allow.
 2. **The vouch precedes `/mcp`.** The runtime recognizes `execute_remedy_plan` before the session runs. See `is_control_tool` in [appa-runtime/src/api/session.rs](../../appa-runtime/src/api/session.rs), applied in [appa-runtime/src/hooks.rs](../../appa-runtime/src/hooks.rs). A `tool_call` that quotes an offer this trajectory pursues answers `pass_control` and binds the vouch. A `tool_call` that quotes an offer another trajectory pursues, or no live offer, answers `deny_call` with `[appa] this offer no longer stands; re-propose the call`. A `tools/call` on `/mcp` with no vouched `tool_call` before it meets the refusal `no live offer with this id exists` ([appa-runtime/src/mcp.rs](../../appa-runtime/src/mcp.rs)). The plugins send that `tool_call` from the before-tool point, so the order holds on the runtime images by construction. A driver that bypasses the plugin sends it itself. The after-tool point reports a `tool_result` for the control tool, and the runtime absorbs it with `ack` — no dispatch was opened.
-3. **One call at a time, and every allowed call is closed.** An `allow_call` opens a dispatch. Before its `tool_result` (or `spawn_result`) arrives, the runtime answers every further `tool_call` on that trajectory with `deny_call` and the feedback `[appa] a call is already outstanding; propose one call at a time`. The `CallOutstanding` error lives in [appa-runtime/src/api/mod.rs](../../appa-runtime/src/api/mod.rs), raised at admission in [appa-runtime/src/api/session.rs](../../appa-runtime/src/api/session.rs). The plugins close each dispatch from the after-tool and tool-error points, success and failure alike. Both plugins report a deferred result as `indeterminate`. Recovery stays inside the turn. A `turn_end`, or the first `tool_call` after a prompt, closes a dispatch the harness never reported, with the outcome `Indeterminate`. An outcome reported after that close answers `block` with `no open dispatch with this id exists`. So a driver reports each outcome before it proposes the next call, and ends the turn it abandons.
+3. **One call at a time, and every allowed call is closed.** An `allow_call` opens a dispatch. Before its `tool_result` (or `spawn_result`) arrives, the runtime answers every further `tool_call` on that trajectory with `deny_call` and the feedback `[appa] a call is already outstanding; propose one call at a time`. The `CallOutstanding` error lives in [appa-runtime/src/api/mod.rs](../../appa-runtime/src/api/mod.rs), raised at admission in [appa-runtime/src/api/session.rs](../../appa-runtime/src/api/session.rs). Python ADK runs parallel function calls concurrently, so `AppaPluginKagent` queues each complete call-to-result lifecycle per `(root, child)` branch. Other branches stay concurrent. Runner close releases an abandoned local lease; the next prompt lets the runtime close the old dispatch. The plugins close each ordinary dispatch from the after-tool and tool-error points, success and failure alike. Both plugins report a deferred result as `indeterminate`. Recovery stays inside the turn. A `turn_end`, or the first `tool_call` after a prompt, closes a dispatch the harness never reported, with the outcome `Indeterminate`. An outcome reported after that close answers `block` with `no open dispatch with this id exists`. So a driver reports each outcome before it proposes the next call, and ends the turn it abandons.
 4. **A spawn declares the return of its child before it releases, and the child returns at its own stop.** Under `context_control` the runtime marks an agent-tool proposal a spawn and answers `deny_call` with the return-declaration menu. The call releases only after `execute_remedy_plan` takes one plan with a `label`, and after the driver proposes the same call again. The value of the child then crosses at its own `child_end`, and nowhere else. The `spawn_result` of the parent may carry only the value that crossed. The runtime replays that value, and it withholds any other. A driver that ends a child pod itself, without a stop, delivers nothing to the parent ([Delegation and the fork](#delegation-and-the-fork)).
 
 ### Labels and flow completeness
@@ -566,39 +531,30 @@ Claude Code keeps `SpawnCoverage::Wildcard`. The packaged quickstart policy name
 
 ## Demo chart
 
-The demo is the Helm chart `appa-kagent-demo` ([demo/chart](demo/chart)) on cells A-py and A-go. Prerequisite: kagent 0.9.12 with `controller.agentImage` set to `appa-kagent-quickstart`, so the gate covers every declarative python agent in the cluster. Every Go agent runs the Go image under the derived name (the chart README). An agent that resolves the `-full` variant stays uncovered. The chart installs:
+The demo composes the dedicated `appa-runtime` chart with the fixture-only `appa-kagent-demo` chart ([demo/chart](demo/chart)) on cells A-py and A-go. kagent 0.9.12 uses `appa-kagent-adk` for enabled declarative Python Agents. Go Agents use the derived `golang-adk` image. An Agent that resolves a `-full` variant stays uncovered.
 
-- One `appa-runtime` pod with three containers. `appa-runtime` listens on `127.0.0.1:18787`, loopback only, by design. An nginx relay listens on `:18789` behind the Service `appa-runtime` and rewrites `Host` to `127.0.0.1:18787`, because `/mcp` on the runtime (rmcp) validates `Host`. The mock externals bind `0.0.0.0:8081` in the same pod, so the runtime consults them at `http://127.0.0.1:8081` on the pod network. A `url` binding takes cleartext http to loopback only. The Service `appa-demo-mocks` exposes the side channel of the change board (`GET /pending`, `POST /decide`).
-- The policy [demo/chart/files/demo.appa.toml](demo/chart/files/demo.appa.toml), with sanitizers over `[externals.llm]` and the `runbook-readers` annotator. It also declares the human-less `release-window` URL authority, the `change-board` URL authority, and the `oncall` `hitl` authority. The change board is people out of band. The mock `POST /approve` parks the consult. A ruling on the side channel, or the close of the approval window, releases it. The window is 25 s, inside the 30 s `timeout_ms` of the policy. Then the mock answers 504 — a no-answer, so the offer stands. `rollback_deployment` requires attention from the change board.
-- The `demo-tools` Deployment, Service and `RemoteMCPServer` ([demo/Dockerfile](demo/Dockerfile)).
-- The `appa-guide` Agent: packaging around the canonical composable skill at [integrations/appa-guide](../appa-guide) — one `SKILL.md` router plus `references/{claude-code,kagent}.md`. kagent attaches that directory through git-ref skills. Claude packaging stages the same directory at its required `plugin/skills/appa-guide` path. The agent carries the kagent tool server's `k8s_*` tools and uses the shared runtime as its own gate. The kagent reference inventories `RemoteMCPServer.status.discoveredTools` and `Agent` tool declarations, proposes contracts, and applies the policy ConfigMap through `k8s_apply_manifest` — which the demo policy puts behind `human-approval`, so the apply raises kagent's Approve card — then waits for the mount sync and POSTs `/reload` through `k8s_execute_command`.
-- Agents `cluster-ops`, `log-analyst` and `release-manager`, and their twins `cluster-ops-go`, `log-analyst-go` and `release-manager-go` on `runtime: go` (`agents.go.enabled`). The parent `cluster-ops` lists `release-manager`, and no contract names it, so the runtime denies every delegation to it. Each Agent carries `APPA_RUNTIME_URL` (the relay Service) and `APPA_KAGENT_OPENAI_REASONING_EFFORT` in `spec.declarative.deployment.env`. The policy names the delegated children by their wire spelling, `<namespace>__NS__<child>` with hyphens as underscores. The chart renders the two names from the release namespace, `agents.childName` and `agents.go.childName` ([templates/_helpers.tpl](demo/chart/templates/_helpers.tpl)). Both delegations stay declared in any namespace and under any distinct child names. The render fails when two of these names coincide: `cluster-ops`, `release-manager`, `agents.childName`, `agents.go.childName`, and, with `agents.go.enabled`, `agents.go.name` and `agents.go.undeclaredName` (`appa-demo.requireDistinctAgentNames`). The policy declares both children even without the go cell, so `agents.go.childName` stays in the set. Every value-derived name renders quoted, so YAML never reads a label as a number or a null. The render test [demo/chart/tests/render-test.sh](demo/chart/tests/render-test.sh) pins the refusal and the quoting, and CI runs it. With the README defaults in `-n kagent` they are `kagent__NS__log_analyst` and `kagent__NS__log_analyst_go`. The policy checksum of the runtime pod covers the rendered names, so a child-name change rolls the pod. The schema [values.schema.json](demo/chart/values.schema.json) constrains every agent-name value to a DNS-1123 label. The seed Job posts to `kagent-controller` in the release namespace unless `seed.controllerUrl` names another address. The `cluster-ops` instruction states the autonomy rule. Choose the remedy yourself, and prefer the sanitized result, else accept the change. Follow the chat when it steers, and name the remedy taken.
-- ModelConfig `appa-demo-model` over the Secret of the same name (`openai.apiKey` or `openai.existingSecret`). So the Models → Edit flow of the dashboard supplies the key after install. The chart defaults to `gpt-4.1-mini` through the OpenAI API.
-- A post-install and post-upgrade seed Job. It replays sixteen captured transcripts into the kagent store through the controller API (`POST /api/sessions`, `POST /api/tasks`) under `uuid5` ids. So the dashboard opens with every case as a chat, and a re-run changes nothing.
+The `appa-runtime` release is the sole owner of the runtime Deployment and Service, serving policy ConfigMap, persistence, and `appa-guide`. The fixture release owns none of them. It installs:
 
-The default image references (`ghcr.io/archestra-ai/*` at the chart `appVersion`) are the names the release publishes. A cluster on another version, or on a source build, points the image values elsewhere (the chart README).
+- Agents `cluster-ops`, `log-analyst`, and `release-manager`, plus optional Go twins. Every Agent receives the explicit shared `APPA_RUNTIME_URL` and an existing `modelConfig.name`. The chart creates no provider Secret or ModelConfig.
+- The `demo-tools` Deployment, Service, and `RemoteMCPServer` ([demo/Dockerfile](demo/Dockerfile)).
+- A standalone `appa-demo-mocks` Deployment and Service. They implement `runbook-readers`, `release-window`, `change-board`, and both deterministic sanitizers. Fixed Python command adapters in [demo.appa.toml](demo/chart/files/demo.appa.toml) forward consult envelopes from the runtime to this Service. Direct cleartext URL bindings remain loopback-only.
+- `ConfigMap/appa-kagent-demo-policy`, an inert rendered policy template. It is neither mounted nor served. `appa-guide` verifies the Helm release, compares the template with serving policy, and applies only the approved merge to the runtime-owned ConfigMap.
+- A post-install and post-upgrade seed Job. It replays sixteen captured transcripts through the controller API under deterministic `uuid5` ids.
+
+The policy names delegated children by the wire spelling `<namespace>__NS__<child>`, with hyphens changed to underscores. The chart renders both child names. It refuses collisions among fixed and configurable Agent names. The schema constrains every name to a DNS-1123 label. A changed name updates only the fixture policy template; the operator must approve the corresponding serving-policy change through `appa-guide`.
 
 ```text
-demo chart — cells A-py and A-go · kagent v0.9.12
-controller.agentImage = appa-kagent-quickstart
-(runtime: go derives …/golang-adk = appa-kagent-adk-go)
+appa-runtime release
+  Deployment + Service appa-runtime:18787
+  serving policy + persistence
+  appa-guide Agent
 
-Agents cluster-ops, log-analyst (+ the -go twins)
-  │  APPA_RUNTIME_URL
-  ▼
-Service appa-runtime:18789
-┌─ pod appa-runtime ────────────────────────────────────┐
-│  relay    nginx :18789 ─▶ 127.0.0.1:18787,            │
-│           Host rewritten to the loopback value        │
-│  runtime  appa-runtime on 127.0.0.1:18787             │
-│           policy from a ConfigMap · appa.db           │
-│  mocks    0.0.0.0:8081 · annotator · release window   │
-│           · change board (side channel: Service       │
-│           appa-demo-mocks:8081)                       │
-└───────────────────────────────────────────────────────┘
-demo-tools  Deployment + Service + RemoteMCPServer
-seed Job    post-install, post-upgrade ─▶ kagent-controller
-            /api/sessions, /api/tasks
+appa-kagent-demo release
+  cluster-ops fleet ──APPA_RUNTIME_URL──▶ appa-runtime
+  demo-tools       Deployment + Service + RemoteMCPServer
+  appa-demo-mocks  Deployment + Service
+  policy template  ConfigMap ──approved merge through appa-guide
+  seed Job         ──▶ kagent-controller
 ```
 
 ## Delivery units
@@ -610,16 +566,15 @@ seed Job    post-install, post-upgrade ─▶ kagent-controller
 | 3 | Python entrypoint: strict config schema and refusal rules, stock plugin parity, both config deliveries, and the controller args contract. Also the `reasoning_effort` fill from `APPA_KAGENT_OPENAI_REASONING_EFFORT`, and the reserved-tool toolset with its 300 s request timeout |
 | 4 | Python OCI image: the kagent app base image pinned by tag and digest, the wheel installed offline with `--no-deps`. The release publishes it with an SBOM and a provenance attestation. |
 | 5 | Lane A end-to-end: kind cluster with the stable chart, `controller.agentImage` swap, parent-and-child scenario against one shared runtime. An operator installs the stack by hand (the chart README), and the matrices run against it. |
-| 5b | The demo as a Helm chart ([Demo chart](#demo-chart)). It holds the shared runtime pod with its relay and mock externals, the demo tools, and six agents. Those are `cluster-ops`, `log-analyst`, `release-manager`, and their go twins. It also holds the ModelConfig over one Secret the dashboard can also fill. The seed Job replays every showcase case as a chat from captured transcripts. Installs into any namespace of a kagent 0.9.12 cluster whose `controller.agentImage` is `appa-kagent-quickstart`. The chart renders the child names in the policy from the release namespace and the child-name values. The go twins need the go image under the derived name. Verified by hand on kind: install, seed, both matrices on both cells. |
+| 5b | The fixture-only demo Helm chart ([Demo chart](#demo-chart)). It holds the demo tools, standalone mock policy services, six Agents, an inert rendered policy template, and the seeded showcase chats. It references the runtime and ModelConfig owned by their dedicated releases. It owns no runtime, serving policy, persistence, provider Secret, ModelConfig, or `appa-guide`. The Go twins need the derived Go image. The two-chart composition drives both live matrix cells. |
 | 6 | `appa-kagent-adk-go`: adk/v2 mapping verification, the Go plugin and runtime main, one image under two published names, the reserved-tool toolset |
 | 7 | Lane B end-to-end: the B1 dual-knob swap on the release-candidate chart, and B2 Harness × AgentTemplate on the Substrate path. Not run |
-| 8 | `appa-kagent-quickstart` bundled image — the python runtime layer, packaged `appa-runtime`, example policy, the quickstart entrypoint |
 
 Every unit lives in this repository.
 
-[release.yml](../../.github/workflows/release.yml) publishes six images to `ghcr.io/archestra-ai` at the release version. `appa-runtime` and `appa-kagent-quickstart` publish for `linux/amd64` and `linux/arm64`. `appa-kagent-adk`, `appa-kagent-adk-go`, `appa-demo-tools`, and `appa-demo-mocks` publish for `linux/amd64`. Each build attaches an SBOM and a provenance attestation. The workflow also publishes the `appa-runtime` chart as an OCI artifact and a GitHub release asset. A last step tags `golang-adk` at that version on the digest of `appa-kagent-adk-go`, the name the kagent controller derives for the Go runtime. The step then reads the alias back, and it fails the job on another digest. The GitHub release waits for the image and chart jobs.
+[release.yml](../../.github/workflows/release.yml) publishes five images to `ghcr.io/archestra-ai` at the release version. `appa-runtime` and `appa-kagent-adk` publish for `linux/amd64` and `linux/arm64`. `appa-kagent-adk-go`, `appa-demo-tools`, and `appa-demo-mocks` publish for `linux/amd64`. Each build attaches an SBOM and provenance. The workflow publishes both Helm charts as OCI artifacts and GitHub release assets. It also tags `golang-adk` on the `appa-kagent-adk-go` digest for kagent 0.9.12.
 
-Every Dockerfile pins each `FROM` and `COPY --from` base by digest, with the tag beside it for the reader. The image jobs in [ci.yml](../../.github/workflows/ci.yml) build all six on a pull request that can break them, including native arm64 checks for the shared runtime and quickstart. They push none. No workflow scans the images.
+Every Dockerfile pins each `FROM` and `COPY --from` base by digest, with the tag beside it for the reader. The image jobs in [ci.yml](../../.github/workflows/ci.yml) build all five on a pull request that can break them, including native arm64 checks for the runtime and Python adapter. They push none. No workflow scans the images.
 
 ## Verification matrix
 
@@ -658,21 +613,21 @@ The integration suite ([tests/](tests/)) drives the real gated path with no clus
 
 The job `kagent-integration` runs those twenty-two cases on the kagent v0.9.12 lane, against a debug `appa` binary it builds. It gates every pull request that touches the python package, the suite, the demo tools, the mocks, the demo policy, or the runtime crates. It uploads the trajectory database and every process log on a failure.
 
-The job `kagent-e2e-subset` runs all seventeen A2A cases against a real model, on a kind cluster it stands up itself. It runs on cell A-py alone, on the `run-e2e` label or a manual dispatch, and never on a fork pull request, which cannot read the OpenRouter key. Each test gets three total attempts, and exhaustion fails the job. The model matches the public playground: `openai/gpt-5.6-luna` at OpenRouter.
+The job `kagent-e2e-subset` runs all eighteen A2A cases against a real model, on a kind cluster it stands up itself. It runs on cell A-py alone, on the `run-e2e` label or a manual dispatch, and never on a fork pull request, which cannot read the OpenRouter key. Each test gets three total attempts, and exhaustion fails the job. The model matches the public playground: `openai/gpt-5.6-luna` at OpenRouter.
 
-Three scripts under [e2e/ci/](e2e/ci/) load the images, install kagent and the demo chart, and run the cases. A person runs the same three on a laptop or a dev VM. A placeholder job of the same name names the label on every other update.
+Three scripts under [e2e/ci/](e2e/ci/) load the images, install kagent plus both OpenAPPA charts, and run the cases. A person runs the same three on a laptop or a dev VM. A placeholder job of the same name names the label on every other update.
 
-The live matrices span three dimensions, and every combination is a row. The dimensions are kagent version, runtime plugin, and driver. The python plugin runs against the google-adk that kagent version locks. The go plugin runs on the adk/v2 v2.1.0 inside its image. The driver is the dashboard in headless Chromium, or A2A `message/send` alone. Each row runs the same seventeen conversations from [e2e/ui](e2e/ui/) and [e2e/a2a](e2e/a2a/). The index is [e2e/README.md](e2e/README.md), and the runner is `e2e/run-matrix.sh`.
+The live matrices span three dimensions, and every combination is a row. The dimensions are kagent version, runtime plugin, and driver. The python plugin runs against the google-adk that kagent version locks. The go plugin runs on the adk/v2 v2.1.0 inside its image. The driver is the dashboard in headless Chromium, or A2A `message/send` alone. Each row runs the same eighteen conversations from [e2e/ui](e2e/ui/) and [e2e/a2a](e2e/a2a/). The index is [e2e/README.md](e2e/README.md), and the runner is `e2e/run-matrix.sh`.
 
-The matrices assume a running stack: they drive the dashboard at `APPA_UI_URL` and the agent at `APPA_A2A_URL`, and provision nothing. The scripts under [e2e/ci/](e2e/ci/) are the one exception, and they build the cluster for the A-py A2A row. The kagent v0.9.12 rows run. Every recorded result predates this port of the child return, and no row ran after it. The PR CI runs the go unit suite and the integration suite. A labeled pull request adds the complete seventeen-case A-py A2A row. The v0.10 rows have no stack.
+Local matrices assume a running stack at `APPA_UI_URL` and `APPA_A2A_URL`. The scripts under [e2e/ci/](e2e/ci/) provision the A-py A2A row. All four kagent v0.9.12 rows pass after the child-return and remote-runtime changes. The PR CI runs the Go unit suite and integration suite. A labeled pull request adds the complete eighteen-case A-py A2A row. The v0.10 rows have no stack.
 
 | kagent | Cell | Runtime plugin | Driver | Status |
 |---|---|---|---|---|
-| v0.9.12 | A-py | python · google-adk 1.31.1 | dashboard | 17/17, recorded before the child-return port |
-| v0.9.12 | A-py | python · google-adk 1.31.1 | A2A | 17/17, recorded before the child-return port |
-| v0.9.12 | A-go | go · adk/v2 v2.1.0 | dashboard | 17/17, recorded before the child-return port, not re-run |
-| v0.9.12 | A-go | go · adk/v2 v2.1.0 | A2A | 17/17, recorded before the child-return port, not re-run |
-| v0.9.12 | A-py | python · google-adk 1.31.1 | A2A, all 17 cases in CI | gates after three attempts per case, on the `run-e2e` label |
+| v0.9.12 | A-py | python · google-adk 1.31.1 | dashboard | 18/18 |
+| v0.9.12 | A-py | python · google-adk 1.31.1 | A2A | 18/18 |
+| v0.9.12 | A-go | go · adk/v2 v2.1.0 | dashboard | 18/18 |
+| v0.9.12 | A-go | go · adk/v2 v2.1.0 | A2A | 18/18 |
+| v0.9.12 | A-py | python · google-adk 1.31.1 | A2A, all 18 cases in CI | gates after three attempts per case, on the `run-e2e` label |
 | v0.10.0-rc4 | B1-py | python · google-adk 2.8.0 | dashboard, A2A | not run |
 | v0.10.0-rc4 | B1-go | go · adk/v2 v2.1.0 | dashboard, A2A | not run |
 | main | B2-py, B2-go | python · google-adk 2.8.0, go · adk/v2 v2.1.0 (kagent main locks v2.2.0) | dashboard, A2A | not run |
@@ -683,7 +638,7 @@ End-to-end tests, each with its status — `[automated: <suite>]`, `[unit-level]
 - Lane B1: both image knobs swapped on the release-candidate chart. A python agent and a go agent gated side by side. [not run]
 - Lane B2: `AgentTemplate` × `Harness` on the Substrate path — admission by selector, `KAGENT_CONFIG_JSON` delivery, the env-var cap respected. [not run]
 - Cross-workload trajectory: parent and delegated child against one shared runtime. The delegation case in both matrices delegates from two fresh parent sessions in turn and asserts that each parent called the child. The A2A matrix asserts that the delegation answers in one of the three shapes a released spawn takes, and never as a denial. The UI matrix asserts that the child card completed with an output that is neither an undeclared-agent denial nor kagent's own failure text. Both assert that the injected instruction never reaches the operator [verified by hand on kind]. Each plugin pins the `ChildStart`, `ChildEnd` and `SpawnResult` pieces, and `appa-runtime/tests/kagent_spawns.rs` pins the spawn `ToolCall` gate [unit-level]. The file `appa-runtime/tests/kagent_returns.rs` pins the whole return contract on the wire: the held menu, the declaration, the crossing at `child_end`, the echo of a sanitized return, the schema block of an attested one, the replay at the parent, and the withhold of bytes that never crossed [automated: `cargo test -p appa --test kagent_returns`]. No test asserts that both land in one trajectory log [not run].
-- Remedy execution per plan element: accept-narrowing and sanitize run in the matrices [verified by hand on kind]. Those are the exfiltration ask, the configured default, the accept and no-remedy steers. Authorize with a URL authority runs both ways [verified by hand on kind]. Human-less: release-window, in and out of window. People out of band: the change board, a parked consult ruled through its own channel (approve, deny, unanswered). The derive hop, redispatch, and the vouch spent once per act have no test [not run].
+- Remedy execution per plan element: accept-narrowing and sanitize run in the matrices [verified by hand on kind]. Those are the exfiltration ask, the configured default, the accept and no-remedy steers. Authorize with an external Authority runs both ways [verified by hand on kind]. Human-less: release-window, in and out of window. People out of band: the change board, a parked consult ruled through its own channel (approve, deny, unanswered). The derive hop, redispatch, and the vouch spent once per act have no test [not run].
 - Human review: the plugin raises the kagent confirmation on the reviewed `execute_remedy_plan` call [verified by hand on kind]. An approval from the caller re-runs the call with `ruling: approve`, and the act executes. A rejection re-runs it with `ruling: deny`, the authority denies, and the runtime retires the offer. Each plugin also pins the channel [unit-level].
 - Annotated tool: the consult happens once and rules per call [verified by hand on kind]. The annotation pins to the canonical digest in the fact (`appa-engine/src/fact.rs`), and no kagent test replays it [not run].
 - Annotator down: the gated call refuses at the `ToolCall` hook, and nothing model-facing crosses. [automated: `appa-runtime/tests/annotators.rs`, `every_annotation_failure_refuses_the_hook_and_appends_nothing`, runtime-level]
@@ -692,5 +647,4 @@ End-to-end tests, each with its status — `[automated: <suite>]`, `[unit-level]
 - Error-turn window per cell: on cell A-py and every go cell, force an unhandled model failure. Then make sure recovery closes the turn at the next `turn_end`, or at the first `tool_call` after the next prompt. On the lane B python cells, make sure the error callbacks post the `turn_end`s. Each plugin pins the error callbacks (`test_the_error_turns_report_quietly`, `TestThePluginsOwnGateErrorIsNotReportedAsAToolFailure`, `TestTheErrorPathDoesNotDoubleReportAtTheAfterToolPoint`) [unit-level]. No cluster run forces the failure [not run].
 - Out-of-band flows on cell A-py: a code-execution agent whose policy denies the code sees the subprocess skipped. A memory agent whose policy denies the persist writes nothing to the memory backend. Pinned in `test_gates.py` with fake executors and callbacks [unit-level]. No cluster run exercises either [not run].
 - Integration suite ([tests/](tests/)): twenty-two of the matrix cases on the real gated path, with a scripted model and no cluster. The real runtime, the real tools, the real mock externals, and both agents built by the real entrypoint. [automated: `integrations/kagent/tests` under `APPA_INTEGRATION=1`, a pull-request gate]
-- Live matrices on the Helm-installed stack ([e2e/ui](e2e/ui/), [e2e/a2a](e2e/a2a/)): seventeen cases each, the same conversations with a real model. One runs through the dashboard in headless Chromium, and the other over A2A `message/send` alone. Both answer the `oncall` review both ways. Both play the change-board member on the mock side channel (approve, deny, unanswered). Nine cases assert that no confirmation card appears. Those are the exfiltration ask, the configured default, the accept steer, and the no-remedy steer. The other five are the forged offer id, the in-window release-window approval, both delegations, and the change-board approval. The other six non-review cases assert nothing about cards. The A2A driver waits `APPA_A2A_DECISION_SETTLE` (2 s) before it answers a confirmation. The reason: kagent persists the confirmation-request event while it answers the request. The variables `APPA_AGENT` (UI) and `APPA_A2A_URL` (A2A) select the go twin for either matrix. 17/17 on cell A-py and 17/17 on cell A-go, both recorded before this port of the child return [verified by hand on kind]. No run after the port exists [not run]. The three steer-dependent cases carry two reruns, because the model sometimes picks another remedy. Those are the configured default, the accept steer, and the no-remedy steer. Either way the test asserts what the gate did, off the tool results.
-- Quickstart pod: the `appa-kagent-quickstart` image starts `appa-runtime` on loopback with the packaged policy, waits for health, and execs the gated entrypoint. The entrypoint serves its A2A card — one pod, nothing else to deploy. The demo runs the shared-runtime branch of the image, with `APPA_RUNTIME_URL` set [verified by hand on kind]. The bundled-runtime branch has no test [not run].
+- Live matrices on the Helm-installed stack ([e2e/ui](e2e/ui/), [e2e/a2a](e2e/a2a/)): eighteen cases each, the same conversations with a real model. One runs through the dashboard in headless Chromium, and the other over A2A `message/send` alone. Both answer the `oncall` review both ways. Both play the change-board member on the mock side channel (approve, deny, unanswered). Nine cases assert that no confirmation card appears. Those are the exfiltration ask, the configured default, the accept steer, and the no-remedy steer. The other five are the forged offer id, the in-window release-window approval, both delegations, and the change-board approval. The other six non-review cases assert nothing about cards. The A2A driver waits `APPA_A2A_DECISION_SETTLE` (2 s) before it answers a confirmation. The reason: kagent persists the confirmation-request event while it answers the request. The variables `APPA_AGENT` (UI) and `APPA_A2A_URL` (A2A) select the go twin for either matrix. 18/18 on cell A-py and 18/18 on cell A-go after the child-return and remote-runtime changes [verified by hand on kind]. The three steer-dependent cases carry two reruns, because the model sometimes picks another remedy. Those are the configured default, the accept steer, and the no-remedy steer. Either way the test asserts what the gate did, off the tool results.

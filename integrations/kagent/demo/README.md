@@ -1,123 +1,82 @@
-# The demo on a cluster — Helm first
+# The kagent demo
 
-The demo is a Helm chart, [chart/](chart/). It installs a gated
-`cluster-ops` fleet with a delegated `log-analyst` and a
-`release-manager` the policy never names, so every delegation to it is
-denied. It also installs the go twins of all three (`cluster-ops-go`,
-`log-analyst-go`, `release-manager-go`). The shared `appa-runtime` runs
-in one pod with its relay and mock externals. The chart adds the demo
-tools and pre-seeds every demo case as a real chat in the kagent
-dashboard.
+The demo composes two Helm releases:
 
-Install it into any cluster that runs kagent 0.9.12 on the OpenAPPA
-runtime image. Two inputs are yours: the images ([chart/README.md](chart/README.md)) and the model key. Install
-it into any namespace. The chart renders the wire names of the delegated
-children from the release namespace and `agents.childName` /
-`agents.go.childName` ([chart/README.md](chart/README.md)).
+- [`charts/appa-runtime`](../../../charts/appa-runtime) owns the runtime,
+  serving policy, persistence, and `appa-guide`.
+- [`chart/`](chart/) owns only the demo Agents, tools, mock policy
+  services, policy template, and seeded chats.
+
+This boundary lets Quickstart, existing-Agent setup, and the demo use one
+runtime installation. No chart competes for the same Kubernetes object.
+
+## Install
+
+Install kagent and appa first by following the public
+[kagent Quickstart](https://openappa.com/kagent). Then install the fixture
+chart:
 
 ```sh
-# kagent on the OpenAPPA runtime image, fleet-wide (once per cluster).
-# The image gates nothing by itself: every agent opts in with
-# APPA_ENABLED=true, and the demo chart sets it on every agent it renders.
-helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-crds \
-  --version 0.9.12 -n kagent --create-namespace
-helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
-  --version 0.9.12 -n kagent \
-  --set controller.agentImage.registry=ghcr.io \
-  --set controller.agentImage.repository=archestra-ai/appa-kagent-quickstart \
-  --set k8s-agent.enabled=false \
-  --set kgateway-agent.enabled=false \
-  --set istio-agent.enabled=false \
-  --set promql-agent.enabled=false \
-  --set observability-agent.enabled=false \
-  --set argo-rollouts-agent.enabled=false \
-  --set helm-agent.enabled=false \
-  --set cilium-policy-agent.enabled=false \
-  --set cilium-manager-agent.enabled=false \
-  --set cilium-debug-agent.enabled=false \
-  --wait --timeout 10m \
-  --set controller.agentImage.tag=0.9.0 # x-release-please-version
-
-# the demo
-APPA_VERSION=0.9.0 # x-release-please-version
+APPA_VERSION=0.12.0 # x-release-please-version
 helm upgrade --install appa-kagent-demo \
-  "https://github.com/archestra-ai/OpenAPPA/releases/download/v${APPA_VERSION}/appa-kagent-demo-${APPA_VERSION}.tgz" \
-  -n kagent \
-  --set-string openai.apiKey="$OPENAI_API_KEY" \
-  --wait --timeout 10m
-kubectl -n kagent port-forward svc/kagent-ui 8901:8080
+  oci://ghcr.io/archestra-ai/charts/appa-kagent-demo \
+  --version "$APPA_VERSION" -n kagent \
+  --set-string runtime.url=http://appa-runtime.appa.svc.cluster.local:18787 \
+  --set-string modelConfig.name=default-model-config \
+  --force-conflicts --wait --timeout 10m
 ```
 
-Then open `http://localhost:8901/agents/kagent/cluster-ops/chat`. Say
-`init` in `http://localhost:8901/agents/kagent/appa-guide/chat` to
-inventory cluster MCP tools and propose fleet policy; the apply raises
-the kagent Approve card, and a new gated chat uses the reloaded policy. The
-showcase chats are already there — replay them in
-[SCENARIOS.md](SCENARIOS.md) terms, or run your own: the exfiltration
-ask is denied at the secret read and leaks nothing, the crash-log
-injection is gated at ingress, the restart asks a person through
-kagent's Approve/Reject card (Approve runs it, Reject leaves it
-blocked), the rollback waits on the remote change board, and the
-ordinary reads flow untouched. The agent takes every other remedy
-itself — its instruction steers it to the sanitized result by default,
-and the chat can steer it to accept the change.
+Open the dashboard:
 
-That one `controller.agentImage` value puts every python-runtime
-declarative agent in the cluster on the quickstart image. Every
-`runtime: go` agent runs on the `golang-adk` name that kagent derives
-from it. kagent's stock sample agents (k8s, helm, istio, cilium, and
-observability) are disabled because the demo does not use them and they
-require a separate provider Secret. The demo agents set `APPA_ENABLED`
-themselves and point at the shared runtime, so a parent and its delegated
-child land in one trajectory.
+```sh
+kubectl port-forward -n kagent svc/kagent-ui 8080:8080
+```
 
-The bundled runtime loads the packaged policy
-([../examples/kagent.appa.toml](../examples/kagent.appa.toml)). That
-policy names seven demo tools, `ask_user`, and the entrypoint's two
-synthetic tools, and it carries no wildcard. So the runtime refuses at
-`ToolCall` every other tool call a gated sample agent makes. To gate a
-sample agent, set `APPA_ENABLED: "true"` in its
-`spec.declarative.deployment.env` and mount a policy that names its
-tools over `APPA_CONFIG`, or add a wildcard annotator. Only with the
-knob on does the entrypoint start the bundled runtime and load that
-policy. To gate a whole fleet at once, bake `ENV APPA_ENABLED=true`
-into a derived image and point `controller.agentImage` at it.
+Open `http://localhost:8080/agents/kagent/appa-guide/chat` and send
+`init`. The guide verifies the demo release, reads its inert policy
+template, and proposes the behavior. Approve the proposal in chat and
+then approve the enforced confirmation card. A new `cluster-ops` chat
+uses the reloaded policy.
 
-## What the chart deploys
+The dashboard contains sixteen seeded chats. They cover confidential
+reads, suspicious ingress, sanitization, human approval, deterministic
+Authorities, and delegated Agents. See [SCENARIOS.md](SCENARIOS.md).
 
-The shared runtime serves the full-matrix policy
-([chart/files/demo.appa.toml](chart/files/demo.appa.toml)): real
-sanitizers over `[externals.llm]`, the `runbook-readers` annotator, the
-human-less `release-window` authority and the remote `change-board`
-authority (people out of band, ruling on the mock's side channel)
-answered by the mock externals ([mocks/](mocks/)), the delegated child
-as the spawn, and the `oncall` human-review authority.
+## What the fixture chart owns
 
-`appa-runtime` binds loopback only, by design, and a `url` binding in
-its policy takes cleartext http to loopback only. So the runtime pod
-carries three containers. The runtime listens on `127.0.0.1:18787`. An
-nginx relay on `:18789` fronts it: every agent reaches the relay
-through the `appa-runtime` Service, and the relay rewrites `Host` to a
-loopback value.
-The runtime's `/mcp` — the rmcp server behind the remedy tool —
-validates that value. The third container is the mocks. They bind
-`0.0.0.0:8081`, and the runtime reaches them at `127.0.0.1:8081`. The
-mocks' side channel is also a Service (`appa-demo-mocks`), so a board
-member outside the pod — or the e2e matrices — can rule.
+- `cluster-ops`, `log-analyst`, and intentionally undeclared
+  `release-manager` Agents;
+- optional Go twins of those Agents;
+- the `demo-tools` Deployment, Service, and `RemoteMCPServer`;
+- the `appa-demo-mocks` Deployment and Service;
+- `ConfigMap/appa-kagent-demo-policy`, which is inert until approved;
+- an idempotent seed Job for the sixteen captured chats.
 
-The `demo-tools` image builds from [Dockerfile](Dockerfile), the mocks
-from [mocks/Dockerfile](mocks/Dockerfile); the chart README covers
-building and loading them on kind.
+Every Agent sets `APPA_ENABLED=true` and the configured
+`APPA_RUNTIME_URL`. Parent and child therefore use the same runtime and
+one Trajectory lineage.
 
-## The scenarios, scripted
+The mock service implements `runbook-readers`, `release-window`,
+`change-board`, and both demo sanitizers. The runtime invokes it through
+fixed local command adapters. The mock's `/pending` and `/decide`
+endpoints form the change board's out-of-band ruling channel.
 
-A deterministic variant of the same cases drives a real ADK agent loop
-with a scripted model through the real plugin and a local runtime — no
-cluster, no model key: [SCENARIOS.md](SCENARIOS.md) and
-[../tests/](../tests/). Those twenty-two tests run on
-[../tests/policy.appa.toml](../tests/policy.appa.toml), the full-matrix
-policy above with both sanitizers rebound to the mock's `/sanitize`, so
-the derivation is deterministic. `APPA_INTEGRATION=1 … pytest
-integrations/kagent/tests` runs them; [../tests/README.md](../tests/README.md)
-carries the full line. The matrices in [../e2e/](../e2e/) drive the same
-substance with a real model, and need the cluster and the key.
+The fixture chart owns no runtime Deployment, runtime Service, serving
+policy, PersistentVolumeClaim, provider Secret, ModelConfig, or
+`appa-guide` Agent.
+
+## Tests
+
+A deterministic variant runs the same tool and delegation paths with a
+scripted model and local processes:
+
+```sh
+APPA_INTEGRATION=1 uv run --project integrations/kagent/appa-kagent-adk \
+  --with "kagent-adk @ git+https://github.com/kagent-dev/kagent@v0.9.12#subdirectory=python/packages/kagent-adk" \
+  --with "a2a-sdk>=0.3.23,<0.4" --with "google-adk==1.31.1" \
+  --with "mcp>=1.25,<2" --with "pytest>=8" \
+  pytest integrations/kagent/tests
+```
+
+The live two-chart installer and real-model matrices are under
+[`../e2e`](../e2e/).

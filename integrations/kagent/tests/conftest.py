@@ -633,7 +633,7 @@ def runtime_url(workdir, mock_port) -> Iterator[str]:
     binary = _appa_binary()
     port = _free_port()
     policy = workdir / "policy.appa.toml"
-    policy.write_text(POLICY.read_text().replace("@@MOCK_PORT@@", str(mock_port)))
+    policy.write_text(POLICY.read_text().replace("@@MOCK_PORT@@", str(mock_port)).replace("@@PYTHON@@", sys.executable))
     command = [
         binary,
         "runtime",

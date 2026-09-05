@@ -6,7 +6,7 @@ Agents reach it at:
 
 Set that URL as APPA_RUNTIME_URL on each gated agent, with APPA_ENABLED=true.
 
-Bundled batteries: GET /batteries on that address.
+Available batteries: GET /batteries on that address.
 Persistent volume: {{ if .Values.persistence.enabled }}on ({{ include "appa-runtime.pvcName" . }}){{ else }}off — the skill will not refresh batteries{{ end }}.
 {{- if and .Values.persistence.enabled .Values.persistence.keep (not .Values.persistence.existingClaim) }}
 The chart-created PVC stays after helm uninstall because persistence.keep is true.

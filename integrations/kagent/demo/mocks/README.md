@@ -4,7 +4,7 @@ One stdlib-only HTTP service (`mock_externals.py`) answering
 appa-runtime's consult wire for four registered components: an
 Annotator that produces per-call contracts for `lookup_runbook`, a
 human-less authority that rules on `scale_deployment` inside its
-release window, a change board — a URL authority backed by people
+release window, a change board — an Authority backed by people
 out of band — that parks each `rollback_deployment` consult until a
 member rules on the side channel (`GET /pending`, `POST /decide`) or
 the approval window closes (a clean no-answer), and a sanitizer that
@@ -121,11 +121,9 @@ and the upstream status page. The demo's crash log wraps its injection
 over two lines, which is why a continuation line goes with the line it
 continues.
 
-The demo chart never reaches this endpoint: its sanitizers bind to
-`builtin = "llm"` and run on the runtime's own model profile. The
-integration suite ([../../tests/](../../tests/))
-binds them here instead, so its sanitized-remedy cases run without a
-model, an API key, or a nondeterministic derivation.
+The demo chart and integration suite ([../../tests/](../../tests/)) bind
+both sanitizers here. Sanitized-remedy cases therefore run without a
+second model credential or a nondeterministic derivation.
 
 ## Policy wiring
 
@@ -173,13 +171,16 @@ attention = ["change-approval"]
 timeout_ms = 30000
 
 [externals.annotators.runbook-readers]
-url = "http://127.0.0.1:8081/annotate"
+command = ["/usr/local/bin/python3", "-c", "<fixed HTTP forwarding adapter>",
+           "http://appa-demo-mocks.kagent.svc.cluster.local:8081/annotate"]
 
 [externals.authorities.release-window]
-url = "http://127.0.0.1:8081/authorize"
+command = ["/usr/local/bin/python3", "-c", "<fixed HTTP forwarding adapter>",
+           "http://appa-demo-mocks.kagent.svc.cluster.local:8081/authorize"]
 
 [externals.authorities.change-board]
-url = "http://127.0.0.1:8081/approve"
+command = ["/usr/local/bin/python3", "-c", "<fixed HTTP forwarding adapter>",
+           "http://appa-demo-mocks.kagent.svc.cluster.local:8081/approve"]
 ```
 
 The sanitizers bind the same way where a deployment wants the
@@ -187,40 +188,39 @@ deterministic derivation instead of a model:
 
 ```toml
 [externals.sanitizers.strip-secret-values]
-url = "http://127.0.0.1:8081/sanitize"
+command = ["/usr/local/bin/python3", "-c", "<fixed HTTP forwarding adapter>",
+           "http://appa-demo-mocks.kagent.svc.cluster.local:8081/sanitize"]
 
 [externals.sanitizers.strip-instructions]
-url = "http://127.0.0.1:8081/sanitize"
+command = ["/usr/local/bin/python3", "-c", "<fixed HTTP forwarding adapter>",
+           "http://appa-demo-mocks.kagent.svc.cluster.local:8081/sanitize"]
 ```
 
-**The URLs must be loopback.** A `url` binding accepts cleartext
-`http` only to a loopback host — a 127.0.0.0/8 address, `[::1]`, or
-the literal `localhost` (`appa-runtime/src/config.rs`,
-`validated_url`). `http://appa-demo-mocks.kagent.svc.cluster.local`
-is refused at startup:
+The complete command is in
+[`../chart/files/demo.appa.toml`](../chart/files/demo.appa.toml). It
+forwards the consult envelope on stdin and writes the answer envelope to
+stdout. No provider token or runtime environment enters the subprocess.
+
+A direct `url` binding still accepts cleartext `http` only to a loopback
+host (`appa-runtime/src/config.rs`, `validated_url`). The in-cluster mock
+address would be refused as a URL binding:
 
 ```
 appa runtime: the annotators endpoint "runbook-readers" uses cleartext http to a non-loopback host: ...
 ```
 
-`https` reaches anywhere, but the runtime offers no CA override, so a
-self-signed in-cluster certificate fails verification and every
-consult becomes a no-answer — the gate fails closed. The wiring that
-works: run the mock in the same pod as `appa-runtime`, and bind
-`http://127.0.0.1:8081/...`. In the demo chart's runtime pod, the
-runtime listens on `127.0.0.1:18787`. In a quickstart pod, it listens
-on `127.0.0.1:8787`.
+The fixture policy instead selects a local command implementation. That
+command forwards only demo consult envelopes to the mock Service. A
+transport failure or malformed answer remains a no-answer, so the gate
+fails closed.
 
 ## Where it runs
 
-In the demo chart ([../chart](../chart)) the mocks are a sidecar of the
-`appa-runtime` pod: the runtime consults them over the pod's loopback
-(`http://127.0.0.1:8081/...` in the policy's `[externals]` bindings —
-a `url` binding takes cleartext http to loopback only), and the
-`appa-demo-mocks` Service exposes the change board's side channel
-(`/pending`, `/decide`) to a member outside the pod. The container
-binds `0.0.0.0:8081`, so the Service reaches it too. The image builds
-from [Dockerfile](Dockerfile).
+The fixture chart ([../chart](../chart)) runs the mocks in their own
+Deployment. `appa-demo-mocks` exposes consult endpoints to the fixed
+command adapters and the change-board side channel (`/pending`,
+`/decide`) to a member outside the pod. The image builds from
+[Dockerfile](Dockerfile) and runs as uid 65532.
 
 For a laptop run against a local `appa runtime`:
 

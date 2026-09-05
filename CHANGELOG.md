@@ -1,5 +1,69 @@
 # Changelog
 
+## [0.12.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.11.1...v0.12.0) (2026-09-05)
+
+
+### Features
+
+* **kagent:** keep demo fixtures off the runtime chart ([#226](https://github.com/archestra-ai/OpenAPPA/issues/226)) ([2e7b664](https://github.com/archestra-ai/OpenAPPA/commit/2e7b664ff27ae45d0eab92b9023fa0d74d236e8d))
+
+## [0.11.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.11.0...v0.11.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* **kagent:** report init inventory accurately ([#224](https://github.com/archestra-ai/OpenAPPA/issues/224)) ([ec82083](https://github.com/archestra-ai/OpenAPPA/commit/ec820834b63d4d4cf8d6923853ce6b3ce03873f0))
+
+## [0.11.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.10.0...v0.11.0) (2026-09-05)
+
+
+### Features
+
+* **kagent:** use one remote OpenAPPA runtime ([#222](https://github.com/archestra-ai/OpenAPPA/issues/222)) ([417383c](https://github.com/archestra-ai/OpenAPPA/commit/417383cca925c1ad5472efb747f42a5a7ce07962))
+
+
+### Bug Fixes
+
+* **kagent:** resolve appa-guide reference path ([#220](https://github.com/archestra-ai/OpenAPPA/issues/220)) ([d29b332](https://github.com/archestra-ai/OpenAPPA/commit/d29b3327acdb56d9aa27244b4cd3013d14dd1d07))
+* **release:** derive chart test versions ([#223](https://github.com/archestra-ai/OpenAPPA/issues/223)) ([aeded73](https://github.com/archestra-ai/OpenAPPA/commit/aeded737ce11b3ec75e9d3a2e596df3236ac299e))
+* **release:** upload Helm charts separately ([#219](https://github.com/archestra-ai/OpenAPPA/issues/219)) ([57f16ff](https://github.com/archestra-ai/OpenAPPA/commit/57f16ffea1b3e88a9eb8c9dcf4ae5fd2666f962f))
+
+
+### Documentation
+
+* **kagent:** explain the default demo fleet ([#216](https://github.com/archestra-ai/OpenAPPA/issues/216)) ([082354e](https://github.com/archestra-ai/OpenAPPA/commit/082354e57dde2be083ae9618ad499462f4c18fda))
+
+## [0.10.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.9.0...v0.10.0) (2026-09-04)
+
+
+### Features
+
+* **annotator:** admit symbolic audiences in mandates and answers ([#213](https://github.com/archestra-ai/OpenAPPA/issues/213)) ([52381a7](https://github.com/archestra-ai/OpenAPPA/commit/52381a76ff09b531f5b044fec74900f763896f46))
+* **kagent:** manage OpenAPPA through appa-guide ([#212](https://github.com/archestra-ai/OpenAPPA/issues/212)) ([299209c](https://github.com/archestra-ai/OpenAPPA/commit/299209c2da0b75f5b95ac5a832cddb4b3378d19b))
+* **kagent:** publish guided demo quickstart ([#211](https://github.com/archestra-ai/OpenAPPA/issues/211)) ([5b322df](https://github.com/archestra-ai/OpenAPPA/commit/5b322dfee7eeac5ed521a8e7b08acd988f6446ac))
+
+
+### Bug Fixes
+
+* **kagent:** allow appa-guide skills and stabilize upgrades ([#215](https://github.com/archestra-ai/OpenAPPA/issues/215)) ([a90373f](https://github.com/archestra-ai/OpenAPPA/commit/a90373ff211415e28c8804fcff593d1883e8aa8f))
+* **website:** retain common language grammars in markdown highlighter ([#201](https://github.com/archestra-ai/OpenAPPA/issues/201)) ([68576b3](https://github.com/archestra-ai/OpenAPPA/commit/68576b3a749b05024f7db83e9204d7d2b4a14e67))
+
+
+### Performance Improvements
+
+* **ci:** overlap e2e setup with runner cleanup ([#200](https://github.com/archestra-ai/OpenAPPA/issues/200)) ([f5f89f4](https://github.com/archestra-ai/OpenAPPA/commit/f5f89f4e7dffc2863c3b1d607b7d4f743251db74))
+* **ci:** skip heavy jobs on docs-only pull requests ([#205](https://github.com/archestra-ai/OpenAPPA/issues/205)) ([1d3314c](https://github.com/archestra-ai/OpenAPPA/commit/1d3314cb0ba075397d844e969eed3e46602a0da5))
+
+
+### Documentation
+
+* improve agent integration guide ([#207](https://github.com/archestra-ai/OpenAPPA/issues/207)) ([7bfc535](https://github.com/archestra-ai/OpenAPPA/commit/7bfc53552b85cb18c00efc2384ffe8e894038735))
+* **kagent:** convert manifests and helm commands to single copy-paste snippets ([#210](https://github.com/archestra-ai/OpenAPPA/issues/210)) ([0d66d94](https://github.com/archestra-ai/OpenAPPA/commit/0d66d94d9f086f6bfb9e57e822a3ad0161a3f601))
+* **kagent:** disable unused sample agents and bound install timeouts ([#206](https://github.com/archestra-ai/OpenAPPA/issues/206)) ([901c7f3](https://github.com/archestra-ai/OpenAPPA/commit/901c7f3c85be2d3e928223877c0a998a98f1b156))
+* **kagent:** guide cluster-wide runtime setup and appa-guide skill workflows ([#204](https://github.com/archestra-ai/OpenAPPA/issues/204)) ([d7fb5a3](https://github.com/archestra-ai/OpenAPPA/commit/d7fb5a31886b2f2eeb9d9ec4bb43ff0b70cf623f))
+* **kagent:** use public artifacts and document provider configuration ([#208](https://github.com/archestra-ai/OpenAPPA/issues/208)) ([a12a192](https://github.com/archestra-ai/OpenAPPA/commit/a12a1928c7a302bdc7c6543a1a8cb2155343ccd2))
+* streamline agent integration guide ([#209](https://github.com/archestra-ai/OpenAPPA/issues/209)) ([f52a721](https://github.com/archestra-ai/OpenAPPA/commit/f52a721dd6b70dc2c6fd3af4f8703ca84a5ecc25))
+
 ## [0.9.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.8.0...v0.9.0) (2026-09-04)
 
 
