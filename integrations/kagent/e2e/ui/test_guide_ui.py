@@ -76,8 +76,9 @@ def test_an_explicit_reload_reaches_a_review_card_and_rejection_stops_it(
     assert chat.decide("Reject"), "the exact reload reaches the operator"
     body = chat.wait_idle(timeout_s=300)
     chat.shot(shots_dir, "guide-reload-rejected")
-    assert "appa-guide-reload" in body
-    assert "Reject" in body or "reject" in body
+    assert "Rejected" in body
+    assert "did not run" in body or "not run" in body
+    assert "standing by" not in body.lower()
 
 
 def test_battery_refresh_reaches_review_before_writing(chat: Chat, shots_dir: str):
@@ -89,7 +90,8 @@ def test_battery_refresh_reaches_review_before_writing(chat: Chat, shots_dir: st
     body = chat.wait_idle(timeout_s=360)
     chat.shot(shots_dir, "guide-battery-refresh-rejected")
     assert "batter" in body.lower()
-    assert "appa-guide-refresh" in body
+    assert "Rejected" in body
+    assert "did not run" in body or "not run" in body
 
 
 @pytest.mark.skipif(

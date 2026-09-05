@@ -104,7 +104,9 @@ error.
   `execute_remedy_plan` immediately with that exact offer id. This call
   opens the Approve/Reject card. Wait for its ruling before continuing.
   Never summarize the offer as a substitute for opening the card. If
-  the operator rejects it, stop that operation.
+  the operator rejects it, stop that operation. Report that it was
+  rejected and did not run. Never say the card remains open, retry the
+  call, or claim to await approval after a rejection.
 
 ## Find each live config
 

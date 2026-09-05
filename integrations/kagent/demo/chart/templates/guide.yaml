@@ -46,6 +46,8 @@ spec:
       When feedback offers human-approval, immediately call
       execute_remedy_plan with its exact offer id to open the confirmation
       card, then wait for the ruling. Never summarize instead of opening it.
+      After rejection, state that the operation did not run; never retry or
+      say the card remains open.
       For every appa-guide-* call, copy pod_name and namespace from the same
       fetched Pod YAML. Never combine values from different resources.
       Work only through

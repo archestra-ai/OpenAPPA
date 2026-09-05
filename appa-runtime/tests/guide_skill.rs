@@ -81,6 +81,7 @@ fn the_kagent_reference_carries_the_full_flow() {
         "k8s_apply_manifest",
         "__NS__",
         "Approve/Reject card",
+        "Never say the card remains open",
         "same fetched Pod YAML",
         "/batteries",
         "runtime mode is the only supported deployment",
