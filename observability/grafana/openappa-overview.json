@@ -15,7 +15,7 @@
       }
     ]
   },
-  "description": "OpenAPPA runtime hook decisions with trace-correlated logs and bounded metrics.",
+  "description": "OpenAPPA runtime hook decisions with trace-correlated logs, bounded metrics, and per-Agent-run drill-down.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -435,7 +435,7 @@
                   {
                     "targetBlank": false,
                     "title": "Inspect this trace",
-                    "url": "/d/openappa-runtime/openappa-runtime?var-traceId=${__value.raw}&var-metrics=${metrics}&var-traces=${traces}&var-logs=${logs}&${__url_time_range}"
+                    "url": "/d/openappa-runtime/openappa-runtime?var-traceId=${__value.raw}&var-agentRun=${agentRun}&var-decision=${decision}&var-trajectory=${trajectory}&var-metrics=${metrics}&var-traces=${traces}&var-logs=${logs}&${__url_time_range}"
                   }
                 ]
               }
@@ -457,7 +457,7 @@
       "targets": [
         {
           "limit": 100,
-          "query": "{ resource.service.name = \"appa-runtime\" && span.appa.decision =~ \"$decision\" && span.appa.trajectory.id =~ \"$trajectory\" } | select(span.appa.trajectory.id, span.appa.hook.event, span.appa.decision, span.gen_ai.tool.name)",
+          "query": "{ resource.service.name = \"appa-runtime\" && resource.archestra.agent_run.id =~ \"$agentRun\" && span.appa.decision =~ \"$decision\" && span.appa.trajectory.id =~ \"$trajectory\" } | select(resource.archestra.agent_run.id, span.appa.trajectory.id, span.appa.hook.event, span.appa.decision, span.gen_ai.tool.name)",
           "queryType": "traceql",
           "refId": "A",
           "tableType": "traces"
@@ -571,6 +571,17 @@
         "options": [],
         "query": "ack,allow,deny,block,refuse,pass_control,replace_output,replace_child_return",
         "type": "custom"
+      },
+      {
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "description": "Platform Agent run UUID from /chat/runs/:id. This filters traces and their correlated logs without adding an unbounded metrics label.",
+        "label": "Agent run",
+        "name": "agentRun",
+        "query": ".*",
+        "type": "textbox"
       },
       {
         "current": {
