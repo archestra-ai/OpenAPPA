@@ -1188,11 +1188,14 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
     // executor classifies a call or confines its result, so a policy naming it declares
     // something the deployment can never apply. A contract naming it and a `[deployment]`
     // field naming it are the same claim, and both are refused rather than accepted as a
-    // silent no-op.
+    // silent no-op. Both of its spellings make that claim: a harness translates the
+    // advertised alias into the canonical id before the hooks see it, so an authored
+    // deployment naming the alias reaches remedy handling the same way. A served
+    // deployment refuses the alias earlier, for not being canonical at all.
     let rc = policy.registry_config();
     let contracts = rc.tools.iter().map(|tool| tool.name().as_str());
     for name in contracts.chain(policy.deployment_tool_names().map(|(_, name)| name)) {
-        if is_control_tool(bare_tool_name(name)) {
+        if appa_runtime_api::is_reserved_tool_name(bare_tool_name(name)) {
             return Err(OpenError::ReservedTool(name.to_string()));
         }
     }
@@ -1465,9 +1468,13 @@ mod deployment_tests {
     /// confined, so a `[deployment]` field naming it claims a treatment the runtime can never
     /// apply. A wildcard contract makes the name pass coverage, so only this refusal stops the
     /// claim from opening as a silent no-op — the same refusal a contract naming it gets.
+    ///
+    /// Under either spelling. This deployment is authored, so nothing else reads its tool
+    /// names: a harness translates the advertised alias into the canonical id on its way to
+    /// the hooks, and the field naming the alias would open and never apply.
     #[test]
     fn no_deployment_field_may_name_the_control_tool() {
-        let policy = |field: &str| {
+        let policy = |field: &str, tool: &str| {
             format!(
                 r#"
                 version = 2
@@ -1478,22 +1485,26 @@ mod deployment_tests {
                 name = "*"
                 annotator = "any"
                 [deployment]
-                {field} = ["{}"]
-            "#,
-                appa_runtime_api::CONTROL_TOOL
+                {field} = ["{tool}"]
+            "#
             )
         };
-        for field in ["assumed_tools", "provider_run_tools", "confined_results"] {
-            assert!(
-                matches!(load(claude_config(&policy(field))), Err(OpenError::ReservedTool(_))),
-                "[deployment] {field} naming the control tool must refuse to open"
-            );
+        for tool in [
+            appa_runtime_api::CONTROL_TOOL,
+            appa_runtime_api::ADVERTISED_CONTROL_TOOL,
+        ] {
+            for field in ["assumed_tools", "provider_run_tools", "confined_results"] {
+                assert!(
+                    matches!(
+                        load(claude_config(&policy(field, tool))),
+                        Err(OpenError::ReservedTool(_))
+                    ),
+                    "[deployment] {field} naming {tool} must refuse to open"
+                );
+            }
         }
         assert!(
-            load(claude_config(
-                &policy("assumed_tools").replace(appa_runtime_api::CONTROL_TOOL, "host/claude-code/Read")
-            ))
-            .is_ok(),
+            load(claude_config(&policy("assumed_tools", "host/claude-code/Read"))).is_ok(),
             "every other name in the same field still opens"
         );
     }

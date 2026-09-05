@@ -131,8 +131,19 @@ impl ToolShim {
         };
         let status = response.status();
         if !status.is_success() {
-            return ToolOutcome::Failure {
-                message: format!("the tool endpoint answered {}", status.as_u16()),
+            // Only the endpoint saying the call itself was bad reports a
+            // failure. Every other status is the endpoint answering about
+            // itself, and it may have run the call before it did: a 500 after
+            // the effect committed, reported as a failure, tells the engine
+            // nothing was admitted when something was.
+            return match status.as_u16() {
+                422 => ToolOutcome::Failure {
+                    message: "the tool endpoint reported a failed call".to_string(),
+                },
+                other => {
+                    tracing::debug!(status = other, "tool endpoint answered a non-success status");
+                    ToolOutcome::Indeterminate
+                }
             };
         }
         let mut response = response;

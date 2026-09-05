@@ -105,6 +105,13 @@ enum ReturnDisposition {
     Substituted,
 }
 
+/// Whether the model received the tool's own bytes or something APPA put in
+/// their place. The same line [`ReturnDisposition`] draws for a child's value,
+/// on the result of a tool call: `Admitted` is the produced result crossing
+/// unchanged, and everything else is `Sealed` — a runtime notice, a narrowing's
+/// text, a refusal, and a value the engine admitted in place of the raw result,
+/// which is a confined result or a sanitizer's derivation and not what the tool
+/// produced. Diagnostic only: nothing branches on it.
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 enum DeliveryDisposition {
@@ -473,6 +480,9 @@ impl SessionInner {
         let (content, disposition) = match decision {
             HookDecision::Ack if as_produced => (produced, DeliveryDisposition::Admitted),
             HookDecision::Ack => (produced, DeliveryDisposition::Sealed),
+            // `DeliverValue` carries what the engine admitted in place of the
+            // raw result, so it is sealed for the reason `ChildReturn` is
+            // substituted: the model reads it, and the tool did not write it.
             HookDecision::ReplaceOutput { output } | HookDecision::DeliverValue { value: output } => {
                 (output, DeliveryDisposition::Sealed)
             }
