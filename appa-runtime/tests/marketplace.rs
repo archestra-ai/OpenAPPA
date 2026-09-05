@@ -231,11 +231,12 @@ fn copy_tree(source: &Path, destination: &Path) {
 /// wrote and a deployment installed, so the marketplace refuses what the loader
 /// merely tolerates from a file the operator wrote themselves — a `url` binding
 /// reaching an endpoint the deployment did not choose is the plain case. Those
-/// are the `!validates && loads` rows below, and each one is a decision rather
-/// than a gap.
+/// are the `no, yes` rows below, and each one is a decision rather than a gap.
 ///
-/// The rows are crafted to sit on each rule's edge. The shipped batteries sit
-/// in the middle of every rule and would agree whatever the rules were.
+/// So each row carries both answers rather than the implication alone, which a
+/// validator that refused everything would satisfy. The rows are crafted to sit
+/// on each rule's edge; the shipped batteries sit in the middle of every rule
+/// and would agree whatever the rules were.
 #[test]
 fn a_battery_that_validates_loads() {
     const HELPER: &str = "audience-source.py";
@@ -243,60 +244,77 @@ fn a_battery_that_validates_loads() {
     let tool = "[[policy.tool]]\nname = \"mcp/probe/read\"\ndelta = {}\n";
     let command = format!("[externals.audience.probe]\ncommand = [\"python3\", \"{HELPER}\"]\n");
 
-    // Each row carries whether the marketplace accepts it, so a validator that
-    // refused everything would fail here rather than satisfy the implication
-    // vacuously.
-    let accepted = true;
-    let refused = false;
+    // Every row carries both answers. The marketplace's is the rule under
+    // test; the loader's is what a deployment does with the same file, and
+    // without it the rows the marketplace refuses would assert nothing.
+    let yes = true;
+    let no = false;
     let fragments = [
-        ("a plain battery", accepted, body(tool, "")),
-        ("a battery that runs its helper", accepted, body(tool, &command)),
+        ("a plain battery", yes, yes, body(tool, "")),
+        ("a battery that runs its helper", yes, yes, body(tool, &command)),
         (
-            "a provider credential",
-            accepted,
+            "a provider credential this package owns",
+            yes,
+            yes,
             body(tool, &format!("{command}token_env = \"APPA_PROVIDER_PROBE\"\n")),
         ),
+        // Stricter than the loader on purpose. A battery is a fragment someone
+        // else wrote and a deployment installed; the loader is reading a file
+        // the operator wrote themselves, and tolerates more from it.
         (
-            "a credential outside the provider namespace",
-            refused,
-            body(tool, &format!("{command}token_env = \"PROBE_TOKEN\"\n")),
+            "a credential another package owns",
+            no,
+            yes,
+            body(tool, &format!("{command}token_env = \"APPA_PROVIDER_SLACK\"\n")),
         ),
-        // Stricter than the loader on purpose: both of these load, and neither
-        // belongs in a fragment a deployment installed from a marketplace.
         (
             "a url binding",
-            refused,
+            no,
+            yes,
             body(tool, "[externals.audience.probe]\nurl = \"http://127.0.0.1:9/x\"\n"),
         ),
         (
+            "a declaration without a name",
+            no,
+            yes,
+            body("[[policy.tool]]\ndelta = {}\n", ""),
+        ),
+        // Refused by both, each for its own reason: neither crate reads the
+        // other, so agreeing here is the thing worth holding.
+        (
             "a builtin binding",
-            refused,
+            no,
+            no,
             body(tool, "[externals.audience.probe]\nbuiltin = \"llm\"\n"),
         ),
         (
             "a root-only external setting",
-            refused,
+            no,
+            no,
             body(tool, "[externals]\ntimeout_ms = 5000\n"),
         ),
         (
+            "a credential outside the provider namespace",
+            no,
+            no,
+            body(tool, &format!("{command}token_env = \"PROBE_TOKEN\"\n")),
+        ),
+        (
             "a root-only policy section",
-            refused,
+            no,
+            no,
             body(&format!("{tool}\n[policy.audience]\nteam = []\n"), ""),
         ),
         (
             "a top-level table only a root carries",
-            refused,
+            no,
+            no,
             format!("[deployment]\nname = \"x\"\n{}", body(tool, "")),
         ),
-        ("no policy version", refused, format!("[policy]\n\n{tool}")),
-        (
-            "a declaration without a name",
-            refused,
-            body("[[policy.tool]]\ndelta = {}\n", ""),
-        ),
+        ("no policy version", no, no, format!("[policy]\n\n{tool}")),
     ];
 
-    for (what, expected, fragment) in fragments {
+    for (what, validates_expected, loads_expected, fragment) in fragments {
         let package = tempfile::tempdir().expect("a temp dir is creatable");
         std::fs::write(
             package.path().join("appa-package.toml"),
@@ -310,8 +328,9 @@ fn a_battery_that_validates_loads() {
         let loads = loads_beside_a_root(package.path());
 
         assert_eq!(
-            validates, expected,
-            "{what}: the marketplace changed its mind about this"
+            (validates, loads),
+            (validates_expected, loads_expected),
+            "{what}: the marketplace says {validates} and the loader says {loads}"
         );
         assert!(
             !validates || loads,

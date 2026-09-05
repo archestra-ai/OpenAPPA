@@ -227,10 +227,21 @@ impl RawBattery {
         }
         let mut namespaces = Vec::new();
         for namespace in &self.namespaces {
-            namespaces.push(Namespace::parse(namespace).map_err(|source| ManifestError::Namespace {
+            let namespace = Namespace::parse(namespace).map_err(|source| ManifestError::Namespace {
                 path: path.to_path_buf(),
                 source,
-            })?);
+            })?;
+            // A marketplace refuses two batteries over one namespace by
+            // comparing what each covers, and reads a repeat as a battery
+            // conflicting with itself. It is a malformed list, so it is
+            // refused where the list is read.
+            if namespaces.contains(&namespace) {
+                return Err(ManifestError::RepeatedNamespace {
+                    path: path.to_path_buf(),
+                    namespace: namespace.to_string(),
+                });
+            }
+            namespaces.push(namespace);
         }
         if namespaces.is_empty() {
             namespaces
@@ -394,6 +405,19 @@ mod tests {
             "namespaces = [\"mcp__github\"]\nhelpers = [\"audience-source.py\"]",
         ));
         assert!(matches!(refused, Err(ManifestError::Namespace { .. })));
+    }
+
+    /// A marketplace refuses two batteries over one namespace by comparing what
+    /// each covers, so a repeat inside one list reads as a battery conflicting
+    /// with itself. The list is malformed, and is refused where it is read.
+    #[test]
+    fn a_battery_may_not_declare_one_namespace_twice() {
+        let refused = manifest(&BATTERY.replace(
+            "helpers = [\"audience-source.py\"]",
+            "namespaces = [\"github\", \"github\"]\nhelpers = [\"audience-source.py\"]",
+        ));
+
+        assert!(matches!(refused, Err(ManifestError::RepeatedNamespace { .. })));
     }
 
     #[test]

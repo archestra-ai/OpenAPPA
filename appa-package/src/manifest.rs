@@ -26,6 +26,8 @@ pub enum ManifestError {
         #[source]
         source: NamespaceError,
     },
+    #[error("{path} declares the namespace `{namespace}` twice")]
+    RepeatedNamespace { path: PathBuf, namespace: String },
     #[error("{path} is not valid TOML: {source}")]
     Syntax {
         path: PathBuf,
