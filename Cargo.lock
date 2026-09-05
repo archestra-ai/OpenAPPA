@@ -104,7 +104,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "appa"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "appa-adapter-claude-code",
  "appa-adapter-kagent",
@@ -147,7 +147,7 @@ dependencies = [
 
 [[package]]
 name = "appa-adapter-claude-code"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "appa-runtime-api",
  "serde",
@@ -157,7 +157,7 @@ dependencies = [
 
 [[package]]
 name = "appa-adapter-kagent"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "appa-runtime-api",
  "serde",
@@ -167,7 +167,7 @@ dependencies = [
 
 [[package]]
 name = "appa-agent-python"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "appa",
  "appa-runtime-api",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "appa-builtin"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -191,7 +191,7 @@ dependencies = [
 
 [[package]]
 name = "appa-engine"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "proptest",
  "serde",
@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "appa-eventlog"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "appa-engine",
  "appa-policy",
@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "appa-example-agent"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "appa",
  "appa-runtime-api",
@@ -246,7 +246,7 @@ version = "0.0.0"
 
 [[package]]
 name = "appa-policy"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "appa-engine",
  "serde",
@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "appa-runtime-api"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "serde",
  "serde_json",

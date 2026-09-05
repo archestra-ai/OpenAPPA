@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Creates the kind cluster the live A2A matrix runs on and loads the three
+# Creates the kind cluster the live A2A matrix runs on and loads the four
 # demo images into it. Run it after the image builds and before
 # install.sh. It leaves the cluster as the current kubectl context.
 #
@@ -18,7 +18,8 @@ set -euo pipefail
 cluster=${KIND_CLUSTER:-appa-e2e}
 tag=${APPA_E2E_IMAGE_TAG:-ci}
 images=(
-  "appa-kagent-quickstart:$tag"
+  "appa-runtime:$tag"
+  "appa-kagent-adk:$tag"
   "appa-demo-tools:$tag"
   "appa-demo-mocks:$tag"
 )

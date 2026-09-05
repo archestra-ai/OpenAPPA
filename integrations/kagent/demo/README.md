@@ -5,7 +5,7 @@ The demo is a Helm chart, [chart/](chart/). It installs a gated
 `release-manager` the policy never names, so every delegation to it is
 denied. Optional Go twins (`cluster-ops-go`, `log-analyst-go`, and
 `release-manager-go`) are disabled by default. The shared `appa-runtime` runs
-in one pod with its relay and mock externals. The chart adds the demo
+in one pod with mock externals. The chart adds the demo
 tools and pre-seeds every demo case as a real chat in the kagent
 dashboard.
 
@@ -26,7 +26,7 @@ helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-c
 helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
   --set controller.agentImage.registry=ghcr.io \
-  --set controller.agentImage.repository=archestra-ai/appa-kagent-quickstart \
+  --set controller.agentImage.repository=archestra-ai/appa-kagent-adk \
   --set k8s-agent.enabled=false \
   --set kgateway-agent.enabled=false \
   --set istio-agent.enabled=false \
@@ -39,10 +39,10 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --set cilium-debug-agent.enabled=false \
   --force-conflicts \
   --wait --timeout 10m \
-  --set controller.agentImage.tag=0.10.0 # x-release-please-version
+  --set controller.agentImage.tag=0.11.0 # x-release-please-version
 
 # the demo
-APPA_VERSION=0.10.0 # x-release-please-version
+APPA_VERSION=0.11.0 # x-release-please-version
 helm upgrade --install appa-kagent-demo \
   "https://github.com/archestra-ai/OpenAPPA/releases/download/v${APPA_VERSION}/appa-kagent-demo-${APPA_VERSION}.tgz" \
   -n kagent \
@@ -68,25 +68,13 @@ itself — its instruction steers it to the sanitized result by default,
 and the chat can steer it to accept the change.
 
 That one `controller.agentImage` value puts every python-runtime
-declarative agent in the cluster on the quickstart image. Every
+declarative agent in the cluster on the OpenAPPA runtime image. Every
 `runtime: go` agent runs on the `golang-adk` name that kagent derives
 from it. kagent's stock sample agents (k8s, helm, istio, cilium, and
 observability) are disabled because the demo does not use them and they
 require a separate provider Secret. The demo agents set `APPA_ENABLED`
 themselves and point at the shared runtime, so a parent and its delegated
 child land in one trajectory.
-
-The bundled runtime loads the packaged policy
-([../examples/kagent.appa.toml](../examples/kagent.appa.toml)). That
-policy names seven demo tools, `ask_user`, and the entrypoint's two
-synthetic tools, and it carries no wildcard. So the runtime refuses at
-`ToolCall` every other tool call a gated sample agent makes. To gate a
-sample agent, set `APPA_ENABLED: "true"` in its
-`spec.declarative.deployment.env` and mount a policy that names its
-tools over `APPA_CONFIG`, or add a wildcard annotator. Only with the
-knob on does the entrypoint start the bundled runtime and load that
-policy. To gate a whole fleet at once, bake `ENV APPA_ENABLED=true`
-into a derived image and point `controller.agentImage` at it.
 
 ## What the chart deploys
 
@@ -98,17 +86,13 @@ authority (people out of band, ruling on the mock's side channel)
 answered by the mock externals ([mocks/](mocks/)), the delegated child
 as the spawn, and the `oncall` human-review authority.
 
-`appa-runtime` binds loopback only, by design, and a `url` binding in
-its policy takes cleartext http to loopback only. So the runtime pod
-carries three containers. The runtime listens on `127.0.0.1:18787`. An
-nginx relay on `:18789` fronts it: every agent reaches the relay
-through the `appa-runtime` Service, and the relay rewrites `Host` to a
-loopback value.
-The runtime's `/mcp` — the rmcp server behind the remedy tool —
-validates that value. The third container is the mocks. They bind
-`0.0.0.0:8081`, and the runtime reaches them at `127.0.0.1:8081`. The
-mocks' side channel is also a Service (`appa-demo-mocks`), so a board
-member outside the pod — or the e2e matrices — can rule.
+`appa-runtime` listens on `0.0.0.0:18787`, and every enabled Agent
+reaches it through the `appa-runtime` Service. A `url` binding in the
+policy still takes cleartext HTTP to loopback only, so the mocks run in
+the same pod. They bind `0.0.0.0:8081`, and the runtime reaches them at
+`127.0.0.1:8081`. The mocks' side channel is also a Service
+(`appa-demo-mocks`), so a board member outside the pod — or the e2e
+matrices — can rule.
 
 The `demo-tools` image builds from [Dockerfile](Dockerfile), the mocks
 from [mocks/Dockerfile](mocks/Dockerfile); the chart README covers

@@ -20,7 +20,7 @@ spec:
         {{- toYaml .Values.networkPolicy.ingress | nindent 8 }}
       ports:
         - protocol: TCP
-          port: relay
+          port: runtime
     # Keep the chart's own connection test usable. This peer is limited
     # to pods carrying this release's Helm identity in the same namespace.
     - from:
@@ -30,5 +30,5 @@ spec:
               app.kubernetes.io/instance: {{ .Release.Name | quote }}
       ports:
         - protocol: TCP
-          port: relay
+          port: runtime
 {{- end }}

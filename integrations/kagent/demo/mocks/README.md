@@ -208,8 +208,7 @@ self-signed in-cluster certificate fails verification and every
 consult becomes a no-answer — the gate fails closed. The wiring that
 works: run the mock in the same pod as `appa-runtime`, and bind
 `http://127.0.0.1:8081/...`. In the demo chart's runtime pod, the
-runtime listens on `127.0.0.1:18787`. In a quickstart pod, it listens
-on `127.0.0.1:8787`.
+runtime listens on `0.0.0.0:18787`.
 
 ## Where it runs
 

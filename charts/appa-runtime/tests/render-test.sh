@@ -4,6 +4,7 @@
 set -eu
 
 chart=$(cd "$(dirname "$0")/.." && pwd)
+app_version=$(sed -n 's/^appVersion: *"\([^"]*\)".*/\1/p' "$chart/Chart.yaml")
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
@@ -50,24 +51,57 @@ expect 1 '^kind: Deployment$'
 expect 1 '^kind: Service$'
 expect 1 '^kind: ServiceAccount$'
 must_contain 'image: ghcr.io/archestra-ai/appa-runtime:'
-must_contain 'nginx-unprivileged:1.27-alpine@sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0'
 must_contain '--batteries-dir'
 must_contain '/opt/appa/batteries'
+must_contain 'containerPort: 18787'
+must_contain 'targetPort: runtime'
+must_contain 'port: 18787'
+must_contain 'port: runtime'
+must_contain '0.0.0.0:18787'
+must_contain 'appa-runtime.appa.svc.cluster.local:18787'
+must_not_contain 'relay'
+must_not_contain 'nginx-unprivileged'
+must_not_contain '18789'
 must_not_contain '/var/lib/appa/batteries'
 must_not_contain '/var/lib/appa/release-batteries'
 must_not_contain 'kind: PersistentVolumeClaim'
 must_not_contain 'kind: NetworkPolicy'
+must_not_contain 'kind: Agent'
 must_contain 'emptyDir: {}'
 must_contain 'runAsNonRoot: true'
 must_contain 'runAsUser: 65532'
 must_contain 'readOnlyRootFilesystem: true'
-must_contain 'runAsUser: 101'
 must_contain 'checksum/policy:'
 must_contain 'name: APPA_CONFIG'
 must_contain 'value: "/etc/appa/appa.toml"'
-expect 2 '^          readinessProbe:$'
+must_contain 'mountPath: /var/run/appa/identity'
+must_contain 'path: pod-name'
+must_contain 'fieldPath: metadata.namespace'
+expect 1 '^          readinessProbe:$'
 expect 1 '^          livenessProbe:$'
 expect 1 '^          startupProbe:$'
+
+must_render --set appaGuide.enabled=true
+expect 1 '^kind: Agent$'
+must_contain 'name: appa-guide'
+must_contain 'namespace: "kagent"'
+must_contain "ref: \"v${app_version}\""
+must_contain 'http://appa-runtime.appa.svc.cluster.local:18787'
+must_contain 'name: "kagent-tool-server"'
+must_contain 'your first tool call must be skills with command appa-guide'
+must_contain 'Inventory Agents as JSON and RemoteMCPServers with a wide list'
+must_contain 'immediately call execute_remedy_plan with its exact offer id'
+must_contain 'copy pod_name and namespace from the same fetched Pod YAML'
+must_contain 'with k8s_apply_manifest over its complete observed spec'
+must_contain 'A request to protect an Agent'
+must_contain 'Never copy status'
+must_contain 'request itself'
+
+must_render --set appaGuide.enabled=true --set appaGuide.namespace=platform \
+  --set appaGuide.skill.ref=main --set appaGuide.modelConfig=platform-model
+must_contain 'namespace: "platform"'
+must_contain 'ref: "main"'
+must_contain 'modelConfig: "platform-model"'
 
 must_render --set persistence.enabled=true --set persistence.size=10Gi
 must_contain 'kind: PersistentVolumeClaim'
@@ -112,6 +146,6 @@ must_render --set networkPolicy.enabled=true \
   --set 'networkPolicy.ingress[0].podSelector.matchLabels.app=kagent-agent'
 must_contain 'kind: NetworkPolicy'
 must_contain 'app: kagent-agent'
-must_contain 'port: relay'
+must_contain 'port: runtime'
 
 echo "render-test: every case passed"

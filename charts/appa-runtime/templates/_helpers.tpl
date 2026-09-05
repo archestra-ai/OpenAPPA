@@ -50,14 +50,6 @@ app: appa-runtime
 {{- end -}}
 {{- end -}}
 
-{{- define "appa-runtime.relayImage" -}}
-{{- if .Values.relay.image.digest -}}
-{{- printf "%s:%s@%s" .Values.relay.image.repository .Values.relay.image.tag .Values.relay.image.digest -}}
-{{- else -}}
-{{- printf "%s:%s" .Values.relay.image.repository .Values.relay.image.tag -}}
-{{- end -}}
-{{- end -}}
-
 {{- define "appa-runtime.testImage" -}}
 {{- if .Values.test.image.digest -}}
 {{- printf "%s:%s@%s" .Values.test.image.repository .Values.test.image.tag .Values.test.image.digest -}}

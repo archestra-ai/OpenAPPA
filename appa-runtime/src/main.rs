@@ -11,7 +11,10 @@ use std::process::ExitCode;
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
-use axum::extract::State;
+use axum::extract::{ConnectInfo, Request, State};
+use axum::http::StatusCode;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use clap::Parser;
 use sha2::{Digest, Sha256};
@@ -65,19 +68,21 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:8787")]
     listen: SocketAddr,
 
+    /// Host headers accepted by the MCP endpoint. Empty keeps rmcp's
+    /// loopback defaults. Shared deployments name each Service address.
+    #[arg(
+        long = "mcp-allowed-host",
+        env = "APPA_MCP_ALLOWED_HOST",
+        value_delimiter = ',',
+        action = clap::ArgAction::Append
+    )]
+    mcp_allowed_hosts: Vec<String>,
+
     #[arg(long, value_enum, default_value_t = Adapter::ClaudeCode, global = true)]
     adapter: Adapter,
 
     #[arg(short, action = clap::ArgAction::Count)]
     verbose: u8,
-}
-
-fn require_loopback(addr: &SocketAddr) -> Result<(), String> {
-    if addr.ip().is_loopback() {
-        Ok(())
-    } else {
-        Err(format!("refusing to listen on non-loopback address {addr}"))
-    }
 }
 
 /// The adapter surface this binary can serve. The one place harness
@@ -303,10 +308,6 @@ async fn serve(args: Args) -> ExitCode {
 
     let config_path = args.config.unwrap_or_else(|| PathBuf::from("appa.toml"));
 
-    if let Err(refusal) = require_loopback(&args.listen) {
-        eprintln!("appa runtime: {refusal}");
-        return ExitCode::FAILURE;
-    }
     match ensure_default_config(&config_path) {
         Ok(true) => tracing::info!(path = %config_path.display(), "created default configuration"),
         Ok(false) => {}
@@ -346,15 +347,21 @@ async fn serve(args: Args) -> ExitCode {
         reload_gate: Arc::new(tokio::sync::Mutex::new(())),
         executable: ExecutableAtStart::of_this_process(),
     };
-    let app = axum::Router::new()
-        .route("/health", get(health))
+    let management = axum::Router::new()
         .route("/binary-fingerprint", get(binary_fingerprint))
         .route("/policy-key", get(policy_key))
-        .route("/batteries", get(batteries))
         .route("/status", get(status))
-        .route("/hook", post(hook))
         .route("/reload", post(reload))
-        .nest_service("/mcp", mcp::service(runtime))
+        .route_layer(axum::middleware::from_fn(loopback_management_only));
+    let app = axum::Router::new()
+        .route("/health", get(health))
+        .route("/batteries", get(batteries))
+        .route("/hook", post(hook))
+        .nest_service(
+            "/mcp",
+            mcp::service_with_allowed_hosts(runtime, &args.mcp_allowed_hosts),
+        )
+        .merge(management)
         .with_state(state);
 
     let listener = match tokio::net::TcpListener::bind(args.listen).await {
@@ -366,9 +373,9 @@ async fn serve(args: Args) -> ExitCode {
     };
     tracing::info!(
         listen = %args.listen,
-        "appa-runtime serving /hook, /mcp, /status, /reload, /health, /binary-fingerprint, /policy-key, and /batteries"
+        "appa-runtime serving /hook, /mcp, /health, and /batteries; management routes require loopback"
     );
-    let exit = match axum::serve(listener, app)
+    let exit = match axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(shutdown_signal())
         .await
     {
@@ -401,6 +408,21 @@ async fn shutdown_signal() {
     }
 }
 
+async fn loopback_management_only(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !management_peer_is_allowed(peer) {
+        return (StatusCode::FORBIDDEN, "management routes require a loopback peer").into_response();
+    }
+    next.run(request).await
+}
+
+fn management_peer_is_allowed(peer: SocketAddr) -> bool {
+    peer.ip().is_loopback()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,11 +448,32 @@ mod tests {
     }
 
     #[test]
-    fn a_non_loopback_listen_address_is_refused() {
-        assert!(require_loopback(&"127.0.0.1:8787".parse().expect("parses")).is_ok());
-        assert!(require_loopback(&"[::1]:8787".parse().expect("parses")).is_ok());
-        assert!(require_loopback(&"0.0.0.0:8787".parse().expect("parses")).is_err());
-        assert!(require_loopback(&"192.168.1.10:8787".parse().expect("parses")).is_err());
+    fn the_runtime_defaults_to_loopback_and_accepts_an_explicit_non_loopback_address() {
+        let default = Args::try_parse_from(["appa runtime"]).expect("the default runtime command parses");
+        assert_eq!(default.listen, "127.0.0.1:8787".parse().expect("the default parses"));
+
+        let shared = Args::try_parse_from(["appa runtime", "--listen", "0.0.0.0:18787"])
+            .expect("an explicit shared-runtime address parses");
+        assert_eq!(
+            shared.listen,
+            "0.0.0.0:18787".parse().expect("the shared address parses")
+        );
+        assert!(shared.mcp_allowed_hosts.is_empty());
+
+        let hosted = Args::try_parse_from([
+            "appa runtime",
+            "--mcp-allowed-host",
+            "appa-runtime.appa.svc.cluster.local:18787",
+        ])
+        .expect("an MCP Service host parses");
+        assert_eq!(hosted.mcp_allowed_hosts, ["appa-runtime.appa.svc.cluster.local:18787"]);
+    }
+
+    #[test]
+    fn management_routes_accept_only_loopback_peers() {
+        assert!(management_peer_is_allowed("127.0.0.1:1234".parse().unwrap()));
+        assert!(management_peer_is_allowed("[::1]:1234".parse().unwrap()));
+        assert!(!management_peer_is_allowed("10.0.0.8:1234".parse().unwrap()));
     }
 
     #[test]

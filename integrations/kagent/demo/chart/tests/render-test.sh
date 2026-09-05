@@ -9,6 +9,7 @@
 set -eu
 
 chart=$(cd "$(dirname "$0")/.." && pwd)
+app_version=$(sed -n 's/^appVersion: *"\([^"]*\)".*/\1/p' "$chart/Chart.yaml")
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
@@ -75,10 +76,38 @@ expect_env() {
 must_render kagent
 expect 2 '/opt/appa/batteries'
 expect 0 '/var/lib/appa/batteries'
+expect 1 "image: ghcr.io/archestra-ai/appa-runtime:${app_version}$"
+expect 1 '0\.0\.0\.0:18787'
+expect 1 '^            - "appa-runtime\.kagent\.svc\.cluster\.local:18787"$'
+expect 1 'containerPort: 18787'
+expect 1 'port: 18787, targetPort: runtime'
+expect 1 '^          startupProbe:$'
+expect 3 '^          readinessProbe:$'
+expect 3 'path: /health, port: runtime'
+expect 1 'fsGroup: 65532'
+expect 0 'name: migrate-data-ownership'
+expect 0 '18789|appa-runtime-relay|name: relay'
 expect 4 '^kind: Agent$'
 expect_env 1 APPA_CONFIG /etc/appa/demo.appa.toml
 expect 1 '^  name: appa-guide$'
+expect 1 "^        ref: \"v${app_version}\"$"
 expect 1 '/skills/appa-guide/references/kagent\.md'
+expect 1 'with offset 1 and limit 0. Follow'
+expect 1 'all read-only inspection and present the proposal without asking whether'
+expect 1 'your first tool call must be skills'
+expect 1 'has no label-selector argument. Fetch the appa-runtime-'
+expect 1 'Run every inspection call sequentially, never in parallel'
+expect 1 'until the full init checklist and comparison are complete'
+expect 1 'Inventory Agents across all namespaces with output json'
+expect 1 'execute_remedy_plan with its exact offer id'
+expect 1 'copy pod_name and namespace from the same'
+expect 1 'with k8s_apply_manifest over its complete observed spec'
+expect 1 'A request to protect an Agent is not approval'
+expect 1 'Never copy status or server-owned metadata'
+expect 1 'request itself is never approval'
+expect 1 '^            - name: APPA_GUIDE_RUNTIME_URL$'
+expect 1 'mountPath: /var/run/appa/identity'
+expect 1 'path: pod-name'
 expect 1 '^    name = "skills"$'
 expect 1 '^    name = "kagent__NS__log_analyst"$'
 expect 1 '^    name = "kagent__NS__log_analyst_go"$'
@@ -86,9 +115,11 @@ expect 1 '^    name = "kagent__NS__log_analyst_go"$'
 # Persistence adds the writable lookup path. An existing claim is used
 # without rendering a second claim.
 must_render kagent --set runtime.persistence.enabled=true \
-  --set runtime.persistence.existingClaim=team-appa
+  --set runtime.persistence.existingClaim=team-appa \
+  --set runtime.persistence.migrateOwnership=true
 expect 2 '/var/lib/appa/batteries'
 expect 2 '/var/lib/appa/release-batteries'
+expect 1 'name: migrate-data-ownership'
 expect 1 'claimName: "team-appa"'
 expect 0 '^kind: PersistentVolumeClaim$'
 
@@ -97,7 +128,8 @@ expect 0 '^kind: PersistentVolumeClaim$'
 # and runs ungated until APPA_ENABLED reads true, and this is a gated
 # demo, so every agent sets it.
 expect_env 4 APPA_ENABLED true
-expect 4 '^        - name: APPA_RUNTIME_URL$'
+expect_env 4 APPA_RUNTIME_URL http://appa-runtime.kagent.svc.cluster.local:18787
+expect 1 'never call ask_user'
 
 # A name that repeats another agent name fails the render, the fixed
 # cluster-ops and release-manager included.
@@ -110,12 +142,15 @@ must_refuse 'agent names collide' kagent --set agents.go.enabled=true --set agen
 # Enabling the Go cell adds its three optional agents.
 must_render kagent --set agents.go.enabled=true
 expect 7 '^kind: Agent$'
+expect_env 7 APPA_RUNTIME_URL http://appa-runtime.kagent.svc.cluster.local:18787
+expect 2 'never call ask_user'
 
 # The guide agent is its own switch, and it leaves the collision set: it
 # takes no value-derived name.
 must_render kagent --set guide.enabled=false
 expect 3 '^kind: Agent$'
 expect 0 '^  name: appa-guide$'
+expect_env 3 APPA_RUNTIME_URL http://appa-runtime.kagent.svc.cluster.local:18787
 must_render kagent --set agents.go.enabled=false --set agents.childName=release-manager-go
 must_refuse 'agent names collide' kagent --set agents.go.enabled=false --set agents.childName=log-analyst-go
 

@@ -68,7 +68,7 @@ echo "== helm install kagent $kagent_version"
 helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version "$kagent_version" -n "$namespace" \
   --set controller.agentImage.registry=docker.io \
-  --set controller.agentImage.repository=library/appa-kagent-quickstart \
+  --set controller.agentImage.repository=library/appa-kagent-adk \
   --set-string controller.agentImage.tag="$tag" \
   --set controller.agentImage.pullPolicy=Never \
   --set ui.replicas=0 \
@@ -92,7 +92,7 @@ helm upgrade --install appa-kagent-demo "$chart" -n "$namespace" \
   --set-string llm.model="$model" \
   --set-string llm.url="$base_url" \
   --set mocks.approvalWindowSeconds=2 \
-  --set runtime.image.repository=docker.io/library/appa-kagent-quickstart \
+  --set runtime.image.repository=docker.io/library/appa-runtime \
   --set-string runtime.image.tag="$tag" \
   --set runtime.image.pullPolicy=Never \
   --set tools.image.repository=docker.io/library/appa-demo-tools \
