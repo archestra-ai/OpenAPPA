@@ -107,7 +107,7 @@ def browser_context():
             try:
                 boot.get_by_text(label, exact=False).first.click(timeout=3000)
                 break
-            except Exception:
+            except playwright_api.TimeoutError:
                 pass
         boot.close()
         yield context
@@ -180,9 +180,16 @@ class Chat:
         the person's ruling on a human-review remedy."""
         deadline = time.time() + timeout_s
         while time.time() < deadline:
-            button = self.page.get_by_role("button", name=label)
+            button = self.page.get_by_role("button", name=label, exact=True)
             if button.count() and button.first.is_visible():
                 button.first.click()
+                if label == "Reject":
+                    reason = self.page.get_by_placeholder("Why are you rejecting this? (optional)")
+                    try:
+                        reason.wait_for(state="visible", timeout=5000)
+                    except playwright_api.TimeoutError:
+                        return True
+                    self.page.get_by_role("button", name="Reject", exact=True).click()
                 return True
             time.sleep(1.5)
         return False
@@ -211,7 +218,7 @@ class Chat:
                     if button.is_visible():
                         button.click()
                         self.page.wait_for_timeout(300)
-                except Exception:  # noqa: BLE001 - a card that re-rendered mid-click
+                except Exception:  # noqa: BLE001, S112 - a card that re-rendered mid-click
                     continue
         return self.page.inner_text("body")
 
@@ -262,11 +269,16 @@ class Board:
         """Wait for the consult on `tool` to be parked, then rule on it; None if none came."""
         deadline = time.time() + timeout_s
         while time.time() < deadline:
-            for entry in self.pending(tool):
-                body = json.dumps({"id": entry["id"], "ruling": ruling, "reason": "ruled by the matrix"}).encode()
-                request = urllib.request.Request(self.url + "/decide", data=body, headers={"content-type": "application/json"})
-                with urllib.request.urlopen(request, timeout=5):
-                    return entry
+            try:
+                for entry in self.pending(tool):
+                    body = json.dumps({"id": entry["id"], "ruling": ruling, "reason": "ruled by the matrix"}).encode()
+                    request = urllib.request.Request(
+                        self.url + "/decide", data=body, headers={"content-type": "application/json"}
+                    )
+                    with urllib.request.urlopen(request, timeout=5):
+                        return entry
+            except OSError:
+                pass
             time.sleep(0.5)
         return None
 
