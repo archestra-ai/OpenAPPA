@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.11.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.10.0...v0.11.0) (2026-09-05)
+
+
+### Features
+
+* **kagent:** use one remote OpenAPPA runtime ([#222](https://github.com/archestra-ai/OpenAPPA/issues/222)) ([417383c](https://github.com/archestra-ai/OpenAPPA/commit/417383cca925c1ad5472efb747f42a5a7ce07962))
+
+
+### Bug Fixes
+
+* **kagent:** resolve appa-guide reference path ([#220](https://github.com/archestra-ai/OpenAPPA/issues/220)) ([d29b332](https://github.com/archestra-ai/OpenAPPA/commit/d29b3327acdb56d9aa27244b4cd3013d14dd1d07))
+* **release:** derive chart test versions ([#223](https://github.com/archestra-ai/OpenAPPA/issues/223)) ([aeded73](https://github.com/archestra-ai/OpenAPPA/commit/aeded737ce11b3ec75e9d3a2e596df3236ac299e))
+* **release:** upload Helm charts separately ([#219](https://github.com/archestra-ai/OpenAPPA/issues/219)) ([57f16ff](https://github.com/archestra-ai/OpenAPPA/commit/57f16ffea1b3e88a9eb8c9dcf4ae5fd2666f962f))
+
+
+### Documentation
+
+* **kagent:** explain the default demo fleet ([#216](https://github.com/archestra-ai/OpenAPPA/issues/216)) ([082354e](https://github.com/archestra-ai/OpenAPPA/commit/082354e57dde2be083ae9618ad499462f4c18fda))
+
 ## [0.10.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.9.0...v0.10.0) (2026-09-04)
 
 
