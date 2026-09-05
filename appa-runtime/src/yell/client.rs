@@ -17,8 +17,10 @@ use hmac::Mac;
 
 use super::report::Finished;
 
-/// Where reports go. Empty until the receiver is deployed, which this build refuses cleanly
-/// rather than posting a session's decisions to a guess.
+/// Where reports go, compiled in. A release build always carries one — `build.rs` refuses to
+/// produce a release without it, because a binary that cannot send says nothing about why and
+/// the feature would ship inert. A development build carries none and refuses cleanly rather
+/// than posting a session's decisions to a guess.
 const ENDPOINT: &str = match option_env!("APPA_YELL_ENDPOINT") {
     Some(endpoint) => endpoint,
     None => "",
