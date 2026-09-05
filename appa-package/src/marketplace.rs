@@ -1,7 +1,7 @@
 //! The root marketplace manifest: what the marketplace holds and what each
 //! package tree must digest to.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -109,6 +109,8 @@ impl Marketplace {
 /// Why a set of packages cannot sit in one marketplace together.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum OwnershipError {
+    #[error("two batteries are named `{name}`")]
+    DuplicateName { name: PackageName },
     #[error("`{first}` and `{second}` both cover the namespace `{namespace}`")]
     SharedNamespace {
         first: PackageName,
@@ -144,6 +146,16 @@ pub fn check_ownership(packages: &[Package]) -> Result<(), OwnershipError> {
         })
         .collect();
 
+    // A name is what the other two rules are stated in terms of: one owns a
+    // credential prefix, and the other tells two packages apart. Two batteries
+    // sharing a name would defeat both, so it is refused before either runs.
+    let mut named: BTreeSet<&PackageName> = BTreeSet::new();
+    for (name, _) in &batteries {
+        if !named.insert(name) {
+            return Err(OwnershipError::DuplicateName { name: (*name).clone() });
+        }
+    }
+
     let mut owner: BTreeMap<&Namespace, &PackageName> = BTreeMap::new();
     for (name, namespaces) in &batteries {
         for namespace in *namespaces {
@@ -158,8 +170,8 @@ pub fn check_ownership(packages: &[Package]) -> Result<(), OwnershipError> {
     }
 
     // A prefix owns its own continuations, so `slack` would read every
-    // credential `slack-admin` reads. Names, not prefixes, are compared for
-    // identity: two batteries cannot share a name in one marketplace.
+    // credential `slack-admin` reads. Names are compared, not prefixes: a
+    // prefix owns itself, and the names are already known distinct.
     for (first, _) in &batteries {
         let prefix = first.credential_prefix();
         for (second, _) in &batteries {
@@ -352,6 +364,17 @@ mod tests {
     #[test]
     fn an_adapter_owns_nothing_a_battery_could_want() {
         assert!(check_ownership(&[adapter("claude-code"), battery("claude-code", &["claude-code"])]).is_ok());
+    }
+
+    /// Two batteries under one name own each other's credentials, and the two
+    /// rules below cannot see it: their namespaces may be disjoint, and a name
+    /// is what tells one package from another.
+    #[test]
+    fn two_batteries_may_not_share_a_name() {
+        assert!(matches!(
+            check_ownership(&[battery("slack", &["a"]), battery("slack", &["b"])]),
+            Err(OwnershipError::DuplicateName { .. })
+        ));
     }
 
     #[test]
