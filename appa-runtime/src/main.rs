@@ -87,8 +87,11 @@ struct Args {
 
 /// The adapter surface this binary can serve. The one place harness
 /// names appear in this crate: each variant maps to one codec crate.
+///
+/// Public because the MCP service is: the tools it serves name the harness in what they
+/// build, so a caller that mounts the service chooses one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub(crate) enum Adapter {
+pub enum Adapter {
     ClaudeCode,
     Kagent,
 }
@@ -327,12 +330,13 @@ async fn report(
         // nothing. That narrows the endpoint — no session can be asked for by name — without
         // making it a per-caller boundary. The recently active trajectory may well belong to
         // someone else's session on this machine, and loopback is the only thing between them.
-        selection: None,
+        selection: crate::yell::Selection::Recent,
         harness: state.adapter,
     };
     state
         .runtime
-        .report(request)
+        .report_off_thread(request)
+        .await
         .map(|finished| finished.plain)
         .map_err(|oversize| refuse(axum::http::StatusCode::PAYLOAD_TOO_LARGE, oversize.to_string()))
 }
@@ -417,7 +421,7 @@ async fn serve(args: Args) -> ExitCode {
         .route("/hook", post(hook))
         .nest_service(
             "/mcp",
-            mcp::service_with_allowed_hosts(runtime, &args.mcp_allowed_hosts),
+            mcp::service_with_allowed_hosts(runtime, &args.mcp_allowed_hosts, args.adapter),
         )
         .merge(management)
         .with_state(state);

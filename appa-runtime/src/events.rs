@@ -212,8 +212,10 @@ impl From<crate::consult::ConsultKind> for ExternalRole {
     }
 }
 
-/// A remedy carries the offer it executes; a report carries the dispatch it was released
-/// under. One shape with a single optional string could model neither honestly.
+/// Which control tool ran, with what identifies its act: a remedy carries the offer it
+/// executes and the dispatch it opened, where it opened one. Tagged by tool rather than
+/// flattened, so a second control tool's own identifiers are a variant and not another
+/// optional string on this one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "tool", rename_all = "snake_case")]
 pub(crate) enum ControlCall {

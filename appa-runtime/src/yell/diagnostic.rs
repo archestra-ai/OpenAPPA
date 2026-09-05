@@ -43,10 +43,20 @@ const MAX_FACT_BYTES: usize = 24 * 1024 * 1024;
 /// against something close to the emitted document rather than the facts alone.
 const ENTRY_OVERHEAD: usize = 32;
 
-/// Which trajectory an export is about: the root a vouched caller names, or — for a caller
-/// with no session of its own — whichever one was recently active. The runtime refuses to
-/// guess between several.
-pub(crate) type Selection = Option<TrajectoryId>;
+/// Which trajectory an export is about.
+///
+/// A caller never names one: `Vouched` carries the root the hook before the call attested,
+/// and `Recent` is for a caller with no session of its own, where the runtime takes whichever
+/// trajectory was recently active and refuses to guess between several.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Selection {
+    /// Whichever trajectory was recently active on this machine. What `appa yell` gets.
+    Recent,
+    /// The trajectory a hook vouched for, which is the one that made the call.
+    Vouched(TrajectoryId),
+    /// No trajectory at all: the agent asked for the rules alone.
+    RulesOnly,
+}
 
 /// How much of a trajectory an export may carry, when the caller has to fit it inside
 /// something this process cannot measure.
@@ -99,6 +109,9 @@ pub(crate) enum OmittedReason {
     LogUnavailable,
     /// The author could not reach a runtime at all, so there was nothing to ask.
     RuntimeUnavailable,
+    /// The author asked for the rules alone. An agent says whether its complaint is about a
+    /// session or about the policy, and this is the second answer.
+    NotRequested,
 }
 
 /// The rules, and the decisions made under them.
@@ -183,6 +196,12 @@ pub(crate) struct Export {
     pub(crate) events_dropped_through_seq: Option<u64>,
     pub(crate) deployment_events_dropped: u64,
     pub(crate) deployment_events_dropped_through_seq: Option<u64>,
+    /// What *this report's* event budget left out, and the sequence it runs through. Separate
+    /// from the four counters above, which are the log's own evictions: those happened to the
+    /// deployment, this happened to the document. Without it a report trimmed down to one
+    /// event reads exactly like a session that only ever had one.
+    pub(crate) events_trimmed: usize,
+    pub(crate) events_trimmed_through_seq: Option<u64>,
 }
 
 /// The deployment's rules, as far as a report may carry them.
@@ -341,10 +360,17 @@ pub(crate) fn build(source: Source<'_>, mode: Mode, budget: Budget) -> Projectio
         });
     }
     runtime_events.sort_by_key(|entry| entry.seq);
-    if let Some(cap) = budget.events {
-        let drop = runtime_events.len().saturating_sub(cap);
-        runtime_events.drain(..drop);
-    }
+    // The oldest go, and the document says so. The last dropped sequence rather than the first
+    // surviving one: a budget of zero drops everything and still has to leave a mark.
+    let events_trimmed = match budget.events {
+        Some(cap) => runtime_events.len().saturating_sub(cap),
+        None => 0,
+    };
+    let events_trimmed_through_seq = match events_trimmed {
+        0 => None,
+        trimmed => runtime_events.get(trimmed - 1).map(|entry| entry.seq),
+    };
+    runtime_events.drain(..events_trimmed);
 
     let export = Export {
         branches,
@@ -357,6 +383,8 @@ pub(crate) fn build(source: Source<'_>, mode: Mode, budget: Budget) -> Projectio
         events_dropped_through_seq: source.events.dropped_through_seq,
         deployment_events_dropped: source.events.deployment_dropped,
         deployment_events_dropped_through_seq: source.events.deployment_dropped_through_seq,
+        events_trimmed,
+        events_trimmed_through_seq,
     };
     Projection {
         policy,
@@ -520,7 +548,7 @@ mod tests {
     }
 
     fn project(runtime: &Runtime, root: &TrajectoryId, mode: Mode, budget: Budget) -> Projection {
-        runtime.projection(Some(root.clone()), mode, budget)
+        runtime.projection(Selection::Vouched(root.clone()), mode, budget)
     }
 
     fn export(runtime: &Runtime, root: &TrajectoryId, mode: Mode) -> Export {
@@ -679,6 +707,16 @@ mod tests {
             whole.runtime_events.last().map(|entry| entry.seq),
             "so does the newest event"
         );
+        // A one-event report and a session that only ever had one event are different things,
+        // and the document has to say which one it is.
+        assert_eq!(budgeted.events_trimmed, whole.runtime_events.len() - 1);
+        assert_eq!(
+            budgeted.events_trimmed_through_seq,
+            whole.runtime_events.get(whole.runtime_events.len() - 2).map(|e| e.seq),
+            "the hole runs through the last event left out"
+        );
+        assert_eq!(whole.events_trimmed, 0, "an untrimmed export says it was not trimmed");
+        assert_eq!(whole.events_trimmed_through_seq, None);
         // The budget only shortens: what the export says about the deployment is unchanged.
         assert_eq!(
             serde_json::to_value(&budgeted.branches).ok(),
@@ -701,7 +739,7 @@ mod tests {
                     .expect("the message is valid"),
                 author: crate::yell::Author::Cli,
                 mode: Mode::Pseudonymized,
-                selection: Some(root),
+                selection: Selection::Vouched(root),
                 harness: crate::runtime_cli::Adapter::ClaudeCode,
             })
             .expect("a recorded session fits a report");
@@ -854,6 +892,38 @@ mod tests {
         assert_eq!(
             resolve(crate::events::Recent::None),
             Err(OmittedReason::NoRecentTrajectory)
+        );
+    }
+
+    /// An agent that reports on the policy alone gets the policy alone — not the session it
+    /// happens to be running in, and not whichever session this machine ran most recently.
+    #[tokio::test]
+    async fn the_rules_alone_carry_the_policy_and_no_session() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let (runtime, root) = recorded_session(&dir).await;
+        assert!(
+            matches!(
+                project(&runtime, &root, Mode::Baseline, Budget::default()).trajectory,
+                Diagnostic::Present(_)
+            ),
+            "the session this one declines to export does export when asked for"
+        );
+
+        let projection = runtime.projection(Selection::RulesOnly, Mode::Baseline, Budget::default());
+        assert_eq!(
+            projection.counts(),
+            (0, 0),
+            "no fact and no event of a session nobody asked about"
+        );
+        assert!(matches!(
+            projection.trajectory,
+            Diagnostic::Omitted {
+                omitted_reason: OmittedReason::NotRequested
+            }
+        ));
+        assert!(
+            projection.policy.is_some(),
+            "the rules are the whole of what was asked for"
         );
     }
 }

@@ -679,9 +679,11 @@ static OFFER_OPENED: Table = Table {
     ],
 };
 
-/// `OfferAccepted` and `OfferInvalidated` carry the same two fields.
+/// `OfferAccepted` and `OfferInvalidated` carry the same two fields. The name is the shared
+/// one, not either variant's: it is what a drift report prints, and naming one of the two
+/// would file the other's drift under a fact it did not come from.
 static OFFER_LIFECYCLE: Table = Table {
-    name: "OfferAccepted",
+    name: "OfferLifecycle",
     entries: &[("trajectory", TRAJECTORY), ("offer", DIGEST)],
 };
 

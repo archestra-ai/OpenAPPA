@@ -256,6 +256,7 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
                     dispatch: opened,
                 }) => {
                     *dispatch = Some(opened);
+                    vouch_yell(runtime, &actor, &call);
                     HookDecision::AllowCall { spawn }
                 }
                 Ok(ToolCallDecision::Deny {
@@ -378,7 +379,7 @@ fn control_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall, ruling: O
     let acting = actor.child.clone().unwrap_or_else(|| actor.root.clone());
     match runtime.resolve_in(&actor.root, &quoted) {
         Some((_, pursuer)) if pursuer == acting => {
-            runtime.vouch(&quoted, actor, ruling);
+            runtime.vouch(&crate::api::PermitKey::offer(&quoted), actor, ruling);
             tracing::debug!(trajectory = %acting.0, "control tool names an offer this trajectory pursues");
             HookDecision::PassControl
         }
@@ -387,6 +388,31 @@ fn control_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall, ruling: O
             deny("this offer no longer stands; re-propose the call".to_string())
         }
     }
+}
+
+/// Record who is making a released `yell` call, so the tool can report on that session
+/// rather than on whichever one this machine ran most recently.
+///
+/// Only a released call: the vouch is what lets a report be built, so a `yell` the policy
+/// blocked must leave nothing behind for the tool to spend. Unlike the control tool, this is
+/// an ordinary checked call — it is a flow like any other, and the policy decides it first.
+fn vouch_yell(runtime: &Runtime, actor: &Actor, call: &ProposedCall) {
+    if !is_yell_tool(&call.tool) {
+        return;
+    }
+    let Some(args) = crate::yell::YellArgs::parse(&call.arguments) else {
+        tracing::debug!(trajectory = %actor.root.0, "yell proposed with arguments this build cannot read");
+        return;
+    };
+    runtime.vouch(&args.ticket(), actor, None);
+    tracing::debug!(trajectory = %actor.root.0, "yell vouched for this trajectory");
+}
+
+/// The runtime's own reporting tool, by the wire names its distribution channels produce.
+/// A lookalike on another server is an ordinary tool this never vouches for, so it reaches
+/// no session's decisions.
+fn is_yell_tool(tool: &str) -> bool {
+    tool == "yell" || tool == "mcp__appa__yell" || tool == "mcp__plugin_appa-runtime_appa__yell"
 }
 
 fn quoted_offer(call: &ProposedCall) -> Option<OfferId> {
@@ -784,7 +810,7 @@ mod tests {
             root: appa_runtime_api::TrajectoryId("cc:s1".to_string()),
             child: None,
         };
-        let quoted = OfferId("offer-1".to_string());
+        let quoted = crate::api::PermitKey::offer(&OfferId("offer-1".to_string()));
         runtime.vouch(&quoted, &actor, None);
 
         // Interrupted: neither PostToolUse nor Stop arrives.
@@ -796,7 +822,7 @@ mod tests {
         assert!(closed_as_unknown(&runtime), "the interrupted call closed as unreported");
         assert_eq!(
             runtime.take_vouched(&quoted),
-            None,
+            Err(crate::api::Unvouched::Nobody),
             "the interrupted turn's vouch is released"
         );
 
@@ -1323,5 +1349,116 @@ mod tests {
         let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
         assert_eq!(status, 409);
         assert_eq!(answer, serde_json::json!({"error": "PreToolUse without a tool call"}));
+    }
+
+    /// A deployment that declares the reporting tool, so a proposal of it is released rather
+    /// than refused as undeclared.
+    fn yelling_runtime(dir: &tempfile::TempDir) -> Runtime {
+        let text = r#"
+            [policy]
+            version = 2
+
+            [[policy.tool]]
+            name = "mcp__appa__yell"
+
+            [externals]
+            timeout_ms = 1000
+            max_body_bytes = 4096
+        "#;
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, text).expect("the fixture writes");
+        Runtime::open(
+            Config::load(&path).expect("the fixture validates"),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the fixture deployment opens")
+    }
+
+    fn yell_call(message: &str, with_trajectory: bool) -> serde_json::Value {
+        serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s1",
+            "tool_name": "mcp__appa__yell",
+            "tool_input": {"message": message, "with_trajectory": with_trajectory},
+        })
+    }
+
+    fn ticket(message: &str, with_trajectory: bool) -> crate::api::PermitKey {
+        crate::yell::YellArgs {
+            message: message.to_string(),
+            with_trajectory,
+        }
+        .ticket()
+    }
+
+    /// An MCP request names no session, so the report a `yell` builds is about whatever the
+    /// hook before it attested. Two sessions on one machine are what makes this matter.
+    #[tokio::test]
+    async fn a_released_yell_vouches_for_the_trajectory_that_made_it() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = yelling_runtime(&dir);
+        let released = hook(&runtime, &yell_call("the hook blocked", true)).await;
+        assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
+
+        assert_eq!(
+            runtime.take_vouched(&ticket("the hook blocked", true)),
+            Ok((
+                Actor {
+                    root: TrajectoryId("cc:s1".to_string()),
+                    child: None,
+                },
+                None
+            ))
+        );
+    }
+
+    /// The vouch is what lets a report be built at all, so a call the policy refused must
+    /// leave nothing behind for the tool to spend.
+    #[tokio::test]
+    async fn a_blocked_yell_vouches_for_nobody() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        // The default fixture declares no `yell` and has no wildcard: undeclared is refused.
+        let runtime = open_runtime(&dir);
+        let refused = hook(&runtime, &yell_call("the hook blocked", true)).await;
+        assert_ne!(refused.1["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(
+            runtime.take_vouched(&ticket("the hook blocked", true)),
+            Err(crate::api::Unvouched::Nobody)
+        );
+    }
+
+    /// The standing is for the call the hook saw. A tool that then reports something else is
+    /// spending a vouch that was never given for it.
+    #[tokio::test]
+    async fn a_yell_vouch_answers_only_the_call_it_was_given_for() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = yelling_runtime(&dir);
+        let released = hook(&runtime, &yell_call("the hook blocked", true)).await;
+        assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
+
+        let nobody = Err(crate::api::Unvouched::Nobody);
+        assert_eq!(runtime.take_vouched(&ticket("the hook blocked", false)), nobody);
+        assert_eq!(runtime.take_vouched(&ticket("something else", true)), nobody);
+        assert!(runtime.take_vouched(&ticket("the hook blocked", true)).is_ok());
+    }
+
+    /// One turn's standing, like the control tool's: the harness may decline the call after
+    /// the hook released it, and nothing later may spend what that turn left behind.
+    #[tokio::test]
+    async fn an_unspent_yell_vouch_does_not_outlive_its_turn() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = yelling_runtime(&dir);
+        hook(&runtime, &yell_call("the hook blocked", true)).await;
+
+        let actor = Actor {
+            root: TrajectoryId("cc:s1".to_string()),
+            child: None,
+        };
+        crate::hooks::handle(&runtime, HookEvent::TurnEnd { actor }).await;
+        assert_eq!(
+            runtime.take_vouched(&ticket("the hook blocked", true)),
+            Err(crate::api::Unvouched::Nobody)
+        );
     }
 }
