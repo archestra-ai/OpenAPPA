@@ -846,6 +846,40 @@ async def test_the_resumed_control_call_carries_the_persons_ruling(confirmed, ru
     assert again.requested == [] and "ruling" not in hook.events[-1]
 
 
+async def test_a_rejected_control_call_tells_the_model_the_action_did_not_run():
+    hook = Hook(DENY_WITH_REVIEW, {"decision": "pass_control"}, ACK)
+    plugin = plugin_over(hook)
+    session = FakeSession("s1")
+    await plugin.before_tool_callback(
+        tool=FakeTool("restart_deployment"),
+        tool_args={"name": "checkout-api"},
+        tool_context=FakeContext(session),
+    )
+    context = dispatch(session, "fc-rejected")
+    context.tool_confirmation = FakeConfirmation(False)
+    assert (
+        await plugin.before_tool_callback(
+            tool=FakeTool("execute_remedy_plan"),
+            tool_args={"offer_id": "offer-1"},
+            tool_context=context,
+        )
+        is None
+    )
+    returned = await plugin.after_tool_callback(
+        tool=FakeTool("execute_remedy_plan"),
+        tool_args={"offer_id": "offer-1"},
+        tool_context=context,
+        result={"content": [{"text": "blocked"}]},
+    )
+    assert returned == {
+        "result": (
+            "[appa] the operator rejected this request. The proposed call did not run. "
+            "Stop this operation; do not request or await approval again."
+        ),
+        "appa": "denied",
+    }
+
+
 async def test_a_control_call_for_an_offer_needing_no_person_never_asks():
     hook = Hook({"decision": "pass_control"})
     plugin = plugin_over(hook)

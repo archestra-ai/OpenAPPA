@@ -72,6 +72,10 @@ _REVIEW_PENDING = (
     "[appa] this remedy needs a person's ruling. The reviewer has been asked through the "
     "confirmation; wait for the answer and do not call the tool again."
 )
+_REVIEW_REJECTED = (
+    "[appa] the operator rejected this request. The proposed call did not run. "
+    "Stop this operation; do not request or await approval again."
+)
 
 RETURN_TOOL = "appa_return"
 """The name of the tool a child scope stops through.
@@ -152,6 +156,7 @@ class AppaPluginKagent(BasePlugin):
         # call that quotes one asks the person through kagent's own
         # confirmation before it crosses, and the answer rides the call.
         self._reviews: dict[str, str] = {}
+        self._rejected_controls: dict[str, set[str]] = {}
         # The return the gate crossed for a run, by invocation id, and
         # the exact bytes that crossed. The stop of that run then carries
         # those bytes, so the reply the child sends replays them. The
@@ -289,6 +294,7 @@ class AppaPluginKagent(BasePlugin):
         self._crossed.pop(invocation_id, None)
         self._scopes.pop(invocation_id, None)
         self._settled.pop(invocation_id, None)
+        self._rejected_controls.pop(invocation_id, None)
 
     # -- synthetic gates for the entrypoint wrappers ------------------
 
@@ -557,6 +563,10 @@ class AppaPluginKagent(BasePlugin):
             else:
                 ruling = "approve" if confirmation.confirmed else "deny"
                 self._reviews.pop(offer, None)
+                if ruling == "deny":
+                    call_id = _call_id(tool_context)
+                    if call_id is not None:
+                        self._rejected_controls.setdefault(tool_context.invocation_id, set()).add(call_id)
         await self._acquire_dispatch(root_id, child_id, tool_context)
         call = wire.tool_call(root_id, tool.name, _plain_json(tool_args), self._is_spawn(tool), child_id, ruling=ruling)
         try:
@@ -599,6 +609,14 @@ class AppaPluginKagent(BasePlugin):
             self._release_tool_dispatch(tool_context)
             return None
         root_id, child_id = self._ids(tool_context)
+        call_id = _call_id(tool_context)
+        rejected = bool(
+            call_id is not None and call_id in self._rejected_controls.get(tool_context.invocation_id, set())
+        )
+        if rejected:
+            self._rejected_controls[tool_context.invocation_id].discard(call_id)
+            if not self._rejected_controls[tool_context.invocation_id]:
+                self._rejected_controls.pop(tool_context.invocation_id)
         arguments = _plain_json(tool_args)
         # A result of None with no failure is a deferred or long-running
         # call. Nothing entered attention, and the dispatch is genuinely
@@ -621,6 +639,8 @@ class AppaPluginKagent(BasePlugin):
                 raise AppaFailClosed(f"appa answered the spawn result with {decision.detail or decision.kind}")
             decision = await self._post(wire.tool_result(root_id, tool.name, arguments, outcome, child_id))
             if decision.kind == "ack":
+                if rejected:
+                    return {"result": _REVIEW_REJECTED, _DENY_KEY: _DENIED}
                 return None
             if decision.kind == "replace_output":
                 return {"result": decision.output}
