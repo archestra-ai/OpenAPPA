@@ -12,11 +12,12 @@ kagent v0.9.12. The dashboard driver and Go cell stay with
 
 ## Run it
 
-Build the three images at the tag the scripts load, from the repository
+Build the four images at the tag the scripts load, from the repository
 root:
 
 ```sh
-docker build -f integrations/kagent/appa-kagent-quickstart/Dockerfile -t appa-kagent-quickstart:ci .
+docker build -f appa-runtime/Dockerfile -t appa-runtime:ci .
+docker build -t appa-kagent-adk:ci integrations/kagent/appa-kagent-adk
 docker build -t appa-demo-tools:ci integrations/kagent/demo
 docker build -t appa-demo-mocks:ci integrations/kagent/demo/mocks
 ```
@@ -31,7 +32,7 @@ OPENROUTER_API_KEY=… ./install.sh         # kagent 0.9.12, then the demo chart
 
 `kind-up.sh` keeps a cluster that already carries the name and leaves it
 as the current kubectl context. `install.sh` installs kagent with the
-agent image pointed at the loaded `appa-kagent-quickstart:ci`, turns off
+agent image pointed at the loaded `appa-kagent-adk:ci`, turns off
 the UI, ten sample agents and three bundled tool charts, and installs the
 demo chart without the guide, go cell or seed Job. It waits for
 `appa-runtime`, `demo-tools` and the three agent Deployments the kagent
@@ -63,7 +64,7 @@ and the first live run is what confirms it.
 
 ## In CI
 
-The workflow job builds the three images, then runs these same three
+The workflow job builds the four images, then runs these same three
 scripts. It runs only when a maintainer adds the `run-e2e` label to the pull
 request and the changed paths touch the stack. Fork pull requests never
 run it, because it needs `OPENROUTER_API_KEY`. Remove the label and add

@@ -1,7 +1,5 @@
-# The shared appa-runtime pod: the runtime binds loopback only, by design;
-# the relay gives it the cluster address every agent uses (rewriting Host
-# to a loopback value, which /mcp validates); the mock externals answer
-# the policy's URL bindings over the pod's loopback.
+# The shared appa-runtime pod: the runtime serves agents directly while
+# the mock externals answer the policy's URL bindings over pod loopback.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -36,7 +34,7 @@ spec:
             - --db
             - /var/lib/appa/appa.db
             - --listen
-            - 127.0.0.1:18787
+            - 0.0.0.0:18787
             {{- if .Values.runtime.persistence.enabled }}
             - --batteries-dir
             - /var/lib/appa/batteries
@@ -64,20 +62,12 @@ spec:
                 secretKeyRef:
                   name: {{ include "appa-demo.secretName" . | quote }}
                   key: OPENAI_API_KEY
+          ports:
+            - { name: runtime, containerPort: 18787 }
           volumeMounts:
             - { name: policy, mountPath: /etc/appa, readOnly: true }
             - { name: data, mountPath: /var/lib/appa }
             - { name: runtime-identity, mountPath: /var/run/appa/identity, readOnly: true }
-        - name: relay
-          image: {{ .Values.relay.image.repository }}:{{ .Values.relay.image.tag }}
-          imagePullPolicy: {{ .Values.relay.image.pullPolicy }}
-          ports:
-            - { name: relay, containerPort: 18789 }
-          readinessProbe:
-            httpGet: { path: /health, port: relay }
-            periodSeconds: 5
-          volumeMounts:
-            - { name: relay, mountPath: /etc/nginx/conf.d, readOnly: true }
         - name: mocks
           image: {{ include "appa-demo.image" (dict "image" .Values.mocks.image "root" .) }}
           imagePullPolicy: {{ .Values.mocks.image.pullPolicy }}
@@ -90,8 +80,6 @@ spec:
       volumes:
         - name: policy
           configMap: { name: appa-runtime-policy }
-        - name: relay
-          configMap: { name: appa-runtime-relay }
         - name: data
           {{- if .Values.runtime.persistence.enabled }}
           persistentVolumeClaim: { claimName: {{ .Values.runtime.persistence.existingClaim | default "appa-runtime-data" | quote }} }
@@ -114,7 +102,7 @@ metadata:
 spec:
   selector: { app: appa-runtime }
   ports:
-    - { name: relay, port: 18789, targetPort: relay }
+    - { name: runtime, port: 18787, targetPort: runtime }
 ---
 # The mocks' side channel (the change board's /pending and /decide), for a
 # board member — or the e2e matrices — outside the pod.

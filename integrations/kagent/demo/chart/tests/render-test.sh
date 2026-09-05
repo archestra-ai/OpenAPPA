@@ -76,6 +76,10 @@ must_render kagent
 expect 2 '/opt/appa/batteries'
 expect 0 '/var/lib/appa/batteries'
 expect 1 'image: ghcr.io/archestra-ai/appa-runtime:0\.10\.0$'
+expect 1 '0\.0\.0\.0:18787'
+expect 1 'containerPort: 18787'
+expect 1 'port: 18787, targetPort: runtime'
+expect 0 '18789|appa-runtime-relay|name: relay'
 expect 4 '^kind: Agent$'
 expect_env 1 APPA_CONFIG /etc/appa/demo.appa.toml
 expect 1 '^  name: appa-guide$'
@@ -111,7 +115,7 @@ expect 0 '^kind: PersistentVolumeClaim$'
 # and runs ungated until APPA_ENABLED reads true, and this is a gated
 # demo, so every agent sets it.
 expect_env 4 APPA_ENABLED true
-expect 4 '^        - name: APPA_RUNTIME_URL$'
+expect_env 4 APPA_RUNTIME_URL http://appa-runtime.kagent.svc.cluster.local:18787
 
 # A name that repeats another agent name fails the render, the fixed
 # cluster-ops and release-manager included.
@@ -124,12 +128,14 @@ must_refuse 'agent names collide' kagent --set agents.go.enabled=true --set agen
 # Enabling the Go cell adds its three optional agents.
 must_render kagent --set agents.go.enabled=true
 expect 7 '^kind: Agent$'
+expect_env 7 APPA_RUNTIME_URL http://appa-runtime.kagent.svc.cluster.local:18787
 
 # The guide agent is its own switch, and it leaves the collision set: it
 # takes no value-derived name.
 must_render kagent --set guide.enabled=false
 expect 3 '^kind: Agent$'
 expect 0 '^  name: appa-guide$'
+expect_env 3 APPA_RUNTIME_URL http://appa-runtime.kagent.svc.cluster.local:18787
 must_render kagent --set agents.go.enabled=false --set agents.childName=release-manager-go
 must_refuse 'agent names collide' kagent --set agents.go.enabled=false --set agents.childName=log-analyst-go
 

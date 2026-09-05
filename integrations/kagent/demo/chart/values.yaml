@@ -19,10 +19,9 @@ openai:
 modelConfig:
   name: appa-demo-model
 
-# The shared appa-runtime: one pod carrying the runtime (loopback only, by
-# design), the relay that gives it a cluster address, and the mock
-# externals it consults over loopback — the proxy-pair topology in one
-# pod. Every demo agent points at the relay.
+# The shared appa-runtime: one pod carrying the runtime, exposed directly
+# at :18787, and the mock externals it consults over loopback. Every demo
+# agent points at the runtime Service.
 runtime:
   image:
     repository: ghcr.io/archestra-ai/appa-runtime
@@ -51,12 +50,6 @@ llm:
   # The OpenAI-compatible endpoint for that model. HTTPS works anywhere;
   # cleartext HTTP works on loopback only.
   url: ""
-
-relay:
-  image:
-    repository: nginx
-    tag: 1.27-alpine
-    pullPolicy: IfNotPresent
 
 mocks:
   image:
@@ -105,9 +98,9 @@ agents:
   # The python child cluster-ops delegates to.
   childName: log-analyst
   # The go cell: a twin of cluster-ops on kagent's go runtime, gated by
-  # the go plugin. kagent derives its image from the python one — the
-  # last path segment becomes `golang-adk` — so it needs that image
-  # beside appa-kagent-quickstart (the chart README shows the build).
+  # the go plugin. On kagent 0.9.12, the controller derives its image
+  # from controller.agentImage by replacing the last path segment with
+  # `golang-adk`, so the alias must be published beside appa-kagent-adk.
   go:
     enabled: false
     name: cluster-ops-go

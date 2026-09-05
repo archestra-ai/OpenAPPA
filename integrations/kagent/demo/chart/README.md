@@ -4,7 +4,7 @@ OpenAPPA on kagent, as a demo you can install in any cluster.
 The chart deploys a gated `cluster-ops` fleet of three agents:
 `cluster-ops`, its delegated `log-analyst`, and a `release-manager` the
 policy never names. Optional Go twins are disabled by default. It deploys the shared
-`appa-runtime` in one pod with its relay and mock externals, and the
+`appa-runtime` in one pod with mock externals, and the
 demo tools. It pre-seeds every demo case as a real chat in the
 dashboard (sixteen captured transcripts).
 Two inputs are yours: the images (published at each release, or built
@@ -29,7 +29,7 @@ helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-c
 helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
   --set controller.agentImage.registry=ghcr.io \
-  --set controller.agentImage.repository=archestra-ai/appa-kagent-quickstart \
+  --set controller.agentImage.repository=archestra-ai/appa-kagent-adk \
   --set k8s-agent.enabled=false \
   --set kgateway-agent.enabled=false \
   --set istio-agent.enabled=false \
@@ -111,7 +111,7 @@ structured outputs.
 | `seed.enabled` | `true` | Replay the showcase chats into `cluster-ops` after install. The go twin gets none. |
 | `seed.controllerUrl` | `""` | The kagent controller the seed Job posts to. Empty means `kagent-controller` in the release namespace. |
 | `agents.childName` | `log-analyst` | The python child `cluster-ops` delegates to. The policy names it `<namespace>__NS__<childName>`, hyphens as underscores. |
-| `agents.go.enabled` | `true` | Also render the go cell: `cluster-ops-go`, `log-analyst-go`, and `release-manager-go` on kagent's go runtime (needs the published `golang-adk` image beside the python one). |
+| `agents.go.enabled` | `false` | Also render the go cell: `cluster-ops-go`, `log-analyst-go`, and `release-manager-go` on kagent's go runtime (needs the published `golang-adk` alias beside `appa-kagent-adk`). |
 | `agents.go.childName` | `log-analyst-go` | The go child `cluster-ops-go` delegates to. The policy names it the same way. |
 | `guide.enabled` | `true` | Install the `appa-guide` agent: the routing skill over the kagent tool server's k8s tools, gated by the shared runtime. |
 | `guide.skill.git.*` | this repo, `v<appVersion>`, `integrations/appa-guide` | Where kagent clones the canonical skill. An empty ref pins the release tag; set a ref explicitly for development. Claude packaging stages the same directory into its plugin. The cluster must reach the repo (or a fork). |
@@ -128,11 +128,10 @@ the controller compile it again.
 
 ```
 three agents (cluster-ops, log-analyst, and release-manager; optional Go twins)
-                                  ──APPA_RUNTIME_URL──▶ Service appa-runtime:18789
-                                                        │ pod appa-runtime
-                                                        ├─ relay (nginx)     :18789 → 127.0.0.1:18787, Host rewritten
-                                                        ├─ runtime (appa)    127.0.0.1:18787, policy from ConfigMap
-                                                        └─ mocks             0.0.0.0:8081, reached at 127.0.0.1:8081 —
+                                  ──APPA_RUNTIME_URL──▶ Service appa-runtime:18787
+                                                         │ pod appa-runtime
+                                                         ├─ runtime (appa)    0.0.0.0:18787, policy from ConfigMap
+                                                         └─ mocks             0.0.0.0:8081, reached at 127.0.0.1:8081 —
                                                                               annotator, release window, change board
                                                                               (+ Service appa-demo-mocks)
 demo-tools (Deployment + RemoteMCPServer) ◀── the agents' MCP tools
@@ -141,17 +140,16 @@ appa-guide Agent ── appa-guide skill (gitRefs) + kagent-tool-server k8s tool
 seed Job (post-install) ──▶ kagent-controller /api/sessions, /api/tasks
 ```
 
-The runtime binds loopback only and its URL externals must be loopback,
-so the relay and the mocks are its sidecars (the plan's
-[Demo chart](../../IMPLEMENTATION.md#demo-chart) section).
+The runtime serves agents directly on `0.0.0.0:18787`. Its URL externals
+remain loopback-only, so the mocks stay in the same pod.
 
 ## Images
 
-The release workflow publishes six images to `ghcr.io/archestra-ai` at
-the release version: `appa-runtime`, `appa-kagent-quickstart`,
-`appa-kagent-adk`, `appa-kagent-adk-go`, `appa-demo-tools`, and
-`appa-demo-mocks`. The first two support `linux/amd64` and
-`linux/arm64`. The other four support `linux/amd64`. It also publishes
+The demo uses five images published to `ghcr.io/archestra-ai` at the
+release version: `appa-runtime`, `appa-kagent-adk`,
+`appa-kagent-adk-go`, `appa-demo-tools`, and `appa-demo-mocks`.
+`appa-runtime` supports `linux/amd64` and `linux/arm64`. The other four
+support `linux/amd64`. The release also publishes
 `golang-adk` at that version, on the same digest as
 `appa-kagent-adk-go`. kagent's controller derives the Go runtime image
 under that name.
@@ -167,11 +165,11 @@ run a tree no release published (or load the images into kind, below).
 
 ```sh
 docker build -f appa-runtime/Dockerfile -t appa-runtime:dev .
-docker build -f integrations/kagent/appa-kagent-quickstart/Dockerfile -t appa-kagent-quickstart:dev .
+docker build -t appa-kagent-adk:dev integrations/kagent/appa-kagent-adk
 docker build -t appa-demo-tools:dev integrations/kagent/demo
 docker build -t appa-demo-mocks:dev integrations/kagent/demo/mocks
 docker build -t golang-adk:dev integrations/kagent/appa-kagent-adk-go   # the go cell: kagent derives this name
-kind load docker-image appa-runtime:dev appa-kagent-quickstart:dev appa-demo-tools:dev appa-demo-mocks:dev golang-adk:dev --name <cluster>
+kind load docker-image appa-runtime:dev appa-kagent-adk:dev appa-demo-tools:dev appa-demo-mocks:dev golang-adk:dev --name <cluster>
 APPA_VERSION=0.10.0 # x-release-please-version
 helm upgrade --install appa-kagent-demo \
   "https://github.com/archestra-ai/OpenAPPA/releases/download/v${APPA_VERSION}/appa-kagent-demo-${APPA_VERSION}.tgz" \
@@ -182,7 +180,7 @@ helm upgrade --install appa-kagent-demo \
   --set mocks.image.repository=docker.io/library/appa-demo-mocks --set mocks.image.tag=dev --set mocks.image.pullPolicy=Never
 ```
 
-(with kagent's `controller.agentImage` set to `docker.io/library/appa-kagent-quickstart:dev`, `pullPolicy: Never`.)
+(with kagent's `controller.agentImage` set to `docker.io/library/appa-kagent-adk:dev`, `pullPolicy: Never`.)
 
 ## Verify
 

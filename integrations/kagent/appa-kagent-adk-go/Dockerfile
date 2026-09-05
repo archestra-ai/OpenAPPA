@@ -3,7 +3,7 @@
 # `APPA_ENABLED` is true. The image leaves that knob unset, so it
 # serves the stock runtime. kagent's controller derives this image's
 # name from the python one — the last path segment becomes
-# `golang-adk` — so tag it beside appa-kagent-quickstart.
+# `golang-adk` — so tag that alias beside appa-kagent-adk.
 # Each FROM and COPY --from pins its base image by digest. The tag beside the digest names the version.
 FROM golang:1.26-bookworm@sha256:9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f600387b5128b12c199f81 AS build
 WORKDIR /src

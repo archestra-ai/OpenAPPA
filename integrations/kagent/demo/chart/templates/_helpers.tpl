@@ -8,9 +8,9 @@
 {{- .Values.openai.existingSecret | default .Values.modelConfig.name -}}
 {{- end -}}
 
-{{/* Where every agent reaches the shared runtime: the relay's Service. */}}
+{{/* Where every agent reaches the shared runtime Service. */}}
 {{- define "appa-demo.runtimeUrl" -}}
-{{- printf "http://appa-runtime.%s.svc.cluster.local:18789" .Release.Namespace -}}
+{{- printf "http://appa-runtime.%s.svc.cluster.local:18787" .Release.Namespace -}}
 {{- end -}}
 
 {{- define "appa-demo.controllerUrl" -}}
