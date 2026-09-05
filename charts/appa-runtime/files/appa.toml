@@ -45,12 +45,16 @@ delta = {}
 trust = "trusted"
 attention = ["human-approval"]
 
+[[policy.annotator]]
+name = "appa-guide-command"
+ranks = ["trusted"]
+audiences = []
+marks = ["human-approval"]
+effects = []
+
 [[policy.tool]]
 name = "k8s_execute_command"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
+annotator = "appa-guide-command"
 
 [[policy.tool]]
 name = "helm_list_releases"
@@ -77,7 +81,7 @@ trust = "trusted"
 attention = ["human-approval"]
 
 [[policy.tool]]
-name = "appa-guide"
+name = "skills"
 delta = {}
 
 [[policy.tool]]
@@ -97,3 +101,6 @@ max_body_bytes = 65536
 
 [externals.authorities.oncall]
 builtin = "hitl"
+
+[externals.annotators.appa-guide-command]
+command = ["/usr/local/bin/appa-guide-command-annotator"]

@@ -105,6 +105,8 @@ jobs:
               - 'scripts/appa-install-test.sh'
               - 'scripts/appa-refresh-batteries.py'
               - 'scripts/test_appa_refresh_batteries.py'
+              - 'scripts/appa-guide-runtime.py'
+              - 'scripts/test_appa_guide_runtime.py'
               - '.github/actions/check-release-versions/**'
               - '.github/release-please/**'
               - '.github/workflows/ci.yml'
@@ -164,7 +166,9 @@ jobs:
               - 'integrations/claude-code/**'
               - 'integrations/appa-guide/**'
               - 'scripts/appa-refresh-batteries.py'
-              # The root ignore file shapes the quickstart build context.
+              - 'scripts/appa-guide-runtime.py'
+              - 'scripts/test_appa_guide_runtime.py'
+              # The root ignore file shapes the runtime build context.
               - '.dockerignore'
 
   plugin-checks:
@@ -234,7 +238,7 @@ jobs:
           done
 
       - name: Test release battery refresh
-        run: python3 -m unittest scripts/test_appa_refresh_batteries.py
+        run: python3 -m unittest scripts/test_appa_refresh_batteries.py scripts/test_appa_guide_runtime.py
 
       - name: Check release versions
         uses: ./.github/actions/check-release-versions
@@ -736,13 +740,14 @@ jobs:
   # same-named twin would report skipped beside a real failure and
   # satisfy the requirement anyway, which is how a twin masks red e2e.
   #
-  # All 17 A2A cases against a real model on a kind cluster. Each test gets
+  # All 18 A2A cases against a real model on a kind cluster. Each test gets
   # three total attempts; a test that exhausts them fails the gate.
   #
   # The steps below own the runner. The scripts under e2e/ci own the stack:
-  #   kind-up.sh    loads the three `:ci` images into the cluster. It keeps
+  #   kind-up.sh    loads the four `:ci` images into the cluster. It keeps
   #                 the cluster the action above creates.
-  #   install.sh    installs kagent and the demo chart, then waits for rollout.
+  #   install.sh    installs kagent, the runtime chart and the fixture chart,
+  #                 then waits for rollout.
   #   run-a2a.sh    port-forwards the agent and the mocks, runs the cases,
   #                 and writes the model and the timings to the step summary.
   # Each script reads the environment this job exports. e2e/ci/README.md
@@ -765,12 +770,13 @@ jobs:
       KIND_CLUSTER: appa-e2e
       KAGENT_VERSION: "0.9.12"
       APPA_E2E_NAMESPACE: kagent
+      APPA_E2E_RUNTIME_NAMESPACE: appa
       APPA_E2E_IMAGE_TAG: ci
       # The load leaves each image in the daemon and in the cluster node,
       # so the script drops the daemon copy.
       APPA_E2E_PRUNE_DAEMON_IMAGES: "1"
-      # One endpoint serves the agents and the policy's sanitizers. This is
-      # the same model and endpoint as the public playground.
+      # The Agent model uses the same endpoint as the public playground.
+      # Demo sanitizers are deterministic mock policy services.
       APPA_E2E_MODEL: openai/gpt-5.6-luna
       APPA_E2E_BASE_URL: https://openrouter.ai/api/v1
     steps:
@@ -788,23 +794,26 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
-      - name: Test the quickstart entrypoint
-        run: |
-          shellcheck -s bash integrations/kagent/appa-kagent-quickstart/entrypoint.sh
-          shellcheck -s sh integrations/kagent/appa-kagent-quickstart/test-entrypoint.sh
-          sh integrations/kagent/appa-kagent-quickstart/test-entrypoint.sh
-
-      # These three builds read the cache the images job writes. They never
+      # These builds read the cache the images job writes. They never
       # write it: two jobs writing one scope in one run overwrite each other.
-      - name: Build the quickstart image
+      - name: Build the shared runtime image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
-          file: integrations/kagent/appa-kagent-quickstart/Dockerfile
-          tags: appa-kagent-quickstart:${{ env.APPA_E2E_IMAGE_TAG }}
+          file: appa-runtime/Dockerfile
+          tags: appa-runtime:${{ env.APPA_E2E_IMAGE_TAG }}
           load: true
           push: false
-          cache-from: type=gha,scope=appa-kagent-quickstart
+          cache-from: type=gha,scope=appa-runtime
+
+      - name: Build the Python plugin image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/appa-kagent-adk
+          tags: appa-kagent-adk:${{ env.APPA_E2E_IMAGE_TAG }}
+          load: true
+          push: false
+          cache-from: type=gha,scope=appa-kagent-adk
 
       - name: Build the demo tools image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -837,7 +846,7 @@ jobs:
       - name: Load the images into the cluster
         run: bash integrations/kagent/e2e/ci/kind-up.sh
 
-      - name: Install kagent and the demo chart
+      - name: Install kagent, runtime and demo fixtures
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: bash integrations/kagent/e2e/ci/install.sh
@@ -847,7 +856,7 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Run all 17 A2A cases
+      - name: Run all 18 A2A cases
         id: live-e2e
         run: bash integrations/kagent/e2e/ci/run-a2a.sh
 
@@ -859,10 +868,12 @@ jobs:
         run: |
           mkdir -p "$DIAGNOSTICS_DIR"
           kubectl get pods -A -o wide > "$DIAGNOSTICS_DIR/pods.txt" 2>&1 || true
-          kubectl describe pods -n "$APPA_E2E_NAMESPACE" > "$DIAGNOSTICS_DIR/describe.txt" 2>&1 || true
-          for pod in $(kubectl get pods -n "$APPA_E2E_NAMESPACE" -o name || true); do
-            kubectl logs -n "$APPA_E2E_NAMESPACE" "$pod" --all-containers --tail=2000 \
-              > "$DIAGNOSTICS_DIR/${pod##*/}.log" 2>&1 || true
+          for namespace in "$APPA_E2E_RUNTIME_NAMESPACE" "$APPA_E2E_NAMESPACE"; do
+            kubectl describe pods -n "$namespace" > "$DIAGNOSTICS_DIR/describe-$namespace.txt" 2>&1 || true
+            for pod in $(kubectl get pods -n "$namespace" -o name || true); do
+              kubectl logs -n "$namespace" "$pod" --all-containers --tail=2000 \
+                > "$DIAGNOSTICS_DIR/$namespace-${pod##*/}.log" 2>&1 || true
+            done
           done
           df -h /
 
@@ -875,11 +886,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # All six published images get an amd64 build here on every change
+  # All published images get an amd64 build here on every change
   # that can break them. Publishing itself happens in release.yml.
-  #
-  # The quickstart image compiles the runtime in release mode with no cargo
-  # cache inside the build, so the timeout allows a cold four-core build.
   kagent-images-build:
     name: kagent Images Build
     needs: changes
@@ -915,13 +923,13 @@ jobs:
       - name: Smoke-test the shared runtime image
         run: |
           docker run --detach --name appa-runtime-ci \
+            --publish 127.0.0.1:18787:18787 \
             --volume "$PWD/charts/appa-runtime/files/appa.toml:/etc/appa/appa.toml:ro" \
             appa-runtime:ci
           trap 'docker rm --force appa-runtime-ci >/dev/null 2>&1 || true' EXIT
           healthy=false
           for _ in $(seq 1 60); do
-            if docker exec appa-runtime-ci python3 -c \
-              'import urllib.request; urllib.request.urlopen("http://127.0.0.1:18787/health", timeout=2).read()'; then
+            if curl --fail --silent http://127.0.0.1:18787/health >/dev/null; then
               healthy=true
               break
             fi
@@ -935,23 +943,10 @@ jobs:
             docker logs appa-runtime-ci
             exit 1
           fi
-          docker exec appa-runtime-ci python3 -c \
+          python3 -c \
             'import json, urllib.request; body=json.load(urllib.request.urlopen("http://127.0.0.1:18787/batteries", timeout=2)); assert any(item["name"] == "slack" for item in body["batteries"])'
 
-      # One cache scope per image: a shared scope keeps only the last build.
-      # The quickstart exports the final stage alone to limit cache use. Its
-      # Rust builder now changes only when an actual build input changes.
-      - name: Build the quickstart image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: integrations/kagent/appa-kagent-quickstart/Dockerfile
-          tags: appa-kagent-quickstart:ci
-          push: false
-          cache-from: type=gha,scope=appa-kagent-quickstart
-          cache-to: type=gha,mode=min,scope=appa-kagent-quickstart
-
-      - name: Build the python plugin image
+      - name: Build the Python plugin image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: integrations/kagent/appa-kagent-adk
@@ -1022,13 +1017,12 @@ jobs:
           cache-from: type=gha,scope=appa-runtime-arm64
           cache-to: type=gha,mode=min,scope=appa-runtime-arm64
 
-      - name: Build the quickstart image
+      - name: Build the Python plugin image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
-          context: .
-          file: integrations/kagent/appa-kagent-quickstart/Dockerfile
+          context: integrations/kagent/appa-kagent-adk
           platforms: linux/arm64
-          tags: appa-kagent-quickstart:ci-arm64
+          tags: appa-kagent-adk:ci-arm64
           push: false
-          cache-from: type=gha,scope=appa-kagent-quickstart-arm64
-          cache-to: type=gha,mode=min,scope=appa-kagent-quickstart-arm64
+          cache-from: type=gha,scope=appa-kagent-adk-arm64
+          cache-to: type=gha,mode=max,scope=appa-kagent-adk-arm64

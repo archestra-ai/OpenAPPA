@@ -131,7 +131,7 @@ func setupLogger(logLevel string) (logr.Logger, *zap.Logger) {
 }
 
 // appaEnabledEnv names the one knob that turns OpenAPPA on. Both
-// runtime images and the quickstart entrypoint read this variable.
+// OpenAPPA kagent runtime images read this variable.
 const appaEnabledEnv = "APPA_ENABLED"
 
 // runtimeURLEnv names the OpenAPPA runtime a gated agent talks to.

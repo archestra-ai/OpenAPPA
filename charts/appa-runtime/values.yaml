@@ -41,11 +41,10 @@ securityContext:
 
 service:
   type: ClusterIP
-  port: 18789
+  port: 18787
 
-# The relay accepts /hook, /mcp, /health, and /batteries. Enable this
-# policy with at least one NetworkPolicyPeer to restrict which pods can
-# reach those routes.
+# Enable this policy with at least one NetworkPolicyPeer to restrict which
+# pods can reach the runtime Service.
 networkPolicy:
   enabled: false
   ingress: []
@@ -61,29 +60,6 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 
-# The runtime binds loopback. The relay is the cluster address.
-relay:
-  image:
-    repository: nginxinc/nginx-unprivileged
-    tag: 1.27-alpine
-    digest: sha256:65e3e85dbaed8ba248841d9d58a899b6197106c23cb0ff1a132b7bfe0547e4c0
-    pullPolicy: IfNotPresent
-  securityContext:
-    runAsNonRoot: true
-    runAsUser: 101
-    runAsGroup: 101
-    allowPrivilegeEscalation: false
-    readOnlyRootFilesystem: true
-    capabilities:
-      drop:
-        - ALL
-  resources:
-    requests:
-      cpu: 25m
-      memory: 32Mi
-    limits:
-      memory: 64Mi
-
 # Policy ConfigMap mounted at /etc/appa. Empty contents use the packaged
 # appa-guide bootstrap policy. Set existingConfigMap to use a ConfigMap you manage.
 config:
@@ -92,7 +68,7 @@ config:
   contents: ""
 
 # Trajectory log and a writable batteries overlay. Off uses emptyDir.
-# The skill refreshes bundled batteries only when this is on.
+# The skill refreshes the shared runtime's release battery layer only when this is on.
 persistence:
   enabled: false
   storageClass: ""
@@ -105,6 +81,20 @@ persistence:
 # Extra environment for battery audience sources (APPA_PROVIDER_*).
 env: {}
 envFrom: []
+
+# Optionally install the configuring kagent Agent with this runtime.
+appaGuide:
+  enabled: false
+  name: appa-guide
+  namespace: kagent
+  modelConfig: default-model-config
+  toolServer:
+    name: kagent-tool-server
+  skill:
+    url: https://github.com/archestra-ai/OpenAPPA
+    # Empty pins the skill to v<chart appVersion>.
+    ref: ""
+    path: integrations/appa-guide
 
 test:
   image:

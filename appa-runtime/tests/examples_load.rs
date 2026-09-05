@@ -49,11 +49,6 @@ fn every_shipped_example_opens() {
 
 #[test]
 fn the_kagent_policies_open() {
-    // The demo policy binds the llm endpoint to APPA_LLM_API_KEY; the
-    // runtime refuses to load a config whose token is absent, so the
-    // test supplies a placeholder. Nothing consults it at open time,
-    // and no other test in this binary reads the variable.
-    unsafe { std::env::set_var("APPA_LLM_API_KEY", "examples-load") };
     opens(&repo_root().join("integrations/kagent/examples/kagent.appa.toml"));
     opens(&repo_root().join("integrations/kagent/demo/chart/files/demo.appa.toml"));
 }
