@@ -81,7 +81,7 @@ metadata:
     {{- include "appa-demo.labels" . | nindent 4 }}
 spec:
   type: Declarative
-  description: The cluster-ops demo agent on the go runtime, gated by OpenAPPA through the go runtime image.
+  description: The cluster-ops demo Agent on Go, gated through the remote OpenAPPA runtime.
   declarative:
     runtime: go
     systemMessage: |

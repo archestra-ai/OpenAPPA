@@ -100,7 +100,7 @@ fn the_kagent_reference_carries_the_full_flow() {
         "List every `RemoteMCPServer`",
         "server not yet attached to an Agent",
         "appa-guide-refresh-check",
-        "kagent 0.9.12 sends `k8s_execute_command.command` as one executable name",
+        "kagent 0.9.12 sends `k8s_execute_command.command` as one executable",
     ] {
         assert!(reference.contains(marker), "the kagent flow names {marker:?}");
     }

@@ -79,6 +79,8 @@ expect 1 'image: ghcr.io/archestra-ai/appa-runtime:0\.10\.0$'
 expect 1 '0\.0\.0\.0:18787'
 expect 1 'containerPort: 18787'
 expect 1 'port: 18787, targetPort: runtime'
+expect 1 'fsGroup: 65532'
+expect 0 'name: migrate-data-ownership'
 expect 0 '18789|appa-runtime-relay|name: relay'
 expect 4 '^kind: Agent$'
 expect_env 1 APPA_CONFIG /etc/appa/demo.appa.toml
@@ -107,6 +109,7 @@ must_render kagent --set runtime.persistence.enabled=true \
   --set runtime.persistence.existingClaim=team-appa
 expect 2 '/var/lib/appa/batteries'
 expect 2 '/var/lib/appa/release-batteries'
+expect 1 'name: migrate-data-ownership'
 expect 1 'claimName: "team-appa"'
 expect 0 '^kind: PersistentVolumeClaim$'
 

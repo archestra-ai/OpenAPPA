@@ -20,6 +20,26 @@ spec:
       annotations:
         checksum/policy: {{ include "appa-demo.policy" . | sha256sum | quote }}
     spec:
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+      {{- if .Values.runtime.persistence.enabled }}
+      initContainers:
+        - name: migrate-data-ownership
+          image: {{ include "appa-demo.image" (dict "image" .Values.runtime.image "root" .) }}
+          imagePullPolicy: {{ .Values.runtime.image.pullPolicy }}
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              add: [CHOWN, FOWNER]
+          command: ["/bin/sh", "-ec", "chown -R 65532:65532 /var/lib/appa && chmod -R u+rwX /var/lib/appa"]
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/appa }
+      {{- end }}
       containers:
         - name: runtime
           image: {{ include "appa-demo.image" (dict "image" .Values.runtime.image "root" .) }}
