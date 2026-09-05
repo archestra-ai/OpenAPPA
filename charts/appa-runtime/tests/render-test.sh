@@ -4,6 +4,7 @@
 set -eu
 
 chart=$(cd "$(dirname "$0")/.." && pwd)
+app_version=$(sed -n 's/^appVersion: *"\([^"]*\)".*/\1/p' "$chart/Chart.yaml")
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
@@ -84,7 +85,7 @@ must_render --set appaGuide.enabled=true
 expect 1 '^kind: Agent$'
 must_contain 'name: appa-guide'
 must_contain 'namespace: "kagent"'
-must_contain 'ref: "v0.10.0"'
+must_contain "ref: \"v${app_version}\""
 must_contain 'http://appa-runtime.appa.svc.cluster.local:18787'
 must_contain 'name: "kagent-tool-server"'
 must_contain 'your first tool call must be skills with command appa-guide'

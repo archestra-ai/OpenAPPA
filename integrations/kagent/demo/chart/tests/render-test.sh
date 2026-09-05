@@ -9,6 +9,7 @@
 set -eu
 
 chart=$(cd "$(dirname "$0")/.." && pwd)
+app_version=$(sed -n 's/^appVersion: *"\([^"]*\)".*/\1/p' "$chart/Chart.yaml")
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
@@ -75,7 +76,7 @@ expect_env() {
 must_render kagent
 expect 2 '/opt/appa/batteries'
 expect 0 '/var/lib/appa/batteries'
-expect 1 'image: ghcr.io/archestra-ai/appa-runtime:0\.10\.0$'
+expect 1 "image: ghcr.io/archestra-ai/appa-runtime:${app_version}$"
 expect 1 '0\.0\.0\.0:18787'
 expect 1 '^            - "appa-runtime\.kagent\.svc\.cluster\.local:18787"$'
 expect 1 'containerPort: 18787'
@@ -89,7 +90,7 @@ expect 0 '18789|appa-runtime-relay|name: relay'
 expect 4 '^kind: Agent$'
 expect_env 1 APPA_CONFIG /etc/appa/demo.appa.toml
 expect 1 '^  name: appa-guide$'
-expect 1 '^        ref: "v0\.10\.0"$'
+expect 1 "^        ref: \"v${app_version}\"$"
 expect 1 '/skills/appa-guide/references/kagent\.md'
 expect 1 'with offset 1 and limit 0. Follow'
 expect 1 'all read-only inspection and present the proposal without asking whether'
