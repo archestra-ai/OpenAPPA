@@ -159,9 +159,13 @@ impl RelativePath {
             match segment {
                 ".." => return Err(RelativePathError::Traversal(text.to_owned())),
                 "" | "." => return Err(RelativePathError::Segment(text.to_owned())),
-                // A backslash is a separator on one of the platforms this runs
-                // on, so it is never part of a portable segment.
-                segment if segment.contains('\\') => return Err(RelativePathError::Segment(text.to_owned())),
+                // A separator on one platform is a name character on another,
+                // and a manifest read on one and deployed on the other must
+                // give the same answer. `Path::is_absolute` cannot help: it
+                // reads `C:/x` as relative on Unix and absolute on Windows, so
+                // the characters that carry a platform's meaning are refused
+                // outright rather than resolved.
+                segment if segment.contains(['\\', ':']) => return Err(RelativePathError::Segment(text.to_owned())),
                 _ => {}
             }
         }
@@ -191,6 +195,9 @@ pub enum Host {
 }
 
 impl Host {
+    /// Every host, so the runtime's own adapter set can be held equal to it.
+    pub const ALL: [Host; 2] = [Host::ClaudeCode, Host::Kagent];
+
     pub fn parse(text: &str) -> Option<Self> {
         match text {
             "claude-code" => Some(Self::ClaudeCode),
@@ -292,6 +299,19 @@ mod tests {
             RelativePath::parse("./plugin"),
             Err(RelativePathError::Segment(_))
         ));
+    }
+
+    /// A manifest is read on one platform and deployed on another, so a
+    /// spelling that carries a separator or a drive on either is refused on
+    /// both. `Path::is_absolute` reads none of these as absolute on Unix.
+    #[test]
+    fn relative_paths_refuse_what_another_platform_reads_as_a_root() {
+        for spelling in ["C:/evil", "c:evil", "plugin\\hooks", "plugin/sub\\dir", "plugin/C:/x"] {
+            assert!(
+                matches!(RelativePath::parse(spelling), Err(RelativePathError::Segment(_))),
+                "accepted {spelling}"
+            );
+        }
     }
 
     #[test]

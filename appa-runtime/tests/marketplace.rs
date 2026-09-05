@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use appa_package::{Host, Marketplace, Role, TreeDigest, check_ownership, validate_package};
+use appa_package::{Host, Marketplace, PackageKind, Role, TreeDigest, check_ownership, validate_package};
 use appa_runtime::config::Config;
 
 fn repository() -> PathBuf {
@@ -50,6 +50,18 @@ fn every_package_the_marketplace_names_validates() {
             package.name, entry.name,
             "{} is listed as {} and calls itself {}",
             entry.path, entry.name, package.name
+        );
+        // The kind is the table the package is listed under, and it decides how
+        // a deployment installs it. A battery listed as an adapter parses,
+        // validates and digests, and is installed as the wrong thing.
+        let kind = match package.role {
+            Role::Adapter(_) => PackageKind::Adapter,
+            Role::Battery(_) => PackageKind::Battery,
+        };
+        assert_eq!(
+            kind, entry.kind,
+            "{} is listed as a {} and is a {kind}",
+            entry.path, entry.kind
         );
         packages.push(package);
     }
@@ -351,4 +363,46 @@ fn loads_beside_a_root(package: &Path) -> bool {
     )
     .expect("the root config is writable");
     Config::load(&root).is_ok()
+}
+
+/// Every rule the two crates share, not a sample of it.
+///
+/// `a_battery_that_validates_loads` walks fragments on each rule's edge, which
+/// says nothing about a field or a binding kind no fragment happens to name.
+/// These two lists are what `appa-package` states an included fragment may
+/// carry, and each entry is a way for a package to validate here and be refused
+/// by the loader there, so every entry gets its own fragment.
+#[test]
+fn every_field_and_binding_a_package_may_carry_loads() {
+    for field in appa_package::INCLUDABLE_POLICY_FIELDS {
+        if field == "version" {
+            continue;
+        }
+        let fragment = format!("[policy]\nversion = 2\n\n[[policy.{field}]]\nname = \"probe\"\n");
+        assert!(
+            probe_loads(&fragment, false),
+            "a package may declare `policy.{field}` and a deployment will not load it"
+        );
+    }
+
+    for kind in appa_package::BINDABLE_KINDS {
+        let fragment = format!(
+            "[policy]\nversion = 2\n\n[externals.{kind}.probe]\ncommand = [\"python3\", \"audience-source.py\"]\n"
+        );
+        assert!(
+            probe_loads(&fragment, true),
+            "a package may bind `externals.{kind}` and a deployment will not load it"
+        );
+    }
+}
+
+/// One fragment installed beside a root config, as `a_battery_that_validates_loads`
+/// installs one, reporting only whether the deployment loads.
+fn probe_loads(fragment: &str, with_helper: bool) -> bool {
+    let package = tempfile::tempdir().expect("a temp dir is creatable");
+    std::fs::write(package.path().join("appa.toml"), fragment).expect("the policy is writable");
+    if with_helper {
+        std::fs::write(package.path().join("audience-source.py"), "print('{}')\n").expect("the helper is writable");
+    }
+    loads_beside_a_root(package.path())
 }

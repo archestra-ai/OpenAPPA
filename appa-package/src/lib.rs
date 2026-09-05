@@ -23,7 +23,7 @@ pub use names::{
 };
 pub use package::{Adapter, Battery, ImageName, ImageReference, MANIFEST_FILE, Package, Role};
 pub use tree::canonical_tree_digest;
-pub use validate::{PackageError, validate_package};
+pub use validate::{BINDABLE_KINDS, INCLUDABLE_POLICY_FIELDS, PackageError, validate_package};
 
 /// The runtime protocol an adapter in this workspace speaks. It must track
 /// `appa_runtime_api::wire::PROTOCOL`; this crate is a leaf and cannot name it.

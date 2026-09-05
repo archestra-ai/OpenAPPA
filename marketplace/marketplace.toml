@@ -9,7 +9,7 @@ name = "appa"
 
 [packages.adapter.claude-code]
 path = "adapters/claude-code"
-digest = "sha256:d71493382c941a37474156413f591f50e02267ed1fe5e95d90027ed2426764d4"
+digest = "sha256:7984a3f60ca2d9b6cf908065b3f57c8ca5d9bdb046d02337b941c9f180ce1bcd"
 
 [packages.adapter.kagent]
 path = "adapters/kagent"

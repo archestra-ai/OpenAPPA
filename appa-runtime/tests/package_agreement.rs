@@ -42,3 +42,24 @@ fn a_namespace_is_the_same_thing_to_the_package_and_to_the_wire() {
         );
     }
 }
+
+/// An adapter package declares the host it adapts, and the runtime binds a
+/// trajectory to the adapter of that name. The two enums carry the same closed
+/// set for that reason: a host in one and not the other is either a package
+/// that parses and cannot be bound, or an adapter no package may declare.
+#[test]
+fn a_host_is_an_adapter_the_runtime_knows() {
+    let hosts: Vec<&str> = appa_package::Host::ALL.iter().map(|host| host.as_str()).collect();
+    let adapters: Vec<&str> = appa_runtime_api::AdapterName::ALL
+        .iter()
+        .map(|adapter| adapter.as_str())
+        .collect();
+
+    assert_eq!(hosts, adapters);
+    for name in &adapters {
+        assert_eq!(
+            appa_package::Host::parse(name).map(appa_package::Host::as_str),
+            Some(*name)
+        );
+    }
+}
