@@ -44,8 +44,8 @@
     },
     {
       "datasource": {
-        "type": "prometheus",
-        "uid": "${metrics}"
+        "type": "tempo",
+        "uid": "${traces}"
       },
       "fieldConfig": {
         "defaults": {
@@ -78,7 +78,7 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": ["sum"],
           "fields": "",
           "values": false
         },
@@ -87,11 +87,9 @@
       },
       "targets": [
         {
-          "editorMode": "code",
-          "expr": "sum(increase(appa_runtime_hook_requests_total[$__range])) or vector(0)",
-          "instant": true,
-          "legendFormat": "Decisions",
-          "range": false,
+          "limit": 20,
+          "query": "{ resource.service.name = \"appa-runtime\" && resource.archestra.agent_run.id =~ \"$agentRun\" && span.appa.decision =~ \"$decision\" } | count_over_time()",
+          "queryType": "traceql",
           "refId": "A"
         }
       ],
@@ -100,8 +98,8 @@
     },
     {
       "datasource": {
-        "type": "prometheus",
-        "uid": "${metrics}"
+        "type": "tempo",
+        "uid": "${traces}"
       },
       "fieldConfig": {
         "defaults": {
@@ -138,7 +136,7 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": ["sum"],
           "fields": "",
           "values": false
         },
@@ -147,11 +145,9 @@
       },
       "targets": [
         {
-          "editorMode": "code",
-          "expr": "sum(increase(appa_runtime_hook_requests_total{appa_decision=~\"deny|block\"}[$__range])) or vector(0)",
-          "instant": true,
-          "legendFormat": "Policy stops",
-          "range": false,
+          "limit": 20,
+          "query": "{ resource.service.name = \"appa-runtime\" && resource.archestra.agent_run.id =~ \"$agentRun\" && span.appa.decision =~ \"deny|block\" } | count_over_time()",
+          "queryType": "traceql",
           "refId": "A"
         }
       ],
@@ -160,8 +156,8 @@
     },
     {
       "datasource": {
-        "type": "prometheus",
-        "uid": "${metrics}"
+        "type": "tempo",
+        "uid": "${traces}"
       },
       "description": "Hook requests OpenAPPA could not parse or safely evaluate. Any non-zero value needs investigation.",
       "fieldConfig": {
@@ -199,7 +195,7 @@
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": ["sum"],
           "fields": "",
           "values": false
         },
@@ -208,11 +204,9 @@
       },
       "targets": [
         {
-          "editorMode": "code",
-          "expr": "sum(increase(appa_runtime_hook_requests_total{appa_decision=\"refuse\"}[$__range])) or vector(0)",
-          "instant": true,
-          "legendFormat": "Runtime refusals",
-          "range": false,
+          "limit": 20,
+          "query": "{ resource.service.name = \"appa-runtime\" && resource.archestra.agent_run.id =~ \"$agentRun\" && span.appa.decision = \"refuse\" } | count_over_time()",
+          "queryType": "traceql",
           "refId": "A"
         }
       ],
@@ -294,8 +288,8 @@
     },
     {
       "datasource": {
-        "type": "prometheus",
-        "uid": "${metrics}"
+        "type": "tempo",
+        "uid": "${traces}"
       },
       "fieldConfig": {
         "defaults": {
@@ -305,7 +299,7 @@
           "custom": {
             "axisCenteredZero": false,
             "axisColorMode": "text",
-            "axisLabel": "decisions / second",
+            "axisLabel": "decisions / interval",
             "axisPlacement": "auto",
             "drawStyle": "line",
             "fillOpacity": 12,
@@ -343,10 +337,9 @@
       },
       "targets": [
         {
-          "editorMode": "code",
-          "expr": "sum by (appa_decision) (rate(appa_runtime_hook_requests_total{appa_decision=~\"$decision\"}[$__rate_interval]))",
-          "legendFormat": "{{appa_decision}}",
-          "range": true,
+          "limit": 20,
+          "query": "{ resource.service.name = \"appa-runtime\" && resource.archestra.agent_run.id =~ \"$agentRun\" && span.appa.decision =~ \"$decision\" } | count_over_time() by (span.appa.decision)",
+          "queryType": "traceql",
           "refId": "A"
         }
       ],
@@ -355,8 +348,8 @@
     },
     {
       "datasource": {
-        "type": "prometheus",
-        "uid": "${metrics}"
+        "type": "tempo",
+        "uid": "${traces}"
       },
       "fieldConfig": {
         "defaults": {
@@ -405,10 +398,9 @@
       },
       "targets": [
         {
-          "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le, appa_decision) (rate(appa_runtime_hook_duration_seconds_bucket{appa_decision=~\"$decision\"}[$__rate_interval])))",
-          "legendFormat": "p95 {{appa_decision}}",
-          "range": true,
+          "limit": 20,
+          "query": "{ resource.service.name = \"appa-runtime\" && resource.archestra.agent_run.id =~ \"$agentRun\" && span.appa.decision =~ \"$decision\" } | quantile_over_time(span:duration, .95) by (span.appa.decision)",
+          "queryType": "traceql",
           "refId": "A"
         }
       ],
