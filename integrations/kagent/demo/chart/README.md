@@ -28,7 +28,7 @@ The defaults expect:
 ## Install
 
 ```sh
-APPA_VERSION=0.11.1 # x-release-please-version
+APPA_VERSION=0.12.0 # x-release-please-version
 helm upgrade --install appa-kagent-demo \
   oci://ghcr.io/archestra-ai/charts/appa-kagent-demo \
   --version "$APPA_VERSION" -n kagent \
