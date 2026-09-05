@@ -8,16 +8,16 @@ use std::path::PathBuf;
 
 use appa_policy::Config;
 
-fn examples_dir() -> PathBuf {
+fn adapter_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("the crate sits one level under the repository root")
-        .join("integrations/claude-code/examples")
+        .join("marketplace/adapters/claude-code")
 }
 
 /// The `[policy]` table of one deployment file, rendered as a policy of its own.
 fn policy_of(example: &str) -> String {
-    let path = examples_dir().join(example);
+    let path = adapter_dir().join(example);
     let text = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{} is readable: {error}", path.display()));
     let file: toml::Value = toml::from_str(&text).unwrap_or_else(|error| panic!("{example} parses: {error}"));
     let policy = file
@@ -32,8 +32,8 @@ fn load(example: &str) {
 
 #[test]
 fn every_shipped_example_loads() {
-    let mut examples: Vec<String> = std::fs::read_dir(examples_dir())
-        .expect("the examples directory is readable")
+    let mut examples: Vec<String> = std::fs::read_dir(adapter_dir())
+        .expect("the adapter directory is readable")
         .map(|entry| {
             entry
                 .expect("a directory entry")

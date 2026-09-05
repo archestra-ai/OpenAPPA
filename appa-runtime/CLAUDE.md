@@ -32,6 +32,6 @@ one at the repository root:
   state of its own beside the log.
 
 The Claude Code plugin, the marketplace manifest, and the example
-policies are not code and live in `integrations/claude-code/` at the
+policies are not code and live in `marketplace/adapters/claude-code/` at the
 repository root. The tests here still run those shipped files
 (`tests/plugin_hooks.rs`, `tests/examples_load.rs`).

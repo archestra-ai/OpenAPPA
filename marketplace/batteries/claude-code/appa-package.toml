@@ -1,0 +1,9 @@
+schema = 1
+name = "claude-code"
+description = "Rules for the Claude Code built-in tools host/claude-code/Bash and host/claude-code/Read: credential paths are refused, and the model Annotator writes every other command's contract."
+
+[battery]
+policy = "appa.toml"
+hosts = ["claude-code"]
+namespaces = ["claude-code"]
+helpers = []

@@ -58,7 +58,7 @@ agents set `APPA_ENABLED` themselves and point at the shared runtime,
 so a parent and its delegated child land in one trajectory.
 
 The bundled runtime loads the packaged policy
-([../examples/kagent.appa.toml](../examples/kagent.appa.toml)). That
+([the kagent adapter default policy](../../../marketplace/adapters/kagent/default.appa.toml)). That
 policy names seven demo tools, `ask_user`, and the entrypoint's two
 synthetic tools, and it carries no wildcard. So the runtime refuses at
 `ToolCall` every other tool call a gated sample agent makes. To gate a

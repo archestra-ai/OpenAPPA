@@ -23,10 +23,12 @@ integrations/kagent/
 ├── e2e/                     # Live matrices against a Helm-installed stack
 │   ├── a2a/                 # Matrix tests over the A2A protocol
 │   └── ui/                  # Browser matrix tests driving the kagent dashboard
-├── examples/                # Reference policies (e.g. kagent.appa.toml)
-├── fixtures/                # Canonical wire event fixtures shared across languages
 └── IMPLEMENTATION.md        # Technical architecture, callback mappings, and specs
 ```
+
+The reference policy and the canonical wire event fixtures the two plugin
+lanes share are the kagent adapter package,
+`marketplace/adapters/kagent/`.
 
 ### 1. Python Runtime (`appa-kagent-adk/`)
 Wraps kagent's published Python runtime container image. It ships `AppaPluginKagent`, a Google ADK `BasePlugin` that maps ADK lifecycle callbacks to OpenAPPA `/hook` events, and a replacement entrypoint that preserves the stock arguments while appending the plugin and the `execute_remedy_plan` MCP tool.

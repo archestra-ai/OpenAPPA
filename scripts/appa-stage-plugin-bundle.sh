@@ -35,8 +35,10 @@ fi
 # is replaced afterwards.
 CDPATH='' cd -- "$outdir" || exit 1
 
-cp -R -- "$repo/integrations/claude-code/.claude-plugin" ./.claude-plugin
-cp -R -- "$repo/integrations/claude-code/plugin" ./plugin
+adapter=$repo/marketplace/adapters/claude-code
+
+cp -R -- "$adapter/.claude-plugin" ./.claude-plugin
+cp -R -- "$adapter/plugin" ./plugin
 # appa-guide is host-neutral source. Materialize it at Claude's required
 # plugin path rather than keeping a second source copy under claude-code/.
 mkdir -p -- ./plugin/skills
@@ -45,10 +47,14 @@ cp -R -- "$repo/integrations/appa-guide" ./plugin/skills/appa-guide
 # so the guide can bootstrap even when the current policy refuses `Read`.
 printf '\n\n' >> ./plugin/skills/appa-guide/SKILL.md
 cat ./plugin/skills/appa-guide/references/claude-code.md >> ./plugin/skills/appa-guide/SKILL.md
-cp -R -- "$repo/integrations/claude-code/examples" ./examples
-cp -R -- "$repo/batteries" ./batteries
-cp -- "$repo/integrations/claude-code/README.md" ./README.md
-cp -- "$repo/integrations/claude-code/live-gate-check.py" ./live-gate-check.py
+# The adapter's two policies are the deployment's examples, under the names a
+# marketplace root spells them.
+mkdir -p -- ./examples
+cp -- "$adapter/default.appa.toml" ./examples/claude-code.appa.toml
+cp -- "$adapter/hitl.appa.toml" ./examples/claude-code-hitl.appa.toml
+cp -R -- "$repo/marketplace/batteries" ./batteries
+cp -- "$adapter/README.md" ./README.md
+cp -- "$adapter/live-gate-check.py" ./live-gate-check.py
 
 mkdir -p -- ./website/content/docs
 cp -- "$repo/website/content/docs/contracts.md" ./website/content/docs/contracts.md
@@ -58,6 +64,10 @@ cp -- "$repo/website/content/docs/contracts.md" ./website/content/docs/contracts
 # excluding them keeps all three staging paths byte-identical.
 find . -type d -name __pycache__ -prune -exec rm -rf -- {} +
 find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+
+# A package manifest describes its package to the marketplace. The deployment
+# reads the policy beside it, never the manifest.
+find . -type f -name appa-package.toml -delete
 
 # Modes are applied by init when it materializes a deployment; these are for
 # anyone who unpacks the archive by hand.

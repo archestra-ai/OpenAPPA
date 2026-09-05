@@ -15,7 +15,7 @@ use common::{repo_root, stage_bundle};
 /// The key of the policy a first install writes: the shipped default, which
 /// composes to the same bytes wherever it is loaded from.
 fn default_policy_key() -> String {
-    let example = repo_root().join("integrations/claude-code/examples/claude-code.appa.toml");
+    let example = repo_root().join("marketplace/adapters/claude-code/default.appa.toml");
     let config = Config::load(&example).expect("the shipped default loads");
     PolicyFileKey::of(config.policy_file().bytes()).as_str().to_owned()
 }
@@ -334,7 +334,7 @@ fn the_plugin_source_override_is_hidden_from_normal_help() {
 
 /// The shipped default config, byte for byte: what a first init seeds.
 fn shipped_default_config() -> String {
-    fs::read_to_string(repo_root().join("integrations/claude-code/examples/claude-code.appa.toml"))
+    fs::read_to_string(repo_root().join("marketplace/adapters/claude-code/default.appa.toml"))
         .expect("the shipped default is readable")
 }
 

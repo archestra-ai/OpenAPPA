@@ -13,7 +13,8 @@ from appa_kagent_adk.gates import CODE_EXECUTION_TOOL, MEMORY_PERSIST_TOOL
 from appa_kagent_adk.inventory import SKILLS_FOLDER_ENV, ToolInventory, builtin_manifest, is_spawn
 
 KAGENT = Path(__file__).parent.parent.parent
-SHARED_MANIFEST = KAGENT / "fixtures" / "kagent-builtins.json"
+REPOSITORY = KAGENT.parent.parent
+SHARED_MANIFEST = REPOSITORY / "marketplace" / "adapters" / "kagent" / "fixtures" / "kagent-builtins.json"
 GO_MANIFEST = KAGENT / "appa-kagent-adk-go" / "builtins.json"
 PYTHON_MANIFEST = KAGENT / "appa-kagent-adk" / "src" / "appa_kagent_adk" / "builtins.json"
 

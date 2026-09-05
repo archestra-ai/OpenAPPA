@@ -1,0 +1,11 @@
+schema = 1
+name = "kagent"
+description = "Gates a kagent agent pod through the Google ADK plugin API: every tool call and agent-to-agent delegation is checked before it runs."
+
+[adapter]
+host = "kagent"
+protocol = 1
+default_policy = "default.appa.toml"
+# Tags, not digests: the release workflow publishes these three at the release
+# version, and nothing pins them by digest yet.
+images = { adk = "ghcr.io/archestra-ai/appa-kagent-adk:0.8.0", adk-go = "ghcr.io/archestra-ai/appa-kagent-adk-go:0.8.0", quickstart = "ghcr.io/archestra-ai/appa-kagent-quickstart:0.8.0" }

@@ -60,7 +60,7 @@ COPY website-chat-playground website-chat-playground
 # appa's build.rs stages the Claude Code plugin source into the binary's
 # build identity, so a release build needs these paths in-context.
 COPY integrations integrations
-COPY batteries batteries
+COPY marketplace marketplace
 COPY website/content/docs/contracts.md website/content/docs/contracts.md
 RUN cargo build --release --locked --package appa
 
@@ -73,7 +73,7 @@ FROM ${KAGENT_APP_IMAGE}
 
 COPY --from=builder /build/target/release/appa /usr/local/bin/appa
 COPY --from=wheel --chown=python:pythongroup /dist/ /tmp/appa-dist/
-COPY --chown=python:pythongroup integrations/kagent/examples/kagent.appa.toml /opt/appa/kagent.appa.toml
+COPY --chown=python:pythongroup marketplace/adapters/kagent/default.appa.toml /opt/appa/kagent.appa.toml
 COPY --chown=python:pythongroup integrations/kagent/appa-kagent-quickstart/entrypoint.sh /opt/appa/entrypoint.sh
 
 RUN uv pip install --python /.kagent/.venv/bin/python --no-deps --offline /tmp/appa-dist/*.whl \

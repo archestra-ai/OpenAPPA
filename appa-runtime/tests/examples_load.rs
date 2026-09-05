@@ -16,11 +16,16 @@ use appa_runtime::hooks;
 #[cfg(unix)]
 use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
 
-fn toml_files(dir: &Path) -> Vec<PathBuf> {
+/// The policies a package directory ships, by the suffix every one of them
+/// carries. The package's own `appa-package.toml` manifest is not a policy.
+fn policy_files(dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
         let path = entry.expect("the directory entry is readable").path();
-        if path.extension().is_some_and(|extension| extension == "toml") {
+        if path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().ends_with(".appa.toml"))
+        {
             found.push(path);
         }
     }
@@ -37,7 +42,7 @@ fn opens(path: &Path) {
 
 #[test]
 fn every_shipped_example_opens() {
-    let examples = toml_files(&repo_root().join("integrations/claude-code/examples"));
+    let examples = policy_files(&repo_root().join("marketplace/adapters/claude-code"));
     assert!(
         examples.len() >= 2,
         "both shipped examples were checked, not {examples:?}"
@@ -54,7 +59,7 @@ fn the_kagent_policies_open() {
     // test supplies a placeholder. Nothing consults it at open time,
     // and no other test in this binary reads the variable.
     unsafe { std::env::set_var("APPA_LLM_API_KEY", "examples-load") };
-    opens(&repo_root().join("integrations/kagent/examples/kagent.appa.toml"));
+    opens(&repo_root().join("marketplace/adapters/kagent/default.appa.toml"));
     opens(&repo_root().join("integrations/kagent/demo/chart/files/demo.appa.toml"));
 }
 
@@ -73,10 +78,10 @@ fn composed_with_the_battery(dir: &tempfile::TempDir) -> Config {
     std::fs::create_dir_all(&battery_dir).expect("the battery directory is created");
 
     let repository = repo_root();
-    let default = std::fs::read_to_string(repository.join("integrations/claude-code/examples/claude-code.appa.toml"))
+    let default = std::fs::read_to_string(repository.join("marketplace/adapters/claude-code/default.appa.toml"))
         .expect("the initialized default is readable");
     std::fs::copy(
-        repository.join("batteries/claude-code/appa.toml"),
+        repository.join("marketplace/batteries/claude-code/appa.toml"),
         battery_dir.join("appa.toml"),
     )
     .expect("the battery file is copied");
@@ -243,15 +248,15 @@ async fn the_slack_battery_allows_public_writes_and_blocks_leaking_self_secrets(
     std::fs::create_dir_all(&claude_battery_dir).expect("claude battery directory is created");
 
     let repository = repo_root();
-    let default = std::fs::read_to_string(repository.join("integrations/claude-code/examples/claude-code.appa.toml"))
+    let default = std::fs::read_to_string(repository.join("marketplace/adapters/claude-code/default.appa.toml"))
         .expect("the initialized default is readable");
     std::fs::copy(
-        repository.join("batteries/slack/appa.toml"),
+        repository.join("marketplace/batteries/slack/appa.toml"),
         slack_battery_dir.join("appa.toml"),
     )
     .expect("slack battery file is copied");
     std::fs::copy(
-        repository.join("batteries/claude-code/appa.toml"),
+        repository.join("marketplace/batteries/claude-code/appa.toml"),
         claude_battery_dir.join("appa.toml"),
     )
     .expect("claude battery file is copied");

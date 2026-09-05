@@ -11,7 +11,7 @@ The Grain battery covers 49 tools for recordings, notes, transcripts, deals, cli
 
 Your root config must define an Authority named `hitl` for actions that need a person's approval.
 
-[View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/batteries/grain).
+[View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/grain).
 
 ## Tool behavior
 

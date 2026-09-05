@@ -1,7 +1,7 @@
 target/
 .env
 # Working runtime config and store (the install instruction copies the
-# default example here; integrations/claude-code/README.md)
+# default example here; marketplace/adapters/claude-code/README.md)
 /appa.toml
 /appa.db*
 # Custom target dirs (CARGO_TARGET_DIR from tooling)

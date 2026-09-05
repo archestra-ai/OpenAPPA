@@ -16,7 +16,7 @@ that is down blocks both sessions, not one.
 Needs the `claude` CLI on PATH and logged in, and the `appa` binary. It
 spends the machine's Claude usage, so it runs by hand:
 
-    uv run integrations/claude-code/live-gate-check.py
+    uv run marketplace/adapters/claude-code/live-gate-check.py
 """
 
 from __future__ import annotations
@@ -65,8 +65,13 @@ SESSION_TIMEOUT_S = 300.0
 HEALTH_TIMEOUT_S = 20.0
 
 
+def adapter_root() -> Path:
+    """The adapter package this check runs, which is the one this file sits in."""
+    return Path(__file__).resolve().parent
+
+
 def repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    return adapter_root().parents[2]
 
 
 def appa_binary() -> Path:
@@ -181,7 +186,7 @@ def run(work: Path, port: int, prompt: str) -> dict[str, Any]:
         "--setting-sources",
         "",
         "--plugin-dir",
-        str(repo_root() / "integrations" / "claude-code" / "plugin"),
+        str(adapter_root() / "plugin"),
         "--tools",
         "Read,Write",
         "--permission-mode",

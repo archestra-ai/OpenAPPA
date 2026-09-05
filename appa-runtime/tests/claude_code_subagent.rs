@@ -113,7 +113,7 @@ fn re_fired(mut stop: serde_json::Value) -> serde_json::Value {
 /// binding, not the default's model-backed compatibility fallback;
 /// `bash_delta` is what the recorded Bash output carries.
 fn deployment(policy_extra: &str, externals_extra: &str, bash_delta: &str) -> Runtime {
-    let example = std::fs::read_to_string(repo_root().join("integrations/claude-code/examples/claude-code.appa.toml"))
+    let example = std::fs::read_to_string(repo_root().join("marketplace/adapters/claude-code/default.appa.toml"))
         .expect("the shipped example is readable");
     let (policy, externals) = example
         .split_once("[externals]")

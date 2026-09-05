@@ -4,7 +4,7 @@ This is a self-contained example of matcher rows, complete-configuration
 includes, and per-annotator `command` bindings.
 
 The example is one deployment that includes the two batteries shipped in
-the repository's top-level `batteries/` directory:
+the repository's `marketplace/batteries/` directory:
 
 ```text
 examples/claude-code-battery/
@@ -12,7 +12,7 @@ examples/claude-code-battery/
 └── local/
     └── read-sensitivity.py
 
-batteries/
+marketplace/batteries/
 ├── claude-code/
 │   └── appa.toml
 └── slack/

@@ -9,7 +9,7 @@ breadcrumb: Claude Code tools
 
 This battery covers Claude Code's built-in `Read` and `Bash` tools, which the policy names `host/claude-code/Read` and `host/claude-code/Bash`. Batteries can also cover tools that do not come from an MCP server.
 
-[View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/batteries/claude-code).
+[View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/claude-code).
 
 ## Covered tools
 
