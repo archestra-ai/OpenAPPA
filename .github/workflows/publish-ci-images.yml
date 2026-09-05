@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      contents: read
+      contents: read # Required to diff changed paths on a push.
     outputs:
       images: ${{ steps.filter.outputs.images }}
     steps:
@@ -75,7 +75,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      contents: read
+      contents: read # Required to check out the tag-contract script.
     outputs:
       tags: ${{ steps.resolve.outputs.tags }}
       source_commit: ${{ steps.resolve.outputs.source_commit }}
@@ -116,9 +116,9 @@ jobs:
     name: Publish rolling images
     needs: tags
     permissions:
-      actions: read
-      contents: read
-      id-token: write
+      actions: read # Required to download image digest artifacts.
+      contents: read # Required to check out the source that is published.
+      id-token: write # Required for Workload Identity Federation when pushing images.
     uses: ./.github/workflows/publish-oci-images.yml
     with:
       tags: ${{ needs.tags.outputs.tags }}

@@ -212,7 +212,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      contents: read
+      contents: read # Required to check out the tag-contract script.
     outputs:
       tags: ${{ steps.tags.outputs.tags }}
     steps:
@@ -245,9 +245,9 @@ jobs:
       - release-please
       - oci-tags
     permissions:
-      actions: read
-      contents: read
-      id-token: write
+      actions: read # Required to download image digest artifacts.
+      contents: read # Required to check out the release source.
+      id-token: write # Required for Workload Identity Federation when pushing images.
     uses: ./.github/workflows/publish-oci-images.yml
     with:
       tags: ${{ needs.oci-tags.outputs.tags }}
