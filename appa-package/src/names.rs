@@ -30,9 +30,49 @@ impl PackageName {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The credential namespace this package owns. Dashes become underscores
+    /// because an environment variable carries no dash.
+    pub fn credential_prefix(&self) -> CredentialPrefix {
+        CredentialPrefix(format!(
+            "{PROVIDER_CREDENTIAL_PREFIX}{}",
+            self.0.to_uppercase().replace('-', "_")
+        ))
+    }
 }
 
 impl fmt::Display for PackageName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// The namespace a deployment names its provider credentials in.
+const PROVIDER_CREDENTIAL_PREFIX: &str = "APPA_PROVIDER_";
+
+/// The environment variables one package's helpers may read.
+///
+/// A deployment hands a helper its credential through the process environment,
+/// so the variable a helper names is the only thing between its own credential
+/// and every other package's. The prefix is derived from the package name and
+/// never declared, so a package cannot name itself into another's credentials.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CredentialPrefix(String);
+
+impl CredentialPrefix {
+    /// Whether this package owns `variable`. The prefix is a whole name, not a
+    /// character run: `APPA_PROVIDER_SLACK` owns `APPA_PROVIDER_SLACK_TOKEN`
+    /// and does not own `APPA_PROVIDER_SLACKBOT_TOKEN`.
+    pub fn owns(&self, variable: &str) -> bool {
+        variable == self.0 || variable.strip_prefix(&self.0).is_some_and(|rest| rest.starts_with('_'))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for CredentialPrefix {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
     }

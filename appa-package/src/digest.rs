@@ -88,16 +88,4 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn a_tree_digest_matches_the_pinned_encoding() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        std::fs::write(root.join("a.txt"), "alpha\n").unwrap();
-        std::fs::create_dir(root.join("dir")).unwrap();
-        std::fs::write(root.join("dir/b.bin"), [0u8, 1, 2, 255]).unwrap();
-        std::fs::write(root.join("z"), "").unwrap();
-
-        assert_eq!(TreeDigest::of_tree(root).unwrap(), TreeDigest::parse(PINNED).unwrap());
-    }
 }

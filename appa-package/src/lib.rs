@@ -16,9 +16,10 @@ mod validate;
 
 pub use digest::{TreeDigest, TreeDigestParseError};
 pub use manifest::{ManifestError, SCHEMA};
-pub use marketplace::{Marketplace, PackageEntry};
+pub use marketplace::{Marketplace, OwnershipError, PackageEntry, check_ownership};
 pub use names::{
-    Host, NameError, Namespace, NamespaceError, PackageKind, PackageName, RelativePath, RelativePathError,
+    CredentialPrefix, Host, NameError, Namespace, NamespaceError, PackageKind, PackageName, RelativePath,
+    RelativePathError,
 };
 pub use package::{Adapter, Battery, ImageName, ImageReference, MANIFEST_FILE, Package, Role};
 pub use tree::canonical_tree_digest;
