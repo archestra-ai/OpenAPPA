@@ -216,26 +216,18 @@ jobs:
       matrix:
         include:
           - image: appa-runtime
-            context: .
-            file: appa-runtime/Dockerfile
             arch: amd64
             platform: linux/amd64
             runner: ubuntu-latest
           - image: appa-runtime
-            context: .
-            file: appa-runtime/Dockerfile
             arch: arm64
             platform: linux/arm64
             runner: ubuntu-24.04-arm
           - image: appa-kagent-adk
-            context: integrations/kagent/appa-kagent-adk
-            file: integrations/kagent/appa-kagent-adk/Dockerfile
             arch: amd64
             platform: linux/amd64
             runner: ubuntu-latest
           - image: appa-kagent-adk
-            context: integrations/kagent/appa-kagent-adk
-            file: integrations/kagent/appa-kagent-adk/Dockerfile
             arch: arm64
             platform: linux/arm64
             runner: ubuntu-24.04-arm
@@ -274,12 +266,30 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Build and push image leg
-        id: build
+      - name: Build and push appa-runtime leg
+        if: ${{ matrix.image == 'appa-runtime' }}
+        id: build-runtime
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.file }}
+          context: .
+          file: appa-runtime/Dockerfile
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=ghcr.io/archestra-ai/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
+          provenance: true
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=min,scope=${{ matrix.image }}-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.release-please.outputs.source_commit }}
+            org.opencontainers.image.version=${{ needs.release-please.outputs.version }}
+
+      - name: Build and push appa-kagent-adk leg
+        if: ${{ matrix.image == 'appa-kagent-adk' }}
+        id: build-adk
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/appa-kagent-adk
           platforms: ${{ matrix.platform }}
           outputs: type=image,name=ghcr.io/archestra-ai/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
           provenance: true
@@ -293,8 +303,10 @@ jobs:
 
       - name: Record image digest
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          RUNTIME_DIGEST: ${{ steps.build-runtime.outputs.digest }}
+          ADK_DIGEST: ${{ steps.build-adk.outputs.digest }}
         run: |
+          DIGEST=${RUNTIME_DIGEST:-$ADK_DIGEST}
           if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "::error::image build did not report a digest"
             exit 1
