@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 import pytest
 from conftest import BASE, NAMESPACE, Chat
@@ -71,6 +72,19 @@ def test_init_completes_the_full_read_only_inventory(chat: Chat, shots_dir: str)
         "release-manager",
     ]:
         assert observed.lower() in details.lower(), f"init observes {observed}"
+    summary = body.lower()
+    assert "release-manager" in summary and any(
+        word in summary for word in ("blocked", "undeclared", "not declared")
+    ), "init reports the intentionally blocked delegation"
+    assert "kagent-grafana-mcp" in summary and any(
+        phrase in summary
+        for phrase in ("not accepted", "unaccepted", "unavailable", "refused")
+    ), "init reports the unaccepted MCP server"
+    assert re.search(
+        r"no batteries\b.{0,60}\bincluded|included batteries\b.{0,30}\bnone|batteries included\b.{0,30}\bnone",
+        summary,
+        re.DOTALL,
+    ), "init distinguishes available batteries from included batteries"
 
 
 def test_diagnose_reports_runtime_policy_agents_and_tools(chat: Chat, shots_dir: str):

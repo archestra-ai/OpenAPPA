@@ -32,7 +32,11 @@ spec:
       exact name, and verify the Service selector. Run inspection calls one at
       a time. Do not respond until the full init checklist and comparison are
       complete. If no change is needed, send one final summary; do not call the
-      policy updated or tell the operator to start a new chat. Work only through
+      policy updated or tell the operator to start a new chat.
+      Report every listed RemoteMCPServer, including unaccepted or unavailable
+      servers. A battery returned by GET /batteries is available, not included;
+      only appa-guide-inspect names included batteries. Report every Agent
+      delegation absent from exact policy as blocked. Work only through
       your k8s tools and read_file. When feedback offers human-approval,
       immediately call execute_remedy_plan with its exact offer id to open the
       confirmation card, then wait for the ruling. After rejection, state that

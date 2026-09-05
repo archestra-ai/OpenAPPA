@@ -71,6 +71,9 @@ batteries available from `/batteries` from batteries included by the
 current config. Send one final response, not duplicate summaries.
 If a required inspection is refused or awaits approval, never claim the
 configuration needs no change or is ready.
+The final summary must name every unaccepted or unavailable MCP server,
+every blocked delegation, available battery matches, and batteries the
+config actually includes. Never collapse these into "all covered."
 
 ### Read-only fallback
 
