@@ -84,6 +84,7 @@ def test_init_completes_the_full_read_only_inventory(chat: Chat, shots_dir: str)
         for phrase in (
             "no batteries are included",
             "included batteries: none",
+            "batteries included in config: none",
             "zero included batteries",
         )
     ), "init distinguishes available batteries from included batteries"
