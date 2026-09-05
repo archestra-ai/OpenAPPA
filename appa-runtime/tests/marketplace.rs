@@ -165,11 +165,12 @@ fn every_package_directory_is_named_by_the_marketplace() {
 }
 
 /// A battery that validates is a battery a deployment can include. The two
-/// checks are written in crates that cannot depend on each other — the
-/// validator states what a fragment may carry, the config loader enforces it —
-/// so this composes each battery into the root config of every host it declares
-/// and loads the result. A rule one of them learns and the other does not shows
-/// up here as a battery that validates and will not load.
+/// checks run in different crates and the dependency goes one way — the
+/// validator is a leaf that cannot see the config loader, so it restates the
+/// loader's rules rather than deriving them — so this composes each battery
+/// into the root config of every host it declares and loads the result. A rule
+/// one of them learns and the other does not shows up here as a battery that
+/// validates and will not load.
 #[test]
 fn every_battery_composes_into_each_host_it_declares() {
     let root = marketplace_root();
@@ -233,11 +234,12 @@ fn copy_tree(source: &Path, destination: &Path) {
 /// A fragment that validates loads.
 ///
 /// `appa-package` states what a distributed fragment may carry and
-/// `appa-runtime`'s config loader states what any include may carry, in two
-/// crates that cannot depend on each other. Every rule one of them learns is a
-/// chance for them to disagree, and the disagreement that matters has one
-/// direction: a package that validates and then will not load breaks a
-/// deployment that trusted the marketplace.
+/// `appa-runtime`'s config loader states what any include may carry. The
+/// dependency goes one way: `appa-package` is a leaf the build script loads,
+/// so it restates the loader's rules and nothing derives one from the other.
+/// Every rule one of them learns is a chance for them to disagree, and the
+/// disagreement that matters has one direction: a package that validates and
+/// then will not load breaks a deployment that trusted the marketplace.
 ///
 /// The converse is deliberately false. A battery is a fragment someone else
 /// wrote and a deployment installed, so the marketplace refuses what the loader
@@ -372,6 +374,11 @@ fn loads_beside_a_root(package: &Path) -> bool {
 /// These two lists are what `appa-package` states an included fragment may
 /// carry, and each entry is a way for a package to validate here and be refused
 /// by the loader there, so every entry gets its own fragment.
+///
+/// The loader keeps its own literals rather than reading these. It owns the
+/// rule; the package crate restates it to refuse a package before a deployment
+/// ever sees it, and reversing that would make a leaf crate normative for what
+/// a deployment config may contain.
 #[test]
 fn every_field_and_binding_a_package_may_carry_loads() {
     for field in appa_package::INCLUDABLE_POLICY_FIELDS {

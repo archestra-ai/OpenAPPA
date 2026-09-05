@@ -65,6 +65,8 @@ pub fn absorb_field(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
+/// What one entry of a package tree is. The digest encodes it, and a declared
+/// path that resolves to the other one is refused by its name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
     File,
@@ -77,6 +79,15 @@ impl EntryKind {
             Self::File => b'f',
             Self::Directory => b'd',
         }
+    }
+}
+
+impl std::fmt::Display for EntryKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::File => "a file",
+            Self::Directory => "a directory",
+        })
     }
 }
 

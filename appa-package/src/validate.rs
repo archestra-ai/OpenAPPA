@@ -10,7 +10,7 @@ use toml::Value;
 use crate::manifest::ManifestError;
 use crate::names::{CredentialPrefix, Namespace, PackageName, RelativePath};
 use crate::package::{MANIFEST_FILE, Package, Role};
-use crate::tree::{self, TreeDigestError};
+use crate::tree::{self, EntryKind, TreeDigestError};
 
 /// Why a directory is not a package. Every variant names the file it read.
 #[derive(Debug, Error)]
@@ -36,7 +36,7 @@ pub enum PackageError {
         manifest: PathBuf,
         field: &'static str,
         declared: String,
-        wanted: Kind,
+        wanted: EntryKind,
     },
     #[error("{manifest} declares `{field}` as `{declared}`, which resolves outside the package")]
     EscapingPath {
@@ -101,16 +101,16 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
     let contained = Contained::new(dir, &manifest_path);
     match &package.role {
         Role::Battery(battery) => {
-            let policy = contained.resolve(&battery.policy, "battery.policy", Kind::File)?;
+            let policy = contained.resolve(&battery.policy, "battery.policy", EntryKind::File)?;
             for helper in &battery.helpers {
-                contained.resolve(helper, "battery.helpers", Kind::File)?;
+                contained.resolve(helper, "battery.helpers", EntryKind::File)?;
             }
             check_policy(&policy, &package.name, &battery.namespaces, &battery.helpers)?;
         }
         Role::Adapter(adapter) => {
-            contained.resolve(adapter.default_policy(), "adapter.default_policy", Kind::File)?;
+            contained.resolve(adapter.default_policy(), "adapter.default_policy", EntryKind::File)?;
             if let crate::package::Adapter::ClaudeCode { plugin_dir, .. } = adapter {
-                contained.resolve(plugin_dir, "adapter.plugin_dir", Kind::Directory)?;
+                contained.resolve(plugin_dir, "adapter.plugin_dir", EntryKind::Directory)?;
             }
         }
     }
@@ -133,7 +133,7 @@ impl Contained {
         }
     }
 
-    fn resolve(&self, declared: &RelativePath, field: &'static str, kind: Kind) -> Result<PathBuf, PackageError> {
+    fn resolve(&self, declared: &RelativePath, field: &'static str, kind: EntryKind) -> Result<PathBuf, PackageError> {
         let resolved =
             self.root
                 .join(declared.as_path())
@@ -155,8 +155,8 @@ impl Contained {
         // plugin tree that is a file both pass containment and fail at use, so
         // the package is refused here rather than at someone's deployment.
         let found = match resolved.is_dir() {
-            true => Kind::Directory,
-            false => Kind::File,
+            true => EntryKind::Directory,
+            false => EntryKind::File,
         };
         match found == kind {
             true => Ok(resolved),
@@ -167,22 +167,6 @@ impl Contained {
                 wanted: kind,
             }),
         }
-    }
-}
-
-/// What a declared path names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
-    File,
-    Directory,
-}
-
-impl std::fmt::Display for Kind {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::File => "a file",
-            Self::Directory => "a directory",
-        })
     }
 }
 
