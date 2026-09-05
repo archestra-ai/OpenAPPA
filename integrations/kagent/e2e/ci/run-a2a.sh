@@ -86,7 +86,7 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     echo "| agent | \`$agent\` in namespace \`$namespace\` |"
     echo "| model | \`$model\` |"
     echo "| endpoint | \`$base_url\` |"
-    echo "| cases | all 17 A2A conversations |"
+    echo "| cases | all 18 A2A conversations |"
     echo "| pytest exit | \`$status\` |"
     echo "| seconds | \`$seconds\` |"
     echo

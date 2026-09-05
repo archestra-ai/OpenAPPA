@@ -324,6 +324,8 @@ helm upgrade --install appa-kagent-demo \
   --force-conflicts --wait --timeout 10m
 ```
 
+If a retained demo volume reports `attempt to write a readonly database`, rerun once with `--set runtime.persistence.migrateOwnership=true`. That repair uses a root init container, so do not enable it in a restricted namespace.
+
 The demo chart pre-seeds the kagent dashboard with interactive scenarios that verify each policy boundary.
 
 The default dashboard contains four OpenAPPA Agents. `appa-guide` manages policy, batteries, and integration lifecycle. `cluster-ops` is the primary demo Agent. `log-analyst` is its delegated child for gated-return scenarios. `release-manager` is intentionally omitted from policy to demonstrate denied delegation. The latter two are scenario fixtures, not general kagent defaults.

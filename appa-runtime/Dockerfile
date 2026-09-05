@@ -6,6 +6,7 @@
 # listens on every interface so Docker and Kubernetes can reach it directly.
 #
 #   docker build -f appa-runtime/Dockerfile -t appa-runtime .
+#   docker run -e APPA_MCP_ALLOWED_HOST=appa-runtime:18787 -p 18787:18787 appa-runtime
 #   (build context: the repository root)
 #
 # Each FROM pins its base image by digest. The tag beside the digest names the version.

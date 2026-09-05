@@ -740,11 +740,11 @@ jobs:
   # same-named twin would report skipped beside a real failure and
   # satisfy the requirement anyway, which is how a twin masks red e2e.
   #
-  # All 17 A2A cases against a real model on a kind cluster. Each test gets
+  # All 18 A2A cases against a real model on a kind cluster. Each test gets
   # three total attempts; a test that exhausts them fails the gate.
   #
   # The steps below own the runner. The scripts under e2e/ci own the stack:
-  #   kind-up.sh    loads the three `:ci` images into the cluster. It keeps
+  #   kind-up.sh    loads the four `:ci` images into the cluster. It keeps
   #                 the cluster the action above creates.
   #   install.sh    installs kagent and the demo chart, then waits for rollout.
   #   run-a2a.sh    port-forwards the agent and the mocks, runs the cases,
@@ -854,7 +854,7 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Run all 17 A2A cases
+      - name: Run all 18 A2A cases
         id: live-e2e
         run: bash integrations/kagent/e2e/ci/run-a2a.sh
 

@@ -192,7 +192,7 @@ namespace and the child names from `APPA_NAMESPACE`, `APPA_CHILD` and
 `APPA_UNDECLARED`, with this chart's defaults.
 
 [../../e2e/ci](../../e2e/ci/) installs this chart on a kind cluster
-from the locally built images and runs five of the A2A cases against
+from the locally built images and runs all 18 A2A cases against
 it, on a laptop or on a CI runner.
 
 [tests/render-test.sh](tests/render-test.sh) renders the chart with

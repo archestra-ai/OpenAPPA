@@ -483,6 +483,14 @@ jobs:
             echo "::error::golang-adk resolves to ${alias_digest}, not ${GO_DIGEST}"
             exit 1
           fi
+          anonymous_token=$(curl --fail --silent \
+            'https://ghcr.io/token?scope=repository%3Aarchestra-ai%2Fgolang-adk%3Apull&service=ghcr.io' \
+            | jq -r .token)
+          test -n "$anonymous_token"
+          curl --fail --silent --output /dev/null \
+            -H "Authorization: Bearer $anonymous_token" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json' \
+            "https://ghcr.io/v2/archestra-ai/golang-adk/manifests/${VERSION}"
 
   publish-chart:
     name: Publish Helm charts

@@ -70,7 +70,12 @@ struct Args {
 
     /// Host headers accepted by the MCP endpoint. Empty keeps rmcp's
     /// loopback defaults. Shared deployments name each Service address.
-    #[arg(long = "mcp-allowed-host", action = clap::ArgAction::Append)]
+    #[arg(
+        long = "mcp-allowed-host",
+        env = "APPA_MCP_ALLOWED_HOST",
+        value_delimiter = ',',
+        action = clap::ArgAction::Append
+    )]
     mcp_allowed_hosts: Vec<String>,
 
     #[arg(long, value_enum, default_value_t = Adapter::ClaudeCode, global = true)]

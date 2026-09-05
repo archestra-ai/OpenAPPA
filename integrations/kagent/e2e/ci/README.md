@@ -1,6 +1,6 @@
 # The live A2A matrix on kind
 
-Three scripts stand the demo stack up on a kind cluster and run all 17
+Three scripts stand the demo stack up on a kind cluster and run all 18
 A2A matrix cases against a real model. CI gates on them after three
 attempts per case, and the same three commands run on a laptop or a dev
 VM. The other suites in [../](../) need a stack that already runs, or no
@@ -27,7 +27,7 @@ Then, from this directory:
 ```sh
 ./kind-up.sh                              # the cluster, and the images into it
 OPENROUTER_API_KEY=… ./install.sh         # kagent 0.9.12, then the demo chart
-./run-a2a.sh                              # all 17 A2A cases
+./run-a2a.sh                              # all 18 A2A cases
 ```
 
 `kind-up.sh` keeps a cluster that already carries the name and leaves it
