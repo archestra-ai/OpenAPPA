@@ -2,7 +2,7 @@
 
 This directory contains the OpenAPPA integration for [kagent](https://github.com/kagent-dev/kagent), the Kubernetes-native AI agent orchestrator.
 
-OpenAPPA makes every declarative kagent agent on Kubernetes ready to gate through one install setting: the runtime image (`controller.agentImage`). Each Agent then turns the gate on itself with `APPA_ENABLED=true` in its own `spec.declarative.deployment.env`. Without that value the image serves the agent exactly as the stock kagent image does and gates nothing. Neither step needs a fork of kagent or a fork of the Google Agent Development Kit (ADK).
+OpenAPPA gates declarative kagent Agents through one remote `appa-runtime`. Set `controller.agentImage` to the Python adapter image. Each protected Agent then sets `APPA_ENABLED=true` and a nonempty `APPA_RUNTIME_URL`. Without that flag, the image preserves stock behavior. This needs no kagent or Google ADK fork.
 
 - **Operator guide**: [website/content/docs/kagent.md](../../website/content/docs/kagent.md)
 - **Implementation specification**: [IMPLEMENTATION.md](IMPLEMENTATION.md)
@@ -15,7 +15,6 @@ OpenAPPA makes every declarative kagent agent on Kubernetes ready to gate throug
 integrations/kagent/
 ├── appa-kagent-adk/         # Python ADK plugin and entrypoint (appa_kagent_adk)
 ├── appa-kagent-adk-go/      # Go ADK plugin and replacement runtime main
-├── appa-kagent-quickstart/  # Unified container image bundling appa-runtime and runtimes
 ├── demo/                    # Demo Helm chart, mock services, and demo tools
 │   ├── chart/               # Helm chart (appa-kagent-demo)
 │   ├── mocks/               # Mock external authorities (change-board, annotator)
@@ -35,13 +34,10 @@ Wraps kagent's published Python runtime container image. It ships `AppaPluginKag
 ### 2. Go Runtime (`appa-kagent-adk-go/`)
 Implements `AppaPluginKagent` for Google Go ADK v2. It provides a replacement runtime main that registers the plugin, manages session lineage headers across agent-to-agent delegation, and coordinates human-in-the-loop approvals.
 
-### 3. Quickstart Image (`appa-kagent-quickstart/`)
-A self-contained container image bundling the Python runtime with an embedded `appa-runtime` binary. `APPA_ENABLED` selects the mode and is off by default: the image then serves the agent as the stock kagent image does and starts no runtime. With `APPA_ENABLED=true` and no `APPA_RUNTIME_URL`, the image starts `appa-runtime` on `127.0.0.1:8787` using a packaged default policy. `APPA_CONFIG_CONTENTS` supplies a complete per-Agent policy for that bundled mode. With `APPA_RUNTIME_URL` supplied, the image connects to the shared runtime service instead.
-
-### 4. Codec Crate (`appa-adapter-kagent`)
+### 3. Codec Crate (`appa-adapter-kagent`)
 The Rust codec crate lives at [`appa-adapter-kagent/`](../../appa-adapter-kagent) in the workspace root. It is compiled directly into `appa-runtime` and parses wire events sent by `AppaPluginKagent`.
 
-### 5. Guide Skill (`../appa-guide/`)
+### 4. Guide Skill (`../appa-guide/`)
 The host-neutral `appa-guide` skill routes to a Claude Code or kagent reference. In kagent, it runs as a dedicated declarative `Agent` using the stock `k8s_*` tools from the kagent tool server to inspect installed tools, match batteries, propose policies in chat, and apply them to the runtime ConfigMap under kagent's Approve / Reject card. With persistence enabled, it also verifies and refreshes upstream policy batteries without container rebuilds. See [website/content/docs/kagent.md](../../website/content/docs/kagent.md) for full deployment and maintenance workflows.
 
 ## Quickstart
@@ -50,18 +46,27 @@ These commands require Helm 4 because upgrades reclaim chart-owned fields with s
 
 ### Deploy kagent with OpenAPPA
 
-Install kagent CRDs and the kagent controller, setting `controller.agentImage` to the OpenAPPA quickstart image:
+Install the CRDs and remote runtime before the kagent controller uses the OpenAPPA adapter image:
 
 ```sh
 # 1. Install kagent CRDs
 helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-crds \
   --version 0.9.12 -n kagent --create-namespace --force-conflicts
 
-# 2. Install kagent controller with OpenAPPA image
+# 2. Install the remote runtime
+APPA_VERSION=0.10.0 # x-release-please-version
+helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
+  --version "$APPA_VERSION" -n appa --create-namespace \
+  --set persistence.enabled=true \
+  --set appaGuide.enabled=true \
+  --set appaGuide.namespace=kagent \
+  --force-conflicts --wait --timeout 10m
+
+# 3. Install kagent controller with the OpenAPPA adapter image
 helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
   --set controller.agentImage.registry=ghcr.io \
-  --set controller.agentImage.repository=archestra-ai/appa-kagent-quickstart \
+  --set controller.agentImage.repository=archestra-ai/appa-kagent-adk \
   --set k8s-agent.enabled=false \
   --set kgateway-agent.enabled=false \
   --set istio-agent.enabled=false \
@@ -74,7 +79,7 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --set cilium-debug-agent.enabled=false \
   --force-conflicts \
   --wait --timeout 10m \
-  --set controller.agentImage.tag=0.10.0 # x-release-please-version
+  --set controller.agentImage.tag="$APPA_VERSION"
 ```
 
 The stock agents are not part of this quickstart and require a separate provider Secret such as `kagent-openai`. These flags disable them while retaining the controller, dashboard, and tool services used below.
@@ -92,17 +97,15 @@ spec:
       env:
         - name: APPA_ENABLED
           value: "true"
-        # Optional: point at a shared appa-runtime. Left unset, the
-        # quickstart image starts its bundled one on loopback.
         - name: APPA_RUNTIME_URL
-          value: http://appa-runtime.kagent.svc.cluster.local:18789
+          value: http://appa-runtime.appa.svc.cluster.local:18787
 ```
 
-An agent with `APPA_ENABLED=true` refuses to start without its runtime. The wrapped runtime refuses a gated start that names no `APPA_RUNTIME_URL`. The quickstart image exits when its bundled `appa-runtime` never answers. So an agent you asked to gate never runs ungated.
+An Agent with `APPA_ENABLED=true` refuses to start without a reachable remote runtime. It never falls back to ungated execution.
 
 ### Deploy a shared cluster-wide runtime
 
-The production chart installs one `appa-runtime` with an unprivileged NGINX relay sidecar, the release batteries, and optional persistence for trajectory auditing and battery refreshing:
+The production chart installs one directly reachable `appa-runtime`, the release batteries, and optional persistence for trajectory auditing and battery refreshing:
 
 ```sh
 helm upgrade --install appa-runtime ../../charts/appa-runtime -n kagent \
@@ -111,7 +114,7 @@ helm upgrade --install appa-runtime ../../charts/appa-runtime -n kagent \
   --set persistence.size=8Gi
 ```
 
-Point any declarative agent at `http://appa-runtime.kagent.svc.cluster.local:18789`. `GET /batteries` on that Service lists the batteries bundled with this release. The `appa-guide` skill translates matched declarations to exact kagent tool names, writes the policy ConfigMap under the kagent Approve / Reject card, and hot-reloads the policy. With persistence enabled, `appa-guide` can also inspect, verify, and refresh upstream batteries from published releases without rebuilding containers.
+Point any declarative Agent at `http://appa-runtime.kagent.svc.cluster.local:18787`. `GET /batteries` on that Service lists the batteries bundled with this release. The `appa-guide` skill translates matched declarations to exact kagent tool names, writes the policy ConfigMap under the kagent Approve / Reject card, and hot-reloads the policy. With persistence enabled, `appa-guide` can also inspect, verify, and refresh upstream batteries from published releases without rebuilding containers.
 
 ### Deploy the Interactive Demo
 
@@ -147,7 +150,7 @@ To build and test the integration images locally (for example, on a local `kind`
 ```sh
 # Build images
 docker build -f ../../appa-runtime/Dockerfile -t appa-runtime:dev ../../
-docker build -f appa-kagent-quickstart/Dockerfile -t appa-kagent-quickstart:dev ../../
+docker build -t appa-kagent-adk:dev appa-kagent-adk
 docker build -t golang-adk:dev appa-kagent-adk-go   # the go cell: kagent derives this name for runtime: go
 docker build -t appa-demo-tools:dev demo
 docker build -t appa-demo-mocks:dev demo/mocks
@@ -155,7 +158,7 @@ docker build -t appa-demo-mocks:dev demo/mocks
 # Load images into kind
 kind load docker-image \
   appa-runtime:dev \
-  appa-kagent-quickstart:dev \
+  appa-kagent-adk:dev \
   golang-adk:dev \
   appa-demo-tools:dev \
   appa-demo-mocks:dev \

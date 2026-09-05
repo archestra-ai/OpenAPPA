@@ -1,13 +1,14 @@
-# Example deployment for a gated kagent cluster-ops agent.
+# Example policy for a kagent cluster-ops Agent gated by a remote runtime.
 #
-# The packaged policy of the quickstart image, and the reference shape
-# for a kagent policy file. It names the demo toolset of a cluster-ops
-# agent: in-cluster reads, two suspicious ingress tools, one outward
+# Store this policy in the shared appa-runtime ConfigMap. It names the
+# demo toolset of a cluster-ops Agent: in-cluster reads, two suspicious
+# ingress tools, one outward
 # sink with a requirement, one effectful action behind human approval,
 # and the two synthetic tools the entrypoint gates route out-of-band
 # flows through. A tool the policy does not name is refused at the
 # `ToolCall` hook — add a wildcard annotator before pointing a long
 # tail of CRD toolsets at this file.
+# Every protected Agent sets `APPA_ENABLED=true` and `APPA_RUNTIME_URL`.
 #
 # It names no agent: on kagent an agent called as a tool runs as a child
 # only under a contract that names it, wildcard or not, so delegation to

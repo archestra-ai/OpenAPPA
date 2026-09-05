@@ -1,7 +1,7 @@
 //! The shipped appa-guide skill is one composable package: a host-routing
 //! SKILL.md and one reference file per host. These checks keep the package
-//! whole — the router routing, each reference carrying its host's flow, and
-//! the kagent chart consuming this same package rather than a second one.
+//! whole: the router routes, the kagent reference uses only the shared remote
+//! runtime, and the chart consumes this package rather than a second skill.
 
 mod common;
 use common::repo_root;
@@ -81,14 +81,13 @@ fn the_kagent_reference_carries_the_full_flow() {
         "k8s_apply_manifest",
         "__NS__",
         "Approve/Reject card",
-        "opens the Approve/Reject card",
         "same fetched Pod YAML",
         "/batteries",
-        "APPA_CONFIG_CONTENTS",
+        "runtime mode is the only supported deployment",
+        "http://appa-runtime.<namespace>.svc.cluster.local:18787",
         "Replace only `name`",
         "PersistentVolumeClaim",
-        "Bundled mode batteries",
-        "kubelet syncs",
+        "kubelet sync",
         "Read-only fallback",
         "Approve, or tell me what to change.",
         "## Cluster operations",
@@ -99,8 +98,14 @@ fn the_kagent_reference_carries_the_full_flow() {
         "Required init checklist",
         "Never construct a pod name",
         "List every `RemoteMCPServer`",
+        "server not yet attached to an Agent",
+        "appa-guide-refresh-check",
+        "kagent 0.9.12 sends `k8s_execute_command.command` as one executable name",
     ] {
         assert!(reference.contains(marker), "the kagent flow names {marker:?}");
+    }
+    for stale in ["APPA_CONFIG_CONTENTS", "Bundled mode", "127.0.0.1:8787"] {
+        assert!(!reference.contains(stale), "{stale:?} is not a supported kagent mode");
     }
     for claude_only in ["claude mcp list", "clappa", "marketplace-root", "APPA_GATE"] {
         assert!(
@@ -146,26 +151,38 @@ fn the_kagent_chart_consumes_this_skill_package() {
 }
 
 #[test]
-fn only_the_shared_runtime_image_carries_battery_refresh_helpers() {
+fn kagent_guidance_requires_the_shared_runtime_and_direct_port() {
     let root = repo_root();
-    let shared = fs::read_to_string(root.join("appa-runtime/Dockerfile")).expect("read shared runtime image");
-    let bundled = fs::read_to_string(root.join("integrations/kagent/appa-kagent-quickstart/Dockerfile"))
-        .expect("read bundled runtime image");
-
-    for operation in ["inspect", "reload"] {
-        assert!(
-            shared.contains(operation) && bundled.contains(operation),
-            "both runtime modes support {operation}"
-        );
-    }
-    assert!(shared.contains("refresh-check"));
-    assert!(shared.contains("command-annotator"));
     assert!(
-        !bundled.contains("refresh-check")
-            && !bundled.contains("appa-refresh-batteries")
-            && !bundled.contains("command-annotator"),
-        "bundled batteries change only with the image"
+        !root.join("integrations/kagent/appa-kagent-quickstart").exists(),
+        "kagent has no bundled-runtime image"
     );
+    for path in [
+        "website/content/docs/kagent.md",
+        "integrations/kagent/README.md",
+        "integrations/kagent/IMPLEMENTATION.md",
+        "integrations/appa-guide/references/kagent.md",
+        "integrations/kagent/examples/kagent.appa.toml",
+    ] {
+        let content = fs::read_to_string(root.join(path)).expect("read kagent guidance");
+        assert!(content.contains("APPA_RUNTIME_URL"), "{path} names the runtime URL");
+        for stale in [
+            "APPA_CONFIG_CONTENTS",
+            "appa-kagent-quickstart",
+            "Bundled mode",
+            "127.0.0.1:8787",
+            "18789",
+            "relay",
+        ] {
+            assert!(!content.contains(stale), "{path} retains stale {stale:?} guidance");
+        }
+    }
+
+    let website = fs::read_to_string(root.join("website/content/docs/kagent.md")).expect("read website guide");
+    assert!(website.contains("http://appa-runtime.appa.svc.cluster.local:18787"));
+    assert!(website.contains("appaGuide.enabled=true"));
+    assert!(website.contains("appa-kagent-adk"));
+    assert!(website.contains("archestra-ai/golang-adk"));
 }
 
 #[test]
@@ -184,6 +201,21 @@ fn kagent_exec_is_annotated_by_exact_guide_operation() {
         assert!(policy.contains("marks = [\"human-approval\"]"));
         assert!(policy.contains("/usr/local/bin/appa-guide-command-annotator"));
     }
+
+    let reference = read("references/kagent.md");
+    assert!(reference.contains("`appa-guide-inspect` | Reads"));
+    assert!(reference.contains("Exact read-only inspection needs no approval"));
+    for operation in [
+        "appa-guide-reload",
+        "appa-guide-refresh-check",
+        "appa-guide-refresh-stage",
+        "appa-guide-refresh-commit",
+        "appa-guide-refresh-rollback",
+    ] {
+        assert!(reference.contains(operation), "the reference names {operation}");
+    }
+    assert!(reference.contains("Every Kubernetes resource write, restart or rollout, Helm mutation"));
+    assert!(reference.contains("runtime reload must cross the `human-approval` authority"));
 }
 
 #[test]
