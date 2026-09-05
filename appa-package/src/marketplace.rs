@@ -6,10 +6,12 @@ use std::fs;
 use std::path::Path;
 
 use serde::Deserialize;
+use thiserror::Error;
 
 use crate::digest::TreeDigest;
 use crate::manifest::{ManifestError, SCHEMA};
-use crate::names::{PackageKind, PackageName, RelativePath};
+use crate::names::{CredentialPrefix, Namespace, PackageKind, PackageName, RelativePath};
+use crate::package::{Package, Role};
 
 /// One listed package: where it lives and what its tree must digest to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +104,75 @@ impl Marketplace {
 
         Ok(Self { name, packages })
     }
+}
+
+/// Why a set of packages cannot sit in one marketplace together.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum OwnershipError {
+    #[error("`{first}` and `{second}` both cover the namespace `{namespace}`")]
+    SharedNamespace {
+        first: PackageName,
+        second: PackageName,
+        namespace: Namespace,
+    },
+    #[error("`{first}` reads every credential `{second}` reads, under `{prefix}`")]
+    NestedCredentials {
+        first: PackageName,
+        second: PackageName,
+        prefix: CredentialPrefix,
+    },
+}
+
+/// Every namespace and every credential in a marketplace has one owner.
+///
+/// One package validates against its own manifest, which is all a single
+/// directory can be checked against, and a battery may cover a namespace its
+/// own name cannot spell (`claude_ai_Slack`). So nothing inside a package stops
+/// a second package from covering the first's namespace, appending permissive
+/// contracts to tools the first never declared and routing their arguments
+/// through its own Annotator; and nothing stops a second package from naming a
+/// credential the first's prefix covers and receiving it at spawn. Both are
+/// refused here, where the whole set is visible.
+///
+/// Adapters carry neither, so this is a rule about batteries.
+pub fn check_ownership(packages: &[Package]) -> Result<(), OwnershipError> {
+    let batteries: Vec<(&PackageName, &[Namespace])> = packages
+        .iter()
+        .filter_map(|package| match &package.role {
+            Role::Battery(battery) => Some((&package.name, battery.namespaces.as_slice())),
+            Role::Adapter(_) => None,
+        })
+        .collect();
+
+    let mut owner: BTreeMap<&Namespace, &PackageName> = BTreeMap::new();
+    for (name, namespaces) in &batteries {
+        for namespace in *namespaces {
+            if let Some(first) = owner.insert(namespace, name) {
+                return Err(OwnershipError::SharedNamespace {
+                    first: first.clone(),
+                    second: (*name).clone(),
+                    namespace: namespace.clone(),
+                });
+            }
+        }
+    }
+
+    // A prefix owns its own continuations, so `slack` would read every
+    // credential `slack-admin` reads. Names, not prefixes, are compared for
+    // identity: two batteries cannot share a name in one marketplace.
+    for (first, _) in &batteries {
+        let prefix = first.credential_prefix();
+        for (second, _) in &batteries {
+            if first != second && prefix.owns(second.credential_prefix().as_str()) {
+                return Err(OwnershipError::NestedCredentials {
+                    first: (*first).clone(),
+                    second: (*second).clone(),
+                    prefix,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -211,6 +282,76 @@ mod tests {
             manifest(&listing().replace("\"batteries/github\"", "\"adapters/claude-code\"")),
             Err(ManifestError::DuplicatePath { .. })
         ));
+    }
+
+    fn battery(name: &str, namespaces: &[&str]) -> Package {
+        let namespaces = namespaces
+            .iter()
+            .map(|namespace| format!("\"{namespace}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Package::parse(
+            &format!(
+                "schema = 1\nname = \"{name}\"\ndescription = \"a battery\"\n\n\
+                 [battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nnamespaces = [{namespaces}]\n"
+            ),
+            Path::new("appa-package.toml"),
+        )
+        .expect("the manifest parses")
+    }
+
+    fn adapter(name: &str) -> Package {
+        Package::parse(
+            &format!(
+                "schema = 1\nname = \"{name}\"\ndescription = \"an adapter\"\n\n\
+                 [adapter]\nhost = \"claude-code\"\nprotocol = 1\ndefault_policy = \"d.toml\"\n\
+                 plugin_dir = \"plugin\"\nplugin = \"appa-runtime\"\n"
+            ),
+            Path::new("appa-package.toml"),
+        )
+        .expect("the manifest parses")
+    }
+
+    #[test]
+    fn two_batteries_may_not_cover_one_namespace() {
+        let together = [battery("github", &["github"]), battery("evil", &["github"])];
+
+        assert!(matches!(
+            check_ownership(&together),
+            Err(OwnershipError::SharedNamespace { .. })
+        ));
+        assert!(check_ownership(&[battery("github", &["github"]), battery("evil", &["evil"])]).is_ok());
+    }
+
+    /// A battery covers several namespaces, and each of them is its own.
+    #[test]
+    fn a_second_namespace_is_owned_like_the_first() {
+        let slack = battery("slack", &["claude_ai_Slack", "slack"]);
+
+        assert!(check_ownership(&[slack.clone(), battery("grain", &["claude_ai_Grain"])]).is_ok());
+        assert!(matches!(
+            check_ownership(&[slack, battery("other", &["slack"])]),
+            Err(OwnershipError::SharedNamespace { .. })
+        ));
+    }
+
+    /// One package's credential prefix owns its own continuations, so a
+    /// marketplace holding both `slack` and `slack-admin` would let `slack`
+    /// read every credential `slack-admin` reads.
+    #[test]
+    fn no_battery_owns_another_batterys_credentials() {
+        assert!(matches!(
+            check_ownership(&[battery("slack", &["a"]), battery("slack-admin", &["b"])]),
+            Err(OwnershipError::NestedCredentials { .. })
+        ));
+        assert!(check_ownership(&[battery("slack", &["a"]), battery("slackadmin", &["b"])]).is_ok());
+    }
+
+    /// An adapter reads no credentials and covers no namespaces, so it shares
+    /// a name with a battery freely — the marketplace ships `claude-code` twice.
+    #[test]
+    fn an_adapter_owns_nothing_a_battery_could_want() {
+        assert!(check_ownership(&[adapter("claude-code"), battery("claude-code", &["claude-code"])]).is_ok());
     }
 
     #[test]

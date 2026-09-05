@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use appa_package::{Host, Marketplace, Role, TreeDigest, validate_package};
+use appa_package::{Host, Marketplace, Role, TreeDigest, check_ownership, validate_package};
 use appa_runtime::config::Config;
 
 fn repository() -> PathBuf {
@@ -31,9 +31,16 @@ fn manifest() -> Marketplace {
 /// Every package the manifest names is a package: it parses, its declared paths
 /// exist, its policy names only namespaces it covers, and it runs only helpers
 /// it ships.
+///
+/// And the packages hold together: a namespace and a credential each have one
+/// owner. A deployment installs several of these side by side into one policy,
+/// so a second package covering the first's namespace would append contracts to
+/// tools the first never declared, and one naming a credential the first's
+/// prefix covers would be handed it at spawn.
 #[test]
 fn every_package_the_marketplace_names_validates() {
     let root = marketplace_root();
+    let mut packages = Vec::new();
     for entry in manifest().packages {
         let directory = root.join(entry.path.as_str());
         let package = validate_package(&directory).unwrap_or_else(|error| {
@@ -44,7 +51,9 @@ fn every_package_the_marketplace_names_validates() {
             "{} is listed as {} and calls itself {}",
             entry.path, entry.name, package.name
         );
+        packages.push(package);
     }
+    check_ownership(&packages).expect("the marketplace's packages hold together");
 }
 
 /// The recorded digest is the digest of the package's committed content, which
