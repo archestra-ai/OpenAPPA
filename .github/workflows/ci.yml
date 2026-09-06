@@ -245,7 +245,9 @@ jobs:
           done
 
       - name: Test release battery refresh
-        run: python3 -m unittest scripts/test_appa_refresh_batteries.py scripts/test_appa_guide_runtime.py scripts/test_appa_oci_tags.py
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --break-system-packages 'pyyaml==6.0.2'
+          python3 -m unittest scripts/test_appa_refresh_batteries.py scripts/test_appa_guide_runtime.py scripts/test_appa_oci_tags.py
 
       - name: Check release versions
         uses: ./.github/actions/check-release-versions

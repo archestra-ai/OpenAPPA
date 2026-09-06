@@ -70,8 +70,29 @@ class AppaGuideRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exactly one Agent document"):
             guide.annotate_apply(consult(smuggled))
         mixed = "apiVersion: kagent.dev/v1alpha2\nkind: Agent\nkind: Secret\nspec:\n  type: Declarative\n"
-        with self.assertRaisesRegex(ValueError, "supports only Agent"):
+        with self.assertRaisesRegex(ValueError, "duplicate key"):
             guide.annotate_apply(consult(mixed))
+        inline_status = agent + "status: {conditions: []}\n"
+        with self.assertRaisesRegex(ValueError, "complete spec and no status"):
+            guide.annotate_apply(consult(inline_status))
+        commented_document = (
+            agent
+            + "--- # comment\napiVersion: v1\nkind: Secret\nmetadata:\n  name: stolen\n"
+        )
+        with self.assertRaisesRegex(ValueError, "exactly one Agent document"):
+            guide.annotate_apply(consult(commented_document))
+        quoted_keys = 'apiVersion: kagent.dev/v1alpha2\n"kind": Agent\nspec:\n  type: Declarative\n'
+        self.assertEqual(
+            guide.annotate_apply(consult(quoted_keys))["answer"]["requires"][
+                "attention"
+            ],
+            ["human-approval"],
+        )
+        no_spec = (
+            "apiVersion: kagent.dev/v1alpha2\nkind: Agent\nmetadata:\n  name: fixture\n"
+        )
+        with self.assertRaisesRegex(ValueError, "complete spec and no status"):
+            guide.annotate_apply(consult(no_spec))
 
     def test_battery_include_preserves_the_complete_root(self) -> None:
         root = (
@@ -198,6 +219,38 @@ class AppaGuideRuntimeTests(unittest.TestCase):
                 ),
             ):
                 guide.publish_and_reload("old", "new")
+
+    def test_a_reload_of_another_policy_rolls_back_the_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "appa.toml"
+            config.write_text("new", encoding="utf-8")
+            candidate_key = guide.policy_file_key("new")
+            restored: list[tuple[str, str]] = []
+
+            def restore(candidate: str, current: str) -> None:
+                restored.append((candidate, current))
+                config.write_text(current, encoding="utf-8")
+
+            def request(path: str, method: str = "GET") -> bytes:
+                if path == "/reload":
+                    return b'{"reloaded": true}'
+                if path == "/policy-key":
+                    return b"somebody-elses-policy"
+                raise AssertionError(path)
+
+            with (
+                mock.patch.dict(guide.os.environ, {"APPA_CONFIG": str(config)}),
+                mock.patch.object(guide, "update_policy_configmap"),
+                mock.patch.object(guide, "runtime_request", side_effect=request),
+                mock.patch.object(guide, "restore_serving_policy", side_effect=restore),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "served a different policy than published; prior policy restored",
+                ),
+            ):
+                guide.publish_and_reload("old", "new")
+            self.assertEqual(restored, [("new", "old")])
+            self.assertNotEqual(candidate_key, "somebody-elses-policy")
 
     def test_refresh_state_reports_the_active_and_previous_layers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
