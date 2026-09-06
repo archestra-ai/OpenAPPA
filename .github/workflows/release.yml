@@ -298,6 +298,12 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
+      - name: Authenticate to Artifact Registry
+        uses: ./.github/actions/auth-to-gar
+        with:
+          service_account: appa-release-publish@friendly-path-465518-r6.iam.gserviceaccount.com
+          workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+
       - name: Verify and checkout release source
         uses: ./.github/actions/verify-release-source
         with:
@@ -321,22 +327,16 @@ jobs:
             test "$(helm show chart "$chart" | sed -n 's/^appVersion: *//p')" = "$VERSION"
           done
 
-      - name: Authenticate to Artifact Registry
-        uses: ./.github/actions/auth-to-gar
-        with:
-          service_account: appa-release-publish@friendly-path-465518-r6.iam.gserviceaccount.com
-          workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
-
       - name: Log in to the chart registry
         run: gcloud auth print-access-token | helm registry login europe-west1-docker.pkg.dev --username oauth2accesstoken --password-stdin
 
       - name: Publish the chart
         env:
+          CHARTS_OCI: oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts
           VERSION: ${{ needs.release-please.outputs.version }}
         run: |
-          charts_oci=$(python3 scripts/appa-oci-tags.py charts-oci)
-          helm push "dist/appa-runtime-${VERSION}.tgz" "$charts_oci"
-          helm push "dist/appa-kagent-demo-${VERSION}.tgz" "$charts_oci"
+          helm push "dist/appa-runtime-${VERSION}.tgz" "$CHARTS_OCI"
+          helm push "dist/appa-kagent-demo-${VERSION}.tgz" "$CHARTS_OCI"
 
       - name: Upload the runtime chart artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

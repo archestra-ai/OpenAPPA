@@ -84,6 +84,12 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
+      - name: Authenticate to Artifact Registry
+        uses: ./.github/actions/auth-to-gar
+        with:
+          service_account: appa-release-publish@friendly-path-465518-r6.iam.gserviceaccount.com
+          workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+
       - name: Verify and checkout release source
         if: ${{ inputs.verify_release }}
         uses: ./.github/actions/verify-release-source
@@ -99,12 +105,6 @@ jobs:
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
-
-      - name: Authenticate to Artifact Registry
-        uses: ./.github/actions/auth-to-gar
-        with:
-          service_account: appa-release-publish@friendly-path-465518-r6.iam.gserviceaccount.com
-          workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
 
       - name: Build and push appa-runtime leg
         if: ${{ matrix.image == 'appa-runtime' }}
@@ -254,6 +254,12 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
+      - name: Authenticate to Artifact Registry
+        uses: ./.github/actions/auth-to-gar
+        with:
+          service_account: appa-release-publish@friendly-path-465518-r6.iam.gserviceaccount.com
+          workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+
       - name: Verify and checkout release source
         if: ${{ inputs.verify_release }}
         uses: ./.github/actions/verify-release-source
@@ -270,19 +276,12 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
-      - name: Authenticate to Artifact Registry
-        uses: ./.github/actions/auth-to-gar
-        with:
-          service_account: appa-release-publish@friendly-path-465518-r6.iam.gserviceaccount.com
-          workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
-
       - name: Resolve image tags
         id: tags
         env:
           IMMUTABLE: ${{ inputs.immutable }}
           TAGS: ${{ inputs.tags }}
         run: |
-          test "$(python3 scripts/appa-oci-tags.py registry)" = "$REGISTRY"
           mapfile -t tags < <(printf '%s\n' "$TAGS" | awk 'NF')
           if [ "${#tags[@]}" -eq 0 ]; then
             echo "::error::no image tags to publish"
