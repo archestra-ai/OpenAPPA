@@ -50,7 +50,7 @@ must_render
 expect 1 '^kind: Deployment$'
 expect 1 '^kind: Service$'
 expect 1 '^kind: ServiceAccount$'
-must_contain 'image: ghcr.io/archestra-ai/appa-runtime:'
+must_contain "image: europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-runtime:v${app_version}"
 must_contain '--batteries-dir'
 must_contain '/opt/appa/batteries'
 must_contain 'containerPort: 18787'

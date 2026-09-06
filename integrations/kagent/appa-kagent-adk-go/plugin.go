@@ -1,5 +1,5 @@
 // Package appakagentadk carries AppaPluginKagent — the adk/v2 plugin
-// of the ghcr.io/archestra-ai/appa-kagent-adk-go image.
+// of the appa-kagent-adk-go image.
 //
 // The plugin maps each gated ADK callback onto one wire event, posts
 // it to $APPA_RUNTIME_URL/hook, and enforces the answered decision. It

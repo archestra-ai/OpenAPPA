@@ -15,9 +15,9 @@ Configure the appa plugin image in the kagent controller Helm values:
 controller:
   # Python declarative runtime image
   agentImage:
-    registry: ghcr.io
-    repository: archestra-ai/appa-kagent-adk
-    tag: 0.12.0 # x-release-please-version
+    registry: europe-west1-docker.pkg.dev
+    repository: friendly-path-465518-r6/appa-public/appa-kagent-adk
+    tag: v0.12.0 # x-release-please-version
 ```
 
 The plugin image replaces kagent's Python Agent image. It stays inert until an Agent sets both variables:
@@ -46,7 +46,7 @@ The Python and Go plugin images run inside Agent pods through the official Googl
 - **Runtime support**: Works with both Python (`appa-kagent-adk`) and Go (`appa-kagent-adk-go`) runtimes.
 - **Subagent return gate**: Delegated child agents stop through `appa_return`. OpenAPPA checks returned data at `SpawnResult` before parent context receives it.
 
-On kagent 0.9.12, Go Agents derive `ghcr.io/archestra-ai/golang-adk` from `controller.agentImage`. OpenAPPA publishes that alias on the `appa-kagent-adk-go` image digest. The stable chart has no `controller.goAgentImage` value.
+On kagent 0.9.12, Go Agents derive `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/golang-adk` from `controller.agentImage`. OpenAPPA publishes that alias on the `appa-kagent-adk-go` image digest. The stable chart has no `controller.goAgentImage` value.
 
 ## Policy scope
 
@@ -87,9 +87,9 @@ helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-c
 
 helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
-  --set controller.agentImage.registry=ghcr.io \
-  --set controller.agentImage.repository=archestra-ai/appa-kagent-adk \
-  --set controller.agentImage.tag="$APPA_VERSION" \
+  --set controller.agentImage.registry=europe-west1-docker.pkg.dev \
+  --set controller.agentImage.repository=friendly-path-465518-r6/appa-public/appa-kagent-adk \
+  --set controller.agentImage.tag="v$APPA_VERSION" \
   --set providers.default=openAI \
   --set-string providers.openAI.apiKey="$OPENAI_API_KEY" \
   --set k8s-agent.enabled=false \
@@ -115,7 +115,7 @@ Now install the runtime. kagent can reconcile `appa-guide` against the model and
 
 ```sh
 APPA_VERSION=0.12.0 # x-release-please-version
-helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
+helm upgrade --install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
   --version "$APPA_VERSION" -n appa --create-namespace \
   --set persistence.enabled=true \
   --set persistence.size=8Gi \
@@ -131,7 +131,7 @@ The runtime listens at `http://appa-runtime.appa.svc.cluster.local:18787`. The s
 ```sh
 APPA_VERSION=0.12.0 # x-release-please-version
 helm upgrade --install appa-kagent-demo \
-  oci://ghcr.io/archestra-ai/charts/appa-kagent-demo \
+  oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-kagent-demo \
   --version "$APPA_VERSION" -n kagent \
   --set-string runtime.url=http://appa-runtime.appa.svc.cluster.local:18787 \
   --set-string modelConfig.name=default-model-config \
@@ -186,7 +186,7 @@ Deploy one policy runtime for the agents you want to protect:
 
 ```sh
 APPA_VERSION=0.12.0 # x-release-please-version
-helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
+helm upgrade --install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
   --version "$APPA_VERSION" \
   --namespace appa --create-namespace \
   --set persistence.enabled=true \
@@ -221,9 +221,9 @@ The new adapter refuses an enabled Agent with no URL. Updating the URL first pre
 ```sh
 helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent --reuse-values \
-  --set controller.agentImage.registry=ghcr.io \
-  --set controller.agentImage.repository=archestra-ai/appa-kagent-adk \
-  --set controller.agentImage.tag="$APPA_VERSION" \
+  --set controller.agentImage.registry=europe-west1-docker.pkg.dev \
+  --set controller.agentImage.repository=friendly-path-465518-r6/appa-public/appa-kagent-adk \
+  --set controller.agentImage.tag="v$APPA_VERSION" \
   --force-conflicts --wait --timeout 10m
 ```
 

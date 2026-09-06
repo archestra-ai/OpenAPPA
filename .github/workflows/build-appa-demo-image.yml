@@ -36,26 +36,21 @@ jobs:
           fetch-depth: 1
 
       - name: Build image
-        run: docker build --tag "$IMAGE:${GITHUB_SHA::12}" --tag "$IMAGE:latest" .
+        run: docker build --tag "$IMAGE:sha-${GITHUB_SHA::12}" --tag "$IMAGE:latest" .
 
-      - name: Authenticate to Google Cloud
+      - name: Authenticate to Artifact Registry
         # Publishing only ever comes from a dispatch on main — a
         # workflow_dispatch on any other ref builds without publishing.
         if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        uses: ./.github/actions/auth-to-gar
         with:
           service_account: ${{ secrets.APPA_GCP_SERVICE_ACCOUNT }}
           workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
 
-      - name: Set up Google Cloud
-        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
-        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
-
       - name: Push image
         if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
         run: |
-          gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
-          docker push "$IMAGE:${GITHUB_SHA::12}"
+          docker push "$IMAGE:sha-${GITHUB_SHA::12}"
           docker push "$IMAGE:latest"
 
       - name: Deploy to Cloud Run
@@ -63,4 +58,4 @@ jobs:
         run: |
           gcloud run services update appa-demo \
             --region europe-west1 \
-            --image "$IMAGE:${GITHUB_SHA::12}"
+            --image "$IMAGE:sha-${GITHUB_SHA::12}"
