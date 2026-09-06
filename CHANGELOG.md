@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.14.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.14.0...v0.14.1) (2026-09-06)
+
+
+### Bug Fixes
+
+* **kagent:** land demo contracts on init so secret reads are gated ([#244](https://github.com/archestra-ai/OpenAPPA/issues/244)) ([bfee821](https://github.com/archestra-ai/OpenAPPA/commit/bfee82121baecb8fd89da32322434ee527ebf621))
+* **kagent:** restore guide-skill pins after the docs polish ([#246](https://github.com/archestra-ai/OpenAPPA/issues/246)) ([256f37e](https://github.com/archestra-ai/OpenAPPA/commit/256f37e34bbbbbf50289673d5a9f3f31fc12808b))
+
+
+### Documentation
+
+* **kagent:** add live A2A prompts and name the seeded chats ([#243](https://github.com/archestra-ai/OpenAPPA/issues/243)) ([ffdec89](https://github.com/archestra-ai/OpenAPPA/commit/ffdec89c74a201b33913dfe7481b476ea63d84d1))
+* **kagent:** install the adapter image before the runtime ([#241](https://github.com/archestra-ai/OpenAPPA/issues/241)) ([ad170ed](https://github.com/archestra-ai/OpenAPPA/commit/ad170eda92bb3522b158eaa883b1b1a97df37200))
+* **kagent:** polish integration page and guides to follow ASD-STE100 ([#245](https://github.com/archestra-ai/OpenAPPA/issues/245)) ([44f00d5](https://github.com/archestra-ai/OpenAPPA/commit/44f00d5c6217123937ae5b4900d89ba465390c0c))
+
 ## [0.14.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.13.0...v0.14.0) (2026-09-06)
 
 

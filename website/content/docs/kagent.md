@@ -52,7 +52,7 @@ Install the kagent CRDs, create the provider secret, and install the kagent cont
 
 ```sh
 : "${OPENAI_API_KEY:?Set OPENAI_API_KEY before installing kagent}"
-APPA_VERSION=0.14.0 # x-release-please-version
+APPA_VERSION=0.14.1 # x-release-please-version
 
 helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-crds \
   --version 0.9.12 -n kagent --create-namespace --force-conflicts
@@ -101,7 +101,7 @@ The plugin image replaces kagent's default agent image. It preserves standard be
 Deploy `appa-runtime` with persistent storage and `appa-guide` enabled:
 
 ```sh
-APPA_VERSION=0.14.0 # x-release-please-version
+APPA_VERSION=0.14.1 # x-release-please-version
 helm upgrade --install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
   --version "$APPA_VERSION" -n appa --create-namespace \
   --set persistence.enabled=true \
@@ -119,7 +119,7 @@ The runtime service listens at `http://appa-runtime.appa.svc.cluster.local:18787
 Install the demo fleet and mock services:
 
 ```sh
-APPA_VERSION=0.14.0 # x-release-please-version
+APPA_VERSION=0.14.1 # x-release-please-version
 helm upgrade --install appa-kagent-demo \
   oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-kagent-demo \
   --version "$APPA_VERSION" -n kagent \
@@ -255,7 +255,7 @@ To protect existing kagent workloads without downtime, follow these steps.
 Update the kagent controller to use the OpenAPPA agent image. Existing agents continue running standard behavior:
 
 ```sh
-APPA_VERSION=0.14.0 # x-release-please-version
+APPA_VERSION=0.14.1 # x-release-please-version
 helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent --reuse-values \
   --set controller.agentImage.registry=europe-west1-docker.pkg.dev \
@@ -269,7 +269,7 @@ helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
 Deploy the runtime service in the `appa` namespace:
 
 ```sh
-APPA_VERSION=0.14.0 # x-release-please-version
+APPA_VERSION=0.14.1 # x-release-please-version
 helm upgrade --install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
   --version "$APPA_VERSION" -n appa --create-namespace \
   --set persistence.enabled=true \
