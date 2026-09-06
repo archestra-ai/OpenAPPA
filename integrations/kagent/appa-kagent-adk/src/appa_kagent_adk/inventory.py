@@ -363,20 +363,30 @@ def _in_cluster(host: str) -> bool:
     The accepted forms are cluster service addresses that resolve
     through cluster DNS, and every other host is refused, so the
     endpoint an MCP entry names is a service of the cluster rather than
-    an arbitrary host. It pins no single Service: the toolset is the
-    first label alone, so the same name in another namespace passes,
-    and an ``ExternalName`` Service resolves an accepted address to a
-    name outside the cluster. ``<service>.<namespace>`` is one form
-    short of a public domain name and nothing here tells the two apart,
-    so it is accepted as the cluster-internal form kagent's own
-    controller reads it as: `isInternalK8sURL` asks the API server
-    whether that second label is a namespace, which this plugin cannot
-    do.
+    an arbitrary host.
+
+    ``<service>.<namespace>`` is not among them. It is one label short
+    of a registrable public domain name, and nothing here tells the two
+    apart, so accepting it would let ``<toolset>.<tld>`` -- an endpoint
+    the cluster does not resolve and the attacker does -- take the
+    policy identity of the in-cluster service that toolset names. The
+    ``.svc`` forms say the same thing and say it unambiguously, so a
+    namespaced address is written with ``.svc``.
+
+    A single label stays accepted: it resolves only through cluster DNS,
+    in the pod's own namespace, and cannot be a public domain.
+
+    This still pins no single Service. The toolset is the first label
+    alone, so the same service name in another namespace reaches the
+    same policy identity, and an ``ExternalName`` Service resolves an
+    accepted address to a name outside the cluster. Closing that needs
+    the ``RemoteMCPServer`` resource name, which the rendered config
+    does not carry.
     """
     if host in _LOOPBACK_HOSTS:
         return True
     match tuple(host.split(".")):
-        case (_,) | (_, _) | (_, _, "svc"):
+        case (_,) | (_, _, "svc"):
             return True
         case (_, _, "svc", *domain):
             return tuple(domain) == _CLUSTER_DOMAIN

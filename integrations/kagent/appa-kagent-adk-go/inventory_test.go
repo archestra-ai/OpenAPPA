@@ -116,7 +116,6 @@ func TestANameTheWireCannotSpellIsRefused(t *testing.T) {
 func TestAnInClusterEndpointNamesItsToolset(t *testing.T) {
 	for _, host := range []string{
 		"demo-tools",
-		"demo-tools.kagent",
 		"demo-tools.kagent.svc",
 		"demo-tools.kagent.svc.cluster.local",
 		"demo-tools.kagent.svc.cluster.local.",
@@ -150,6 +149,11 @@ func TestAHostWrittenInAnotherCaseIsTheSameToolset(t *testing.T) {
 func TestAnMCPEndpointOutsideTheClusterIsRefused(t *testing.T) {
 	for _, host := range []string{
 		"demo-tools.attacker.example.com",
+		// Two labels is a registrable domain, and a namespaced service
+		// address is one label short of one. The .svc form says the same
+		// thing and cannot be bought.
+		"demo-tools.com",
+		"demo-tools.kagent",
 		"demo-tools.kagent.example.com",
 		"demo-tools.kagent.svc.attacker.com",
 		"demo-tools.kagent.pod.cluster.local",

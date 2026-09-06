@@ -90,7 +90,6 @@ def test_a_name_the_wire_cannot_spell_is_refused(server):
     "host",
     [
         pytest.param("demo-tools", id="the-service"),
-        pytest.param("demo-tools.kagent", id="the-service-and-namespace"),
         pytest.param("demo-tools.kagent.svc", id="the-svc-form"),
         pytest.param("demo-tools.kagent.svc.cluster.local", id="the-fully-qualified-form"),
         pytest.param("demo-tools.kagent.svc.cluster.local.", id="the-absolute-form"),
@@ -117,6 +116,11 @@ def test_a_host_written_in_another_case_is_the_same_toolset():
         # The attack: a toolset name a trusted policy already names,
         # served by an authority the cluster does not resolve.
         pytest.param("demo-tools.attacker.example.com", id="a-foreign-domain"),
+        # Two labels is a registrable domain, and a namespaced service
+        # address is one label short of one. The `.svc` form says the
+        # same thing and cannot be bought.
+        pytest.param("demo-tools.com", id="a-registrable-two-label-domain"),
+        pytest.param("demo-tools.kagent", id="the-namespaced-form-without-svc"),
         pytest.param("demo-tools.kagent.example.com", id="a-foreign-domain-under-the-namespace"),
         pytest.param("demo-tools.kagent.svc.attacker.com", id="a-foreign-domain-past-svc"),
         pytest.param("demo-tools.kagent.pod.cluster.local", id="a-form-that-is-not-a-service"),
