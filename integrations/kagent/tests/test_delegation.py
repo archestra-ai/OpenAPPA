@@ -229,6 +229,7 @@ def test_the_floor_the_parent_declared_binds_the_child_s_own_reads(stack, runtim
     )
     derivation = json.dumps(reads[1], default=str)
     assert reads[1].get("appa") is None, f"the re-proposed read is not gated shut: {derivation}"
+    assert "handshake failed" in derivation, f"the derivation keeps the crash facts: {derivation}"
     assert INJECTION not in derivation, f"the derivation dropped the line addressed to the reader: {derivation}"
 
     returned = crossing(task)

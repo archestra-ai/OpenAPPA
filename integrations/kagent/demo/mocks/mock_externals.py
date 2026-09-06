@@ -156,6 +156,37 @@ def drop_instructions(body: str) -> str:
     return "\n".join(kept)
 
 
+def _rewrite_strings(value: object, rewrite) -> object:
+    if isinstance(value, str):
+        return rewrite(value)
+    if isinstance(value, list):
+        return [_rewrite_strings(item, rewrite) for item in value]
+    if isinstance(value, dict):
+        return {key: _rewrite_strings(item, rewrite) for key, item in value.items()}
+    return value
+
+
+def derive(body: str) -> str:
+    """The two mechanical rules, applied to the body the harness delivered.
+
+    A JSON envelope (the MCP call result in full) is walked so each
+    string is rewritten, then serialized again. A non-JSON body is
+    rewritten as one text. Either way the facts and the injection can
+    share a serialized line without the facts going with it.
+    """
+
+    def rewrite(text: str) -> str:
+        return SECRET_VALUE.sub(REDACTION, drop_instructions(text))
+
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return rewrite(body)
+    if not isinstance(parsed, (dict, list, str)):
+        return rewrite(body)
+    return json.dumps(_rewrite_strings(parsed, rewrite), separators=(",", ":"))
+
+
 def sanitize(artifact: object) -> tuple[dict | None, str]:
     """The sanitizer derivation: (answer, log detail). None is no answer.
 
@@ -166,7 +197,7 @@ def sanitize(artifact: object) -> tuple[dict | None, str]:
     body = artifact.get("body") if isinstance(artifact, dict) else None
     if not isinstance(body, str):
         return None, "no body in the artifact"
-    derived = SECRET_VALUE.sub(REDACTION, drop_instructions(body))
+    derived = derive(body)
     tool = artifact.get("tool")
     return {"body": derived}, f"tool={tool} body={len(body)}b -> {len(derived)}b"
 
