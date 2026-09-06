@@ -267,10 +267,6 @@ fn kagent_guidance_requires_the_shared_runtime_and_direct_port() {
     assert!(website.contains("runtime.reasoningEffort=none"));
     assert!(website.contains("appa-kagent-adk"));
     assert!(website.contains("friendly-path-465518-r6/appa-public/golang-adk"));
-    assert!(website.contains("kubectl get agent -A -o json"));
-    assert!(website.contains("It preserves the Agent environment and adds a missing runtime URL:"));
-    assert!(website.contains("`appa-guide` uses the existing `controller.agentImage`"));
-    assert!(website.contains("cannot guarantee enforced write approval"));
 }
 
 #[test]
@@ -321,6 +317,43 @@ fn the_website_quickstart_is_copy_safe_and_dependency_ordered() {
     assert!(install_block.contains("querydoc.enabled=false"));
     assert!(!install_block.contains("<your-api-key>"));
     assert!(!quickstart.contains("quickstart-ops"));
+}
+
+#[test]
+fn the_website_existing_agent_guide_is_dependency_ordered() {
+    let website = fs::read_to_string(repo_root().join("website/content/docs/kagent.md")).expect("read website guide");
+    let protect = website
+        .split("## Protect existing Agents")
+        .nth(1)
+        .expect("the guide has existing-Agent guidance")
+        .split("## Manage integration with appa-guide")
+        .next()
+        .expect("existing-Agent guidance ends before manage-integration");
+
+    for heading in [
+        "### 1. Install the OpenAPPA Agent image",
+        "### 2. Install OpenAPPA",
+        "### 3. Protect your Agents",
+    ] {
+        assert!(protect.contains(heading), "existing-Agent guidance carries {heading:?}");
+    }
+
+    let image = protect
+        .find("helm upgrade kagent oci://")
+        .expect("controller image install");
+    let runtime = protect
+        .find("helm upgrade --install appa-runtime")
+        .expect("runtime install");
+    let wait = protect.find("kubectl wait agent/appa-guide").expect("appa-guide wait");
+    let protect_one = protect
+        .find("protect sre-agent with the shared OpenAPPA runtime")
+        .expect("protect-one prompt");
+    let protect_all = protect
+        .find("enable OpenAPPA for all agents using the shared runtime")
+        .expect("protect-all prompt");
+    assert!(image < runtime && runtime < wait && wait < protect_one && protect_one < protect_all);
+    assert!(!protect.contains("`appa-guide` uses the existing `controller.agentImage`"));
+    assert!(!protect.contains("cannot guarantee enforced write approval"));
 }
 
 #[test]
