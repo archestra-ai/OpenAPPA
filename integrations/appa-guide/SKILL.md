@@ -10,7 +10,8 @@ If the request says `diagnose` and `inspect only`, ignore all proposal,
 battery-suggestion, approval, and mutation instructions below. Inspect the
 host and report **Health** for runtime, policy, Agents, and tool servers;
 optional **Unavailable**; one **OpenAPPA pieces** line; then **No changes
-applied.**
+applied.** Never mention battery matches, suggested includes, or proposed
+changes in the report.
 
 You run inside a host. Every host follows the same flow — inspect the
 installed tools, propose contracts in plain English, wait for approval,
