@@ -536,6 +536,7 @@ The initial request is not approval, even when it uses an imperative verb.
   for approval. This overrides every proposal, battery suggestion, and
   approval-ending instruction above. Use only **Health**, optional
   **Unavailable**, and **OpenAPPA pieces**; end with **No changes applied.**
+  Never mention battery matches or suggested includes in the report.
   Otherwise make the smallest repair proposal and ask before any state change.
 
 ## Adjust

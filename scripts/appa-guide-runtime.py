@@ -18,6 +18,26 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import tomllib
+import yaml
+
+
+class UniqueKeyLoader(yaml.SafeLoader):
+    pass
+
+
+def _unique_mapping(loader, node, deep=False):
+    keys = []
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=True)
+        if key in keys:
+            raise ValueError(f"duplicate key in apply manifest: {key}")
+        keys.append(key)
+    return loader.construct_mapping(node, deep=deep)
+
+
+UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _unique_mapping
+)
 
 RUNTIME_URL = os.environ.get("APPA_GUIDE_RUNTIME_URL", "http://127.0.0.1:8787").rstrip(
     "/"
@@ -45,6 +65,7 @@ RELOAD_ERRORS = (
     TypeError,
     ValueError,
     json.JSONDecodeError,
+    subprocess.SubprocessError,
 )
 
 
@@ -279,31 +300,57 @@ def mounted_policy() -> str:
     return Path(os.environ["APPA_CONFIG"]).read_text(encoding="utf-8")
 
 
-def restore_serving_policy(candidate: str, current: str) -> None:
+def restore_serving_policy(candidate: str, current: str, expected_key: str) -> None:
     update_policy_configmap(candidate, current)
-    runtime_request("/reload", "POST")
+    reloaded = json.loads(runtime_request("/reload", "POST"))
+    if not isinstance(reloaded, dict) or reloaded.get("policy_key") != expected_key:
+        raise RuntimeError("rollback did not restore the serving policy")
     if mounted_policy() != current:
         raise RuntimeError("rollback did not restore the mounted policy")
 
 
 def publish_and_reload(current: str, candidate: str) -> dict:
+    before_key = policy_key()
+    changed = candidate != current
     update_policy_configmap(current, candidate)
     if mounted_policy() != candidate:
-        restore_serving_policy(candidate, current)
+        restore_serving_policy(candidate, current, before_key)
         raise RuntimeError(
             "mounted policy changed before reload; prior policy restored"
         )
     try:
-        return json.loads(runtime_request("/reload", "POST"))
+        reloaded = json.loads(runtime_request("/reload", "POST"))
     except RELOAD_ERRORS as error:
         try:
-            restore_serving_policy(candidate, current)
+            restore_serving_policy(candidate, current, before_key)
         except RELOAD_ERRORS as rollback_error:
             raise RuntimeError(
                 "reload failed and rollback did not restore serving policy: "
                 f"{rollback_error}"
             ) from error
         raise
+    if (
+        not isinstance(reloaded, dict)
+        or reloaded.get("changed") is not changed
+        or (
+            changed
+            and reloaded.get("policy_key") in (None, before_key)
+            or not changed
+            and reloaded.get("policy_key") != before_key
+        )
+        or mounted_policy() != candidate
+    ):
+        try:
+            restore_serving_policy(candidate, current, before_key)
+        except RELOAD_ERRORS as rollback_error:
+            raise RuntimeError(
+                "the runtime served a different policy than published; rollback failed: "
+                f"{rollback_error}"
+            )
+        raise RuntimeError(
+            "the runtime served a different policy than published; prior policy restored"
+        )
+    return reloaded
 
 
 def include_battery(request: dict) -> dict:
@@ -357,23 +404,22 @@ def refresh_batteries(request: dict) -> dict:
             [REFRESH], check=True, capture_output=True, text=True, timeout=180
         )
         reloaded = json.loads(runtime_request("/reload", "POST"))
+        if not isinstance(reloaded, dict) or "policy_key" not in reloaded:
+            raise RuntimeError("the battery refresh reload served no policy key")
         subprocess.run(
             [REFRESH, "--commit"], check=True, capture_output=True, timeout=30
         )
-    except (
-        OSError,
-        RuntimeError,
-        subprocess.CalledProcessError,
-        subprocess.TimeoutExpired,
-        HTTPError,
-    ):
-        subprocess.run(
-            [REFRESH, "--rollback"], check=False, capture_output=True, timeout=30
-        )
+    except RELOAD_ERRORS as error:
         try:
+            subprocess.run(
+                [REFRESH, "--rollback"], check=True, capture_output=True, timeout=30
+            )
             runtime_request("/reload", "POST")
-        except (OSError, HTTPError) as rollback_error:
-            print(f"battery rollback reload failed: {rollback_error}", file=sys.stderr)
+        except RELOAD_ERRORS as rollback_error:
+            raise RuntimeError(
+                "battery refresh failed and its rollback did not restore serving "
+                f"policy: {rollback_error}"
+            ) from error
         raise
     return {**runtime_state(), "release": refreshed.stdout.strip(), "reload": reloaded}
 
@@ -445,21 +491,25 @@ def annotate_apply(request: dict) -> dict:
     manifest = arguments.get("manifest")
     if not isinstance(manifest, str):
         raise TypeError("apply carries no manifest")
-    documents = [
-        document.strip()
-        for document in re.split(r"(?m)^---\s*$", manifest)
-        if document.strip()
-    ]
+    try:
+        documents = list(yaml.load_all(manifest, Loader=UniqueKeyLoader))
+    except yaml.YAMLError as error:
+        raise ValueError(f"apply manifest is not valid YAML: {error}") from error
+    documents = [document for document in documents if document is not None]
     if len(documents) != 1:
         raise ValueError("apply manifest must be exactly one Agent document")
     document = documents[0]
-    kinds = re.findall(r"(?m)^kind:\s*(\S+)\s*$", document)
-    if kinds != ["Agent"]:
+    if not isinstance(document, dict):
+        raise TypeError("apply manifest must be one mapping")
+    if document.get("kind") != "Agent":
         raise ValueError("appa-guide Kubernetes apply supports only Agent manifests")
-    if re.search(r"(?m)^status:\s*$", document) or not re.search(
-        r"(?m)^spec:\s*$", document
-    ):
+    if "status" in document:
         raise ValueError("Agent apply must carry complete spec and no status")
+    spec = document.get("spec")
+    if spec is None:
+        raise ValueError("Agent apply must carry complete spec and no status")
+    if not isinstance(spec, dict):
+        raise TypeError("Agent apply spec must be a mapping")
     return {
         "version": 1,
         "answer": {

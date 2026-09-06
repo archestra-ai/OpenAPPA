@@ -35,7 +35,8 @@ COPY website/content/docs/contracts.md website/content/docs/contracts.md
 RUN cargo build --release --locked --package appa
 
 FROM python:3.13-slim@sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285
-RUN groupadd --system --gid 65532 appa \
+RUN pip install --no-cache-dir 'pyyaml==6.0.2' \
+    && groupadd --system --gid 65532 appa \
     && useradd --system --uid 65532 --gid 65532 --home-dir /var/lib/appa --create-home appa \
     && mkdir -p /opt/appa /etc/appa \
     && chown appa:appa /var/lib/appa /etc/appa

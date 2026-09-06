@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import tempfile
 import threading
 import time
@@ -70,8 +71,29 @@ class AppaGuideRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exactly one Agent document"):
             guide.annotate_apply(consult(smuggled))
         mixed = "apiVersion: kagent.dev/v1alpha2\nkind: Agent\nkind: Secret\nspec:\n  type: Declarative\n"
-        with self.assertRaisesRegex(ValueError, "supports only Agent"):
+        with self.assertRaisesRegex(ValueError, "duplicate key"):
             guide.annotate_apply(consult(mixed))
+        inline_status = agent + "status: {conditions: []}\n"
+        with self.assertRaisesRegex(ValueError, "complete spec and no status"):
+            guide.annotate_apply(consult(inline_status))
+        commented_document = (
+            agent
+            + "--- # comment\napiVersion: v1\nkind: Secret\nmetadata:\n  name: stolen\n"
+        )
+        with self.assertRaisesRegex(ValueError, "exactly one Agent document"):
+            guide.annotate_apply(consult(commented_document))
+        quoted_keys = 'apiVersion: kagent.dev/v1alpha2\n"kind": Agent\nspec:\n  type: Declarative\n'
+        self.assertEqual(
+            guide.annotate_apply(consult(quoted_keys))["answer"]["requires"][
+                "attention"
+            ],
+            ["human-approval"],
+        )
+        no_spec = (
+            "apiVersion: kagent.dev/v1alpha2\nkind: Agent\nmetadata:\n  name: fixture\n"
+        )
+        with self.assertRaisesRegex(ValueError, "complete spec and no status"):
+            guide.annotate_apply(consult(no_spec))
 
     def test_battery_include_preserves_the_complete_root(self) -> None:
         root = (
@@ -166,15 +188,18 @@ class AppaGuideRuntimeTests(unittest.TestCase):
             config = Path(directory) / "appa.toml"
             config.write_text("new", encoding="utf-8")
 
-            def restore(_candidate: str, current: str) -> None:
+            def request(path: str, method: str = "GET") -> bytes:
+                if path == "/policy-key":
+                    return b"before"
+                raise TimeoutError("reload stalled")
+
+            def restore(candidate: str, current: str, expected_key: str) -> None:
                 config.write_text(current, encoding="utf-8")
 
             with (
                 mock.patch.dict(guide.os.environ, {"APPA_CONFIG": str(config)}),
                 mock.patch.object(guide, "update_policy_configmap"),
-                mock.patch.object(
-                    guide, "runtime_request", side_effect=TimeoutError("reload stalled")
-                ),
+                mock.patch.object(guide, "runtime_request", side_effect=request),
                 mock.patch.object(guide, "restore_serving_policy", side_effect=restore),
                 self.assertRaises(TimeoutError),
             ):
@@ -185,9 +210,7 @@ class AppaGuideRuntimeTests(unittest.TestCase):
             with (
                 mock.patch.dict(guide.os.environ, {"APPA_CONFIG": str(config)}),
                 mock.patch.object(guide, "update_policy_configmap"),
-                mock.patch.object(
-                    guide, "runtime_request", side_effect=TimeoutError("reload stalled")
-                ),
+                mock.patch.object(guide, "runtime_request", side_effect=request),
                 mock.patch.object(
                     guide,
                     "restore_serving_policy",
@@ -198,6 +221,79 @@ class AppaGuideRuntimeTests(unittest.TestCase):
                 ),
             ):
                 guide.publish_and_reload("old", "new")
+
+    def test_a_reload_of_another_policy_rolls_back_the_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "appa.toml"
+            config.write_text("new", encoding="utf-8")
+            restored: list[tuple[str, str, str]] = []
+
+            def restore(candidate: str, current: str, expected_key: str) -> None:
+                restored.append((candidate, current, expected_key))
+                config.write_text(current, encoding="utf-8")
+
+            def request(path: str, method: str = "GET") -> bytes:
+                if path == "/policy-key":
+                    return b"before"
+                if path == "/reload":
+                    return b'{"policy_key": "before", "changed": false}'
+                raise AssertionError(path)
+
+            with (
+                mock.patch.dict(guide.os.environ, {"APPA_CONFIG": str(config)}),
+                mock.patch.object(guide, "update_policy_configmap"),
+                mock.patch.object(guide, "runtime_request", side_effect=request),
+                mock.patch.object(guide, "restore_serving_policy", side_effect=restore),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "served a different policy than published; prior policy restored",
+                ),
+            ):
+                guide.publish_and_reload("old", "new")
+            self.assertEqual(restored, [("new", "old", "before")])
+
+    def test_a_successful_publish_accepts_the_moved_serving_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "appa.toml"
+            config.write_text("new", encoding="utf-8")
+
+            def request(path: str, method: str = "GET") -> bytes:
+                if path == "/policy-key":
+                    return b"before"
+                if path == "/reload":
+                    return b'{"policy_key": "after", "changed": true}'
+                raise AssertionError(path)
+
+            with (
+                mock.patch.dict(guide.os.environ, {"APPA_CONFIG": str(config)}),
+                mock.patch.object(guide, "update_policy_configmap"),
+                mock.patch.object(guide, "runtime_request", side_effect=request),
+            ):
+                reloaded = guide.publish_and_reload("old", "new")
+            self.assertEqual(reloaded["policy_key"], "after")
+
+    def test_a_refresh_failure_rolls_back_or_names_the_split(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            helper = Path(directory) / "refresh"
+            helper.write_text("", encoding="utf-8")
+
+            def request(path: str, method: str = "GET") -> bytes:
+                if path == "/policy-key":
+                    return b"before"
+                if path == "/reload":
+                    return b"not json"
+                raise AssertionError(path)
+
+            with (
+                mock.patch.object(guide, "REFRESH", str(helper)),
+                mock.patch.object(
+                    guide, "refresh_state", return_value={"supported": True}
+                ),
+                mock.patch.object(guide, "runtime_request", side_effect=request),
+                mock.patch.object(guide.subprocess, "run"),
+                self.assertRaises(json.JSONDecodeError),
+            ):
+                guide.refresh_batteries({"expected_policy_key": "before"})
 
     def test_refresh_state_reports_the_active_and_previous_layers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
