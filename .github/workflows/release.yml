@@ -10,6 +10,11 @@ on:
         required: false
         default: false
         type: boolean
+      publish_registry_only:
+        description: Publish images and charts for an existing release
+        required: false
+        default: false
+        type: boolean
       version:
         description: Existing version without the v prefix (for example, 0.2.0)
         required: false
@@ -35,11 +40,12 @@ jobs:
       tag_name: ${{ steps.resolve.outputs.tag_name }}
       version: ${{ steps.resolve.outputs.version }}
       source_commit: ${{ steps.resolve.outputs.source_commit }}
+      registry_only: ${{ steps.resolve.outputs.registry_only }}
     steps:
       # Create releases before calculating the next release PR. A draft release
       # needs its forced tag to exist before Release Please can anchor that calculation.
       - name: Create releases for merged release PRs
-        if: ${{ !inputs.publish_existing_release }}
+        if: ${{ !inputs.publish_existing_release && !inputs.publish_registry_only }}
         id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
@@ -58,17 +64,26 @@ jobs:
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
           INPUT_PUBLISH_EXISTING_RELEASE: ${{ inputs.publish_existing_release }}
+          INPUT_PUBLISH_REGISTRY_ONLY: ${{ inputs.publish_registry_only }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if [ "$INPUT_PUBLISH_EXISTING_RELEASE" = "true" ]; then
+          if [ "$INPUT_PUBLISH_EXISTING_RELEASE" = "true" ] && [ "$INPUT_PUBLISH_REGISTRY_ONLY" = "true" ]; then
+            echo "::error::choose one existing-release mode"
+            exit 1
+          fi
+          if [ "$INPUT_PUBLISH_EXISTING_RELEASE" = "true" ] || [ "$INPUT_PUBLISH_REGISTRY_ONLY" = "true" ]; then
             if [[ ! "$INPUT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
               echo "::error::version is required and must be a release version"
               exit 1
             fi
             tag_name=v${INPUT_VERSION}
             is_draft=$(gh release view "$tag_name" --json isDraft --jq '.isDraft')
-            if [ "$is_draft" != "true" ]; then
+            if [ "$INPUT_PUBLISH_EXISTING_RELEASE" = "true" ] && [ "$is_draft" != "true" ]; then
               echo "::error::${tag_name} is not a draft release"
+              exit 1
+            fi
+            if [ "$INPUT_PUBLISH_REGISTRY_ONLY" = "true" ] && [ "$is_draft" = "true" ]; then
+              echo "::error::${tag_name} is still a draft; publish its complete assets instead"
               exit 1
             fi
             source_commit=$(gh api "repos/${GH_REPO}/commits/${tag_name}" --jq '.sha')
@@ -81,6 +96,7 @@ jobs:
               echo "version=${INPUT_VERSION}"
               echo "tag_name=${tag_name}"
               echo "source_commit=${source_commit}"
+              echo "registry_only=${INPUT_PUBLISH_REGISTRY_ONLY}"
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -90,11 +106,12 @@ jobs:
             echo "version=${ACTION_VERSION}"
             echo "tag_name=${ACTION_TAG_NAME}"
             echo "source_commit=${GITHUB_SHA}"
+            echo "registry_only=false"
           } >> "$GITHUB_OUTPUT"
 
   release-pr:
     name: Create or update next release PR
-    if: ${{ !inputs.publish_existing_release }}
+    if: ${{ !inputs.publish_existing_release && !inputs.publish_registry_only }}
     needs: release-please
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -147,7 +164,9 @@ jobs:
 
   plugin-artifact:
     name: Build the plugin artifact
-    if: ${{ needs.release-please.outputs.should_publish == 'true' }}
+    if: >-
+      needs.release-please.outputs.should_publish == 'true' &&
+      needs.release-please.outputs.registry_only != 'true'
     needs: release-please
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -192,7 +211,9 @@ jobs:
 
   build-binaries:
     name: Build release binaries
-    if: ${{ needs.release-please.outputs.should_publish == 'true' }}
+    if: >-
+      needs.release-please.outputs.should_publish == 'true' &&
+      needs.release-please.outputs.registry_only != 'true'
     needs:
       - release-please
       - plugin-artifact
@@ -339,7 +360,9 @@ jobs:
 
   publish-release:
     name: Publish GitHub release
-    if: ${{ needs.release-please.outputs.should_publish == 'true' }}
+    if: >-
+      needs.release-please.outputs.should_publish == 'true' &&
+      needs.release-please.outputs.registry_only != 'true'
     needs:
       - release-please
       - plugin-artifact
