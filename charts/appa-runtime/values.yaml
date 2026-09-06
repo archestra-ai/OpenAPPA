@@ -90,6 +90,8 @@ appaGuide:
   name: appa-guide
   namespace: kagent
   modelConfig: default-model-config
+  # Fills reasoning_effort when the referenced OpenAI ModelConfig omits it.
+  reasoningEffort: ""
   toolServer:
     name: kagent-tool-server
   skill:

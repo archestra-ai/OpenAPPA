@@ -135,6 +135,7 @@ must_contain 'verbs: ["get", "patch"]'
 must_contain 'automountServiceAccountToken: true'
 must_contain 'name: APPA_GUIDE'
 must_contain 'name: APPA_GUIDE_MCP_URL'
+must_contain 'name: APPA_KAGENT_OPENAI_REASONING_EFFORT'
 must_contain 'http://appa-runtime.appa.svc.cluster.local:18788/guide-mcp'
 must_contain 'name: guide-mcp'
 must_contain 'port: 18788'
@@ -147,10 +148,12 @@ must_contain 'port: 18788'
 must_contain 'containerPort: 18788'
 
 must_render --set appaGuide.enabled=true --set appaGuide.namespace=platform \
-  --set appaGuide.skill.ref=main --set appaGuide.modelConfig=platform-model
+  --set appaGuide.skill.ref=main --set appaGuide.modelConfig=platform-model \
+  --set-string appaGuide.reasoningEffort=none
 must_contain 'namespace: "platform"'
 must_contain 'ref: "main"'
 must_contain 'modelConfig: "platform-model"'
+must_contain 'value: "none"'
 
 must_render --set persistence.enabled=true --set persistence.size=10Gi
 must_contain 'kind: PersistentVolumeClaim'

@@ -40,6 +40,12 @@
           "items": { "type": "object" }
         }
       }
+    },
+    "appaGuide": {
+      "type": "object",
+      "properties": {
+        "reasoningEffort": { "type": "string" }
+      }
     }
   }
 }
