@@ -173,5 +173,9 @@ for deployment in appa-demo-mocks demo-tools cluster-ops log-analyst release-man
 done
 
 kubectl -n "$namespace" wait agent/cluster-ops --for=condition=Ready --timeout="${wait_seconds}s"
+echo "== waiting for remotemcpserver/demo-tools discovered tools"
+kubectl -n "$namespace" wait remotemcpserver/demo-tools \
+  --for=jsonpath='{.status.discoveredTools[0].name}' \
+  --timeout="${wait_seconds}s"
 kubectl get pods -n "$runtime_namespace" -o wide
 kubectl get pods -n "$namespace" -o wide

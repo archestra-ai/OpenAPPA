@@ -38,9 +38,12 @@ spec:
       Pass the policy key from appa_get_runtime_state as expected_policy_key
       to every mutating runtime tool.
 
-      Inventory Agents, Deployments, and RemoteMCPServers once each with
-      lowercase singular resource_type and output json. Fetch Helm manifest
-      only, never Helm values or Kubernetes Secrets. APPA_ENABLED alone does
+      Inventory Agents and RemoteMCPServers across all namespaces once
+      each with lowercase singular resource_type and output json.
+      Inventory Deployments once per observed Agent namespace; never set
+      all_namespaces on Deployments. Fetch Helm manifest
+      only, never Helm values or Kubernetes Secrets. List Helm releases
+      with all_namespaces true; never set all. APPA_ENABLED alone does
       not prove gating: require a Ready Agent and an owner-referenced
       Deployment using an OpenAPPA image.
 
@@ -58,7 +61,12 @@ spec:
       delegation names. Its matches, included, and unconfigured_tools fields
       are authoritative. Never infer catalog matches or coverage in prose.
       For demo-tools, the qualified mcp__github__get_file_contents and
-      mcp__github__issue_write names match the GitHub battery. release-manager
+      mcp__github__issue_write names match the GitHub battery. If that
+      server lists any of the ten static demo tools as unconfigured, the
+      init write is one appa_update_policy of the verified demo manifest
+      with the GitHub include prepended. Never call appa_include_battery
+      as the sole init write in that case; serving policy must declare
+      read_secret. release-manager
       remains a blocked delegation unless the operator separately requests it.
 
       Inspection and proposals are read-only. A request is never approval.

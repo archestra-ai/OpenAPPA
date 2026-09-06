@@ -183,7 +183,7 @@ attention = ["human-approval"]
 
 [externals]
 timeout_ms = 5000
-max_body_bytes = 65536
+max_body_bytes = 262144
 
 [externals.authorities.oncall]
 builtin = "hitl"
