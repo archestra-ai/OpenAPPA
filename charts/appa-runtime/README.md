@@ -129,8 +129,12 @@ the live key during template rendering; a concurrent later write wins.
 Without the optional general NetworkPolicy, any pod that can reach the
 Service can call `/hook`, remedy-only `/mcp`, `/health`, and `/batteries`.
 When appa-guide is enabled, its dedicated NetworkPolicy restricts port
-`18788` to the guide pod. Vouched calls remain mandatory even where the
-CNI does not enforce NetworkPolicy. The runtime returns `403` on
+`18788` to the guide pod. A one-shot vouch still refuses a direct
+`/guide-mcp` call that never passed a gated ToolCall. `/hook` is
+unauthenticated. A client that can reach both `/hook` and `/guide-mcp`
+can complete the gated approval path. Enable a CNI that enforces
+NetworkPolicy, or the optional general NetworkPolicy. The vouch is not a
+substitute for that network boundary. The runtime returns `403` on
 `/reload`, `/status`, `/policy-key`, and `/binary-fingerprint` unless the
 network peer is loopback. Treat the Service as trusted internal
 infrastructure. Restrict callers by enabling the chart policy and listing
