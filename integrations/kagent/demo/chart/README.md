@@ -28,7 +28,7 @@ The defaults expect:
 ## Install
 
 ```sh
-APPA_VERSION=0.13.0 # x-release-please-version
+APPA_VERSION=0.14.0 # x-release-please-version
 helm upgrade --install appa-kagent-demo \
   oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-kagent-demo \
   --version "$APPA_VERSION" -n kagent \

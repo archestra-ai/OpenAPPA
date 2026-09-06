@@ -4,7 +4,7 @@ Shared OpenAPPA runtime for a Kubernetes cluster. One replica. Agents
 that set `APPA_RUNTIME_URL` to this Service, with `APPA_ENABLED=true`,
 are gated by the policy in the ConfigMap.
 
-The image of this chart version is `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-runtime:v0.13.0`. # x-release-please-version
+The image of this chart version is `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-runtime:v0.14.0`. # x-release-please-version
 
 ## Install
 
