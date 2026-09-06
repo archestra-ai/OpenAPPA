@@ -76,6 +76,10 @@ must_contain 'runAsNonRoot: true'
 must_contain 'runAsUser: 65532'
 must_contain 'readOnlyRootFilesystem: true'
 must_contain 'checksum/policy:'
+must_contain 'appa.dev/packaged-policy-sha256:'
+must_contain 'annotator = "appa-guide-apply"'
+must_not_contain 'appa-guide-command'
+must_not_contain 'k8s_execute_command'
 must_contain 'name: APPA_CONFIG'
 must_contain 'value: "/etc/appa/appa.toml"'
 must_contain 'name: APPA_GUIDE_RUNTIME_URL'
@@ -171,6 +175,7 @@ must_contain 'name: APPA_POLICY_CONFIGMAP_KEY'
 must_contain 'name: APPA_RUNTIME_RELEASE_NAME'
 must_not_contain 'name: appa-runtime-policy'
 must_not_contain 'checksum/policy:'
+must_not_contain 'appa.dev/packaged-policy-sha256:'
 
 printf '%s\n' 'include = ["batteries/slack/appa.toml"]' >"$work/policy.toml"
 must_render --set-file config.contents="$work/policy.toml"

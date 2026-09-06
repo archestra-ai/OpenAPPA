@@ -74,13 +74,49 @@ app: appa-runtime
 {{- end -}}
 {{- end -}}
 
-{{- define "appa-runtime.managedPolicy" -}}
-{{- $policy := include "appa-runtime.policy" . -}}
+{{- define "appa-runtime.packagedPolicyHash" -}}
+{{- include "appa-runtime.policy" . | trim | sha256sum -}}
+{{- end -}}
+
+{{- define "appa-runtime.preserveLive" -}}
+{{- $preserve := "" -}}
 {{- if and .Release.IsUpgrade (not .Values.config.existingConfigMap) (not .Values.config.contents) -}}
 {{- $live := lookup "v1" "ConfigMap" .Release.Namespace (include "appa-runtime.configMapName" .) -}}
 {{- if and $live $live.data (hasKey $live.data .Values.config.key) -}}
-{{- $policy = index $live.data .Values.config.key -}}
+{{- $data := index $live.data .Values.config.key -}}
+{{- $ann := "" -}}
+{{- if $live.metadata.annotations -}}
+{{- $ann = index $live.metadata.annotations "appa.dev/packaged-policy-sha256" | default "" -}}
+{{- end -}}
+{{- $unmodifiedBootstrap := and (contains "# Bootstrap policy for the shared kagent runtime." $data) (not (contains "include =" $data)) -}}
+{{- if $ann -}}
+{{- if ne ($data | trim | sha256sum) $ann -}}
+{{- $preserve = "true" -}}
+{{- end -}}
+{{- else if not $unmodifiedBootstrap -}}
+{{- $preserve = "true" -}}
 {{- end -}}
 {{- end -}}
-{{- $policy -}}
+{{- end -}}
+{{- $preserve -}}
+{{- end -}}
+
+{{- define "appa-runtime.managedPolicy" -}}
+{{- if eq (include "appa-runtime.preserveLive" . | trim) "true" -}}
+{{- $live := lookup "v1" "ConfigMap" .Release.Namespace (include "appa-runtime.configMapName" .) -}}
+{{- index $live.data .Values.config.key -}}
+{{- else -}}
+{{- include "appa-runtime.policy" . -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "appa-runtime.policyHashAnnotation" -}}
+{{- if eq (include "appa-runtime.preserveLive" . | trim) "true" -}}
+{{- $live := lookup "v1" "ConfigMap" .Release.Namespace (include "appa-runtime.configMapName" .) -}}
+{{- if $live.metadata.annotations -}}
+{{- index $live.metadata.annotations "appa.dev/packaged-policy-sha256" | default "" -}}
+{{- end -}}
+{{- else -}}
+{{- include "appa-runtime.packagedPolicyHash" . -}}
+{{- end -}}
 {{- end -}}
