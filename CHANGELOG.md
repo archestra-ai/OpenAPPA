@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.13.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.12.0...v0.13.0) (2026-09-06)
+
+
+### Features
+
+* **release:** publish v* and rolling CI tags to appa-public ([#230](https://github.com/archestra-ai/OpenAPPA/issues/230)) ([5b5f455](https://github.com/archestra-ai/OpenAPPA/commit/5b5f45584b0cf66dbe4706f912514449fb0698fc))
+* **runtime:** isolate vouched appa-guide management ([#235](https://github.com/archestra-ai/OpenAPPA/issues/235)) ([c9f7bfd](https://github.com/archestra-ai/OpenAPPA/commit/c9f7bfd0937a91d204970008c7b5fd43f14c494f))
+
+
+### Bug Fixes
+
+* **guide:** verify reloaded policy and parse apply manifests ([#236](https://github.com/archestra-ai/OpenAPPA/issues/236)) ([dcf9d26](https://github.com/archestra-ai/OpenAPPA/commit/dcf9d2688d80dac7c553e3d1b9096bc891880741))
+* **release:** authenticate before historical source checkout ([#233](https://github.com/archestra-ai/OpenAPPA/issues/233)) ([fdb52f3](https://github.com/archestra-ai/OpenAPPA/commit/fdb52f3eae8213c81c406735fd46aa3f5092bc6f))
+* **release:** keep historical auth cleanup available ([#234](https://github.com/archestra-ai/OpenAPPA/issues/234)) ([cc0dfdb](https://github.com/archestra-ai/OpenAPPA/commit/cc0dfdb67758e120e0b5a90dd103f9c56762bdce))
+* **release:** support registry-only release recovery ([#232](https://github.com/archestra-ai/OpenAPPA/issues/232)) ([6ffb731](https://github.com/archestra-ai/OpenAPPA/commit/6ffb731fa40cfe2294e0a429d4fbc0e75dcc5f2d))
+
 ## [0.12.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.11.1...v0.12.0) (2026-09-05)
 
 
