@@ -108,10 +108,11 @@ unrelated tool remains fail-closed. Typed runtime MCP tools validate,
 publish, reload, and roll back policy and battery changes. Set
 `config.existingConfigMap` to manage that ConfigMap yourself.
 
-When `config.contents` stays empty, an upgrade preserves the live policy
-key that appa-guide changed. Setting `config.contents` explicitly makes
-Helm replace that key. An existing ConfigMap always remains under the
-operator's ownership.
+When `config.contents` stays empty, an upgrade replaces the live policy
+key if it is still the packaged bootstrap. It preserves that key when
+appa-guide or an operator has changed it. Setting `config.contents`
+explicitly makes Helm replace that key. An existing ConfigMap always
+remains under the operator's ownership.
 
 Keep `config.key` unchanged after appa-guide manages that key. Helm
 treats another key as a new policy and initializes it from chart values.
