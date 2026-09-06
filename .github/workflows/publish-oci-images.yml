@@ -85,10 +85,16 @@ jobs:
           fetch-depth: 1
 
       - name: Authenticate to Artifact Registry
-        uses: ./.github/actions/auth-to-gar
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           service_account: appa-release-publish@friendly-path-465518-r6.iam.gserviceaccount.com
           workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+
+      - name: Set up Google Cloud
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
 
       - name: Verify and checkout release source
         if: ${{ inputs.verify_release }}
@@ -198,10 +204,16 @@ jobs:
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Authenticate to Artifact Registry
-        uses: ./.github/actions/auth-to-gar
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           service_account: appa-release-publish@friendly-path-465518-r6.iam.gserviceaccount.com
           workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+
+      - name: Set up Google Cloud
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
 
       - name: Merge and tag image manifests
         env:
@@ -255,10 +267,16 @@ jobs:
           fetch-depth: 1
 
       - name: Authenticate to Artifact Registry
-        uses: ./.github/actions/auth-to-gar
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           service_account: appa-release-publish@friendly-path-465518-r6.iam.gserviceaccount.com
           workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+
+      - name: Set up Google Cloud
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
 
       - name: Verify and checkout release source
         if: ${{ inputs.verify_release }}
