@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.14.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.13.0...v0.14.0) (2026-09-06)
+
+
+### Features
+
+* **kagent:** streamline guided setup ([#240](https://github.com/archestra-ai/OpenAPPA/issues/240)) ([3c9915e](https://github.com/archestra-ai/OpenAPPA/commit/3c9915e2dfd7fb548c087a61b72c5a8605ba0a2f))
+
+
+### Bug Fixes
+
+* **kagent:** refresh unmodified bootstrap policy on helm upgrade ([#237](https://github.com/archestra-ai/OpenAPPA/issues/237)) ([935a6ef](https://github.com/archestra-ai/OpenAPPA/commit/935a6ef12826b494ee5dcda80e27ff9bd46c9f64))
+* **website:** keep docs table headers and kagent prompts from wrapping ([#238](https://github.com/archestra-ai/OpenAPPA/issues/238)) ([46b7bd5](https://github.com/archestra-ai/OpenAPPA/commit/46b7bd52276523f1155b90273120c5ad59edaaf7))
+
 ## [0.13.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.12.0...v0.13.0) (2026-09-06)
 
 
