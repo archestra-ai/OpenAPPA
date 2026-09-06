@@ -270,9 +270,17 @@ kubectl wait agent/appa-guide -n kagent \
 
 ### 5. Wire existing agents to the runtime
 
-Send `appa-guide`: `protect sre-agent with the shared OpenAPPA runtime and verify its rollout`.
+Send `appa-guide`:
 
-To protect every eligible declarative Agent, send: `enable OpenAPPA for all agents using the shared runtime; show me the affected agents before applying`.
+```text
+protect sre-agent with the shared OpenAPPA runtime and verify its rollout
+```
+
+To protect every eligible declarative Agent, send:
+
+```text
+enable OpenAPPA for all agents using the shared runtime; show me the affected agents before applying
+```
 
 The guide inventories the Agents, proposes the exact manifest, waits for approval, applies the complete observed spec through `k8s_apply_manifest`, and verifies the rollout. If the guide is unavailable, edit the complete resource and preserve every existing environment entry:
 
