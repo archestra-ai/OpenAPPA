@@ -21,7 +21,8 @@ adds the OpenAPPA construction deltas:
    executor and the memory persist callback (``gates``).
 3. Rebuild the stock plugin list with the stock conditions, then append
    ``AppaPluginKagent`` last.
-4. Append the reserved-tool toolset over ``$APPA_RUNTIME_URL/mcp``.
+4. Append the runtime-owned remedy and battery-matcher toolset over
+   ``$APPA_RUNTIME_URL/mcp``.
 5. Fill the OpenAI model's ``reasoning_effort`` from
    ``$APPA_KAGENT_OPENAI_REASONING_EFFORT`` when the rendered config
    leaves it unset (``fill_reasoning_effort``).
@@ -49,7 +50,7 @@ import pydantic
 from .config_guard import ConfigRefused
 from .identity import SessionIdentity
 from .plugin import AppaPluginKagent
-from .wire import RESERVED_TOOL
+from .wire import RESERVED_TOOL, RUNTIME_TOOLS
 
 logger = logging.getLogger("appa_kagent_adk.entrypoint")
 
@@ -267,14 +268,14 @@ def build_server(filepath: str, runtime_url: str):
             )
         if gates.gate_memory_persist(root_agent, plugin):
             logger.info("the memory persist callback crosses the tool gate")
-        root_agent.tools.append(_reserved_toolset(runtime_url))
+        root_agent.tools.append(_runtime_toolset(runtime_url))
         return root_agent
 
     return _kagent_server(app_cfg, agent_config, agent_card, plugins, root_agent_factory)
 
 
-def _reserved_toolset(runtime_url: str):
-    """The reserved-tool toolset: `execute_remedy_plan` over /mcp.
+def _runtime_toolset(runtime_url: str):
+    """The remedy-only toolset, or appa-guide's isolated management set.
 
     The agent executes the offered remedies on its own. A blocked call
     answers with the offers, the model chooses one (steered by its
@@ -290,11 +291,17 @@ def _reserved_toolset(runtime_url: str):
     from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnectionParams
     from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 
+    guide = os.environ.get("APPA_GUIDE", "").strip().lower() == "true"
+    endpoint = runtime_url.rstrip("/") + "/mcp"
+    tools = [RESERVED_TOOL]
+    if guide:
+        endpoint = os.environ.get("APPA_GUIDE_MCP_URL", "").strip()
+        if not endpoint:
+            raise ConfigRefused("APPA_GUIDE=true requires a nonempty APPA_GUIDE_MCP_URL")
+        tools = RUNTIME_TOOLS
     return McpToolset(
-        connection_params=StreamableHTTPConnectionParams(
-            url=runtime_url.rstrip("/") + "/mcp", timeout=REMEDY_CALL_TIMEOUT_SECONDS
-        ),
-        tool_filter=[RESERVED_TOOL],
+        connection_params=StreamableHTTPConnectionParams(url=endpoint, timeout=REMEDY_CALL_TIMEOUT_SECONDS),
+        tool_filter=tools,
     )
 
 

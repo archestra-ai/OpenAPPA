@@ -2,6 +2,7 @@
 //! parses flags, initializes a missing deployment config, opens the
 //! runtime, picks the adapter codec, and serves.
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -67,6 +68,10 @@ struct Args {
 
     #[arg(long, default_value = "127.0.0.1:8787")]
     listen: SocketAddr,
+
+    /// Optional dedicated listener for the kagent appa-guide MCP surface.
+    #[arg(long, env = "APPA_GUIDE_LISTEN")]
+    guide_listen: Option<SocketAddr>,
 
     /// Host headers accepted by the MCP endpoint. Empty keeps rmcp's
     /// loopback defaults. Shared deployments name each Service address.
@@ -185,7 +190,7 @@ struct AppState {
     codec: Codec,
     config: PathBuf,
     battery_dirs: Vec<PathBuf>,
-    batteries: Arc<RwLock<crate::batteries::BatteriesResponse>>,
+    battery_state: Arc<RwLock<mcp::BatteryState>>,
     reload_gate: Arc<tokio::sync::Mutex<()>>,
     executable: Option<ExecutableAtStart>,
 }
@@ -239,9 +244,10 @@ fn health_answer(stale: bool, pid: u32) -> String {
 
 async fn batteries(State(state): State<AppState>) -> axum::Json<crate::batteries::BatteriesResponse> {
     let catalog = state
-        .batteries
+        .battery_state
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .catalog
         .clone();
     axum::Json(catalog)
 }
@@ -250,13 +256,21 @@ async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (
     let _reload = state.reload_gate.lock().await;
     let config = Config::load_from(&state.config, &state.battery_dirs)
         .map_err(|error| (axum::http::StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
+    let battery_state = mcp::BatteryState {
+        catalog: crate::batteries::snapshot(&state.battery_dirs),
+        included: config.included_batteries().iter().cloned().collect(),
+        serving_tools: config.tool_names().into_iter().collect(),
+    };
+    let mut published = state
+        .battery_state
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // The matcher holds this lock while reading policy metadata. Keep it
+    // across the synchronous policy swap so no response can describe the
+    // old policy after the new one starts serving.
     match state.runtime.reload(config) {
         Ok(reloaded) => {
-            let catalog = crate::batteries::snapshot(&state.battery_dirs);
-            *state
-                .batteries
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = catalog;
+            *published = battery_state;
             Ok(axum::Json(reloaded))
         }
         Err(refusal) => {
@@ -332,6 +346,11 @@ async fn serve(args: Args) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let battery_state = Arc::new(RwLock::new(mcp::BatteryState {
+        catalog: crate::batteries::snapshot(&battery_dirs),
+        included: config.included_batteries().iter().cloned().collect::<BTreeSet<_>>(),
+        serving_tools: config.tool_names().into_iter().collect(),
+    }));
     let runtime = match Runtime::open(config, args.db, args.modules_dir) {
         Ok(runtime) => Arc::new(runtime.with_spawn_coverage(args.adapter.spawn_coverage())),
         Err(error) => {
@@ -344,7 +363,7 @@ async fn serve(args: Args) -> ExitCode {
         runtime: Arc::clone(&runtime),
         codec: args.adapter.codec(),
         config: config_path,
-        batteries: Arc::new(RwLock::new(crate::batteries::snapshot(&battery_dirs))),
+        battery_state: Arc::clone(&battery_state),
         battery_dirs,
         reload_gate: Arc::new(tokio::sync::Mutex::new(())),
         executable: ExecutableAtStart::of_this_process(),
@@ -361,7 +380,7 @@ async fn serve(args: Args) -> ExitCode {
         .route("/hook", post(hook))
         .nest_service(
             "/mcp",
-            mcp::service_with_allowed_hosts(runtime, &args.mcp_allowed_hosts),
+            mcp::service_with_allowed_hosts(Arc::clone(&runtime), &args.mcp_allowed_hosts),
         )
         .merge(management)
         .with_state(state);
@@ -373,11 +392,37 @@ async fn serve(args: Args) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let guide = if let Some(address) = args.guide_listen {
+        let listener = match tokio::net::TcpListener::bind(address).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                eprintln!("appa runtime: cannot bind guide listener {address}: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let app = axum::Router::new().nest_service(
+            "/guide-mcp",
+            mcp::guide_service_with_allowed_hosts(runtime, battery_state, &args.mcp_allowed_hosts),
+        );
+        Some((address, listener, app))
+    } else {
+        None
+    };
     tracing::info!(
         listen = %args.listen,
+        guide_listen = ?args.guide_listen,
         "appa-runtime serving /hook, /mcp, /health, and /batteries; management routes require loopback"
     );
-    match axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await {
+    let result = if let Some((address, guide_listener, guide_app)) = guide {
+        tracing::info!(listen = %address, "appa-runtime serving the vouched appa-guide MCP surface");
+        tokio::select! {
+            result = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()) => result,
+            result = axum::serve(guide_listener, guide_app.into_make_service()) => result,
+        }
+    } else {
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("appa runtime: server failed: {error}");
@@ -429,6 +474,10 @@ mod tests {
     fn the_runtime_defaults_to_loopback_and_accepts_an_explicit_non_loopback_address() {
         let default = Args::try_parse_from(["appa runtime"]).expect("the default runtime command parses");
         assert_eq!(default.listen, "127.0.0.1:8787".parse().expect("the default parses"));
+        assert_eq!(
+            default.guide_listen, None,
+            "Claude Code exposes no guide management listener"
+        );
 
         let shared = Args::try_parse_from(["appa runtime", "--listen", "0.0.0.0:18787"])
             .expect("an explicit shared-runtime address parses");
@@ -440,10 +489,16 @@ mod tests {
 
         let hosted = Args::try_parse_from([
             "appa runtime",
+            "--guide-listen",
+            "0.0.0.0:18788",
             "--mcp-allowed-host",
             "appa-runtime.appa.svc.cluster.local:18787",
         ])
         .expect("an MCP Service host parses");
+        assert_eq!(
+            hosted.guide_listen,
+            Some("0.0.0.0:18788".parse().expect("guide address"))
+        );
         assert_eq!(hosted.mcp_allowed_hosts, ["appa-runtime.appa.svc.cluster.local:18787"]);
     }
 

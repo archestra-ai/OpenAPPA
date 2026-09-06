@@ -54,6 +54,27 @@ def turn_end(root_id: str, child_id: str | None = None) -> dict[str, Any]:
 RESERVED_TOOL = "execute_remedy_plan"
 """The engine's remedy-execution tool, as it crosses the wire."""
 
+BATTERY_MATCH_TOOL = "appa_match_batteries"
+"""The runtime's deterministic battery matcher."""
+
+RUNTIME_STATE_TOOL = "appa_get_runtime_state"
+INCLUDE_BATTERY_TOOL = "appa_include_battery"
+RELOAD_POLICY_TOOL = "appa_reload_policy"
+REFRESH_BATTERIES_TOOL = "appa_refresh_batteries"
+UPDATE_POLICY_TOOL = "appa_update_policy"
+
+RUNTIME_TOOLS = [
+    RESERVED_TOOL,
+    BATTERY_MATCH_TOOL,
+    RUNTIME_STATE_TOOL,
+    INCLUDE_BATTERY_TOOL,
+    RELOAD_POLICY_TOOL,
+    REFRESH_BATTERIES_TOOL,
+    UPDATE_POLICY_TOOL,
+]
+
+MANAGEMENT_TOOLS = frozenset(RUNTIME_TOOLS) - {RESERVED_TOOL}
+
 
 def tool_call(
     root_id: str,

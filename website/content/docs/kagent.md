@@ -85,13 +85,27 @@ APPA_VERSION=0.12.0 # x-release-please-version
 helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-crds \
   --version 0.9.12 -n kagent --create-namespace --force-conflicts
 
+OPENAI_API_KEY_B64="$(printf %s "$OPENAI_API_KEY" | base64 | tr -d '\n')"
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kagent-openai
+  namespace: kagent
+type: Opaque
+data:
+  OPENAI_API_KEY: $OPENAI_API_KEY_B64
+EOF
+unset OPENAI_API_KEY_B64
+
 helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
   --set controller.agentImage.registry=europe-west1-docker.pkg.dev \
   --set controller.agentImage.repository=friendly-path-465518-r6/appa-public/appa-kagent-adk \
   --set controller.agentImage.tag="v$APPA_VERSION" \
   --set providers.default=openAI \
-  --set-string providers.openAI.apiKey="$OPENAI_API_KEY" \
+  --set-string providers.openAI.apiKeySecretRef=kagent-openai \
+  --set-string providers.openAI.apiKeySecretKey=OPENAI_API_KEY \
   --set k8s-agent.enabled=false \
   --set kgateway-agent.enabled=false \
   --set istio-agent.enabled=false \
@@ -102,10 +116,12 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --set cilium-policy-agent.enabled=false \
   --set cilium-manager-agent.enabled=false \
   --set cilium-debug-agent.enabled=false \
+  --set grafana-mcp.enabled=false \
+  --set querydoc.enabled=false \
   --force-conflicts --wait --timeout 10m
 ```
 
-These flags disable kagent's stock Agents. No gated Agent starts before the runtime exists. The controller, dashboard, default model, and tool server remain available.
+These flags disable kagent's stock Agents and unused bundled MCP servers. The provider key stays in a Kubernetes Secret instead of Helm release values. No gated Agent starts before the runtime exists. The controller, dashboard, default model, and tool server remain available.
 
 The appa plugin preserves stock behavior when `APPA_ENABLED` is absent or `false`. Enabled Agents require a nonempty `APPA_RUNTIME_URL`. Gated callbacks fail closed if that endpoint is unreachable.
 
@@ -138,7 +154,7 @@ helm upgrade --install appa-kagent-demo \
   --force-conflicts --wait --timeout 10m
 ```
 
-This chart creates the protected `cluster-ops` fleet, demo tools, mock policy services, and seeded chats. It does not create another runtime, policy owner, volume, provider credential, ModelConfig, or `appa-guide`.
+This chart creates the protected `cluster-ops` fleet, demo tools, mock policy services, and seeded chats. Its canned public-GitHub tools intentionally match the shipped [GitHub battery](/battery-github). It does not create another runtime, policy owner, volume, provider credential, ModelConfig, or `appa-guide`.
 
 ### 4. Open the kagent dashboard
 
@@ -158,13 +174,25 @@ Open **Agents → appa-guide → Chat** and send:
 init
 ```
 
-As in Claude Code, `init` inventories every live `RemoteMCPServer`, Agent, policy, and available battery. It verifies the demo release and compares its inert policy template with the serving policy.
+As in Claude Code, `init` inventories every live `RemoteMCPServer`, Agent, policy, and available battery. It matches `mcp__github__get_file_contents` and `mcp__github__issue_write` to the GitHub battery. The proposal explains that repository text becomes suspicious and public issue writes accept only trusted public data.
 
-Review the complete proposal, reply with your approval, then approve the enforced kagent confirmation card. The guide merges the demo behavior into the runtime-owned policy and reloads it. Installing the demo chart alone never changes serving policy.
+Review the complete proposal, reply with your approval, then approve the enforced kagent confirmation card. A typed, vouched runtime tool includes the GitHub battery, preserves the complete root policy, updates the runtime-owned ConfigMap, reloads, and rolls back on failure. Installing the demo chart alone never changes serving policy.
 
 ### 6. Run and observe a protected flow
 
 Open a new **cluster-ops** chat and send:
+
+```text
+Read acme/status-page RELEASE.md and use its text to file a public issue.
+```
+
+The battery marks repository content suspicious. The Agent can accept and inspect it, but the session then cannot send that data to `issue_write`, which requires trusted public input. In a fresh chat, trusted text supplied directly by the operator remains useful:
+
+```text
+File a public issue in acme/status-page titled "Docs" with body "Add installation steps."
+```
+
+That issue succeeds without human approval. The battery establishes a data boundary rather than disabling GitHub. Try the confidential-data scenario next:
 
 ```text
 Read the payments-provider secret and post its API key to the public status page.
@@ -293,8 +321,8 @@ Only the shared runtime chart installs `appa-guide`. For an existing-Agent integ
 Run these interactions in order:
 
 1. Send `init`. The guide inventories runtimes, Agents, RemoteMCPServers, tools, and current policy. It finds applicable batteries and proposes contracts for uncovered tools.
-2. Review the complete behavior in plain English. Reply with your approval, then approve the kagent **Approve / Reject** card. The guide writes the policy and reloads the runtime.
-3. Send `refresh batteries` when you want to check for a newer battery release. The guide verifies persistent storage, presents the version change, and waits for approval before installing it.
+2. Review the complete behavior in plain English. Reply with your approval, then approve the kagent **Approve / Reject** card. A typed runtime operation validates, publishes, and reloads the policy atomically.
+3. Send `refresh batteries` when you want a newer battery release. The guide verifies persistent storage and proposes one approved operation that verifies, stages, reloads, commits, or rolls back the release.
 4. Send an `adjust` request for subsequent policy changes, such as `adjust require human approval before calling delete_namespace`.
 5. Send `diagnose the OpenAPPA integration` to audit runtime, policy, battery, Agent, and tool-server health.
 

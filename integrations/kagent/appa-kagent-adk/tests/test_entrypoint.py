@@ -28,7 +28,7 @@ from appa_kagent_adk import entrypoint  # noqa: E402
 from appa_kagent_adk.config_guard import ConfigRefused  # noqa: E402
 from appa_kagent_adk.gates import GatedCodeExecutor  # noqa: E402
 from appa_kagent_adk.plugin import AppaPluginKagent  # noqa: E402
-from appa_kagent_adk.wire import RESERVED_TOOL  # noqa: E402
+from appa_kagent_adk.wire import RESERVED_TOOL, RUNTIME_TOOLS  # noqa: E402
 
 RUNTIME_URL = "http://127.0.0.1:8787"
 
@@ -143,7 +143,7 @@ def test_a_divergent_summarizer_refuses_the_start(config_dir):
         entrypoint.build_server(config_dir(divergent), RUNTIME_URL)
 
 
-def test_the_factory_wraps_code_execution_and_appends_the_reserved_toolset(config_dir):
+def test_the_factory_wraps_code_execution_and_appends_the_remedy_toolset(config_dir):
     from kagent.adk import AgentConfig
     from kagent.core import KAgentConfig
 
@@ -163,12 +163,25 @@ def test_the_factory_wraps_code_execution_and_appends_the_reserved_toolset(confi
     agent.code_executor = gates.GatedCodeExecutor(agent.code_executor, gates.SyncHookGate(RUNTIME_URL, identity))
     assert isinstance(agent.code_executor, GatedCodeExecutor)
     before = len(agent.tools)
-    agent.tools.append(entrypoint._reserved_toolset(RUNTIME_URL))
+    agent.tools.append(entrypoint._runtime_toolset(RUNTIME_URL))
     assert len(agent.tools) == before + 1
     reserved = agent.tools[-1]
+    assert reserved.tool_filter == [RESERVED_TOOL]
     assert reserved._connection_params.timeout == entrypoint.REMEDY_CALL_TIMEOUT_SECONDS, (
         "the remedy call outlasts a parked consult; ADK's five-second default would fail it at the client"
     )
+
+
+def test_only_appa_guide_receives_the_management_toolset(monkeypatch):
+    monkeypatch.setenv("APPA_GUIDE", "true")
+    monkeypatch.setenv("APPA_GUIDE_MCP_URL", "http://runtime:18788/guide-mcp")
+    guide = entrypoint._runtime_toolset(RUNTIME_URL)
+    assert guide.tool_filter == RUNTIME_TOOLS
+    assert guide._connection_params.url == "http://runtime:18788/guide-mcp"
+
+    monkeypatch.delenv("APPA_GUIDE_MCP_URL")
+    with pytest.raises(ConfigRefused, match="APPA_GUIDE_MCP_URL"):
+        entrypoint._runtime_toolset(RUNTIME_URL)
 
 
 def test_the_appa_plugin_needs_a_runtime_url():

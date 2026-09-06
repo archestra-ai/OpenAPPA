@@ -42,6 +42,14 @@ clusters without kagent. The target namespace, kagent model config, and
 tool-server name are configurable under `appaGuide`. An empty
 `appaGuide.skill.ref` pins the skill to the chart's `v<appVersion>` tag.
 
+Enabling `appaGuide` opens a separate guide MCP listener on Service port
+`18788`. Only the `appa-guide` Agent receives that URL and management
+toolset. The chart adds a NetworkPolicy that permits that port only from
+the labeled guide pod, plus a Role allowing the runtime ServiceAccount to
+get and patch its one policy ConfigMap. Every guide MCP call also consumes
+a one-shot APPA vouch, so direct calls cannot read or mutate management
+state. The normal `/mcp` endpoint remains remedy-only.
+
 The runtime binds the pod network directly. Point agents at:
 
 ```text
@@ -95,9 +103,9 @@ starts. The prior layer remains on the PVC throughout the transaction.
 ## Policy
 
 The chart mounts a bootstrap policy that lets appa-guide inspect the
-cluster and requires human approval for its first policy write. Every
-unrelated tool remains fail-closed. The appa-guide skill then adds
-batteries and root rules through the ConfigMap. Set
+cluster and requires human approval for policy management. Every
+unrelated tool remains fail-closed. Typed runtime MCP tools validate,
+publish, reload, and roll back policy and battery changes. Set
 `config.existingConfigMap` to manage that ConfigMap yourself.
 
 When `config.contents` stays empty, an upgrade preserves the live policy
@@ -118,8 +126,11 @@ the live key during template rendering; a concurrent later write wins.
 
 ## Network access
 
-Without a NetworkPolicy, any pod that can reach the Service can call
-`/hook`, `/mcp`, `/health`, and `/batteries`. The runtime returns `403` on
+Without the optional general NetworkPolicy, any pod that can reach the
+Service can call `/hook`, remedy-only `/mcp`, `/health`, and `/batteries`.
+When appa-guide is enabled, its dedicated NetworkPolicy restricts port
+`18788` to the guide pod. Vouched calls remain mandatory even where the
+CNI does not enforce NetworkPolicy. The runtime returns `403` on
 `/reload`, `/status`, `/policy-key`, and `/binary-fingerprint` unless the
 network peer is loopback. Treat the Service as trusted internal
 infrastructure. Restrict callers by enabling the chart policy and listing

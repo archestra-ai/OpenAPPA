@@ -152,44 +152,93 @@ name = "appa_memory_persist"
 delta = {}
 
 # --- the configuring actor: the appa-guide agent ---
-# The guide agent runs the routing skill against these tools. Reads are
-# unrestricted; cluster and Helm writes sit behind a person (kagent's
+# The guide agent runs the routing skill against these tools. Reads cover
+# only the Kubernetes kinds and Helm releases required by the workflow;
+# cluster and Helm writes sit behind a person (kagent's
 # Approve card is the oncall authority's channel). The command annotator
 # permits read-only inspection and puts every state-changing helper behind
 # that same person.
 # The skill's file helpers that it never uses (bash, write_file,
 # edit_file) stay undeclared, so they are refused.
 [[policy.tool]]
-name = "k8s_get_resources"
+name = "k8s_get_resources(resource_type:agent)"
 delta = {}
 
 [[policy.tool]]
-name = "k8s_get_resource_yaml"
+name = "k8s_get_resources(resource_type:remotemcpserver)"
 delta = {}
 
 [[policy.tool]]
-name = "k8s_get_events"
+name = "k8s_get_resources(resource_type:pod)"
 delta = {}
 
 [[policy.tool]]
-name = "k8s_get_pod_logs"
+name = "k8s_get_resources(resource_type:service)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resources(resource_type:deployment)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resources(resource_type:job)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resources(resource_type:persistentvolumeclaim)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resources(resource_type:persistentvolume)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resources(resource_type:storageclass)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resources(resource_type:namespace)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resource_yaml(resource_type:agent)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resource_yaml(resource_type:remotemcpserver)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resource_yaml(resource_type:pod)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resource_yaml(resource_type:service)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resource_yaml(resource_type:deployment)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resource_yaml(resource_type:job)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resource_yaml(resource_type:persistentvolumeclaim)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resource_yaml(resource_type:persistentvolume)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resource_yaml(resource_type:storageclass)"
 delta = {}
 
 [[policy.tool]]
 name = "k8s_apply_manifest"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-attention = ["human-approval"]
-
-[[policy.tool]]
-name = "k8s_patch_resource"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-attention = ["human-approval"]
+annotator = "appa-guide-apply"
 
 [[policy.tool]]
 name = "k8s_delete_resource"
@@ -200,22 +249,18 @@ trust = "trusted"
 attention = ["human-approval"]
 
 [[policy.annotator]]
-name = "appa-guide-command"
+name = "appa-guide-apply"
 ranks = ["trusted"]
 audiences = []
 marks = ["human-approval"]
 effects = []
 
 [[policy.tool]]
-name = "k8s_execute_command"
-annotator = "appa-guide-command"
-
-[[policy.tool]]
 name = "helm_list_releases"
 delta = {}
 
 [[policy.tool]]
-name = "helm_get_release"
+name = "helm_get_release(resource:manifest)"
 delta = {}
 
 [[policy.tool]]
@@ -242,6 +287,46 @@ delta = {}
 name = "read_file"
 delta = {}
 
+[[policy.tool]]
+name = "appa_match_batteries"
+delta = {}
+
+[[policy.tool]]
+name = "appa_get_runtime_state"
+delta = {}
+
+[[policy.tool]]
+name = "appa_include_battery"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "appa_reload_policy"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "appa_update_policy"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "appa_refresh_batteries"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
 # The runtime can withhold these tools' results and deliver a sanitized
 # derivation instead (the after-tool replacement the plugin enforces) —
 # the application point the output sanitizers register on.
@@ -253,7 +338,7 @@ confined_results = ["read_secret", "get_pod_logs", "check_status_page"]
 
 [[policy.authority]]
 name = "oncall"
-hint = "Ask the on-call lead through the kagent approval flow."
+hint = "Ask the operator through the kagent approval flow."
 
 [policy.authority.permits]
 attention = ["human-approval"]
@@ -286,8 +371,8 @@ max_body_bytes = 65536
 [externals.authorities.oncall]
 builtin = "hitl"
 
-[externals.annotators.appa-guide-command]
-command = ["/usr/local/bin/appa-guide-command-annotator"]
+[externals.annotators.appa-guide-apply]
+command = ["/usr/local/bin/appa-guide-apply-annotator"]
 
 # The runtime's Python image carries the standard-library client used by
 # these fixed command adapters. Each adapter forwards one consult envelope

@@ -97,6 +97,8 @@ expect 5 'http://appa-demo-mocks\.kagent\.svc\.cluster\.local:8081/'
 expect 1 '^    name = "skills"$'
 expect 1 '^    name = "kagent__NS__log_analyst"$'
 expect 1 '^    name = "kagent__NS__log_analyst_go"$'
+expect 1 '^            - mcp__github__get_file_contents$'
+expect 1 '^            - mcp__github__issue_write$'
 
 # Every rendered Agent uses the one explicitly selected shared runtime.
 expect_env 3 APPA_ENABLED true

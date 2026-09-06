@@ -5,37 +5,87 @@
 [policy]
 version = 2
 
+# Kubernetes inspection is restricted to the resource types appa-guide
+# needs. Secret objects and unknown kinds match no contract.
 [[policy.tool]]
-name = "k8s_get_resources"
+name = "k8s_get_resources(resource_type:agent)"
 delta = {}
 
 [[policy.tool]]
-name = "k8s_get_resource_yaml"
+name = "k8s_get_resources(resource_type:remotemcpserver)"
 delta = {}
 
 [[policy.tool]]
-name = "k8s_get_events"
+name = "k8s_get_resources(resource_type:pod)"
 delta = {}
 
 [[policy.tool]]
-name = "k8s_get_pod_logs"
+name = "k8s_get_resources(resource_type:service)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resources(resource_type:deployment)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resources(resource_type:job)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resources(resource_type:persistentvolumeclaim)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resources(resource_type:persistentvolume)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resources(resource_type:storageclass)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resources(resource_type:namespace)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resource_yaml(resource_type:agent)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resource_yaml(resource_type:remotemcpserver)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resource_yaml(resource_type:pod)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resource_yaml(resource_type:service)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resource_yaml(resource_type:deployment)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resource_yaml(resource_type:job)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resource_yaml(resource_type:persistentvolumeclaim)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resource_yaml(resource_type:persistentvolume)"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resource_yaml(resource_type:storageclass)"
 delta = {}
 
 [[policy.tool]]
 name = "k8s_apply_manifest"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-attention = ["human-approval"]
-
-[[policy.tool]]
-name = "k8s_patch_resource"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-attention = ["human-approval"]
+annotator = "appa-guide-apply"
 
 [[policy.tool]]
 name = "k8s_delete_resource"
@@ -46,22 +96,18 @@ trust = "trusted"
 attention = ["human-approval"]
 
 [[policy.annotator]]
-name = "appa-guide-command"
+name = "appa-guide-apply"
 ranks = ["trusted"]
 audiences = []
 marks = ["human-approval"]
 effects = []
 
 [[policy.tool]]
-name = "k8s_execute_command"
-annotator = "appa-guide-command"
-
-[[policy.tool]]
 name = "helm_list_releases"
 delta = {}
 
 [[policy.tool]]
-name = "helm_get_release"
+name = "helm_get_release(resource:manifest)"
 delta = {}
 
 [[policy.tool]]
@@ -88,6 +134,46 @@ delta = {}
 name = "read_file"
 delta = {}
 
+[[policy.tool]]
+name = "appa_match_batteries"
+delta = {}
+
+[[policy.tool]]
+name = "appa_get_runtime_state"
+delta = {}
+
+[[policy.tool]]
+name = "appa_include_battery"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "appa_reload_policy"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "appa_update_policy"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "appa_refresh_batteries"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
 [[policy.authority]]
 name = "oncall"
 hint = "Ask the operator through the kagent approval flow."
@@ -102,5 +188,5 @@ max_body_bytes = 65536
 [externals.authorities.oncall]
 builtin = "hitl"
 
-[externals.annotators.appa-guide-command]
-command = ["/usr/local/bin/appa-guide-command-annotator"]
+[externals.annotators.appa-guide-apply]
+command = ["/usr/local/bin/appa-guide-apply-annotator"]

@@ -8,6 +8,7 @@ pub mod describe;
 pub mod hook_client;
 pub mod hooks;
 pub mod init;
+mod management;
 pub mod mcp;
 pub mod plugin_bundle;
 pub mod replay;

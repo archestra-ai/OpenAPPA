@@ -36,6 +36,7 @@ from google.adk.runners import InMemoryRunner
 from google.genai import types
 
 from appa_kagent_adk.plugin import RETURN_TOOL, AppaFailClosed, _cause
+from appa_kagent_adk.wire import RESERVED_TOOL
 
 ACK = {"decision": "ack"}
 ALLOW = {"decision": "allow_call"}
@@ -453,6 +454,33 @@ async def test_an_allowed_call_passes_and_a_denied_call_answers_the_model():
         "arguments": {"replicas": 3},
         "spawn": False,
     }
+
+
+async def test_management_tool_arguments_are_bound_to_the_current_trajectory():
+    hook = Hook(ALLOW)
+    plugin = plugin_over(hook)
+    arguments: dict[str, object] = {}
+
+    assert (
+        await plugin.before_tool_callback(
+            tool=FakeTool("appa_get_runtime_state"),
+            tool_args=arguments,
+            tool_context=FakeContext(FakeSession("s1")),
+        )
+        is None
+    )
+    assert arguments["_appa_actor"] == "s1"
+    assert hook.events[-1]["arguments"] == {"_appa_actor": "s1"}
+
+
+async def test_management_actor_is_injected_before_adk_schedules_the_call():
+    plugin = plugin_over(Hook())
+    context = FakeContext(FakeSession("s1"))
+    response = called("appa_get_runtime_state")
+    response.content.parts[0].function_call.args = {"_appa_actor": "invented"}
+
+    assert await plugin.after_model_callback(callback_context=context, llm_response=response) is None
+    assert response.content.parts[0].function_call.args == {"_appa_actor": "s1"}
 
 
 async def test_the_agent_shaped_tools_classify_as_the_spawn():
@@ -960,6 +988,71 @@ async def test_a_root_scope_registers_no_return_gate_and_holds_no_stop():
     assert request.tools_dict == {}, "a root trajectory returns to nobody"
     assert await plugin.after_model_callback(callback_context=context, llm_response=spoke("all done")) is None
     assert gated(hook) == [], "the model points of a root scope feed no event"
+
+
+async def test_one_pending_human_review_replaces_a_model_stop_with_the_exact_card_call():
+    hook = Hook()
+    plugin = plugin_over(hook)
+    context = FakeContext(FakeSession("s1"), "i1")
+    plugin._pending_reviews["i1"] = {"offer-exact"}
+    plugin._review_authorized_invocations.add("i1")
+
+    bridged = await plugin.after_model_callback(callback_context=context, llm_response=spoke("The card is open."))
+
+    call = bridged.content.parts[0].function_call
+    assert (call.name, call.args) == (RESERVED_TOOL, {"offer_id": "offer-exact"})
+    assert plugin._pending_reviews["i1"] == {"offer-exact"}, "the actual reserved call consumes the pending offer"
+
+
+async def test_a_review_offer_does_not_open_a_card_without_chat_approval():
+    plugin = plugin_over(Hook())
+    context = FakeContext(FakeSession("s1"), "i1")
+    plugin._pending_reviews["i1"] = {"offer-exact"}
+
+    assert await plugin.after_model_callback(callback_context=context, llm_response=spoke("I stopped.")) is None
+
+
+async def test_a_review_offer_never_crosses_into_a_later_approval_turn():
+    plugin = plugin_over(Hook())
+    plugin._pending_reviews["proposal-turn"] = {"offer-stale"}
+    plugin._close_run("proposal-turn")
+    plugin._review_authorized_invocations.add("approval-turn")
+
+    assert (
+        await plugin.after_model_callback(
+            callback_context=FakeContext(FakeSession("s1"), "approval-turn"),
+            llm_response=spoke("Approve it."),
+        )
+        is None
+    )
+
+
+async def test_init_completes_an_authoritative_battery_suggestion():
+    plugin = plugin_over(Hook())
+    context = FakeContext(FakeSession("s1"), "i1")
+    plugin._init_invocations.add("i1")
+    plugin._remember_battery_suggestions(
+        "i1",
+        {"content": [{"text": json.dumps({"matches": [{"battery": "github", "included": False, "tools": []}]})}]},
+    )
+
+    completed = await plugin.after_model_callback(
+        callback_context=context,
+        llm_response=spoke("Observed tools are ready."),
+    )
+
+    assert "GitHub battery" in completed.content.parts[0].text
+    assert "Approve the GitHub battery include" in completed.content.parts[0].text
+
+
+async def test_init_does_not_suggest_an_included_battery():
+    plugin = plugin_over(Hook())
+    plugin._init_invocations.add("i1")
+    plugin._remember_battery_suggestions(
+        "i1",
+        {"content": [{"text": json.dumps({"matches": [{"battery": "github", "included": True, "tools": []}]})}]},
+    )
+    assert plugin._battery_suggestions == {}
 
 
 async def test_the_stop_of_a_child_becomes_one_call_to_the_return_gate():

@@ -45,7 +45,7 @@ COPY --chown=appa:appa batteries /opt/appa/batteries
 COPY --chown=appa:appa scripts/appa-refresh-batteries.py /usr/local/bin/appa-refresh-batteries
 COPY --chown=appa:appa scripts/appa-guide-runtime.py /opt/appa/appa-guide-runtime
 RUN chmod 0755 /usr/local/bin/appa-refresh-batteries /opt/appa/appa-guide-runtime \
-    && for operation in inspect reload refresh-check refresh-stage refresh-commit refresh-rollback command-annotator; do \
+    && for operation in apply-annotator runtime-state include-battery update-policy reload-policy refresh-batteries; do \
          ln -s /opt/appa/appa-guide-runtime "/usr/local/bin/appa-guide-${operation}"; \
        done
 
@@ -54,6 +54,7 @@ ENV APPA_CONFIG=/etc/appa/appa.toml
 ENV APPA_DB=/var/lib/appa/appa.db
 ENV APPA_BATTERIES_DIR=/opt/appa/batteries
 ENV APPA_GUIDE_RUNTIME_URL=http://127.0.0.1:18787
+ENV APPA_PERSISTENCE_ENABLED=false
 WORKDIR /var/lib/appa
 EXPOSE 18787
 ENTRYPOINT ["/usr/local/bin/appa"]

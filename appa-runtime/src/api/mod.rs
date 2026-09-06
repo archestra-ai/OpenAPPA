@@ -421,6 +421,7 @@ impl Prepared {
                 modules: self.modules,
                 executing: std::sync::Mutex::new(std::collections::BTreeSet::new()),
                 permits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                management_permits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 prompted: std::sync::Mutex::new(std::collections::BTreeSet::new()),
                 gates: self.gates,
                 named_spawns: std::sync::atomic::AtomicBool::new(false),
@@ -436,6 +437,7 @@ struct Inner {
     modules: crate::builtins::ModuleRegistry,
     executing: std::sync::Mutex<std::collections::BTreeSet<String>>,
     permits: std::sync::Mutex<std::collections::BTreeMap<String, Vec<Vouch>>>,
+    management_permits: std::sync::Mutex<std::collections::BTreeMap<Vec<u8>, Vec<Actor>>>,
     /// Trajectories a prompt reached since their turn last settled. Claude Code sends no
     /// `Stop` hook for a turn the user interrupted, so the prompt is the only sign the
     /// previous turn is over; the next tool call or turn end settles what it left behind.
@@ -450,6 +452,29 @@ struct Inner {
 /// The trajectory an actor's events belong to: the child when the harness names one.
 pub(crate) fn acting_trajectory(actor: &Actor) -> &TrajectoryId {
     actor.child.as_ref().unwrap_or(&actor.root)
+}
+
+pub(crate) fn management_tool_name(tool: &str) -> Option<&'static str> {
+    const TOOLS: [&str; 6] = [
+        "appa_get_runtime_state",
+        "appa_include_battery",
+        "appa_match_batteries",
+        "appa_reload_policy",
+        "appa_refresh_batteries",
+        "appa_update_policy",
+    ];
+    let bare = tool
+        .strip_prefix("mcp__appa__")
+        .or_else(|| tool.strip_prefix("mcp__plugin_appa-runtime_appa__"))
+        .unwrap_or(tool);
+    TOOLS.into_iter().find(|name| bare == *name)
+}
+
+fn management_key(tool: &str, arguments: &serde_json::Value) -> Vec<u8> {
+    let mut key = tool.as_bytes().to_vec();
+    key.push(0);
+    key.extend(serde_json_canonicalizer::to_vec(arguments).expect("management tool arguments canonicalize"));
+    key
 }
 
 impl Runtime {
@@ -898,6 +923,50 @@ impl Runtime {
             holders.retain(|holder| holder.actor != *acting);
             !holders.is_empty()
         });
+        let mut management = self
+            .inner
+            .management_permits
+            .lock()
+            .expect("the management-permit mutex is never poisoned");
+        management.retain(|_, holders| {
+            holders.retain(|holder| holder != acting);
+            !holders.is_empty()
+        });
+    }
+
+    pub(crate) fn vouch_management(&self, call: &ProposedCall, acting: &Actor) {
+        let Some(name) = management_tool_name(&call.tool) else {
+            return;
+        };
+        let Ok(mut arguments) = serde_json::from_str::<serde_json::Value>(call.arguments.get()) else {
+            return;
+        };
+        if arguments.is_null() {
+            arguments = serde_json::json!({});
+        }
+        let key = management_key(name, &arguments);
+        let mut permits = self
+            .inner
+            .management_permits
+            .lock()
+            .expect("the management-permit mutex is never poisoned");
+        let holders = permits.entry(key).or_default();
+        if !holders.contains(acting) {
+            holders.push(acting.clone());
+        }
+    }
+
+    pub(crate) fn take_management_vouch<T: serde::Serialize>(&self, tool: &str, arguments: &T) -> Option<Actor> {
+        let name = management_tool_name(tool)?;
+        let value = serde_json::to_value(arguments).ok()?;
+        let key = management_key(name, &value);
+        let mut permits = self
+            .inner
+            .management_permits
+            .lock()
+            .expect("the management-permit mutex is never poisoned");
+        let mut holders = permits.remove(&key)?;
+        (holders.len() == 1).then(|| holders.remove(0))
     }
 
     /// A prompt reached this actor. Nothing is recorded: the mark lives in memory and is
@@ -1690,6 +1759,47 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             None,
             "the turn ended without spending it, so nothing later can"
         );
+    }
+
+    #[tokio::test]
+    async fn a_management_vouch_is_exact_one_shot_and_turn_bounded() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let actor = Actor {
+            root: TrajectoryId("management-vouch".to_string()),
+            child: None,
+        };
+        let args = crate::mcp::IncludeBatteryArgs {
+            actor: "management-vouch".to_string(),
+            battery: "github".to_string(),
+            expected_policy_key: "policy-1".to_string(),
+        };
+        let call = ProposedCall {
+            tool: "mcp__appa__appa_include_battery".to_string(),
+            arguments: serde_json::value::to_raw_value(&args).expect("arguments serialize"),
+        };
+
+        runtime.vouch_management(&call, &actor);
+        let other_actor = crate::mcp::IncludeBatteryArgs {
+            actor: "other-trajectory".to_string(),
+            battery: "github".to_string(),
+            expected_policy_key: "policy-1".to_string(),
+        };
+        assert_eq!(
+            runtime.take_management_vouch("appa_include_battery", &other_actor),
+            None,
+            "another trajectory cannot consume the permit"
+        );
+        assert_eq!(
+            runtime.take_management_vouch("appa_include_battery", &args),
+            Some(actor.clone())
+        );
+        assert_eq!(runtime.take_management_vouch("appa_include_battery", &args), None);
+
+        runtime.vouch_management(&call, &actor);
+        runtime.release_vouches(&actor);
+        assert_eq!(runtime.take_management_vouch("appa_include_battery", &args), None);
     }
 
     /// The session-start check refuses on any fault, so the variant it refuses with is

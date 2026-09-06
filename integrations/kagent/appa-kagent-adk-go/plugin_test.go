@@ -585,6 +585,38 @@ func TestAnAllowedCallPassesAndADeniedCallAnswersTheModel(t *testing.T) {
 	}
 }
 
+func TestManagementArgumentsAreBoundToTheCurrentTrajectory(t *testing.T) {
+	h := newHook(t, map[string]any{"decision": "allow_call"})
+	p := pluginOver(t, h)
+	arguments := map[string]any{}
+	if returned, err := p.beforeTool(newFakeContext(newFakeSession("s1")), &fakeTool{RuntimeStateTool}, arguments); err != nil || returned != nil {
+		t.Fatalf("management call must pass: %v %v", returned, err)
+	}
+	if arguments["_appa_actor"] != "s1" {
+		t.Fatalf("management actor = %v", arguments["_appa_actor"])
+	}
+	events := gated(h)
+	hookArguments := events[len(events)-1]["arguments"].(map[string]any)
+	if hookArguments["_appa_actor"] != "s1" {
+		t.Fatalf("hook actor = %v", hookArguments)
+	}
+}
+
+func TestManagementActorIsInjectedBeforeADKSchedulesTheCall(t *testing.T) {
+	p := pluginOver(t, newHook(t))
+	ctx := newFakeContext(newFakeSession("s1"))
+	response := modelResponse(&genai.Part{FunctionCall: &genai.FunctionCall{
+		Name: RuntimeStateTool,
+		Args: map[string]any{"_appa_actor": "invented"},
+	}})
+	if held, err := p.afterModel(ctx, response, nil); err != nil || held != nil {
+		t.Fatalf("management call must continue: %v %v", held, err)
+	}
+	if response.Content.Parts[0].FunctionCall.Args["_appa_actor"] != "s1" {
+		t.Fatalf("management actor = %v", response.Content.Parts[0].FunctionCall.Args)
+	}
+}
+
 func TestTheConfiguredSpawnToolsClassifyAsTheSpawn(t *testing.T) {
 	h := newHook(t, allow, allow)
 	p := pluginOver(t, h, "billing-agent")
@@ -1302,6 +1334,63 @@ func TestARootScopeRegistersNoReturnGateAndHoldsNoStop(t *testing.T) {
 	}
 	if len(gated(h)) != 0 {
 		t.Errorf("the model points of a root scope feed no event, got %v", gated(h))
+	}
+}
+
+func TestOnePendingHumanReviewReplacesAnApprovedModelStopWithTheExactCardCall(t *testing.T) {
+	p := pluginOver(t, newHook(t))
+	ctx := newFakeContext(newFakeSession("s1")).forInvocation("i1")
+	p.pendingReviews["i1"] = map[string]struct{}{"offer-exact": {}}
+	p.reviewAuthorized["i1"] = struct{}{}
+
+	bridged, err := p.afterModel(ctx, spoke("The card is open."), nil)
+	if err != nil || bridged == nil || bridged.Content == nil || len(bridged.Content.Parts) != 1 {
+		t.Fatalf("one approved review must become a control call, got %v, %v", bridged, err)
+	}
+	call := bridged.Content.Parts[0].FunctionCall
+	if call == nil || call.Name != ReservedTool || !reflect.DeepEqual(call.Args, map[string]any{"offer_id": "offer-exact"}) {
+		t.Fatalf("the bridge must carry the exact offer, got %+v", call)
+	}
+}
+
+func TestAReviewOfferDoesNotOpenWithoutChatApproval(t *testing.T) {
+	p := pluginOver(t, newHook(t))
+	ctx := newFakeContext(newFakeSession("s1")).forInvocation("i1")
+	p.pendingReviews["i1"] = map[string]struct{}{"offer-exact": {}}
+
+	bridged, err := p.afterModel(ctx, spoke("I stopped."), nil)
+	if err != nil || bridged != nil {
+		t.Fatalf("an unapproved review must not open, got %v, %v", bridged, err)
+	}
+}
+
+func TestAReviewOfferNeverCrossesIntoALaterApprovalTurn(t *testing.T) {
+	p := pluginOver(t, newHook(t))
+	p.pendingReviews["proposal-turn"] = map[string]struct{}{"offer-stale": {}}
+	p.clearInvocationReviews("proposal-turn")
+	p.reviewAuthorized["approval-turn"] = struct{}{}
+
+	bridged, err := p.afterModel(
+		newFakeContext(newFakeSession("s1")).forInvocation("approval-turn"),
+		spoke("Approve it."),
+		nil,
+	)
+	if err != nil || bridged != nil {
+		t.Fatalf("a stale cross-turn review must not open, got %v, %v", bridged, err)
+	}
+}
+
+func TestChatApprovalDetectionIsExplicit(t *testing.T) {
+	for text, want := range map[string]bool{
+		"Approve the exact patch": true,
+		"approved operation":      true,
+		"yes, approve it":         true,
+		"do not approve":          false,
+		"restart it":              false,
+	} {
+		if got := isChatApproval(text); got != want {
+			t.Errorf("isChatApproval(%q) = %v, want %v", text, got, want)
+		}
 	}
 }
 
