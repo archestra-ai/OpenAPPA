@@ -276,14 +276,14 @@ fn the_website_quickstart_is_copy_safe_and_dependency_ordered() {
         .split("## Quickstart")
         .nth(1)
         .expect("the guide has a Quickstart")
-        .split("## Protect existing Agents")
+        .split("## Protect existing agents")
         .next()
         .expect("the Quickstart ends before existing-Agent guidance");
 
     for heading in [
-        "### 1. Install kagent with appa plugin",
-        "### 2. Install appa",
-        "### 3. Install the demo Agents",
+        "### 1. Install kagent with the OpenAPPA plugin",
+        "### 2. Deploy the OpenAPPA runtime",
+        "### 3. Deploy the demo agents",
     ] {
         assert!(quickstart.contains(heading), "the Quickstart carries {heading:?}");
     }
@@ -323,17 +323,17 @@ fn the_website_quickstart_is_copy_safe_and_dependency_ordered() {
 fn the_website_existing_agent_guide_is_dependency_ordered() {
     let website = fs::read_to_string(repo_root().join("website/content/docs/kagent.md")).expect("read website guide");
     let protect = website
-        .split("## Protect existing Agents")
+        .split("## Protect existing agents")
         .nth(1)
         .expect("the guide has existing-Agent guidance")
-        .split("## Manage integration with appa-guide")
+        .split("## Manage policy with appa-guide")
         .next()
         .expect("existing-Agent guidance ends before manage-integration");
 
     for heading in [
-        "### 1. Install the OpenAPPA Agent image",
-        "### 2. Install OpenAPPA",
-        "### 3. Protect your Agents",
+        "### 1. Update the controller image",
+        "### 2. Deploy appa-runtime",
+        "### 3. Enable gating on an Agent",
     ] {
         assert!(protect.contains(heading), "existing-Agent guidance carries {heading:?}");
     }

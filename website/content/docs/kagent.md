@@ -12,7 +12,7 @@ An OpenAPPA plugin runs inside agent pods via Google ADK plugin APIs. The plugin
 
 ## How it works
 
-The OpenAPPA integration uses plugin images for Python (`appa-kagent-adk`) and Go (`appa-kagent-adk-go`).
+The OpenAPPA integration uses plugin images for Python (`appa-kagent-adk`) and Go (`appa-kagent-adk-go`). On kagent 0.9.12, Go agents derive `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/golang-adk` from `controller.agentImage`. OpenAPPA publishes that alias on the `appa-kagent-adk-go` image digest.
 
 :::fig-kagent:::
 
@@ -277,6 +277,8 @@ helm upgrade --install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-p
   --set appaGuide.enabled=true \
   --set appaGuide.namespace=kagent \
   --force-conflicts --wait --timeout 10m
+kubectl wait agent/appa-guide -n kagent \
+  --for=condition=Ready=True --timeout=5m
 ```
 
 ### 3. Enable gating on an Agent
@@ -308,6 +310,12 @@ You can also prompt `appa-guide` to automate onboarding:
 
 ```text
 protect sre-agent with the shared OpenAPPA runtime and verify its rollout
+```
+
+To protect every eligible declarative Agent, send:
+
+```text
+enable OpenAPPA for all agents using the shared runtime; show me the affected agents before applying
 ```
 
 ## Manage policy with appa-guide
