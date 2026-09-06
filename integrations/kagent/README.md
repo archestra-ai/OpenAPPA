@@ -38,7 +38,7 @@ Implements `AppaPluginKagent` for Google Go ADK v2. It provides a replacement ru
 The Rust codec crate lives at [`appa-adapter-kagent/`](../../appa-adapter-kagent) in the workspace root. It is compiled directly into `appa-runtime` and parses wire events sent by `AppaPluginKagent`.
 
 ### 4. Guide Skill (`../appa-guide/`)
-The host-neutral `appa-guide` skill routes to a Claude Code or kagent reference. In kagent, it runs as a dedicated declarative `Agent` using the stock `k8s_*` tools from the kagent tool server to inspect installed tools, match batteries, propose policies in chat, and apply them to the runtime ConfigMap under kagent's Approve / Reject card. With persistence enabled, it also verifies and refreshes upstream policy batteries without container rebuilds. See [website/content/docs/kagent.md](../../website/content/docs/kagent.md) for full deployment and maintenance workflows.
+The host-neutral `appa-guide` skill routes to a Claude Code or kagent reference. In kagent, it runs as a dedicated declarative `Agent` using the stock `k8s_*` tools to inspect the cluster and runtime-owned `appa_match_batteries` to compute exact battery matches. It proposes policy in chat and applies it to the runtime ConfigMap under kagent's Approve / Reject card. With persistence enabled, it also verifies and refreshes upstream policy batteries without container rebuilds. See [website/content/docs/kagent.md](../../website/content/docs/kagent.md) for full deployment and maintenance workflows.
 
 ## Quickstart
 
@@ -65,12 +65,26 @@ helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-c
 
 # 2. Install kagent with the appa plugin image
 APPA_VERSION=0.12.0 # x-release-please-version
+OPENAI_API_KEY_B64="$(printf %s "$OPENAI_API_KEY" | base64 | tr -d '\n')"
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kagent-openai
+  namespace: kagent
+type: Opaque
+data:
+  OPENAI_API_KEY: $OPENAI_API_KEY_B64
+EOF
+unset OPENAI_API_KEY_B64
+
 helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
   --set controller.agentImage.registry=europe-west1-docker.pkg.dev \
   --set controller.agentImage.repository=friendly-path-465518-r6/appa-public/appa-kagent-adk \
   --set providers.default=openAI \
-  --set-string providers.openAI.apiKey="$OPENAI_API_KEY" \
+  --set-string providers.openAI.apiKeySecretRef=kagent-openai \
+  --set-string providers.openAI.apiKeySecretKey=OPENAI_API_KEY \
   --set k8s-agent.enabled=false \
   --set kgateway-agent.enabled=false \
   --set istio-agent.enabled=false \
@@ -81,6 +95,8 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --set cilium-policy-agent.enabled=false \
   --set cilium-manager-agent.enabled=false \
   --set cilium-debug-agent.enabled=false \
+  --set grafana-mcp.enabled=false \
+  --set querydoc.enabled=false \
   --force-conflicts \
   --wait --timeout 10m \
   --set controller.agentImage.tag="v$APPA_VERSION"
@@ -138,7 +154,7 @@ Point any declarative Agent at `http://appa-runtime.kagent.svc.cluster.local:187
 
 ### Open the interactive demo
 
-The fixture chart sets `APPA_ENABLED=true` on every Agent it renders and points each one at the runtime owned by `appa-runtime`.
+The fixture chart sets `APPA_ENABLED=true` on every Agent it renders and points each one at the runtime owned by `appa-runtime`. Its canned `mcp__github__get_file_contents` and `mcp__github__issue_write` tools match the shipped GitHub battery exactly, so `appa-guide init` proposes a real battery include rather than demo-only policy.
 
 Port-forward the kagent dashboard:
 

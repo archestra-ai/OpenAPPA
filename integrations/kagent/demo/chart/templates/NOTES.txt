@@ -7,8 +7,9 @@ Open the dashboard:
   http://localhost:8080/agents/{{ .Release.Namespace }}/cluster-ops/chat
 
 Open appa-guide first and send `init`. It will inspect and propose the
-demo policy template. The template does not become active without your
-approval and the enforced confirmation card.
+demo policy template and the GitHub battery matched by the canned
+mcp__github__get_file_contents and mcp__github__issue_write tools. Nothing becomes active without
+your approval and the enforced confirmation card.
 
 The cluster-ops agent opens with all sixteen showcase chats already there,
 one per demo case as it ran:

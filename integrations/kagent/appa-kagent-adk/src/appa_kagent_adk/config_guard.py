@@ -16,7 +16,7 @@ from pydantic import AliasChoices
 from pydantic.fields import FieldInfo
 
 from .plugin import RETURN_TOOL
-from .wire import RESERVED_TOOL
+from .wire import RUNTIME_TOOLS
 
 # The keys the kagent `_McpTlsMixin` reads from the raw `params` dict of
 # an MCP tool config, in its before-validator `_lift_tls_from_params`.
@@ -76,16 +76,17 @@ def refuse_unsupported(config: dict[str, Any], model_cls: type[pydantic.BaseMode
 # The tool names APPA owns: the return gate the plugin registers in a
 # child scope, and the reserved tool the entrypoint appends over the
 # runtime's own MCP endpoint. A config may declare neither.
-_RESERVED_TOOL_NAMES = frozenset({RETURN_TOOL, RESERVED_TOOL})
+_RESERVED_TOOL_NAMES = frozenset({RETURN_TOOL, *RUNTIME_TOOLS})
 
 
 def _refuse_the_reserved_names(config: dict[str, Any]) -> None:
     """Refuse a config that declares a tool APPA owns the name of.
 
-    Two names are APPA's. The plugin registers its own return gate as
+    APPA owns the return and runtime-management names. The plugin registers its own return gate as
     ``appa_return`` on every model request of a child scope, and the
-    entrypoint appends ``execute_remedy_plan`` over the runtime's own
-    MCP endpoint after this guard runs. Each plugin recognizes what it
+    entrypoint appends the tools in ``RUNTIME_TOOLS`` over the runtime's
+    own MCP endpoint after
+    this guard runs. Each plugin recognizes what it
     owns by identity, so a declared tool of either name crosses the tool
     gate like any other tool. What such a tool cannot do is run as the
     operator meant: the model reads two declarations of one name, and

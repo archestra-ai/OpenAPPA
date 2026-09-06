@@ -34,9 +34,10 @@ kubectl port-forward -n kagent svc/kagent-ui 8080:8080
 
 Open `http://localhost:8080/agents/kagent/appa-guide/chat` and send
 `init`. The guide verifies the demo release, reads its inert policy
-template, and proposes the behavior. Approve the proposal in chat and
-then approve the enforced confirmation card. A new `cluster-ops` chat
-uses the reloaded policy.
+template, matches the canned GitHub tools to the shipped GitHub battery,
+and proposes the behavior. Approve the proposal in chat and then approve
+the enforced confirmation card. A vouched runtime MCP operation validates,
+publishes, and reloads the policy. A new `cluster-ops` chat uses it.
 
 The dashboard contains sixteen seeded chats. They cover confidential
 reads, suspicious ingress, sanitization, human approval, deterministic
@@ -64,6 +65,13 @@ endpoints form the change board's out-of-band ruling channel.
 The fixture chart owns no runtime Deployment, runtime Service, serving
 policy, PersistentVolumeClaim, provider Secret, ModelConfig, or
 `appa-guide` Agent.
+
+`demo-tools` also exposes canned `mcp__github__get_file_contents` and
+`mcp__github__issue_write`
+calls for a public repository. They have no rules in the demo template.
+`appa-guide` discovers their exact GitHub battery match and proposes the
+include. Repository text then enters as suspicious, while trusted issue
+text supplied by the operator can still publish.
 
 ## Tests
 

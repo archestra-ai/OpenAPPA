@@ -31,4 +31,18 @@ spec:
       ports:
         - protocol: TCP
           port: runtime
+    {{- if .Values.appaGuide.enabled }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.appaGuide.namespace | quote }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Values.appaGuide.name | quote }}
+      ports:
+        - protocol: TCP
+          port: runtime
+        - protocol: TCP
+          port: guide-mcp
+    {{- end }}
 {{- end }}

@@ -4,7 +4,7 @@ Fixture-only OpenAPPA demo for kagent. The chart installs:
 
 - the gated `cluster-ops`, `log-analyst`, and `release-manager` Agents;
 - optional Go twins;
-- the `demo-tools` MCP server;
+- the `demo-tools` MCP server, including a canned GitHub battery showcase;
 - deterministic mock implementations for demo policy components;
 - an inert, rendered policy template;
 - sixteen seeded dashboard chats.
@@ -39,8 +39,9 @@ helm upgrade --install appa-kagent-demo \
 
 Open `appa-guide` and send `init`. The guide verifies this release and
 reads `ConfigMap/appa-kagent-demo-policy`. It presents the resulting
-behavior before copying any entries into the runtime-owned policy. Reply
-with approval, then approve the enforced kagent confirmation card.
+behavior and the matched GitHub battery. Reply with approval, then approve
+the enforced kagent confirmation card. Typed runtime MCP operations update
+and reload the complete runtime-owned policy.
 
 The demo ConfigMap is never mounted or served directly. Installing or
 upgrading this chart cannot change runtime policy.

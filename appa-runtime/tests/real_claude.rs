@@ -65,10 +65,10 @@ fn real_claude_keeps_the_marketplace_directory_and_copies_the_plugin() {
     // register an immutable deployment directory and rely on Claude reading it
     // from there.
     let marketplaces: serde_json::Value = serde_json::from_slice(
-        &fs::read(config.join("plugins/marketplaces.json")).expect("the marketplace registry is readable"),
+        &fs::read(config.join("plugins/known_marketplaces.json")).expect("the marketplace registry is readable"),
     )
     .expect("the marketplace registry parses");
-    let recorded = marketplaces["marketplaces"]["appa"]["source"]["path"]
+    let recorded = marketplaces["appa"]["installLocation"]
         .as_str()
         .expect("a local marketplace records its directory");
     assert_eq!(

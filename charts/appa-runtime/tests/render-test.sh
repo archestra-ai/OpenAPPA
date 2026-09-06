@@ -57,6 +57,7 @@ must_contain 'containerPort: 18787'
 must_contain 'targetPort: runtime'
 must_contain 'port: 18787'
 must_contain 'port: runtime'
+
 must_contain '0.0.0.0:18787'
 must_contain 'appa-runtime.appa.svc.cluster.local:18787'
 must_not_contain 'relay'
@@ -67,6 +68,9 @@ must_not_contain '/var/lib/appa/release-batteries'
 must_not_contain 'kind: PersistentVolumeClaim'
 must_not_contain 'kind: NetworkPolicy'
 must_not_contain 'kind: Agent'
+must_not_contain 'kind: Role'
+must_not_contain 'kind: RoleBinding'
+must_contain 'automountServiceAccountToken: false'
 must_contain 'emptyDir: {}'
 must_contain 'runAsNonRoot: true'
 must_contain 'runAsUser: 65532'
@@ -74,6 +78,10 @@ must_contain 'readOnlyRootFilesystem: true'
 must_contain 'checksum/policy:'
 must_contain 'name: APPA_CONFIG'
 must_contain 'value: "/etc/appa/appa.toml"'
+must_contain 'name: APPA_GUIDE_RUNTIME_URL'
+must_contain 'value: "http://127.0.0.1:18787"'
+must_contain 'name: APPA_PERSISTENCE_ENABLED'
+must_contain 'value: "false"'
 must_contain 'mountPath: /var/run/appa/identity'
 must_contain 'path: pod-name'
 must_contain 'fieldPath: metadata.namespace'
@@ -88,15 +96,51 @@ must_contain 'namespace: "kagent"'
 must_contain "ref: \"v${app_version}\""
 must_contain 'http://appa-runtime.appa.svc.cluster.local:18787'
 must_contain 'name: "kagent-tool-server"'
-must_contain 'your first tool call must be skills with command appa-guide'
-must_contain 'Inventory Agents as JSON and RemoteMCPServers with a wide list'
-must_contain 'immediately call execute_remedy_plan with its exact offer id'
-must_contain 'copy pod_name and namespace from the same fetched Pod YAML'
-must_contain 'with k8s_apply_manifest over its complete observed spec'
-must_contain 'A request to protect an Agent'
-must_contain 'Never copy status'
-must_contain 'request itself'
-must_contain 'available, not included'
+must_contain 'first call skills with'
+must_contain 'Runtime management uses only direct runtime-owned MCP tools'
+must_contain 'appa_get_runtime_state reads serving policy'
+must_contain 'appa_include_battery updates the complete root policy and reloads it'
+must_contain 'appa_update_policy publishes one complete approved root policy and reloads it'
+must_contain 'appa_reload_policy reloads the mounted complete root policy'
+must_contain 'appa_refresh_batteries refreshes, validates, reloads'
+must_contain 'Never use Kubernetes tools, shell commands, helper executables'
+must_contain 'Pass the policy key from appa_get_runtime_state'
+must_contain 'never Helm values or Kubernetes Secrets'
+must_contain 'APPA_ENABLED alone does'
+must_contain 'matches, included, and unconfigured_tools fields'
+must_contain 'ascending discovered-tool count'
+must_contain 'release-manager'
+must_contain 'remains a blocked delegation'
+must_contain 'A request is never approval'
+must_contain 'Never invent or request an offer id'
+must_contain 'Protect an existing Agent only with k8s_apply_manifest'
+must_contain 'Never patch a generated Deployment'
+must_contain 'If the request says diagnose and inspect only'
+must_contain 'No changes applied'
+must_contain 'under'
+must_contain '1,600 characters'
+must_not_contain '- k8s_execute_command'
+must_not_contain '- k8s_patch_resource'
+must_not_contain '- k8s_get_events'
+must_not_contain '- k8s_get_pod_logs'
+expect 1 '^kind: Role$'
+expect 1 '^kind: RoleBinding$'
+expect 1 '^kind: NetworkPolicy$'
+must_contain 'resourceNames: ["appa-runtime-policy"]'
+must_contain 'verbs: ["get", "patch"]'
+must_contain 'automountServiceAccountToken: true'
+must_contain 'name: APPA_GUIDE'
+must_contain 'name: APPA_GUIDE_MCP_URL'
+must_contain 'http://appa-runtime.appa.svc.cluster.local:18788/guide-mcp'
+must_contain 'name: guide-mcp'
+must_contain 'port: 18788'
+must_contain 'app.kubernetes.io/name: "appa-guide"'
+
+# An upgrade with --reuse-values from a release predating guidePort keeps
+# the isolated management endpoint on its stable default.
+must_render --set appaGuide.enabled=true --set service.guidePort=null
+must_contain 'port: 18788'
+must_contain 'containerPort: 18788'
 
 must_render --set appaGuide.enabled=true --set appaGuide.namespace=platform \
   --set appaGuide.skill.ref=main --set appaGuide.modelConfig=platform-model
@@ -113,6 +157,7 @@ must_contain '.release-batteries.previous'
 must_contain 'storage: "10Gi"'
 must_contain 'helm.sh/resource-policy: keep'
 must_contain 'claimName:'
+must_contain 'value: "true"'
 
 must_render --set persistence.enabled=true --set persistence.existingClaim=team-appa
 must_contain 'claimName: team-appa'
@@ -121,6 +166,9 @@ must_not_contain 'kind: PersistentVolumeClaim'
 must_render --set config.existingConfigMap=my-policy --set config.key=policy.toml
 must_contain 'name: my-policy'
 must_contain '/etc/appa/policy.toml'
+must_contain 'name: APPA_POLICY_CONFIGMAP_NAME'
+must_contain 'name: APPA_POLICY_CONFIGMAP_KEY'
+must_contain 'name: APPA_RUNTIME_RELEASE_NAME'
 must_not_contain 'name: appa-runtime-policy'
 must_not_contain 'checksum/policy:'
 
@@ -134,7 +182,7 @@ if render --set env.APPA_CONFIG=/tmp/other; then
   echo "render accepted reserved APPA_CONFIG" >&2
   exit 1
 fi
-if ! grep -F -q 'env.APPA_BATTERIES_DIR and env.APPA_CONFIG are reserved' "$work/err"; then
+if ! grep -F -q 'env.APPA_BATTERIES_DIR, env.APPA_CONFIG, env.APPA_GUIDE_RUNTIME_URL, env.APPA_PERSISTENCE_ENABLED, env.APPA_POLICY_CONFIGMAP_NAME, env.APPA_POLICY_CONFIGMAP_KEY, and env.APPA_RUNTIME_RELEASE_NAME are reserved' "$work/err"; then
   echo "reserved env refusal did not name the contract" >&2
   exit 1
 fi
@@ -148,5 +196,12 @@ must_render --set networkPolicy.enabled=true \
 must_contain 'kind: NetworkPolicy'
 must_contain 'app: kagent-agent'
 must_contain 'port: runtime'
+
+must_render --set appaGuide.enabled=true --set networkPolicy.enabled=true \
+  --set 'networkPolicy.ingress[0].podSelector.matchLabels.app=kagent-agent'
+expect 1 '^kind: NetworkPolicy$'
+must_contain 'app.kubernetes.io/name: "appa-guide"'
+must_contain 'port: runtime'
+must_contain 'port: guide-mcp'
 
 echo "render-test: every case passed"

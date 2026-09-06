@@ -2933,10 +2933,16 @@ fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId, spelling: &Retu
         (true, false, None) => "Submit for approval".to_string(),
         (false, false, None) => "Apply the offered remedy".to_string(),
     };
-    format!(
+    let mut instruction = format!(
         "  - {action}:\n    execute_remedy_plan(offer_id: \"{}\")",
         terminal_safe(&id.0),
-    )
+    );
+    if needs_approval {
+        instruction.push_str(
+            "\n    The confirmation card is not open yet. Make this call now; only then wait for the ruling.",
+        );
+    }
+    instruction
 }
 
 fn remedy_lines(

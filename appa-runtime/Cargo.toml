@@ -39,6 +39,7 @@ rmcp = { version = "3", features = ["server", "macros", "transport-streamable-ht
 schemars = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_json_canonicalizer = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tar = "0.4"

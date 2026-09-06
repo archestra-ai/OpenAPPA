@@ -439,7 +439,7 @@ scripted `refuse` on that `child_start`, not the runtime's refusal.
 `cmd/appa-kagent-adk-go/main.go` is the stock
 `kagent go/adk/cmd/main.go` (rc4) with seven marked deltas, the ones its
 header comment numbers. The first six are the `APPA_RUNTIME_URL`
-refusal, the reserved-tool toolset, the plugin appended last, the
+refusal, the runtime-owned toolset, the plugin appended last, the
 reasoning-effort fill, the lineage-header session service, and the
 review-shaped executor. The seventh is the config guard
 (`configguard.go`), which refuses a rendered config this image cannot
@@ -451,7 +451,7 @@ internal import from an outside module.
 
 - The stock main itself uses only exported packages
   (`kagent go/adk/cmd/main.go:15-25`), so the replay is exact.
-- The reserved-tool toolset rides the stock `HttpTools` path:
+- The runtime-owned toolset rides the stock `HttpTools` path:
   an appended `HttpMcpServerConfig` becomes a streamable-HTTP
   `mcptoolset` through `mcp.CreateToolsets`
   (`kagent go/adk/pkg/agent/agent.go:50`,

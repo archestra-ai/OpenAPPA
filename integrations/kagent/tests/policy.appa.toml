@@ -17,6 +17,8 @@
 #    mock's loopback URL instead of the runtime image path and Service DNS.
 # 4. The consult timeouts are the harness's, not a deployment's.
 #
+include = ["batteries/github/appa.toml"]
+
 # `@@MOCK_PORT@@` is the loopback port the mock externals process took;
 # `conftest.py` renders it before the runtime starts.
 

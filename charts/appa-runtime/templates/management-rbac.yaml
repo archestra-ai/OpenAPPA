@@ -1,0 +1,57 @@
+{{- if .Values.appaGuide.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "appa-runtime.fullname" . }}-policy-manager
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "appa-runtime.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ include "appa-runtime.configMapName" . | quote }}]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "appa-runtime.fullname" . }}-policy-manager
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "appa-runtime.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "appa-runtime.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "appa-runtime.fullname" . }}-policy-manager
+{{- if not .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "appa-runtime.fullname" . }}-guide-mcp
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "appa-runtime.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "appa-runtime.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: runtime }
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.appaGuide.namespace | quote }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Values.appaGuide.name | quote }}
+      ports:
+        - { protocol: TCP, port: guide-mcp }
+{{- end }}
+{{- end }}

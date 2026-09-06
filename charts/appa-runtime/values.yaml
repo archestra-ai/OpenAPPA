@@ -42,6 +42,8 @@ securityContext:
 service:
   type: ClusterIP
   port: 18787
+  # Dedicated vouched MCP surface attached only to appa-guide.
+  guidePort: 18788
 
 # Enable this policy with at least one NetworkPolicyPeer to restrict which
 # pods can reach the runtime Service.

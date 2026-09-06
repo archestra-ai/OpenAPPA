@@ -1,13 +1,13 @@
 # Demo scenarios — an APPA-gated kagent agent
 
 These scenarios show OpenAPPA gating a real kagent declarative agent.
-They are the openappa.com/playground cases in cluster-ops terms: a
-gated agent operates a Kubernetes cluster through the demo toolset
-(`demo_tools.py`), and every proposed flow crosses `appa-runtime`
-under the example policy (`../examples/kagent.appa.toml`).
+The core scenarios are the openappa.com/playground cases in cluster-ops
+terms under the demo policy. The GitHub scenario adds the maintained
+GitHub battery through `appa-guide`. Every proposed flow crosses
+`appa-runtime`.
 
-The integration suite in [../tests/](../tests/) runs these scenarios,
-and eighteen more, as twenty-two tests.
+The integration suite in [../tests/](../tests/) runs twenty-four policy
+and adapter scenarios.
 
 - two exfiltration reads, both denied with the offer to accept the narrowing
 - the ordinary read
@@ -24,7 +24,8 @@ run only in the live matrices (`../e2e/ui`, `../e2e/a2a`).
 
 The demo data carries real hazards: `read_secret` returns real secret
 material, `get_pod_logs` returns text written to steer the reader, and
-`check_status_page` carries a prompt-injection attempt. What the agent
+`check_status_page` and the canned GitHub file carry prompt-injection
+attempts. What the agent
 may do with each is APPA's decision, not the toolset's.
 
 ## The shape of an APPA decision
@@ -55,6 +56,22 @@ call. The child then returns at its own stop. A return the declaration
 does not cover comes back to the child with the reason, so the child
 writes another final message
 ([IMPLEMENTATION.md](../IMPLEMENTATION.md#delegation-and-the-fork)).
+
+## GitHub battery — useful defaults from two matched tools
+
+The fixture exposes `mcp__github__get_file_contents` and
+`mcp__github__issue_write` for a canned
+public repository. The demo template deliberately declares neither tool.
+`appa-guide` matches their plain kagent names to the shipped GitHub
+battery and proposes including it.
+
+Before inclusion, both tools are undeclared and fail closed. After
+inclusion, repository text enters as suspicious and public issue writes
+require trusted public data. The Agent can accept and inspect `RELEASE.md`,
+but the resulting suspicious session cannot send its text to an issue. A
+fresh request containing operator-authored issue text succeeds without
+approval. The battery establishes a boundary without disabling the useful
+write.
 
 ## Data exfiltration — a confidential read into a public session
 

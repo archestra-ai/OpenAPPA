@@ -111,7 +111,10 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             })
             .await
             {
-                Ok(ToolCallDecision::Allow { spawn }) => HookDecision::AllowCall { spawn },
+                Ok(ToolCallDecision::Allow { spawn }) => {
+                    runtime.vouch_management(&call, &actor);
+                    HookDecision::AllowCall { spawn }
+                }
                 Ok(ToolCallDecision::Deny {
                     feedback,
                     offers,

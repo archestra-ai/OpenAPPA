@@ -84,6 +84,34 @@ import (
 // the runtime refuses a call no hook vouched for.
 const ReservedTool = "execute_remedy_plan"
 
+// BatteryMatchTool is the runtime's deterministic battery matcher.
+const BatteryMatchTool = "appa_match_batteries"
+
+const RuntimeStateTool = "appa_get_runtime_state"
+const IncludeBatteryTool = "appa_include_battery"
+const ReloadPolicyTool = "appa_reload_policy"
+const RefreshBatteriesTool = "appa_refresh_batteries"
+const UpdatePolicyTool = "appa_update_policy"
+
+var RuntimeTools = []string{
+	ReservedTool,
+	BatteryMatchTool,
+	RuntimeStateTool,
+	IncludeBatteryTool,
+	ReloadPolicyTool,
+	RefreshBatteriesTool,
+	UpdatePolicyTool,
+}
+
+func IsManagementTool(name string) bool {
+	for _, runtimeTool := range RuntimeTools[1:] {
+		if name == runtimeTool {
+			return true
+		}
+	}
+	return false
+}
+
 // ReturnTool is the tool a child scope stops through. APPA owns it, so
 // it crosses no tool gate.
 const ReturnTool = "appa_return"
@@ -178,6 +206,11 @@ type AppaPluginKagent struct {
 	// The control call that quotes one asks the person through kagent's
 	// own confirmation before it crosses, and the answer rides the call.
 	reviews map[string]string
+	// pendingReviews belongs to one invocation. An explicit approval turn
+	// with one pending review turns an attempted model stop into the exact
+	// control call that opens its confirmation.
+	pendingReviews   map[string]map[string]struct{}
+	reviewAuthorized map[string]struct{}
 	// invocationIDs maps each running invocation to its trajectory ids.
 	// adk-go hands the tool and agent callbacks a context that refuses
 	// Session() and Agent() — only the run-level InvocationContext
@@ -249,6 +282,8 @@ func New(cfg Config) (*AppaPluginKagent, error) {
 		spawnTools:       spawnTools,
 		invocationAgents: map[string]string{},
 		reviews:          map[string]string{},
+		pendingReviews:   map[string]map[string]struct{}{},
+		reviewAuthorized: map[string]struct{}{},
 		invocationIDs:    map[string]trajectoryIDs{},
 		opened:           map[trajectoryIDs]struct{}{},
 		crossed:          map[string]string{},
@@ -302,12 +337,58 @@ func (p *AppaPluginKagent) pinnedIDs(invocationID string) (trajectoryIDs, bool) 
 }
 
 // rememberReviews keeps the reviews a deny handed over.
-func (p *AppaPluginKagent) rememberReviews(review []Review) {
+func (p *AppaPluginKagent) rememberReviews(invocationID string, review []Review) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, entry := range review {
 		p.reviews[entry.OfferID] = entry.Text
+		pending := p.pendingReviews[invocationID]
+		if pending == nil {
+			pending = map[string]struct{}{}
+			p.pendingReviews[invocationID] = pending
+		}
+		pending[entry.OfferID] = struct{}{}
 	}
+}
+
+func (p *AppaPluginKagent) authorizeReview(invocationID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.reviewAuthorized[invocationID] = struct{}{}
+}
+
+func (p *AppaPluginKagent) pendingReview(invocationID string) (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, authorized := p.reviewAuthorized[invocationID]; !authorized {
+		return "", false
+	}
+	pending := p.pendingReviews[invocationID]
+	if len(pending) != 1 {
+		return "", false
+	}
+	for offer := range pending {
+		return offer, true
+	}
+	return "", false
+}
+
+func (p *AppaPluginKagent) consumePendingReview(invocationID, offer string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if pending := p.pendingReviews[invocationID]; pending != nil {
+		delete(pending, offer)
+		if len(pending) == 0 {
+			delete(p.pendingReviews, invocationID)
+		}
+	}
+}
+
+func (p *AppaPluginKagent) clearInvocationReviews(invocationID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.pendingReviews, invocationID)
+	delete(p.reviewAuthorized, invocationID)
 }
 
 // review looks up the text a person reads for this offer, if any.
@@ -694,6 +775,9 @@ func (p *AppaPluginKagent) openScope(ctx context.Context, sess session.Session, 
 }
 
 func (p *AppaPluginKagent) onUserMessage(ictx agent.InvocationContext, userMessage *genai.Content) (*genai.Content, error) {
+	if isChatApproval(contentText(userMessage)) {
+		p.authorizeReview(ictx.InvocationID())
+	}
 	ids := p.openInvocation(ictx)
 	contract, err := p.openScope(ictx, ictx.Session(), ids)
 	if err != nil {
@@ -880,6 +964,11 @@ func (p *AppaPluginKagent) afterModel(ctx agent.Context, resp *model.LLMResponse
 	if err := p.pingHook(ctx); err != nil {
 		return nil, err
 	}
+	p.bindManagementCalls(ctx, resp)
+	if offer, pending := p.pendingReview(ctx.InvocationID()); pending && modelStops(resp) {
+		log.Printf("appa: model stopped with one human-review offer pending; opening its confirmation card")
+		return reviewCallResponse(offer), nil
+	}
 	if !p.inChildScope(ctx) {
 		return nil, nil
 	}
@@ -887,6 +976,29 @@ func (p *AppaPluginKagent) afterModel(ctx agent.Context, resp *model.LLMResponse
 	// (internal/llminternal/base_flow.go:804-819), and the flow
 	// dispatches the function calls it carries.
 	return p.holdTheStop(ctx.InvocationID(), resp), nil
+}
+
+func (p *AppaPluginKagent) bindManagementCalls(ctx agent.Context, resp *model.LLMResponse) {
+	if resp == nil || resp.Content == nil {
+		return
+	}
+	ids, ok := p.idsFor(ctx)
+	if !ok {
+		return
+	}
+	actor := ids.rootID
+	if ids.childID != "" {
+		actor = ids.rootID + ":" + ids.childID
+	}
+	for _, part := range resp.Content.Parts {
+		if part == nil || part.FunctionCall == nil || !IsManagementTool(part.FunctionCall.Name) {
+			continue
+		}
+		if part.FunctionCall.Args == nil {
+			part.FunctionCall.Args = map[string]any{}
+		}
+		part.FunctionCall.Args["_appa_actor"] = actor
+	}
 }
 
 // holdTheStop is the stop of a child scope: the gate call, or the value
@@ -948,6 +1060,28 @@ func modelResponse(part *genai.Part) *model.LLMResponse {
 	return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{part}}}
 }
 
+func reviewCallResponse(offer string) *model.LLMResponse {
+	call := &genai.FunctionCall{Name: ReservedTool, Args: map[string]any{"offer_id": offer}}
+	return modelResponse(&genai.Part{FunctionCall: call})
+}
+
+func modelStops(resp *model.LLMResponse) bool {
+	if resp == nil || resp.Partial || resp.Content == nil {
+		return false
+	}
+	for _, part := range resp.Content.Parts {
+		if part != nil && part.FunctionCall != nil {
+			return false
+		}
+	}
+	for _, part := range resp.Content.Parts {
+		if part != nil && !part.Thought && part.Text != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *AppaPluginKagent) onModelError(ctx agent.Context, _ *model.LLMRequest, _ error) (*model.LLMResponse, error) {
 	// On a live channel the original model error propagates.
 	return nil, p.pingHook(ctx)
@@ -1003,9 +1137,17 @@ func (p *AppaPluginKagent) beforeTool(ctx agent.Context, t tool.Tool, args map[s
 	if !ok {
 		return nil, failClosed("no trajectory is pinned for invocation %s", ctx.InvocationID())
 	}
+	if IsManagementTool(t.Name()) {
+		actor := ids.rootID
+		if ids.childID != "" {
+			actor = ids.rootID + ":" + ids.childID
+		}
+		args["_appa_actor"] = actor
+	}
 	ruling := ""
 	if t.Name() == ReservedTool {
 		offer, _ := args["offer_id"].(string)
+		p.consumePendingReview(ctx.InvocationID(), offer)
 		if confirmation := ctx.ToolConfirmation(); confirmation == nil {
 			if text, reviewed := p.review(offer); reviewed {
 				// The person rules before the act, through kagent's stock
@@ -1042,7 +1184,7 @@ func (p *AppaPluginKagent) beforeTool(ctx agent.Context, t tool.Tool, args map[s
 	case "allow_call", "pass_control":
 		return nil, nil
 	case "deny_call":
-		p.rememberReviews(decision.Review)
+		p.rememberReviews(ctx.InvocationID(), decision.Review)
 		p.answerOwn(ctx.FunctionCallID())
 		return map[string]any{"result": decision.Feedback, denyKey: denied}, nil
 	default:
@@ -1311,6 +1453,13 @@ func (p *AppaPluginKagent) afterRun(ictx agent.InvocationContext) {
 	p.releaseScope(ictx.InvocationID())
 	p.closeInvocation(ictx.InvocationID())
 	p.dropCrossed(ictx.InvocationID())
+	p.clearInvocationReviews(ictx.InvocationID())
+}
+
+func isChatApproval(text string) bool {
+	first := strings.ToLower(strings.TrimSpace(text))
+	return first == "approve" || strings.HasPrefix(first, "approve ") ||
+		strings.HasPrefix(first, "approved ") || strings.HasPrefix(first, "yes, approve")
 }
 
 // -- value shaping ------------------------------------------------
