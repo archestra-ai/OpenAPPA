@@ -119,6 +119,9 @@ helm upgrade --install appa-kagent-demo \
   --set-string modelConfig.name=default-model-config \
   --set-string runtime.reasoningEffort=none \
   --force-conflicts --wait --timeout 10m
+kubectl wait -n kagent remotemcpserver/demo-tools \
+  --for=jsonpath='{.status.discoveredTools[0].name}' \
+  --timeout=2m
 ```
 
 The stock agents are not part of this quickstart. These flags disable them while retaining the controller, dashboard, and tool services. The provider values create `default-model-config` with `gpt-5.6-luna` on the OpenAI API. `appa-guide` and every demo Agent use that configuration. The adapter supplies `reasoning_effort: "none"`, which Luna requires for function tools on the chat completions API.

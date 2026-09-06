@@ -366,7 +366,7 @@ trust = { from = "suspicious", to = "trusted" }
 [externals]
 timeout_ms = 30000
 review_timeout_ms = 600000
-max_body_bytes = 65536
+max_body_bytes = 262144
 
 [externals.authorities.oncall]
 builtin = "hitl"

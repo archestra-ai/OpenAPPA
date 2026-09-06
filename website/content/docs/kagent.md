@@ -155,7 +155,12 @@ helm upgrade --install appa-kagent-demo \
   --set-string modelConfig.name=default-model-config \
   --set-string runtime.reasoningEffort=none \
   --force-conflicts --wait --timeout 10m
+kubectl wait -n kagent remotemcpserver/demo-tools \
+  --for=jsonpath='{.status.discoveredTools[0].name}' \
+  --timeout=2m
 ```
+
+Helm `--wait` returns when the `demo-tools` pod is Ready. kagent discovers MCP tools after that. Wait until `demo-tools` reports at least one discovered tool before you send `init`.
 
 This chart creates the protected `cluster-ops` fleet, demo tools, mock policy services, and sixteen seeded `cluster-ops` chats. `appa-guide` and every demo Agent use `gpt-5.6-luna` from the shared `default-model-config`. The adapter supplies `reasoning_effort: "none"`, which Luna requires for function tools on the chat completions API. Its canned public-GitHub tools intentionally match the shipped [GitHub battery](/battery-github). It does not create another runtime, policy owner, volume, provider credential, ModelConfig, or `appa-guide`.
 
@@ -177,9 +182,9 @@ Open **Agents → appa-guide → Chat** and send:
 init
 ```
 
-As in Claude Code, `init` inventories every live `RemoteMCPServer`, Agent, policy, and available battery. It matches `mcp__github__get_file_contents` and `mcp__github__issue_write` to the GitHub battery. The proposal explains that repository text becomes suspicious and public issue writes accept only trusted public data.
+As in Claude Code, `init` inventories every live `RemoteMCPServer`, Agent, policy, and available battery. It matches `mcp__github__get_file_contents` and `mcp__github__issue_write` to the GitHub battery. It also copies the demo fleet contracts that the bootstrap policy does not declare, including `read_secret`. The proposal explains that repository text becomes suspicious, public issue writes accept only trusted public data, and a secret read stays with the operations audience.
 
-Review the complete proposal, reply with your approval, then approve the enforced kagent confirmation card. A typed, vouched runtime tool includes the GitHub battery, preserves the complete root policy, updates the runtime-owned ConfigMap, reloads, and rolls back on failure. Installing the demo chart alone never changes serving policy.
+Review the complete proposal, reply with your approval, then approve the enforced kagent confirmation card. A typed, vouched runtime tool includes the GitHub battery, merges the missing demo contracts, preserves the complete root policy, updates the runtime-owned ConfigMap, reloads, and rolls back on failure. Installing the demo chart alone never changes serving policy.
 
 ### 6. Run and observe a protected flow
 

@@ -36,6 +36,9 @@ helm upgrade --install appa-kagent-demo \
   --set-string modelConfig.name=default-model-config \
   --set-string runtime.reasoningEffort=none \
   --force-conflicts --wait --timeout 10m
+kubectl wait -n kagent remotemcpserver/demo-tools \
+  --for=jsonpath='{.status.discoveredTools[0].name}' \
+  --timeout=2m
 ```
 
 Open `appa-guide` and send `init`. The guide verifies this release and

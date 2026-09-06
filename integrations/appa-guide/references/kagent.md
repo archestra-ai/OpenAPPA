@@ -41,8 +41,11 @@ unavailable state is reported:
 2. Read this complete reference.
 3. List Agents across all namespaces with `output: json`. Record their
    environments, attached tools, delegations, and target runtimes.
-4. List Helm releases across all namespaces. For each installed
-   `appa-kagent-demo` chart, fetch only its `manifest` resource. Never fetch
+4. List Helm releases with `all_namespaces` true. Never set `all`;
+   that lists deleted releases and fails. For each installed
+   `appa-kagent-demo` chart, fetch only its `manifest` resource. If the
+   list fails, call `helm_get_release` with name `appa-kagent-demo` and
+   the observed Agent namespace. Never fetch
    Helm values; provider credentials can be stored there. Verify its manifest owns no
    runtime, runtime policy, persistence, ModelConfig, provider Secret, or
    `appa-guide`. Read the demo policy template only from that Helm
@@ -59,6 +62,10 @@ unavailable state is reported:
 6. List every `RemoteMCPServer` across all namespaces in one call with
    `resource_type: remotemcpserver` and `output: json`. Record every
    resource's discovered tools or unavailable state from that result.
+   A server whose `Accepted` condition is `False` is not ready. Report
+   it under **Exceptions**. Do not call `appa_match_batteries` with an
+   empty `tools` list for it. Do not conclude that no battery include
+   is needed.
 7. Compare installed tools, delegations, and any verified demo template
    with `appa_get_runtime_state.policy`. A demo template is never serving
    policy. If the template
@@ -173,10 +180,12 @@ the same Kubernetes read with different capitalization or pluralization.
    empty or `false` serves the stock kagent runtime, and no policy applies
    to that Agent, whatever `APPA_RUNTIME_URL` says. Any other value
    refuses the start. Environment variables alone never prove the gate.
-   List Deployments across the observed Agent namespaces once with
-   `resource_type: deployment` and `output: json`. Match each complete
-   object by its controller ownerReference to the exact Agent. Do not fetch
-   each Deployment separately. Verify its resolved container image is an OpenAPPA kagent image and the
+    List Deployments once per observed Agent namespace with
+    `resource_type: deployment`, `output: json`, and that namespace.
+    Never set `all_namespaces` for Deployments. Match each complete
+    object by its controller ownerReference to the exact Agent. Do not fetch
+    each Deployment separately. If the result is not carried, report
+    Deployment verification unavailable and do not retry. Verify its resolved container image is an OpenAPPA kagent image and the
    Agent's Ready condition is true. Only then call the Agent gated. A
    missing image or failed readiness is a blocking prerequisite. A verified gated
    Agent reaches this policy only when `APPA_RUNTIME_URL` names the runtime
@@ -254,13 +263,21 @@ Always use this order:
    exact observed tool source and summarize the behavior it adds. A
    catalog entry with no observed match is not a suggestion.
 
-When the operator approves a battery include, call `appa_include_battery`
+When the operator approves a battery include and the ten demo cluster
+tools are already in serving policy, call `appa_include_battery`
 with that exact battery name and the policy key from the proposal's
 `appa_get_runtime_state`. The tool preserves the complete root policy,
 updates only the runtime-owned ConfigMap, waits for kubelet sync, reloads,
 and rolls back on failure. Never synthesize a ConfigMap or invoke a separate
 reload. A blocked delegation under **Exceptions** is not part of a battery
 include and remains unchanged unless separately requested.
+
+When `demo-tools` lists any of the ten static demo tools as
+unconfigured, do not call `appa_include_battery` as the init write.
+After approval, call `appa_update_policy` once with the verified demo
+manifest as the complete root, `include = ["batteries/github/appa.toml"]`
+prepended when GitHub matched, and the proposal's policy key. That one
+write must declare `read_secret` and the other nine cluster tools.
 
 Report these three results under **Observed tools**, **Battery
 reconciliation**, and **Suggested includes**. Keep each result to one
@@ -306,8 +323,9 @@ When the `demo-tools` matcher result lists only
 `mcp__github__get_file_contents` and `mcp__github__issue_write` under
 `unconfigured_tools`, the static demo contracts are
 already present. Propose only the matched GitHub battery include. If it
-lists any of the ten static demo tools above, propose those missing entries
-from the verified demo manifest.
+lists any of the ten static demo tools above, the same proposal must
+copy those missing entries from the verified demo manifest. Do not
+suggest only a battery include while those ten tools stay undeclared.
 
 For an approved complete policy proposal, call `appa_update_policy` with
 the exact full root policy and the proposal's serving policy key. The
