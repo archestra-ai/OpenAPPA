@@ -85,6 +85,7 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --set providers.default=openAI \
   --set-string providers.openAI.apiKeySecretRef=kagent-openai \
   --set-string providers.openAI.apiKeySecretKey=OPENAI_API_KEY \
+  --set-string providers.openAI.model=gpt-5.6-luna \
   --set k8s-agent.enabled=false \
   --set kgateway-agent.enabled=false \
   --set istio-agent.enabled=false \
@@ -107,6 +108,7 @@ helm upgrade --install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-p
   --set persistence.enabled=true \
   --set appaGuide.enabled=true \
   --set appaGuide.namespace=kagent \
+  --set-string appaGuide.reasoningEffort=none \
   --force-conflicts --wait --timeout 10m
 
 # 4. Install the demo fixtures
@@ -115,10 +117,11 @@ helm upgrade --install appa-kagent-demo \
   --version "$APPA_VERSION" -n kagent \
   --set-string runtime.url=http://appa-runtime.appa.svc.cluster.local:18787 \
   --set-string modelConfig.name=default-model-config \
+  --set-string runtime.reasoningEffort=none \
   --force-conflicts --wait --timeout 10m
 ```
 
-The stock agents are not part of this quickstart. These flags disable them while retaining the controller, dashboard, and tool services. The provider values create the `default-model-config` and credential used by `appa-guide` and the demo Agents.
+The stock agents are not part of this quickstart. These flags disable them while retaining the controller, dashboard, and tool services. The provider values create `default-model-config` with `gpt-5.6-luna` on the OpenAI API. `appa-guide` and every demo Agent use that configuration. The adapter supplies `reasoning_effort: "none"`, which Luna requires for function tools on the chat completions API.
 
 ### Gate an agent
 

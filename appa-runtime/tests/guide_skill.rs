@@ -262,8 +262,15 @@ fn kagent_guidance_requires_the_shared_runtime_and_direct_port() {
     let website = fs::read_to_string(root.join("website/content/docs/kagent.md")).expect("read website guide");
     assert!(website.contains("http://appa-runtime.appa.svc.cluster.local:18787"));
     assert!(website.contains("appaGuide.enabled=true"));
+    assert!(website.contains("providers.openAI.model=gpt-5.6-luna"));
+    assert!(website.contains("appaGuide.reasoningEffort=none"));
+    assert!(website.contains("runtime.reasoningEffort=none"));
     assert!(website.contains("appa-kagent-adk"));
     assert!(website.contains("friendly-path-465518-r6/appa-public/golang-adk"));
+    assert!(website.contains("kubectl get agent -A -o json"));
+    assert!(website.contains("It preserves the Agent environment and adds a missing runtime URL:"));
+    assert!(website.contains("`appa-guide` uses the existing `controller.agentImage`"));
+    assert!(website.contains("cannot guarantee enforced write approval"));
 }
 
 #[test]
@@ -273,7 +280,7 @@ fn the_website_quickstart_is_copy_safe_and_dependency_ordered() {
         .split("## Quickstart")
         .nth(1)
         .expect("the guide has a Quickstart")
-        .split("## Protect existing agents")
+        .split("## Protect existing Agents")
         .next()
         .expect("the Quickstart ends before existing-Agent guidance");
 

@@ -34,6 +34,7 @@ helm upgrade --install appa-kagent-demo \
   --version "$APPA_VERSION" -n kagent \
   --set-string runtime.url=http://appa-runtime.appa.svc.cluster.local:18787 \
   --set-string modelConfig.name=default-model-config \
+  --set-string runtime.reasoningEffort=none \
   --force-conflicts --wait --timeout 10m
 ```
 
