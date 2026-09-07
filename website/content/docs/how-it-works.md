@@ -120,6 +120,16 @@ annotator = "classify_file"
 
 The built-in `llm` annotator runs in-process and calls the model configured in `[externals.llm]`. See [Model transports](/contracts#model-transports) for that configuration and [Annotators in the policy reference](/contracts#annotators) for limits on the rules it can return.
 
+### Subagents Isolate Sensitive Reads
+
+Reading confidential records or untrusted external data can restrict the main agent's whole session. A subagent can read and reason over that data in a separate context, keeping those restrictions local to its own session.
+
+Before the subagent starts, the main agent declares what restrictions it will accept on the returned result and whether a sanitizer must clean it first. That declaration also limits what the subagent may read. A result that does not meet the declaration is blocked before it reaches the main agent.
+
+For example, a subagent can examine a private customer ticket and return a summary through a sanitizer that removes customer identities. If the policy permits that cleaned result to be shared publicly, the main agent can use it in a public bug report without reading the private ticket itself. Both agents' actions and approvals remain in the same audit log.
+
+The integration must support separate subagent contexts. See [Subagent Returns in the policy reference](/contracts#subagent-returns) for configuration and return rules.
+
 ### Audience Sources
 
 An audience source tells OpenAPPA who belongs to an allowed group. Even when a session is restricted to a group, the agent can still share data with its members. OpenAPPA can check your company's existing directory to find out who those members are.
