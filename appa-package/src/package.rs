@@ -1,7 +1,7 @@
 //! A package manifest: `appa-package.toml` beside the package's own files.
 //!
-//! A package is a battery or an plugin, never both and never neither, and an
-//! plugin carries only the fields of the host it adapts.
+//! A package is either a battery or a plugin. A plugin carries the fields
+//! needed to install APPA support for its host.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -80,7 +80,7 @@ pub struct Battery {
     pub helpers: Vec<RelativePath>,
 }
 
-/// An plugin, carrying the fields of the host it adapts and no others.
+/// A plugin package, with installation fields specific to its host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Plugin {
     ClaudeCode {
