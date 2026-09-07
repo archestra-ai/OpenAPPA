@@ -44,7 +44,7 @@ OpenAPPA operates with three concepts:
 
 3. **Remedy Plans**
 
-   When an action does not meet its tool contract, OpenAPPA blocks it and returns the remedy plans allowed by the policy. A plan can involve cleaning data with a [sanitizer](#sanitizers), receiving approval from an [authority](#authorities), accepting a narrower audience, or isolating a sensitive read in a subagent.
+   When an action does not meet its tool contract, OpenAPPA blocks it and returns the remedy plans allowed by the policy. A plan can involve cleaning data with a [sanitizer](#sanitizers), receiving approval from an [authority](#authorities), accepting a narrower audience, or isolating a sensitive read in a [subagent](#subagent-reads).
 
    An offered plan can still be denied by an approval service or fail during data cleaning. If no permitted remedy succeeds, the action remains blocked.
 
