@@ -466,7 +466,7 @@ name = "apply_db_migration"
 requires = { trust = "trusted" }
 ```
 
-Reading a later result marked `trusted` does not undo the earlier drop to `suspicious`. A tool's `delta.trust` can lower the trajectory's trust, but cannot raise it. To allow a blocked call, configure a [remedy plan](#remedy-plans-and-child-returns) with permission to address its trust requirement.
+Reading a later result marked `trusted` does not undo the earlier drop to `suspicious`. A tool's `delta.trust` can lower the trajectory's trust, but cannot raise it. An [authority](#authorities) with the required permission can approve a blocked call without changing the trajectory's trust.
 
 ### Effects
 
@@ -524,7 +524,7 @@ permits = { attention = ["sre-signoff"] }
 builtin = "hitl"
 ```
 
-The mark `sre-signoff` routes the request to authorities whose `permits.attention` lists it. Authority tags do not restrict this routing. See [Authorities](#authorities) for other approval permissions.
+An attention mark is the name of an approval requirement, such as `sre-signoff`. OpenAPPA can ask any authority whose `permits.attention` includes that name, regardless of its tags. See [Authorities](#authorities) for other approval permissions.
 
 ## Annotators
 
@@ -552,22 +552,9 @@ hint = "Use suspicious for data from unverified sources. Use trusted only for lo
 name = "Bash"
 description = "Runs one shell command and returns its output."
 annotator = "classify-command"
-
 ```
 
-Without `inputs`, the annotator receives the complete tool call under `args`:
-
-```json
-{
-  "args": {
-    "name": "Bash",
-    "description": "Runs one shell command and returns its output.",
-    "arguments": { "command": "cargo test" }
-  }
-}
-```
-
-The complete-call form does not require a parameter schema. If the tool has no description, OpenAPPA omits `description` from the artifact.
+This configuration sends the tool name, description, and arguments to Claude Code. It does not require a `parameters` schema. If the tool has no description, the request omits it.
 
 ### Inputs
 
@@ -592,15 +579,15 @@ annotator = "classify-customer"
 url = "https://classifier.corp/label"
 ```
 
-The annotator receives `customer_id` under `subject`. It still returns the complete annotation.
+Selecting fewer inputs does not change the response requirements: the annotator still supplies the complete annotation. Each input can select one of the following:
 
 | Input value | Selected data |
 |---|---|
 | `$tool_call` | Complete call: name, optional description, and arguments. |
 | `$tool_call.name` | Tool name. |
-| `$tool_call.description` | Description declared on the tool. Requires a description. |
+| `$tool_call.description` | The tool's description. The tool contract must declare `description`. |
 | `$tool_call.arguments` | Complete argument object. |
-| `$tool_call.arguments.<name>` | One required top-level argument. Requires a parameter schema. |
+| `$tool_call.arguments.<name>` | One top-level argument. The tool's `parameters` schema must declare it as required. |
 
 `$tool_call` is the only input source. A selected argument can contain any JSON value permitted by its schema.
 
@@ -611,45 +598,34 @@ An annotator's permits limit the values it can use in its answers. The following
 | Field | Allowed values in an answer | If omitted |
 |---|---|---|
 | `ranks` | Ranks used in `delta.trust` or `requires.trust`. | Every rank in the trust chain. |
-| `audiences` | Built-in audiences, `@` mentions, or literal readers used in restricted audiences. | Every audience in the policy vocabulary. |
+| `audiences` | Built-in audiences, `@` references, or literal reader IDs that the answer may use. | `self`, `internal`, named groups, and reader IDs declared in the policy. |
 | `marks` | Required attention marks. | Every mark declared in an authority's `permits.attention`. |
-| `effects` | Effects emitted or checked in history. | Every effect kind declared by the policy. |
+| `effects` | Effects that the call may record or require. | Every effect name declared by the policy. |
 
-`public` is always an allowed audience answer. Do not list it in `audiences`. An empty `audiences` list permits only public answers. The default audience vocabulary includes `self`, `internal`, named groups, and reader IDs from declarations.
+`public` is always allowed in an answer, so it is not listed in `audiences`. Setting `audiences = []` allows only public answers.
 
-Write explicit bounds for each annotator. An omitted bound does not prohibit values. It admits the corresponding policy vocabulary.
+An empty list and an omitted field have different meanings. For example, `marks = []` prevents the annotator from requiring attention. Omitting `marks` allows it to use any mark declared in an authority's `permits.attention`.
 
-The optional `hint` explains how to select values. It can define terms, evidence requirements, and examples. It cannot expand the permits and cannot exceed 512 characters. An annotator name must be non-empty and can contain dots.
-
-A root annotator replaces the complete included declaration with the same name. Fields omitted from the replacement are not inherited.
+The optional `hint` tells the annotator how to classify the call. It can explain what to look for and give examples. It cannot allow values excluded by the permits and cannot exceed 512 characters. An annotator name must be non-empty and can contain dots.
 
 ### Implementing an annotator
 
-Bind an annotator to an HTTP endpoint or Unix command under `[externals.annotators.<name>]`.
+An annotator can be an HTTP service or a local program on a Unix system. Configure its `url` or `command` under `[externals.annotators.<name>]`, where `<name>` matches the annotator's declaration.
 
 Alternatively, use a built-in annotator. The available options are:
 
 - `builtin = "claude-code"`: uses Claude Code to classify tool calls.
 - `builtin = "llm"`: uses the model configured under `[externals.llm]` to classify tool calls.
 
-```toml
-[[policy.annotator]]
-name = "classify-call"
-builtin = "claude-code"
-ranks = ["suspicious"]
-audiences = ["internal"]
-marks = []
-effects = []
-hint = "Treat output as suspicious. Restrict private results to internal."
-```
+Set `builtin` on `[[policy.annotator]]`, as in the Claude Code example above. An annotator with `builtin` cannot also have an `[externals.annotators.<name>]` section. Unlike sanitizers and authorities, annotators do not accept `builtin` under `[externals]`.
 
-Do not add an external binding for an annotator with a builtin. A `builtin` field under `[externals.annotators.<name>]` is invalid.
-
-The deployment refuses to load an unbound annotator, an unknown binding, or an unavailable builtin. `llm` requires `[externals.llm]`. `claude-code` requires a supported Unix host.
+`claude-code` runs the local `claude` command and requires Claude Code on the Unix machine running OpenAPPA. `llm` requires model settings under `[externals.llm]`. OpenAPPA rejects a configuration with a missing implementation, an unknown implementation name, or an implementation unavailable on that system.
 
 ### Annotator protocol
 
-A consult request to an annotator uses `kind = "annotation"`. For the customer example, the request is:
+OpenAPPA sends the selected call data and the annotator's instructions in a consult request with `kind = "annotation"`. `declaration` contains the instructions and permitted values; `artifact.args` contains the call data to classify.
+
+For the customer example, the request is:
 
 ```json
 {
@@ -668,9 +644,21 @@ A consult request to an annotator uses `kind = "annotation"`. For the customer e
 }
 ```
 
-`declaration.inputs` is empty for the complete-call form. The other declaration fields contain the permitted values. The request excludes the current trajectory label and history.
+Without an `inputs` mapping, `declaration.inputs` is empty and `artifact.args` contains the complete call. For example, the `artifact` field contains:
 
-An endpoint or command returns:
+```json
+{
+  "args": {
+    "name": "Bash",
+    "description": "Runs one shell command and returns its output.",
+    "arguments": { "command": "cargo test" }
+  }
+}
+```
+
+The request does not include the trajectory's current audience, trust rank, or previous actions.
+
+For the customer request, the service returns this response to classify the result as internal and suspicious, with no call requirements or effects:
 
 ```json
 {
@@ -687,21 +675,23 @@ The response uses `emits` for effects and `requires.history` for history checks.
 
 - `answer` must contain exactly `delta`, `requires`, and `emits`.
 - `requires` must contain `history` and `attention` arrays, even when empty.
-- Other leaves are optional. An omitted leaf adds no restriction or requirement.
+- Audience and trust fields inside `delta` and `requires` are optional. An omitted field adds no restriction or requirement.
 - `requires.audience` can contain `contains`, `within`, or both.
 - Each history entry is `{"contains":"<effect>"}` or `{"excludes":"<effect>"}`.
 - JSON audience values use `"public"` or a list of permitted audiences. Do not put `public` inside a JSON audience list.
 - A restricted list cannot repeat entries or contain both `self` and `internal`.
 
-OpenAPPA rejects unknown keys, `null` values, empty audience objects, duplicate emitted effects, and values outside the permits. A model builtin returns the `answer` object without the envelope.
+OpenAPPA rejects unknown keys, `null` values, empty audience objects, duplicate emitted effects, and values outside the permits. A built-in model returns only the contents of `answer`, without the surrounding `version` and `answer` fields.
 
-The accepted annotation is bound to the exact call. A recorded recheck or record replay reuses it. A rewritten call receives a new annotation. Symbolic audience membership uses the decision's recorded evidence.
+OpenAPPA uses the annotation only for the call it classified. Changing the call requires a new annotation. Rechecking or replaying the same recorded call reuses its annotation and membership responses.
 
-If classification fails, the call does not run. The agent can propose the call again. Checking the permits limits the values in the answer; it does not establish that the classification is correct.
+If the annotator fails or returns an invalid answer, the call does not run. The agent can propose it again. OpenAPPA checks that the answer uses permitted values; the annotator is responsible for classifying the call correctly.
 
 ## Sanitizers
 
-A sanitizer transforms data before the agent receives it or before a tool receives new arguments. Its `permits` table declares the label transition allowed for the transformed value.
+A sanitizer cleans or validates data before an agent or tool receives it. Its `permits` section specifies which audience or trust rank OpenAPPA can assign to the result.
+
+In the example below, the integration keeps the original ticket hidden from the agent while `remove_customer_details` removes private information. The policy allows the cleaned result to be shared publicly. The service must remove all information that cannot be shared publicly.
 
 ```toml
 [[policy.tool]]
@@ -725,18 +715,16 @@ confined_results = ["get_ticket_from_crm"]
 url = "https://sanitizer.corp/sanitize"
 ```
 
-This declaration permits public sharing of the sanitizer's output. The service must remove all information that cannot be shared publicly.
-
 ### Permitted transitions
 
-A sanitizer permits a transition in one dimension. Declare either `audience` or `trust`, not both.
+A sanitizer can change either the audience or the trust rank of its result. Its `permits` section declares the allowed change with `from` and `to`. It can contain `audience` or `trust`, but not both.
 
 | Transition | Meaning of `from` | Meaning of `to` |
 |---|---|---|
-| `audience` | Readers that the source audience must contain. | Exact audience assigned to the transformed value. |
-| `trust` | Minimum trust rank that the source must meet. | Trust rank assigned to the transformed value. |
+| `audience` | Readers who must be included in the original data's audience. | Audience assigned to the cleaned result. |
+| `trust` | Minimum trust rank of the original data. | Trust rank assigned to the result. |
 
-For example, a sanitizer can validate or transform suspicious input into trusted output:
+For example, the following declaration permits a sanitizer to validate or clean suspicious data and return a trusted result:
 
 ```toml
 [[policy.sanitizer]]
@@ -747,26 +735,28 @@ on = ["tool_output"]
 trust = { from = "suspicious", to = "trusted" }
 ```
 
-This declaration needs a suitable implementation and an output point the deployment can control. The declaration alone does not establish that the output is safe to trust.
+The sanitizer implementation must perform the validation or cleaning. The integration must keep the original data hidden until the sanitizer finishes. Merely declaring the result `trusted` does not make its content trustworthy.
 
-The optional `hint` states what the sanitizer removes or validates. It grants no additional permission. `permits` limits the output label; it does not prove that an implementation removed the required content.
+The optional `hint` tells the sanitizer what to remove or validate. It does not grant permission beyond `permits`.
 
 ### Tool outputs and inputs
 
-| `on` value | Application point | Required behavior |
+The `on` field selects which data the sanitizer can transform:
+
+| `on` value | Data to transform | What the integration must do |
 |---|---|---|
-| `tool_output` | A tool result or child return. | The integration withholds the original value and delivers the transformed value. |
-| `tool_input` | All arguments of one tool call. | The integration dispatches exactly the replacement arguments. |
+| `tool_output` | A tool result or a child agent's answer. | Keep the original hidden from the receiving agent and deliver the transformed result. |
+| `tool_input` | All arguments of one tool call. | Run the tool with exactly the arguments returned by the sanitizer. |
 
-For tool output, OpenAPPA offers a sanitizer only when its transition can reduce the additional restriction. If the agent selects it, the integration withholds the original result and runs the sanitizer.
+When a tool result would restrict the agent, OpenAPPA can offer a sanitizer whose permitted change reduces that restriction. If the agent selects it, the integration runs the sanitizer before delivering the result.
 
-The agent receives the transformed result. If restrictions remain, the agent can accept them or select another compatible sanitizer. Cleaning a new result does not remove restrictions from data already in the trajectory.
+If the cleaned result still adds restrictions, the agent can accept them or select another compatible sanitizer. Cleaning a new result does not remove restrictions from data the agent has already read.
 
-A `tool_input` rewrite can satisfy an unmet audience `contains` requirement. It cannot satisfy a `within` or trust requirement. Those requirements still apply to the trajectory and the decision to call the tool.
+Changing tool arguments can satisfy an audience `contains` requirement. For example, a sanitizer could replace an external recipient with an allowed internal recipient. It cannot satisfy `within` or trust requirements, because changing arguments does not change the data the agent has already read.
 
-OpenAPPA selects a contract for the rewritten arguments. The replacement call must satisfy that contract's requirements, effects, and parameter schema. If the contract uses an annotator, OpenAPPA requests a new annotation. Membership checks reuse the decision's recorded evidence.
+OpenAPPA selects the contract that matches the new arguments and checks the call again, including its requirements, effects, and argument schema. If that contract uses an annotator, OpenAPPA requests a new annotation. Membership checks use the responses already recorded for this decision.
 
-A sanitizer's [tags](#tags) restrict it to values from tools with a matching tag. For input rewrites, the tags must also match the selected replacement contract. A child return has no originating tool. Only a sanitizer without tags can transform that return.
+A sanitizer's [tags](#tags) select the tools whose data it can transform. When arguments change, the new matching contract must also have a matching tag. Only a sanitizer without tags can transform a child agent's answer, because that answer is not a tool result.
 
 ### Implementing a sanitizer
 
@@ -793,19 +783,21 @@ See [Externals](#externals) for implementation settings. The reserved `attest-sc
 
 ### Sanitizer protocol
 
-A consult request to a sanitizer contains these fields:
+A consult request tells the sanitizer what to change and supplies the data in `artifact.body`. The sanitizer returns the transformed data in `answer.body`:
 
 | Part | Fields |
 |---|---|
-| `declaration` | `hint`, `on`, and `permits`. For `tool_input`, also `parameters`. |
-| `artifact` | `body`, and `tool` when the originating tool is known. |
-| `answer` | `body`: the transformed value. |
+| `declaration` | Instructions in `hint`, the permitted change in `permits`, and the data type in `on`. For `tool_input`, also the argument schema in `parameters`. |
+| `artifact` | The data in `body`, and the tool name in `tool` when known. |
+| `answer` | The transformed data in `body`. |
 
-The request's `on` is one string: `tool_input` or `tool_output`. OpenAPPA assigns the returned value's label from `permits`. See [The consult request](#the-consult-request) for the complete JSON format and failure rules.
+In a request, `on` is one string: `tool_input` or `tool_output`. OpenAPPA assigns the returned data's audience or trust rank from `permits`. See [The consult request](#the-consult-request) for the complete JSON format and response requirements.
 
 ## Authorities
 
-An authority approves or denies a specific call with unmet requirements. Its `permits` table limits the requirements it can approve.
+An authority reviews a tool call that would otherwise be blocked. It can approve an exception only for requirements listed in its `permits` section.
+
+In the example below, a person reviews requests to share data from tools tagged `support`. The reviewer can approve sharing to any audience, including public sharing:
 
 ```toml
 [[policy.authority]]
@@ -820,20 +812,20 @@ audience_missing = ["public"]
 builtin = "hitl"
 ```
 
-This authority can approve sharing to any audience, including public sharing, for tools with `tags = ["support"]`.
-
 Approval applies to one call. It does not change the trajectory's label or approve later calls.
 
 ### Permissions, tags, and hints
 
+Each field in `permits` allows the authority to approve a different type of requirement:
+
 | `permits` field | What an approval can satisfy |
 |---|---|
-| `trust_below` | An unmet trust requirement, up to the specified rank. |
-| `audience_missing` | Missing required readers, up to the specified audience. |
-| `effects_containing` | An `excludes` requirement for a listed effect already present in history. |
+| `trust_below` | Allows a call whose required trust rank is not met, up to the rank specified here. |
+| `audience_missing` | Allows sharing with readers outside the current audience, limited to the audience specified here. |
+| `effects_containing` | Allows a call blocked by `excludes` because a listed effect has already occurred. |
 | `attention` | The listed attention marks for this call. |
 
-For example:
+For example, these permissions let an authority approve a call that needs `trusted` data, a public audience, an exception for an earlier `email.sent` effect, or `finance-signoff`:
 
 ```toml
 [policy.authority.permits]
@@ -847,19 +839,25 @@ An authority's [tags](#tags) select the tools it can review for unmet audience, 
 
 The optional `hint` explains what the authority reviews. It does not expand `permits`.
 
-### Authority implementation modes
+### Implementing an authority
+
+An authority can use a built-in reviewer, an HTTP service, or a local program. Configure the implementation under `[externals.authorities.<name>]`, using the name from `[[policy.authority]]`:
 
 | Implementation | Behavior |
 |---|---|
 | `builtin = "hitl"` | Asks a person to review the exact call and the requirements to be approved. |
 | `builtin = "approve"` | Automatically approves every matching request within `permits`. |
 | `builtin = "claude-code"` or `builtin = "llm"` | A model approves or denies using the declaration, call, and unmet requirements. |
-| `builtin = "<module name>"` | Runs a trusted module loaded from `--modules-dir` with the runtime's privileges. |
-| `url` or `command` | Requests a ruling from an external service or local program. |
+| `builtin = "<module name>"` | Runs a module loaded from `--modules-dir` with the same system permissions as OpenAPPA. |
+| `url` or `command` | Asks an external service or local program to approve or deny the call. |
 
-Bind the implementation under `[externals.authorities.<name>]`. Every implementation has the same permission limits. A wide `permits` table gives an automatic approver wide approval power.
+Every implementation is limited by the authority's `permits`, including automatic approvers.
 
-A consult request to an authority has `hint` and `permits` in `declaration`. Its artifact contains `tool`, canonical `arguments` (normalized JSON), and the unmet `requirements` the ruling would cover:
+### Authority protocol
+
+OpenAPPA sends the authority the proposed tool call and the requirements that need approval. The consult request puts `hint` and `permits` in `declaration`. The `artifact` field contains the tool name in `tool`, its `arguments`, and the unmet `requirements`.
+
+Each entry in `requirements` uses one of these forms:
 
 | Requirement | JSON form |
 |---|---|
@@ -869,21 +867,37 @@ A consult request to an authority has `hint` and `permits` in `declaration`. Its
 | Effect exclusion | `{"kind":"effect","excludes":"email.sent"}` |
 | Attention | `{"kind":"attention","mark":"finance-signoff"}` |
 
-The artifact does not contain the current label, actual rank, or actual reader set. The answer contains `ruling`, either `approve` or `deny`, and an optional `reason`. The reason is logged at debug level and is not persisted.
+The request describes the requirements to approve. It does not include the trajectory's current audience or trust rank, or the identities of its current readers.
+
+The authority returns `ruling` as `approve` or `deny`, with an optional `reason`. For example:
+
+```json
+{
+  "version": 1,
+  "answer": {
+    "ruling": "approve",
+    "reason": "The user authorized this email."
+  }
+}
+```
+
+See [The consult request](#the-consult-request) for the full request format.
 
 ## Remedy plans and child returns
 
-When a call fails its requirements, OpenAPPA blocks it and returns the remedy plans permitted by the policy. A plan can request approval or transform the proposed arguments.
+The authorities, sanitizers, and integration settings in the policy determine which remedy plans OpenAPPA can offer. These plans give the agent ways to continue when a call is blocked or a result would add restrictions.
 
-When a result would add restrictions, a plan can accept those restrictions or transform the result before delivery. Available plans depend on the configured components and deployment capabilities.
+For a blocked call, a plan can request approval or change the proposed arguments. For a restricted result, a plan can clean it before the agent reads it or let the agent accept its restrictions.
 
 ### Subagent Returns
 
 A child agent can read data without exposing it to the parent agent. `context_control = true` declares that the integration keeps the child's data separate and can withhold its answer until OpenAPPA allows it. The parent chooses how the answer will be checked or cleaned before the child starts.
 
-The first plan accepts the child's return without transformation. Later plans use registered `tool_output` sanitizers without tags, in registry order.
+OpenAPPA first offers a plan that checks the child's answer without changing it. It then offers plans that use the registered `tool_output` sanitizers without tags.
 
-Each plan takes a `label`: the minimum label the parent accepts from the child return. Use `{}` for the parent's own label. A sanitized route permits child restrictions only as far as the sanitizer can transform them back to that limit.
+The parent supplies `label` to specify the audience and trust limits for the child's answer. `label = {}` uses the parent's current audience and trust rank, so the answer cannot add restrictions to the parent. If a plan uses a sanitizer, the cleaned answer must meet those limits.
+
+In the example below, a child can read internal customer data and pass its answer through `remove_customer_details`. The sanitizer must remove private details before the parent receives the answer:
 
 ```toml
 [[policy.sanitizer]]
@@ -901,21 +915,23 @@ context_control = true
 url = "https://sanitizer.corp/sanitize"
 ```
 
-The parent selects the corresponding offer:
+The parent selects this sanitizer's plan by its `offer_id`. This request keeps the parent's current audience and trust rank as the limits for the cleaned answer:
 
 ```json
 { "offer_id": "<the sanitizer offer ID>", "label": {} }
 ```
 
-The return declaration also limits what the child can read. The child receives the declared shape at startup and returns by ending its turn. If the return violates the declaration, OpenAPPA blocks it and gives the child the reason. The child can submit a revised return.
+The chosen limits also restrict what the child can read: it must still be able to return an answer that meets them, with the selected sanitizer if needed. The child receives its answer requirements when it starts and submits its answer when it finishes its turn. If the answer does not meet those requirements, OpenAPPA explains the problem so the child can revise it.
 
 ### Structured child returns
 
-The reserved sanitizer `attest-schema` validates structured child returns. It does not change the returned bytes. It can raise trust from `suspicious` to `trusted` only when all these conditions hold:
+Use the reserved sanitizer `attest-schema` when the child must return structured data, such as a number of days, rather than free text. It checks the answer against the parent's JSON Schema without changing it. It can raise trust from `suspicious` to `trusted` only when all these conditions hold:
 
-1. Every returned field has a restricted shape, such as a number, boolean, fixed enum, or bounded format. Free text is not permitted.
+1. Every field limits what the child can return: a number, a boolean, a fixed list of choices, or a restricted format. Free text is not permitted.
 2. The parent declares the schema before the child reads untrusted data.
 3. The parent is trusted when it starts the child.
+
+The following declaration allows `attest-schema` to return a trusted answer after these checks:
 
 ```toml
 [[policy.sanitizer]]
@@ -930,7 +946,7 @@ trust = { from = "suspicious", to = "trusted" }
 context_control = true
 ```
 
-The parent supplies `return_schema` when it selects the plan:
+The parent supplies `return_schema` when it selects the plan. This example requires one non-negative integer, `days_allowed`, and rejects extra fields:
 
 ```json
 {
@@ -945,13 +961,13 @@ The parent supplies `return_schema` when it selects the plan:
 }
 ```
 
-OpenAPPA applies `attest-schema` directly. Do not add `[externals.sanitizers.attest-schema]`; that binding causes a load error. Schema validation establishes the permitted structure, not the factual accuracy of the returned values.
+OpenAPPA runs `attest-schema` itself. An `[externals.sanitizers.attest-schema]` section is not allowed. The schema checks the answer's format; it cannot check whether the number of days is factually correct.
 
 ### Example: Customer Ticket Policy
 
 This complete configuration accompanies the [customer-ticket example](/how-it-works#example-sharing-information-from-a-private-customer-ticket).
 
-The integration must withhold original ticket results and support separate child contexts. The example uses external services and an `APPA_PII_TOKEN` environment variable for authentication.
+The integration must be able to keep original ticket results hidden and keep a child's data separate from its parent's. The example uses external services and an `APPA_PII_TOKEN` environment variable to authenticate requests to the sanitizer.
 
 ```toml
 [policy]
@@ -1010,17 +1026,15 @@ builtin = "hitl"
 url = "https://audience.corp/google-workspace"
 ```
 
-After the agent reads the original ticket, it can email verified company members. External email and public issue creation require approval. Approval permits one call and leaves the trajectory internal.
+After the agent reads the original ticket, it can email readers identified as company members by the membership service. External email and public issue creation require approval. Approval permits one call and leaves the trajectory internal.
 
-If the agent receives only a public sanitized result, that result does not add an internal restriction. The same principle applies to a sanitized child return.
+If the agent receives only the cleaned, public version of the ticket, that result does not restrict it to internal readers. The same applies to a cleaned answer from a child agent.
 
-The example authority can approve audience gaps across all tools. It has no tags and permits public sharing. Narrow these permissions when the reviewer should cover fewer releases.
-
-Use [Validation](/validation) to check allowed calls, blocked calls, and remedy selection. Test the actual services separately. Replay stand-ins do not verify a sanitizer's data removal or a human review process.
+The example authority has no tags, so it can approve sharing to any audience for any tool. See [Validation](/validation) for ways to check policy behavior.
 
 ## Include policy files
 
-Use `include` at the file root to load other configuration files:
+Use `include` to reuse configuration from other files. It belongs at the start of the file, outside `[policy]` and `[externals]`. This example loads declarations from `battery.toml` alongside the root file's settings:
 
 ```toml
 include = ["battery.toml"]
@@ -1033,13 +1047,13 @@ timeout_ms = 2000
 max_body_bytes = 65536
 ```
 
-Root declarations come first. Included declarations follow in list order. The following rules apply:
+OpenAPPA checks declarations in the root file first, then declarations from included files in the order listed by `include`. The following rules apply:
 
 - An included file cannot include another file.
 - An included file cannot replace settings that apply to the whole deployment.
 - A root `[[policy.annotator]]` replaces an included annotator with the same name. Fields omitted from the replacement are not inherited.
 - Two included files cannot declare the same annotator.
-- Duplicate external names within one component kind are errors.
+- Two files cannot configure the same external component name within the same kind, such as two `[externals.sanitizers.clean]` sections.
 
 See [Batteries](/batteries) for reusable policy files.
 
@@ -1057,16 +1071,17 @@ context_control = true
 
 `context_control = true` declares that the integration can keep a child agent's data hidden from the parent and withhold the child's answer until OpenAPPA allows it. This lets OpenAPPA check or clean the answer before the parent reads it. The integration must implement this behavior; the setting alone does not provide it.
 
-- A `tool_output` sanitizer needs a confined tool result or, with `context_control`, a child return.
-- Each `confined_results` entry must name a covered tool. A wildcard covers any tool name for this check.
-- A provider-run tool executes inside the model provider's inference call. Its result cannot be withheld by the host.
-- Provider-run tools can declare only static `delta` semantics. They cannot declare requirements, annotators, or argument selectors, and cannot appear in `confined_results`.
+- A `tool_output` sanitizer requires either a tool listed in `confined_results` or a child agent's answer controlled through `context_control`.
+- Every tool in `confined_results` must have a policy contract. A wildcard contract also satisfies this requirement.
+- Some tools run inside the model provider's service. The integration cannot intercept their results before the model reads them. These tools can declare only static `delta` fields. They cannot declare requirements, annotators, or argument selectors, and cannot appear in `confined_results`.
 
-Unsupported constructs cause a load error. See [integration configuration](/writing-an-integration) for deployment capabilities.
+OpenAPPA rejects configurations that require controls the integration does not support. See [integration configuration](/writing-an-integration) for the integration's responsibilities.
 
 ## Externals
 
-An external binding connects a declared component to its implementation. Use `[externals.<kind>.<name>]`:
+The `[externals]` sections tell OpenAPPA how to call the components declared in the policy. Each component uses `[externals.<kind>.<name>]`, where `kind` identifies its role and `name` matches its policy declaration. This connection is called a binding.
+
+In the example below, OpenAPPA sends approval requests for `support-reviewer` to an HTTP service. The shared settings limit requests to two seconds and responses to 65,536 bytes:
 
 ```toml
 [externals]
@@ -1080,7 +1095,9 @@ token_env = "APPA_APPROVER_TOKEN"
 
 `timeout_ms` limits the time an endpoint or command has to answer one request. `max_body_bytes` limits the accepted response size. These settings apply to the whole deployment.
 
-| Component kind | Binding | Requirement |
+The available settings depend on the component's role:
+
+| Component kind | Implementation setting | Requirement |
 |---|---|---|
 | `authorities` | Exactly one of `url`, `command`, or `builtin`. | Optional. Without a binding, the authority returns no answer. |
 | `sanitizers` | Exactly one of `url`, `command`, or `builtin`. | Required, except for `attest-schema`. |
@@ -1088,7 +1105,7 @@ token_env = "APPA_APPROVER_TOKEN"
 | `audience` | Exactly one of `url` or `command`. | Required for each referenced provider. |
 | `identity` | Exactly one of `url` or `command`. | Required for custom implementations. No binding for `verified-email`. |
 
-A binding for an unregistered name causes a load error. A missing required binding also causes a load error. An annotator builtin belongs on `[[policy.annotator]]`, not under `[externals]`.
+OpenAPPA rejects an external component name that the policy does not declare, or a component that is missing its required implementation. For annotators, `builtin` belongs on `[[policy.annotator]]`, not under `[externals]`.
 
 Included files can add bindings and annotator builtins. They cannot replace root settings: `timeout_ms`, `max_body_bytes`, `review_timeout_ms`, `[externals.claude_code]`, or `[externals.llm]`.
 
@@ -1106,11 +1123,11 @@ The program reads one JSON consult request from standard input and writes one JS
 
 If the program needs a credential, set `token_env` to an environment variable whose name starts with `APPA_PROVIDER_`. OpenAPPA passes that variable to the program. It does not pass other `APPA_*` variables, including its own credentials.
 
-The variable can be absent when OpenAPPA loads the policy, but a program that needs it may fail when called. Set it before running that program.
+OpenAPPA does not require this variable when loading the policy. The program must handle a missing credential when it runs.
 
 ### The consult request
 
-A consult request is a JSON request that OpenAPPA sends to an external component. HTTP endpoints and local commands receive the same request format:
+A consult request is a JSON request that OpenAPPA sends to an external component. HTTP services and local programs receive the same format. This example asks `support-reviewer` to approve an email whose recipient is outside the current audience:
 
 ```json
 {
@@ -1133,9 +1150,11 @@ A consult request is a JSON request that OpenAPPA sends to an external component
 |---|---|
 | `version` | Protocol version. Must be `1`. |
 | `kind` | `authority`, `sanitizer`, `annotation`, `audience`, or `identity`. |
-| `name` | Registered component name. |
+| `name` | The component name declared in the policy. |
 | `declaration` | Policy instructions and limits for the component. The agent does not supply them. |
-| `artifact` | The call, value, or membership data the component must process. |
+| `artifact` | Request data: the tool call to review, data to clean, or membership details to look up. |
+
+Each component uses these fields differently:
 
 | Kind | `declaration` | `artifact` | `answer` |
 |---|---|---|---|
@@ -1149,19 +1168,19 @@ For an audience request, `declaration.templates` lists the selector formats that
 
 OpenAPPA records membership responses with the decision that requested them. If that decision requires an approval or remedy, OpenAPPA reuses those responses when it continues the decision. A new decision can request updated membership. Replaying a recorded decision uses its saved responses without calling the membership service. Responses from unrelated decisions cannot be substituted.
 
-A consult request does not provide the current trajectory label, reader set, history, or user turn. The component evaluates its artifact against its declaration.
+A consult request does not include the agent's current audience, trust rank, previous actions, or user message. The component processes the request data in `artifact` using the instructions and limits in `declaration`.
 
-An endpoint or command returns `{"version":1,"answer":{...}}`. `answer` must contain exactly the fields defined for the component kind. Unknown envelope fields are invalid.
+The service or program returns `{"version":1,"answer":{...}}`. The fields inside `answer` must match the component's response format. Extra fields in the surrounding response object are not allowed.
 
-An error status, non-zero exit, timeout, oversized response, or malformed answer counts as no answer. A blocked call stays blocked, a withheld result stays withheld, and an unannotated call does not run. A failed request is not a denial.
+OpenAPPA rejects a response if the HTTP service reports an error, the program exits with a non-zero status, the request times out, or the response exceeds the size limit or has an invalid format. It cannot use that response to approve a call, deliver cleaned data, or annotate a tool.
 
-### Model transports
+### Model implementations
 
-`claude-code` and `llm` use the same model request structure. The system prompt contains fixed instructions and the declaration JSON. The artifact JSON is the only user turn and must be treated as data.
+The `claude-code` and `llm` implementations send the component's instructions and request data to a model. OpenAPPA puts fixed instructions and `declaration` in the system prompt. It sends `artifact` as the user message, to be processed as data.
 
-The output schema comes from the declaration. The model returns the component's answer object without the envelope. OpenAPPA persists only the validated answer, not the prompt or raw model output.
+OpenAPPA builds the expected response format from the declaration. The model returns only the contents of `answer`, without the surrounding `version` and `answer` fields.
 
-Authorities and annotators remain limited by their permits. Sanitizer output receives the declared transition. These checks do not prove that a model made the correct judgment or removed all private content.
+OpenAPPA checks authority and annotator answers against their permits and assigns sanitized data the declared audience or trust rank. The model is responsible for making the correct judgment or removing the required content.
 
 `[externals.claude_code]` configures the local Claude Code implementation:
 
@@ -1171,9 +1190,9 @@ Authorities and annotators remain limited by their permits. Sanitizer output rec
 | `model` | Selects the model. |
 | `timeout_ms` | Sets the timeout for one request. |
 
-Each consult request starts one isolated `claude -p` process. It has no tools, project settings, or session persistence. It uses a fresh temporary directory, disables optional background traffic, and receives no `APPA_*` variables. At most four requests run concurrently per runtime.
+Each request starts a new `claude -p` process. It cannot use tools, load project settings, or reuse a previous conversation. It runs in a new temporary directory with optional background traffic disabled and receives no `APPA_*` environment variables. Each OpenAPPA instance runs at most four of these requests at once.
 
-`[externals.llm]` configures one API profile per deployment:
+`[externals.llm]` selects the model used by all `builtin = "llm"` components. This example uses an Anthropic model, a token from `APPA_LLM_TOKEN`, a 30-second timeout, and up to four concurrent requests:
 
 ```toml
 [externals.llm]
@@ -1186,6 +1205,6 @@ max_concurrent = 4
 # url = "https://gateway.corp/v1"
 ```
 
-Supported providers are `anthropic`, `openai`, `gemini`, and `ollama`. `token_env` is required except for `ollama`. Endpoint overrides follow the same URL rules as HTTP bindings.
+Supported providers are `anthropic`, `openai`, `gemini`, and `ollama`. `token_env` is required except for `ollama`. An optional `url` selects a custom endpoint and follows the same URL rules as [HTTP services](#http-services).
 
-`openai` uses the Chat Completions API. An OpenAI-compatible endpoint can use the same profile. `ollama` defaults to `http://localhost:11434` and requires no token.
+`openai` uses the Chat Completions API, including when `url` points to a compatible service. `ollama` uses `http://localhost:11434` unless `url` specifies another endpoint, and requires no token.
