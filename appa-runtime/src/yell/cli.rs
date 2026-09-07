@@ -69,7 +69,7 @@ async fn yell(
     println!();
     println!("{TICK} Report written to {path}");
     println!();
-    let destination = destination(&receiver, source);
+    let destination = destination(source);
     match yes {
         true => println!("Sending it to {destination}."),
         false => {
@@ -101,13 +101,12 @@ async fn yell(
     }
 }
 
-/// Where the report goes, as the person is told it. The compiled-in receiver is the OpenAPPA
-/// team's and is named as such; an address from the environment is a different destination,
-/// and the person is owed the URL.
-fn destination(receiver: &client::Receiver, source: client::Source) -> String {
+/// Where the report goes, as the person is told it. Whoever set an override knows where it
+/// points, so the address itself is not repeated; the tag says only that one is in effect.
+fn destination(source: client::Source) -> &'static str {
     match source {
-        client::Source::CompiledIn => "the OpenAPPA team".to_string(),
-        client::Source::Environment => format!("{} (from APPA_YELL_ENDPOINT)", receiver.as_str()),
+        client::Source::CompiledIn => "the OpenAPPA team",
+        client::Source::Environment => "the OpenAPPA team (via APPA_YELL_ENDPOINT)",
     }
 }
 

@@ -86,10 +86,6 @@ impl Receiver {
             Self::Secure(url) | Self::Loopback(url) => url,
         }
     }
-
-    pub(crate) fn as_str(&self) -> &str {
-        self.url().as_str()
-    }
 }
 
 /// Whether a parsed URL names this machine by address. A host *name* is not loopback here,
