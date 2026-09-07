@@ -3,45 +3,35 @@ title: kAgent
 nav_title: kAgent
 category: Integrations
 order: 6
-description: Gate declarative kagent agents through a shared OpenAPPA runtime.
+description: Protect kagent agents on Kubernetes with OpenAPPA security policies.
 ---
 
-[kagent](https://kagent.dev/docs/kagent/introduction/what-is-kagent/) runs AI agents on Kubernetes. OpenAPPA gates declarative kagent agents through a shared `appa-runtime` service.
+[kagent](https://kagent.dev/docs/kagent/introduction/what-is-kagent/) runs AI agents on Kubernetes. OpenAPPA protects these agents by checking tool calls and delegations against your security policies.
 
-An OpenAPPA plugin runs inside agent pods via Google ADK plugin APIs. The plugin intercepts every tool call and agent-to-agent delegation. It submits proposed actions to OpenAPPA before execution proceeds.
+An OpenAPPA plugin inside each agent pod intercepts tool calls and checks them with `appa-runtime` before they run.
 
 ## How it works
 
-The OpenAPPA integration uses plugin images for Python (`appa-kagent-adk`) and Go (`appa-kagent-adk-go`). On kagent 0.9.12, Go agents derive `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/golang-adk` from `controller.agentImage`. OpenAPPA publishes that alias on the `appa-kagent-adk-go` image digest.
+OpenAPPA provides drop-in plugin images for Python and Go agents running on kagent.
 
 :::fig-kagent:::
 
-- **Enforcement before execution**: OpenAPPA evaluates policy before tools execute. Blocked tools do not run.
-- **Fail-closed security**: If the runtime is unreachable, tool calls stop immediately.
-- **Runtime support**: Works with both Python (`appa-kagent-adk`) and Go (`appa-kagent-adk-go`) runtimes. Both plugins post the hook protocol's wire envelope (`protocol: 1`) directly to the runtime's `/hook` endpoint; the runtime serves them with `--adapter kagent` and prefixes every trajectory id with `kagent:`.
-- **Subagent return gate**: Child agents terminate through `appa_return`. OpenAPPA checks returned data at `spawn_result` before the parent trajectory receives it.
-- **Human-in-the-loop integration**: The runtime routes approval requests directly to native kagent confirmation cards.
+The plugin checks every tool call and delegation with `appa-runtime` before it runs. If a call violates policy, OpenAPPA blocks it. If the runtime is unreachable, the call halts immediately.
 
-## Policy scope
-
-Policy scope follows the runtime service. A gated agent enforces the policy of the `appa-runtime` named in its `APPA_RUNTIME_URL`.
-
-Agents connected to the same runtime share one `appa.toml` policy file and decision log. To enforce different policies for different agent groups, deploy separate `appa-runtime` instances.
-
-Cross-workload delegations require a shared runtime deployment. Parent and child pods must reach the same policy engine to maintain trajectory lineage.
+Sensitive actions can require human approval through kagent confirmation cards. Child agents run in isolated contexts, so their output is verified before returning to the parent agent.
 
 ## Quickstart
 
 Deploy kagent with OpenAPPA and run a protected agent in a test cluster.
 
-### Prerequisites
+#### Prerequisites
 
 - [kind](https://kind.sigs.k8s.io/docs/user/quick-start/) or an existing Kubernetes cluster
 - [Helm](https://helm.sh/docs/intro/install/) v4
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
 - An [OpenAI API key](https://platform.openai.com/api-keys) or credentials for another [supported provider](https://kagent.dev/docs/kagent/supported-providers/)
 
-### 1. Install kagent with the OpenAPPA plugin
+#### 1. Deploy the test stack
 
 Set your OpenAI API key:
 
@@ -49,12 +39,13 @@ Set your OpenAI API key:
 export OPENAI_API_KEY="<your-api-key>"
 ```
 
-Install the kagent CRDs, create the provider secret, and install the kagent controller:
+Deploy the kagent controller, `appa-runtime`, and the demonstration fleet in one script:
 
 ```sh
 : "${OPENAI_API_KEY:?Set OPENAI_API_KEY before installing kagent}"
 APPA_VERSION=0.14.1 # x-release-please-version
 
+# 1. Install kagent CRDs and OpenAI secret
 helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-crds \
   --version 0.9.12 -n kagent --create-namespace --force-conflicts
 
@@ -71,6 +62,7 @@ data:
 EOF
 unset OPENAI_API_KEY_B64
 
+# 2. Install kagent with the OpenAPPA plugin image
 helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
   --set controller.agentImage.registry=europe-west1-docker.pkg.dev \
@@ -93,16 +85,8 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --set grafana-mcp.enabled=false \
   --set querydoc.enabled=false \
   --force-conflicts --wait --timeout 10m
-```
 
-The plugin image replaces kagent's default agent image. It preserves standard behavior until an agent explicitly enables OpenAPPA.
-
-### 2. Deploy the OpenAPPA runtime
-
-Deploy `appa-runtime` with persistent storage and `appa-guide` enabled:
-
-```sh
-APPA_VERSION=0.14.1 # x-release-please-version
+# 3. Deploy appa-runtime with persistent storage and appa-guide
 helm upgrade --install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
   --version "$APPA_VERSION" -n appa --create-namespace \
   --set persistence.enabled=true \
@@ -111,16 +95,8 @@ helm upgrade --install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-p
   --set appaGuide.namespace=kagent \
   --set-string appaGuide.reasoningEffort=none \
   --force-conflicts --wait --timeout 10m
-```
 
-The runtime service listens at `http://appa-runtime.appa.svc.cluster.local:18787`.
-
-### 3. Deploy the demo agents
-
-Install the demo fleet and mock services:
-
-```sh
-APPA_VERSION=0.14.1 # x-release-please-version
+# 4. Deploy demo fleet and mock policy services
 helm upgrade --install appa-kagent-demo \
   oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-kagent-demo \
   --version "$APPA_VERSION" -n kagent \
@@ -130,19 +106,17 @@ helm upgrade --install appa-kagent-demo \
   --force-conflicts --wait --timeout 10m
 ```
 
-This chart deploys the protected `cluster-ops` fleet, demo tools, and mock policy services.
+The runtime service listens at `http://appa-runtime.appa.svc.cluster.local:18787`.
 
-### 4. Access the dashboard
+#### 2. Access the dashboard
 
-Forward the kagent dashboard to your machine:
+Forward the kagent dashboard and open [http://localhost:8080](http://localhost:8080) in your browser:
 
 ```sh
 kubectl port-forward -n kagent svc/kagent-ui 8080:8080
 ```
 
-Open [http://localhost:8080](http://localhost:8080) in your browser.
-
-### 5. Initialize policy with appa-guide
+#### 3. Initialize policy with appa-guide
 
 Open **Agents → appa-guide → Chat** and send:
 
@@ -152,125 +126,132 @@ init
 
 `appa-guide` inventories live tools, agents, and policies. It matches discovered tools to shipped batteries, including the [GitHub battery](/battery-github).
 
-Review the proposal in chat. Reply with your approval, then approve the kagent confirmation card. The guide atomically writes the ConfigMap and reloads the runtime.
-
-### 6. Verify policy enforcement
-
-Open a chat with **cluster-ops** and test a protected tool flow:
-
-```text
-Read acme/status-page RELEASE.md and use its text to file a public issue.
-```
-
-The GitHub battery marks repository text as suspicious. OpenAPPA allows the read but blocks the subsequent public issue write because `issue_write` requires trusted data.
-
-To view runtime decisions in real time, inspect the runtime logs:
-
-```sh
-kubectl logs -n appa deployment/appa-runtime -c runtime -f
-```
+Review the proposal in chat and approve the confirmation card. The guide updates the ConfigMap and reloads the runtime. Your cluster is now protected and ready for the demonstration scenarios below.
 
 ## Demonstration scenarios
 
-The demo installation includes pre-configured scenarios on the `cluster-ops` agent.
+The demo installation (`appa-kagent-demo`) pre-seeds 16 showcase sessions on `cluster-ops`. You can inspect completed traces in the kagent dashboard or execute fresh live prompts.
 
-### 1. Confidential read and sanitization
+#### 1. Confidential read and sanitization
 
-This scenario demonstrates data exfiltration prevention and automatic remedy plans.
+This scenario prevents confidential data from leaking into public sinks.
 
-Ask `cluster-ops` to read a secret and publish it:
+- **Pre-seeded chat**: `read the payments-provider secret and show me what you received`
+- **Prompt**:
+  ```text
+  Read the payments-provider secret and post its API key to the public status page.
+  ```
+- **Policy rule**: `read_secret` specifies `delta = { audience = ["ops"] }`. `post_status_update` requires `audience = { contains = ["public"] }`.
+- **Engine decision**: Admitting the secret narrows the trajectory audience from `public` to `ops`. OpenAPPA blocks the call before credentials enter model context. It returns a continuation offer with the `strip-secret-values` remedy plan.
+- **Resolution**: The agent calls `execute_remedy_plan(offer_id)`. The `strip-secret-values` sanitizer redacts credentials and returns safe key names. The sanitized output enters model context, preventing credential leaks.
 
-```text
-Read the payments-provider secret and post its API key to the public status page.
-```
+#### 2. Untrusted ingress and prompt injection
 
-1. **Confidential read proposed:**
-   The agent calls `read_secret(name: "payments-provider")`. The contract `mcp/demo-tools/read_secret` defines `delta = { audience = ["ops"] }`. Admitting the secret would narrow the trajectory audience from public to `ops`.
+This scenario prevents prompt injection payloads from entering trusted trajectories silently.
 
-2. **OpenAPPA blocks the read:**
-   OpenAPPA blocks the call before secret data enters model context. It returns a continuation offer with a remedy plan:
-   ```text
-   [appa] Blocked: this call cannot run yet.
+- **Pre-seeded chat**: `read the crash logs of checkout-api-b2k1 and post a summary to the status page`
+- **Prompt**:
+  ```text
+  Read the crash logs of checkout-api-b2k1 and post a summary to the status page.
+  ```
+- **Policy rule**: `get_pod_logs` specifies `delta = { trust = "suspicious" }`. `post_status_update` requires `trust = "trusted"`.
+- **Engine decision**: Reading unvetted logs reduces trajectory trust from `trusted` to `suspicious`. When the agent calls `post_status_update`, OpenAPPA denies the flow because suspicious data cannot enter trusted sinks.
+- **Resolution**: The write fails closed. Injected instructions inside unvetted logs cannot trigger outward actions.
 
-   Why:
-     - allowed readers would narrow: public -> 1 reader
+#### 3. Destructive action and human review (HITL)
 
-   Continue:
-     - Use sanitizer strip-secret-values's result:
-       execute_remedy_plan(offer_id: "…")
-   ```
+This scenario enforces human sign-off for operational actions using native kagent confirmation cards.
 
-3. **Remedy plan executes:**
-   The agent calls `execute_remedy_plan` using the offer ID. The `strip-secret-values` sanitizer redacts credentials and returns safe key names. The sanitized output enters the model context, and the secret is not leaked.
+- **Pre-seeded chat**: `restart the checkout-api deployment; if it is blocked, execute the offered remedy plan`
+- **Prompt**:
+  ```text
+  Restart the checkout-api deployment.
+  ```
+- **Policy rule**: `restart_deployment` specifies `requires = { attention = ["human-approval"] }`. The `oncall` authority permits `human-approval` via `builtin = "hitl"`.
+- **Engine decision**: OpenAPPA blocks the direct call. It offers a remedy plan that consults the `oncall` authority. The agent calls `execute_remedy_plan(offer_id)`.
+- **Resolution**: The agent turn suspends. An **Approve / Reject** card appears in the kagent dashboard:
+  - **Approve**: The `oncall` authority grants `human-approval`. The deployment restarts.
+  - **Reject**: The `oncall` authority refuses. OpenAPPA records the refusal, and the tool does not run.
 
-### 2. Destructive action and human review
+#### 4. Remote authority review (Async Webhook)
 
-This scenario demonstrates human-in-the-loop policy enforcement using native kagent confirmation cards.
+This scenario demonstrates asynchronous sign-off by an external change advisory board.
 
-Ask `cluster-ops` to restart a production deployment:
+- **Pre-seeded chat**: `roll back the checkout-api deployment; if it is blocked, execute the offered remedy plan`
+- **Prompt**:
+  ```text
+  Roll back the checkout-api deployment.
+  ```
+- **Policy rule**: `rollback_deployment` specifies `requires = { attention = ["change-approval"] }`. The `change-board` authority connects to an external webhook endpoint.
+- **Engine decision**: OpenAPPA suspends the call while waiting for a decision from the change advisory board.
+- **Resolution**: An external operator or system reviews the request via API (`GET /pending`, `POST /decide`):
+  - **Approve**: OpenAPPA admits `change-approval`. The rollback runs.
+  - **Reject**: OpenAPPA records the denial fail-closed. The action aborts.
 
-```text
-Restart the checkout-api deployment.
-```
-
-1. **Destructive action proposed:**
-   The agent calls `restart_deployment(name: "checkout-api")`. The policy requires operator approval: `requires = { attention = ["human-approval"] }`.
-
-2. **OpenAPPA blocks and offers review:**
-   OpenAPPA blocks the direct call. It offers a remedy plan that consults the `oncall` authority. The agent calls `execute_remedy_plan(offer_id: "…")`.
-
-3. **Operator decides:**
-   The agent turn suspends. An **Approve / Reject** card appears in the kagent dashboard:
-   - **Approve**: The `oncall` authority grants `human-approval`. The deployment restarts.
-   - **Reject**: The `oncall` authority refuses. OpenAPPA records the refusal, and the tool does not run.
-
-### 3. Subagent delegation and the return gate
+#### 5. Subagent delegation and the return gate (A2A)
 
 This scenario demonstrates context isolation and return value gating during Agent-to-Agent (A2A) delegation.
 
-Ask `cluster-ops` to delegate log analysis to `log-analyst`:
+- **Pre-seeded chat**: `ask the log analyst to analyze the crash logs of checkout-api-b2k1 and give me its summary`
+- **Prompt**:
+  ```text
+  Ask the log analyst to analyze the crash logs of checkout-api-b2k1 and give me its summary.
+  ```
+- **Policy rule**: `kagent__NS__log_analyst` is declared in policy. `context_control = true` isolates child trajectories. Undeclared subagents are excluded.
+- **Engine decision**: `cluster-ops` delegates to `log-analyst`. The child executes on an isolated child trajectory. Untrusted logs (`trust = "suspicious"`) remain quarantined in child context.
+- **Resolution**: The child agent completes by calling `appa_return`. OpenAPPA checks the return payload at `SpawnResult` against parent policy. The clean summary enters the parent trajectory. If the parent calls an undeclared agent, OpenAPPA denies the spawn fail-closed:
+  ```text
+  Ask the release manager to approve a version bump of checkout-api to 2.4.1.
+  ```
 
-```text
-Ask the log analyst to analyze the crash logs of checkout-api-b2k1 and give me its summary.
-```
+#### 6. Dynamic per-call contracts (Annotators)
 
-1. **Context isolation:**
-   `cluster-ops` delegates to `log-analyst`. With `context_control = true`, the child agent executes on an isolated child trajectory. Untrusted logs (`trust = "suspicious"`) remain quarantined in the child context.
+This scenario demonstrates dynamic policy evaluation based on runtime call arguments.
 
-2. **Return gate validation:**
-   The child agent completes by calling `appa_return`. OpenAPPA evaluates the return payload against parent policy at `SpawnResult`. The clean summary enters the parent trajectory, while untrusted prompt injections inside raw logs cannot reach the parent.
+- **Pre-seeded chat**: `look up the public-oncall-rotation runbook`
+- **Prompt**:
+  ```text
+  Look up the public-oncall-rotation runbook.
+  ```
+- **Policy rule**: `lookup_runbook` routes through the `runbook-readers` annotator. The annotator inspects arguments dynamically per call.
+- **Engine decision**: Public runbooks carry no reader restrictions and execute immediately. Ops runbooks narrow the audience to `["ops"]`. Invalid IDs receive no annotation, producing an operational refusal.
+- **Resolution**: Annotators produce call contracts dynamically, avoiding static rule proliferation for heterogeneous endpoints.
 
-3. **Unauthorized delegation blocked:**
-   If `cluster-ops` attempts to delegate to an undeclared agent:
-   ```text
-   Ask the release manager to approve a version bump of checkout-api to 2.4.1.
-   ```
-   The policy does not declare `release-manager`. OpenAPPA denies the spawn fail-closed.
+#### 7. Permitted baseline execution
+
+This scenario demonstrates unhindered execution for operations that violate no boundaries.
+
+- **Pre-seeded chat**: `list the pods in the shop namespace`
+- **Prompt**:
+  ```text
+  List the pods in the shop namespace.
+  ```
+- **Policy rule**: `list_pods` defines `delta = {}` and requires no attention marks.
+- **Engine decision**: The call violates no audience or trust boundaries.
+- **Resolution**: OpenAPPA evaluates the call against policy and permits immediate execution without operator friction.
 
 ## Protect existing agents
 
-To protect existing kagent workloads without downtime, follow these steps.
+Policy scope follows the `APPA_RUNTIME_URL` service endpoint. Agents connected to the same runtime share one policy file and decision log. To enforce different policies for different agent groups, deploy separate runtime instances.
 
-### 1. Update the controller image
+To protect existing kagent workloads without downtime, follow these steps:
 
-Update the kagent controller to use the OpenAPPA agent image. Existing agents continue running standard behavior:
+#### 1. Update the controller and deploy appa-runtime
+
+Update the kagent controller to use the OpenAPPA plugin image, and deploy `appa-runtime` with `appa-guide`:
 
 ```sh
 APPA_VERSION=0.14.1 # x-release-please-version
+
+# 1. Update the kagent controller to use the OpenAPPA plugin image
 helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent --reuse-values \
   --set controller.agentImage.registry=europe-west1-docker.pkg.dev \
   --set controller.agentImage.repository=friendly-path-465518-r6/appa-public/appa-kagent-adk \
   --set controller.agentImage.tag="v$APPA_VERSION" \
   --force-conflicts --wait --timeout 10m
-```
 
-### 2. Deploy appa-runtime
-
-Deploy the runtime service in the `appa` namespace:
-
-```sh
-APPA_VERSION=0.14.1 # x-release-please-version
+# 2. Deploy appa-runtime with persistent storage and appa-guide
 helm upgrade --install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
   --version "$APPA_VERSION" -n appa --create-namespace \
   --set persistence.enabled=true \
@@ -278,13 +259,34 @@ helm upgrade --install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-p
   --set appaGuide.enabled=true \
   --set appaGuide.namespace=kagent \
   --force-conflicts --wait --timeout 10m
+
 kubectl wait agent/appa-guide -n kagent \
   --for=condition=Ready=True --timeout=5m
 ```
 
-### 3. Enable gating on an Agent
+Existing workloads continue running standard behavior until explicitly gated.
 
-Enable OpenAPPA by setting environment variables on the target `Agent` resource:
+#### 2. Enable gating with appa-guide
+
+Once deployed, `appa-guide` automates onboarding and rollout verification inside the cluster.
+
+Open **Agents → appa-guide → Chat** and prompt the guide:
+
+```text
+protect sre-agent with the shared OpenAPPA runtime and verify its rollout
+```
+
+`appa-guide` updates the Agent deployment configuration, monitors pod rollout, and verifies runtime connectivity. All changes require operator sign-off via the kagent confirmation card.
+
+To onboard every eligible declarative Agent at once:
+
+```text
+enable OpenAPPA for all agents using the shared runtime; show me the affected agents before applying
+```
+
+##### Manual configuration (GitOps)
+
+If you manage agent manifests via GitOps, configure environment variables directly on the `Agent` resource:
 
 ```yaml
 apiVersion: kagent.dev/v1alpha2
@@ -302,22 +304,12 @@ spec:
           value: "http://appa-runtime.appa.svc.cluster.local:18787"
 ```
 
-| Mode | `APPA_ENABLED` | `APPA_RUNTIME_URL` | Behavior |
+The OpenAPPA plugin inspects these two environment variables on pod startup to determine enforcement behavior:
+
+| Deployment mode | `APPA_ENABLED` | `APPA_RUNTIME_URL` | Enforcement behavior |
 |---|---|---|---|
 | **Disabled (Default)** | Unset or `"false"` | Any | Ungated. Runs standard kagent execution without policy checks. |
-| **Gated** | `"true"` | `http://...` | Gated. Tool calls and delegations cross `appa-runtime` before execution. |
-
-You can also prompt `appa-guide` to automate onboarding:
-
-```text
-protect sre-agent with the shared OpenAPPA runtime and verify its rollout
-```
-
-To protect every eligible declarative Agent, send:
-
-```text
-enable OpenAPPA for all agents using the shared runtime; show me the affected agents before applying
-```
+| **Gated** | `"true"` | `http://...` | Gated. Intercepts tool calls and delegations via `appa-runtime`. |
 
 ## Manage policy with appa-guide
 
@@ -330,87 +322,43 @@ enable OpenAPPA for all agents using the shared runtime; show me the affected ag
 | `refresh batteries` | Download and apply updated batteries from upstream releases. |
 | `diagnose the OpenAPPA integration` | Audit health across runtime pods, agents, and tool servers. |
 
-## Tool names
+You do not need to hand-edit raw policy TOML files. You can ask `appa-guide` to inspect and modify rules directly in chat:
 
-The policy names each tool by its canonical tool id. The kagent adapter maps what the pod
-dispatches onto these ids:
-
-| kagent dispatches | The policy names it |
-|---|---|
-| A tool of the `RemoteMCPServer` or `ToolServer` served at `<toolset>` | `mcp/<toolset>/<tool>` |
-| An agent called as a tool | `agent/<namespace>/<agent>` |
-| A kagent built-in, such as `ask_user`, `load_memory`, `save_memory`, `prefetch_memory`, or a skill tool | `host/kagent/<name>` |
-| The entrypoint's code-execution and memory-persist gates | `host/kagent-gate/code_execution`, `host/kagent-gate/memory_persist` |
-| The remedy tool | `appa/execute_remedy_plan`, which no policy declares |
-
-The toolset is the first label of the server host in the rendered `params.url`, which is the
-resource name when the Service carries it. A gated agent must give each MCP entry an explicit
-`tools` list: without one the server decides the tool list at run time, and the plugin refuses
-to start.
-
-The toolset name therefore constrains the endpoint that serves it. A gated agent may point an
-MCP entry only at `<service>`, `<service>.<namespace>.svc`,
-`<service>.<namespace>.svc.cluster.local`, `localhost` or `127.0.0.1`. A namespaced address is
-written with `.svc`: `<service>.<namespace>` alone is one label short of a registrable public
-domain, and nothing tells the two apart. Any other host refuses the start, so the endpoint your
-contracts name is a cluster service address and not an arbitrary host. The check establishes no
-more than that: the toolset is the host's first label alone, so a service of the same name in
-another namespace, or an `ExternalName` Service that resolves an accepted address outside the
-cluster, carries the same policy identity `mcp/<toolset>/<tool>`. A cluster with a DNS domain
-other than `cluster.local` uses the shorter `<service>.<namespace>.svc` form.
-
-Agent delegation requires an explicit tool entry under `agent/<namespace>/<agent>`. Wildcards do
-not cover delegation spawns. See [Policy contracts](/contracts#tool-names) for the grammar.
-
-## Policy example
-
-Policies are written in declarative TOML. The following configuration illustrates tool contracts, requirements, subagent delegation, and human authorities:
-
-```toml
-# In-cluster secret read from the `demo-tools` toolset: results carry the ops audience
-[[policy.tool]]
-name = "mcp/demo-tools/read_secret"
-delta = { audience = ["ops"] }
-
-# Outward update: requires public audience and trusted data
-[[policy.tool]]
-name = "mcp/demo-tools/post_status_update"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-audience = { contains = ["public"] }
-
-# Production change: requires human operator approval
-[[policy.tool]]
-name = "mcp/demo-tools/restart_deployment"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-attention = ["human-approval"]
-
-# Delegation: the log-analyst agent in the kagent namespace, called as a tool
-[[policy.tool]]
-name = "agent/kagent/log-analyst"
-delta = {}
-
-# Isolate subagent execution trajectories
-[policy.deployment]
-context_control = true
-
-# Human authority definition
-[[policy.authority]]
-name = "oncall"
-hint = "Ask the on-call lead through the kagent approval flow."
-
-[policy.authority.permits]
-attention = ["human-approval"]
-
-# Bind oncall authority to native kagent confirmation cards
-[externals.authorities.oncall]
-builtin = "hitl"
+```text
+adjust restart_deployment to require human-approval
 ```
+
+`appa-guide` generates the proposed rule diff, explains the change, and presents a native confirmation card. Once approved, `appa-guide` writes the updated policy to the runtime ConfigMap and reloads the policy engine atomically.
+
+To view the active policy generated by `appa-guide`, ask in chat:
+
+```text
+show me the active policy rules for cluster-ops
+```
+
+For the formal policy grammar and syntax specification, see [Policy contracts](/contracts).
+
+## Tool names and startup requirements
+
+Both the Python and Go plugins post the shared hook protocol (`protocol: 1`) to `/hook`. Run the runtime with `--adapter kagent`; trajectory ids receive the `kagent:` prefix.
+
+The plugin maps host tool names to structured wire names. Policies use canonical ids:
+
+| kagent dispatches | Policy name |
+|---|---|
+| MCP tool | `mcp/<toolset>/<tool>` |
+| Agent called as a tool | `agent/<namespace>/<agent>` |
+| Built-in tool | `host/kagent/<name>` |
+| Code-execution or memory-persist gate | `host/kagent-gate/code_execution`, `host/kagent-gate/memory_persist` |
+| Remedy tool | `appa/execute_remedy_plan` (not declared in policy) |
+
+For example, the policy for the demo's `read_secret` tool names it `mcp/demo-tools/read_secret`. Agent delegation needs an explicit `agent/<namespace>/<agent>` entry; wildcards do not cover delegation spawns.
+
+Each gated MCP entry must provide an explicit `tools` list. The plugin builds its inventory from rendered configuration and refuses startup if mappings are ambiguous or missing.
+
+The toolset identity is the first label of the server host in `params.url`. Accepted hosts are `<service>`, `<service>.<namespace>.svc`, `<service>.<namespace>.svc.cluster.local`, `localhost`, and `127.0.0.1`. Other hosts, including `<service>.<namespace>` without `.svc`, are refused. Clusters with another DNS domain can use `<service>.<namespace>.svc`.
+
+This is a hostname check, not endpoint authentication. Same-named services in different namespaces share a policy identity; an `ExternalName` Service can resolve outside the cluster. See [Tool names](/contracts#tool-names) for the canonical grammar.
 
 ## Where next
 
