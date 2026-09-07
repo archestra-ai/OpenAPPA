@@ -8,6 +8,9 @@ mode, proposal and approval rules. It routes to one host reference:
 - `references/kagent.md` — kagent CR discovery, policy ConfigMap apply
   and in-cluster runtime reload.
 
+[`PARITY.md`](PARITY.md) defines the behavior both hosts must preserve
+and the limited platform-specific differences they may expose.
+
 kagent attaches this directory directly through `skills.gitRefs`.
 Claude packaging copies this same directory to the plugin path Claude
 requires, `plugin/skills/appa-guide`, then appends the Claude reference

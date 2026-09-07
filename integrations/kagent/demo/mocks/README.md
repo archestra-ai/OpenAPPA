@@ -108,7 +108,10 @@ here the MCP call result in full, secret values and all.
 The answer is exactly `{"version": 1, "answer": {"body": "..."}}` —
 `SanitizerAnswer` rejects an unknown key, so nothing else may ride
 along. The mock ignores the hint and the name, and applies two
-mechanical rules to the body:
+mechanical rules to the body. When the body is a JSON envelope, each
+string value is rewritten and the envelope is serialized again, so a
+fact and an injection that share one serialized line stay distinct.
+A non-JSON body is rewritten as one text.
 
 | rule | effect |
 |---|---|

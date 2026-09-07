@@ -16,6 +16,7 @@ pub struct Config {
     /// Deliberately outside [`PolicyFile`]: changing one must not move the policy file key
     /// that every session's opening binds to.
     pub reporting: Reporting,
+    included_batteries: Vec<String>,
 }
 
 /// What this deployment reports about itself, and to whom.
@@ -678,6 +679,7 @@ impl Config {
         }
         let mut origins = root_command_origins(&root, &source_dir)?;
         let mut seen = std::collections::BTreeSet::new();
+        let mut included_batteries = std::collections::BTreeSet::new();
         let mut replaced_annotators = std::collections::BTreeSet::new();
         for authored in &root.include {
             let include = Path::new(authored);
@@ -691,6 +693,9 @@ impl Config {
             })?;
             if !seen.insert(include_path.clone()) {
                 return Err(ConfigError::DuplicateInclude { path: authored.clone() });
+            }
+            if let Some(name) = crate::batteries::name_from_resolved(&include_path, battery_dirs) {
+                included_batteries.insert(name);
             }
             let included_text = std::fs::read_to_string(&include_path).map_err(|source| ConfigError::Unreadable {
                 path: include_path.display().to_string(),
@@ -728,7 +733,14 @@ impl Config {
         let raw: RawConfig = toml::from_str(&composed).map_err(|source| ConfigError::UnparsablePolicy { source })?;
         add_composed_metadata(&mut document, &raw.externals, &origins)?;
         let stored = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
-        Config::validate_composed(stored, raw, reporting, origins, |var| std::env::var(var).ok())
+        Config::validate_composed(
+            stored,
+            raw,
+            reporting,
+            origins,
+            included_batteries.into_iter().collect(),
+            |var| std::env::var(var).ok(),
+        )
     }
 
     /// The configuration of a host that composes its policy in memory
@@ -741,11 +753,30 @@ impl Config {
         let text = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
         let raw: RawConfig = toml::from_str(&text).map_err(|source| ConfigError::UnparsablePolicy { source })?;
         let origins = root_command_origins(&raw, Path::new("."))?;
-        Config::validate_composed(text, raw, Reporting::default(), origins, |var| std::env::var(var).ok())
+        Config::validate_composed(text, raw, Reporting::default(), origins, Vec::new(), |var| {
+            std::env::var(var).ok()
+        })
     }
 
     pub fn policy_file(&self) -> &PolicyFile {
         &self.policy
+    }
+
+    pub fn included_batteries(&self) -> &[String] {
+        &self.included_batteries
+    }
+
+    pub fn tool_names(&self) -> Vec<String> {
+        self.policy
+            .value()
+            .get("tool")
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|tool| tool.get("name"))
+            .filter_map(toml::Value::as_str)
+            .map(str::to_owned)
+            .collect()
     }
 
     #[cfg(test)]
@@ -761,7 +792,7 @@ impl Config {
             .into_iter()
             .map(|key| (key, source_dir.to_path_buf()))
             .collect();
-        Config::validate_composed(text, raw, Reporting::default(), origins, lookup)
+        Config::validate_composed(text, raw, Reporting::default(), origins, Vec::new(), lookup)
     }
 
     fn validate_composed(
@@ -769,6 +800,7 @@ impl Config {
         raw: RawConfig,
         reporting: Reporting,
         origins: BTreeMap<String, PathBuf>,
+        included_batteries: Vec<String>,
         lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<Config, ConfigError> {
         debug_assert!(raw.include.is_empty(), "composed configuration has no includes");
@@ -800,6 +832,7 @@ impl Config {
         Ok(Config {
             policy: PolicyFile::new(text.into_bytes(), raw.policy),
             reporting,
+            included_batteries,
             externals: Externals {
                 timeout: Duration::from_millis(timeout_ms),
                 review_timeout: Duration::from_millis(review_timeout_ms),
@@ -1947,6 +1980,29 @@ mod tests {
             .map(|tool| tool["name"].as_str().expect("tool name"))
             .collect::<Vec<_>>();
         assert_eq!(names, ["root", "from-image"]);
+        assert_eq!(config.included_batteries(), ["slack"]);
+    }
+
+    #[test]
+    fn a_relative_battery_include_reports_its_resolved_name() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let config_dir = dir.path().join("deploy/config");
+        let battery_dir = dir.path().join("batteries/github");
+        std::fs::create_dir_all(&config_dir).expect("config directory");
+        std::fs::create_dir_all(&battery_dir).expect("battery directory");
+        std::fs::write(
+            battery_dir.join("appa.toml"),
+            "[policy]\nversion = 2\n[[policy.tool]]\nname = \"read\"\ndelta = {}\n",
+        )
+        .expect("battery config");
+        std::fs::write(
+            config_dir.join("appa.toml"),
+            "include = [\"../../batteries/github/appa.toml\"]\n[policy]\nversion = 2\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 4096\n",
+        )
+        .expect("root config");
+
+        let config = Config::load(&config_dir.join("appa.toml")).expect("relative battery include loads");
+        assert_eq!(config.included_batteries(), ["github"]);
     }
 
     #[test]

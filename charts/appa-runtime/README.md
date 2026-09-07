@@ -4,15 +4,15 @@ Shared OpenAPPA runtime for a Kubernetes cluster. One replica. Agents
 that set `APPA_RUNTIME_URL` to this Service, with `APPA_ENABLED=true`,
 are gated by the policy in the ConfigMap.
 
-The image of this chart version is `ghcr.io/archestra-ai/appa-runtime:0.12.0`. # x-release-please-version
+The image of this chart version is `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-runtime:v0.14.1`. # x-release-please-version
 
 ## Install
 
-Install a released chart from GHCR after setting `APPA_VERSION` to an
-OpenAPPA release that contains the chart:
+Install a released chart from Artifact Registry after setting
+`APPA_VERSION` to an OpenAPPA release that contains the chart:
 
 ```sh
-helm install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
+helm install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
   --version "$APPA_VERSION" --namespace appa --create-namespace
 ```
 
@@ -31,7 +31,7 @@ checkout.
 The chart can install the configuring kagent Agent with the runtime:
 
 ```sh
-helm install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
+helm install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
   --version "$APPA_VERSION" --namespace appa --create-namespace \
   --set appaGuide.enabled=true \
   --set appaGuide.namespace=kagent
@@ -42,9 +42,13 @@ clusters without kagent. The target namespace, kagent model config, and
 tool-server name are configurable under `appaGuide`. An empty
 `appaGuide.skill.ref` pins the skill to the chart's `v<appVersion>` tag.
 
-GHCR packages start private. An organization owner must make the
-`charts/appa-runtime` package public after its first publish before an
-anonymous OCI install can pull it.
+Enabling `appaGuide` opens a separate guide MCP listener on Service port
+`18788`. Only the `appa-guide` Agent receives that URL and management
+toolset. The chart adds a NetworkPolicy that permits that port only from
+the labeled guide pod, plus a Role allowing the runtime ServiceAccount to
+get and patch its one policy ConfigMap. Every guide MCP call also consumes
+a one-shot APPA vouch, so direct calls cannot read or mutate management
+state. The normal `/mcp` endpoint remains remedy-only.
 
 The runtime binds the pod network directly. Point agents at:
 
@@ -99,15 +103,16 @@ starts. The prior layer remains on the PVC throughout the transaction.
 ## Policy
 
 The chart mounts a bootstrap policy that lets appa-guide inspect the
-cluster and requires human approval for its first policy write. Every
-unrelated tool remains fail-closed. The appa-guide skill then adds
-batteries and root rules through the ConfigMap. Set
+cluster and requires human approval for policy management. Every
+unrelated tool remains fail-closed. Typed runtime MCP tools validate,
+publish, reload, and roll back policy and battery changes. Set
 `config.existingConfigMap` to manage that ConfigMap yourself.
 
-When `config.contents` stays empty, an upgrade preserves the live policy
-key that appa-guide changed. Setting `config.contents` explicitly makes
-Helm replace that key. An existing ConfigMap always remains under the
-operator's ownership.
+When `config.contents` stays empty, an upgrade replaces the live policy
+key if it is still the packaged bootstrap. It preserves that key when
+appa-guide or an operator has changed it. Setting `config.contents`
+explicitly makes Helm replace that key. An existing ConfigMap always
+remains under the operator's ownership.
 
 Keep `config.key` unchanged after appa-guide manages that key. Helm
 treats another key as a new policy and initializes it from chart values.
@@ -122,8 +127,15 @@ the live key during template rendering; a concurrent later write wins.
 
 ## Network access
 
-Without a NetworkPolicy, any pod that can reach the Service can call
-`/hook`, `/mcp`, `/health`, and `/batteries`. The runtime returns `403` on
+Without the optional general NetworkPolicy, any pod that can reach the
+Service can call `/hook`, remedy-only `/mcp`, `/health`, and `/batteries`.
+When appa-guide is enabled, its dedicated NetworkPolicy restricts port
+`18788` to the guide pod. A one-shot vouch still refuses a direct
+`/guide-mcp` call that never passed a gated ToolCall. `/hook` is
+unauthenticated. A client that can reach both `/hook` and `/guide-mcp`
+can complete the gated approval path. Enable a CNI that enforces
+NetworkPolicy, or the optional general NetworkPolicy. The vouch is not a
+substitute for that network boundary. The runtime returns `403` on
 `/reload`, `/status`, `/policy-key`, and `/binary-fingerprint` unless the
 network peer is loopback. Treat the Service as trusted internal
 infrastructure. Restrict callers by enabling the chart policy and listing

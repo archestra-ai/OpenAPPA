@@ -35,7 +35,7 @@ call and its result.
 
 The [Dockerfile](Dockerfile) builds the package into the
 `appa-kagent-adk` image, one layer over kagent's published runtime
-image. The plan names that image `ghcr.io/archestra-ai/appa-kagent-adk`.
+image. The plan names that image `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk`.
 
 The operator guide lives at `website/content/docs/kagent.md`; the
 implementation plan, per-version mapping tables, and verification

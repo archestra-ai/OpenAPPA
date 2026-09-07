@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.14.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.14.0...v0.14.1) (2026-09-06)
+
+
+### Bug Fixes
+
+* **kagent:** land demo contracts on init so secret reads are gated ([#244](https://github.com/archestra-ai/OpenAPPA/issues/244)) ([bfee821](https://github.com/archestra-ai/OpenAPPA/commit/bfee82121baecb8fd89da32322434ee527ebf621))
+* **kagent:** restore guide-skill pins after the docs polish ([#246](https://github.com/archestra-ai/OpenAPPA/issues/246)) ([256f37e](https://github.com/archestra-ai/OpenAPPA/commit/256f37e34bbbbbf50289673d5a9f3f31fc12808b))
+
+
+### Documentation
+
+* **kagent:** add live A2A prompts and name the seeded chats ([#243](https://github.com/archestra-ai/OpenAPPA/issues/243)) ([ffdec89](https://github.com/archestra-ai/OpenAPPA/commit/ffdec89c74a201b33913dfe7481b476ea63d84d1))
+* **kagent:** install the adapter image before the runtime ([#241](https://github.com/archestra-ai/OpenAPPA/issues/241)) ([ad170ed](https://github.com/archestra-ai/OpenAPPA/commit/ad170eda92bb3522b158eaa883b1b1a97df37200))
+* **kagent:** polish integration page and guides to follow ASD-STE100 ([#245](https://github.com/archestra-ai/OpenAPPA/issues/245)) ([44f00d5](https://github.com/archestra-ai/OpenAPPA/commit/44f00d5c6217123937ae5b4900d89ba465390c0c))
+
+## [0.14.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.13.0...v0.14.0) (2026-09-06)
+
+
+### Features
+
+* **kagent:** streamline guided setup ([#240](https://github.com/archestra-ai/OpenAPPA/issues/240)) ([3c9915e](https://github.com/archestra-ai/OpenAPPA/commit/3c9915e2dfd7fb548c087a61b72c5a8605ba0a2f))
+
+
+### Bug Fixes
+
+* **kagent:** refresh unmodified bootstrap policy on helm upgrade ([#237](https://github.com/archestra-ai/OpenAPPA/issues/237)) ([935a6ef](https://github.com/archestra-ai/OpenAPPA/commit/935a6ef12826b494ee5dcda80e27ff9bd46c9f64))
+* **website:** keep docs table headers and kagent prompts from wrapping ([#238](https://github.com/archestra-ai/OpenAPPA/issues/238)) ([46b7bd5](https://github.com/archestra-ai/OpenAPPA/commit/46b7bd52276523f1155b90273120c5ad59edaaf7))
+
+## [0.13.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.12.0...v0.13.0) (2026-09-06)
+
+
+### Features
+
+* **release:** publish v* and rolling CI tags to appa-public ([#230](https://github.com/archestra-ai/OpenAPPA/issues/230)) ([5b5f455](https://github.com/archestra-ai/OpenAPPA/commit/5b5f45584b0cf66dbe4706f912514449fb0698fc))
+* **runtime:** isolate vouched appa-guide management ([#235](https://github.com/archestra-ai/OpenAPPA/issues/235)) ([c9f7bfd](https://github.com/archestra-ai/OpenAPPA/commit/c9f7bfd0937a91d204970008c7b5fd43f14c494f))
+
+
+### Bug Fixes
+
+* **guide:** verify reloaded policy and parse apply manifests ([#236](https://github.com/archestra-ai/OpenAPPA/issues/236)) ([dcf9d26](https://github.com/archestra-ai/OpenAPPA/commit/dcf9d2688d80dac7c553e3d1b9096bc891880741))
+* **release:** authenticate before historical source checkout ([#233](https://github.com/archestra-ai/OpenAPPA/issues/233)) ([fdb52f3](https://github.com/archestra-ai/OpenAPPA/commit/fdb52f3eae8213c81c406735fd46aa3f5092bc6f))
+* **release:** keep historical auth cleanup available ([#234](https://github.com/archestra-ai/OpenAPPA/issues/234)) ([cc0dfdb](https://github.com/archestra-ai/OpenAPPA/commit/cc0dfdb67758e120e0b5a90dd103f9c56762bdce))
+* **release:** support registry-only release recovery ([#232](https://github.com/archestra-ai/OpenAPPA/issues/232)) ([6ffb731](https://github.com/archestra-ai/OpenAPPA/commit/6ffb731fa40cfe2294e0a429d4fbc0e75dcc5f2d))
+
 ## [0.12.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.11.1...v0.12.0) (2026-09-05)
 
 

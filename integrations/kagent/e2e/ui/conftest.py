@@ -169,6 +169,11 @@ class Chat:
             time.sleep(1.0)
         return self.wait_reply(timeout_s=max(deadline - time.time(), 5.0))
 
+    def last_agent_text(self) -> str:
+        """Return the final rendered agent message without dashboard chrome."""
+        messages = self.page.locator(".prose-md")
+        return messages.last.inner_text() if messages.count() else ""
+
     def agent_card(self, agent: str) -> str | None:
         """The status on the sub-agent card the dashboard renders for a
         call to `agent`, or None when no such card is on the page.

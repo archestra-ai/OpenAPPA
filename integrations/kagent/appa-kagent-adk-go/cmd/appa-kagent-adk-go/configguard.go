@@ -233,7 +233,15 @@ func refuseReservedToolNames(agentConfig *adk.AgentConfig) error {
 // model would read two declarations of one name, and which one answers
 // is the builder's order rather than the policy's.
 func isReservedToolName(name string) bool {
-	return name == appakagentadk.ReturnTool || name == appakagentadk.ReservedTool
+	if name == appakagentadk.ReturnTool {
+		return true
+	}
+	for _, runtimeTool := range appakagentadk.RuntimeTools {
+		if name == runtimeTool {
+			return true
+		}
+	}
+	return false
 }
 
 // reservedToolAt names the position and the spelling of the first

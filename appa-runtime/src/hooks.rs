@@ -256,6 +256,7 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
                     dispatch: opened,
                 }) => {
                     *dispatch = Some(opened);
+                    runtime.vouch_management(&call, &actor);
                     HookDecision::AllowCall { spawn }
                 }
                 Ok(ToolCallDecision::Deny {

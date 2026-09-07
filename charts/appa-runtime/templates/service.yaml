@@ -14,3 +14,9 @@ spec:
       port: {{ .Values.service.port }}
       targetPort: runtime
       protocol: TCP
+    {{- if .Values.appaGuide.enabled }}
+    - name: guide-mcp
+      port: {{ .Values.service.guidePort | default 18788 }}
+      targetPort: guide-mcp
+      protocol: TCP
+    {{- end }}

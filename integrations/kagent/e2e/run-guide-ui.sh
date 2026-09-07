@@ -6,6 +6,7 @@ cd "$(dirname "$0")"
 namespace=${APPA_NAMESPACE:-kagent}
 model_config=${APPA_MODEL_CONFIG:-default-model-config}
 runtime_url=${APPA_RUNTIME_URL:-http://appa-runtime.appa.svc.cluster.local:18787}
+runtime_namespace=${APPA_RUNTIME_NAMESPACE:-appa}
 target=appa-guide-e2e-fixture
 created=false
 
@@ -45,7 +46,7 @@ kubectl wait agent/"$target" -n "$namespace" --for=condition=Ready=True --timeou
 (
   cd ui
   APPA_UI_E2E=1 APPA_AGENT=appa-guide APPA_GUIDE_TARGET="$target" \
-    uv run --with playwright --with "pytest>=8" --with pytest-rerunfailures \
+    uv run --with playwright --with "pytest>=8" \
     pytest -v test_guide_ui.py
 )
 
@@ -67,4 +68,8 @@ kubectl get agent "$target" -n "$namespace" -o json | jq -e \
     any($env[]; .name == "EXISTING_SETTING" and .value == "preserve-me") and
     any($env[]; .name == "APPA_ENABLED" and .value == "true") and
     any($env[]; .name == "APPA_RUNTIME_URL" and .value == $runtime))
+' >/dev/null
+
+kubectl get configmap appa-runtime-policy -n "$runtime_namespace" -o json | jq -e '
+  .data["appa.toml"] | contains("batteries/github/appa.toml")
 ' >/dev/null

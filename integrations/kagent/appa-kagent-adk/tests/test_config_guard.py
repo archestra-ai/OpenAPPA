@@ -6,6 +6,7 @@ import pydantic
 import pytest
 
 from appa_kagent_adk.config_guard import ConfigRefused, refuse_unsupported
+from appa_kagent_adk.wire import RUNTIME_TOOLS
 
 
 class Inner(pydantic.BaseModel):
@@ -116,10 +117,10 @@ def test_sub_agents_get_the_named_runtime_mismatch_refusal():
         refuse_unsupported({"model": "m", "sub_agents": [{"name": "child"}]}, Schema)
 
 
-@pytest.mark.parametrize("reserved", ["appa_return", "execute_remedy_plan"])
+@pytest.mark.parametrize("reserved", ["appa_return", *RUNTIME_TOOLS])
 def test_a_declared_tool_under_an_appa_owned_name_refuses(reserved):
-    """APPA owns both names: the return gate a child scope stops
-    through, and the reserved tool the entrypoint appends after this
+    """APPA owns these names: the return gate a child scope stops
+    through, and the runtime tools the entrypoint appends after this
     guard runs. The refusal reads the raw config, so it names the
     collision before validation."""
     server = {"params": {"url": "http://mcp"}, "tools": ["read_ledger", reserved]}
@@ -193,7 +194,7 @@ def test_the_tls_keys_inside_mcp_params_pass_and_reach_the_tool_config():
         refuse_unsupported({**STOCK, "http_tools": other}, types.AgentConfig)
 
 
-@pytest.mark.parametrize("reserved", ["appa_return", "execute_remedy_plan"])
+@pytest.mark.parametrize("reserved", ["appa_return", *RUNTIME_TOOLS])
 def test_the_real_agent_config_refuses_an_appa_owned_tool_name(reserved):
     types = pytest.importorskip("kagent.adk.types", reason="the kagent-adk lane is not installed")
     filtered = [{"params": {"url": "http://mcp"}, "tools": [reserved]}]

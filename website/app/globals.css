@@ -1055,7 +1055,7 @@ samp {
 
 /* Keep identifiers intact in tables. The table wrapper provides horizontal
    scrolling when an identifier is wider than the available viewport. */
-.prose td code {
+.prose :is(th, td) code {
   overflow-wrap: normal;
   word-break: normal;
   white-space: nowrap;

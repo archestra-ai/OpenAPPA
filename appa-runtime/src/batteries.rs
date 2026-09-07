@@ -115,6 +115,30 @@ pub fn name_from_include(path: &Path) -> Option<String> {
     name.to_str().map(str::to_owned)
 }
 
+/// A resolved battery file has the tail `batteries/<name>/appa.toml`,
+/// regardless of how the root config spelled the relative include.
+pub fn name_from_resolved(path: &Path, battery_dirs: &[PathBuf]) -> Option<String> {
+    for directory in battery_dirs {
+        let Ok(relative) = path.strip_prefix(directory) else {
+            continue;
+        };
+        let parts: Vec<_> = relative.components().collect();
+        if let [Component::Normal(name), Component::Normal(file)] = parts.as_slice()
+            && *file == OsStr::new("appa.toml")
+        {
+            return name.to_str().map(str::to_owned);
+        }
+    }
+    if path.file_name()? != OsStr::new("appa.toml") {
+        return None;
+    }
+    let directory = path.parent()?;
+    if directory.parent()?.file_name()? != OsStr::new("batteries") {
+        return None;
+    }
+    directory.file_name()?.to_str().map(str::to_owned)
+}
+
 fn names_in(dir: &Path) -> io::Result<Vec<String>> {
     let mut names = Vec::new();
     for entry in fs::read_dir(dir)? {
@@ -187,6 +211,29 @@ mod tests {
                 "{other:?} is not a battery include"
             );
         }
+    }
+
+    #[test]
+    fn resolved_battery_name_uses_the_path_tail() {
+        assert_eq!(
+            name_from_resolved(Path::new("/deployment/vendor/batteries/slack/appa.toml"), &[]).as_deref(),
+            Some("slack")
+        );
+        for other in [
+            "/deployment/vendor/slack/appa.toml",
+            "/deployment/batteries/slack/other.toml",
+            "/deployment/batteries/appa.toml",
+        ] {
+            assert_eq!(name_from_resolved(Path::new(other), &[]), None);
+        }
+        assert_eq!(
+            name_from_resolved(
+                Path::new("/deployment/image/slack/appa.toml"),
+                &[PathBuf::from("/deployment/image")],
+            )
+            .as_deref(),
+            Some("slack")
+        );
     }
 
     #[test]

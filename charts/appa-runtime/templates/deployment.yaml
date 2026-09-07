@@ -1,5 +1,5 @@
-{{- if or (hasKey .Values.env "APPA_BATTERIES_DIR") (hasKey .Values.env "APPA_CONFIG") }}
-{{- fail "env.APPA_BATTERIES_DIR and env.APPA_CONFIG are reserved; the chart derives them" }}
+{{- if or (hasKey .Values.env "APPA_BATTERIES_DIR") (hasKey .Values.env "APPA_CONFIG") (hasKey .Values.env "APPA_GUIDE_RUNTIME_URL") (hasKey .Values.env "APPA_PERSISTENCE_ENABLED") (hasKey .Values.env "APPA_POLICY_CONFIGMAP_NAME") (hasKey .Values.env "APPA_POLICY_CONFIGMAP_KEY") (hasKey .Values.env "APPA_RUNTIME_RELEASE_NAME") }}
+{{- fail "env.APPA_BATTERIES_DIR, env.APPA_CONFIG, env.APPA_GUIDE_RUNTIME_URL, env.APPA_PERSISTENCE_ENABLED, env.APPA_POLICY_CONFIGMAP_NAME, env.APPA_POLICY_CONFIGMAP_KEY, and env.APPA_RUNTIME_RELEASE_NAME are reserved; the chart derives them" }}
 {{- end }}
 apiVersion: apps/v1
 kind: Deployment
@@ -35,7 +35,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "appa-runtime.serviceAccountName" . }}
-      automountServiceAccountToken: {{ .Values.serviceAccount.automount }}
+      automountServiceAccountToken: {{ or .Values.serviceAccount.automount .Values.appaGuide.enabled }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       {{- if .Values.persistence.enabled }}
@@ -86,9 +86,17 @@ spec:
             - --db
             - /var/lib/appa/appa.db
             - --listen
-            - 0.0.0.0:18787
+            - {{ printf "0.0.0.0:%v" .Values.service.port | quote }}
+            {{- if .Values.appaGuide.enabled }}
+            - --guide-listen
+            - {{ printf "0.0.0.0:%v" (.Values.service.guidePort | default 18788) | quote }}
+            {{- end }}
             - --mcp-allowed-host
             - {{ printf "%s.%s.svc.cluster.local:%v" (include "appa-runtime.fullname" .) .Release.Namespace .Values.service.port | quote }}
+            {{- if .Values.appaGuide.enabled }}
+            - --mcp-allowed-host
+            - {{ printf "%s.%s.svc.cluster.local:%v" (include "appa-runtime.fullname" .) .Release.Namespace (.Values.service.guidePort | default 18788) | quote }}
+            {{- end }}
             {{- if .Values.persistence.enabled }}
             - --batteries-dir
             - /var/lib/appa/batteries
@@ -103,6 +111,16 @@ spec:
           env:
             - name: APPA_CONFIG
               value: {{ printf "/etc/appa/%s" .Values.config.key | quote }}
+            - name: APPA_GUIDE_RUNTIME_URL
+              value: {{ printf "http://127.0.0.1:%v" .Values.service.port | quote }}
+            - name: APPA_PERSISTENCE_ENABLED
+              value: {{ .Values.persistence.enabled | quote }}
+            - name: APPA_POLICY_CONFIGMAP_NAME
+              value: {{ include "appa-runtime.configMapName" . | quote }}
+            - name: APPA_POLICY_CONFIGMAP_KEY
+              value: {{ .Values.config.key | quote }}
+            - name: APPA_RUNTIME_RELEASE_NAME
+              value: {{ .Release.Name | quote }}
             - name: APPA_BATTERIES_DIR
               {{- if .Values.persistence.enabled }}
               value: /var/lib/appa/batteries:/var/lib/appa/release-batteries:/opt/appa/batteries
@@ -121,8 +139,13 @@ spec:
             {{- toYaml .Values.resources | nindent 12 }}
           ports:
             - name: runtime
-              containerPort: 18787
+              containerPort: {{ .Values.service.port }}
               protocol: TCP
+            {{- if .Values.appaGuide.enabled }}
+            - name: guide-mcp
+              containerPort: {{ .Values.service.guidePort | default 18788 }}
+              protocol: TCP
+            {{- end }}
           startupProbe:
             httpGet:
               path: /health

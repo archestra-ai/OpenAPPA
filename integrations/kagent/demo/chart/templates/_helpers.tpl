@@ -1,6 +1,6 @@
-{{/* An image reference; an empty tag means the chart's appVersion. */}}
+{{/* An image reference; an empty tag means v<appVersion>. */}}
 {{- define "appa-demo.image" -}}
-{{- printf "%s:%s" .image.repository (.image.tag | default .root.Chart.AppVersion) -}}
+{{- printf "%s:%s" .image.repository (.image.tag | default (printf "v%s" .root.Chart.AppVersion)) -}}
 {{- end -}}
 
 {{/* The existing shared runtime Service used by every demo Agent. */}}

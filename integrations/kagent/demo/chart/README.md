@@ -4,7 +4,7 @@ Fixture-only OpenAPPA demo for kagent. The chart installs:
 
 - the gated `cluster-ops`, `log-analyst`, and `release-manager` Agents;
 - optional Go twins;
-- the `demo-tools` MCP server;
+- the `demo-tools` MCP server, including a canned GitHub battery showcase;
 - deterministic mock implementations for demo policy components;
 - an inert, rendered policy template;
 - sixteen seeded dashboard chats.
@@ -28,19 +28,24 @@ The defaults expect:
 ## Install
 
 ```sh
-APPA_VERSION=0.12.0 # x-release-please-version
+APPA_VERSION=0.14.1 # x-release-please-version
 helm upgrade --install appa-kagent-demo \
-  oci://ghcr.io/archestra-ai/charts/appa-kagent-demo \
+  oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-kagent-demo \
   --version "$APPA_VERSION" -n kagent \
   --set-string runtime.url=http://appa-runtime.appa.svc.cluster.local:18787 \
   --set-string modelConfig.name=default-model-config \
+  --set-string runtime.reasoningEffort=none \
   --force-conflicts --wait --timeout 10m
+kubectl wait -n kagent remotemcpserver/demo-tools \
+  --for=jsonpath='{.status.discoveredTools[0].name}' \
+  --timeout=2m
 ```
 
 Open `appa-guide` and send `init`. The guide verifies this release and
 reads `ConfigMap/appa-kagent-demo-policy`. It presents the resulting
-behavior before copying any entries into the runtime-owned policy. Reply
-with approval, then approve the enforced kagent confirmation card.
+behavior and the matched GitHub battery. Reply with approval, then approve
+the enforced kagent confirmation card. Typed runtime MCP operations update
+and reload the complete runtime-owned policy.
 
 The demo ConfigMap is never mounted or served directly. Installing or
 upgrading this chart cannot change runtime policy.
@@ -52,8 +57,8 @@ upgrading this chart cannot change runtime policy.
 | `runtime.url` | `http://appa-runtime.appa.svc.cluster.local:18787` | Existing shared runtime used by every demo Agent. |
 | `runtime.reasoningEffort` | `""` | Optional reasoning effort passed to each Agent model request. |
 | `modelConfig.name` | `default-model-config` | Existing kagent ModelConfig used by every demo Agent. |
-| `tools.image.*` | `ghcr.io/archestra-ai/appa-demo-tools:<appVersion>` | Demo MCP server image. |
-| `mocks.image.*` | `ghcr.io/archestra-ai/appa-demo-mocks:<appVersion>` | Demo policy-service image. |
+| `tools.image.*` | `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-demo-tools:v<appVersion>` | Demo MCP server image. |
+| `mocks.image.*` | `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-demo-mocks:v<appVersion>` | Demo policy-service image. |
 | `mocks.approvalWindowSeconds` | `25` | Change-board ruling window, below the policy's 30-second consult timeout. |
 | `seed.enabled` | `true` | Replay the sixteen showcase chats after install. |
 | `seed.controllerUrl` | controller in the release namespace | kagent controller receiving seeded sessions. |
@@ -91,7 +96,7 @@ answers and exposes the change board at `/pending` and `/decide`.
 ## Images
 
 This chart directly uses only `appa-demo-tools` and `appa-demo-mocks`.
-Both default to the chart `appVersion` in `ghcr.io/archestra-ai`. kagent
+Both default to `v<appVersion>` in `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public`. kagent
 and the runtime releases separately select `appa-kagent-adk`,
 `appa-kagent-adk-go`/`golang-adk`, and `appa-runtime`.
 

@@ -84,19 +84,21 @@ expect 0 '^kind: Secret$'
 expect 0 '^  name: appa-runtime$'
 expect 0 '^  name: appa-runtime-policy$'
 expect 0 '^  name: appa-guide$'
-expect 0 "image: ghcr.io/archestra-ai/appa-runtime:${app_version}$"
+expect 0 "image: europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-runtime:v${app_version}$"
 expect 0 '/opt/appa/batteries|/var/lib/appa|APPA_CONFIG|APPA_GUIDE_RUNTIME_URL'
 expect 1 '^  name: appa-kagent-demo-policy$'
 expect 1 '^    app.kubernetes.io/component: policy-template$'
 expect 2 '^  name: appa-demo-mocks$'
-expect 1 "image: ghcr.io/archestra-ai/appa-demo-mocks:${app_version}$"
-expect 1 "image: ghcr.io/archestra-ai/appa-demo-tools:${app_version}$"
+expect 1 "image: europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-demo-mocks:v${app_version}$"
+expect 1 "image: europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-demo-tools:v${app_version}$"
 expect 1 '^        runAsNonRoot: true$'
 expect 1 '^            readOnlyRootFilesystem: true$'
 expect 5 'http://appa-demo-mocks\.kagent\.svc\.cluster\.local:8081/'
 expect 1 '^    name = "skills"$'
 expect 1 '^    name = "kagent__NS__log_analyst"$'
 expect 1 '^    name = "kagent__NS__log_analyst_go"$'
+expect 1 '^            - mcp__github__get_file_contents$'
+expect 1 '^            - mcp__github__issue_write$'
 
 # Every rendered Agent uses the one explicitly selected shared runtime.
 expect_env 3 APPA_ENABLED true

@@ -257,6 +257,7 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
     );
     assert_eq!(review.len(), 1, "the offer is backed by the default human authority");
     assert!(feedback.contains("Submit for approval"));
+    assert!(feedback.contains("The confirmation card is not open yet"));
     assert!(review[0].text.contains("page.html"), "the review shows the exact call");
     assert!(
         review[0].text.contains("public"),

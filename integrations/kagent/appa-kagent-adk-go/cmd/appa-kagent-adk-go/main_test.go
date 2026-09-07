@@ -210,7 +210,9 @@ func TestTheKnobDecidesTheConfigDeltas(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(reasoningEffortEnv, "none")
 			agentConfig := deltaConfig()
-			applyConfigDeltas(tc.gate, agentConfig, logr.Discard())
+			if err := applyConfigDeltas(tc.gate, agentConfig, logr.Discard()); err != nil {
+				t.Fatalf("applyConfigDeltas: %v", err)
+			}
 			if len(agentConfig.HttpTools) != tc.httpTools {
 				t.Errorf("the stock builder reads %d toolsets, want %d", len(agentConfig.HttpTools), tc.httpTools)
 			}
@@ -320,7 +322,9 @@ func TestTheKnobOffLoadsThroughTheStockLoader(t *testing.T) {
 
 func TestTheReservedToolsetJoinsTheRenderedConfig(t *testing.T) {
 	agentConfig := &adk.AgentConfig{}
-	withReservedToolset(agentConfig, "http://appa-runtime.appa-system:8787/")
+	if err := withReservedToolset(agentConfig, "http://appa-runtime.appa-system:8787/"); err != nil {
+		t.Fatalf("withReservedToolset: %v", err)
+	}
 	if len(agentConfig.HttpTools) != 1 {
 		t.Fatalf("exactly one reserved toolset must join, got %d", len(agentConfig.HttpTools))
 	}
@@ -329,10 +333,28 @@ func TestTheReservedToolsetJoinsTheRenderedConfig(t *testing.T) {
 		t.Errorf("the reserved toolset must point at /mcp, got %q", reserved.Params.Url)
 	}
 	if !reflect.DeepEqual(reserved.Tools, []string{appakagentadk.ReservedTool}) {
-		t.Errorf("the reserved toolset must serve only execute_remedy_plan, got %v", reserved.Tools)
+		t.Errorf("the reserved toolset must serve the runtime-owned tools, got %v", reserved.Tools)
 	}
 	if reserved.Params.Timeout == nil || *reserved.Params.Timeout != remedyCallTimeoutSeconds {
 		t.Errorf("the remedy call must outlast a parked consult; the ADK default fails it at the client: %v", reserved.Params.Timeout)
+	}
+}
+
+func TestOnlyAppaGuideReceivesTheManagementToolset(t *testing.T) {
+	t.Setenv(appaGuideEnv, "true")
+	t.Setenv(appaGuideMCPURLEnv, "http://runtime:18788/guide-mcp")
+	agentConfig := &adk.AgentConfig{}
+	if err := withReservedToolset(agentConfig, "http://runtime:18787"); err != nil {
+		t.Fatalf("withReservedToolset: %v", err)
+	}
+	toolset := agentConfig.HttpTools[0]
+	if toolset.Params.Url != "http://runtime:18788/guide-mcp" || !reflect.DeepEqual(toolset.Tools, appakagentadk.RuntimeTools) {
+		t.Fatalf("guide management toolset = %+v", toolset)
+	}
+
+	t.Setenv(appaGuideMCPURLEnv, "")
+	if err := withReservedToolset(&adk.AgentConfig{}, "http://runtime:18787"); err == nil {
+		t.Fatal("APPA_GUIDE without APPA_GUIDE_MCP_URL must fail")
 	}
 }
 
@@ -608,6 +630,10 @@ func TestTheConfigGuardRefusesWhatThisImageCannotRunAsDeclared(t *testing.T) {
 			config: withKey(t, stockConfig, "remote_agents",
 				`[{"name": "execute_remedy_plan", "url": "http://x:8080"}]`),
 			refused: true, kind: reservedToolName, keys: []string{"remote_agents[0].name"}},
+		{name: "a declared tool named appa_match_batteries is refused",
+			config: withKey(t, stockConfig, "http_tools",
+				`[{"params": {"url": "http://demo-tools:8080/mcp"}, "tools": ["appa_match_batteries"]}]`),
+			refused: true, kind: reservedToolName, keys: []string{"http_tools[0].tools[0]"}},
 
 		// -- network --
 		// Neither runtime reads network from config.json at the pinned
@@ -746,6 +772,14 @@ func deliverUnderConfigDir(t *testing.T, config string) (args, env []string) {
 	dir := t.TempDir()
 	writeConfig(t, dir, config)
 	return nil, []string{"CONFIG_DIR=" + dir}
+}
+
+func TestEveryRuntimeToolNameIsReserved(t *testing.T) {
+	for _, name := range appakagentadk.RuntimeTools {
+		if !isReservedToolName(name) {
+			t.Errorf("runtime tool %q is not reserved", name)
+		}
+	}
 }
 
 func TestTheRuntimeRefusesToStartOnAnUnsupportedConfig(t *testing.T) {

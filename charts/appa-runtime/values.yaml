@@ -1,8 +1,8 @@
 # Shared OpenAPPA runtime. One replica: the trajectory log is SQLite.
 
 image:
-  repository: ghcr.io/archestra-ai/appa-runtime
-  # Empty uses the chart appVersion.
+  repository: europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-runtime
+  # Empty uses v<appVersion>.
   tag: ""
   pullPolicy: IfNotPresent
   digest: ""
@@ -42,6 +42,8 @@ securityContext:
 service:
   type: ClusterIP
   port: 18787
+  # Dedicated vouched MCP surface attached only to appa-guide.
+  guidePort: 18788
 
 # Enable this policy with at least one NetworkPolicyPeer to restrict which
 # pods can reach the runtime Service.
@@ -88,6 +90,8 @@ appaGuide:
   name: appa-guide
   namespace: kagent
   modelConfig: default-model-config
+  # Fills reasoning_effort when the referenced OpenAI ModelConfig omits it.
+  reasoningEffort: ""
   toolServer:
     name: kagent-tool-server
   skill:

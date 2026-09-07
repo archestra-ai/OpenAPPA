@@ -156,6 +156,13 @@ class AppaPluginKagent(BasePlugin):
         # call that quotes one asks the person through kagent's own
         # confirmation before it crosses, and the answer rides the call.
         self._reviews: dict[str, str] = {}
+        # Human-review offers created in one invocation. If the model
+        # tries to stop instead of pursuing the one unambiguous review,
+        # the model gate emits the exact reserved call for it.
+        self._pending_reviews: dict[str, set[str]] = {}
+        self._review_authorized_invocations: set[str] = set()
+        self._init_invocations: set[str] = set()
+        self._battery_suggestions: dict[str, set[str]] = {}
         self._rejected_controls: dict[str, set[str]] = {}
         # The return the gate crossed for a run, by invocation id, and
         # the exact bytes that crossed. The stop of that run then carries
@@ -295,6 +302,10 @@ class AppaPluginKagent(BasePlugin):
         self._scopes.pop(invocation_id, None)
         self._settled.pop(invocation_id, None)
         self._rejected_controls.pop(invocation_id, None)
+        self._pending_reviews.pop(invocation_id, None)
+        self._review_authorized_invocations.discard(invocation_id)
+        self._init_invocations.discard(invocation_id)
+        self._battery_suggestions.pop(invocation_id, None)
 
     # -- synthetic gates for the entrypoint wrappers ------------------
 
@@ -356,6 +367,11 @@ class AppaPluginKagent(BasePlugin):
 
     async def on_user_message_callback(self, *, invocation_context, user_message):
         self._own_invocation(invocation_context.invocation_id)
+        message = _content_text(user_message)
+        if message.strip().casefold() == "init":
+            self._init_invocations.add(invocation_context.invocation_id)
+        if _is_chat_approval(message):
+            self._review_authorized_invocations.add(invocation_context.invocation_id)
         root_id, child_id = self._identity.open_invocation(invocation_context)
         contract = None
         opening = self._opening(invocation_context.session, root_id, child_id)
@@ -405,6 +421,13 @@ class AppaPluginKagent(BasePlugin):
 
     async def after_model_callback(self, *, callback_context, llm_response):
         await self._ping()
+        self._bind_management_calls(callback_context, llm_response)
+        review = self._open_pending_review(callback_context.invocation_id, llm_response)
+        if review is not None:
+            return review
+        proposal = self._complete_init_proposal(callback_context.invocation_id, llm_response)
+        if proposal is not None:
+            return proposal
         _, child_id = self._ids(callback_context)
         if child_id is None:
             return None
@@ -545,9 +568,16 @@ class AppaPluginKagent(BasePlugin):
             # the same name from anywhere else is somebody else's, and
             # it crosses the gate like any other.
             return None
+        if tool.name in wire.MANAGEMENT_TOOLS:
+            tool_args["_appa_actor"] = f"{root_id}:{child_id}" if child_id else root_id
         ruling = None
         if tool.name == wire.RESERVED_TOOL:
             offer = str(tool_args.get("offer_id", ""))
+            pending = self._pending_reviews.get(tool_context.invocation_id)
+            if pending is not None:
+                pending.discard(offer)
+                if not pending:
+                    self._pending_reviews.pop(tool_context.invocation_id)
             confirmation = getattr(tool_context, "tool_confirmation", None)
             if confirmation is None:
                 review = self._reviews.get(offer)
@@ -582,6 +612,7 @@ class AppaPluginKagent(BasePlugin):
         if decision.kind == "deny_call":
             for offer_id, text in decision.review:
                 self._reviews[offer_id] = text
+                self._pending_reviews.setdefault(tool_context.invocation_id, set()).add(offer_id)
             self._settle(tool_context)
             self._release_tool_dispatch(tool_context)
             # The feedback rides under "result": kagent's model converters
@@ -608,6 +639,8 @@ class AppaPluginKagent(BasePlugin):
             # the `appa` key included.
             self._release_tool_dispatch(tool_context)
             return None
+        if tool.name == wire.BATTERY_MATCH_TOOL:
+            self._remember_battery_suggestions(tool_context.invocation_id, result)
         root_id, child_id = self._ids(tool_context)
         call_id = _call_id(tool_context)
         rejected = bool(
@@ -756,6 +789,82 @@ class AppaPluginKagent(BasePlugin):
             return _spoken(crossed)
         return _return_call("\n".join(part.text for part in answer if getattr(part, "text", None)))
 
+    def _open_pending_review(self, invocation_id: str, llm_response: Any) -> Any:
+        """Turn an attempted stop after one review block into its card call."""
+        offers = self._pending_reviews.get(invocation_id)
+        if (
+            invocation_id not in self._review_authorized_invocations
+            or offers is None
+            or len(offers) != 1
+            or getattr(llm_response, "partial", None)
+        ):
+            return None
+        content = getattr(llm_response, "content", None)
+        parts = getattr(content, "parts", None) or []
+        if any(getattr(part, "function_call", None) is not None for part in parts):
+            return None
+        if not any(not getattr(part, "thought", None) and getattr(part, "text", None) for part in parts):
+            return None
+        offer = next(iter(offers))
+        logger.info("model stopped with one human-review offer pending; opening its confirmation card")
+        return _review_call(offer)
+
+    def _remember_battery_suggestions(self, invocation_id: str, result: Any) -> None:
+        if invocation_id not in self._init_invocations or not isinstance(result, dict):
+            return
+        for content in result.get("content", []):
+            if not isinstance(content, dict) or not isinstance(content.get("text"), str):
+                continue
+            try:
+                matched = json.loads(content["text"])
+            except json.JSONDecodeError:
+                continue
+            for battery in matched.get("matches", []):
+                if (
+                    isinstance(battery, dict)
+                    and battery.get("included") is False
+                    and isinstance(battery.get("battery"), str)
+                ):
+                    self._battery_suggestions.setdefault(invocation_id, set()).add(battery["battery"])
+
+    def _complete_init_proposal(self, invocation_id: str, llm_response: Any) -> Any:
+        suggestions = self._battery_suggestions.get(invocation_id)
+        if not suggestions or getattr(llm_response, "partial", None):
+            return None
+        content = getattr(llm_response, "content", None)
+        parts = getattr(content, "parts", None) or []
+        if any(getattr(part, "function_call", None) is not None for part in parts):
+            return None
+        answer = "\n".join(
+            part.text for part in parts if not getattr(part, "thought", None) and getattr(part, "text", None)
+        )
+        if not answer:
+            return None
+        lowered = answer.casefold()
+        if all(name.casefold() in lowered for name in suggestions) and any(
+            word in lowered for word in ("approve", "confirm")
+        ):
+            return None
+        names = ", ".join(sorted(_battery_display_name(name) for name in suggestions))
+        appendix = (
+            f"\n\nSuggested includes\n- {names} battery"
+            f"\n\nApprove the {names} battery include, or tell me what to change."
+        )
+        return _response(types.Part(text=answer.rstrip() + appendix))
+
+    def _bind_management_calls(self, callback_context: Any, llm_response: Any) -> None:
+        content = getattr(llm_response, "content", None)
+        parts = getattr(content, "parts", None) or []
+        root_id, child_id = self._ids(callback_context)
+        actor = f"{root_id}:{child_id}" if child_id else root_id
+        for part in parts:
+            call = getattr(part, "function_call", None)
+            if call is None or call.name not in wire.MANAGEMENT_TOOLS:
+                continue
+            arguments = dict(call.args or {})
+            arguments["_appa_actor"] = actor
+            call.args = arguments
+
     # -- turn ends ----------------------------------------------------
 
     async def after_run_callback(self, *, invocation_context):
@@ -807,6 +916,21 @@ def _return_call(text: str) -> LlmResponse:
     """The stop of a child, as one call to the return gate."""
     call = types.FunctionCall(name=RETURN_TOOL, args={"text": text})
     return _response(types.Part(function_call=call))
+
+
+def _review_call(offer_id: str) -> LlmResponse:
+    """One exact human-review offer as the runtime-owned control call."""
+    call = types.FunctionCall(name=wire.RESERVED_TOOL, args={"offer_id": offer_id})
+    return _response(types.Part(function_call=call))
+
+
+def _is_chat_approval(text: str) -> bool:
+    first = text.strip().casefold()
+    return first == "approve" or first.startswith(("approve ", "approved ", "yes, approve"))
+
+
+def _battery_display_name(name: str) -> str:
+    return "GitHub" if name.casefold() == "github" else name.title()
 
 
 def _spoken(value: str) -> LlmResponse:
