@@ -134,9 +134,12 @@ timeout_ms = 5000
 max_body_bytes = 65536
 
 [externals.claude_code]
-command = "/usr/local/bin/claude"   # the executable; a service environment often strips PATH
-model = "sonnet"                    # pin a model id here for stable classifications
-timeout_ms = 60000                  # the consult's own budget — a model call is slower than an endpoint
+# the executable; a service environment often strips PATH
+command = "/usr/local/bin/claude"
+# pin a model id here for stable classifications
+model = "sonnet"
+# the consult's own budget — a model call is slower than an endpoint
+timeout_ms = 60000
 
 [externals.authorities.operator]
 builtin = "hitl"

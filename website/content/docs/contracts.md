@@ -71,12 +71,14 @@ from = ["google-workspace:viewer", "slack:viewer", "github:viewer"]
 from = [
   "google-workspace:full-members",
   "slack:full-members",
-  "github:org/archestra-ai/members",   # only this organization; selected explicitly
+# only this organization; selected explicitly
+  "github:org/archestra-ai/members",
 ]
 
 [[audience.group]]
 name   = "finance"
-within = "internal"                    # a trusted policy assertion: @finance ⊆ internal
+# a trusted policy assertion: @finance ⊆ internal
+within = "internal"
 from   = ["google-workspace:group/finance@corp.com", "github:org/archestra-ai/team/finance"]
 ```
 
@@ -97,7 +99,8 @@ implementation = "verified-email"      # the shipped default
 
 ```toml
 [identity]
-implementation = "corp-identity"       # bound under [externals.identity.corp-identity]
+# bound under [externals.identity.corp-identity]
+implementation = "corp-identity"
 ```
 
 A custom implementation answers one principal per member, is pinned per act like any membership answer, and must be deterministic. If it fails or answers an invalid principal, the act fails operationally and records nothing.
@@ -189,7 +192,8 @@ Omit `inputs` to pass the complete tool call: its name, its description when the
 ```toml
 [[annotator]]
 name  = "classify-command"
-ranks = ["suspicious", "trusted"]              # The trust ranks its answers may use
+# The trust ranks its answers may use
+ranks = ["suspicious", "trusted"]
 hint  = "Use suspicious for output from network or unvetted sources. Use trusted only for local computation over trusted inputs."
 
 [[tool]]
@@ -222,7 +226,8 @@ This form does not need a tool parameter schema. It does not need a `description
 name      = "classify-customer"
 inputs    = { subject = "$tool_call.arguments.customer_id" }
 ranks     = ["suspicious", "trusted"]
-audiences = ["finance", "support"]             # The audiences a restricted answer may name
+# The audiences a restricted answer may name
+audiences = ["finance", "support"]
 hint      = "finance may read billing records. support may read records assigned to a support case."
 
 [[tool]]
@@ -387,24 +392,30 @@ A `[[tool]]` entry defines its canonical tool id as `name` (see [Tool names](#to
 ```toml
 [[tool]]
 name = "mcp/helpdesk/fetch_support_ticket"
-tags = ["support"]                                     # Authorities and sanitizers select tools by tag
+# Authorities and sanitizers select tools by tag
+tags = ["support"]
 
 [tool.delta]
-trust    = "suspicious"                                # The ticket body is customer-written text
-audience = ["support"]                                 # The record is for the support desk only
+# The ticket body is customer-written text
+trust    = "suspicious"
+# The record is for the support desk only
+audience = ["support"]
 
 [[tool]]
 name     = "mcp/database/apply_db_migration"
 effects  = ["migration.applied", "mutation"]           # Emitted side effects
-delta    = {}                                          # Status string carries no label
+# Status string carries no label
+delta    = {}
 
 [tool.requires]
 trust     = "trusted"
 attention = ["sre-signoff"]                            # Fresh per-call demand
 
 [tool.requires.effects]
-contains = ["backup.completed"]                        # Already recorded in the trajectory
-excludes = ["migration.applied"]                       # Neither recorded nor reserved by an unsettled dispatch
+# Already recorded in the trajectory
+contains = ["backup.completed"]
+# Neither recorded nor reserved by an unsettled dispatch
+excludes = ["migration.applied"]
 ```
 
 ### Key contract rules
@@ -426,15 +437,20 @@ An `[[authority]]` provides dynamic judgment to clear specific requirement gaps 
 ```toml
 [[authority]]
 name = "finance-officer"
-hint = "The desk that signs off spend. Consult it to release a payment."  # Advisory; grants nothing
-tags = ["finance"]                             # The tools it can answer; omitted, every tool.
-                                               # Attention routing ignores tags: a mark routes to every
-                                               # authority whose `permits.attention` names it.
+# Advisory; grants nothing
+hint = "The desk that signs off spend. Consult it to release a payment."
+# The tools it can answer; omitted, every tool.
+tags = ["finance"]
+# Attention routing ignores tags: a mark routes to every
+# authority whose `permits.attention` names it.
 
 [authority.permits]
-trust_below        = "trusted"                 # A call whose trust requirement is unmet, for requirements up to this rank
-audience_missing   = ["public"]                # A call whose audience is missing required readers, up to these readers
-effects_containing = ["email.sent"]            # A call although the trajectory already contains one of these effects
+# A call whose trust requirement is unmet, for requirements up to this rank
+trust_below        = "trusted"
+# A call whose audience is missing required readers, up to these readers
+audience_missing   = ["public"]
+# A call although the trajectory already contains one of these effects
+effects_containing = ["email.sent"]
 attention          = ["finance-signoff"]       # The marks its rulings satisfy
 ```
 
@@ -450,8 +466,11 @@ token_env = "APPA_APPROVER_TOKEN"            # sent as a bearer token
 # builtin = "hitl"                             # Human-in-the-loop elicitation
 # builtin = "approve"                          # In-process auto-approval
 # builtin = "claude-code"                      # A model rules, within `permits`
-# builtin = "llm"                              # A model rules through [externals.llm]
+# A model rules through [externals.llm]
+# builtin = "llm"
 ```
+
+An offered remedy is not an approval. An authority can deny the request; that denial is recorded so the agent cannot repeat the same approval request for that specific call.
 
 A missing authority binding does not stop the deployment. That authority
 returns no answer, so a remedy that names it cannot release the call.
@@ -480,24 +499,33 @@ delta = { trust = "suspicious", audience = ["finance"] }
 
 [[sanitizer]]
 name = "pii-redactor"
-on   = ["tool_output"]                         # Tool results and child sub-execution returns
-# on = ["tool_input"]                          # Whole-argument substitution at dispatch
-hint = "Removes personal details from a finance record."  # Advisory; grants nothing
-tags = ["support"]                             # Applies only to values from tools with these tags
+# Tool results and child sub-execution returns
+on   = ["tool_output"]
+# Whole-argument substitution at dispatch
+# on = ["tool_input"]
+# Advisory; grants nothing
+hint = "Removes personal details from a finance record."
+# Applies only to values from tools with these tags
+tags = ["support"]
 
 [sanitizer.permits]
-# `from`: the source audience must contain these readers; `to`: the output gets exactly this audience
+# `from`: the source audience must contain these readers; `to`: the output gets
+# exactly this audience
 audience = { from = ["finance"], to = ["public"] }
 
 [deployment]
-confined_results = ["mcp/helpdesk/fetch_support_ticket"]   # The host can withhold this tool's raw result
+# The host can withhold this tool's raw result
+confined_results = ["mcp/helpdesk/fetch_support_ticket"]
 ```
 
 ```toml
-[externals.sanitizers.pii-redactor]            # the deployment binds the scrubber
+# the deployment binds the scrubber
+[externals.sanitizers.pii-redactor]
 builtin = "redact-email"
-# builtin = "claude-code"                      # A model rewrites the value, within `permits`
-# builtin = "llm"                              # A model rewrites it through [externals.llm]
+# A model rewrites the value, within `permits`
+# builtin = "claude-code"
+# A model rewrites it through [externals.llm]
+# builtin = "llm"
 ```
 
 ### Sanitizer implementation modes
@@ -520,10 +548,12 @@ name = "vouch-fetched-text"
 on   = ["tool_output"]
 
 [sanitizer.permits]
-trust = { from = "suspicious", to = "trusted" } # Instead of `audience`, never alongside it
+# Instead of `audience`, never alongside it
+trust = { from = "suspicious", to = "trusted" }
 
 [deployment]
-context_control = true                          # A child's return is an application point
+# A child's return is an application point
+context_control = true
 ```
 
 When a tool result would narrow the trajectory label, OpenAPPA checks if a registered `tool_output` sanitizer can improve the label. If selected, the host withholds the raw result and runs the sanitizer. If the cleaned derivation prevents narrowing, it enters the trajectory label. If residual narrowing remains, the agent can accept the residual or apply another compatible sanitizer. A sanitizer whose declared transition cannot improve the label is never offered.
@@ -531,6 +561,8 @@ When a tool result would narrow the trajectory label, OpenAPPA checks if a regis
 Like an authority, a sanitizer can name `tags`: it then applies only to values whose originating tool carries one of them. A child sub-execution return originates from no tool, so only a sanitizer without `tags` applies at that crossing.
 
 At `tool_input`, the sanitizer derives a replacement for the whole argument set of one call, and the harness dispatches exactly the substituted bytes. This substitution can satisfy an unmet `contains` audience requirement, but cannot clear a `within` or trust requirement (`within` bounds the trajectory's own reach, and rewriting arguments does not change the decision to invoke the tool). A rewritten call is judged by the ordered contract its rewritten arguments select: the sanitizer's `tags` must reach that contract too, and its effects and requirements apply. An annotation binds the exact call, so a rewrite of an annotator-backed tool is annotated afresh, whichever contract it selects; membership answers are pinned to the act, so the substituted call is judged under the same pinned evidence.
+
+### Subagent Returns
 
 A parent declares what a child's return may carry when it spawns the child. Under `context_control`, a spawn is held until the parent takes one plan from the block's menu: the first plan takes the return as spoken; each plan after it routes the return through one registered `tool_output` sanitizer without `tags`, in registry order. Every plan takes a `label`, the lowest label the parent accepts from the return (`{}` for the parent's own); the `attest-schema` plan also takes `return_schema`. The declaration bounds the child: it can narrow no further than the declared floor, or, on a sanitized route, than the sanitizer lifts back to it. The child learns the declared shape when it starts, and returns by ending its turn. A return the declaration does not cover is blocked at the child with the reason, and the child may stop again with what does cross.
 
@@ -543,7 +575,8 @@ on   = ["tool_output"]
 audience = { from = ["finance"], to = ["public"] }
 
 [deployment]
-context_control = true              # Children run on their own context; their returns are an application point
+# Children run on their own context; their returns are an application point
+context_control = true
 ```
 
 ```json
@@ -574,6 +607,77 @@ context_control = true
 
 Registering `name = "attest-schema"` is sufficient; OpenAPPA applies it natively without an `[externals]` entry (binding one is a load error).
 
+## Example: Customer Ticket Policy
+
+This configuration accompanies [the customer-ticket walkthrough](/how-it-works#example-sharing-information-from-a-private-customer-ticket). CRM tickets are internal, email recipients must be allowed to see the session's data, and public GitHub issues require data that may be shared publicly.
+
+The sanitizer produces a version without customer identities; the authority can approve a specific action that shares data outside the company. The integration must withhold the original ticket when sanitizing its output and support separate subagent contexts for the subagent option. See [Deployment coverage](#deployment-coverage) for these requirements.
+
+```toml
+version = 2
+
+[deployment]
+# The integration must support separate subagent contexts and withholding raw
+# results.
+context_control = true
+confined_results = ["mcp/crm/get_ticket"]
+
+[audience.internal]
+# Use Google Workspace membership to identify people inside the company.
+from = ["google-workspace:full-members"]
+
+[[tool]]
+name  = "mcp/crm/get_ticket"
+# Reading the original ticket makes the agent's session internal.
+delta = { audience = ["internal"] }
+
+[[tool]]
+name       = "mcp/mail/send_email"
+parameters = { type = "object", properties = { recipient = { type = "string" }, body = { type = "string" } }, required = ["recipient", "body"] }
+# The recipient must be allowed to see the session's data.
+requires   = { audience = { contains = ["$recipient"] } }
+delta      = {}
+effects    = ["egress"]
+
+[[tool]]
+name     = "mcp/github/file_issue"
+# Creating a public issue requires data that can be shared publicly.
+requires = { audience = { contains = ["public"] } }
+delta    = {}
+effects  = ["egress", "mutation"]
+
+[[sanitizer]]
+name = "remove_pii"
+on   = ["tool_output"]
+hint = "Removes customer identities from a CRM record."
+[sanitizer.permits]
+# Allow this sanitizer to produce a version that can be shared publicly.
+audience = { from = ["internal"], to = ["public"] }
+
+[[authority]]
+name = "user"
+[authority.permits]
+# Allow a person to approve sharing outside the company.
+audience_missing = ["public"]
+```
+
+The following configuration connects the policy to a service that removes customer details, a human approval prompt, and a service that checks company membership. The URLs are examples to replace with your own services:
+
+```toml
+[externals.sanitizers.remove_pii]
+url       = "https://pii.corp/redact"
+# Read the service's authentication token from this environment variable.
+token_env = "APPA_PII_TOKEN"
+
+[externals.authorities.user]
+# Ask a person for approval.
+builtin = "hitl"
+
+[externals.audience.google-workspace]
+# Check who belongs to the company.
+url = "https://audience.corp/google-workspace"
+```
+
 ## Externals
 
 The policy registers components by name. The deployment binds each name in the `[externals]` table:
@@ -585,7 +689,8 @@ max_body_bytes = 65536       # the largest answer accepted
 
 [externals.authorities.finance-officer]
 url       = "https://approver.corp/rule"
-token_env = "APPA_APPROVER_TOKEN"     # an APPA_* variable; its value is sent as a bearer token
+# an APPA_* variable; its value is sent as a bearer token
+token_env = "APPA_APPROVER_TOKEN"
 
 [externals.sanitizers.pii-redactor]
 builtin = "redact-email"
@@ -668,7 +773,8 @@ A model answer can do what the kind allows any implementation: an authority's ru
 provider       = "anthropic"          # anthropic | openai | gemini | ollama
 model          = "claude-sonnet-4-5"
 token_env      = "APPA_LLM_TOKEN"     # required, except for ollama
-# url          = "https://gateway.corp/v1"   # optional; validated like a `url` binding
+# optional; validated like a `url` binding
+# url          = "https://gateway.corp/v1"
 timeout_ms     = 30000                # this profile's own consult budget
 max_concurrent = 4                    # consults in flight at once
 ```

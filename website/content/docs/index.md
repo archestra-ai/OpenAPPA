@@ -29,6 +29,15 @@ The foundation of OpenAPPA is data-flow tracking. In other words, it answers one
 
 And where it is genuinely unavoidable, OpenAPPA also lets you plug in non-deterministic agent-security tools.
 
+### Threat Model: What OpenAPPA Protects Against
+
+OpenAPPA is designed for real-world enterprise agent workflows:
+
+- **What it protects against:** Prompt injections, poisoned external data, confused agent actions, and accidental data leaks across multi-step workflows.
+- **How it stops attacks:** At the deterministic runtime boundary. Even if the LLM is completely tricked by an attacker, unauthorized tool calls physically cannot dispatch.
+- **System boundaries:** Pre-vetted internal data is trusted by configuration. Custom authorities (like human review queues) are trusted within their declared permissions.
+- **Auditability:** Every check, dispatch, and remedy decision is recorded in an append-only, tamper-evident log for post-hoc audit and deterministic replay.
+
 ## Where next
 
 - [How OpenAPPA works](/how-it-works) — the whole model in one sitting.
