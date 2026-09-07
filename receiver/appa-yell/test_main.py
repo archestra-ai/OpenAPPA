@@ -150,6 +150,10 @@ def test_the_decompression_cap_is_the_clients_own_limit():
         (one_report(message=42), 400),
         (one_report(origin="cli"), 400),
         (one_report(origin=["cli"]), 400),
+        (one_report(build="local"), 400),
+        (one_report(build={"version": "0.9.0"}), 400),
+        (one_report(build={"version": "0.9.0", "source": {"kind": "../release"}}), 400),
+        (one_report(build={"version": "0.9.0", "source": {"kind": ""}}), 400),
         (one_report(message="x" * (main.MAX_MESSAGE_BYTES + 1)), 413),
     ],
 )
@@ -192,6 +196,15 @@ def test_more_entries_than_a_session_has_is_refused(client):
         }
     )
     assert post(client, document).status_code == 413
+
+
+def test_reports_are_filed_by_the_kind_of_build_that_sent_them():
+    """One endpoint for every build: what keeps a release's reports and a developer's own
+    runs apart is the prefix each is stored under."""
+    assert main.build_kind(one_report()) == "local"
+    release = one_report(build={"version": "0.9.0", "source": {"kind": "release", "reference": "v0.9.0"}})
+    assert main.build_kind(release) == "release"
+    assert main.build_kind(one_report(build={"version": "0.9.0", "source": {"kind": "nightly_2"}})) == "nightly_2"
 
 
 def test_entries_counts_both_lists_and_survives_a_report_with_none():
