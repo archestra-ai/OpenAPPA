@@ -36,9 +36,8 @@ const ENDPOINT: &str = match option_env!("APPA_YELL_COMPILED_ENDPOINT") {
 /// The two variants are not decoration. A proxy between here and a real receiver is a normal
 /// way to reach the internet and is honoured; a proxy between here and this same machine is
 /// never right, and would relay a report that was only ever meant to cross a socket.
-/// Where a receiver's address came from. The compiled-in one is the OpenAPPA team's and can
-/// be named as such; one from the environment is a different destination, and the person is
-/// owed the URL.
+/// Where a receiver's address came from, so the question before sending can say when an
+/// override rather than the compiled-in destination is in effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Source {
     CompiledIn,
@@ -58,8 +57,10 @@ impl Receiver {
     /// there is none to use.
     ///
     /// `APPA_YELL_ENDPOINT` overrides the compiled destination. It is not a hole in consent:
-    /// the person is shown whatever it resolves to before answering. Plaintext is refused
-    /// unless it is this machine, so an override cannot downgrade a real send to `http://`.
+    /// whoever set it in this process's environment chose where reports go, and the
+    /// question that asks before sending says an override is in effect. Plaintext is
+    /// refused unless it is this machine, so an override cannot downgrade a real send to
+    /// `http://`.
     pub(crate) fn resolve() -> Option<(Self, Source)> {
         let (named, source) = match std::env::var("APPA_YELL_ENDPOINT") {
             Ok(named) => (named, Source::Environment),
