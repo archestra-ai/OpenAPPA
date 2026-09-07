@@ -104,7 +104,7 @@ See [Sanitizers in the policy reference](/contracts#sanitizers) for service conf
 
 An annotator classifies a tool call to determine its output restrictions (`delta`), requirements (`requires`), and effects. Use one when these depend on the specific call, such as which file the agent reads or who receives an email. OpenAPPA checks the resulting contract before allowing the call.
 
-For example, a Python script can check which directory a file comes from. Files in `/srv/public-docs` can be shared publicly; all other files are restricted to internal users.
+For example, a Python script can classify files by directory: public documentation can be shared publicly, while customer records are restricted to internal users.
 
 ```toml
 [[annotator]]
@@ -123,32 +123,7 @@ annotator = "classify_file"
 command = ["python3", "./classify_file.py"]
 ```
 
-```python
-import json
-import sys
-from pathlib import Path
-
-request = json.load(sys.stdin)
-call = request["artifact"]["args"]
-path = Path(call["arguments"]["path"])
-if not path.is_absolute():
-    raise ValueError("read_file requires an absolute path")
-
-public_docs = Path("/srv/public-docs").resolve(strict=True)
-path = path.resolve(strict=True)
-audience = "public" if path.is_relative_to(public_docs) else "internal"
-
-json.dump({
-    "version": 1,
-    "answer": {
-        "delta": {"audience": [audience], "trust": "suspicious"},
-        "requires": {"history": [], "attention": []},
-        "emits": [],
-    },
-}, sys.stdout)
-```
-
-The script and file-reading tool must use the same filesystem. `/srv/public-docs` must exist and contain only files approved for public access. See [Annotators in the policy reference](/contracts#annotators) for the script protocol and limits on the rules it can return.
+An annotator can run as a local script or an external service. See [Annotators in the policy reference](/contracts#annotators) for configuration, the request and response format, and limits on its answers.
 
 ### Subagents Isolate Sensitive Reads
 
