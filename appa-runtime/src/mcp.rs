@@ -174,17 +174,33 @@ async fn execute_remedy(
 ) -> CallToolResult {
     let quoted = OfferId(args.offer_id.clone());
     let arguments = RemedyArguments::from(args);
+    // Requires the vouched trajectory from the preceding hook.
     let Some((acting, ruling)) = runtime.take_vouched(&quoted) else {
         return render(RemedyOutcome::Refused {
             detail: "no live offer with this id exists".to_string(),
         });
     };
     let elicitation = Elicitation::new(request, runtime.review_timeout());
-    render(
-        runtime
-            .remedy(&acting, quoted, arguments, Some(&elicitation), ruling)
-            .await,
-    )
+    let started = std::time::Instant::now();
+    let outcome = runtime
+        .remedy(&acting, quoted.clone(), arguments, Some(&elicitation), ruling)
+        .await;
+    // Recorded from the typed outcome, before `render` turns it into the text the model
+    // reads: a remedy that takes a minute and then declines is the shape of "APPA is in
+    // the way", and neither the duration nor the offer it quoted is in the trajectory.
+    runtime.record(
+        // The family, never the acting trajectory: see `Session::timed_consult`.
+        Some(&acting.root),
+        crate::events::RuntimeEvent::Control {
+            call: crate::events::ControlCall::Remedy {
+                offer: quoted.0,
+                dispatch: None,
+            },
+            outcome: (&outcome).into(),
+            duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        },
+    );
+    render(outcome)
 }
 
 #[tool_router]

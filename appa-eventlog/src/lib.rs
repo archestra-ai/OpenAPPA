@@ -94,6 +94,74 @@ impl Log {
     }
 }
 
+/// Why a store operation failed, with nothing of the failure in it.
+///
+/// Every error this crate returns carries free text — a root id, a path, a decode detail, a
+/// `rusqlite` message. That text is fine locally, where it is logged and read by the operator,
+/// and unusable anywhere a report leaves the machine. This is the closed form: a caller that
+/// must name a failure without repeating it matches the source variant here, once, and carries
+/// the class instead of the message.
+///
+/// The mapping lives in this crate because this crate owns the variants. `Injected` exists only
+/// under `fault-injection`, and a caller whose own dependency does not enable that feature has
+/// no `cfg` to gate an arm on, so an exhaustive match written anywhere else compiles in one
+/// build mode and fails in the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StoreErrorClass {
+    /// No log for this root exists.
+    UnknownRoot,
+    /// A log for this root already exists.
+    AlreadyExists,
+    /// The opening's policy file is missing from the store.
+    PolicyUnavailable,
+    /// The supplied policy file is not the one the opening names.
+    PolicyMismatch,
+    /// A stored batch does not decode.
+    Undecodable,
+    /// The opening batch is not usable as one.
+    Malformed,
+    /// The log moved under a decision that was computed against an earlier position.
+    Conflict,
+    /// The database itself failed.
+    Storage,
+}
+
+impl From<&CreateError> for StoreErrorClass {
+    fn from(error: &CreateError) -> Self {
+        match error {
+            CreateError::AlreadyExists { .. } => StoreErrorClass::AlreadyExists,
+            CreateError::Malformed { .. } => StoreErrorClass::Malformed,
+            CreateError::PolicyFileMismatch => StoreErrorClass::PolicyMismatch,
+            CreateError::Storage(_) => StoreErrorClass::Storage,
+            #[cfg(feature = "fault-injection")]
+            CreateError::Injected => StoreErrorClass::Storage,
+        }
+    }
+}
+
+impl From<&ReadError> for StoreErrorClass {
+    fn from(error: &ReadError) -> Self {
+        match error {
+            ReadError::UnknownRoot { .. } => StoreErrorClass::UnknownRoot,
+            ReadError::PolicyFileMissing { .. } => StoreErrorClass::PolicyUnavailable,
+            ReadError::Undecodable(_) => StoreErrorClass::Undecodable,
+            ReadError::Storage(_) => StoreErrorClass::Storage,
+        }
+    }
+}
+
+impl From<&AppendError> for StoreErrorClass {
+    fn from(error: &AppendError) -> Self {
+        match error {
+            AppendError::Conflict { .. } => StoreErrorClass::Conflict,
+            AppendError::Storage(_) => StoreErrorClass::Storage,
+            #[cfg(feature = "fault-injection")]
+            AppendError::Injected => StoreErrorClass::Storage,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
     #[error("the database at {path} is damaged: {detail}")]

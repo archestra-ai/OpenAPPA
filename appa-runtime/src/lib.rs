@@ -20,6 +20,8 @@ mod builtins;
 mod consult;
 mod elicit;
 mod engine;
+mod events;
 mod external;
 mod llm;
 mod plugin_layout;
+pub mod yell;

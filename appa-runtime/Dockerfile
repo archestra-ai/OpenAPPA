@@ -32,6 +32,9 @@ COPY integrations/claude-code integrations/claude-code
 COPY integrations/appa-guide integrations/appa-guide
 COPY batteries batteries
 COPY website/content/docs/contracts.md website/content/docs/contracts.md
+# The salt `appa yell` signs reports with. Compiled in by client.rs, so the
+# build needs the file even though nothing in the image reads it.
+COPY receiver/appa-yell/salt.txt receiver/appa-yell/salt.txt
 RUN cargo build --release --locked --package appa
 
 FROM python:3.13-slim@sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285

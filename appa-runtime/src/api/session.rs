@@ -297,6 +297,7 @@ impl Session {
                     );
                     Ok(ToolCallDecision::Allow {
                         spawn: released.fork.clone(),
+                        dispatch: released.dispatch.clone(),
                     })
                 }
                 ([], feedback) if !feedback.is_empty() => {
@@ -350,7 +351,10 @@ impl Session {
                     tool = %open.tool,
                     "substituted call handed to the harness"
                 );
-                return Ok(ToolCallDecision::Allow { spawn: None });
+                return Ok(ToolCallDecision::Allow {
+                    spawn: None,
+                    dispatch: open.id.clone(),
+                });
             }
             Standing::Abandoned(open) => open,
         };
@@ -880,10 +884,44 @@ impl Session {
                     );
                     continue;
                 }
-                Err(error) => return Err(EventError::Storage(error.to_string())),
+                Err(error) => {
+                    self.inner
+                        .note_store_error(Some(&self.root), crate::events::StoreOperation::Append, &error);
+                    return Err(EventError::Storage(error.to_string()));
+                }
             }
         }
         Err(EventError::Contended { attempts: REPLAY_LIMIT })
+    }
+
+    /// Run one consult, timed, and note what it cost.
+    ///
+    /// Every consult in this file goes through here rather than calling `externals.consult`
+    /// directly. An external that is slow, unreachable, or answering nonsense is the single
+    /// most common reason an agent appears to be stuck for no reason the trajectory's facts
+    /// explain, and the duration is only knowable at the await.
+    async fn timed_consult(
+        &self,
+        consult: &Consult,
+        elicitation: Option<&Elicitation>,
+        ruling: Option<appa_runtime_api::Ruling>,
+    ) -> crate::external::ConsultOutcome {
+        let started = std::time::Instant::now();
+        let outcome = self.deployment.externals.consult(consult, elicitation, ruling).await;
+        // Filed under the family, never the acting trajectory: a subagent's slow authority is
+        // part of its family's account, and `EventLog` reads one root's bucket.
+        self.inner.record(
+            Some(&self.root),
+            crate::events::RuntimeEvent::External {
+                role: consult.kind().into(),
+                name: consult.name.clone(),
+                outcome: (&outcome).into(),
+                duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                offer: None,
+                dispatch: None,
+            },
+        );
+        outcome
     }
 
     /// One external consult. Only an annotation failure is an error: the call cannot be
@@ -909,7 +947,7 @@ impl Session {
                         artifact: artifact.clone(),
                     },
                 };
-                let verdict = match self.deployment.externals.consult(&consult, elicitation, ruling).await {
+                let verdict = match self.timed_consult(&consult, elicitation, ruling).await {
                     ConsultOutcome::Answer(answer) => AuthorityVerdict::from_wire(&answer),
                     ConsultOutcome::NoAnswer(_) => AuthorityVerdict::Abstain,
                 };
@@ -932,7 +970,7 @@ impl Session {
                         artifact: artifact.clone(),
                     },
                 };
-                let derived = match self.deployment.externals.consult(&consult, None, None).await {
+                let derived = match self.timed_consult(&consult, None, None).await {
                     ConsultOutcome::Answer(answer) => SanitizerAnswer::from_wire(&answer).map(|answer| answer.body),
                     ConsultOutcome::NoAnswer(_) => None,
                 };
@@ -955,7 +993,7 @@ impl Session {
                         artifact: AnnotationArtifact { args: args.clone() },
                     },
                 };
-                let answer = match self.deployment.externals.consult(&consult, None, None).await {
+                let answer = match self.timed_consult(&consult, None, None).await {
                     ConsultOutcome::Answer(answer) => {
                         AnnotationAnswer::from_wire(&answer, declaration).ok_or_else(|| {
                             crate::external::NoAnswerReason::MalformedAnswer(
@@ -1003,7 +1041,7 @@ impl Session {
                         },
                     },
                 };
-                let members = match self.deployment.externals.consult(&consult, None, None).await {
+                let members = match self.timed_consult(&consult, None, None).await {
                     ConsultOutcome::Answer(answer) => MembersAnswer::from_wire(&answer).map(|answer| answer.members),
                     ConsultOutcome::NoAnswer(_) => None,
                 };
@@ -1027,7 +1065,7 @@ impl Session {
                         artifact: AudienceSourceArtifact::Member { member: member.clone() },
                     },
                 };
-                let claims = match self.deployment.externals.consult(&consult, None, None).await {
+                let claims = match self.timed_consult(&consult, None, None).await {
                     ConsultOutcome::Answer(answer) => LookupAnswer::from_wire(&answer).map(|answer| answer.claims),
                     ConsultOutcome::NoAnswer(_) => None,
                 };
@@ -1044,7 +1082,7 @@ impl Session {
                         artifact: claims.clone(),
                     },
                 };
-                let principal = match self.deployment.externals.consult(&consult, None, None).await {
+                let principal = match self.timed_consult(&consult, None, None).await {
                     ConsultOutcome::Answer(answer) => PrincipalAnswer::from_wire(&answer)
                         .map(|answer| appa_engine::label::ReaderId::new(answer.principal)),
                     ConsultOutcome::NoAnswer(_) => None,
@@ -1270,7 +1308,9 @@ context_control = true
         else {
             panic!("a return declaration approves the spawn");
         };
-        let ToolCallDecision::Allow { spawn: Some(binding) } = session
+        let ToolCallDecision::Allow {
+            spawn: Some(binding), ..
+        } = session
             .on_tool_call(call.proposed(), true)
             .await
             .expect("the approved spawn releases")
@@ -1459,7 +1499,7 @@ name = "execute_remedy_plan"
             .on_tool_call(fetch(serde_json::json!({"b": 1, "a": 2})), false)
             .await
             .expect("the call is decided");
-        assert_eq!(decision, ToolCallDecision::Allow { spawn: None });
+        assert!(matches!(decision, ToolCallDecision::Allow { spawn: None, .. }));
         let open = runtime
             .open_dispatches(&root(), &root())
             .pop()
@@ -1556,13 +1596,13 @@ name = "execute_remedy_plan"
                 .expect("the sanitize offer binds"),
             RemedyDecision::Authorized { .. },
         ));
-        assert_eq!(
+        assert!(matches!(
             session
                 .on_tool_call(leak(), false)
                 .await
                 .expect("the re-proposal resumes"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
         let base = runtime.log_basis(&root());
 
         runtime.store().fail_commit_after(1);
@@ -1744,9 +1784,8 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
             .await
             .expect("the old root decides");
-        assert_eq!(
-            decision,
-            ToolCallDecision::Allow { spawn: None },
+        assert!(
+            matches!(decision, ToolCallDecision::Allow { spawn: None, .. }),
             "the old root keeps fetch"
         );
 
@@ -1768,9 +1807,8 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             )
             .await
             .expect("the new root decides");
-        assert_eq!(
-            allowed,
-            ToolCallDecision::Allow { spawn: None },
+        assert!(
+            matches!(allowed, ToolCallDecision::Allow { spawn: None, .. }),
             "the edited policy's tool releases"
         );
     }
@@ -1923,7 +1961,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
             .await
             .expect("the reopened trajectory decides");
-        assert_eq!(decision, ToolCallDecision::Allow { spawn: None });
+        assert!(matches!(decision, ToolCallDecision::Allow { spawn: None, .. }));
     }
 
     #[tokio::test]
@@ -2150,9 +2188,8 @@ context_control = false
             )
             .await
             .expect("the marked call is decided");
-        assert_eq!(
-            decision,
-            ToolCallDecision::Allow { spawn: None },
+        assert!(
+            matches!(decision, ToolCallDecision::Allow { spawn: None, .. }),
             "the mark is refused and the call releases as an ordinary flow, not a fork",
         );
     }
@@ -2330,7 +2367,7 @@ attention = ["irreversible"]
             .on_tool_call(wire(500), false)
             .await
             .expect("the re-proposal resumes");
-        assert_eq!(resumed, ToolCallDecision::Allow { spawn: None });
+        assert!(matches!(resumed, ToolCallDecision::Allow { spawn: None, .. }));
         let kept = session
             .on_tool_result(
                 wire(500),
@@ -2630,13 +2667,13 @@ context_control = true
             session.on_remedy(accept, RemedyArguments::default(), None, None).await,
             Ok(RemedyDecision::Authorized { .. }),
         ));
-        assert_eq!(
+        assert!(matches!(
             session
                 .on_tool_call(read.clone(), false)
                 .await
                 .expect("the read releases"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
         session
             .on_tool_result(
                 read,
@@ -2702,20 +2739,20 @@ context_control = true
         );
         assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 1);
 
-        assert_eq!(
+        assert!(matches!(
             session
                 .on_tool_call(send(REDACTED_BODY), false)
                 .await
                 .expect("the substituted call is allowed"),
-            ToolCallDecision::Allow { spawn: None },
-        );
-        assert_eq!(
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
+        assert!(matches!(
             session
                 .on_tool_call(send(REDACTED_BODY), false)
                 .await
                 .expect("the repeat is handed the same release"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
 
         assert_eq!(
             session
@@ -2830,13 +2867,13 @@ context_control = true
             standing_release(&runtime).is_some(),
             "the substituted call still stands after the turn ended"
         );
-        assert_eq!(
+        assert!(matches!(
             session
                 .on_tool_call(send(REDACTED_BODY), false)
                 .await
                 .expect("the next turn is still handed the substituted call"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
     }
 
     #[tokio::test]
@@ -2876,10 +2913,10 @@ context_control = true
             "the abandoned dispatch closed as not run: {entries:?}"
         );
 
-        assert_eq!(
+        assert!(matches!(
             session.on_tool_call(other, false).await.expect("the repeat is decided"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
         assert!(matches!(
             session.on_remedy(hop, RemedyArguments::default(), None, None).await,
             Ok(RemedyDecision::Declined { .. }),
@@ -2904,13 +2941,13 @@ context_control = true
             Runtime::open(substituting_config(SUBSTITUTED_SEND, None), db, None).expect("the deployment reopens");
         let session = runtime.session(&root(), &root()).expect("the trajectory reopens");
         assert!(standing_release(&runtime).is_some());
-        assert_eq!(
+        assert!(matches!(
             session
                 .on_tool_call(send(REDACTED_BODY), false)
                 .await
                 .expect("the substituted call is allowed after the restart"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
     }
 
     #[tokio::test]
@@ -2940,13 +2977,13 @@ context_control = true
         ));
         assert!(standing_release(&runtime).is_some());
 
-        assert_eq!(
+        assert!(matches!(
             session
                 .on_tool_call(send(REDACTED_BODY), false)
                 .await
                 .expect("the replaced call still runs"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
     }
 
     #[tokio::test]
@@ -2984,13 +3021,13 @@ context_control = true
             session.on_tool_call(send(RAW_BODY), false).await,
             Ok(ToolCallDecision::Deny { .. }),
         ));
-        assert_eq!(
+        assert!(matches!(
             session
                 .on_tool_call(send(REDACTED_BODY), false)
                 .await
                 .expect("the approved call releases"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
     }
 
     const SANITIZED_CHILD: &str = r#"
@@ -3307,13 +3344,13 @@ confined_results = ["leak"]
             .await
             .expect("the offer executes");
         assert!(matches!(authorized, RemedyDecision::Authorized { .. }));
-        assert_eq!(
+        assert!(matches!(
             session
                 .on_tool_call(leak(), false)
                 .await
                 .expect("the re-proposal resumes"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
         session
             .on_tool_result(
                 leak(),
@@ -3449,13 +3486,13 @@ context_control = true
             child.on_remedy(offer, RemedyArguments::default(), None, None).await,
             Ok(RemedyDecision::Authorized { .. })
         ));
-        assert_eq!(
+        assert!(matches!(
             child
                 .on_tool_call(browse.clone(), false)
                 .await
                 .expect("the accepted narrowing releases the call"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
         assert_eq!(
             child
                 .on_tool_result(
@@ -3581,13 +3618,13 @@ context_control = true
                     .expect("the acceptance executes"),
                 RemedyDecision::Authorized { .. },
             ));
-            assert_eq!(
+            assert!(matches!(
                 session
                     .on_tool_call(call.clone(), false)
                     .await
                     .expect("the re-proposal resumes"),
-                ToolCallDecision::Allow { spawn: None },
-            );
+                ToolCallDecision::Allow { spawn: None, .. }
+            ));
         }
         let kept = session
             .on_tool_result(
@@ -4397,13 +4434,13 @@ context_control = true
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
         let session = runtime.create_session(root()).expect("a fresh id opens");
-        assert_eq!(
+        assert!(matches!(
             session
                 .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
                 .await
                 .expect("the call releases"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
         assert!(matches!(
             session.on_tool_call(fetch(serde_json::json!({"a": 2})), false).await,
             Err(EventError::CallOutstanding),
@@ -4425,13 +4462,13 @@ context_control = true
                 )),
             "the unreported dispatch closed as unknown, not as a run that failed"
         );
-        assert_eq!(
+        assert!(matches!(
             session
                 .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
                 .await
                 .expect("the next turn proposes freely"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
     }
 
     /// The outcome the close ruled out cannot be reported afterwards:
@@ -4721,13 +4758,13 @@ context_control = true
         let runtime = open_runtime(&dir);
         let session = runtime.create_session(root()).expect("a fresh id opens");
         runtime.store().contend_next_appends(1);
-        assert_eq!(
+        assert!(matches!(
             session
                 .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
                 .await
                 .expect("the replay commits"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
         assert_eq!(
             runtime.log_basis(&root()),
             3,
