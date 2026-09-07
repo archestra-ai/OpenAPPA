@@ -55,7 +55,7 @@ fn every_package_the_marketplace_names_validates() {
         // a deployment installs it. A battery listed as an adapter parses,
         // validates and digests, and is installed as the wrong thing.
         let kind = match package.role {
-            Role::Adapter(_) => PackageKind::Adapter,
+            Role::Plugin(_) => PackageKind::Plugin,
             Role::Battery(_) => PackageKind::Battery,
         };
         assert_eq!(
@@ -73,8 +73,7 @@ fn every_package_the_marketplace_names_validates() {
 /// rather than off the working tree, because a working tree also holds what the
 /// tests left behind — a `__pycache__` beside a battery's helper is not part of
 /// the package, and never reaches the archive a deployment resolves. When this
-/// fails, the package changed and its digest did not: the message carries the
-/// lines to write back.
+/// fails, regenerate the catalog with `bash scripts/appa-marketplace.sh`.
 #[test]
 fn every_recorded_digest_is_the_digest_of_its_committed_package() {
     let exported = tempfile::tempdir().expect("a temp dir is creatable");
@@ -95,7 +94,7 @@ fn every_recorded_digest_is_the_digest_of_its_committed_package() {
 
     assert!(
         drifted.is_empty(),
-        "marketplace.toml records a digest for a package that has since changed:\n  {}",
+        "Regenerate with `bash scripts/appa-marketplace.sh`: package digests changed:\n  {}",
         drifted.join("\n  ")
     );
 }
@@ -143,7 +142,7 @@ fn every_package_directory_is_named_by_the_marketplace() {
         .collect();
 
     let mut found = Vec::new();
-    for kind in ["adapters", "batteries"] {
+    for kind in ["plugins", "batteries"] {
         let directory = root.join(kind);
         for entry in std::fs::read_dir(&directory).expect("the marketplace holds both package kinds") {
             let path = entry.expect("the directory entry reads").path();
@@ -181,7 +180,7 @@ fn every_battery_composes_into_each_host_it_declares() {
             .iter()
             .find_map(
                 |entry| match validate_package(&root.join(entry.path.as_str())).ok()?.role {
-                    Role::Adapter(adapter) if adapter.host() == host => {
+                    Role::Plugin(adapter) if adapter.host() == host => {
                         Some(root.join(entry.path.as_str()).join(adapter.default_policy().as_str()))
                     }
                     _ => None,

@@ -244,7 +244,7 @@ fn kagent_guidance_requires_the_shared_runtime_and_direct_port() {
         "integrations/kagent/README.md",
         "integrations/kagent/IMPLEMENTATION.md",
         "integrations/appa-guide/references/kagent.md",
-        "marketplace/adapters/kagent/default.appa.toml",
+        "marketplace/plugins/kagent/default.appa.toml",
     ] {
         let content = fs::read_to_string(root.join(path)).expect("read kagent guidance");
         assert!(content.contains("APPA_RUNTIME_URL"), "{path} names the runtime URL");
@@ -419,7 +419,7 @@ fn kagent_runtime_management_is_typed_vouched_and_least_privilege() {
 fn the_claude_plugin_has_no_second_source_copy() {
     assert!(
         !repo_root()
-            .join("marketplace/adapters/claude-code/plugin/skills/appa-guide")
+            .join("marketplace/plugins/claude-code/plugin/skills/appa-guide")
             .exists(),
         "the Claude plugin materializes the canonical skill at staging time; a source copy would drift"
     );

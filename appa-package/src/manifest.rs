@@ -57,7 +57,7 @@ pub enum ManifestError {
         #[source]
         source: TreeDigestParseError,
     },
-    #[error("{path}: `{kind}` is not a package kind: a package is an adapter or a battery")]
+    #[error("{path}: `{kind}` is not a package kind: a package is an plugin or a battery")]
     Kind { path: PathBuf, kind: String },
     #[error("{path}: `{host}` is not a host: this build serves claude-code and kagent")]
     Host { path: PathBuf, host: String },
@@ -68,19 +68,19 @@ pub enum ManifestError {
         second: String,
         shared: String,
     },
-    #[error("{path} declares neither `[battery]` nor `[adapter]`")]
+    #[error("{path} declares neither `[battery]` nor `[plugin]`")]
     NoRole { path: PathBuf },
-    #[error("{path} declares both `[battery]` and `[adapter]`")]
+    #[error("{path} declares both `[battery]` and `[plugin]`")]
     BothRoles { path: PathBuf },
     #[error("{path} speaks protocol {found}; this build serves protocol {}", crate::PROTOCOL)]
     Protocol { path: PathBuf, found: u32 },
-    #[error("{path}: `{field}` is not a field of a {host} adapter")]
+    #[error("{path}: `{field}` is not a field of a {host} plugin")]
     FieldNotForHost {
         path: PathBuf,
         host: Host,
         field: &'static str,
     },
-    #[error("{path}: a {host} adapter must declare `{field}`, and this one does not")]
+    #[error("{path}: a {host} plugin must declare `{field}`, and this one does not")]
     MissingField {
         path: PathBuf,
         host: Host,

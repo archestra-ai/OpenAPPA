@@ -11,21 +11,21 @@ use std::io::{self, Write};
 use std::path::Path;
 
 pub const REPOSITORY_MAPPINGS: [(&str, &str); 9] = [
-    ("marketplace/adapters/claude-code/.claude-plugin", ".claude-plugin"),
-    ("marketplace/adapters/claude-code/plugin", "plugin"),
+    ("marketplace/plugins/claude-code/.claude-plugin", ".claude-plugin"),
+    ("marketplace/plugins/claude-code/plugin", "plugin"),
     ("integrations/appa-guide", "plugin/skills/appa-guide"),
     (
-        "marketplace/adapters/claude-code/default.appa.toml",
+        "marketplace/plugins/claude-code/default.appa.toml",
         "examples/claude-code.appa.toml",
     ),
     (
-        "marketplace/adapters/claude-code/hitl.appa.toml",
+        "marketplace/plugins/claude-code/hitl.appa.toml",
         "examples/claude-code-hitl.appa.toml",
     ),
     ("marketplace/batteries", "batteries"),
-    ("marketplace/adapters/claude-code/README.md", "README.md"),
+    ("marketplace/plugins/claude-code/README.md", "README.md"),
     (
-        "marketplace/adapters/claude-code/live-gate-check.py",
+        "marketplace/plugins/claude-code/live-gate-check.py",
         "live-gate-check.py",
     ),
     ("website/content/docs/contracts.md", "website/content/docs/contracts.md"),

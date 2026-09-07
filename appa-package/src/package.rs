@@ -1,7 +1,7 @@
 //! A package manifest: `appa-package.toml` beside the package's own files.
 //!
-//! A package is a battery or an adapter, never both and never neither, and an
-//! adapter carries only the fields of the host it adapts.
+//! A package is a battery or an plugin, never both and never neither, and an
+//! plugin carries only the fields of the host it adapts.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -16,7 +16,7 @@ use crate::names::{Host, NameError, Namespace, PackageName, RelativePath, lower_
 /// The manifest file every package carries.
 pub const MANIFEST_FILE: &str = "appa-package.toml";
 
-/// One of a kagent adapter's named images.
+/// One of a kagent plugin's named images.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ImageName(String);
 
@@ -80,9 +80,9 @@ pub struct Battery {
     pub helpers: Vec<RelativePath>,
 }
 
-/// An adapter, carrying the fields of the host it adapts and no others.
+/// An plugin, carrying the fields of the host it adapts and no others.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Adapter {
+pub enum Plugin {
     ClaudeCode {
         default_policy: RelativePath,
         plugin_dir: RelativePath,
@@ -94,8 +94,8 @@ pub enum Adapter {
     },
 }
 
-impl Adapter {
-    /// The host this adapter connects, which is also the tag its manifest block
+impl Plugin {
+    /// The host this plugin connects, which is also the tag its manifest block
     /// is written under.
     pub fn host(&self) -> Host {
         match self {
@@ -115,7 +115,7 @@ impl Adapter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Role {
     Battery(Battery),
-    Adapter(Adapter),
+    Plugin(Plugin),
 }
 
 /// A parsed package manifest.
@@ -152,7 +152,7 @@ impl Package {
             field: "name".to_owned(),
             source,
         })?;
-        let role = match (raw.battery, raw.adapter) {
+        let role = match (raw.battery, raw.plugin) {
             (Some(_), Some(_)) => {
                 return Err(ManifestError::BothRoles {
                     path: path.to_path_buf(),
@@ -164,7 +164,7 @@ impl Package {
                 });
             }
             (Some(battery), None) => Role::Battery(battery.validate(&name, path)?),
-            (None, Some(adapter)) => Role::Adapter(adapter.validate(path)?),
+            (None, Some(plugin)) => Role::Plugin(plugin.validate(path)?),
         };
         Ok(Self {
             name,
@@ -177,14 +177,14 @@ impl Package {
     pub fn battery(&self) -> Option<&Battery> {
         match &self.role {
             Role::Battery(battery) => Some(battery),
-            Role::Adapter(_) => None,
+            Role::Plugin(_) => None,
         }
     }
 
     #[cfg(test)]
-    pub fn adapter(&self) -> Option<&Adapter> {
+    pub fn plugin(&self) -> Option<&Plugin> {
         match &self.role {
-            Role::Adapter(adapter) => Some(adapter),
+            Role::Plugin(plugin) => Some(plugin),
             Role::Battery(_) => None,
         }
     }
@@ -201,7 +201,7 @@ struct RawPackage {
     name: String,
     description: String,
     battery: Option<RawBattery>,
-    adapter: Option<RawAdapter>,
+    plugin: Option<RawPlugin>,
 }
 
 #[derive(Deserialize)]
@@ -260,11 +260,11 @@ impl RawBattery {
     }
 }
 
-/// Every adapter field, so the host that does not own one can refuse it by
+/// Every plugin field, so the host that does not own one can refuse it by
 /// name instead of the reader guessing at a TOML error.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawAdapter {
+struct RawPlugin {
     host: String,
     protocol: u32,
     default_policy: String,
@@ -273,8 +273,8 @@ struct RawAdapter {
     images: Option<BTreeMap<String, String>>,
 }
 
-impl RawAdapter {
-    fn validate(self, path: &Path) -> Result<Adapter, ManifestError> {
+impl RawPlugin {
+    fn validate(self, path: &Path) -> Result<Plugin, ManifestError> {
         let host = Host::parse(&self.host).ok_or(ManifestError::Host {
             path: path.to_path_buf(),
             host: self.host.clone(),
@@ -285,7 +285,7 @@ impl RawAdapter {
                 found: self.protocol,
             });
         }
-        let default_policy = relative(&self.default_policy, "adapter.default_policy", path)?;
+        let default_policy = relative(&self.default_policy, "plugin.default_policy", path)?;
         let absent = |present: bool, field: &'static str| match present {
             true => Err(ManifestError::FieldNotForHost {
                 path: path.to_path_buf(),
@@ -305,12 +305,12 @@ impl RawAdapter {
                 absent(self.images.is_some(), "images")?;
                 let plugin_dir = self.plugin_dir.ok_or_else(|| missing("plugin_dir"))?;
                 let plugin = self.plugin.ok_or_else(|| missing("plugin"))?;
-                Ok(Adapter::ClaudeCode {
+                Ok(Plugin::ClaudeCode {
                     default_policy,
-                    plugin_dir: relative(&plugin_dir, "adapter.plugin_dir", path)?,
+                    plugin_dir: relative(&plugin_dir, "plugin.plugin_dir", path)?,
                     plugin: PackageName::parse(&plugin).map_err(|source| ManifestError::Name {
                         path: path.to_path_buf(),
-                        field: "adapter.plugin".to_owned(),
+                        field: "plugin.plugin".to_owned(),
                         source,
                     })?,
                 })
@@ -323,7 +323,7 @@ impl RawAdapter {
                 for (name, reference) in declared {
                     let name = ImageName::parse(&name).map_err(|source| ManifestError::Name {
                         path: path.to_path_buf(),
-                        field: format!("adapter.images.{name}"),
+                        field: format!("plugin.images.{name}"),
                         source,
                     })?;
                     let reference = ImageReference::parse(&reference).ok_or(ManifestError::ImageReference {
@@ -332,7 +332,7 @@ impl RawAdapter {
                     })?;
                     images.insert(name, reference);
                 }
-                Ok(Adapter::Kagent { default_policy, images })
+                Ok(Plugin::Kagent { default_policy, images })
             }
         }
     }
@@ -353,12 +353,12 @@ mod tests {
     const BATTERY: &str = "schema = 1\nname = \"github\"\ndescription = \"GitHub MCP server\"\n\n\
          [battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n";
 
-    const CLAUDE_CODE: &str = "schema = 1\nname = \"claude-code\"\ndescription = \"Claude Code adapter\"\n\n\
-         [adapter]\nhost = \"claude-code\"\nprotocol = 1\ndefault_policy = \"default.appa.toml\"\n\
+    const CLAUDE_CODE: &str = "schema = 1\nname = \"claude-code\"\ndescription = \"Claude Code plugin\"\n\n\
+         [plugin]\nhost = \"claude-code\"\nprotocol = 1\ndefault_policy = \"default.appa.toml\"\n\
          plugin_dir = \"plugin\"\nplugin = \"appa-runtime\"\n";
 
-    const KAGENT: &str = "schema = 1\nname = \"kagent\"\ndescription = \"kagent adapter\"\n\n\
-         [adapter]\nhost = \"kagent\"\nprotocol = 1\ndefault_policy = \"default.appa.toml\"\n\
+    const KAGENT: &str = "schema = 1\nname = \"kagent\"\ndescription = \"kagent plugin\"\n\n\
+         [plugin]\nhost = \"kagent\"\nprotocol = 1\ndefault_policy = \"default.appa.toml\"\n\
          images = { adk = \"ghcr.io/x/adk@sha256:aa\", adk-go = \"ghcr.io/x/adk-go@sha256:bb\" }\n";
 
     fn manifest(body: &str) -> Result<Package, ManifestError> {
@@ -425,8 +425,8 @@ mod tests {
         let package = manifest(CLAUDE_CODE).unwrap();
 
         assert_eq!(
-            package.adapter().unwrap(),
-            &Adapter::ClaudeCode {
+            package.plugin().unwrap(),
+            &Plugin::ClaudeCode {
                 default_policy: RelativePath::parse("default.appa.toml").unwrap(),
                 plugin_dir: RelativePath::parse("plugin").unwrap(),
                 plugin: PackageName::parse("appa-runtime").unwrap(),
@@ -438,8 +438,8 @@ mod tests {
     fn a_kagent_adapter_parses_its_images() {
         let package = manifest(KAGENT).unwrap();
 
-        let Some(Adapter::Kagent { images, .. }) = package.adapter() else {
-            panic!("expected a kagent adapter");
+        let Some(Plugin::Kagent { images, .. }) = package.plugin() else {
+            panic!("expected a kagent plugin");
         };
         assert_eq!(
             images.keys().map(ImageName::as_str).collect::<Vec<_>>(),
@@ -454,7 +454,7 @@ mod tests {
     #[test]
     fn a_manifest_declares_exactly_one_role() {
         let both = format!(
-            "{BATTERY}\n[adapter]\nhost = \"kagent\"\nprotocol = 1\ndefault_policy = \"d.toml\"\nimages = {{ adk = \"x\" }}\n"
+            "{BATTERY}\n[plugin]\nhost = \"kagent\"\nprotocol = 1\ndefault_policy = \"d.toml\"\nimages = {{ adk = \"x\" }}\n"
         );
         assert!(matches!(manifest(&both), Err(ManifestError::BothRoles { .. })));
 

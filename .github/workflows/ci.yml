@@ -60,11 +60,11 @@ jobs:
             python: &python
               - 'integrations/kagent/appa-kagent-adk/**'
               - 'integrations/kagent/tests/**'
-              - 'marketplace/adapters/kagent/fixtures/**'
+              - 'marketplace/plugins/kagent/fixtures/**'
               - '.github/workflows/ci.yml'
             go:
               - 'integrations/kagent/appa-kagent-adk-go/**'
-              - 'marketplace/adapters/kagent/fixtures/**'
+              - 'marketplace/plugins/kagent/fixtures/**'
               - '.github/workflows/ci.yml'
             chart:
               - 'integrations/kagent/demo/chart/**'
@@ -92,13 +92,13 @@ jobs:
               - 'bench/corp/policies/**'
               - 'examples/**'
               - 'marketplace/batteries/**'
-              - 'marketplace/adapters/claude-code/**'
+              - 'marketplace/plugins/claude-code/**'
               - 'integrations/appa-guide/**'
-              - 'marketplace/adapters/kagent/fixtures/**'
+              - 'marketplace/plugins/kagent/fixtures/**'
               - 'website/content/docs/contracts.md'
             plugin:
-              - 'marketplace/adapters/claude-code/plugin/**'
-              - 'marketplace/adapters/claude-code/.claude-plugin/**'
+              - 'marketplace/plugins/claude-code/plugin/**'
+              - 'marketplace/plugins/claude-code/.claude-plugin/**'
               - 'marketplace/batteries/**'
               - 'scripts/appa-stage-plugin-bundle.sh'
               - 'scripts/appa-install.sh'
@@ -137,10 +137,14 @@ jobs:
               - 'bench/agentthreatbench/**'
             marketplace:
               - 'marketplace/**'
+              - 'appa-package/**'
+              - 'appa-runtime-api/**'
+              - 'scripts/appa-marketplace.sh'
+              - 'Cargo.lock'
               - '.github/workflows/ci.yml'
             integration: &integration
               - *python
-              - 'marketplace/adapters/kagent/**'
+              - 'marketplace/plugins/kagent/**'
               - 'integrations/kagent/demo/demo_tools.py'
               - 'integrations/kagent/demo/mocks/**'
               - 'integrations/kagent/demo/chart/files/**'
@@ -195,19 +199,19 @@ jobs:
 
       - name: Check plugin shell syntax
         run: |
-          sh -n marketplace/adapters/claude-code/plugin/hooks/ensure-runtime.sh \
-            marketplace/adapters/claude-code/plugin/hooks/hook.sh \
-            marketplace/adapters/claude-code/plugin/hooks/appa-paths.sh \
-            marketplace/adapters/claude-code/plugin/statusline.sh \
+          sh -n marketplace/plugins/claude-code/plugin/hooks/ensure-runtime.sh \
+            marketplace/plugins/claude-code/plugin/hooks/hook.sh \
+            marketplace/plugins/claude-code/plugin/hooks/appa-paths.sh \
+            marketplace/plugins/claude-code/plugin/statusline.sh \
             scripts/appa-stage-plugin-bundle.sh \
             scripts/appa-install.sh \
             scripts/appa-install-test.sh
 
       - name: Lint plugin shell scripts
         run: |
-          shellcheck -x -s sh marketplace/adapters/claude-code/plugin/hooks/ensure-runtime.sh \
-            marketplace/adapters/claude-code/plugin/hooks/hook.sh \
-            marketplace/adapters/claude-code/plugin/hooks/appa-paths.sh \
+          shellcheck -x -s sh marketplace/plugins/claude-code/plugin/hooks/ensure-runtime.sh \
+            marketplace/plugins/claude-code/plugin/hooks/hook.sh \
+            marketplace/plugins/claude-code/plugin/hooks/appa-paths.sh \
             scripts/appa-stage-plugin-bundle.sh \
             scripts/appa-install.sh \
             scripts/appa-install-test.sh
@@ -220,9 +224,9 @@ jobs:
         run: |
           $failed = $false
           foreach ($script in @(
-            "marketplace/adapters/claude-code/plugin/hooks/hook.ps1",
-            "marketplace/adapters/claude-code/plugin/hooks/appa-paths.ps1",
-            "marketplace/adapters/claude-code/plugin/statusline.ps1"
+            "marketplace/plugins/claude-code/plugin/hooks/hook.ps1",
+            "marketplace/plugins/claude-code/plugin/hooks/appa-paths.ps1",
+            "marketplace/plugins/claude-code/plugin/statusline.ps1"
           )) {
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$errors) | Out-Null
@@ -235,9 +239,9 @@ jobs:
 
       - name: Validate plugin JSON
         run: |
-          jq -e .hooks marketplace/adapters/claude-code/plugin/hooks/hooks.json >/dev/null
-          jq -e .hooks marketplace/adapters/claude-code/plugin/hooks/hooks.windows.json >/dev/null
-          jq -e .plugins marketplace/adapters/claude-code/.claude-plugin/marketplace.json >/dev/null
+          jq -e .hooks marketplace/plugins/claude-code/plugin/hooks/hooks.json >/dev/null
+          jq -e .hooks marketplace/plugins/claude-code/plugin/hooks/hooks.windows.json >/dev/null
+          jq -e .plugins marketplace/plugins/claude-code/.claude-plugin/marketplace.json >/dev/null
 
       - name: Test release battery refresh
         run: |
@@ -264,7 +268,10 @@ jobs:
         run: rustup show
 
       - name: Manifest tests
-        run: cargo test -p appa-package --locked
+        run: cargo test -p appa-package --all-targets --locked
+
+      - name: Generated marketplace catalog
+        run: bash scripts/appa-marketplace.sh --check
 
       # Every package validates, every recorded digest is still the digest of
       # the directory it names, and no package directory goes unnamed. A digest

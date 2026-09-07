@@ -28,8 +28,8 @@ integrations/kagent/
 ```
 
 The reference policy and the canonical wire event fixtures the two plugin
-lanes share are the kagent adapter package,
-`marketplace/adapters/kagent/`.
+lanes share are in the kagent plugin package,
+`marketplace/plugins/kagent/`.
 
 ### 1. Python Runtime (`appa-kagent-adk/`)
 Wraps kagent's published Python runtime container image. It ships `AppaPluginKagent`, a Google ADK `BasePlugin` that maps lifecycle callbacks to OpenAPPA `/hook` events. It appends the plugin and the `execute_remedy_plan` tool to the agent entrypoint.

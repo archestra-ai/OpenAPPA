@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 
-const TEMPLATE: &str = include_str!("../../marketplace/adapters/claude-code/default.appa.toml");
+const TEMPLATE: &str = include_str!("../../marketplace/plugins/claude-code/default.appa.toml");
 const UNIX_FALLBACK_BEGIN: &str = "# APPA-UNIX-FALLBACK-BEGIN";
 const UNIX_FALLBACK_END: &str = "# APPA-UNIX-FALLBACK-END";
 

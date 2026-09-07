@@ -47,8 +47,9 @@ marketplace/batteries/
 
 `appa-package.toml` is the package manifest: the battery's name and
 description, the policy file, the hosts it is composed with, and the helper
-scripts its bindings name. Add the battery to `marketplace/marketplace.toml`
-as well.
+scripts its bindings name. Run `bash scripts/appa-marketplace.sh` to generate
+the catalog entry and content digest, then commit `marketplace/marketplace.toml`
+with the package. CI checks that the generated catalog is current.
 
 `appa.toml` contains the tool contracts. Add an annotator when a contract depends on the call's arguments. Add an audience source when the service's users or groups define who can receive data.
 

@@ -245,6 +245,7 @@ version = "0.0.0"
 name = "appa-package"
 version = "0.14.1"
 dependencies = [
+ "appa-runtime-api",
  "serde",
  "sha2",
  "tempfile",

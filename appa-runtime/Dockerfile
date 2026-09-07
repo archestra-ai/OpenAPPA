@@ -29,7 +29,7 @@ COPY bench bench
 COPY website-chat-playground website-chat-playground
 # appa's build.rs stages these two plugin trees into the binary's build
 # identity. Kagent harness and chart changes must not invalidate this compile.
-COPY marketplace/adapters/claude-code marketplace/adapters/claude-code
+COPY marketplace/plugins/claude-code marketplace/plugins/claude-code
 COPY marketplace/batteries marketplace/batteries
 COPY integrations/appa-guide integrations/appa-guide
 COPY website/content/docs/contracts.md website/content/docs/contracts.md

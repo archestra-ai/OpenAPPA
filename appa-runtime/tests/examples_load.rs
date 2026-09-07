@@ -42,7 +42,7 @@ fn opens(path: &Path) {
 
 #[test]
 fn every_shipped_example_opens() {
-    let examples = policy_files(&repo_root().join("marketplace/adapters/claude-code"));
+    let examples = policy_files(&repo_root().join("marketplace/plugins/claude-code"));
     assert!(
         examples.len() >= 2,
         "both shipped examples were checked, not {examples:?}"
@@ -54,7 +54,7 @@ fn every_shipped_example_opens() {
 
 #[test]
 fn the_kagent_policies_open() {
-    opens(&repo_root().join("marketplace/adapters/kagent/default.appa.toml"));
+    opens(&repo_root().join("marketplace/plugins/kagent/default.appa.toml"));
     opens(&repo_root().join("integrations/kagent/demo/chart/files/demo.appa.toml"));
 }
 
@@ -73,7 +73,7 @@ fn composed_with_the_battery(dir: &tempfile::TempDir) -> Config {
     std::fs::create_dir_all(&battery_dir).expect("the battery directory is created");
 
     let repository = repo_root();
-    let default = std::fs::read_to_string(repository.join("marketplace/adapters/claude-code/default.appa.toml"))
+    let default = std::fs::read_to_string(repository.join("marketplace/plugins/claude-code/default.appa.toml"))
         .expect("the initialized default is readable");
     std::fs::copy(
         repository.join("marketplace/batteries/claude-code/appa.toml"),
@@ -283,7 +283,7 @@ async fn the_slack_battery_allows_public_writes_and_blocks_leaking_self_secrets(
     std::fs::create_dir_all(&claude_battery_dir).expect("claude battery directory is created");
 
     let repository = repo_root();
-    let default = std::fs::read_to_string(repository.join("marketplace/adapters/claude-code/default.appa.toml"))
+    let default = std::fs::read_to_string(repository.join("marketplace/plugins/claude-code/default.appa.toml"))
         .expect("the initialized default is readable");
     std::fs::copy(
         repository.join("marketplace/batteries/slack/appa.toml"),

@@ -142,7 +142,7 @@ pub fn check_ownership(packages: &[Package]) -> Result<(), OwnershipError> {
         .iter()
         .filter_map(|package| match &package.role {
             Role::Battery(battery) => Some((&package.name, battery.namespaces.as_slice())),
-            Role::Adapter(_) => None,
+            Role::Plugin(_) => None,
         })
         .collect();
 
@@ -216,7 +216,7 @@ mod tests {
     fn listing() -> String {
         format!(
             "schema = 1\nname = \"appa\"\n\n\
-             [packages.adapter.claude-code]\npath = \"adapters/claude-code\"\ndigest = \"{DIGEST}\"\n\n\
+             [packages.plugin.claude-code]\npath = \"plugins/claude-code\"\ndigest = \"{DIGEST}\"\n\n\
              [packages.battery.github]\npath = \"batteries/github\"\ndigest = \"{DIGEST}\"\n"
         )
     }
@@ -233,8 +233,8 @@ mod tests {
                 .map(|entry| (entry.kind, entry.name.as_str(), entry.path.as_str()))
                 .collect::<Vec<_>>(),
             vec![
-                (PackageKind::Adapter, "claude-code", "adapters/claude-code"),
                 (PackageKind::Battery, "github", "batteries/github"),
+                (PackageKind::Plugin, "claude-code", "plugins/claude-code"),
             ]
         );
         assert_eq!(marketplace.packages[0].digest, TreeDigest::parse(DIGEST).unwrap());
@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn two_packages_may_not_share_a_path() {
         assert!(matches!(
-            manifest(&listing().replace("\"batteries/github\"", "\"adapters/claude-code\"")),
+            manifest(&listing().replace("\"batteries/github\"", "\"plugins/claude-code\"")),
             Err(ManifestError::DuplicatePath { .. })
         ));
     }
@@ -312,11 +312,11 @@ mod tests {
         .expect("the manifest parses")
     }
 
-    fn adapter(name: &str) -> Package {
+    fn plugin(name: &str) -> Package {
         Package::parse(
             &format!(
-                "schema = 1\nname = \"{name}\"\ndescription = \"an adapter\"\n\n\
-                 [adapter]\nhost = \"claude-code\"\nprotocol = 1\ndefault_policy = \"d.toml\"\n\
+                "schema = 1\nname = \"{name}\"\ndescription = \"an plugin\"\n\n\
+                 [plugin]\nhost = \"claude-code\"\nprotocol = 1\ndefault_policy = \"d.toml\"\n\
                  plugin_dir = \"plugin\"\nplugin = \"appa-runtime\"\n"
             ),
             Path::new("appa-package.toml"),
@@ -359,11 +359,11 @@ mod tests {
         assert!(check_ownership(&[battery("slack", &["a"]), battery("slackadmin", &["b"])]).is_ok());
     }
 
-    /// An adapter reads no credentials and covers no namespaces, so it shares
+    /// An plugin reads no credentials and covers no namespaces, so it shares
     /// a name with a battery freely — the marketplace ships `claude-code` twice.
     #[test]
     fn an_adapter_owns_nothing_a_battery_could_want() {
-        assert!(check_ownership(&[adapter("claude-code"), battery("claude-code", &["claude-code"])]).is_ok());
+        assert!(check_ownership(&[plugin("claude-code"), battery("claude-code", &["claude-code"])]).is_ok());
     }
 
     /// Two batteries under one name own each other's credentials, and the two

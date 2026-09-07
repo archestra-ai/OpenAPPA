@@ -35,7 +35,7 @@ fi
 # is replaced afterwards.
 CDPATH='' cd -- "$outdir" || exit 1
 
-adapter=$repo/marketplace/adapters/claude-code
+adapter=$repo/marketplace/plugins/claude-code
 
 cp -R -- "$adapter/.claude-plugin" ./.claude-plugin
 cp -R -- "$adapter/plugin" ./plugin

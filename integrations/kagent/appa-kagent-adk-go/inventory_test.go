@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	sharedManifestPath = "../../../marketplace/adapters/kagent/fixtures/kagent-builtins.json"
+	sharedManifestPath = "../../../marketplace/plugins/kagent/fixtures/kagent-builtins.json"
 	pythonManifestPath = "../appa-kagent-adk/src/appa_kagent_adk/builtins.json"
 )
 

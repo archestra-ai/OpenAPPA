@@ -4,7 +4,7 @@
 # after the operator approves the proposed behavior.
 #
 # This is the shared-runtime variant of the example policy
-# (`marketplace/adapters/kagent/default.appa.toml`): the same
+# (`marketplace/plugins/kagent/default.appa.toml`): the same
 # cluster-ops toolset, plus deterministic sanitizers, the delegated
 # log-analyst child, and the human-review authority. Serve it from one
 # `appa-runtime` that every agent pod reaches, so a parent and its

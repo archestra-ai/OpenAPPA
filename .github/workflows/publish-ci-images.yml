@@ -52,7 +52,7 @@ jobs:
               - 'appa-example-agent/**'
               - 'appa-agent-python/**'
               - 'integrations/kagent/**'
-              - 'marketplace/adapters/claude-code/**'
+              - 'marketplace/plugins/claude-code/**'
               - 'integrations/appa-guide/**'
               - 'marketplace/batteries/**'
               - 'scripts/appa-oci-tags.py'

@@ -2,7 +2,7 @@ schema = 1
 name = "kagent"
 description = "Gates a kagent agent pod through the Google ADK plugin API: every tool call and agent-to-agent delegation is checked before it runs."
 
-[adapter]
+[plugin]
 host = "kagent"
 protocol = 1
 default_policy = "default.appa.toml"

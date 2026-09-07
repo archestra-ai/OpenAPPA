@@ -12,7 +12,7 @@ fn adapter_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("the crate sits one level under the repository root")
-        .join("marketplace/adapters/claude-code")
+        .join("marketplace/plugins/claude-code")
 }
 
 /// The `[policy]` table of one deployment file, rendered as a policy of its own.

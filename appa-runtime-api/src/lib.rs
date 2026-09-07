@@ -23,6 +23,10 @@ pub enum AdapterName {
 impl AdapterName {
     pub const ALL: [AdapterName; 2] = [AdapterName::ClaudeCode, AdapterName::Kagent];
 
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|host| host.as_str() == text)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             AdapterName::ClaudeCode => "claude-code",

@@ -8,6 +8,8 @@ use std::path::Path;
 
 use thiserror::Error;
 
+pub use appa_runtime_api::AdapterName as Host;
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum NameError {
     #[error("`{0}` is not a name: a name matches ^[a-z0-9][a-z0-9-]*$")]
@@ -89,10 +91,8 @@ pub(crate) fn lower_kebab(text: &str) -> bool {
 /// The middle segment of a canonical tool id: `mcp/<namespace>/<tool>`. Its
 /// alphabet is the harness's, not this marketplace's — an MCP server key such
 /// as `claude_ai_Slack` is a namespace and can never be a `PackageName` — so
-/// the two grammars are separate on purpose. This one must accept exactly what
-/// `appa_runtime_api::CanonicalTool` accepts between the family and the tool;
-/// `appa-runtime` holds the test that keeps them agreeing, because only it
-/// depends on both crates.
+/// the two grammars are separate on purpose. The protocol parser validates
+/// namespaces here too, so package and runtime names cannot drift apart.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Namespace(String);
 
@@ -106,16 +106,12 @@ pub enum NamespaceError {
 
 impl Namespace {
     pub fn parse(text: &str) -> Result<Self, NamespaceError> {
-        let spellable = !text.is_empty()
-            && text
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'));
-        if !spellable {
-            return Err(NamespaceError::Malformed(text.to_owned()));
-        }
-        match text.contains("__") {
-            true => Err(NamespaceError::DoubleUnderscore(text.to_owned())),
-            false => Ok(Self(text.to_owned())),
+        match appa_runtime_api::CanonicalTool::of("mcp", text, "tool") {
+            Ok(_) => Ok(Self(text.to_owned())),
+            Err(appa_runtime_api::CanonicalToolError::Namespace { .. }) => {
+                Err(NamespaceError::DoubleUnderscore(text.to_owned()))
+            }
+            Err(_) => Err(NamespaceError::Malformed(text.to_owned())),
         }
     }
 
@@ -187,51 +183,18 @@ impl fmt::Display for RelativePath {
     }
 }
 
-/// The harnesses this workspace ships adapters and batteries for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Host {
-    ClaudeCode,
-    Kagent,
-}
-
-impl Host {
-    /// Every host, so the runtime's own adapter set can be held equal to it.
-    pub const ALL: [Host; 2] = [Host::ClaudeCode, Host::Kagent];
-
-    pub fn parse(text: &str) -> Option<Self> {
-        match text {
-            "claude-code" => Some(Self::ClaudeCode),
-            "kagent" => Some(Self::Kagent),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::ClaudeCode => "claude-code",
-            Self::Kagent => "kagent",
-        }
-    }
-}
-
-impl fmt::Display for Host {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
 /// What a marketplace package is. The kind is the table a package is listed
 /// under, never a free string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PackageKind {
-    Adapter,
+    Plugin,
     Battery,
 }
 
 impl PackageKind {
     pub fn parse(text: &str) -> Option<Self> {
         match text {
-            "adapter" => Some(Self::Adapter),
+            "plugin" => Some(Self::Plugin),
             "battery" => Some(Self::Battery),
             _ => None,
         }
@@ -239,7 +202,7 @@ impl PackageKind {
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Adapter => "adapter",
+            Self::Plugin => "plugin",
             Self::Battery => "battery",
         }
     }
@@ -271,8 +234,8 @@ mod tests {
     #[test]
     fn relative_paths_may_be_nested() {
         assert_eq!(
-            RelativePath::parse("adapters/claude-code").unwrap().as_str(),
-            "adapters/claude-code"
+            RelativePath::parse("plugins/claude-code").unwrap().as_str(),
+            "plugins/claude-code"
         );
     }
 

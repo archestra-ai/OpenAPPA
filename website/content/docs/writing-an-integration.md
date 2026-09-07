@@ -147,7 +147,7 @@ A new host chooses one of the two shapes: build the envelope in-process, as kage
 
 Use the shipped source on GitHub as a reference:
 
-- **Claude Code**: [Appa adapter](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-claude-code) and [hooks plugin](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/adapters/claude-code).
+- **Claude Code**: [Appa adapter](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-claude-code) and [hooks plugin](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/plugins/claude-code).
 - **kagent**: [Appa adapter](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-kagent), [Python plugin](https://github.com/archestra-ai/OpenAPPA/tree/main/integrations/kagent/appa-kagent-adk), and [Go plugin](https://github.com/archestra-ai/OpenAPPA/tree/main/integrations/kagent/appa-kagent-adk-go).
 
 ### Smoke-Test Checklist

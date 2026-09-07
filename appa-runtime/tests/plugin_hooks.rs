@@ -30,12 +30,12 @@ fn built_binary() -> &'static std::path::Path {
 }
 
 fn plugin_root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace/adapters/claude-code/plugin")
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace/plugins/claude-code/plugin")
 }
 
 fn shipped(file: &str) -> serde_json::Value {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../marketplace/adapters/claude-code/plugin/hooks")
+        .join("../marketplace/plugins/claude-code/plugin/hooks")
         .join(file);
     serde_json::from_str(&std::fs::read_to_string(path).unwrap_or_else(|_| panic!("the shipped {file} is readable")))
         .unwrap_or_else(|_| panic!("the shipped {file} parses"))
@@ -43,7 +43,7 @@ fn shipped(file: &str) -> serde_json::Value {
 
 fn plugin_file(file: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../marketplace/adapters/claude-code/plugin")
+        .join("../marketplace/plugins/claude-code/plugin")
         .join(file)
 }
 
@@ -144,7 +144,7 @@ fn both_shipped_hook_maps_mark_the_same_turn_ends() {
 fn both_shipped_hook_maps_inject_the_same_session_context() {
     const CONTEXT: &str = "session-context.md";
     let hooks_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace/adapters/claude-code/plugin/hooks");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace/plugins/claude-code/plugin/hooks");
     assert!(hooks_dir.join(CONTEXT).is_file(), "the shipped {CONTEXT} is missing");
 
     let posix = shipped("hooks.json");

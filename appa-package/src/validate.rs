@@ -107,10 +107,10 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
             }
             check_policy(&policy, &package.name, &battery.namespaces, &battery.helpers)?;
         }
-        Role::Adapter(adapter) => {
-            contained.resolve(adapter.default_policy(), "adapter.default_policy", EntryKind::File)?;
-            if let crate::package::Adapter::ClaudeCode { plugin_dir, .. } = adapter {
-                contained.resolve(plugin_dir, "adapter.plugin_dir", EntryKind::Directory)?;
+        Role::Plugin(plugin) => {
+            contained.resolve(plugin.default_policy(), "plugin.default_policy", EntryKind::File)?;
+            if let crate::package::Plugin::ClaudeCode { plugin_dir, .. } = plugin {
+                contained.resolve(plugin_dir, "plugin.plugin_dir", EntryKind::Directory)?;
             }
         }
     }
@@ -422,7 +422,7 @@ mod tests {
     use std::fs;
 
     use crate::names::Host;
-    use crate::package::Adapter;
+    use crate::package::Plugin;
 
     const BATTERY_MANIFEST: &str = "schema = 1\nname = \"github\"\ndescription = \"GitHub MCP server\"\n\n\
          [battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n";
@@ -444,8 +444,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         fs::write(
             directory.path().join("appa-package.toml"),
-            "schema = 1\nname = \"claude-code\"\ndescription = \"Claude Code adapter\"\n\n\
-             [adapter]\nhost = \"claude-code\"\nprotocol = 1\ndefault_policy = \"default.appa.toml\"\n\
+            "schema = 1\nname = \"claude-code\"\ndescription = \"Claude Code plugin\"\n\n\
+             [plugin]\nhost = \"claude-code\"\nprotocol = 1\ndefault_policy = \"default.appa.toml\"\n\
              plugin_dir = \"plugin\"\nplugin = \"appa-runtime\"\n",
         )
         .unwrap();
@@ -459,8 +459,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         fs::write(
             directory.path().join("appa-package.toml"),
-            "schema = 1\nname = \"kagent\"\ndescription = \"kagent adapter\"\n\n\
-             [adapter]\nhost = \"kagent\"\nprotocol = 1\ndefault_policy = \"default.appa.toml\"\n\
+            "schema = 1\nname = \"kagent\"\ndescription = \"kagent plugin\"\n\n\
+             [plugin]\nhost = \"kagent\"\nprotocol = 1\ndefault_policy = \"default.appa.toml\"\n\
              images = { adk = \"ghcr.io/x/adk@sha256:aa\" }\n",
         )
         .unwrap();
@@ -484,12 +484,12 @@ mod tests {
         let kagent = kagent_adapter();
 
         assert!(matches!(
-            validate_package(claude_code.path()).unwrap().adapter(),
-            Some(Adapter::ClaudeCode { .. })
+            validate_package(claude_code.path()).unwrap().plugin(),
+            Some(Plugin::ClaudeCode { .. })
         ));
         assert!(matches!(
-            validate_package(kagent.path()).unwrap().adapter(),
-            Some(Adapter::Kagent { .. })
+            validate_package(kagent.path()).unwrap().plugin(),
+            Some(Plugin::Kagent { .. })
         ));
     }
 
@@ -536,7 +536,7 @@ mod tests {
         assert!(matches!(
             validate_package(directory.path()),
             Err(PackageError::MissingPath {
-                field: "adapter.plugin_dir",
+                field: "plugin.plugin_dir",
                 ..
             })
         ));
@@ -668,21 +668,21 @@ mod tests {
             })
         ));
 
-        let adapter = tempfile::tempdir().unwrap();
+        let plugin = tempfile::tempdir().unwrap();
         fs::write(
-            adapter.path().join("appa-package.toml"),
-            "schema = 1\nname = \"claude-code\"\ndescription = \"Claude Code adapter\"\n\n\
-             [adapter]\nhost = \"claude-code\"\nprotocol = 1\ndefault_policy = \"default.appa.toml\"\n\
+            plugin.path().join("appa-package.toml"),
+            "schema = 1\nname = \"claude-code\"\ndescription = \"Claude Code plugin\"\n\n\
+             [plugin]\nhost = \"claude-code\"\nprotocol = 1\ndefault_policy = \"default.appa.toml\"\n\
              plugin_dir = \"plugin\"\nplugin = \"appa-runtime\"\n",
         )
         .unwrap();
-        fs::write(adapter.path().join("default.appa.toml"), "[policy]\nversion = 2\n").unwrap();
-        fs::write(adapter.path().join("plugin"), "not a tree").unwrap();
+        fs::write(plugin.path().join("default.appa.toml"), "[policy]\nversion = 2\n").unwrap();
+        fs::write(plugin.path().join("plugin"), "not a tree").unwrap();
 
         assert!(matches!(
-            validate_package(adapter.path()),
+            validate_package(plugin.path()),
             Err(PackageError::WrongKind {
-                field: "adapter.plugin_dir",
+                field: "plugin.plugin_dir",
                 ..
             })
         ));

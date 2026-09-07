@@ -14,7 +14,7 @@ import pytest
 from appa_kagent_adk import wire
 
 REPOSITORY = Path(__file__).parents[4]
-FIXTURES = REPOSITORY / "marketplace" / "adapters" / "kagent" / "fixtures" / "wire-events.jsonl"
+FIXTURES = REPOSITORY / "marketplace" / "plugins" / "kagent" / "fixtures" / "wire-events.jsonl"
 
 ROOT = "adk-4f6c2f1e"
 CHILD = "adk-9b0d11aa"
