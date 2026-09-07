@@ -63,10 +63,10 @@ An authority can approve a specific action that the session's restrictions would
 For example, an agent has read a private customer report and wants to email it to an external auditor. An authority can approve that email without approving future emails or changing the session's restrictions.
 
 ```toml
-[[authority]]
+[[policy.authority]]
 name = "reviewer"
 
-[authority.permits]
+[policy.authority.permits]
 # Allow the reviewer to approve sharing
 # outside the session's audience.
 audience_missing = ["public"]
@@ -76,7 +76,7 @@ audience_missing = ["public"]
 builtin = "hitl"
 ```
 
-See [Authorities in the policy reference](/contracts#authorities) for configuration and supported implementations.
+See [Authorities in Policy configuration](/contracts#authorities) for configuration and supported implementations.
 
 ### Sanitizers
 
@@ -85,11 +85,11 @@ A sanitizer cleans data before the agent receives it or sends it to a tool. Clea
 For example, a sanitizer removes customer names and email addresses from a support ticket. The policy permits the agent to share that cleaned version in a public bug report.
 
 ```toml
-[[sanitizer]]
+[[policy.sanitizer]]
 name = "remove_customer_details"
 on = ["tool_output"]
 
-[sanitizer.permits]
+[policy.sanitizer.permits]
 # Allow the cleaned result to be shared publicly.
 audience = { from = ["internal"], to = ["public"] }
 
@@ -98,7 +98,7 @@ audience = { from = ["internal"], to = ["public"] }
 url = "https://sanitizer.corp.example/sanitize"
 ```
 
-See [Sanitizers in the policy reference](/contracts#sanitizers) for service configuration and where cleaning can happen.
+See [Sanitizers in Policy configuration](/contracts#sanitizers) for service configuration and where cleaning can happen.
 
 ### Annotators
 
@@ -107,14 +107,14 @@ An annotator classifies a tool call to determine its output restrictions (`delta
 For example, a Python script can classify files by directory: files in `/srv/public-docs` can be shared publicly, while files in `/srv/customer-records` are restricted to internal users.
 
 ```toml
-[[annotator]]
+[[policy.annotator]]
 name = "classify_file"
 ranks = ["suspicious"]
-audiences = ["public", "internal"]
+audiences = ["internal"]
 marks = []
 effects = []
 
-[[tool]]
+[[policy.tool]]
 name = "read_file"
 # Ask the annotator to classify the file being read.
 annotator = "classify_file"
@@ -123,7 +123,7 @@ annotator = "classify_file"
 command = ["python3", "./classify_file.py"]
 ```
 
-An annotator can run as a local script or an external service. See [Annotators in the policy reference](/contracts#annotators) for configuration, the request and response format, and limits on its answers.
+An annotator can run as a local script or an external service. See [Annotators in Policy configuration](/contracts#annotators) for configuration, the request and response format, and limits on its answers.
 
 ### Subagent Reads
 
@@ -169,7 +169,7 @@ The agent can still finish useful work with private data, but sharing it outside
 
 ## Next steps
 
-- [Policy Reference](/contracts): Guide to reviewing and writing policy configuration.
+- [Policy configuration](/contracts): Syntax and requirements for policy declarations and component services.
 - [How to add it to your agent](/writing-an-integration): Integration guide, deployment models, and existing integrations.
 - [Benchmarks](/evaluation): Empirical paper results on multi-step workflows and bench-corp.
 - [OpenAPPA Paper](/paper): Formal information-flow model, theorems, and experimental methodology.

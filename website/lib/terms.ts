@@ -7,7 +7,7 @@
 const TERMS = {
   version: "The policy configuration dialect version.",
   include:
-    "Policy fragments composed by the root configuration. Root declarations run first, followed by included declarations in list order. Included files cannot include more files or replace root-wide settings. A root [[annotator]] replaces one included Annotator with the same name.",
+    "Policy fragments composed by the root configuration. Root declarations run first, followed by included declarations in list order. Included files cannot include more files or replace root-wide settings. A root [[policy.annotator]] replaces one included Annotator with the same name.",
   trust_chain:
     "The ordered list of trust ranks, least-trusted first. Omitted, it defaults to suspicious < trusted.",
 
@@ -29,8 +29,8 @@ const TERMS = {
   annotators:
     "Registered components that produce complete per-call tool contracts inside their declared mandates.",
   annotation:
-    "The complete concrete contract one released tool call carries: its delta, its requires, and the effects it emits. Written statically in the [[tool]] entry, or answered per call by an annotator; pinned to the exact call, so a rewrite is annotated afresh and replay never consults again.",
-  "[[annotator]]":
+    "The complete concrete contract one released tool call carries: its delta, its requires, and the effects it emits. Written statically in the [[policy.tool]] entry, or answered per call by an annotator; pinned to the exact call, so a rewrite is annotated afresh and replay never consults again.",
+  "[[policy.annotator]]":
     "A named producer of per-call tool contracts. It declares an optional policy-authored hint, an input mapping, and a mandate that bounds every answer. It may name builtin = \"claude-code\" or \"llm\"; otherwise the deployment binds it under [externals.annotators.<name>].",
   mandate:
     "The closed vocabulary an annotator's answers may use: ranks, audiences, marks, and effects. An omitted bound admits the whole policy vocabulary; public is always an admissible audience. Every transport's answer passes the same mandate validation.",
@@ -53,24 +53,24 @@ const TERMS = {
   trusted:
     "Data from a vetted source, or vouched to the rank by a sanitizer that permits the transition — a claim about the instruction channel, never about a value's honesty.",
   suspicious:
-    "Data from an unvetted source, like external web content. Once ingested, the run stays suspicious.",
+    "Data from an unverified source, such as a web page. Reading it lowers the trajectory's trust and can block tools that require trusted input.",
   public:
     "The reserved unrestricted audience state, not a reader ID: no audience restriction applies. An agent with public reach can send data to any outbound destination. As a placeholder argument it names the Public audience, which only a Public trajectory includes. Never a group member.",
   "@name":
-    "A mention of a symbolic audience: @finance names a configured [[audience.group]], and @provider:selector reads a source collection directly. The mention stays symbolic in labels and the log; membership is read from the configured sources per act and pinned.",
+    "A mention of a symbolic audience: @finance names a configured [[policy.audience.group]], and @provider:selector reads a source collection directly. The mention stays symbolic in labels and the log; membership is read from the configured sources per act and pinned.",
   "@finance":
     "A mention of a configured named audience. It stays symbolic in labels and the log; its membership is read from the audience sources per act and pinned.",
-  "[[audience.group]]":
+  "[[policy.audience.group]]":
     "One configured named audience: its bare name (mentioned as @name), an optional within assertion into a built-in audience, and the from selectors that supply its members. Multiple sources are unioned.",
-  "[audience.self]":
-    "The mapping of the built-in self audience: the viewer selectors of the configured sources. self is the deployment's configured operating principal — whoever the credentials represent.",
-  "[audience.internal]":
+  "[policy.audience.self]":
+    "Configures the self audience: the identity OpenAPPA acts for. Uses viewer selectors to read that identity from the configured sources. Results from multiple sources are combined.",
+  "[policy.audience.internal]":
     "The mapping of the built-in internal audience: full-membership collections, and for GitHub only explicitly selected organizations. Multiple sources are unioned.",
-  self: "The innermost built-in audience: the deployment's configured operating principal — whoever the credentials represent, which need not be a person — extensionally the union of the configured viewer sources.",
-  "[identity]":
-    "The deployment's one identity implementation, canonicalizing each provider-reported member to one principal before exact reader comparison. The shipped verified-email is deterministic and network-free; a custom name binds under [externals.identity.<name>].",
+  self: "The identity OpenAPPA acts for. This can be a person or a service. The configured viewer sources supply its reader IDs, which are combined into the self audience.",
+  "[policy.identity]":
+    "Selects how OpenAPPA converts member details into reader IDs. If omitted, OpenAPPA uses verified-email. To use your own service, set implementation to its name and configure it under [externals.identity.<name>].",
   "verified-email":
-    "The shipped identity implementation: a member with a verified email becomes that address under conservative normalization (domain case only); a member without one keeps its provider-qualified ID. The address is the principal, so a reader written as an address is the same reader the verified claim resolves to. Deterministic and network-free.",
+    "Uses the membership service's verified_email field as the reader ID. The service must verify who owns the email; OpenAPPA only checks its format. A value such as finance causes an error. If the field is absent, OpenAPPA keeps the provider ID. This is the default identity implementation.",
   inputs:
     "The values an annotator reads, each mapped from $tool_call on its declaration. Without an explicit mapping, the annotator reads the complete tool call: name, description when declared, and arguments.",
   ranks:
@@ -90,7 +90,7 @@ const TERMS = {
   artifact:
     "The judged half of a consult: the call and its unmet requirements, the body to rewrite, an annotator's args, a selector or member to read, or the member claims to canonicalize. Never the trajectory.",
   internal:
-    "The built-in organization audience, between self and public in the shipped chain. Symbolic in labels and the log; extensionally the union of the configured internal sources, the members of self, and every group declared within either. Reading internal data closes off public destinations.",
+    "Data for members of the organization, as defined by the policy. After reading it, the agent needs a permitted remedy to share data outside that audience.",
   "{public, trusted}":
     "The neutral starting label before reading any data: unrestricted outbound reach and the trust chain's top rank — trusted under the default chain.",
   egress:
@@ -104,7 +104,7 @@ const TERMS = {
   contains:
     "Under requires.audience: the current audience must include these readers; a $arg placeholder is allowed only here. Under requires.effects: the trajectory already recorded this effect.",
   within:
-    "Under requires.audience: the current audience must sit within this audience; a tool_input rewrite cannot clear it. On an [[audience.group]]: the trusted policy assertion that the group sits within a built-in audience (self or internal).",
+    "Under requires.audience: the current audience must sit within this audience; a tool_input rewrite cannot clear it. On an [[policy.audience.group]]: the trusted policy assertion that the group sits within a built-in audience (self or internal).",
   excludes:
     "Under requires.effects: the effect is neither recorded in the trajectory nor reserved by an unsettled dispatch.",
   tags: "Routing names with no algebraic life. On a tool, the names that select it. On an authority or sanitizer, the tools it answers or the values it acts on; omitted, every tool. Attention routing ignores tags.",

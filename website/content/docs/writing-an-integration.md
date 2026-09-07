@@ -53,9 +53,9 @@ OpenAPPA can work with the approval processes, data-cleaning services, and compa
 | **Human review & automated approval services** | [Authority](/contracts#authorities) | Ask a person, webhook, or LLM evaluator to approve or deny a specific action before the agent proceeds. |
 | **Data and Action Classification** | [Annotator](/contracts#annotators) | Use a scanner or classifier to determine who may see data, how much it can be trusted, or whether an action needs review. |
 | **PII redactors & sanitizers** | [Sanitizer](/contracts#sanitizers) | Remove sensitive information before the agent receives data or shares it with another tool. |
-| **IAM Groups based access control** | [Audience sources](/contracts#audience-sources) | Use membership from Google Workspace, Slack, or GitHub to check who is allowed to access data. |
+| **IAM Groups based access control** | [Audience sources](/contracts#configure-audience-membership) | Use membership from Google Workspace, Slack, or GitHub to check who is allowed to access data. |
 
-See the [Policy reference](/contracts) for configuration examples.
+See the [Policy configuration](/contracts) for configuration examples.
 
 ## Why Add OpenAPPA?
 
