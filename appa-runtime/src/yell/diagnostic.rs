@@ -38,7 +38,7 @@ use crate::engine::ReplayRefusalClass;
 
 /// How much stripped fact JSON one export may hold. The report envelope around it is trimmed
 /// separately against the receiver's own limits; this bounds what the *builder* materializes.
-const MAX_FACT_BYTES: usize = 24 * 1024 * 1024;
+pub(crate) const MAX_FACT_BYTES: usize = 24 * 1024 * 1024;
 /// What each entry's own JSON framing costs on top of the fact, so the budget is measured
 /// against something close to the emitted document rather than the facts alone.
 const ENTRY_OVERHEAD: usize = 32;
