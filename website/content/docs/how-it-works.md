@@ -123,8 +123,6 @@ annotator = "classify_file"
 command = ["python3", "./classify_file.py"]
 ```
 
-Save this as `classify_file.py` beside the configuration file. The script reads the proposed call from standard input and writes its annotation as JSON:
-
 ```python
 import json
 import sys
