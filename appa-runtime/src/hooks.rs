@@ -1,6 +1,7 @@
 //! The hook dispatcher: one canonical wire event in, one wire decision
 //! out; between them, one typed `HookEvent` and one `HookDecision`.
 
+use appa_engine::value::DispatchId as EngineDispatchId;
 use appa_runtime_api::{
     Accepted, Actor, Adapter, HookDecision, HookEvent, ParseRefusal, ProposedCall, Ruling, TrajectoryId, WireDecision,
     WireEvent,
@@ -15,37 +16,99 @@ fn wire(decision: &HookDecision) -> serde_json::Value {
     serde_json::to_value(WireDecision::of(decision)).expect("a wire decision serializes")
 }
 
-/// One hook call, wire to wire: read the canonical envelope, derive what
-/// the served adapter derives from the raw call, dispatch, answer with
-/// the wire decision and the HTTP status it travels under. A non-2xx
-/// status makes the hook command exit 2, which blocks the action —
-/// hooks fail closed. Nothing about a call is read from the wire beyond
-/// its raw spelling and arguments; the host's own translation happens
-/// on the client side and is not trusted here.
+/// One hook call: validate the canonical wire, dispatch, and record its outcome. A
+/// non-2xx status makes the hook command exit 2, which blocks the
+/// action — hooks fail closed.
 pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> (u16, serde_json::Value) {
+    use crate::events::{HookKind, HookOutcome};
+
+    // Every way a hook can end leaves exactly one entry, including the three that never
+    // reach the dispatcher. Those are the answers a reader is most likely to be confused
+    // by: nothing happened, and the trajectory's facts say nothing about why. None of them
+    // has an actor yet, so they are recorded deployment-wide.
     let accepted = match WireEvent::read(body).and_then(|event| event.into_event(adapter)) {
         Ok(Some(accepted)) => accepted,
-        Ok(None) => return (200, wire(&HookDecision::Ack)),
-        Err(ParseRefusal::Unreadable { detail }) => return (400, serde_json::json!({ "error": detail })),
-        Err(ParseRefusal::Malformed { detail }) => return (409, serde_json::json!({ "error": detail })),
+        Ok(None) => {
+            runtime.record(None, bare_hook(HookKind::Ignored, HookOutcome::Ignored, None));
+            return (200, wire(&HookDecision::Ack));
+        }
+        Err(ParseRefusal::Unreadable { detail }) => {
+            runtime.record(None, bare_hook(HookKind::Unparsable, HookOutcome::Unreadable, None));
+            return (400, serde_json::json!({ "error": detail }));
+        }
+        Err(ParseRefusal::Malformed { detail }) => {
+            runtime.record(None, bare_hook(HookKind::Unparsable, HookOutcome::Malformed, None));
+            return (409, serde_json::json!({ "error": detail }));
+        }
     };
     let Accepted { event, names_children } = accepted;
-    if let HookEvent::ToolCall { actor, .. } = &event {
-        match runtime.opened_among(&actor.root, &names_children) {
+    let root = hook_root(&event).clone();
+    if let HookEvent::ToolCall { actor, call, .. } = &event {
+        let early = match runtime.opened_among(&actor.root, &names_children) {
             Ok(Some(child)) => {
                 tracing::debug!(root = %actor.root.0, child = %child.0, "a call names a family child's transcript");
-                return (200, wire(&deny(NAMED_TRANSCRIPT.to_string())));
+                Some((200, deny(NAMED_TRANSCRIPT.to_string())))
             }
-            Ok(None) => {}
-            Err(error) => return (409, wire(&refuse(error.to_string()))),
+            Ok(None) => None,
+            Err(error) => Some((409, refuse(error.to_string()))),
+        };
+        if let Some((status, decision)) = early {
+            let (outcome, offers) = hook_result(&decision);
+            runtime.record(
+                Some(&root),
+                crate::events::RuntimeEvent::Hook {
+                    event: HookKind::ToolCall,
+                    tool: Some(call.tool.clone()),
+                    dispatch: None,
+                    outcome,
+                    offers,
+                },
+            );
+            return (status, wire(&decision));
         }
     }
-    let decision = handle(runtime, event).await;
-    let status = match decision {
+    let handled = handle_internal(runtime, event).await;
+    runtime.record(Some(&root), handled.event);
+    let status = match handled.decision {
         HookDecision::Refuse { .. } => 409,
         _ => 200,
     };
-    (status, wire(&decision))
+    (status, wire(&handled.decision))
+}
+
+/// A hook that ended before an actor existed, so there is nothing to attribute it to.
+fn bare_hook(
+    event: crate::events::HookKind,
+    outcome: crate::events::HookOutcome,
+    tool: Option<String>,
+) -> crate::events::RuntimeEvent {
+    crate::events::RuntimeEvent::Hook {
+        event,
+        tool,
+        dispatch: None,
+        outcome,
+        offers: Vec::new(),
+    }
+}
+
+/// The trajectory an entry belongs to. A child's events are kept under its own id, as the
+/// engine's facts are: a report about a subagent should not have to be found under its parent.
+/// The root this event's diagnostic entry is filed under.
+///
+/// The *root*, never the acting trajectory: the event log is keyed by family, because that is
+/// the unit a report is about and the unit its per-list bound must apply to. Filing a
+/// subagent's hooks under the subagent would put them outside the family's own account and
+/// leave `recent_root` naming something no log can be read for.
+fn hook_root(event: &HookEvent) -> &TrajectoryId {
+    match event {
+        HookEvent::SessionStart { root } => root,
+        HookEvent::ChildStart { root, .. } | HookEvent::ChildEnd { root, .. } => root,
+        HookEvent::Prompt { actor, .. }
+        | HookEvent::TurnEnd { actor }
+        | HookEvent::ToolCall { actor, .. }
+        | HookEvent::ToolResult { actor, .. }
+        | HookEvent::SpawnResult { actor, .. } => &actor.root,
+    }
 }
 
 /// A subagent's words reach its parent through the checked return only; a call that
@@ -53,10 +116,84 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> (u16, 
 const NAMED_TRANSCRIPT: &str = "this call names a subagent's transcript or output file; a subagent's words \
                                 reach this session only through its checked return";
 
+/// Dispatch one typed event to its session and fold the outcome into one decision.
+///
+/// The wrapper every adapter, `replay`, and the MCP endpoint calls: it drops the diagnostic
+/// entry that [`handle_internal`] also builds. Only `answer` — the one path a live harness
+/// reaches — keeps it.
+pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
+    handle_internal(runtime, event).await.decision
+}
+
+/// One dispatched hook: the decision the adapters render, and the entry the runtime keeps
+/// about it.
+///
+/// The two travel together because the dispatch id belongs to exactly one of them.
+/// `HookDecision` is the public adapter wire type and carries no id — an adapter must not
+/// see one — but a diagnostic that cannot tie a hook to the dispatch it opened cannot be
+/// correlated with the trajectory's own facts. So the id is picked up here, where the
+/// release is still in scope, and never crosses the adapter boundary.
+pub(crate) struct Handled {
+    pub(crate) decision: HookDecision,
+    pub(crate) event: crate::events::RuntimeEvent,
+}
+
+pub(crate) async fn handle_internal(runtime: &Runtime, event: HookEvent) -> Handled {
+    let (kind, tool) = hook_shape(&event);
+    let mut dispatch = None;
+    let decision = dispatch_event(runtime, event, &mut dispatch).await;
+    let (outcome, offers) = hook_result(&decision);
+    Handled {
+        event: crate::events::RuntimeEvent::Hook {
+            event: kind,
+            tool,
+            dispatch,
+            outcome,
+            offers,
+        },
+        decision,
+    }
+}
+
+/// Which hook this is, and the tool it names where it names one.
+fn hook_shape(event: &HookEvent) -> (crate::events::HookKind, Option<String>) {
+    use crate::events::HookKind;
+    match event {
+        HookEvent::SessionStart { .. } => (HookKind::SessionStart, None),
+        HookEvent::Prompt { .. } => (HookKind::Prompt, None),
+        HookEvent::TurnEnd { .. } => (HookKind::TurnEnd, None),
+        HookEvent::ToolCall { call, .. } => (HookKind::ToolCall, Some(call.tool.clone())),
+        HookEvent::ToolResult { call, .. } => (HookKind::ToolResult, Some(call.tool.clone())),
+        HookEvent::ChildStart { .. } => (HookKind::ChildStart, None),
+        HookEvent::ChildEnd { .. } => (HookKind::ChildEnd, None),
+        HookEvent::SpawnResult { call, .. } => (HookKind::SpawnResult, Some(call.tool.clone())),
+    }
+}
+
+/// How it was answered. `offers` are the remedy ids a block named, so a report can say
+/// which way out was on the table.
+fn hook_result(decision: &HookDecision) -> (crate::events::HookOutcome, Vec<String>) {
+    use crate::events::HookOutcome;
+    match decision {
+        HookDecision::Ack
+        | HookDecision::Context { .. }
+        | HookDecision::ChildReturn { .. }
+        | HookDecision::DeliverValue { .. } => (HookOutcome::Acked, Vec::new()),
+        HookDecision::AllowCall { .. } => (HookOutcome::Allowed, Vec::new()),
+        HookDecision::PassControl => (HookOutcome::PassControl, Vec::new()),
+        HookDecision::DenyCall { offers, .. } => (
+            HookOutcome::Denied,
+            offers.iter().map(|offered| offered.id.clone()).collect(),
+        ),
+        HookDecision::Block { .. } | HookDecision::ReplaceOutput { .. } => (HookOutcome::Blocked, Vec::new()),
+        HookDecision::Refuse { .. } => (HookOutcome::Refused, Vec::new()),
+    }
+}
+
 /// Dispatch one typed event to its session and fold the outcome into
 /// one decision. The dispatcher holds nothing between calls; every id
 /// it needs is in the event or in the runtime's persistence.
-pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
+async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Option<EngineDispatchId>) -> HookDecision {
     match event {
         HookEvent::SessionStart { root } => match open_or_reopen(runtime, &root) {
             Ok(_) => match runtime.live(&root, &root) {
@@ -122,7 +259,12 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             })
             .await
             {
-                Ok(ToolCallDecision::Allow { spawn }) => {
+                Ok(ToolCallDecision::Allow {
+                    spawn,
+                    dispatch: opened,
+                }) => {
+                    *dispatch = Some(opened);
+                    vouch_yell(runtime, &actor, &call);
                     runtime.vouch_management(&call, &actor);
                     HookDecision::AllowCall { spawn }
                 }
@@ -247,7 +389,7 @@ fn control_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall, ruling: O
     let acting = actor.child.clone().unwrap_or_else(|| actor.root.clone());
     match runtime.resolve_in(&actor.root, &quoted) {
         Some((_, pursuer)) if pursuer == acting => {
-            runtime.vouch(&quoted, actor, ruling);
+            runtime.vouch(&crate::api::PermitKey::offer(&quoted), actor, ruling);
             tracing::debug!(trajectory = %acting.0, "control tool names an offer this trajectory pursues");
             HookDecision::PassControl
         }
@@ -256,6 +398,38 @@ fn control_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall, ruling: O
             deny("this offer no longer stands; re-propose the call".to_string())
         }
     }
+}
+
+/// Record who is making a released `yell` call, so the tool can report on that session
+/// rather than on whichever one this machine ran most recently.
+///
+/// Only a released call: the vouch is what lets a report be built, so a `yell` the policy
+/// blocked must leave nothing behind for the tool to spend. Unlike the control tool, this is
+/// an ordinary checked call — it is a flow like any other, and the policy decides it first.
+fn vouch_yell(runtime: &Runtime, actor: &Actor, call: &ProposedCall) {
+    if !is_yell_tool(&call.tool) {
+        return;
+    }
+    let Some(args) = crate::yell::YellArgs::parse(&call.arguments) else {
+        tracing::debug!(trajectory = %actor.root.0, "yell proposed with arguments this build cannot read");
+        return;
+    };
+    runtime.vouch(&args.ticket(), actor, None);
+    tracing::debug!(trajectory = %actor.root.0, "yell vouched for this trajectory");
+}
+
+/// The runtime's own reporting tool, by the wire names its distribution channels produce.
+/// A lookalike on another server is an ordinary tool this never vouches for, so it reaches
+/// no session's decisions.
+fn is_yell_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "yell"
+            | "mcp/appa/yell"
+            | "mcp/plugin_appa-runtime_appa/yell"
+            | "mcp__appa__yell"
+            | "mcp__plugin_appa-runtime_appa__yell"
+    )
 }
 
 fn quoted_offer(call: &ProposedCall) -> Option<OfferId> {
@@ -669,7 +843,7 @@ mod tests {
             root: appa_runtime_api::TrajectoryId("cc:s1".to_string()),
             child: None,
         };
-        let quoted = OfferId("offer-1".to_string());
+        let quoted = crate::api::PermitKey::offer(&OfferId("offer-1".to_string()));
         runtime.vouch(&quoted, &actor, None);
 
         // Interrupted: neither PostToolUse nor Stop arrives.
@@ -681,7 +855,7 @@ mod tests {
         assert!(closed_as_unknown(&runtime), "the interrupted call closed as unreported");
         assert_eq!(
             runtime.take_vouched(&quoted),
-            None,
+            Err(crate::api::Unvouched::Nobody),
             "the interrupted turn's vouch is released"
         );
 
@@ -1027,8 +1201,8 @@ mod tests {
         assert_eq!(status, 409, "a forged ruling must refuse: {reply}");
         assert!(reply["error"].is_string(), "{reply}");
         assert_eq!(
-            runtime.take_vouched(&quoted),
-            None,
+            runtime.take_vouched(&crate::api::PermitKey::offer(&quoted)),
+            Err(crate::api::Unvouched::Nobody),
             "the refused envelope recorded no reviewer's answer"
         );
 
@@ -1306,5 +1480,116 @@ mod tests {
         let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
         assert_eq!(status, 409);
         assert_eq!(answer, serde_json::json!({"error": "PreToolUse without a tool call"}));
+    }
+
+    /// A deployment that declares the reporting tool, so a proposal of it is released rather
+    /// than refused as undeclared.
+    fn yelling_runtime(dir: &tempfile::TempDir) -> Runtime {
+        let text = r#"
+            [policy]
+            version = 2
+
+            [[policy.tool]]
+            name = "mcp/appa/yell"
+
+            [externals]
+            timeout_ms = 1000
+            max_body_bytes = 4096
+        "#;
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, text).expect("the fixture writes");
+        Runtime::open(
+            Config::load(&path).expect("the fixture validates"),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the fixture deployment opens")
+    }
+
+    fn yell_call(message: &str, with_trajectory: bool) -> serde_json::Value {
+        serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s1",
+            "tool_name": "mcp__appa__yell",
+            "tool_input": {"message": message, "with_trajectory": with_trajectory},
+        })
+    }
+
+    fn ticket(message: &str, with_trajectory: bool) -> crate::api::PermitKey {
+        crate::yell::YellArgs {
+            message: message.to_string(),
+            with_trajectory,
+        }
+        .ticket()
+    }
+
+    /// An MCP request names no session, so the report a `yell` builds is about whatever the
+    /// hook before it attested. Two sessions on one machine are what makes this matter.
+    #[tokio::test]
+    async fn a_released_yell_vouches_for_the_trajectory_that_made_it() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = yelling_runtime(&dir);
+        let released = hook(&runtime, &yell_call("the hook blocked", true)).await;
+        assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
+
+        assert_eq!(
+            runtime.take_vouched(&ticket("the hook blocked", true)),
+            Ok((
+                Actor {
+                    root: TrajectoryId("cc:s1".to_string()),
+                    child: None,
+                },
+                None
+            ))
+        );
+    }
+
+    /// The vouch is what lets a report be built at all, so a call the policy refused must
+    /// leave nothing behind for the tool to spend.
+    #[tokio::test]
+    async fn a_blocked_yell_vouches_for_nobody() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        // The default fixture declares no `yell` and has no wildcard: undeclared is refused.
+        let runtime = open_runtime(&dir);
+        let refused = hook(&runtime, &yell_call("the hook blocked", true)).await;
+        assert_ne!(refused.1["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(
+            runtime.take_vouched(&ticket("the hook blocked", true)),
+            Err(crate::api::Unvouched::Nobody)
+        );
+    }
+
+    /// The standing is for the call the hook saw. A tool that then reports something else is
+    /// spending a vouch that was never given for it.
+    #[tokio::test]
+    async fn a_yell_vouch_answers_only_the_call_it_was_given_for() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = yelling_runtime(&dir);
+        let released = hook(&runtime, &yell_call("the hook blocked", true)).await;
+        assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
+
+        let nobody = Err(crate::api::Unvouched::Nobody);
+        assert_eq!(runtime.take_vouched(&ticket("the hook blocked", false)), nobody);
+        assert_eq!(runtime.take_vouched(&ticket("something else", true)), nobody);
+        assert!(runtime.take_vouched(&ticket("the hook blocked", true)).is_ok());
+    }
+
+    /// One turn's standing, like the control tool's: the harness may decline the call after
+    /// the hook released it, and nothing later may spend what that turn left behind.
+    #[tokio::test]
+    async fn an_unspent_yell_vouch_does_not_outlive_its_turn() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = yelling_runtime(&dir);
+        hook(&runtime, &yell_call("the hook blocked", true)).await;
+
+        let actor = Actor {
+            root: TrajectoryId("cc:s1".to_string()),
+            child: None,
+        };
+        crate::hooks::handle(&runtime, HookEvent::TurnEnd { actor }).await;
+        assert_eq!(
+            runtime.take_vouched(&ticket("the hook blocked", true)),
+            Err(crate::api::Unvouched::Nobody)
+        );
     }
 }

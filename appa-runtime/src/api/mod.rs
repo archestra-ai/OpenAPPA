@@ -23,6 +23,7 @@ use crate::config::Config;
 use crate::elicit::Elicitation;
 use crate::engine::{EngineRefusal, Liveness, PolicyEngine, RuntimeEngine};
 use crate::external::{ConsultGates, ExternalServices};
+use crate::yell;
 use appa_eventlog::{Backend, Log, LogStore};
 use appa_runtime_api::{Adapter, AdapterName};
 
@@ -57,10 +58,48 @@ struct Vouch {
     ruling: Option<appa_runtime_api::Ruling>,
 }
 
+/// What a vouch is *about*, and the reason a runtime-provided tool can trust the trajectory
+/// it is told it belongs to.
+///
+/// An MCP request carries no session, so a tool this runtime serves cannot know which
+/// trajectory called it. The hook that preceded the call does know — it is the one place the
+/// harness names the actor — so it records the standing here and the tool spends it. The two
+/// variants are the two things a hook can key that record by, and they are separate variants
+/// because they can never mean each other: an offer id is a name the engine minted and the
+/// model quotes back, and a ticket is the call itself.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PermitKey {
+    /// The offer id `execute_remedy_plan` quotes.
+    Offer(String),
+    /// One `yell` call, by its arguments: the tool takes no id, and the arguments are the
+    /// only thing both the hook and the tool see. A digest, so nothing a person wrote is a
+    /// map key.
+    Yell(String),
+}
+
+impl PermitKey {
+    pub(crate) fn offer(quoted: &OfferId) -> Self {
+        Self::Offer(quoted.0.clone())
+    }
+}
+
+/// Why a runtime-provided tool has no trajectory to act for. The two are different things to
+/// tell a caller: one says no hook saw this call, the other says the call does not identify
+/// which of two sessions made it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unvouched {
+    Nobody,
+    Ambiguous,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ToolCallDecision {
     Allow {
         spawn: Option<SpawnBinding>,
+        /// The dispatch this release opened. Never reaches an adapter — `HookDecision` is
+        /// the wire type and carries no id — but the hook dispatcher needs it to tie a
+        /// recorded event to the fact the same call produced.
+        dispatch: appa_engine::value::DispatchId,
     },
     Deny {
         feedback: String,
@@ -298,8 +337,10 @@ impl EventError {
 impl From<EngineRefusal> for EventError {
     fn from(refusal: EngineRefusal) -> EventError {
         match refusal {
-            EngineRefusal::UntrustedLog { detail } => EventError::UntrustedLog(detail),
-            EngineRefusal::OpeningMismatch { detail } => EventError::PolicyUnavailable(detail),
+            // The class is for a report; this conversion is the local error path, which
+            // keeps the operator-facing detail.
+            EngineRefusal::UntrustedLog { detail, .. } => EventError::UntrustedLog(detail),
+            EngineRefusal::OpeningMismatch { detail, .. } => EventError::PolicyUnavailable(detail),
             EngineRefusal::Invariant { detail } => EventError::EngineInvariant(detail),
             EngineRefusal::Ended => EventError::TrajectoryEnded,
             EngineRefusal::DispatchClosed => EventError::UnknownDispatch,
@@ -485,6 +526,7 @@ impl Prepared {
                 permits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 management_permits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 prompted: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+                events: std::sync::Mutex::new(crate::events::EventLog::default()),
                 gates: self.gates,
                 naming: self.naming,
             }),
@@ -498,12 +540,15 @@ struct Inner {
     store: LogStore,
     modules: crate::builtins::ModuleRegistry,
     executing: std::sync::Mutex<std::collections::BTreeSet<String>>,
-    permits: std::sync::Mutex<std::collections::BTreeMap<String, Vouch>>,
+    permits: std::sync::Mutex<std::collections::BTreeMap<PermitKey, Vec<Vouch>>>,
     management_permits: std::sync::Mutex<std::collections::BTreeMap<Vec<u8>, Vec<Actor>>>,
     /// Trajectories a prompt reached since their turn last settled. Claude Code sends no
     /// `Stop` hook for a turn the user interrupted, so the prompt is the only sign the
     /// previous turn is over; the next tool call or turn end settles what it left behind.
     prompted: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    /// What this runtime did, as opposed to what the engine decided: bounded, in this
+    /// process, and gone on restart. A diagnostic only — see [`crate::events`].
+    events: std::sync::Mutex<crate::events::EventLog>,
     /// The gates every process-costing consult of this runtime passes; deployment reloads
     /// clone them, so old and new snapshots contend on the same permits.
     gates: ConsultGates,
@@ -545,7 +590,68 @@ fn management_key(tool: &str, arguments: &serde_json::Value) -> Vec<u8> {
     key
 }
 
+impl Runtime {
+    /// Note one thing this runtime did. Infallible and best-effort by construction: a
+    /// diagnostic must never fail a decision the engine has already made, and the lock is
+    /// held only for the insert.
+    ///
+    /// `root` is the family's root, never the acting trajectory. The log is keyed by family
+    /// because that is the unit a report is about and the unit the per-list bound applies to;
+    /// filing a subagent's event under the subagent would put it outside its own family's
+    /// account and leave [`crate::events::EventLog::recent_root`] naming an id no log reads
+    /// for. `None` is for what happens before any family is known.
+    pub(crate) fn record(&self, root: Option<&TrajectoryId>, event: crate::events::RuntimeEvent) {
+        self.inner.record(root, event);
+    }
+}
+
 impl Inner {
+    /// Note a failed store operation as a closed class.
+    ///
+    /// Takes the *typed* error, deliberately. Every one of these errors carries free text —
+    /// a root id, a path, a `rusqlite` message — and the call sites below convert them to
+    /// strings a line later. Classifying after that conversion would mean reading prose, so
+    /// the class is taken here, where the variant is still a variant.
+    fn note_store_error<'a>(
+        &self,
+        root: Option<&TrajectoryId>,
+        operation: crate::events::StoreOperation,
+        error: impl Into<appa_eventlog::StoreErrorClass> + 'a,
+    ) {
+        self.record(
+            root,
+            crate::events::RuntimeEvent::StoreError {
+                operation,
+                class: error.into(),
+            },
+        );
+    }
+
+    /// See [`Runtime::record`]. Lives here because a `Session` holds the `Inner`, not the
+    /// `Runtime`, and the consults worth timing happen inside a session.
+    pub(crate) fn record(&self, root: Option<&TrajectoryId>, event: crate::events::RuntimeEvent) {
+        self.events
+            .lock()
+            .expect("the event mutex is never poisoned: no panic runs while it is held")
+            .record(root, event);
+    }
+
+    /// See [`crate::events::EventLog::events`].
+    pub(crate) fn events(&self, root: &TrajectoryId) -> crate::events::Events {
+        self.events
+            .lock()
+            .expect("the event mutex is never poisoned: no panic runs while it is held")
+            .events(root)
+    }
+
+    /// See [`crate::events::EventLog::recent_root`].
+    pub(crate) fn recent_root(&self, window: std::time::Duration) -> crate::events::Recent {
+        self.events
+            .lock()
+            .expect("the event mutex is never poisoned: no panic runs while it is held")
+            .recent_root(window)
+    }
+
     fn deployment(&self) -> Arc<Deployment> {
         Arc::clone(
             &self
@@ -624,6 +730,7 @@ impl Inner {
     pub(super) fn log(&self, root: &TrajectoryId) -> Result<Log, EventError> {
         self.store
             .log(&crate::engine::engine_id(root))
+            .inspect_err(|error| self.note_store_error(Some(root), crate::events::StoreOperation::Read, error))
             .map_err(|error| match error {
                 appa_eventlog::ReadError::UnknownRoot { .. } => EventError::UnknownTrajectory,
                 appa_eventlog::ReadError::Undecodable(detail) => EventError::UntrustedLog(detail),
@@ -738,6 +845,15 @@ impl Runtime {
             changed,
             "reloaded the serving deployment"
         );
+        // Deployment-wide: a reload belongs to no trajectory, and every trajectory alive
+        // across it needs to see that its policy moved under it.
+        self.record(
+            None,
+            crate::events::RuntimeEvent::Reload {
+                policy_key: key.clone(),
+                changed,
+            },
+        );
         Ok(Reloaded {
             policy_key: key,
             policy_identity: identity,
@@ -757,6 +873,10 @@ impl Runtime {
             .inner
             .store
             .create_root(opening, deployment.config.policy_file().bytes())
+            .inspect_err(|error| {
+                self.inner
+                    .note_store_error(Some(&id), crate::events::StoreOperation::Open, error)
+            })
             .map_err(|error| match error {
                 appa_eventlog::CreateError::AlreadyExists { .. } => EventError::TrajectoryExists,
                 error => EventError::Storage(error.to_string()),
@@ -772,6 +892,10 @@ impl Runtime {
             .inner
             .store
             .has_root(&crate::engine::engine_id(root))
+            .inspect_err(|error| {
+                self.inner
+                    .note_store_error(Some(root), crate::events::StoreOperation::Read, error)
+            })
             .map_err(|error| EventError::Storage(error.to_string()))?;
         if !known {
             return Err(EventError::UnknownTrajectory);
@@ -872,6 +996,131 @@ impl Runtime {
         }
     }
 
+    /// [`Runtime::report`], off the async workers.
+    ///
+    /// Stripping, serializing and gzipping a long trajectory is seconds of CPU over as much
+    /// as [`crate::yell::report::MAX_PLAIN_BYTES`], and the same runtime serves the hooks that gate
+    /// an agent's every tool call. A report is never worth stalling the sessions it is about,
+    /// so every async caller goes through here and the synchronous builder stays synchronous.
+    pub(crate) async fn report_off_thread(
+        self: &Arc<Self>,
+        request: yell::ReportRequest,
+    ) -> Result<yell::Finished, yell::Oversize> {
+        let runtime = Arc::clone(self);
+        tokio::task::spawn_blocking(move || runtime.report(request))
+            .await
+            .expect("building a report does not panic")
+    }
+
+    /// One finished `openappa.yell.v1` document, ready to write and to send.
+    ///
+    /// Assembling here rather than in the CLI is what keeps the size loop honest: only a
+    /// finished, gzipped document can be measured against the receiver's limits, and only this
+    /// process can rebuild a smaller export. So an oversized report is built again from the
+    /// source under half the counts — never trimmed as a document, which would leave its token
+    /// numbering full of holes — until it fits.
+    pub(crate) fn report(&self, request: yell::ReportRequest) -> Result<yell::Finished, yell::Oversize> {
+        let report_id = yell::ReportId::generate();
+        let origin = yell::Origin::new(request.author, request.mode);
+        let mut budget = yell::Budget::default();
+        loop {
+            let projection = self.projection(request.selection.clone(), request.mode, budget);
+            let (facts, events) = projection.counts();
+            let report = yell::Report::serving(
+                report_id.clone(),
+                origin,
+                request.message.clone(),
+                request.harness,
+                projection,
+            );
+            match report.finalize() {
+                Ok(finished) => return Ok(finished),
+                // Nothing left to drop: the message, the build and the policy are the whole
+                // document, and they are over the limit on their own.
+                Err(oversize) if facts + events == 0 => return Err(oversize),
+                Err(_) => {
+                    budget = yell::Budget {
+                        facts: Some(facts / 2),
+                        events: Some(events / 2),
+                    }
+                }
+            }
+        }
+    }
+
+    /// One trajectory's decisions, stripped for a report that leaves this machine.
+    ///
+    /// A read like [`Runtime::audit`]: it gates nothing and appends nothing. Unlike an audit
+    /// it survives a log the engine refuses — a refused log is the very thing worth reporting
+    /// — and carries the refusal as a closed class instead of the facts a view would have
+    /// given. What may leave is decided in [`crate::yell::tables`], never here.
+    pub(crate) fn projection(
+        &self,
+        selection: yell::Selection,
+        mode: yell::Mode,
+        budget: yell::Budget,
+    ) -> yell::Projection {
+        let deployment = self.inner.deployment();
+        // Every path below that has no trajectory to show still says what the rules are, from
+        // the policy this deployment serves now. A report with no facts is still a report about
+        // a policy, and "the runtime would not give me my session" is a thing worth yelling.
+        let serving = || policy_section(deployment.config.policy_file().bytes());
+        let root = match selection {
+            yell::Selection::RulesOnly => {
+                return yell::Projection::rules_only(serving(), mode, yell::OmittedReason::NotRequested);
+            }
+            yell::Selection::Vouched(root) => root,
+            yell::Selection::Recent => match yell::resolve(self.inner.recent_root(yell::RECENT_WINDOW)) {
+                Ok(root) => root,
+                Err(omitted_reason) => return yell::Projection::rules_only(serving(), mode, omitted_reason),
+            },
+        };
+        let yelling = Some(root.clone());
+        let Ok(log) = self.inner.log(&root) else {
+            // The store error is already recorded as a runtime event by `Inner::log`.
+            return yell::Projection::rules_only(serving(), mode, yell::OmittedReason::LogUnavailable);
+        };
+        // The policy is what names the trust ranks, and the view is what names the parents.
+        // Neither is required: without them the facts still export, with the fields a reader
+        // cannot be given left empty and the refusal said out loud.
+        let policy = self.inner.resolve_policy(&deployment, &log).ok();
+        let rebuilt = policy.as_ref().map(|policy| policy.engine().rebuild_view(&log));
+        let replay_refused = match &rebuilt {
+            Some(Err(refusal)) => Some(refusal.class()),
+            _ => None,
+        };
+        let view = rebuilt.and_then(Result::ok);
+        let trust_chain = policy
+            .as_ref()
+            .map(|policy| {
+                policy
+                    .engine()
+                    .registry()
+                    .trust_chain()
+                    .names()
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Which tool spellings the deployment itself chose. Without a policy nothing is
+        // vouched, which is the safe end: every tool name is then a token.
+        let vouched = policy
+            .as_ref()
+            .map(|policy| policy.engine().vouched_tools())
+            .unwrap_or_default();
+        let source = yell::Source {
+            facts: log.facts(),
+            events: self.inner.events(&root),
+            trust_chain,
+            policy: policy_section(log.policy_file()),
+            vouched,
+            parents: yell::branches(log.facts(), view.as_ref(), policy.as_ref()),
+            replay_refused,
+            yelling,
+        };
+        yell::build(source, mode, budget)
+    }
+
     /// Execute one surfaced remedy offer by its id.
     pub async fn execute_remedy(&self, acting: &Actor, offer: OfferId) -> RemedyOutcome {
         self.remedy(acting, offer, RemedyArguments::default(), None, None).await
@@ -921,7 +1170,7 @@ impl Runtime {
         if pursuer != trajectory {
             return unknown();
         }
-        self.spend_vouch(&quoted, acting);
+        self.spend_vouch(&PermitKey::offer(&quoted), acting);
         let Some(_claim) = self.claim_offer(&offer) else {
             return RemedyOutcome::Refused {
                 detail: "this offer is already being executed".to_string(),
@@ -971,35 +1220,45 @@ impl Runtime {
         Some((offer, pursuer))
     }
 
-    /// Record that this trajectory quoted this offer id, for the request
+    /// Record that this trajectory stands behind this key, for the request
     /// that runs it. `ruling` is a person's answer the harness obtained
     /// through its own review channel; it rides the vouch and is spent
     /// with it, so it can answer exactly the execution it was given for.
-    ///
-    /// One quoted id stands for one vouch. Only the trajectory the offer
-    /// names as its pursuer records one at all, and an offer has one pursuer
-    /// at a time: a child's, until that child ends and the offer falls to
-    /// its parent. A later quote is that next pursuer's, so it supersedes
-    /// the vouch it succeeds rather than standing beside it — where two
-    /// stood, neither could be told from the other and the live one was
-    /// refused together with the stale one.
-    pub(crate) fn vouch(&self, quoted: &OfferId, acting: &Actor, ruling: Option<appa_runtime_api::Ruling>) {
+    pub(crate) fn vouch(&self, key: &PermitKey, acting: &Actor, ruling: Option<appa_runtime_api::Ruling>) {
         let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
-        permits.insert(
-            quoted.0.clone(),
-            Vouch {
+        let holders = permits.entry(key.clone()).or_default();
+        // An offer has one current pursuer: its new vouch replaces the former
+        // pursuer's. A yell ticket may be quoted by independent sessions, so
+        // retain those holders and refuse ambiguity when it is consumed.
+        if matches!(key, PermitKey::Offer(_)) {
+            holders.clear();
+        }
+        match holders.iter_mut().find(|holder| holder.actor == *acting) {
+            Some(holder) => holder.ruling = ruling,
+            None => holders.push(Vouch {
                 actor: acting.clone(),
                 ruling,
-            },
-        );
+            }),
+        }
     }
 
-    /// The trajectory vouched for this quoted id, taken once, with the
-    /// ruling its harness attached.
-    pub(crate) fn take_vouched(&self, quoted: &OfferId) -> Option<(Actor, Option<appa_runtime_api::Ruling>)> {
+    /// The trajectory vouched for this key, taken once, with the ruling its harness
+    /// attached.
+    ///
+    /// Two trajectories standing behind one key is not a tie to break: it means the key does
+    /// not identify a caller, and answering either one would put one session's standing
+    /// behind another session's call. That case keeps the record rather than consuming it —
+    /// destroying it would make the *next* identical call look like one nothing vouched for,
+    /// and the two need different answers. The turn's end releases it either way.
+    pub(crate) fn take_vouched(&self, key: &PermitKey) -> Result<(Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
         let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
-        let vouch = permits.remove(&quoted.0)?;
-        Some((vouch.actor, vouch.ruling))
+        let holders = permits.get_mut(key).ok_or(Unvouched::Nobody)?;
+        if holders.len() != 1 {
+            return Err(Unvouched::Ambiguous);
+        }
+        let vouch = holders.remove(0);
+        permits.remove(key);
+        Ok((vouch.actor, vouch.ruling))
     }
 
     /// Drop every vouch this actor still holds. A vouch is recorded when the actor
@@ -1009,7 +1268,10 @@ impl Runtime {
     /// later can spend it.
     pub(crate) fn release_vouches(&self, acting: &Actor) {
         let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
-        permits.retain(|_, holder| holder.actor != *acting);
+        permits.retain(|_, holders| {
+            holders.retain(|holder| holder.actor != *acting);
+            !holders.is_empty()
+        });
         let mut management = self
             .inner
             .management_permits
@@ -1079,13 +1341,14 @@ impl Runtime {
         prompted.remove(acting_trajectory(acting).0.as_str())
     }
 
-    /// Spend the vouch this actor holds, where it is the one standing. A
-    /// vouch the offer's next pursuer has since superseded is not this
-    /// actor's to take away.
-    fn spend_vouch(&self, quoted: &OfferId, acting: &Actor) {
+    fn spend_vouch(&self, key: &PermitKey, acting: &Actor) {
         let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
-        if permits.get(&quoted.0).is_some_and(|holder| holder.actor == *acting) {
-            permits.remove(&quoted.0);
+        let Some(holders) = permits.get_mut(key) else {
+            return;
+        };
+        holders.retain(|holder| holder.actor != *acting);
+        if holders.is_empty() {
+            permits.remove(key);
         }
     }
 
@@ -1219,6 +1482,13 @@ impl Runtime {
     /// person reads the arguments and thinks.
     pub(crate) fn review_timeout(&self) -> std::time::Duration {
         self.inner.deployment().config.externals.review_timeout
+    }
+
+    /// Whether this deployment lets an agent report on its own. Read from the deployment
+    /// this runtime serves *now*, so a `/reload` that flips the knob decides the next MCP
+    /// session rather than the next restart.
+    pub(crate) fn agent_yell(&self) -> bool {
+        self.inner.deployment().config.reporting.agent_yell
     }
 }
 
@@ -1419,6 +1689,19 @@ fn compile_policy(config: &Config) -> Result<appa_policy::Config, OpenError> {
     let text = toml::to_string(config.policy_file().value())
         .map_err(|error| OpenError::UnsupportedPolicy(format!("the policy table does not serialize: {error}")))?;
     appa_policy::Config::from_toml_str(&text).map_err(|error| OpenError::Policy(Box::new(error)))
+}
+
+/// The `[policy]` table of a stored policy file, with the key of the bytes it came from.
+///
+/// A trajectory's own bytes rather than the deployment's current ones wherever there is a
+/// trajectory: the log pins its policy file, so a reload since the session opened does not
+/// rewrite the rules a report explains. The key comes from the same bytes, so the document and
+/// its fingerprint are one snapshot.
+fn policy_section(bytes: &[u8]) -> Option<(toml::Value, String)> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let composed: toml::Value = toml::from_str(text).ok()?;
+    let document = composed.get("policy")?.clone();
+    Some((document, crate::engine::policy_file_key(bytes)))
 }
 
 fn compile_stored_policy(bytes: &[u8]) -> Result<appa_policy::Config, String> {
@@ -2097,13 +2380,13 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             root: root.clone(),
             child: Some(TrajectoryId(format!("{}:c1", root.0))),
         };
-        let quoted = OfferId("offer-1".to_string());
+        let quoted = PermitKey::offer(&OfferId("offer-1".to_string()));
 
         runtime.vouch(&quoted, &child, Some(appa_runtime_api::Ruling::Approve));
         crate::hooks::handle(&runtime, appa_runtime_api::HookEvent::TurnEnd { actor: parent.clone() }).await;
         assert_eq!(
             runtime.take_vouched(&quoted),
-            Some((child.clone(), Some(appa_runtime_api::Ruling::Approve))),
+            Ok((child.clone(), Some(appa_runtime_api::Ruling::Approve))),
             "a turn end releases the actor's own vouches, and a child's is not one of them"
         );
 
@@ -2111,7 +2394,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         runtime.vouch(&quoted, &parent, None);
         assert_eq!(
             runtime.take_vouched(&quoted),
-            Some((parent.clone(), None)),
+            Ok((parent.clone(), None)),
             "the offer's pursuer takes its own vouch, and no one else's ruling rides it"
         );
 
@@ -2119,7 +2402,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         runtime.release_vouches(&child);
         assert_eq!(
             runtime.take_vouched(&quoted),
-            Some((parent, None)),
+            Ok((parent, None)),
             "releasing the child's vouches takes away no vouch of the parent's"
         );
     }
@@ -2143,12 +2426,12 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             root: root.clone(),
             child: None,
         };
-        let quoted = OfferId("offer-1".to_string());
+        let quoted = PermitKey::offer(&OfferId("offer-1".to_string()));
 
         runtime.vouch(&quoted, &actor, None);
         assert_eq!(
             runtime.take_vouched(&quoted),
-            Some((actor.clone(), None)),
+            Ok((actor.clone(), None)),
             "a standing vouch is what the tool takes"
         );
 
@@ -2156,9 +2439,41 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         crate::hooks::handle(&runtime, appa_runtime_api::HookEvent::TurnEnd { actor: actor.clone() }).await;
         assert_eq!(
             runtime.take_vouched(&quoted),
-            None,
+            Err(Unvouched::Nobody),
             "the turn ended without spending it, so nothing later can"
         );
+    }
+
+    /// Two trajectories behind one key is a key that does not identify a caller. Both are
+    /// refused, and both are told *why* — a caller told "nothing vouched for this" would
+    /// make the identical call again and be told the same thing forever.
+    #[tokio::test]
+    async fn an_ambiguous_vouch_refuses_every_holder_and_says_so() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let key = PermitKey::Yell("same-call".to_string());
+        let one = Actor {
+            root: TrajectoryId("cc:one".to_string()),
+            child: None,
+        };
+        let other = Actor {
+            root: TrajectoryId("cc:other".to_string()),
+            child: None,
+        };
+        runtime.vouch(&key, &one, None);
+        runtime.vouch(&key, &other, None);
+
+        assert_eq!(runtime.take_vouched(&key), Err(Unvouched::Ambiguous));
+        assert_eq!(
+            runtime.take_vouched(&key),
+            Err(Unvouched::Ambiguous),
+            "the second caller is told the same thing, not that nobody vouched"
+        );
+
+        // Once one of them is gone the key identifies a caller again.
+        runtime.release_vouches(&other);
+        assert_eq!(runtime.take_vouched(&key), Ok((one, None)));
     }
 
     #[tokio::test]

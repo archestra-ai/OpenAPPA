@@ -94,6 +94,11 @@ jobs:
           # guesses it from the Cargo version, which may also describe later
           # development commits before the next release.
           APPA_RELEASE_REF: ${{ inputs.release_ref }}
+          # Where `appa yell` sends reports. A release build requires it (see
+          # appa-runtime/build.rs) because a binary without one refuses to send
+          # and says nothing about why, so the feature would ship inert. The
+          # variable is the `endpoint` output of the appa-yell Terraform root.
+          APPA_YELL_ENDPOINT: ${{ vars.APPA_YELL_ENDPOINT }}
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
           TARGET: ${{ matrix.target }}
         run: cargo build --release --locked --package appa --target "$TARGET"
