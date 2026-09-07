@@ -71,6 +71,12 @@ A development build has none, resolves an empty endpoint, and refuses to send.
 `APPA_YELL_ENDPOINT` in the environment overrides the compiled value at run
 time, which is how a test points at a local receiver.
 
+The `appa-runtime` container image takes the override route rather than the
+compiled one: its Dockerfile exports `APPA_YELL_ENDPOINT` from a build argument
+the image workflow fills from the same repository variable. The binary inside
+is a development build, so a report from a cluster is filed under `local`, not
+`release`.
+
 ## Who owns what
 
 Terraform, in a root of its own in the infra repository, owns the bucket and

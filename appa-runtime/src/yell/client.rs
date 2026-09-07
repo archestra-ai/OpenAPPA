@@ -62,9 +62,11 @@ impl Receiver {
     /// refused unless it is this machine, so an override cannot downgrade a real send to
     /// `http://`.
     pub(crate) fn resolve() -> Option<(Self, Source)> {
+        // An empty value is no override: an image built without an address still
+        // exports the variable.
         let (named, source) = match std::env::var("APPA_YELL_ENDPOINT") {
-            Ok(named) => (named, Source::Environment),
-            Err(_) => (ENDPOINT.to_owned(), Source::CompiledIn),
+            Ok(named) if !named.trim().is_empty() => (named, Source::Environment),
+            _ => (ENDPOINT.to_owned(), Source::CompiledIn),
         };
         Self::parse(&named).map(|receiver| (receiver, source))
     }
