@@ -121,7 +121,9 @@ func (h *hook) kinds() []string {
 }
 
 // testInventory spells the tools the tests dispatch: one MCP server
-// named by its host, and two remote agents as kagent renders them.
+// named by its host, two remote agents as kagent renders them, and
+// appa-guide's management set, which the cases that bind a management
+// call's actor dispatch.
 func testInventory(t *testing.T) Inventory {
 	t.Helper()
 	inventory, err := BuildInventory(InventorySpec{
@@ -134,6 +136,7 @@ func testInventory(t *testing.T) Inventory {
 			{Path: "remote_agents[0].name", Name: "kagent__NS__billing_agent"},
 			{Path: "remote_agents[1].name", Name: "kagent__NS__log_analyst"},
 		},
+		Guide: true,
 	})
 	if err != nil {
 		t.Fatalf("the test inventory must build: %v", err)

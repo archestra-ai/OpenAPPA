@@ -662,13 +662,28 @@ def demo_tools_url(workdir) -> Iterator[str]:
         yield f"http://localhost:{port}/mcp"
 
 
+def _stage_github_battery(destination: Path) -> None:
+    """Copy the shipped GitHub battery under the toolset this stack serves.
+
+    A battery names its tools by canonical id, and the toolset half of
+    that id is the host label of the MCP server that carries them. The
+    fleet here reaches one server at ``localhost``, which also carries
+    the two canned GitHub tools under the names kagent renders. Only the
+    identity is restated: the contracts, sanitizers and trust rules the
+    tests exercise are the shipped battery's own.
+    """
+    shutil.copytree(REPO_ROOT / "batteries" / "github", destination)
+    policy = destination / "appa.toml"
+    policy.write_text(policy.read_text().replace("mcp/github/", "mcp/localhost/mcp__github__"))
+
+
 @pytest.fixture(scope="session")
 def runtime_url(workdir, mock_port) -> Iterator[str]:
     """The one appa-runtime every agent in the fleet gates against."""
     binary = _appa_binary()
     port = _free_port()
     policy = workdir / "policy.appa.toml"
-    shutil.copytree(REPO_ROOT / "batteries" / "github", workdir / "batteries" / "github")
+    _stage_github_battery(workdir / "batteries" / "github")
     policy.write_text(POLICY.read_text().replace("@@MOCK_PORT@@", str(mock_port)).replace("@@PYTHON@@", sys.executable))
     command = [
         binary,

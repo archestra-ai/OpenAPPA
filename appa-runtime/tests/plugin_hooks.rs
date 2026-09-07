@@ -719,8 +719,9 @@ async fn the_windows_hook_fails_closed_when_its_client_cannot_answer() {
     let answer: serde_json::Value = serde_json::from_str(post_stdout.trim()).expect("the fail-closed answer is JSON");
     assert_eq!(answer["decision"], "block", "{answer}");
     assert_eq!(answer["hookSpecificOutput"]["hookEventName"], "PostToolUse", "{answer}");
+    let replaced = &answer["hookSpecificOutput"]["updatedToolOutput"];
     assert!(
-        answer["hookSpecificOutput"]["updatedToolOutput"].is_string(),
+        !replaced.is_null() && !replaced.to_string().contains("readme.txt"),
         "the tool's own output must be replaced, not left in front of the model: {answer}"
     );
 
