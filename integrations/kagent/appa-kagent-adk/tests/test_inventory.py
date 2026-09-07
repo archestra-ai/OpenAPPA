@@ -10,7 +10,7 @@ import pytest
 from appa_kagent_adk import wire
 from appa_kagent_adk.config_guard import ConfigRefused
 from appa_kagent_adk.gates import CODE_EXECUTION_TOOL, MEMORY_PERSIST_TOOL
-from appa_kagent_adk.inventory import SKILLS_FOLDER_ENV, ToolInventory, builtin_manifest, is_spawn
+from appa_kagent_adk.inventory import GUIDE_ENV, SKILLS_FOLDER_ENV, ToolInventory, builtin_manifest, is_spawn
 
 KAGENT = Path(__file__).parent.parent.parent
 SHARED_MANIFEST = KAGENT / "fixtures" / "kagent-builtins.json"
@@ -263,6 +263,20 @@ def test_the_builtin_groups_follow_the_config_and_the_environment():
     assert with_skills.spelling("read_file") == "builtin:read_file"
     assert with_skills.spelling("bash") == "builtin:bash"
     assert ToolInventory.from_config(BASE, environ={SKILLS_FOLDER_ENV: " "}).spelling("skills") is None
+
+
+def test_the_guide_spells_the_management_set_and_a_bad_switch_refuses_the_config():
+    plain = ToolInventory.from_config(BASE, environ={})
+    for name in wire.MANAGEMENT_TOOLS:
+        assert plain.spelling(name) is None
+
+    guide = ToolInventory.from_config(BASE, environ={GUIDE_ENV: "true"})
+    for name in wire.MANAGEMENT_TOOLS:
+        assert guide.spelling(name) == f"mcp:appa-guide/{name}"
+        assert guide.despell(f"mcp:appa-guide/{name}") == name
+
+    with pytest.raises(ConfigRefused, match=GUIDE_ENV):
+        ToolInventory.from_config(BASE, environ={GUIDE_ENV: "1"})
 
 
 def test_the_packaged_manifest_is_the_shared_one_and_the_go_copy():

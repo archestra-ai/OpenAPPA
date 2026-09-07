@@ -762,7 +762,7 @@ mod tests {
         };
         runtime.vouch_management(
             &ProposedCall {
-                tool: "appa_include_battery".to_string(),
+                tool: "mcp/appa-guide/appa_include_battery".to_string(),
                 arguments: serde_json::value::to_raw_value(&args).expect("arguments serialize"),
             },
             &actor,

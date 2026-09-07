@@ -52,7 +52,7 @@ import pydantic
 
 from .config_guard import ConfigRefused
 from .identity import SessionIdentity
-from .inventory import ToolInventory
+from .inventory import ToolInventory, guide_enabled
 from .plugin import AppaPluginKagent
 from .wire import RESERVED_TOOL, RUNTIME_TOOLS
 
@@ -300,7 +300,7 @@ def _runtime_toolset(runtime_url: str):
     from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnectionParams
     from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 
-    guide = os.environ.get("APPA_GUIDE", "").strip().lower() == "true"
+    guide = guide_enabled()
     endpoint = runtime_url.rstrip("/") + "/mcp"
     tools = [RESERVED_TOOL]
     if guide:

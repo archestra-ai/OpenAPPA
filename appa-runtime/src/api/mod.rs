@@ -527,8 +527,12 @@ pub(crate) fn management_tool_name(tool: &str) -> Option<&'static str> {
         "appa_refresh_batteries",
         "appa_update_policy",
     ];
+    // Every host spells the management set its own way; the vouch is keyed by the
+    // one bare name. A served deployment names it canonically under appa-guide's
+    // own toolset, Claude Code under whichever MCP server carries the plugin.
     let bare = tool
-        .strip_prefix("mcp__appa__")
+        .strip_prefix("mcp/appa-guide/")
+        .or_else(|| tool.strip_prefix("mcp__appa__"))
         .or_else(|| tool.strip_prefix("mcp__plugin_appa-runtime_appa__"))
         .unwrap_or(tool);
     TOOLS.into_iter().find(|name| bare == *name)

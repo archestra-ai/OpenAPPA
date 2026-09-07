@@ -61,12 +61,13 @@ LANE = "python"
 """This image's key in the shared builtin manifest."""
 
 SKILLS_FOLDER_ENV = "KAGENT_SKILLS_FOLDER"
-GUIDE_ENV = "APPA_GUIDE"
-# appa-guide's management set is served over its own endpoint and named
-# under one fixed toolset, so a policy names it the way it names any
-# other MCP tool.
-GUIDE_TOOLSET = "appa-guide"
 """The kagent runtime attaches its skills tools while this names a directory."""
+
+GUIDE_ENV = "APPA_GUIDE"
+GUIDE_TOOLSET = "appa-guide"
+"""appa-guide's management set is served over its own endpoint and named
+under one fixed toolset, so a policy names it the way it names any other
+MCP tool."""
 
 _MCP_KEYS = ("http_tools", "sse_tools")
 _NAMESPACE_MARK = "__NS__"
@@ -137,6 +138,23 @@ def gate_spelling(name: str) -> str:
 
 def guide_spelling(name: str) -> str:
     return mcp_spelling(GUIDE_TOOLSET, name)
+
+
+def guide_enabled(environ: Mapping[str, str] = os.environ) -> bool:
+    """Whether this deployment is appa-guide's own agent.
+
+    The inventory, which spells the management set only for the guide,
+    and the toolset the guide reaches it through read the same answer,
+    and a value that is neither refuses the config rather than start an
+    agent that silently has no guide.
+    """
+    match environ.get(GUIDE_ENV, "").strip().lower():
+        case "" | "false":
+            return False
+        case "true":
+            return True
+        case other:
+            raise ConfigRefused(f"{GUIDE_ENV} must be true or false, not {other!r}")
 
 
 def is_spawn(spelling: str) -> bool:
@@ -212,7 +230,7 @@ class ToolInventory:
         """
         builder = _Builder()
         builder.add(wire.RESERVED_TOOL, wire.CONTROL_TOOL, "the reserved tool")
-        if environ.get(GUIDE_ENV, "").strip().lower() == "true":
+        if guide_enabled(environ):
             for name in sorted(wire.MANAGEMENT_TOOLS):
                 builder.add(name, guide_spelling(name), "the appa-guide management set")
         for key in _MCP_KEYS:

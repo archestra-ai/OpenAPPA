@@ -376,7 +376,10 @@ fn kagent_runtime_management_is_typed_vouched_and_least_privilege() {
         assert!(!policy.contains("k8s_get_resources(resource_type:configmap)"));
         assert!(!policy.contains("name = \"k8s_execute_command\""));
         assert!(!policy.contains("k8s_get_resource_yaml(resource_type:configmap)"));
-        for tool in ["mcp/appa-guide/appa_get_runtime_state", "mcp/appa-guide/appa_match_batteries"] {
+        for tool in [
+            "mcp/appa-guide/appa_get_runtime_state",
+            "mcp/appa-guide/appa_match_batteries",
+        ] {
             assert!(policy.contains(&format!("name = \"{tool}\"")));
         }
         for tool in [
