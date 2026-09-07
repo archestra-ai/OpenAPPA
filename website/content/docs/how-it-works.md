@@ -122,13 +122,13 @@ The built-in `llm` annotator runs in-process and calls the model configured in `
 
 ### Subagents Isolate Sensitive Reads
 
-Reading confidential records or untrusted external data can restrict the main agent's whole session. A subagent can read and reason over that data in a separate context, keeping those restrictions local to its own session.
+A subagent can read sensitive or untrusted data in its own session. The main agent receives only the result the policy allows, so it can keep working without taking on all the restrictions of the original data.
 
-Before the subagent starts, the main agent declares what restrictions it will accept on the returned result and whether a sanitizer must clean it first. That declaration also limits what the subagent may read. A result that does not meet the declaration is blocked before it reaches the main agent.
+For example, a subagent reads a private customer ticket and prepares a summary. A sanitizer removes customer names and email addresses before the summary reaches the main agent. If the policy allows that cleaned summary to be shared publicly, the main agent can use it in a public bug report.
 
-For example, a subagent can examine a private customer ticket and return a summary through a sanitizer that removes customer identities. If the policy permits that cleaned result to be shared publicly, the main agent can use it in a public bug report without reading the private ticket itself. Both agents' actions and approvals remain in the same audit log.
+The main agent sets the rules for the result before the subagent starts, including whether it needs cleaning. Those rules also limit what the subagent can read. OpenAPPA blocks any result that does not meet them. Both agents' actions and approvals appear in the same audit log.
 
-The integration must support separate subagent contexts. See [Subagent Returns in the policy reference](/contracts#subagent-returns) for configuration and return rules.
+This requires an integration that keeps the agents' contexts separate. See [Subagent Returns in the policy reference](/contracts#subagent-returns) for configuration.
 
 ### Audience Sources
 
