@@ -169,7 +169,7 @@ The agent can still finish useful work with private data, but sharing it outside
 
 ## Audience Sources
 
-An audience source tells OpenAPPA who belongs to an allowed group. Even when a session is restricted to a group, the agent can still share data with its members. OpenAPPA can check your company's existing directory to find out who those members are.
+An audience source tells OpenAPPA who belongs to a group, such as your company's Finance team. When a policy restricts data to that group, OpenAPPA uses membership from your company's directory to check who may receive it.
 
 For example, before sending a Finance report, OpenAPPA checks whether the recipient belongs to the Finance group in Google Workspace.
 
