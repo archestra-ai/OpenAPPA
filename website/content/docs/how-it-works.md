@@ -104,21 +104,53 @@ See [Sanitizers in the policy reference](/contracts#sanitizers) for service conf
 
 An annotator applies policy dynamically when that is more convenient than writing a separate tool contract for every case. It describes what the tool call requires, the restrictions on its output, and its effects.
 
-For example, when an agent reads a file, an annotator can check which directory it comes from. Files in a public documentation directory can have a public audience, while files in a customer records directory are restricted to internal users. The policy also defines how much data from each directory can be trusted.
+For example, a Python script can check which directory a file comes from. Files in `/srv/public-docs` can be shared publicly; all other files are restricted to internal users. This example treats all file contents as untrusted.
 
 ```toml
 [[annotator]]
 name = "classify_file"
-builtin = "llm"
-hint = "Use the file's directory to determine its audience and trust."
+ranks = ["suspicious"]
+audiences = ["public", "internal"]
+marks = []
+effects = []
 
 [[tool]]
 name = "read_file"
 # Ask the annotator to classify the file being read.
 annotator = "classify_file"
+
+[externals.annotators.classify_file]
+command = ["python3", "./classify_file.py"]
 ```
 
-The built-in `llm` annotator runs in-process and calls the model configured in `[externals.llm]`. See [Model transports](/contracts#model-transports) for that configuration and [Annotators in the policy reference](/contracts#annotators) for limits on the rules it can return.
+Save this as `classify_file.py` beside the configuration file. The script reads the proposed call from standard input and writes its annotation as JSON:
+
+```python
+import json
+import sys
+from pathlib import Path
+
+request = json.load(sys.stdin)
+call = request["artifact"]["args"]
+path = Path(call["arguments"]["path"])
+if not path.is_absolute():
+    raise ValueError("read_file requires an absolute path")
+
+public_docs = Path("/srv/public-docs").resolve(strict=True)
+path = path.resolve(strict=True)
+audience = "public" if path.is_relative_to(public_docs) else "internal"
+
+json.dump({
+    "version": 1,
+    "answer": {
+        "delta": {"audience": [audience], "trust": "suspicious"},
+        "requires": {"history": [], "attention": []},
+        "emits": [],
+    },
+}, sys.stdout)
+```
+
+The script and file-reading tool must use the same filesystem. `/srv/public-docs` must exist and contain only files approved for public access. See [Annotators in the policy reference](/contracts#annotators) for the script protocol and limits on the rules it can return.
 
 ### Subagents Isolate Sensitive Reads
 
