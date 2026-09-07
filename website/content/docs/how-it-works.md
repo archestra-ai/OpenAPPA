@@ -133,25 +133,6 @@ Before the subagent starts, the main agent sets the return requirements, includi
 
 See [Subagent Returns](/contracts#subagent-returns) for integration requirements and configuration.
 
-### Audience Sources
-
-An audience source tells OpenAPPA who belongs to an allowed group. Even when a session is restricted to a group, the agent can still share data with its members. OpenAPPA can check your company's existing directory to find out who those members are.
-
-For example, before sending a Finance report, OpenAPPA checks whether the recipient belongs to the Finance group in Google Workspace.
-
-```toml
-[[audience.group]]
-name = "finance"
-from = ["google-workspace:group/finance@corp.com"]
-
-[[tool]]
-name = "get_finance_report"
-# Restrict the report to members of the Finance group.
-delta = { audience = ["@finance"] }
-```
-
-Connect the Google Workspace audience source to your directory service. See [Audience sources in the policy reference](/contracts#audience-sources) for supported providers and configuration.
-
 ## Example: sharing information from a private customer ticket
 
 The example shows an agent reading a private customer ticket and then trying to share information from it.
@@ -185,6 +166,25 @@ The agent has three options when reading the ticket:
 Suppose the agent takes the first option: it reads the original ticket and tries to email an external auditor at `auditor@external.com`. OpenAPPA blocks the email and offers human approval. If approved, that particular email is sent. Future external emails still need their own approval.
 
 The agent can still finish useful work with private data, but sharing it outside the company requires either cleaning it or obtaining permission.
+
+## Audience Sources
+
+An audience source tells OpenAPPA who belongs to an allowed group. Even when a session is restricted to a group, the agent can still share data with its members. OpenAPPA can check your company's existing directory to find out who those members are.
+
+For example, before sending a Finance report, OpenAPPA checks whether the recipient belongs to the Finance group in Google Workspace.
+
+```toml
+[[audience.group]]
+name = "finance"
+from = ["google-workspace:group/finance@corp.com"]
+
+[[tool]]
+name = "get_finance_report"
+# Restrict the report to members of the Finance group.
+delta = { audience = ["@finance"] }
+```
+
+Connect the Google Workspace audience source to your directory service. See [Audience sources in the policy reference](/contracts#audience-sources) for supported providers and configuration.
 
 ## Next steps
 
