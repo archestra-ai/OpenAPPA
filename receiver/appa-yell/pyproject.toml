@@ -1,0 +1,21 @@
+[project]
+name = "appa-yell-receiver"
+version = "0.1.0"
+description = "The openappa.yell.v1 ingestion endpoint"
+requires-python = ">=3.12"
+dependencies = [
+    "functions-framework>=3,<4",
+    "google-cloud-storage>=2,<3",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
