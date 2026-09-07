@@ -385,17 +385,17 @@ func TestTheInventorySpecFollowsTheStockBuilder(t *testing.T) {
 		RemoteAgents: []appakagentadk.RemoteAgentSpec{{Path: "remote_agents[0].name", Name: "kagent__NS__billing_agent"}},
 		Builtins:     appakagentadk.BuiltinGroups{Memory: true, Skills: true, ShareTools: true},
 	}
-	if got := inventorySpec(agentConfig, "/skills"); !reflect.DeepEqual(got, want) {
+	if got := inventorySpec(agentConfig, "/skills", false); !reflect.DeepEqual(got, want) {
 		t.Errorf("the spec drifted from what the stock builder wires:\n got %+v\n want %+v", got, want)
 	}
-	plain := inventorySpec(&adk.AgentConfig{}, " ")
+	plain := inventorySpec(&adk.AgentConfig{}, " ", false)
 	if plain.Builtins != (appakagentadk.BuiltinGroups{}) {
 		t.Errorf("no memory, no skills folder and no share tools switch nothing on, got %+v", plain.Builtins)
 	}
 }
 
 func TestTheGuardHandsBackTheInventoryOfTheStockConfig(t *testing.T) {
-	_, inventory, err := decodeGuarded([]byte(stockConfig), "")
+	_, inventory, err := decodeGuarded([]byte(stockConfig), "", false)
 	if err != nil {
 		t.Fatalf("the stock config must be accepted: %v", err)
 	}
@@ -737,7 +737,7 @@ func TestTheConfigGuardRefusesWhatThisImageCannotRunAsDeclared(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, _, err := decodeGuarded([]byte(tc.config), "")
+			got, _, err := decodeGuarded([]byte(tc.config), "", false)
 			var refusal *configRefusal
 			isRefusal := errors.As(err, &refusal)
 			if tc.parse {

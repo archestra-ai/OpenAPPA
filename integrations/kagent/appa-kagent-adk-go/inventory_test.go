@@ -285,3 +285,26 @@ func TestTheEmbeddedManifestIsTheSharedOneAndThePythonCopy(t *testing.T) {
 		t.Errorf("the manifest carries the python and go lanes, got %v", lanes)
 	}
 }
+
+// The guide reaches its management set the way it reaches any MCP tool,
+// so the inventory spells that set under one fixed toolset, and only for
+// the guide.
+func TestTheGuideSpellsTheManagementSet(t *testing.T) {
+	plain := mustBuild(t, InventorySpec{MCPServers: []MCPServerSpec{demoTools}})
+	for _, name := range RuntimeTools[1:] {
+		if spelled, known := plain.Spelling(name); known {
+			t.Errorf("%s is spelled %q without the guide", name, spelled)
+		}
+	}
+
+	guide := mustBuild(t, InventorySpec{MCPServers: []MCPServerSpec{demoTools}, Guide: true})
+	for _, name := range RuntimeTools[1:] {
+		spelled, known := guide.Spelling(name)
+		if !known || spelled != MCPSpelling(GuideToolset, name) {
+			t.Errorf("%s spells %q (%v), want %q", name, spelled, known, MCPSpelling(GuideToolset, name))
+		}
+		if back := guide.Despell(spelled); back != name {
+			t.Errorf("%s spells back to %q, want %q", spelled, back, name)
+		}
+	}
+}
