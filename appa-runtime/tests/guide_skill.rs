@@ -225,8 +225,8 @@ fn only_the_runtime_chart_consumes_this_skill_package() {
     );
 
     let github = fs::read_to_string(root.join("batteries/github/appa.toml")).expect("the GitHub battery exists");
-    assert!(github.contains("name = \"mcp__github__get_file_contents\""));
-    assert!(github.contains("name = \"mcp__github__issue_write\""));
+    assert!(github.contains("name = \"mcp/github/get_file_contents\""));
+    assert!(github.contains("name = \"mcp/github/issue_write\""));
     assert!(!github.contains("name = \"get_file_contents\""));
     assert!(!github.contains("name = \"issue_write\""));
 }
@@ -376,14 +376,14 @@ fn kagent_runtime_management_is_typed_vouched_and_least_privilege() {
         assert!(!policy.contains("k8s_get_resources(resource_type:configmap)"));
         assert!(!policy.contains("name = \"k8s_execute_command\""));
         assert!(!policy.contains("k8s_get_resource_yaml(resource_type:configmap)"));
-        for tool in ["appa_get_runtime_state", "appa_match_batteries"] {
+        for tool in ["mcp/appa-guide/appa_get_runtime_state", "mcp/appa-guide/appa_match_batteries"] {
             assert!(policy.contains(&format!("name = \"{tool}\"")));
         }
         for tool in [
-            "appa_include_battery",
-            "appa_update_policy",
-            "appa_reload_policy",
-            "appa_refresh_batteries",
+            "mcp/appa-guide/appa_include_battery",
+            "mcp/appa-guide/appa_update_policy",
+            "mcp/appa-guide/appa_reload_policy",
+            "mcp/appa-guide/appa_refresh_batteries",
         ] {
             let declaration = policy
                 .split("[[policy.tool]]")
