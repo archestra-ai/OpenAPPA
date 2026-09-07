@@ -94,7 +94,7 @@ jobs:
               - 'marketplace/batteries/**'
               - 'marketplace/adapters/claude-code/**'
               - 'integrations/appa-guide/**'
-              - 'integrations/kagent/fixtures/**'
+              - 'marketplace/adapters/kagent/fixtures/**'
               - 'website/content/docs/contracts.md'
             plugin:
               - 'marketplace/adapters/claude-code/plugin/**'

@@ -13,7 +13,7 @@ digest = "sha256:c0e2d1d0e342fa3ffb4c51101eaa63b88c0eca719803ba14513e47de7b5fd9c
 
 [packages.adapter.kagent]
 path = "adapters/kagent"
-digest = "sha256:232777ab66dee717b5b8035ee2f4cc3c1f2fac6bf42d5e1e23623a8c1d665a38"
+digest = "sha256:3c341f2aef6269d588697f51f6e98597c4226a1858d36072a2c81e9588864432"
 
 [packages.battery.claude-code]
 path = "batteries/claude-code"
