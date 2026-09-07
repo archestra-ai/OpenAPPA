@@ -167,25 +167,6 @@ Suppose the agent takes the first option: it reads the original ticket and tries
 
 The agent can still finish useful work with private data, but sharing it outside the company requires either cleaning it or obtaining permission.
 
-## Audience Sources
-
-An audience source tells OpenAPPA who belongs to a group, such as your company's Finance team. When a policy restricts data to that group, OpenAPPA uses membership from your company's directory to check who may receive it.
-
-For example, before sending a Finance report, OpenAPPA checks whether the recipient belongs to the Finance group in Google Workspace.
-
-```toml
-[[audience.group]]
-name = "finance"
-from = ["google-workspace:group/finance@corp.com"]
-
-[[tool]]
-name = "get_finance_report"
-# Restrict the report to members of the Finance group.
-delta = { audience = ["@finance"] }
-```
-
-Connect the Google Workspace audience source to your directory service. See [Audience sources in the policy reference](/contracts#audience-sources) for supported providers and configuration.
-
 ## Next steps
 
 - [Policy Reference](/contracts): Guide to reviewing and writing policy configuration.
