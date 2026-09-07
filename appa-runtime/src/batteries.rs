@@ -119,7 +119,10 @@ pub fn name_from_include(path: &Path) -> Option<String> {
 /// regardless of how the root config spelled the relative include.
 pub fn name_from_resolved(path: &Path, battery_dirs: &[PathBuf]) -> Option<String> {
     for directory in battery_dirs {
-        let Ok(relative) = path.strip_prefix(directory) else {
+        // The include path is canonical, so a search-path entry that reaches the
+        // same directory through a link has to be resolved to prefix it.
+        let resolved = fs::canonicalize(directory).unwrap_or_else(|_| directory.clone());
+        let Ok(relative) = path.strip_prefix(&resolved) else {
             continue;
         };
         let parts: Vec<_> = relative.components().collect();
@@ -234,6 +237,20 @@ mod tests {
             .as_deref(),
             Some("slack")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_battery_directory_reached_through_a_link_keeps_its_name() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let real = root.path().join("real");
+        let link = root.path().join("link");
+        write_battery(&real, "slack", &["send"]);
+        std::os::unix::fs::symlink(&real, &link).expect("link to the batteries directory");
+
+        // The include arrives canonical, as `resolve_include` leaves it.
+        let include = fs::canonicalize(real.join("slack/appa.toml")).expect("canonical include");
+        assert_eq!(name_from_resolved(&include, &[link]).as_deref(), Some("slack"));
     }
 
     #[test]
