@@ -409,13 +409,16 @@ impl RuntimeToolService {
 }
 
 fn take_management_vouch<T: ManagementArguments>(runtime: &Runtime, tool: &str, arguments: &T) -> bool {
-    runtime.take_management_vouch(tool, arguments).is_some_and(|actor| {
-        let actual = &crate::api::acting_trajectory(&actor).0;
-        actual == arguments.actor()
-            || actual
-                .strip_prefix("kagent:")
-                .is_some_and(|trajectory| trajectory == arguments.actor())
-    })
+    let arguments_value = serde_json::to_value(arguments).expect("management arguments are plain data");
+    runtime
+        .take_vouched(&PermitKey::call(tool, &arguments_value))
+        .is_ok_and(|(actor, _)| {
+            let actual = &crate::api::acting_trajectory(&actor).0;
+            actual == arguments.actor()
+                || actual
+                    .strip_prefix("kagent:")
+                    .is_some_and(|trajectory| trajectory == arguments.actor())
+        })
 }
 
 fn management_result(result: Result<String, String>) -> CallToolResult {
@@ -891,13 +894,11 @@ mod tests {
             battery: "github".to_string(),
             expected_policy_key: "key".to_string(),
         };
-        runtime.vouch_management(
-            &ProposedCall {
-                tool: "mcp/appa-guide/appa_include_battery".to_string(),
-                arguments: serde_json::value::to_raw_value(&args).expect("arguments serialize"),
-            },
-            &actor,
-        );
+        let call = ProposedCall {
+            tool: "appa_include_battery".to_string(),
+            arguments: serde_json::value::to_raw_value(&args).expect("arguments serialize"),
+        };
+        runtime.vouch(&crate::api::call_key(&call).expect("a management call"), &actor, None);
         assert!(take_management_vouch(&runtime, "appa_include_battery", &args));
     }
 

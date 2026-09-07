@@ -119,10 +119,10 @@ pub fn name_from_include(path: &Path) -> Option<String> {
 /// regardless of how the root config spelled the relative include.
 pub fn name_from_resolved(path: &Path, battery_dirs: &[PathBuf]) -> Option<String> {
     for directory in battery_dirs {
-        // The include path is canonical, so a search-path entry that reaches the
-        // same directory through a link has to be resolved to prefix it.
-        let resolved = fs::canonicalize(directory).unwrap_or_else(|_| directory.clone());
-        let Ok(relative) = path.strip_prefix(&resolved) else {
+        // `path` arrives canonical; a search-path entry may not be (a symlink, or
+        // `/var` for `/private/var` on macOS), and the prefix test needs both alike.
+        let directory = fs::canonicalize(directory).unwrap_or_else(|_| directory.clone());
+        let Ok(relative) = path.strip_prefix(&directory) else {
             continue;
         };
         let parts: Vec<_> = relative.components().collect();

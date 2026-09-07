@@ -66,21 +66,70 @@ struct Vouch {
 /// harness names the actor — so it records the standing here and the tool spends it. The two
 /// variants are the two things a hook can key that record by, and they are separate variants
 /// because they can never mean each other: an offer id is a name the engine minted and the
-/// model quotes back, and a ticket is the call itself.
+/// model quotes back, and a call key is the call itself.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum PermitKey {
     /// The offer id `execute_remedy_plan` quotes.
     Offer(String),
-    /// One `yell` call, by its arguments: the tool takes no id, and the arguments are the
-    /// only thing both the hook and the tool see. A digest, so nothing a person wrote is a
-    /// map key.
-    Yell(String),
+    /// One call to a tool this runtime serves, by the tool's bare name and its arguments:
+    /// the tool takes no id, and the arguments are the only thing both the hook and the
+    /// tool see. A digest, so nothing a person wrote is a map key.
+    Call(String),
 }
 
 impl PermitKey {
     pub(crate) fn offer(quoted: &OfferId) -> Self {
         Self::Offer(quoted.0.clone())
     }
+
+    /// RFC 8785 over the parsed arguments, not over the bytes either side received: the
+    /// harness and the MCP client serialize the same call differently, and the digest has
+    /// to survive that.
+    pub(crate) fn call(tool: &str, arguments: &serde_json::Value) -> Self {
+        use sha2::Digest as _;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(tool.as_bytes());
+        hasher.update([0]);
+        hasher.update(appa_engine::params::canonical_bytes(arguments));
+        Self::Call(format!("{:x}", hasher.finalize()))
+    }
+}
+
+/// The key a proposed call to a tool this runtime serves is vouched under, or `None` when
+/// the call is not one: a tool on another server under a matching name, or a shape the tool
+/// itself would not read as its call.
+pub(crate) fn call_key(call: &ProposedCall) -> Option<PermitKey> {
+    const MANAGEMENT_TOOLS: [&str; 6] = [
+        "appa_get_runtime_state",
+        "appa_include_battery",
+        "appa_match_batteries",
+        "appa_reload_policy",
+        "appa_refresh_batteries",
+        "appa_update_policy",
+    ];
+    let bare = bare_runtime_tool(&call.tool);
+    if bare == "yell" {
+        return crate::yell::YellArgs::parse(&call.arguments).map(|args| args.ticket());
+    }
+    if !MANAGEMENT_TOOLS.contains(&bare) {
+        return None;
+    }
+    let mut arguments = serde_json::from_str::<serde_json::Value>(call.arguments.get()).ok()?;
+    if arguments.is_null() {
+        arguments = serde_json::json!({});
+    }
+    Some(PermitKey::call(bare, &arguments))
+}
+
+/// The tool's own name, under whichever prefix a harness's MCP client spells this runtime's
+/// server as.
+fn bare_runtime_tool(tool: &str) -> &str {
+    tool.strip_prefix("mcp__appa__")
+        .or_else(|| tool.strip_prefix("mcp__plugin_appa-runtime_appa__"))
+        .or_else(|| tool.strip_prefix("mcp/appa/"))
+        .or_else(|| tool.strip_prefix("mcp/plugin_appa-runtime_appa/"))
+        .or_else(|| tool.strip_prefix("mcp/appa-guide/"))
+        .unwrap_or(tool)
 }
 
 /// Why a runtime-provided tool has no trajectory to act for. The two are different things to
@@ -524,7 +573,6 @@ impl Prepared {
                 modules: self.modules,
                 executing: std::sync::Mutex::new(std::collections::BTreeSet::new()),
                 permits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
-                management_permits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 prompted: std::sync::Mutex::new(std::collections::BTreeSet::new()),
                 events: std::sync::Mutex::new(crate::events::EventLog::default()),
                 gates: self.gates,
@@ -541,7 +589,6 @@ struct Inner {
     modules: crate::builtins::ModuleRegistry,
     executing: std::sync::Mutex<std::collections::BTreeSet<String>>,
     permits: std::sync::Mutex<std::collections::BTreeMap<PermitKey, Vec<Vouch>>>,
-    management_permits: std::sync::Mutex<std::collections::BTreeMap<Vec<u8>, Vec<Actor>>>,
     /// Trajectories a prompt reached since their turn last settled. Claude Code sends no
     /// `Stop` hook for a turn the user interrupted, so the prompt is the only sign the
     /// previous turn is over; the next tool call or turn end settles what it left behind.
@@ -561,33 +608,6 @@ struct Inner {
 /// The trajectory an actor's events belong to: the child when the harness names one.
 pub(crate) fn acting_trajectory(actor: &Actor) -> &TrajectoryId {
     actor.child.as_ref().unwrap_or(&actor.root)
-}
-
-pub(crate) fn management_tool_name(tool: &str) -> Option<&'static str> {
-    const TOOLS: [&str; 6] = [
-        "appa_get_runtime_state",
-        "appa_include_battery",
-        "appa_match_batteries",
-        "appa_reload_policy",
-        "appa_refresh_batteries",
-        "appa_update_policy",
-    ];
-    // Every host spells the management set its own way; the vouch is keyed by the
-    // one bare name. A served deployment names it canonically under appa-guide's
-    // own toolset, Claude Code under whichever MCP server carries the plugin.
-    let bare = tool
-        .strip_prefix("mcp/appa-guide/")
-        .or_else(|| tool.strip_prefix("mcp__appa__"))
-        .or_else(|| tool.strip_prefix("mcp__plugin_appa-runtime_appa__"))
-        .unwrap_or(tool);
-    TOOLS.into_iter().find(|name| bare == *name)
-}
-
-fn management_key(tool: &str, arguments: &serde_json::Value) -> Vec<u8> {
-    let mut key = tool.as_bytes().to_vec();
-    key.push(0);
-    key.extend(serde_json_canonicalizer::to_vec(arguments).expect("management tool arguments canonicalize"));
-    key
 }
 
 impl Runtime {
@@ -1272,50 +1292,6 @@ impl Runtime {
             holders.retain(|holder| holder.actor != *acting);
             !holders.is_empty()
         });
-        let mut management = self
-            .inner
-            .management_permits
-            .lock()
-            .expect("the management-permit mutex is never poisoned");
-        management.retain(|_, holders| {
-            holders.retain(|holder| holder != acting);
-            !holders.is_empty()
-        });
-    }
-
-    pub(crate) fn vouch_management(&self, call: &ProposedCall, acting: &Actor) {
-        let Some(name) = management_tool_name(&call.tool) else {
-            return;
-        };
-        let Ok(mut arguments) = serde_json::from_str::<serde_json::Value>(call.arguments.get()) else {
-            return;
-        };
-        if arguments.is_null() {
-            arguments = serde_json::json!({});
-        }
-        let key = management_key(name, &arguments);
-        let mut permits = self
-            .inner
-            .management_permits
-            .lock()
-            .expect("the management-permit mutex is never poisoned");
-        let holders = permits.entry(key).or_default();
-        if !holders.contains(acting) {
-            holders.push(acting.clone());
-        }
-    }
-
-    pub(crate) fn take_management_vouch<T: serde::Serialize>(&self, tool: &str, arguments: &T) -> Option<Actor> {
-        let name = management_tool_name(tool)?;
-        let value = serde_json::to_value(arguments).ok()?;
-        let key = management_key(name, &value);
-        let mut permits = self
-            .inner
-            .management_permits
-            .lock()
-            .expect("the management-permit mutex is never poisoned");
-        let mut holders = permits.remove(&key)?;
-        (holders.len() == 1).then(|| holders.remove(0))
     }
 
     /// A prompt reached this actor. Nothing is recorded: the mark lives in memory and is
@@ -2452,7 +2428,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime =
             Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens");
-        let key = PermitKey::Yell("same-call".to_string());
+        let key = PermitKey::Call("same-call".to_string());
         let one = Actor {
             root: TrajectoryId("cc:one".to_string()),
             child: None,
@@ -2494,27 +2470,29 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             tool: "mcp__appa__appa_include_battery".to_string(),
             arguments: serde_json::value::to_raw_value(&args).expect("arguments serialize"),
         };
+        let key = call_key(&call).expect("a management call under the MCP prefix");
 
-        runtime.vouch_management(&call, &actor);
+        runtime.vouch(&key, &actor, None);
         let other_actor = crate::mcp::IncludeBatteryArgs {
             actor: "other-trajectory".to_string(),
             battery: "github".to_string(),
             expected_policy_key: "policy-1".to_string(),
         };
+        let other_key = PermitKey::call(
+            "appa_include_battery",
+            &serde_json::to_value(&other_actor).expect("arguments serialize"),
+        );
         assert_eq!(
-            runtime.take_management_vouch("appa_include_battery", &other_actor),
-            None,
+            runtime.take_vouched(&other_key),
+            Err(Unvouched::Nobody),
             "another trajectory cannot consume the permit"
         );
-        assert_eq!(
-            runtime.take_management_vouch("appa_include_battery", &args),
-            Some(actor.clone())
-        );
-        assert_eq!(runtime.take_management_vouch("appa_include_battery", &args), None);
+        assert_eq!(runtime.take_vouched(&key), Ok((actor.clone(), None)));
+        assert_eq!(runtime.take_vouched(&key), Err(Unvouched::Nobody));
 
-        runtime.vouch_management(&call, &actor);
+        runtime.vouch(&key, &actor, None);
         runtime.release_vouches(&actor);
-        assert_eq!(runtime.take_management_vouch("appa_include_battery", &args), None);
+        assert_eq!(runtime.take_vouched(&key), Err(Unvouched::Nobody));
     }
 
     /// The session-start check refuses on any fault, so the variant it refuses with is

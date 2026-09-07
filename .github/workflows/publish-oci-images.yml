@@ -4,6 +4,9 @@ name: Publish OCI images
 # attaches the caller's tags. Release callers pass one immutable v* tag.
 # CI callers pass rolling sha-/pr-/main/latest tags. Charts stay in
 # release.yml: their versions are SemVer without v and must not be GC'd.
+#
+# Repository variable APPA_YELL_ENDPOINT, the receiver `appa yell` reports to,
+# is exported into the appa-runtime image so a runtime in a cluster can send.
 
 on:
   workflow_call:
@@ -120,6 +123,8 @@ jobs:
           context: .
           file: appa-runtime/Dockerfile
           platforms: ${{ matrix.platform }}
+          build-args: |
+            APPA_YELL_ENDPOINT=${{ vars.APPA_YELL_ENDPOINT }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
           provenance: true
           sbom: true

@@ -39,7 +39,9 @@ two agree.
 
 ## Storage
 
-One object per report at `reports/<sha256 of the document>.json.gz`, holding
+One object per report at `reports/<build kind>/<sha256 of the document>.json.gz`,
+where the build kind is `release`, `commit` or `local` as the report's `build.source.kind`
+says, holding
 the gzip exactly as it arrived and written create-only. A retry of the same bytes is the same object and comes back as
 `"duplicate": true`; two different reports can never collide. The name is a
 digest rather than the document's `report_id` because that field is written by
@@ -68,6 +70,12 @@ repository variable of that name; the release workflow passes it through.
 A development build has none, resolves an empty endpoint, and refuses to send.
 `APPA_YELL_ENDPOINT` in the environment overrides the compiled value at run
 time, which is how a test points at a local receiver.
+
+The `appa-runtime` container image takes the override route rather than the
+compiled one: its Dockerfile exports `APPA_YELL_ENDPOINT` from a build argument
+the image workflow fills from the same repository variable. The binary inside
+is a development build, so a report from a cluster is filed under `local`, not
+`release`.
 
 ## Who owns what
 

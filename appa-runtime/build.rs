@@ -53,16 +53,17 @@ fn main() {
         let endpoint = release_yell_endpoint();
         println!("cargo:rustc-env=APPA_RELEASE_REF={reference}");
         println!("cargo:rustc-env=APPA_PLUGIN_SHA256={digest}");
-        println!("cargo:rustc-env=APPA_YELL_ENDPOINT={endpoint}");
+        println!("cargo:rustc-env=APPA_YELL_COMPILED_ENDPOINT={endpoint}");
         return;
     }
 
-    // Emitted rather than left unset. `option_env!` reads the environment the
-    // build ran in, so a shell that exports APPA_YELL_ENDPOINT to point a test
-    // at a local receiver would otherwise bake that address into the binary.
-    // A development build carries no endpoint because this says so, not because
-    // the variable happened to be absent. The runtime override is unaffected.
-    println!("cargo:rustc-env=APPA_YELL_ENDPOINT=");
+    // Emitted rather than left unset, and under a name of its own. A
+    // development build carries no endpoint because this says so, not because
+    // the variable happened to be absent. The name differs from the one the
+    // build reads because Cargo also exports a `rustc-env` to the process under
+    // `cargo run`: emitted as APPA_YELL_ENDPOINT, this empty value would
+    // overwrite the runtime override a developer set in the shell.
+    println!("cargo:rustc-env=APPA_YELL_COMPILED_ENDPOINT=");
 
     match (commit, dirty) {
         (Some(commit), false) => {

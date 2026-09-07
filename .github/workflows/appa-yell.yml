@@ -6,8 +6,11 @@ name: Deploy appa-yell
 # This workflow owns the function's *code* and nothing else. Scaling, ingress,
 # IAM, the runtime service account, the bucket and its retention belong to the
 # Terraform root in the infra repository, which is applied separately. That is
-# why the deploy below passes no such flag: `gcloud functions deploy` leaves
-# every setting it is not given alone, so CI cannot roll infrastructure back.
+# why the deploy below passes almost no such flag: `gcloud functions deploy`
+# leaves every setting it is not given alone, so CI cannot roll infrastructure
+# back. The one exception is the build account, named below because when the
+# flag is absent gcloud asks Cloud Build for the project's default, a call the
+# deploy identity is not permitted to make. Terraform sets the same value.
 #
 # Required repository secrets: APPA_YELL_GCP_SERVICE_ACCOUNT,
 # APPA_YELL_GCP_WORKLOAD_IDENTITY_PROVIDER (a deploy identity of its own, not
@@ -58,12 +61,14 @@ jobs:
 
       - name: Deploy the function source
         run: |
+          # CLOUDSDK_CORE_PROJECT is set by the auth step from the deploy identity.
           gcloud functions deploy "$FUNCTION" \
             --gen2 \
             --region "$REGION" \
             --source receiver/appa-yell \
             --runtime python312 \
-            --entry-point receive
+            --entry-point receive \
+            --build-service-account "projects/$CLOUDSDK_CORE_PROJECT/serviceAccounts/appa-yell-build@$CLOUDSDK_CORE_PROJECT.iam.gserviceaccount.com"
 
       - name: Smoke test the deployed endpoint
         env:

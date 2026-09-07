@@ -20,14 +20,20 @@ use super::{Author, Mode};
 /// facts are stripped, serialized and gzipped before the answer comes back.
 const BUILD_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The marks a person reads the run by: a question, a step that succeeded, one that did not.
+const ASK: &str = "?";
+const TICK: &str = "✓";
+const CROSS: &str = "✗";
+
 /// Run one yell to completion.
 pub fn run(url: &str, yes: bool, message: Vec<String>) -> ExitCode {
+    // Before anything is asked: a build with nowhere to send to has nothing to ask about.
+    let Some((receiver, source)) = client::Receiver::resolve() else {
+        return fail(&client::SendFailure::NoReceiver);
+    };
     let message = match message_from(&message) {
         Ok(message) => message,
-        Err(refusal) => {
-            eprintln!("appa yell: {refusal}");
-            return ExitCode::FAILURE;
-        }
+        Err(refusal) => return fail(&refusal),
     };
     let mode = match yes {
         true => Mode::Pseudonymized,
@@ -35,65 +41,85 @@ pub fn run(url: &str, yes: bool, message: Vec<String>) -> ExitCode {
     };
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
-        Err(error) => {
-            eprintln!("appa yell: no async runtime: {error}");
-            return ExitCode::FAILURE;
-        }
+        Err(error) => return fail(&format!("no async runtime: {error}")),
     };
-    runtime.block_on(yell(url, yes, message, mode))
+    runtime.block_on(yell(url, yes, message, mode, receiver, source))
 }
 
-async fn yell(url: &str, yes: bool, message: YellMessage, mode: Mode) -> ExitCode {
+async fn yell(
+    url: &str,
+    yes: bool,
+    message: YellMessage,
+    mode: Mode,
+    receiver: client::Receiver,
+    source: client::Source,
+) -> ExitCode {
     let finished = match build(url, &message, mode).await {
         Ok(finished) => finished,
         Err(class) => match local(message, mode, class) {
             Ok(finished) => finished,
-            Err(oversize) => {
-                eprintln!("appa yell: {oversize}");
-                return ExitCode::FAILURE;
-            }
+            Err(oversize) => return fail(&oversize),
         },
     };
     let written = match super::report::write(finished, &std::env::temp_dir()) {
         Ok(written) => written,
-        Err(error) => {
-            eprintln!("appa yell: {error}");
-            return ExitCode::FAILURE;
-        }
+        Err(error) => return fail(&error),
     };
     let path = written.path.display();
-    println!("The report is at {path}");
-    let Some(receiver) = client::Receiver::resolve() else {
-        eprintln!("appa yell: {}", client::SendFailure::NoReceiver);
-        eprintln!("The report is kept at {path}.");
-        return ExitCode::FAILURE;
-    };
-    // Named, not described. "The OpenAPPA team" is a claim about a URL, and the person is
-    // owed the URL — under `-y` too, where they are told where it went rather than asked.
+    println!();
+    println!("{TICK} Report written to {path}");
+    println!();
+    let destination = destination(source);
     match yes {
-        true => println!("Sending to {}.", receiver.as_str()),
+        true => println!("Sending it to {destination}."),
         false => {
-            if !ask_sharing(&written.path.display().to_string(), receiver.as_str()) {
-                println!("Not sent. The report is kept at {path}.");
+            if !confirm(&format!("Share it with {destination}?"), false) {
+                println!();
+                println!("Not sent. The report stays at {path}.");
                 return ExitCode::SUCCESS;
             }
         }
     }
+    println!();
     match client::send(&written.finished, &receiver).await {
         Ok(receipt) => {
             let already = match receipt.duplicate {
-                true => " (already had this one)",
+                true => " (we already had this one)",
                 false => "",
             };
-            println!("Sent{already}. Receipt {}.", receipt.receipt_id);
+            println!(
+                "{TICK} Sent{already}, thank you. Your reference is {}.",
+                reference(&receipt.receipt_id)
+            );
             ExitCode::SUCCESS
         }
         Err(failure) => {
-            eprintln!("appa yell: {failure}");
-            eprintln!("The report is kept at {path}.");
+            fail(&failure);
+            eprintln!("  The report stays at {path}.");
             ExitCode::FAILURE
         }
     }
+}
+
+/// Where the report goes, as the person is told it. Whoever set an override knows where it
+/// points, so the address itself is not repeated; the tag says only that one is in effect.
+fn destination(source: client::Source) -> &'static str {
+    match source {
+        client::Source::CompiledIn => "the OpenAPPA team",
+        client::Source::Environment => "the OpenAPPA team (via APPA_YELL_ENDPOINT)",
+    }
+}
+
+/// The start of a receipt id: enough for a person to quote and the team to find, and short
+/// enough to read aloud.
+fn reference(receipt_id: &str) -> &str {
+    receipt_id.get(..10).unwrap_or(receipt_id)
+}
+
+/// One failure, on stderr, and the exit code that goes with it.
+fn fail(error: &impl std::fmt::Display) -> ExitCode {
+    eprintln!("{CROSS} appa yell: {error}");
+    ExitCode::FAILURE
 }
 
 /// Ask the runtime for the whole document.
@@ -193,7 +219,10 @@ fn message_from(words: &[String]) -> Result<YellMessage, String> {
         return YellMessage::new(&words.join(" ")).map_err(|refusal| refusal.to_string());
     }
     let raw = match std::io::stdin().is_terminal() {
-        true => prompt("What is APPA doing wrong? ").unwrap_or_default(),
+        true => {
+            println!("{}", bold("What is APPA doing wrong?"));
+            prompt("> ").unwrap_or_default()
+        }
         false => {
             let mut piped = String::new();
             std::io::stdin()
@@ -208,22 +237,15 @@ fn message_from(words: &[String]) -> Result<YellMessage, String> {
 /// The first question. Its wording is the whole of what the person is agreeing to, so it names
 /// what pseudonymization replaces rather than calling it "additional privacy".
 fn ask_pseudonymization() -> Mode {
-    println!(
-        "Additional pseudonymization replaces the names your policy chose — tools, effects, \n\
-         authorities, sanitizers, trust ranks and audiences — with report-local tokens like \n\
-         `tool-1`. It never changes what kinds of things the report carries, and it does not \n\
-         touch your message, which is sent exactly as you write it."
-    );
-    match confirm("Apply additional pseudonymization?", true) {
+    println!();
+    match confirm(
+        "Pseudonymize your policy's names (tools, effects, authorities, sanitizers,\n  \
+         trust ranks, audiences) as tokens like tool-1? Your message is never changed.",
+        false,
+    ) {
         true => Mode::Pseudonymized,
         false => Mode::Baseline,
     }
-}
-
-/// The second question, asked only once the file exists, so the person can read it first, and
-/// naming the destination it will actually go to.
-fn ask_sharing(path: &str, receiver: &str) -> bool {
-    confirm(&format!("Share {path} with the OpenAPPA team at {receiver}?"), false)
 }
 
 /// A yes/no question. Anything but an explicit answer takes the default, including a closed
@@ -233,7 +255,7 @@ fn confirm(question: &str, default: bool) -> bool {
         true => "[Y/n]",
         false => "[y/N]",
     };
-    match prompt(&format!("{question} {suffix} ")) {
+    match prompt(&format!("{ASK} {}  {suffix} ", bold(question))) {
         None => default,
         Some(answer) => match answer.trim().to_ascii_lowercase().as_str() {
             "y" | "yes" => true,
@@ -251,6 +273,14 @@ fn prompt(question: &str) -> Option<String> {
     match std::io::stdin().read_line(&mut line) {
         Ok(0) | Err(_) => None,
         Ok(_) => Some(line),
+    }
+}
+
+/// Bold when a person is looking at a terminal; plain when the output is a file or a pipe.
+fn bold(text: &str) -> String {
+    match std::io::stdout().is_terminal() {
+        true => format!("\x1b[1m{text}\x1b[0m"),
+        false => text.to_string(),
     }
 }
 

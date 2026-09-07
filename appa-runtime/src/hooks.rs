@@ -264,8 +264,7 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
                     dispatch: opened,
                 }) => {
                     *dispatch = Some(opened);
-                    vouch_yell(runtime, &actor, &call);
-                    runtime.vouch_management(&call, &actor);
+                    vouch_call(runtime, &actor, &call);
                     HookDecision::AllowCall { spawn }
                 }
                 Ok(ToolCallDecision::Deny {
@@ -400,36 +399,20 @@ fn control_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall, ruling: O
     }
 }
 
-/// Record who is making a released `yell` call, so the tool can report on that session
-/// rather than on whichever one this machine ran most recently.
+/// Record who is making a released call to a tool this runtime serves — `yell`, or one of
+/// the management tools — so the tool, whose MCP request names no session, acts for the
+/// session the hook saw rather than whichever one this machine ran most recently.
 ///
-/// Only a released call: the vouch is what lets a report be built, so a `yell` the policy
-/// blocked must leave nothing behind for the tool to spend. Unlike the control tool, this is
-/// an ordinary checked call — it is a flow like any other, and the policy decides it first.
-fn vouch_yell(runtime: &Runtime, actor: &Actor, call: &ProposedCall) {
-    if !is_yell_tool(&call.tool) {
-        return;
-    }
-    let Some(args) = crate::yell::YellArgs::parse(&call.arguments) else {
-        tracing::debug!(trajectory = %actor.root.0, "yell proposed with arguments this build cannot read");
+/// Only a released call: the vouch is what lets the tool act at all, so a call the policy
+/// blocked must leave nothing behind for the tool to spend. Unlike the control tool, these
+/// are ordinary checked calls — flows like any other, and the policy decides them first. A
+/// lookalike on another server is an ordinary tool this never vouches for.
+fn vouch_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall) {
+    let Some(key) = crate::api::call_key(call) else {
         return;
     };
-    runtime.vouch(&args.ticket(), actor, None);
-    tracing::debug!(trajectory = %actor.root.0, "yell vouched for this trajectory");
-}
-
-/// The runtime's own reporting tool, by the wire names its distribution channels produce.
-/// A lookalike on another server is an ordinary tool this never vouches for, so it reaches
-/// no session's decisions.
-fn is_yell_tool(tool: &str) -> bool {
-    matches!(
-        tool,
-        "yell"
-            | "mcp/appa/yell"
-            | "mcp/plugin_appa-runtime_appa/yell"
-            | "mcp__appa__yell"
-            | "mcp__plugin_appa-runtime_appa__yell"
-    )
+    runtime.vouch(&key, actor, None);
+    tracing::debug!(trajectory = %actor.root.0, tool = %call.tool, "vouched for this trajectory");
 }
 
 fn quoted_offer(call: &ProposedCall) -> Option<OfferId> {
