@@ -61,7 +61,7 @@ effects = ["egress"]
 | `name` | The tool name, optionally with an argument selector. |
 | `description` | Optional description of the tool. Annotators can receive this description. |
 | `parameters` | JSON Schema for the tool arguments. Some input mappings require it. |
-| `tags` | Names used to select applicable authorities and sanitizers. |
+| `tags` | Names used to select applicable authorities and sanitizers. See [Tags](#tags). |
 | `delta` | Can restrict the audience or lower trust. It cannot make the trajectory less restricted. |
 | `requires` | Audience, trust, effects, or attention requirements for the call. |
 | `effects` | Effect names recorded after successful execution. Declare all relevant side effects. |
@@ -72,6 +72,21 @@ An omitted `delta` adds no restriction. An omitted `requires` adds no requiremen
 Only one source of contract rules is allowed: static `delta`, `requires`, and `effects` fields, or an `annotator`. Combining them causes a load error.
 
 OpenAPPA checks both `delta` and `requires` before allowing the tool call.
+
+### Tags
+
+Tags connect tools to the authorities that can review their calls and the sanitizers that can transform their data. For example, this contract gives a ticket tool the `support` tag:
+
+```toml
+[[policy.tool]]
+name = "get_ticket_from_crm"
+tags = ["support"]
+delta = { audience = ["internal"] }
+```
+
+An authority or sanitizer with `tags = ["support"]` applies to tools with that tag. If it lists several tags, one matching tag is enough. Without tags, an authority or sanitizer is not restricted to a particular set of tools. Its permissions still limit what it can approve or transform.
+
+Attention approvals use a different rule: OpenAPPA selects authorities by `permits.attention`, regardless of their tags. See [Attention](#attention).
 
 ### Pattern matching
 
@@ -364,7 +379,7 @@ It reads the membership service's `verified_email` field, checks that it has a v
 
 The membership service is responsible for verifying who owns the email address. OpenAPPA trusts that service's claim; it does not verify ownership itself. A value such as `"finance"` or `"id63234"` in `verified_email` causes an error because it is not an email address. OpenAPPA does not fall back to the provider ID when this field is invalid.
 
-The following configuration explicitly selects this default behavior. You do not need to add it to your file:
+This configuration explicitly selects the default implementation:
 
 ```toml
 [policy.identity]
@@ -606,7 +621,7 @@ Write explicit bounds for each annotator. An omitted bound does not prohibit val
 
 The optional `hint` explains how to select values. It can define terms, evidence requirements, and examples. It cannot expand the permits and cannot exceed 512 characters. An annotator name must be non-empty and can contain dots.
 
-A root annotator replaces the complete included declaration with the same name. When changing only a hint, repeat the original implementation, inputs, and fields that define its permits.
+A root annotator replaces the complete included declaration with the same name. Fields omitted from the replacement are not inherited.
 
 ### Implementing an annotator
 
@@ -710,7 +725,7 @@ confined_results = ["get_ticket_from_crm"]
 url = "https://sanitizer.corp/sanitize"
 ```
 
-Replace the example endpoint with a service that performs the stated transformation. This declaration permits public sharing of its output. The service must remove all information that cannot be shared publicly.
+This declaration permits public sharing of the sanitizer's output. The service must remove all information that cannot be shared publicly.
 
 ### Permitted transitions
 
@@ -751,7 +766,7 @@ A `tool_input` rewrite can satisfy an unmet audience `contains` requirement. It 
 
 OpenAPPA selects a contract for the rewritten arguments. The replacement call must satisfy that contract's requirements, effects, and parameter schema. If the contract uses an annotator, OpenAPPA requests a new annotation. Membership checks reuse the decision's recorded evidence.
 
-A sanitizer's `tags` restrict it to values from tools with a matching tag. For input rewrites, the tags must also match the selected replacement contract. A child return has no originating tool. Only a sanitizer without tags can transform that return.
+A sanitizer's [tags](#tags) restrict it to values from tools with a matching tag. For input rewrites, the tags must also match the selected replacement contract. A child return has no originating tool. Only a sanitizer without tags can transform that return.
 
 ### Implementing a sanitizer
 
@@ -797,7 +812,7 @@ audience_missing = ["public"]
 builtin = "hitl"
 ```
 
-Add `tags = ["support"]` to the tools this reviewer should cover. This authority can approve sharing to any audience, including public sharing, for matching tools. Use narrower permissions where required.
+This authority can approve sharing to any audience, including public sharing, for tools with `tags = ["support"]`.
 
 Approval applies to one call. It does not change the trajectory's label or approve later calls. An offered remedy still requires the authority's decision.
 
@@ -820,13 +835,9 @@ effects_containing = ["email.sent"]
 attention = ["finance-signoff"]
 ```
 
-Place this table after the authority it configures. The fields are independent permissions. Declare only those the authority needs.
-
-Tags restrict which tools an authority covers for ordinary requirement gaps. If tags are omitted, it can cover all tools. Attention routing ignores tags. A mark routes to every authority whose `permits.attention` contains it.
+An authority's [tags](#tags) select the tools it can review for unmet audience, trust, or effects requirements. Attention approvals are selected by `permits.attention` instead.
 
 The optional `hint` explains what the authority reviews. It does not expand `permits`.
-
-A denial is recorded. The agent cannot repeat the same approval request for that specific call. An authority without an implementation returns no answer. This does not prevent deployment startup, but that authority cannot release a call.
 
 ### Authority implementation modes
 
@@ -934,7 +945,7 @@ OpenAPPA applies `attest-schema` directly. Do not add `[externals.sanitizers.att
 
 This complete configuration accompanies the [customer-ticket example](/how-it-works#example-sharing-information-from-a-private-customer-ticket).
 
-The integration must withhold original ticket results and support separate child contexts. Replace the example service URLs and set `APPA_PII_TOKEN` before loading the configuration.
+The integration must withhold original ticket results and support separate child contexts. The example uses external services and an `APPA_PII_TOKEN` environment variable for authentication.
 
 ```toml
 [policy]
@@ -1020,7 +1031,7 @@ Root declarations come first. Included declarations follow in list order. The fo
 
 - An included file cannot include another file.
 - An included file cannot replace settings that apply to the whole deployment.
-- A root `[[policy.annotator]]` replaces an included annotator with the same name. The replacement is complete. Repeat all fields that you want to keep.
+- A root `[[policy.annotator]]` replaces an included annotator with the same name. Fields omitted from the replacement are not inherited.
 - Two included files cannot declare the same annotator.
 - Duplicate external names within one component kind are errors.
 
