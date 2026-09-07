@@ -163,7 +163,10 @@ async fn deployment_with(review_timeout_ms: u64) -> Deployment {
         "http://{}/mcp",
         listener.local_addr().expect("the socket has an address")
     );
-    let app = axum::Router::new().nest_service("/mcp", mcp::service(Arc::clone(&runtime)));
+    let app = axum::Router::new().nest_service(
+        "/mcp",
+        mcp::service(Arc::clone(&runtime), appa_runtime::runtime_cli::Adapter::ClaudeCode),
+    );
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
@@ -281,7 +284,10 @@ builtin = "hitl"
         "http://{}/mcp",
         listener.local_addr().expect("the socket has an address")
     );
-    let app = axum::Router::new().nest_service("/mcp", mcp::service(Arc::clone(&runtime)));
+    let app = axum::Router::new().nest_service(
+        "/mcp",
+        mcp::service(Arc::clone(&runtime), appa_runtime::runtime_cli::Adapter::ClaudeCode),
+    );
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });

@@ -76,6 +76,7 @@ impl ReportId {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Author {
     Cli,
+    Agent,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]

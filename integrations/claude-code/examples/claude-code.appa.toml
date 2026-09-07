@@ -221,6 +221,27 @@ name = "WebSearch"
 requires = { audience = { contains = ["public"] } }
 delta = { trust = "suspicious" }
 
+# Reporting to the OpenAPPA team that APPA is in the way. Served by the runtime
+# itself, and gated by the same algebra as any other sink that leaves this
+# machine: the report carries this session's APPA decisions, so a session
+# narrowed by a battery's reads reaches a human review instead of sending. The
+# report never carries a prompt, a tool argument or a tool output — what it may
+# carry is decided by the runtime, not by this rule. Turn the tool off entirely
+# with `[reporting] agent_yell = false` at the end of this file; a deployment
+# that leaves it on and wants a person in the loop can add
+# `requires = { attention = ["hitl"] }` here instead.
+[[policy.tool]]
+name = "mcp__plugin_appa-runtime_appa__yell"
+requires = { audience = { contains = ["public"] } }
+delta = {}
+
+# The same tool where the runtime's MCP server is registered directly rather
+# than through the plugin. One deployment reaches only one of these names.
+[[policy.tool]]
+name = "mcp__appa__yell"
+requires = { audience = { contains = ["public"] } }
+delta = {}
+
 # Compatibility net for tools installed after this policy was generated. Exact
 # declarations always win over the wildcard, including declarations supplied by
 # connector batteries. The mandate is deliberately closed to this deployment's
@@ -305,3 +326,9 @@ builtin = "hitl"
 #   [externals.audience.github]
 #   command = ["python3", "batteries/github/audience-source.py"]
 #   token_env = "APPA_PROVIDER_GITHUB_TOKEN"
+
+# Whether the agent may report on its own through the `yell` tool. Off leaves it
+# unadvertised and unroutable; a person can always report with `appa yell`.
+# `appa init` asks, and writes the answer here.
+[reporting]
+agent_yell = false

@@ -174,6 +174,10 @@ enum Attempt {
     Give(SendFailure),
 }
 
+/// What a receipt may weigh. It is two short strings; anything larger is a receiver that is
+/// broken or is not one, and either way this process will not hold it in memory to find out.
+const MAX_RECEIPT_BYTES: usize = 64 * 1024;
+
 async fn read(response: reqwest::Response) -> Result<Receipt, Attempt> {
     let status = response.status();
     if status.is_success() {
@@ -181,8 +185,9 @@ async fn read(response: reqwest::Response) -> Result<Receipt, Attempt> {
         // in transit is exactly the case the idempotency id exists for: the same bytes go up
         // again and come back marked as the duplicate they are. A body that arrives whole and
         // does not parse is a different thing, and retrying it changes nothing.
-        return match response.bytes().await {
-            Err(_) => Err(Attempt::Retry(SendFailure::UnreadableReceipt)),
+        return match bounded_body(response, MAX_RECEIPT_BYTES).await {
+            Err(BodyRefusal::Transport) => Err(Attempt::Retry(SendFailure::UnreadableReceipt)),
+            Err(BodyRefusal::TooLarge) => Err(Attempt::Give(SendFailure::UnreadableReceipt)),
             Ok(body) => {
                 serde_json::from_slice::<Receipt>(&body).map_err(|_| Attempt::Give(SendFailure::UnreadableReceipt))
             }
@@ -197,6 +202,35 @@ async fn read(response: reqwest::Response) -> Result<Receipt, Attempt> {
     match matches!(status.as_u16(), 408 | 429) || status.is_server_error() {
         true => Err(Attempt::Retry(failure)),
         false => Err(Attempt::Give(failure)),
+    }
+}
+
+/// Why a body did not arrive whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BodyRefusal {
+    Transport,
+    TooLarge,
+}
+
+/// One response body, read a chunk at a time and refused the moment it passes `cap`.
+///
+/// Neither side of this exchange has earned the right to decide how much memory this process
+/// commits: the receiver is somebody else's service, and the runtime a `yell` asks may not be
+/// a runtime at all. A declared content length is a claim, not a bound, so the count is of
+/// bytes actually taken.
+pub(crate) async fn bounded_body(mut response: reqwest::Response, cap: usize) -> Result<Vec<u8>, BodyRefusal> {
+    let mut body = Vec::new();
+    loop {
+        match response.chunk().await {
+            Err(_) => return Err(BodyRefusal::Transport),
+            Ok(None) => return Ok(body),
+            Ok(Some(chunk)) => {
+                if body.len() + chunk.len() > cap {
+                    return Err(BodyRefusal::TooLarge);
+                }
+                body.extend_from_slice(&chunk);
+            }
+        }
     }
 }
 
@@ -245,6 +279,55 @@ mod tests {
         assert_eq!(
             send(&finished, &receiver).await,
             Err(SendFailure::Unreachable { attempts: 3 })
+        );
+    }
+
+    /// A receiver that answers on loopback, so the send path is exercised against a real
+    /// socket rather than a stand-in for one. Returns the address it is listening on.
+    async fn receiver_answering(body: &'static str) -> Receiver {
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::post(
+                move || async move { ([(axum::http::header::CONTENT_TYPE, "application/json")], body) },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback binds");
+        let address = listener.local_addr().expect("the listener has an address");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Receiver::parse(&format!("http://{address}/")).expect("loopback is a receiver")
+    }
+
+    fn one_report() -> Finished {
+        Finished::of(br#"{"schema":"openappa.yell.v1"}"#.to_vec()).expect("the fixture fits")
+    }
+
+    #[tokio::test]
+    async fn a_receipt_is_read_back_from_a_real_receiver() {
+        let receiver = receiver_answering(r#"{"receipt_id":"r-1","duplicate":true}"#).await;
+        assert_eq!(
+            send(&one_report(), &receiver).await,
+            Ok(Receipt {
+                receipt_id: "r-1".to_string(),
+                duplicate: true,
+            })
+        );
+    }
+
+    /// A receipt is two short strings. A receiver that answers with megabytes is broken or is
+    /// not a receiver, and either way this process does not hold the answer to find out — nor
+    /// does it retry, because the same bytes would come back.
+    #[tokio::test]
+    async fn a_receipt_larger_than_the_contract_is_refused_without_being_held() {
+        let flood: &'static str =
+            Box::leak(format!(r#"{{"receipt_id":"{}"}}"#, "x".repeat(MAX_RECEIPT_BYTES + 1)).into_boxed_str());
+        let receiver = receiver_answering(flood).await;
+        assert_eq!(
+            send(&one_report(), &receiver).await,
+            Err(SendFailure::UnreadableReceipt)
         );
     }
 
