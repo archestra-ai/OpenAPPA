@@ -104,7 +104,7 @@ See [Sanitizers in the policy reference](/contracts#sanitizers) for service conf
 
 An annotator classifies a tool call to determine its output restrictions (`delta`), requirements (`requires`), and effects. OpenAPPA checks the resulting contract before allowing the call.
 
-For example, a Python script can classify files by directory: public documentation can be shared publicly, while customer records are restricted to internal users.
+For example, a Python script can classify files by directory: files in `/srv/public-docs` can be shared publicly, while files in `/srv/customer-records` are restricted to internal users.
 
 ```toml
 [[annotator]]
