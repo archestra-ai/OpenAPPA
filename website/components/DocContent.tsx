@@ -195,6 +195,12 @@ function Markdown({ content, terms = true }: { content: string; terms?: boolean 
         [rehypeHighlight, { languages: { ...common, appa: appaTraceLanguage } }],
       ]}
       components={{
+        p: ({ children }) => {
+          // Indented directives stay inside their Markdown list item.
+          const match = typeof children === "string" ? children.match(/^:::([a-z0-9-]+):::$/) : null;
+          const render = match ? DIRECTIVES[match[1]] : undefined;
+          return render ? <>{render()}</> : <p>{children}</p>;
+        },
         pre: (props) => <CodeBlock {...props} />,
         code: terms ? MarkdownCode : PlainCode,
         a: MarkdownLink,

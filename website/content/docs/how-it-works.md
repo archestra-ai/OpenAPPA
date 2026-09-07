@@ -9,206 +9,167 @@ description: Deterministic security guarantees, flow tracking, and how agents se
 
 OpenAPPA sits between an agent and its tools to answer one question before every action: *is this data allowed to go to this destination?*
 
-Powered by **APPA** (Agentic Permissions Policy Algebra), it provides a formal system to track data sensitivity and trust deterministically across heterogeneous tools. Security context, policy labels, and audit trails flow entirely out-of-band—outside the agent's prompt and token stream. Because enforcement lives at the runtime boundary rather than inside the model's context, prompt injections cannot alter or bypass policy rules.
+Powered by **APPA** (Agentic Permissions Policy Algebra), OpenAPPA tracks data sensitivity and trust across the tools an agent uses. The security engine stays outside the agent loop, so prompt injections cannot alter or bypass policy rules.
 
-When an action cannot proceed as proposed, OpenAPPA does not simply throw a dead-end error. It returns a structured **remedy plan**—such as requesting human approval, scrubbing sensitive fields, or isolating reads in a sub-execution—giving the agent the exact playbook to self-correct and finish its task safely.
+OpenAPPA also helps the agent remain useful under security restrictions. If an action is blocked by policy, OpenAPPA returns ways to continue: request human approval, clean sensitive fields, or isolate a read in a subagent.
 
-Because policy checks happen prospectively before tools run, sensitive data is never exposed to unauthorized tools, and the agent is never left stranded mid-workflow.
+## The Core Concepts
 
-### The core mental model
+OpenAPPA operates with three concepts:
 
-OpenAPPA operates on three runtime concepts:
+1. **Security Label**
 
-1. **Security Labels** (`label`)  
-   Attached to every running trajectory. A label tracks audience (who is authorized to receive the trajectory's data) and trust rank (whether data comes from a vetted internal source or untrusted external data). An audience can name readers exactly, or symbolically: OpenAPPA ships the built-in chain `self` ⊆ `internal` ⊆ `public`, and policies declare named audiences such as `@finance` on top of it. A symbolic audience stays symbolic in the label and the log; when a decision needs actual membership, OpenAPPA reads the configured sources — Google Workspace, Slack, or GitHub, each bound to your own endpoint or command — for that one act, pins the answer, and replays from the pin without ever consulting a source again.
+   A trajectory is an agent's work on a conversation or task, including its tool calls. For each trajectory, OpenAPPA keeps a security label and the policy configuration needed to evaluate its next action. Each decision accounts for what the agent has already read and done.
 
-2. **Tool Contracts** (`delta` & `requires`)  
-   Declarative rules configured per tool. Reading data restricts the trajectory's label (`delta`), while invoking an outbound tool verifies that the destination is permitted by the trajectory's current label (`requires`).
+   The security label can become more restrictive as the agent works, but it cannot become less restrictive. Once the agent reads restricted or untrusted data, those restrictions stay with the session.
 
-3. **Policy Remedies** (`remedy_plans`)  
-   When a proposed tool dispatch exceeds the trajectory's current permissions, OpenAPPA returns a structured refusal containing actionable remedy plans:
-   - Narrowing: accept restricted reach to continue internal tasks.
-   - Sanitizers: clean data through a registered sanitizer to preserve reach.
-   - Authorities: request targeted approval (e.g. human-in-the-loop) for an out-of-bounds call.
-   - Child Branches: spin off a sub-execution to isolate sensitive reads from the main workflow.
+   :::fig-label-fold:::
 
-## Labels only move one way
+   Audience and Trust make up the security label. OpenAPPA also tracks Effects and checks Attention requirements:
 
-A tool contract declares a `delta` to define how fetching its result restricts the agent's current security label. A `delta` can only restrict permissions—it intersects allowed readers, lowers trust levels, or leaves the label unchanged.
+   1. **Audience:** Who is authorized to access data in this agent session. Reading data for a smaller audience restricts where the agent can send data later. For example, after reading an internal customer record, the agent cannot send session data to a public destination.
+   2. **Trust:** How much the data in the session can be trusted. Reading an untrusted web page can lower the session's trust, and tools that require trusted input will no longer be allowed to run.
+   3. **Effect:** What the agent has already done, such as sending an email or changing a system. Effects accumulate in the session history. A policy can require an effect to have happened, or prevent an action after an effect has happened.
+   4. **Attention:** Approval or review required for a specific action. Unlike effects, attention does not accumulate. An approval clears the attention requirement for that action only, and later calls must request attention again.
 
-Because permissions only tighten over time, **data cannot be laundered** by passing it through intermediate steps or LLM prompts. Reading internal system records permanently marks the execution context as internal, and ingesting untrusted external data permanently drops its trust level.
+2. **Tool Contracts**
 
-Restricting permissions doesn't mean blocking external work: an `authority` can approve a specific outbound call without changing the overall label, or the agent can spin off a child execution to isolate sensitive reads from its main workflow.
+   Every tool has a contract in the OpenAPPA policy. The contract tells OpenAPPA how the tool interacts with the agent's security state:
 
-:::fig-label-fold:::
+   - **`delta`:** How data returned by the tool changes the security label.
+   - **`requires`:** Which requirements the session must satisfy for OpenAPPA to allow the action.
+   - **`effects`:** Which effects are recorded after a tool runs successfully.
 
-The current label is computed directly from all values admitted so far—combining tool result restrictions and sanitized derivations—eliminating the need to re-evaluate full trajectory history:
+   For example, a CRM tool can label its result as internal, while an email tool can require the recipient to be included in the session's audience.
 
-```ts
-label = admittedLabels.reduce(narrow, startingLabel)   // narrow only ever restricts
-```
+3. **Remedy Plans**
 
-This monotonic structure provides a **formally provable non-interference guarantee**: because label transitions strictly narrow permitted reader sets over an execution trace, sensitive data is mathematically prevented from leaking to unauthorized destinations across arbitrary multi-step tool sequences.
+   When an action does not meet its tool contract, OpenAPPA blocks it and returns the remedy plans allowed by the policy. A plan can involve cleaning data with a [sanitizer](#sanitizers), receiving approval from an [authority](#authorities), accepting a narrower audience, or isolating a sensitive read in a [subagent](#subagent-reads).
 
-## Worked example: preserve reach or approve the exact call
+   An offered plan can still be denied by an approval service or fail during data cleaning. If no permitted remedy succeeds, the action remains blocked.
 
-To see how this works in practice, consider an agent configured with three tools: `get_ticket_from_crm`, `send_email`, and `file_github_issue`:
+   :::fig-remedy-plan:::
+
+## Keeping Agents Useful Under Restrictions
+
+If the security label becomes more restrictive as the agent works, how can the agent still do something useful?
+
+OpenAPPA can ask for approval for a specific action or clean data before the agent sees it. It also uses information about each tool call and who may access the data to apply the appropriate restrictions. The policy configuration defines when these options are available.
+
+### Authorities
+
+An authority can approve a specific action that the session's restrictions would otherwise block. It can be a person, an approval service, or an LLM evaluator. Approval does not make the security label less restrictive; it only allows that one action.
+
+For example, an agent has read a private customer report and wants to email it to an external auditor. An authority can approve that email without approving future emails or changing the session's restrictions.
 
 ```toml
-[audience.internal]
-from = ["google-workspace:full-members"]   # who "internal" means, read from the directory per act
-
-[[tool]]
-name  = "get_ticket_from_crm"
-delta = { audience = ["internal"] }   # reading CRM data restricts the trajectory to the built-in internal audience
-
-[[tool]]
-name       = "send_email"
-parameters = { type = "object", properties = { recipient = { type = "string" }, body = { type = "string" } }, required = ["recipient", "body"] }
-requires   = { audience = { contains = ["$recipient"] } }   # recipient must be in current audience
-delta      = {}
-effects    = ["egress"]
-
-[[tool]]
-name     = "file_github_issue"
-requires = { audience = { contains = ["public"] } }         # requires public reach
-delta    = {}
-effects  = ["egress", "mutation"]
-
-[[sanitizer]]
-name = "remove_pii"
-on   = ["tool_output"]
-hint = "Removes customer identities from a CRM record."
-[sanitizer.permits]
-audience = { from = ["internal"], to = ["public"] }         # declassifies internal to public
-
 [[authority]]
-name = "user"
+name = "reviewer"
+
 [authority.permits]
-audience_missing = ["public"]                                # user can approve public egress
+# Allow the reviewer to approve sharing
+# outside the session's audience.
+audience_missing = ["public"]
+
+[externals.authorities.reviewer]
+# OpenAPPA's built-in human-in-the-loop authority.
+builtin = "hitl"
 ```
 
-The policy declares the security bounds. The deployment specifies who executes them in a separate `[externals]` table (e.g. binding `user` to a human approval prompt or `remove_pii` to an HTTP sanitizer endpoint):
+See [Authorities in the policy reference](/contracts#authorities) for configuration and supported implementations.
+
+### Sanitizers
+
+A sanitizer cleans data before the agent receives it or sends it to a tool. Cleaning data before the agent sends it can allow an action that would otherwise be blocked.
+
+For example, a sanitizer removes customer names and email addresses from a support ticket. The policy permits the agent to share that cleaned version in a public bug report.
 
 ```toml
-[externals.sanitizers.remove_pii]
-url       = "https://pii.corp/redact"
-token_env = "APPA_PII_TOKEN"               # sent as a bearer token
+[[sanitizer]]
+name = "remove_customer_details"
+on = ["tool_output"]
 
-[externals.authorities.user]
-builtin = "hitl"                           # ask a person
+[sanitizer.permits]
+# Allow the cleaned result to be shared publicly.
+audience = { from = ["internal"], to = ["public"] }
 
-[externals.audience.google-workspace]
-url = "https://audience.corp/google-workspace"   # answers the internal membership reads
+[externals.sanitizers.remove_customer_details]
+# Replace with your internal sanitization service URL.
+url = "https://sanitizer.corp.example/sanitize"
 ```
+
+See [Sanitizers in the policy reference](/contracts#sanitizers) for service configuration and where cleaning can happen.
+
+### Annotators
+
+An annotator classifies a tool call to determine its output restrictions (`delta`), requirements (`requires`), and effects. OpenAPPA checks the resulting contract before allowing the call.
+
+For example, a Python script can classify files by directory: files in `/srv/public-docs` can be shared publicly, while files in `/srv/customer-records` are restricted to internal users.
+
+```toml
+[[annotator]]
+name = "classify_file"
+ranks = ["suspicious"]
+audiences = ["public", "internal"]
+marks = []
+effects = []
+
+[[tool]]
+name = "read_file"
+# Ask the annotator to classify the file being read.
+annotator = "classify_file"
+
+[externals.annotators.classify_file]
+command = ["python3", "./classify_file.py"]
+```
+
+An annotator can run as a local script or an external service. See [Annotators in the policy reference](/contracts#annotators) for configuration, the request and response format, and limits on its answers.
+
+### Subagent Reads
+
+A subagent reads sensitive data in a separate context and returns only what the policy allows. For example, it can summarize a private ticket and pass the summary through a sanitizer, letting the main agent use the cleaned result in a public bug report if the policy permits.
+
+Before the subagent starts, the main agent sets the return requirements, including any cleaning. These also limit what the subagent can read. OpenAPPA blocks results that do not meet them.
+
+See [Subagent Returns](/contracts#subagent-returns) for integration requirements and configuration.
+
+## Example: sharing information from a private customer ticket
+
+The example shows an agent reading a private customer ticket and then trying to share information from it.
+
+The agent has three tools:
+
+- **`get_ticket_from_crm`:** Read a customer support ticket.
+- **`send_email`:** Send an email to a recipient.
+- **`file_github_issue`:** Create a public GitHub issue.
+
+The policy says:
+
+- CRM tickets are internal.
+- Emails may only go to people authorized to see the session's data.
+- Public GitHub issues cannot contain internal data.
+
+The policy also allows a sanitizer to remove customer details and a person to approve sharing outside the company.
+
+See the [customer-ticket policy example](/contracts#example-customer-ticket-policy) for the tool rules and service configuration.
 
 ### What happens when the agent reads a ticket?
 
-When the agent calls `get_ticket_from_crm()`, OpenAPPA intercepts the dispatch before execution and presents three clear paths:
+The agent has three options when reading the ticket:
 
-| Execution Path | Trajectory Label Impact | Downstream Dispatch Impact |
-|---|---|---|
-| **Accept Narrowing** | Trajectory becomes `internal`. | `file_github_issue` is blocked; `send_email` requires authority approval for external recipients. |
-| **Sanitize the Result** | Trajectory stays `{public, trusted}`. | Raw ticket is withheld from the model; `remove_pii`'s sanitized derivation is admitted in its place. |
-| **Child Branch + Sanitizer** | Parent stays `{public, trusted}`; child narrows to `internal`. | Parent declares the sanitized route at the spawn; child reads raw ticket, reasons over it, and returns the sanitized derivation across the merge boundary. |
+1. **Read the original ticket itself.** Its session becomes internal. It can email colleagues, but posting publicly or emailing an external recipient requires approval.
+2. **Have a sanitizer remove customer details first.** The agent sees only the cleaned ticket. This example's policy permits that cleaned version to be shared publicly.
+3. **Have a subagent read the original ticket.** The subagent examines the private information and returns a sanitized result. The main agent never sees the private details and can use the cleaned result in public tools.
 
 :::fig-two-endings:::
 
-If the agent accepts narrowing to `internal` and later attempts `send_email(body, "auditor@external.com")`, OpenAPPA reads the configured `internal` sources for this act, finds `auditor@external.com` is not a member, halts dispatch, and returns a remedy plan pointing to the `user` authority. Once the human approves, the email dispatches and the event is permanently logged — with the membership answer pinned to it, so replay reaches the same decision without a directory call.
+Suppose the agent takes the first option: it reads the original ticket and tries to email an external auditor at `auditor@external.com`. OpenAPPA blocks the email and offers human approval. If approved, that particular email is sent. Future external emails still need their own approval.
 
-## Sub-agents isolate sensitive reads
-
-Reading untrusted external files, third-party APIs, or confidential internal records normally restricts the entire agent session. Child trajectories isolate these label modifications within host-managed sub-executions.
-
-A child process can read and reason over raw, untrusted data in its own sandboxed context without restricting the parent. The parent declares, when it spawns the child, the lowest label it accepts from the child's return and whether a sanitizer rewrites the return first; the child can narrow no further than that declaration allows. When the child completes, it returns only what the declaration covers across the merge boundary, and a return outside it is blocked at the child, never quietly widened. The main agent stays clean and retains its full reach to interact with public tools. Parent and child branches share a single append-only log so that all sends and approvals remain globally auditable.
-
-## Engine refusals enumerate every valid remedy
-
-Traditional guardrails act like a brick wall: they throw a generic exception that leaves the agent confused, trapped in retry loops, or crashed. OpenAPPA acts like a detour sign.
-
-When an action cannot proceed as proposed, OpenAPPA returns a typed refusal listing the exact prerequisites needed to proceed safely: requesting authority approval, cleaning data with a sanitizer, running a prerequisite tool, or accepting a narrowing prompt. The agent takes the structured hint, executes the remedy, and completes its task.
-
-:::fig-remedy-plan:::
-
-```ts
-{ outcome: "block",
-  requirement_gaps: [...],  // unmet entries from `requires`
-  narrowing: {...},         // present when the call's own delta narrows
-  remedy_plans: [...] }     // valid remedy plans executable by id or tool call
-```
-
-A non-empty remedy list indicates that candidate paths exist, though external components may still decline a requested ruling. When an authority denies a request, that denial is appended to the log to prevent repeating the request for that specific call.
-
-## Declarative contracts and annotators
-
-Tool contracts are strictly declarative TOML. Instead of writing imperative access checks across code, developers declare tool requirements (`requires`), label restrictions (`delta`), and side effects (`effects`).
-
-Every released tool call carries one complete annotation — its `delta`, its `requires`, and the effects it emits, with every dimension concrete. The policy produces that annotation in one of two ways:
-
-- **Static declaration**: The `[[tool]]` entry writes the whole contract, and every call to the tool carries it.
-- **Annotator**: Where the right contract depends on the call itself (a document path, a recipient, a command line), the `[[tool]]` entry names a registered **annotator** instead. The annotator reads the proposed call and answers the complete contract for that one call, inside the vocabulary its declaration bounds — its **mandate**.
-
-An Annotator declaration can include a trusted policy `hint`. The hint defines policy-specific values and their selection criteria, but cannot expand the mandate. An input mapping can restrict which call values cross the consult boundary.
-
-An annotation is pinned to the exact call it was produced for. A sanitizer rewrite that changes the arguments is annotated afresh, so no call ever runs under another call's annotation, and replay reconstructs every decision without consulting an annotator again.
-
-An annotator that gives no valid answer — no route to it, a timeout, a malformed or out-of-mandate answer — stops the call before it runs. That refusal is operational, not a policy denial: the call was never judged, and nothing is appended to the log.
-
-*(For complete syntax on ordered contracts, argument matching, and annotator declarations, see the [Policy reference](/contracts).)*
-
-## A wildcard annotator covers the tools the policy never names
-
-Real-world systems rarely annotate every tool up front. OpenAPPA supports partial coverage without a partial label: incompleteness lives at the policy boundary, never inside the algebra, so every admitted value carries one concrete label and every check has a two-valued answer.
-
-A policy covers a proposed call in exactly one of these ways:
-
-| Proposed call | What decides it |
-|---|---|
-| **Declared tool** | The first matching `[[tool]]` contract, written in full in the policy. |
-| **Annotator-backed tool** | The annotator the matching `[[tool]]` entry names, answering the complete contract for this call. |
-| **Any other tool, with a wildcard** | The wildcard entry `name = "*"` routes the call to its annotator, and the call is annotated like any other. |
-| **Any other tool, without a wildcard** | The call is refused before it runs: the tool is not declared and no wildcard covers it. The refusal is typed and operational, not a policy denial. |
-
-The wildcard entry carries no static contract and no metadata: it exists only to name the annotator that answers for the long tail. An exact declaration always wins over it. This lets teams annotate high-risk tools first and expand coverage incrementally — five declared tools and one wildcard annotator cover a deployment whose remaining tools the policy never names.
-
-To inspect data before the LLM sees it, the deployment can list a tool in `confined_results`: the host then withholds the raw result, and a `tool_output` sanitizer's derivation can be admitted in its place. If the admitted label restricts the trajectory, OpenAPPA offers the agent the narrowing choice before delivery.
-
-## Deployment: Where OpenAPPA fits in your stack
-
-You can drop OpenAPPA into your architecture at three levels:
-
-| Deployment Option | How it works | Best for |
-|---|---|---|
-| **LLM Gateway** | Point your agent's `BASE_URL` to OpenAPPA. It intercepts tool calls directly in the inference stream. | Zero-code integration across existing agent stacks. |
-| **Agent Middleware / Hooks** | Add pre-tool hooks inside your agent loop (e.g. Claude Code, LangChain, PydanticAI). | Local CLI tools and custom Python/TypeScript agents. |
-| **Tool Proxy** | Run OpenAPPA in front of your remote APIs or MCP servers. | Shared enterprise tool infrastructure and microservices. |
-
-## Threat model: What OpenAPPA protects
-
-OpenAPPA is designed for real-world enterprise agent workflows:
-
-- **What it protects against:** Prompt injections, poisoned external data, confused agent actions, and accidental data leaks across multi-step workflows.
-- **How it stops attacks:** At the deterministic runtime boundary. Even if the LLM is completely tricked by an attacker, unauthorized tool calls physically cannot dispatch.
-- **System boundaries:** Pre-vetted internal data is trusted by configuration. Custom authorities (like human review queues) are trusted within their declared permissions.
-- **Auditability:** Every check, dispatch, and remedy decision is recorded in an append-only, tamper-evident log for post-hoc audit and deterministic replay.
-
-## Migrating existing controls to OpenAPPA
-
-You don't need to throw away existing security controls. OpenAPPA unifies them as declarative policy components:
-
-| Existing Security Control | OpenAPPA Component |
-|---|---|
-| Human review / HITL prompts | `builtin = "hitl"` Authority |
-| Custom approval webhooks / LLM evaluators | Authority (`url`, `command`, or model builtin) |
-| Content scanners & argument-aware trust, audience, and review classifiers | Annotator (endpoint, command, or model builtin) inside its declared mandate |
-| PII redactors & sanitizers | Sanitizer (`builtin = "redact-email"`, endpoint, command, or model builtin) |
-| Directory / IAM group lookups | Audience sources (`[audience.self]`, `[audience.internal]`, `[[audience.group]]`): the Google Workspace, Slack, and GitHub catalogs, each bound to your own endpoint or command |
-| Imperative `if/else` access checks | Tool Contracts (`delta` & `requires`) |
-
-Crucially, an authority or sanitizer can do only what its `permits` declares, and an annotator can answer only inside its declared mandate. Even if a third-party scanner or classifier makes a mistake, it cannot grant permissions beyond its pre-configured bounds.
+The agent can still finish useful work with private data, but sharing it outside the company requires either cleaning it or obtaining permission.
 
 ## Next steps
 
-- [Reading a policy](/contracts): Guide to reviewing and writing policy configuration.
+- [Policy Reference](/contracts): Guide to reviewing and writing policy configuration.
+- [How to add it to your agent](/writing-an-integration): Integration guide, deployment models, and existing integrations.
 - [Benchmarks](/evaluation): Empirical paper results on multi-step workflows and bench-corp.
 - [OpenAPPA Paper](/paper): Formal information-flow model, theorems, and experimental methodology.
