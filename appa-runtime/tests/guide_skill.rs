@@ -224,7 +224,8 @@ fn only_the_runtime_chart_consumes_this_skill_package() {
         "the unused skill helpers stay undeclared"
     );
 
-    let github = fs::read_to_string(root.join("marketplace/batteries/github/appa.toml")).expect("the GitHub battery exists");
+    let github =
+        fs::read_to_string(root.join("marketplace/batteries/github/appa.toml")).expect("the GitHub battery exists");
     assert!(github.contains("name = \"mcp/github/get_file_contents\""));
     assert!(github.contains("name = \"mcp/github/issue_write\""));
     assert!(!github.contains("name = \"get_file_contents\""));
@@ -243,7 +244,7 @@ fn kagent_guidance_requires_the_shared_runtime_and_direct_port() {
         "integrations/kagent/README.md",
         "integrations/kagent/IMPLEMENTATION.md",
         "integrations/appa-guide/references/kagent.md",
-        "integrations/kagent/examples/kagent.appa.toml",
+        "marketplace/adapters/kagent/default.appa.toml",
     ] {
         let content = fs::read_to_string(root.join(path)).expect("read kagent guidance");
         assert!(content.contains("APPA_RUNTIME_URL"), "{path} names the runtime URL");

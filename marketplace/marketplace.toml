@@ -9,15 +9,15 @@ name = "appa"
 
 [packages.adapter.claude-code]
 path = "adapters/claude-code"
-digest = "sha256:7984a3f60ca2d9b6cf908065b3f57c8ca5d9bdb046d02337b941c9f180ce1bcd"
+digest = "sha256:c0e2d1d0e342fa3ffb4c51101eaa63b88c0eca719803ba14513e47de7b5fd9c9"
 
 [packages.adapter.kagent]
 path = "adapters/kagent"
-digest = "sha256:7aa2433704aee3ec20c7f7876983530074fe2f5ffec1c8ba0b0667a4b8c1bb85"
+digest = "sha256:232777ab66dee717b5b8035ee2f4cc3c1f2fac6bf42d5e1e23623a8c1d665a38"
 
 [packages.battery.claude-code]
 path = "batteries/claude-code"
-digest = "sha256:4d9eb8395d10e0a350bafa502dfd16d825c977b8e3c07f7d25d4a0c1bd8ad01d"
+digest = "sha256:7762819bf62da4af830c031dfcec173565f15485287996911c277e788e66a959"
 
 [packages.battery.github]
 path = "batteries/github"
