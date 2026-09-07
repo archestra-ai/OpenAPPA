@@ -125,7 +125,7 @@ command = ["python3", "./classify_file.py"]
 
 An annotator can run as a local script or an external service. See [Annotators in the policy reference](/contracts#annotators) for configuration, the request and response format, and limits on its answers.
 
-### Subagents Isolate Sensitive Reads
+### Subagent Reads
 
 A subagent reads sensitive data in a separate context and returns only what the policy allows. For example, it can summarize a private ticket and pass the summary through a sanitizer, letting the main agent use the cleaned result in a public bug report if the policy permits.
 
