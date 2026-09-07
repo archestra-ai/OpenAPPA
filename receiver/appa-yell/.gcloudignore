@@ -1,0 +1,10 @@
+# What the function does not need to run. `salt.txt` is deliberately not here:
+# the endpoint reads it to check signatures.
+.gcloudignore
+pyproject.toml
+uv.lock
+test_main.py
+smoke.py
+README.md
+__pycache__/
+.pytest_cache/

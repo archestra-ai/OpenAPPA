@@ -6,11 +6,11 @@
 //! *whether to send* lives in the CLI and the tool handler. Here the only questions are shape
 //! and size.
 //!
-//! Size is a two-sided bound. The receiver refuses a body over 32 MiB on the wire and over
-//! 256 MiB decoded, so this module refuses at 28 MiB and 224 MiB — the headroom covers the
-//! request the receiver measures, which is this body plus its headers. A report that does not
-//! fit is not truncated here: [`finalize`](Report::finalize) reports the measurement and the
-//! caller asks the runtime for a smaller export, which renumbers from its own start.
+//! Size is a two-sided bound. [`MAX_GZIPPED_BYTES`] and [`MAX_PLAIN_BYTES`] sit under the caps
+//! `receiver/appa-yell` enforces, by the width of a request's headers — which is what the
+//! receiver measures and this module does not. A report that does not fit is not truncated
+//! here: [`finalize`](Report::finalize) reports the measurement and the caller asks the runtime
+//! for a smaller export, which renumbers from its own start.
 
 use std::path::{Path, PathBuf};
 
@@ -27,9 +27,15 @@ use crate::runtime_cli::Adapter;
 pub(crate) const SCHEMA: &str = "openappa.yell.v1";
 
 /// The largest body this client puts on the wire, gzipped, and the largest document behind it.
-/// Both sit under the receiver's own limits by the width of a request's headers.
+///
+/// Both sit under `receiver/appa-yell`'s own caps by the width of a request's headers, and the
+/// plain cap is the one that has to agree: a receiver decompresses before it can validate, so
+/// a document this client is willing to send and that receiver is not willing to hold would
+/// fail every attempt forever. The facts alone are bounded well below it
+/// ([`super::diagnostic::MAX_FACT_BYTES`]), and a trajectory large enough to pass it is
+/// rebuilt smaller by the size loop rather than refused.
 pub(crate) const MAX_GZIPPED_BYTES: usize = 28 * 1024 * 1024;
-pub(crate) const MAX_PLAIN_BYTES: usize = 224 * 1024 * 1024;
+pub(crate) const MAX_PLAIN_BYTES: usize = 32 * 1024 * 1024;
 
 /// The longest message a person or an agent can send. Longer is a paste of something else.
 pub(crate) const MAX_MESSAGE_BYTES: usize = 64 * 1024;
