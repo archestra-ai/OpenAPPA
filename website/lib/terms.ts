@@ -5,6 +5,8 @@
    with no entry renders as plain code. */
 
 const TERMS = {
+  context_control:
+    "Declares that the integration can keep a child agent's data hidden from the parent and withhold its answer until OpenAPPA allows it. Setting this to true does not implement that behavior; the integration must already support it.",
   version: "The policy configuration dialect version.",
   include:
     "Policy fragments composed by the root configuration. Root declarations run first, followed by included declarations in list order. Included files cannot include more files or replace root-wide settings. A root [[policy.annotator]] replaces one included Annotator with the same name.",

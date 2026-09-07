@@ -571,7 +571,7 @@ The complete-call form does not require a parameter schema. If the tool has no d
 
 ### Inputs
 
-Use `inputs` to select call data and assign input names:
+By default, the annotator receives the complete tool call. Use `inputs` when it needs only specific parts of the call. In the example below, the annotator receives the `customer_id` argument under the name `subject`, instead of receiving the tool name, description, and all arguments:
 
 ```toml
 [[policy.annotator]]
@@ -781,7 +781,15 @@ For example, this configuration runs a local program for the `remove_customer_de
 command = ["python3", "./remove_customer_details.py"]
 ```
 
-You can also select a built-in implementation with `builtin`. See [Externals](#externals) for implementation settings. The reserved `attest-schema` sanitizer has separate configuration for [structured child returns](#structured-child-returns).
+You can also select a built-in implementation with `builtin` under `[externals.sanitizers.<name>]`. The available options are:
+
+| Configuration | Behavior |
+|---|---|
+| `builtin = "redact-email"` | Replaces email addresses with a fixed placeholder. It does not remove other private information. |
+| `builtin = "claude-code"` | Uses Claude Code to transform data according to the sanitizer's `hint`, `on`, and `permits`. |
+| `builtin = "llm"` | Uses the model configured under `[externals.llm]` to transform data according to the sanitizer's `hint`, `on`, and `permits`. |
+
+See [Externals](#externals) for implementation settings. The reserved `attest-schema` sanitizer has separate configuration for [structured child returns](#structured-child-returns).
 
 ### Sanitizer protocol
 
@@ -814,7 +822,7 @@ builtin = "hitl"
 
 This authority can approve sharing to any audience, including public sharing, for tools with `tags = ["support"]`.
 
-Approval applies to one call. It does not change the trajectory's label or approve later calls. An offered remedy still requires the authority's decision.
+Approval applies to one call. It does not change the trajectory's label or approve later calls.
 
 ### Permissions, tags, and hints
 
@@ -869,11 +877,9 @@ When a call fails its requirements, OpenAPPA blocks it and returns the remedy pl
 
 When a result would add restrictions, a plan can accept those restrictions or transform the result before delivery. Available plans depend on the configured components and deployment capabilities.
 
-The agent selects an offered plan. An authority can deny it, or a sanitizer can fail. Selecting a plan does not guarantee execution. If no permitted remedy succeeds, the call or result remains blocked.
-
 ### Subagent Returns
 
-A child can read data in a separate context and return only what the parent permits. With `context_control`, OpenAPPA holds the spawn until the parent selects a return plan.
+A child agent can read data without exposing it to the parent agent. `context_control = true` declares that the integration keeps the child's data separate and can withhold its answer until OpenAPPA allows it. The parent chooses how the answer will be checked or cleaned before the child starts.
 
 The first plan accepts the child's return without transformation. Later plans use registered `tool_output` sanitizers without tags, in registry order.
 
@@ -1039,7 +1045,7 @@ See [Batteries](/batteries) for reusable policy files.
 
 ## Deployment coverage
 
-The deployment must support each configured application point:
+These settings describe what the agent integration can control: which tool results it can withhold and whether it can keep a child agent's data separate from the parent's:
 
 ```toml
 [policy.deployment]
@@ -1047,7 +1053,9 @@ confined_results = ["get_ticket_from_crm"]
 context_control = true
 ```
 
-`confined_results` lists tools whose original results the integration can withhold. `context_control` requires separate child contexts and control over their returns. Setting these fields does not add those capabilities to an integration.
+`confined_results` lists tools whose results the integration can withhold from the agent.
+
+`context_control = true` declares that the integration can keep a child agent's data hidden from the parent and withhold the child's answer until OpenAPPA allows it. This lets OpenAPPA check or clean the answer before the parent reads it. The integration must implement this behavior; the setting alone does not provide it.
 
 - A `tool_output` sanitizer needs a confined tool result or, with `context_control`, a child return.
 - Each `confined_results` entry must name a covered tool. A wildcard covers any tool name for this check.
