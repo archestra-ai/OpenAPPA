@@ -1,9 +1,9 @@
 "use client";
 
 import { Figure } from "@/components/figures/Figure";
-import { chip, drawCard, ease, roundRect, seg, type Theme } from "@/components/figures/lib";
+import { chip, ease, roundRect, seg, type Theme } from "@/components/figures/lib";
 
-/* Figure: Engine Refusals Enumerate Every Sound Remedy
+/* Figure: Engine Refusals Enumerate Available Remedy Plans
    When a call is blocked due to a policy gap, OpenAPPA doesn't stop the agent.
    It returns structured remedy plans: Approval, Sanitizer, or Narrowing Acceptance. */
 
@@ -80,8 +80,8 @@ export function RemedyPlanFigure() {
           ctx.font = font(11, 400);
           ctx.fillText("send_email(body, to)", PROPOSED_BOX.x + 14, PROPOSED_BOX.y + 48);
 
-          chip(ctx, PROPOSED_BOX.x + 14, PROPOSED_BOX.y + 70, "label: internal", th.warn, th.warnBg, th.mono);
-          chip(ctx, PROPOSED_BOX.x + 14, PROPOSED_BOX.y + 100, "target: auditor@corp", th.accent, th.accentBg, th.mono);
+          chip(ctx, PROPOSED_BOX.x + PROPOSED_BOX.w / 2, PROPOSED_BOX.y + 70, "label: internal", th.warn, th.warnBg, th.mono);
+          chip(ctx, PROPOSED_BOX.x + PROPOSED_BOX.w / 2, PROPOSED_BOX.y + 100, "target: auditor@corp", th.accent, th.accentBg, th.mono);
           ctx.restore();
         }
 
@@ -111,7 +111,7 @@ export function RemedyPlanFigure() {
           ctx.fillText("Requirement Gap:", ENGINE_BOX.x + 14, ENGINE_BOX.y + 74);
           ctx.fillText("auditor@corp ∉ internal", ENGINE_BOX.x + 14, ENGINE_BOX.y + 92);
 
-          chip(ctx, ENGINE_BOX.x + 14, ENGINE_BOX.y + 110, "remedy_plans: [3]", th.accent, th.accentBg, th.mono);
+          chip(ctx, ENGINE_BOX.x + ENGINE_BOX.w / 2, ENGINE_BOX.y + 110, "remedy_plans: [3]", th.accent, th.accentBg, th.mono);
           ctx.restore();
         }
 
@@ -142,7 +142,7 @@ export function RemedyPlanFigure() {
           ctx.fillText(box.detail, REMEDIES_X + 16, box.y + 52);
 
           if (isHighlighted) {
-            chip(ctx, REMEDIES_X + REMEDY_W - 100, box.y + 20, "Executable", th.accent, th.accentBg, th.mono);
+            chip(ctx, REMEDIES_X + REMEDY_W - 55, box.y + 24, "Executable", th.accent, th.accentBg, th.mono);
           }
 
           ctx.restore();
@@ -154,7 +154,7 @@ export function RemedyPlanFigure() {
         ctx.textAlign = "center";
         let caption = "1. Agent proposes outbound email with internal CRM data";
         if (t >= 0.25 && t < 0.5) caption = "2. OpenAPPA intercepts and identifies the policy gap";
-        else if (t >= 0.5 && t < 0.85) caption = "3. Refusal object enumerates all sound remedy plans";
+        else if (t >= 0.5 && t < 0.85) caption = "3. Refusal object enumerates available remedy plans";
         else if (t >= 0.85) caption = "4. Agent executes policy approval to safely unblock dispatch";
 
         ctx.fillText(caption, W / 2, 24);
