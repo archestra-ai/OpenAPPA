@@ -58,8 +58,30 @@ enum Command {
         paths: Vec<PathBuf>,
     },
 
-    /// Post one Claude Code hook event to the running runtime. The host is not a choice:
-    /// the kagent plugin posts the canonical wire itself, so this bridge is Claude Code's.
+    /// Tell the OpenAPPA team that this deployment is broken, confusing, or in the way.
+    #[command(long_about = "Tell the OpenAPPA team that this deployment is broken, confusing, or \
+                            in the way.\n\n\
+                            The report carries your message and what APPA decided — its rulings, \
+                            remedies, label changes and the policy they were made under. It never \
+                            carries a prompt, a tool argument, a tool output, or a path.\n\n\
+                            Two questions, in this order: whether to replace the names your policy \
+                            chose with report-local tokens such as `tool-1`, and whether to send \
+                            the finished file, which is named before you answer. The file is kept \
+                            either way.")]
+    Yell {
+        /// The runtime that builds the report. Loopback only.
+        #[arg(long, env = "APPA_RUNTIME_URL", default_value = "http://127.0.0.1:8787")]
+        url: String,
+
+        /// Answer both questions with yes: pseudonymize the report, and send it.
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
+
+        /// What went wrong. Read from stdin when absent.
+        message: Vec<String>,
+    },
+
+    /// Post one harness hook event to the running runtime.
     #[command(hide = true)]
     Hook {
         #[arg(long, env = "APPA_RUNTIME_URL", default_value = "http://127.0.0.1:8787")]
@@ -89,6 +111,7 @@ fn main() -> ExitCode {
 
     match Args::parse().command {
         Command::Hook { url, turn_end } => appa_runtime::hook_client::run(&url, turn_end),
+        Command::Yell { url, yes, message } => appa_runtime::yell::cli::run(&url, yes, message),
         Command::Replay {
             config,
             modules_dir,
