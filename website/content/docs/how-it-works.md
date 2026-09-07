@@ -152,13 +152,11 @@ The script and file-reading tool must use the same filesystem. `/srv/public-docs
 
 ### Subagents Isolate Sensitive Reads
 
-A subagent can read sensitive or untrusted data in its own session. The main agent receives only the result the policy allows, so it can keep working without taking on all the restrictions of the original data.
+A subagent reads sensitive data in a separate context and returns only what the policy allows. For example, it can summarize a private ticket and pass the summary through a sanitizer, letting the main agent use the cleaned result in a public bug report if the policy permits.
 
-For example, a subagent reads a private customer ticket and prepares a summary. A sanitizer removes customer names and email addresses before the summary reaches the main agent. If the policy allows that cleaned summary to be shared publicly, the main agent can use it in a public bug report.
+Before the subagent starts, the main agent sets the return requirements, including any cleaning. These also limit what the subagent can read. OpenAPPA blocks results that do not meet them.
 
-The main agent sets the rules for the result before the subagent starts, including whether it needs cleaning. Those rules also limit what the subagent can read. OpenAPPA blocks any result that does not meet them. Both agents' actions and approvals appear in the same audit log.
-
-This requires an integration that keeps the agents' contexts separate. See [Subagent Returns in the policy reference](/contracts#subagent-returns) for configuration.
+See [Subagent Returns](/contracts#subagent-returns) for integration requirements and configuration.
 
 ### Audience Sources
 
