@@ -102,7 +102,7 @@ See [Sanitizers in the policy reference](/contracts#sanitizers) for service conf
 
 ### Annotators
 
-An annotator classifies a tool call to determine its output restrictions (`delta`), requirements (`requires`), and effects. Use one when these depend on the specific call, such as which file the agent reads or who receives an email. OpenAPPA checks the resulting contract before allowing the call.
+An annotator classifies a tool call to determine its output restrictions (`delta`), requirements (`requires`), and effects. OpenAPPA checks the resulting contract before allowing the call.
 
 For example, a Python script can classify files by directory: public documentation can be shared publicly, while customer records are restricted to internal users.
 
