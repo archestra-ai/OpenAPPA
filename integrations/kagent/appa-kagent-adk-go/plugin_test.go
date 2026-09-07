@@ -618,7 +618,7 @@ func TestAnAllowedCallPassesAndADeniedCallAnswersTheModel(t *testing.T) {
 }
 
 func TestManagementArgumentsAreBoundToTheCurrentTrajectory(t *testing.T) {
-	h := newHook(t, map[string]any{"decision": "allow_call"})
+	h := newHook(t, allow)
 	p := pluginOver(t, h)
 	arguments := map[string]any{}
 	if returned, err := p.beforeTool(newFakeContext(newFakeSession("s1")), &fakeTool{RuntimeStateTool}, arguments); err != nil || returned != nil {
