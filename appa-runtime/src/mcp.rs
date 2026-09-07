@@ -1,13 +1,22 @@
-//! Runtime-owned MCP tools, provided identically to every harness.
+//! Runtime-owned MCP tools, provided identically to every harness: `execute_remedy_plan`,
+//! the engine's reserved tool; the `appa_*` management tools; and `yell`, which reports
+//! that APPA is in the way.
 //!
-//! `execute_remedy_plan` carries only the quoted id and no trajectory, so
-//! the trajectory comes from the hook that preceded the call. A request no
-//! hook vouched for is refused. `appa_match_batteries` is read-only: it
-//! intersects host-observed names with the runtime's current catalog.
+//! Served over streamable HTTP from process start. `execute_remedy_plan` and `yell` carry
+//! no trajectory, so both take it from the hook that preceded the call — the one place the
+//! harness names it. A request no hook vouched for is refused. For a remedy the engine then
+//! judges from the log whether the offer still stands: an unknown, unpursued, cross-turn,
+//! or terminal id is refused. `appa_match_batteries` is read-only: it intersects
+//! host-observed names with the runtime's current catalog.
+//!
+//! `yell` is advertised only where the deployment turned agent reporting on. A build that
+//! does not advertise it does not route it either, so a client holding a stale tool list
+//! gets the same answer as a client that invented the name.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, RwLock};
 
+use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
 use rmcp::service::{RequestContext, RoleServer};
@@ -15,10 +24,15 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 
-use crate::api::{LabelSpelling, OfferId, RemedyArguments, RemedyOutcome, Runtime};
+use crate::api::{LabelSpelling, OfferId, PermitKey, RemedyArguments, RemedyOutcome, Runtime};
 use crate::batteries::{BatteriesResponse, BundledBattery};
 use crate::elicit::Elicitation;
+use crate::runtime_cli::Adapter;
+use crate::yell::YellArgs;
 
+/// The tools this runtime serves, and the router that decides which of them exist for this
+/// session. Built per session, so a `/reload` that turns agent reporting on or off settles
+/// the next client rather than the next restart.
 #[derive(Clone)]
 pub struct RuntimeToolService {
     runtime: Arc<Runtime>,
@@ -26,8 +40,10 @@ pub struct RuntimeToolService {
 }
 
 #[derive(Clone)]
-pub struct RemedyService {
+pub struct RuntimeTools {
     runtime: Arc<Runtime>,
+    harness: Adapter,
+    tool_router: ToolRouter<Self>,
 }
 
 #[derive(Debug, Clone)]
@@ -175,7 +191,7 @@ async fn execute_remedy(
     let quoted = OfferId(args.offer_id.clone());
     let arguments = RemedyArguments::from(args);
     // Requires the vouched trajectory from the preceding hook.
-    let Some((acting, ruling)) = runtime.take_vouched(&quoted) else {
+    let Ok((acting, ruling)) = runtime.take_vouched(&PermitKey::offer(&quoted)) else {
         return render(RemedyOutcome::Refused {
             detail: "no live offer with this id exists".to_string(),
         });
@@ -204,9 +220,20 @@ async fn execute_remedy(
 }
 
 #[tool_router]
-impl RemedyService {
-    pub fn new(runtime: Arc<Runtime>) -> RemedyService {
-        RemedyService { runtime }
+impl RuntimeTools {
+    /// The tools this deployment serves right now. `yell` is dropped from the router where
+    /// the deployment has not turned agent reporting on, which is both how it stops being
+    /// advertised and how a call to it stops being routed.
+    pub fn new(runtime: Arc<Runtime>, harness: Adapter) -> RuntimeTools {
+        let mut tool_router = Self::tool_router();
+        if !runtime.agent_yell() {
+            tool_router.remove_route(YELL);
+        }
+        RuntimeTools {
+            runtime,
+            harness,
+            tool_router,
+        }
     }
 
     #[tool(description = "Execute one remedy plan by the offer id that blocking \
@@ -222,7 +249,55 @@ impl RemedyService {
     ) -> CallToolResult {
         execute_remedy(&self.runtime, args, request).await
     }
+
+    #[tool(description = "Report to the OpenAPPA team that APPA is broken, confusing, or in \
+                       the way. Say in `message` what you were trying to do and what APPA \
+                       did. Set `with_trajectory` to include this session's APPA decisions \
+                       — its rulings, remedies and label changes, never your prompts, tool \
+                       arguments or tool outputs — or leave it false to report on the \
+                       policy alone.")]
+    pub(crate) async fn yell(&self, Parameters(args): Parameters<YellArgs>) -> CallToolResult {
+        match crate::yell::agent::yell(&self.runtime, self.harness, &args).await {
+            crate::yell::agent::Outcome::Sent(receipt) => {
+                let already = match receipt.duplicate {
+                    true => " (already had this one)",
+                    false => "",
+                };
+                CallToolResult::success(vec![ContentBlock::text(format!(
+                    "[appa] Reported{already}. Receipt {}.",
+                    receipt.receipt_id
+                ))])
+            }
+            crate::yell::agent::Outcome::Refused(refusal) => {
+                CallToolResult::error(vec![ContentBlock::text(format!("[appa] {refusal}"))])
+            }
+            crate::yell::agent::Outcome::Unvouched(crate::api::Unvouched::Nobody) => {
+                CallToolResult::error(vec![ContentBlock::text(
+                    "[appa] This call was not seen by a hook, so there is no session to report on. \
+                     Propose it as an ordinary tool call.",
+                )])
+            }
+            // Retrying the identical call cannot work, so the answer says what to change.
+            crate::yell::agent::Outcome::Unvouched(crate::api::Unvouched::Ambiguous) => {
+                CallToolResult::error(vec![ContentBlock::text(
+                    "[appa] Another session on this machine is reporting the same thing word for \
+                     word, so this call does not say which session it is about. Call again with a \
+                     message that describes your own session.",
+                )])
+            }
+            crate::yell::agent::Outcome::Oversize => CallToolResult::error(vec![ContentBlock::text(
+                "[appa] The report is too large to send even with the session left out.",
+            )]),
+            crate::yell::agent::Outcome::Undeliverable(failure) => {
+                CallToolResult::error(vec![ContentBlock::text(format!("[appa] Not reported: {failure}"))])
+            }
+        }
+    }
 }
+
+/// The advertised name of the reporting tool, and the route removed where the deployment
+/// leaves agent reporting off.
+const YELL: &str = "yell";
 
 #[tool_router]
 impl RuntimeToolService {
@@ -478,8 +553,8 @@ impl ServerHandler for RuntimeToolService {
     }
 }
 
-#[tool_handler]
-impl ServerHandler for RemedyService {
+#[tool_handler(router = self.tool_router)]
+impl ServerHandler for RuntimeTools {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.server_info.name = "appa-runtime".to_string();
@@ -497,19 +572,20 @@ const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SESSION_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// MCP service served at `/mcp`.
-pub fn service(runtime: Arc<Runtime>) -> StreamableHttpService<RemedyService, LocalSessionManager> {
-    service_with_allowed_hosts(runtime, &[])
+pub fn service(runtime: Arc<Runtime>, harness: Adapter) -> StreamableHttpService<RuntimeTools, LocalSessionManager> {
+    service_with_allowed_hosts(runtime, &[], harness)
 }
 
 pub fn service_with_allowed_hosts(
     runtime: Arc<Runtime>,
     allowed_hosts: &[String],
-) -> StreamableHttpService<RemedyService, LocalSessionManager> {
+    harness: Adapter,
+) -> StreamableHttpService<RuntimeTools, LocalSessionManager> {
     let mut sessions = LocalSessionManager::default();
     sessions.session_config.keep_alive = Some(runtime.review_timeout() + SESSION_GRACE);
     let config = server_config(allowed_hosts);
     StreamableHttpService::new(
-        move || Ok(RemedyService::new(Arc::clone(&runtime))),
+        move || Ok(RuntimeTools::new(Arc::clone(&runtime), harness)),
         Arc::new(sessions),
         config,
     )
@@ -564,9 +640,12 @@ mod tests {
             )
             .expect("the deployment opens"),
         );
-        let service = RemedyService::new(Arc::clone(&runtime));
+        let service = RuntimeTools::new(Arc::clone(&runtime), Adapter::ClaudeCode);
         assert_eq!(service.get_info().server_info.version, env!("CARGO_PKG_VERSION"));
-        let remedy_tools: Vec<String> = RemedyService::tool_router()
+        // The instance's router, not the static one: `RuntimeTools` decides per session
+        // whether `yell` exists, and this fixture leaves agent reporting off.
+        let remedy_tools: Vec<String> = service
+            .tool_router
             .list_all()
             .into_iter()
             .map(|tool| tool.name.to_string())
@@ -609,6 +688,7 @@ mod tests {
                 Runtime::open(config(), directory.path().join("appa.db"), None).expect("the deployment opens"),
             ),
             &["appa-runtime.appa.svc.cluster.local:18787".to_string()],
+            Adapter::ClaudeCode,
         );
 
         let response = service
@@ -650,6 +730,43 @@ mod tests {
         let path = dir.path().join("appa.toml");
         std::fs::write(&path, text).expect("the fixture writes");
         Config::load(&path).expect("the minimal fixture validates")
+    }
+
+    /// The tools a deployment with this reporting posture serves.
+    fn tools_with(agent_yell: bool) -> RuntimeTools {
+        let text = format!(
+            r#"
+            [policy]
+            version = 2
+            [externals]
+            timeout_ms = 1000
+            max_body_bytes = 4096
+            [reporting]
+            agent_yell = {agent_yell}
+        "#
+        );
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, text).expect("the fixture writes");
+        let config = Config::load(&path).expect("the fixture validates");
+        let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
+        RuntimeTools::new(std::sync::Arc::new(runtime), Adapter::ClaudeCode)
+    }
+
+    /// A deployment that has not turned agent reporting on does not advertise the tool, and
+    /// a client that calls it anyway — from a stale list, or by guessing — finds no route.
+    /// The remedy tool is unaffected either way: it is the engine's, not the deployment's.
+    #[test]
+    fn agent_reporting_off_serves_no_yell_at_all() {
+        let off = tools_with(false);
+        assert!(!off.tool_router.has_route(YELL));
+        assert!(!off.tool_router.list_all().iter().any(|tool| tool.name == YELL));
+        assert!(off.tool_router.has_route("execute_remedy_plan"));
+
+        let on = tools_with(true);
+        assert!(on.tool_router.has_route(YELL));
+        assert!(on.tool_router.list_all().iter().any(|tool| tool.name == YELL));
+        assert!(on.tool_router.has_route("execute_remedy_plan"));
     }
 
     #[test]
@@ -908,7 +1025,7 @@ mod tests {
             "another trajectory's quote is refused where the harness names it: {stranger:?}",
         );
         assert!(
-            runtime.take_vouched(&quoted).is_none(),
+            runtime.take_vouched(&PermitKey::offer(&quoted)).is_err(),
             "a refused control act vouches for nobody"
         );
 
@@ -917,17 +1034,17 @@ mod tests {
             assert!(matches!(admitted, HookDecision::PassControl), "got {admitted:?}");
         }
         assert_eq!(
-            runtime.take_vouched(&quoted),
-            Some((acting(root.0.as_str()), None)),
+            runtime.take_vouched(&PermitKey::offer(&quoted)),
+            Ok((acting(root.0.as_str()), None)),
             "a repeated hook is one caller"
         );
-        assert!(runtime.take_vouched(&quoted).is_none());
+        assert!(runtime.take_vouched(&PermitKey::offer(&quoted)).is_err());
 
         let admitted = crate::hooks::handle(&runtime, control_act(&acting(root.0.as_str()), &quoted)).await;
         assert!(matches!(admitted, HookDecision::PassControl));
         let _ = runtime.execute_remedy(&acting(root.0.as_str()), quoted.clone()).await;
         assert!(
-            runtime.take_vouched(&quoted).is_none(),
+            runtime.take_vouched(&PermitKey::offer(&quoted)).is_err(),
             "executing the act spends its vouch on every transport"
         );
     }

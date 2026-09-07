@@ -93,6 +93,23 @@ Setup, upgrade and uninstall: [Claude Code
 integration](https://openappa.com/claude-code) ·
 [`integrations/claude-code`](integrations/claude-code/README.md).
 
+## When APPA is in the way
+
+```sh
+appa yell "the hook blocked a Bash call I needed and the remedy went nowhere"
+```
+
+The report carries your message and what APPA decided — rulings, remedies, label
+changes, and the policy they were made under. It never carries a prompt, a tool
+argument, a tool output, or a path. You are asked twice: whether to replace the
+names your policy chose with tokens such as `tool-1`, and whether to send the
+finished file, which is named before you answer and kept either way.
+
+The agent can report on its own through the `yell` tool, on a deployment that
+turns it on. `appa init` asks; `[reporting] agent_yell` in the config is the
+answer. That call is checked by your policy like any other, so a session
+narrowed to `self` or `internal` reaches a human review instead of sending.
+
 ## Status
 
 OpenAPPA is a **preview and an RFC**. The model is settled enough to build
