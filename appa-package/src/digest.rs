@@ -30,7 +30,8 @@ impl TreeDigest {
             return Err(malformed());
         }
         let mut bytes = [0u8; 32];
-        for (byte, pair) in bytes.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
+        let (pairs, _) = hex.as_bytes().as_chunks::<2>();
+        for (byte, pair) in bytes.iter_mut().zip(pairs) {
             let digit = |character: u8| match character {
                 b'0'..=b'9' => Some(character - b'0'),
                 b'a'..=b'f' => Some(character - b'a' + 10),
