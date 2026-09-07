@@ -39,7 +39,9 @@ two agree.
 
 ## Storage
 
-One object per report at `reports/<sha256 of the document>.json.gz`, holding
+One object per report at `reports/<build kind>/<sha256 of the document>.json.gz`,
+where the build kind is `release`, `commit` or `local` as the report's `build.source.kind`
+says, holding
 the gzip exactly as it arrived and written create-only. A retry of the same bytes is the same object and comes back as
 `"duplicate": true`; two different reports can never collide. The name is a
 digest rather than the document's `report_id` because that field is written by

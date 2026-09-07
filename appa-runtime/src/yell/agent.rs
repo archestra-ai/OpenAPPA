@@ -84,7 +84,7 @@ pub(crate) async fn yell(runtime: &std::sync::Arc<Runtime>, harness: Adapter, ar
     let Ok(finished) = runtime.report_off_thread(request).await else {
         return Outcome::Oversize;
     };
-    let Some(receiver) = client::Receiver::resolve() else {
+    let Some((receiver, _)) = client::Receiver::resolve() else {
         return Outcome::Undeliverable(SendFailure::NoReceiver);
     };
     match client::send(&finished, &receiver).await {

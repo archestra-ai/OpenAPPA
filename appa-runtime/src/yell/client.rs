@@ -21,7 +21,7 @@ use super::report::Finished;
 /// produce a release without it, because a binary that cannot send says nothing about why and
 /// the feature would ship inert. A development build carries none and refuses cleanly rather
 /// than posting a session's decisions to a guess.
-const ENDPOINT: &str = match option_env!("APPA_YELL_ENDPOINT") {
+const ENDPOINT: &str = match option_env!("APPA_YELL_COMPILED_ENDPOINT") {
     Some(endpoint) => endpoint,
     None => "",
 };
@@ -36,6 +36,15 @@ const ENDPOINT: &str = match option_env!("APPA_YELL_ENDPOINT") {
 /// The two variants are not decoration. A proxy between here and a real receiver is a normal
 /// way to reach the internet and is honoured; a proxy between here and this same machine is
 /// never right, and would relay a report that was only ever meant to cross a socket.
+/// Where a receiver's address came from. The compiled-in one is the OpenAPPA team's and can
+/// be named as such; one from the environment is a different destination, and the person is
+/// owed the URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Source {
+    CompiledIn,
+    Environment,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Receiver {
     /// A real receiver, always over TLS.
@@ -45,14 +54,18 @@ pub(crate) enum Receiver {
 }
 
 impl Receiver {
-    /// The receiver this run will use, or `None` when there is none to use.
+    /// The receiver this run will use and where its address came from, or `None` when
+    /// there is none to use.
     ///
     /// `APPA_YELL_ENDPOINT` overrides the compiled destination. It is not a hole in consent:
     /// the person is shown whatever it resolves to before answering. Plaintext is refused
     /// unless it is this machine, so an override cannot downgrade a real send to `http://`.
-    pub(crate) fn resolve() -> Option<Self> {
-        let named = std::env::var("APPA_YELL_ENDPOINT").unwrap_or_else(|_| ENDPOINT.to_owned());
-        Self::parse(&named)
+    pub(crate) fn resolve() -> Option<(Self, Source)> {
+        let (named, source) = match std::env::var("APPA_YELL_ENDPOINT") {
+            Ok(named) => (named, Source::Environment),
+            Err(_) => (ENDPOINT.to_owned(), Source::CompiledIn),
+        };
+        Self::parse(&named).map(|receiver| (receiver, source))
     }
 
     /// HTTPS anywhere, or plain HTTP only to this machine, and credentials nowhere.
@@ -111,7 +124,9 @@ pub(crate) struct Receipt {
 /// message names hosts and paths and this one is printed for a person to read.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum SendFailure {
-    #[error("this build has no receiver compiled in, so there is nowhere to send the report")]
+    #[error(
+        "this build has no receiver compiled in, so there is nowhere to send the report; set APPA_YELL_ENDPOINT in the environment to name one"
+    )]
     NoReceiver,
     #[error("the receiver could not be reached after {attempts} attempts")]
     Unreachable { attempts: u32 },
