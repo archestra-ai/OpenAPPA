@@ -5,25 +5,83 @@ order: 7
 description: Connect an agent harness to OpenAPPA, map its lifecycle to the runtime API, and add optional capabilities such as subagents.
 ---
 
-**OpenAPPA is a deterministic security and policy engine for AI agents.**
+An **integration** connects an agent harness (such as Claude Code, kagent, or a custom agent loop) to OpenAPPA. It intercepts the agent at key lifecycle points, submits proposed actions to OpenAPPA, and enforces the engine's policy decision before execution proceeds.
 
-When an LLM agent runs, it ingests data (user prompts, files, web pages, APIs) and takes actions (executes commands, calls external services, writes to databases). OpenAPPA sits between your agent framework (the **harness**) and those tools. Before any action runs or new data enters model context, OpenAPPA evaluates one question: *Can this data, given where it originated, legally flow into this destination?*
+Follow [Add an Integration](#add-an-integration) to wire your harness hooks, or see [Runtime Overview](#runtime-overview) for architecture details.
 
-An **integration** connects an agent harness (such as Claude Code, Hermes, or a custom agent loop) to OpenAPPA. It intercepts the agent at key lifecycle points, submits proposed actions to OpenAPPA, and enforces the engine's policy decision before execution proceeds.
+## Runtime Overview
 
 A host reaches the runtime through an adapter, which speaks one hook protocol: a versioned wire envelope posted to `/hook`. Claude Code and kagent are the initial adapters.
 
-Follow [Add an Integration](#add-an-integration) to wire your harness hooks, or see [Appa Overview](#appa-overview) for runtime architecture details.
+`appa-runtime` is an HTTP service that runs alongside your agent as a local process, sidecar container, or centralized deployment.
 
----
+:::fig-runtime-overview:::
+
+### Endpoints
+
+By default, `appa-runtime` listens on `http://127.0.0.1:8787` (`--listen`) and exposes HTTP and MCP endpoints:
+
+- **`POST /hook`**: Primary lifecycle interception endpoint. Receives one hook protocol envelope per event (`tool_call`, `tool_result`, …) and returns the synchronous gating decision in the same protocol.
+- **`/mcp`**: Built-in Model Context Protocol endpoint. Exposes the runtime's control tool, `appa/execute_remedy_plan`, and handles human-in-the-loop (HITL) reviews when a blocked action requires approval or sanitization.
+- **`GET /health` & `GET /status`**: Liveness probes and operational status for active trajectories.
+- **`POST /reload`**: Hot-reloads policy configurations from disk without restarting the runtime process.
+- **`GET /binary-fingerprint`**: Deployment check. Returns the process ID, binary build digest, and config file path so CLI tools (such as `appa init`) can verify process ownership.
+- **`GET /policy-key`**: Policy synchronization check. Returns the hash of the active in-memory policy to detect disk-policy changes.
+
+### Event Log
+
+To keep track of agent actions and enforce policies, OpenAPPA reconstructs each trajectory from an append-only event log. The log preserves state across turns: tool dispatches, child branches, authority decisions, and the initial policy.
+
+`appa-runtime` persists this log to a local SQLite database (`--db ./appa.db`). Use durable storage when trajectories must resume across runtime restarts.
+
+### Deployment Models
+
+`appa-runtime` works with any agent able to send lifecycle events over HTTP and wait for a decision before continuing—including background running agents or interactive chat agents. The integration contract remains identical across deployment models:
+
+| Placement | Typical use |
+|---|---|
+| **Same-host process or sidecar** | Enforces policy beside a single agent. Typical for local CLI agents and single-tenant agent pods. |
+| **Shared internal service** | Gates multiple internal agents through a centralized runtime and shared policy configuration. |
+| **SaaS-managed service** | Protects user-facing agents directly inside your application infrastructure and private network. |
+
+## Why Add OpenAPPA?
+
+### Benefits for a SaaS Product
+
+OpenAPPA enforces policy independently of the LLM. If your product lets users connect custom MCP servers, you can let them control where their data may flow. If your product performs agentic work behind the scenes, OpenAPPA prevents the agent from sending that data to destinations the policy does not allow.
+
+### Benefits for an Enterprise Agent
+
+OpenAPPA lets an enterprise apply centralized security policies across its fleet of agents. A policy defines where data may go, how it must be cleaned before it is sent, and who must approve sensitive actions.
 
 ## Add an Integration
 
-OpenAPPA's integration surface centers on the [`POST /hook`](#endpoints-openappa-exposes) endpoint. The runtime handles five core lifecycle events for single-agent workflows, plus three optional events for child agents (subagents).
+OpenAPPA's integration surface centers on the [`POST /hook`](#endpoints) endpoint. The runtime handles five core lifecycle events for single-agent workflows, plus three optional events for child agents (subagents).
 
 Connecting an agent harness requires two steps:
+
 1. Configure your [agent harness](#connect-the-agent-hooks) to intercept execution at these lifecycle events.
 2. Provide an [adapter](#the-adapter-and-the-hook-protocol): the runtime serves one adapter, and it derives the canonical tool id of every call from that adapter and the host's raw tool spelling.
+
+> **Ask your coding agent**
+>
+> Copy this prompt into the coding agent that has access to your agent's source code:
+>
+> ```text
+> Integrate OpenAPPA with the agent in this repository.
+>
+> Follow the technical integration guide:
+> https://openappa.com/writing-an-integration#add-an-integration
+>
+> Load the OpenAPPA documentation in one of these ways:
+> - Add https://openappa.com/mcp as a remote MCP server named openappa-docs.
+> - Or run: curl -s https://openappa.com/llms.txt
+>
+> Inspect the agent harness, connect every lifecycle hook required by the guide,
+> and enforce every decision returned by OpenAPPA. Then run the smoke-test
+> checklist and the repository's available checks. Explain what you changed,
+> what you verified, and any required hook the harness cannot expose.
+> ```
 
 ### Lifecycle Events
 
@@ -43,7 +101,7 @@ A decision that stands in for a result says which of two contents it carries. `d
 
 The `prompt` event gates nothing. The runtime notes it as the boundary that ends the previous turn. The prompt text reaches no engine check and enters no trajectory record, and the answer is always `ack`. Enforcement starts at `tool_call`.
 
-`appa/execute_remedy_plan` is the canonical tool id OpenAPPA owns. When the model takes a remedy offer, send the `tool_call` for it like any other call, in the host's raw spelling. The runtime recognizes the control tool from the adapter's mapping, records the offer the call quotes, and answers `pass_control`. The call must then reach the [`/mcp`](#endpoints-openappa-exposes) endpoint unmodified.
+`appa/execute_remedy_plan` is the canonical tool id OpenAPPA owns. When the model takes a remedy offer, send the `tool_call` for it like any other call, in the host's raw spelling. The runtime recognizes the control tool from the adapter's mapping, records the offer the call quotes, and answers `pass_control`. The call must then reach the [`/mcp`](#endpoints) endpoint unmodified.
 
 That endpoint refuses a remedy call that no `tool_call` preceded. A call that quotes an offer this trajectory no longer pursues comes back as `deny_call`. A harness tool cannot take the id: only the raw spelling the adapter maps to `appa/execute_remedy_plan` is the control tool, and a lookalike on another server is an ordinary checked call.
 
@@ -67,7 +125,7 @@ Integration hooks can live directly inside your agent or run as an external exte
 At each hook point, the harness must:
 
 1. **Pause** the pending action.
-2. **Send** the wire envelope to the OpenAPPA [`POST /hook`](#endpoints-openappa-exposes) endpoint.
+2. **Send** the wire envelope to the OpenAPPA [`POST /hook`](#endpoints) endpoint.
 3. **Enforce** the returned decision before resuming the agent.
 
 **Fail closed on errors:** If `appa-runtime` is unreachable, times out, or returns an HTTP error, the harness must treat the response as `block` and refuse the action. Never fail open.
@@ -85,12 +143,12 @@ The two initial adapters reach the wire differently:
 
 A new host chooses one of the two shapes: build the envelope in-process, as kagent does, or translate a host's hook format in a client, as `appa hook` does. Either way it needs an adapter crate the runtime is built with, because the runtime derives the tool identity of every call from it. For a complete reference, see [`appa-adapter-claude-code`](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-claude-code) and [`appa-adapter-kagent`](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-kagent); the envelope and decision types are in [`appa-runtime-api`](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-runtime-api).
 
-### Reference Implementation
+### Reference Implementations
 
-Inspect the Claude Code integration on GitHub for a complete reference:
+Use the shipped source on GitHub as a reference:
 
-- **Adapter**: [`appa-adapter-claude-code`](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-claude-code) — derives the canonical tool id and spawn-ness from Claude Code's raw tool spellings, and carries the client-side codec `appa hook` uses to translate Claude Code's hook JSON to the envelope and the decision back.
-- **Claude Code Hooks Plugin**: [`integrations/claude-code`](https://github.com/archestra-ai/OpenAPPA/tree/main/integrations/claude-code) — client-side harness configuration (`hooks.json`, the `appa hook` invocation, and MCP registration).
+- **Claude Code**: [Appa adapter](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-claude-code) and [hooks plugin](https://github.com/archestra-ai/OpenAPPA/tree/main/integrations/claude-code).
+- **kagent**: [Appa adapter](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-kagent), [Python plugin](https://github.com/archestra-ai/OpenAPPA/tree/main/integrations/kagent/appa-kagent-adk), and [Go plugin](https://github.com/archestra-ai/OpenAPPA/tree/main/integrations/kagent/appa-kagent-adk-go).
 
 ### Smoke-Test Checklist
 
@@ -101,40 +159,5 @@ Verify your integration against these core behaviors:
 - [ ] **Remedy calls pass through**: When OpenAPPA returns `pass_control`, the harness runs the remedy tool unmodified and does not re-gate it.
 - [ ] **Replaced outputs take effect**: When OpenAPPA returns `deliver_value` or `replace_output`, model context and trajectory history receive the substituted content, never the raw tool output. The `value` of a `deliver_value` reaches the model unchanged; only the runtime's own text is rewritten into the host's spellings.
 - [ ] **Blocked outputs are withheld**: A blocked result is completely dropped from model attention and trajectory history.
-- [ ] **Fails closed on connection failure**: Stopping [`appa-runtime`](#appa-overview) causes subsequent prompts and tool calls to fail safely instead of running unprotected.
+- [ ] **Fails closed on connection failure**: Stopping [`appa-runtime`](#runtime-overview) causes subsequent prompts and tool calls to fail safely instead of running unprotected.
 - [ ] **Subagents are bounded (if supported)**: Child trajectories inherit parent security labels, and unverified child returns are blocked at `child_end`.
-
----
-
-## Appa Overview
-
-OpenAPPA runs as a standalone daemon written in Rust (`appa-runtime`). In production or local development, it runs alongside your agent as a local background process or sidecar container.
-
-:::fig-runtime-overview:::
-
-### Endpoints OpenAPPA Exposes
-
-By default, `appa-runtime` listens on `http://127.0.0.1:8787` (`--listen`) and exposes HTTP and MCP endpoints:
-
-- **`POST /hook`**: Primary lifecycle interception endpoint. Receives one hook protocol envelope per event (`tool_call`, `tool_result`, …) and returns the synchronous gating decision in the same protocol.
-- **`/mcp`**: Built-in Model Context Protocol endpoint. Exposes the runtime's control tool, `appa/execute_remedy_plan`, and handles human-in-the-loop (HITL) review elicitation when a blocked action requires approval or sanitization.
-- **`GET /health` & `GET /status`**: Liveness probes and operational status for active trajectories.
-- **`POST /reload`**: Hot-reloads policy configurations from disk without restarting the runtime process.
-- **`GET /binary-fingerprint`**: Deployment check. Returns the process ID, binary build digest, and config file path so CLI tools (such as `appa init`) can verify process ownership.
-- **`GET /policy-key`**: Policy synchronization check. Returns the hash of the active in-memory policy to detect disk-policy changes.
-
-### Persistence: SQLite by Default, Pluggable for Any Storage
-
-OpenAPPA records an append-only log of every trajectory, tool dispatch, authority approval, and policy decision.
-
-- **SQLite by default**: Out of the box, `appa-runtime` persists state to a local SQLite database (`--db ./appa.db`).
-- **Pluggable storage mechanism**: The storage layer (`appa-eventlog`) abstracts durability behind an append-only event log interface. SQLite is the only shipped backend today, but the storage architecture is pluggable so alternative backends can be implemented as needed.
-
----
-
-## Existing Integrations
-
-Explore working integrations in this repository:
-
-- **[Claude Code](/claude-code)**: Anthropic's terminal agent, gated through the plugin's hooks running `appa hook`.
-- **[kAgent](/kagent)**: Kubernetes agents gated in-pod through the Google Agent Development Kit (ADK) plugin API, in both the Python and Go runtimes; the plugins post the envelope directly.

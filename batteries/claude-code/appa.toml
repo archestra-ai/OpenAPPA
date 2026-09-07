@@ -97,15 +97,14 @@ requires = { attention = ["token-exposed"] }
 delta = {}
 
 # The default model Annotator generates every other command's complete contract
-# before dispatch: its output trust rank and required trust and review marks.
+# before dispatch: its output label, required trust, review marks, and effects.
 # To customize the `hint` without modifying this battery, declare an Annotator
-# with the same name in the root config. `audiences = []` closes the mandate to
-# `public`: an annotation names literal readers only, never `self` or `internal`,
-# so static rules control who may see command output.
+# with the same name in the root config. `audiences` is left omitted, so an
+# annotation may narrow command output to `self` or `internal`, or require a
+# reader the policy names — the same vocabulary a static rule writes.
 [[policy.annotator]]
 name = "claude-code.bash-requirements"
 builtin = "claude-code"
-audiences = []
 hint = "Treat network or otherwise unvetted output as suspicious. Classify trust and audience requirements from the command's visible behavior and destination."
 
 [[policy.tool]]

@@ -3213,8 +3213,11 @@ mod tests {
     }
 
     fn annotator_with_readers(name: &str, readers: &[&str]) -> crate::registry::AnnotatorDeclaration {
+        let entries: Vec<String> = readers.iter().map(|reader| reader.to_string()).collect();
         crate::registry::AnnotatorDeclaration {
-            audiences: Some(readers.iter().map(|reader| ReaderId::new(*reader)).collect()),
+            audiences: Some(
+                crate::registry::AudienceVocabulary::parse_entries(&entries).expect("a fixture vocabulary parses"),
+            ),
             ..annotator(name)
         }
     }
@@ -11013,6 +11016,130 @@ mod tests {
                 needed: vec![group_atom("team")]
             }),
             "a decision over an unanswered symbolic audience claims answers it does not pin"
+        );
+    }
+
+    /// A symbolic audience an annotation produces is the act's membership question, exactly
+    /// as a declaration writing it: the check asks for the atoms, decides under the pinned
+    /// answers, and replay reads the pin — a record without the answers, or with answers the
+    /// decision does not follow from, is refused.
+    #[test]
+    fn a_produced_symbolic_audience_reads_membership_per_act_and_replays_from_the_pin() {
+        let notify = plain_tool("notify");
+        let mut cfg = test_config(vec![]);
+        cfg.tools.push(annotated(notify.clone(), "acl"));
+        cfg.annotators.push(annotator("acl"));
+        cfg.audience = slack_groups(&["team"]);
+        let e = open_engine_at(cfg, known(TRUSTED, Audience::restricted([corp_reader("alice")])));
+        let log = vec![opened(&e)];
+        let capped = {
+            let mut produced = notify.clone();
+            produced.requires.label.audience = vec![AudienceRequirement::Cap(group_audience("team"))];
+            let unpinned = call("notify", json!({}));
+            raw(&unpinned
+                .clone()
+                .with_annotation(Some(pinned_for(produced, "acl", &unpinned))))
+        };
+        let batch_with =
+            |evidence: crate::audience::AudienceEvidence| evidenced_batch("b1", vec![capped.clone()], evidence);
+
+        assert_eq!(
+            e.handle(
+                &viewing(&e, &log),
+                batch_with(crate::audience::AudienceEvidence::default())
+            ),
+            Err(TransitionError::MembershipNeeded {
+                needed: vec![group_atom("team")]
+            }),
+            "the produced cap is read extensionally, so the act asks for exactly its group"
+        );
+
+        let team = |members: Vec<crate::audience::MemberClaims>| source_evidence(vec![user_group("team", members)]);
+        let evidence = team(vec![slack_member("slack:UA", Some("alice@corp.com"))]);
+        let decision = e
+            .handle(&viewing(&e, &log), batch_with(evidence.clone()))
+            .expect("the batch decides under the pinned answer");
+        let (released, blocked) = answered(&decision);
+        assert_eq!(released.len(), 1, "alice is a team member, so the cap holds");
+        assert!(blocked.is_empty());
+        let facts = appended_facts(decision);
+        assert!(
+            facts.iter().any(|fact| matches!(
+                fact,
+                Fact::ProposalBatchDecided { evidence: pinned, .. } if pinned == &evidence
+            )),
+            "the decision pins the answer it consumed"
+        );
+        assert_eq!(e.validate_replay(&[log.clone(), facts.clone()].concat()), Ok(()));
+
+        let tampered = |mutate: &dyn Fn(&mut Fact)| {
+            let mut facts = facts.clone();
+            for fact in &mut facts {
+                mutate(fact);
+            }
+            e.validate_replay(&[log.clone(), facts].concat())
+        };
+        assert_eq!(
+            tampered(&|fact| {
+                if let Fact::ProposalBatchDecided { evidence, .. } = fact {
+                    *evidence = crate::audience::AudienceEvidence::default();
+                }
+            }),
+            Err(TransitionRefusal::UnansweredDecision {
+                needed: vec![group_atom("team")]
+            }),
+            "replay reads the pin, never a source: without it the decision is unanswered"
+        );
+        assert_eq!(
+            tampered(&|fact| {
+                if let Fact::ProposalBatchDecided { evidence, .. } = fact {
+                    *evidence = team(vec![slack_member("slack:UB", Some("bob@corp.com"))]);
+                }
+            }),
+            Err(TransitionRefusal::MisdecidedBatch),
+            "a membership the directory would report today does not rewrite the recorded decision"
+        );
+    }
+
+    /// A produced delta that narrows to a symbolic audience narrows symbolically: no `requires`
+    /// reads it, so the act asks for no membership, and the narrowing the agent is offered
+    /// carries the chain word unexpanded.
+    #[test]
+    fn a_produced_symbolic_delta_narrows_without_a_membership_read() {
+        let notify = plain_tool("notify");
+        let mut cfg = test_config(vec![]);
+        cfg.tools.push(annotated(notify.clone(), "acl"));
+        cfg.annotators.push(annotator("acl"));
+        let e = open_engine_at(cfg, known(TRUSTED, Audience::public()));
+        let log = vec![opened(&e)];
+        let internal = DeclaredAudience::Union(
+            crate::label::Clause::new([crate::label::ChainAudience::Internal], [], []).expect("a chain clause"),
+        );
+        let narrowing = {
+            let mut produced = notify.clone();
+            produced.delta.audience = Some(internal.clone());
+            let unpinned = call("notify", json!({}));
+            raw(&unpinned
+                .clone()
+                .with_annotation(Some(pinned_for(produced, "acl", &unpinned))))
+        };
+        let decision = e
+            .handle(&viewing(&e, &log), batch("b1", Vec::new(), vec![narrowing]))
+            .expect("a symbolic delta needs no directory answer to decide");
+        let (released, blocked) = answered(&decision);
+        assert!(released.is_empty());
+        assert_eq!(blocked.len(), 1);
+        let narrowing = blocked[0]
+            .block
+            .raw
+            .narrowing
+            .as_ref()
+            .expect("a narrowing delta blocks on the narrowing it proposes");
+        assert!(blocked[0].block.raw.requirement_gaps.is_empty());
+        assert_eq!(
+            narrowing.to,
+            known(TRUSTED, Audience::of_declared(&internal)),
+            "the chain word reaches the offered narrowing unexpanded"
         );
     }
 

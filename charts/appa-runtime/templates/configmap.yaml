@@ -1,0 +1,17 @@
+{{- if not .Values.config.existingConfigMap }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "appa-runtime.configMapName" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "appa-runtime.labels" . | nindent 4 }}
+  {{- $policyHash := include "appa-runtime.policyHashAnnotation" . | trim }}
+  {{- if $policyHash }}
+  annotations:
+    appa.dev/packaged-policy-sha256: {{ $policyHash | quote }}
+  {{- end }}
+data:
+  {{ .Values.config.key }}: |
+{{ include "appa-runtime.managedPolicy" . | indent 4 }}
+{{- end }}

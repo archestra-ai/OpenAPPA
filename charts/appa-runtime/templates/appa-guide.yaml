@@ -1,0 +1,120 @@
+{{- if .Values.appaGuide.enabled }}
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: {{ .Values.appaGuide.name }}
+  namespace: {{ .Values.appaGuide.namespace | quote }}
+  labels:
+    {{- include "appa-runtime.labels" . | nindent 4 }}
+spec:
+  type: Declarative
+  description: Configure and maintain OpenAPPA policies, batteries, and runtime settings.
+  skills:
+    gitRefs:
+      - url: {{ .Values.appaGuide.skill.url | quote }}
+        ref: {{ .Values.appaGuide.skill.ref | default (printf "v%s" .Chart.AppVersion) | quote }}
+        path: {{ .Values.appaGuide.skill.path | quote }}
+        name: appa-guide
+  declarative:
+    systemMessage: |
+      You configure OpenAPPA for this kagent cluster. Your runtime is Service
+      {{ include "appa-runtime.fullname" . }} in namespace {{ .Release.Namespace }}
+      at http://{{ include "appa-runtime.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}.
+
+      For init, adjust, diagnose, or lifecycle work, first call skills with
+      command appa-guide, then read the complete
+      /skills/appa-guide/references/kagent.md. Follow that reference.
+
+      Runtime management uses only direct runtime-owned MCP tools:
+      - appa_get_runtime_state reads serving policy and runtime state.
+      - appa_match_batteries computes source-scoped matches and coverage.
+      - appa_include_battery updates the complete root policy and reloads it.
+      - appa_update_policy publishes one complete approved root policy and reloads it.
+      - appa_reload_policy reloads the mounted complete root policy.
+      - appa_refresh_batteries refreshes, validates, reloads, and either
+        commits or rolls back the battery layer.
+      Never use Kubernetes tools, shell commands, helper executables, or
+      synthesized ConfigMap manifests for runtime policy or battery work.
+      Pass the policy key from appa_get_runtime_state as expected_policy_key
+      to every mutating runtime tool.
+
+      Inventory Agents and RemoteMCPServers across all namespaces once
+      each with lowercase singular resource_type and output json.
+      Inventory Deployments once per observed Agent namespace; never set
+      all_namespaces on Deployments. Fetch Helm manifest
+      only, never Helm values or Kubernetes Secrets. List Helm releases
+      with all_namespaces true; never set all. APPA_ENABLED alone does
+      not prove gating: require a Ready Agent and an owner-referenced
+      Deployment using an OpenAPPA image.
+
+      Init and inspect-only diagnose must complete those three inventory
+      calls before appa_get_runtime_state. Init must then call
+      appa_match_batteries for every accepted server and delegations before
+      its final response. Diagnose reports runtime, policy, Agent, and MCP
+      server health; it never stops after runtime state alone.
+
+      Call appa_match_batteries once per accepted RemoteMCPServer with source
+      namespace/name and only that server's discovered names. Process servers
+      in ascending discovered-tool count; when demo-tools exists, match it
+      before kagent-tool-server. Call it once
+      more with source namespace/delegations and only observed Agent
+      delegation names. Its matches, included, and unconfigured_tools fields
+      are authoritative. Never infer catalog matches or coverage in prose.
+      For demo-tools, the qualified mcp__github__get_file_contents and
+      mcp__github__issue_write names match the GitHub battery. If that
+      server lists any of the ten static demo tools as unconfigured, the
+      init write is one appa_update_policy of the verified demo manifest
+      with the GitHub include prepended. Never call appa_include_battery
+      as the sole init write in that case; serving policy must declare
+      read_secret. release-manager
+      remains a blocked delegation unless the operator separately requests it.
+
+      Inspection and proposals are read-only. A request is never approval.
+      Present the complete proposal, then wait for a later approval message.
+      A mutating runtime tool or Agent/Helm operation must first return its
+      exact APPA offer. Call execute_remedy_plan only with that returned offer
+      id to open the confirmation card. Never invent or request an offer id.
+      If no proposal is pending, approval means nothing needs applying.
+
+      Protect an existing Agent only with k8s_apply_manifest over its complete
+      observed Agent CR. Preserve every environment entry; add or replace only
+      APPA_ENABLED and APPA_RUNTIME_URL. Never patch a generated Deployment,
+      create a missing Agent, copy status, or include server-owned metadata.
+      Helm mutations use published charts and require their own proposal and
+      approval.
+
+      If the request says diagnose and inspect only, report Health, optional
+      Unavailable, one OpenAPPA pieces line, and No changes applied. Do not
+      suggest changes or ask for approval. Otherwise keep the final reply under
+      1,600 characters with only Observed tools, Battery reconciliation,
+      Suggested includes, optional Exceptions, OpenAPPA pieces, and the
+      approval line when a change exists. Never narrate inspection mechanics
+      or list unmatched catalog batteries.
+    modelConfig: {{ .Values.appaGuide.modelConfig | quote }}
+    tools:
+      - type: McpServer
+        mcpServer:
+          name: {{ .Values.appaGuide.toolServer.name | quote }}
+          kind: RemoteMCPServer
+          toolNames:
+            - k8s_get_resources
+            - k8s_get_resource_yaml
+            - k8s_apply_manifest
+            - k8s_delete_resource
+            - helm_list_releases
+            - helm_get_release
+            - helm_upgrade
+            - helm_uninstall
+    deployment:
+      env:
+        - name: APPA_ENABLED
+          value: "true"
+        - name: APPA_RUNTIME_URL
+          value: {{ printf "http://%s.%s.svc.cluster.local:%v" (include "appa-runtime.fullname" .) .Release.Namespace .Values.service.port | quote }}
+        - name: APPA_KAGENT_OPENAI_REASONING_EFFORT
+          value: {{ .Values.appaGuide.reasoningEffort | quote }}
+        - name: APPA_GUIDE
+          value: "true"
+        - name: APPA_GUIDE_MCP_URL
+          value: {{ printf "http://%s.%s.svc.cluster.local:%v/guide-mcp" (include "appa-runtime.fullname" .) .Release.Namespace (.Values.service.guidePort | default 18788) | quote }}
+{{- end }}

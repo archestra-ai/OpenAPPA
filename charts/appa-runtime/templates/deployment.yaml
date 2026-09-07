@@ -1,0 +1,209 @@
+{{- if or (hasKey .Values.env "APPA_BATTERIES_DIR") (hasKey .Values.env "APPA_CONFIG") (hasKey .Values.env "APPA_GUIDE_RUNTIME_URL") (hasKey .Values.env "APPA_PERSISTENCE_ENABLED") (hasKey .Values.env "APPA_POLICY_CONFIGMAP_NAME") (hasKey .Values.env "APPA_POLICY_CONFIGMAP_KEY") (hasKey .Values.env "APPA_RUNTIME_RELEASE_NAME") }}
+{{- fail "env.APPA_BATTERIES_DIR, env.APPA_CONFIG, env.APPA_GUIDE_RUNTIME_URL, env.APPA_PERSISTENCE_ENABLED, env.APPA_POLICY_CONFIGMAP_NAME, env.APPA_POLICY_CONFIGMAP_KEY, and env.APPA_RUNTIME_RELEASE_NAME are reserved; the chart derives them" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "appa-runtime.fullname" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "appa-runtime.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "appa-runtime.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- if not .Values.config.existingConfigMap }}
+        checksum/policy: {{ include "appa-runtime.managedPolicy" . | sha256sum | quote }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "appa-runtime.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "appa-runtime.serviceAccountName" . }}
+      automountServiceAccountToken: {{ or .Values.serviceAccount.automount .Values.appaGuide.enabled }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.persistence.enabled }}
+      initContainers:
+        - name: recover-battery-refresh
+          image: {{ include "appa-runtime.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              target=/var/lib/appa/release-batteries
+              backup=/var/lib/appa/.release-batteries.previous
+              if [ ! -e "$target" ] && { [ -e "$backup" ] || [ -L "$backup" ]; }; then
+                test -d "$backup"
+                test ! -L "$backup"
+                mv -- "$backup" "$target"
+              fi
+              mkdir -p /var/lib/appa/batteries "$target"
+              rm -rf /var/lib/appa/.release-batteries.new-* \
+                /var/lib/appa/.release-batteries.failed-* \
+                /var/lib/appa/.release-batteries.trash-*
+          resources:
+            requests:
+              cpu: 5m
+              memory: 16Mi
+            limits:
+              memory: 32Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/appa
+      {{- end }}
+      containers:
+        - name: runtime
+          image: {{ include "appa-runtime.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          command:
+            - /usr/local/bin/appa
+            - runtime
+            - --adapter
+            - kagent
+            - --config
+            - {{ printf "/etc/appa/%s" .Values.config.key | quote }}
+            - --db
+            - /var/lib/appa/appa.db
+            - --listen
+            - {{ printf "0.0.0.0:%v" .Values.service.port | quote }}
+            {{- if .Values.appaGuide.enabled }}
+            - --guide-listen
+            - {{ printf "0.0.0.0:%v" (.Values.service.guidePort | default 18788) | quote }}
+            {{- end }}
+            - --mcp-allowed-host
+            - {{ printf "%s.%s.svc.cluster.local:%v" (include "appa-runtime.fullname" .) .Release.Namespace .Values.service.port | quote }}
+            {{- if .Values.appaGuide.enabled }}
+            - --mcp-allowed-host
+            - {{ printf "%s.%s.svc.cluster.local:%v" (include "appa-runtime.fullname" .) .Release.Namespace (.Values.service.guidePort | default 18788) | quote }}
+            {{- end }}
+            {{- if .Values.persistence.enabled }}
+            - --batteries-dir
+            - /var/lib/appa/batteries
+            - --batteries-dir
+            - /var/lib/appa/release-batteries
+            {{- end }}
+            - --batteries-dir
+            - /opt/appa/batteries
+            {{- if .Values.verbosity }}
+            - {{ .Values.verbosity | quote }}
+            {{- end }}
+          env:
+            - name: APPA_CONFIG
+              value: {{ printf "/etc/appa/%s" .Values.config.key | quote }}
+            - name: APPA_GUIDE_RUNTIME_URL
+              value: {{ printf "http://127.0.0.1:%v" .Values.service.port | quote }}
+            - name: APPA_PERSISTENCE_ENABLED
+              value: {{ .Values.persistence.enabled | quote }}
+            - name: APPA_POLICY_CONFIGMAP_NAME
+              value: {{ include "appa-runtime.configMapName" . | quote }}
+            - name: APPA_POLICY_CONFIGMAP_KEY
+              value: {{ .Values.config.key | quote }}
+            - name: APPA_RUNTIME_RELEASE_NAME
+              value: {{ .Release.Name | quote }}
+            - name: APPA_BATTERIES_DIR
+              {{- if .Values.persistence.enabled }}
+              value: /var/lib/appa/batteries:/var/lib/appa/release-batteries:/opt/appa/batteries
+              {{- else }}
+              value: /opt/appa/batteries
+              {{- end }}
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          {{- with .Values.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          ports:
+            - name: runtime
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+            {{- if .Values.appaGuide.enabled }}
+            - name: guide-mcp
+              containerPort: {{ .Values.service.guidePort | default 18788 }}
+              protocol: TCP
+            {{- end }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: runtime
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: runtime
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: runtime
+            periodSeconds: 20
+          volumeMounts:
+            - name: policy
+              mountPath: /etc/appa
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/appa
+            - name: tmp
+              mountPath: /tmp
+            - name: runtime-identity
+              mountPath: /var/run/appa/identity
+              readOnly: true
+      volumes:
+        - name: policy
+          configMap:
+            name: {{ include "appa-runtime.configMapName" . }}
+        - name: tmp
+          emptyDir: {}
+        - name: runtime-identity
+          downwardAPI:
+            items:
+              - path: pod-name
+                fieldRef:
+                  fieldPath: metadata.name
+              - path: namespace
+                fieldRef:
+                  fieldPath: metadata.namespace
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "appa-runtime.pvcName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

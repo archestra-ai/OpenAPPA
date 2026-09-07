@@ -1,0 +1,192 @@
+# Bootstrap policy for the shared kagent runtime. It permits appa-guide to
+# inspect the cluster and requires human approval before its first policy
+# write. Every unrelated tool remains refused until the guide configures it.
+
+[policy]
+version = 2
+
+# Kubernetes inspection is restricted to the resource types appa-guide
+# needs. Secret objects and unknown kinds match no contract.
+[[policy.tool]]
+name = "mcp/kagent-tool-server/k8s_get_resources(resource_type:agent)"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/k8s_get_resources(resource_type:remotemcpserver)"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/k8s_get_resources(resource_type:pod)"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/k8s_get_resources(resource_type:service)"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/k8s_get_resources(resource_type:deployment)"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/k8s_get_resources(resource_type:job)"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/k8s_get_resources(resource_type:persistentvolumeclaim)"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/k8s_get_resources(resource_type:persistentvolume)"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/k8s_get_resources(resource_type:storageclass)"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/k8s_get_resources(resource_type:namespace)"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/k8s_get_resource_yaml(resource_type:agent)"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/k8s_get_resource_yaml(resource_type:remotemcpserver)"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/k8s_get_resource_yaml(resource_type:pod)"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/k8s_get_resource_yaml(resource_type:service)"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/k8s_get_resource_yaml(resource_type:deployment)"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/k8s_get_resource_yaml(resource_type:job)"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/k8s_get_resource_yaml(resource_type:persistentvolumeclaim)"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/k8s_get_resource_yaml(resource_type:persistentvolume)"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/k8s_get_resource_yaml(resource_type:storageclass)"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/k8s_apply_manifest"
+annotator = "appa-guide-apply"
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/k8s_delete_resource"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.annotator]]
+name = "appa-guide-apply"
+ranks = ["trusted"]
+audiences = []
+marks = ["human-approval"]
+effects = []
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/helm_list_releases"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/helm_get_release(resource:manifest)"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/helm_upgrade"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "mcp/kagent-tool-server/helm_uninstall"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "host/kagent/skills"
+delta = {}
+
+[[policy.tool]]
+name = "host/kagent/read_file"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/appa-guide/appa_match_batteries"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/appa-guide/appa_get_runtime_state"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/appa-guide/appa_include_battery"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "mcp/appa-guide/appa_reload_policy"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "mcp/appa-guide/appa_update_policy"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "mcp/appa-guide/appa_refresh_batteries"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.authority]]
+name = "oncall"
+hint = "Ask the operator through the kagent approval flow."
+
+[policy.authority.permits]
+attention = ["human-approval"]
+
+[externals]
+timeout_ms = 5000
+max_body_bytes = 262144
+
+[externals.authorities.oncall]
+builtin = "hitl"
+
+[externals.annotators.appa-guide-apply]
+command = ["/usr/local/bin/appa-guide-apply-annotator"]

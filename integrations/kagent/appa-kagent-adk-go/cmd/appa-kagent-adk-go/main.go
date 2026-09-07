@@ -22,9 +22,9 @@
 //
 // With the knob on the image adds exactly six deltas:
 //
-//  1. It appends the reserved-tool toolset to the rendered config: a
+//  1. It appends the runtime-owned toolset to the rendered config: a
 //     streamable-HTTP MCP toolset at $APPA_RUNTIME_URL/mcp serving
-//     execute_remedy_plan, through the same HttpTools path kagent uses
+//     execute_remedy_plan and appa_match_batteries through the same HttpTools path kagent uses
 //     for CRD MCP tools.
 //  2. It registers AppaPluginKagent after the stock plugins in
 //     runner.PluginConfig — the registration point kagent itself uses
@@ -131,7 +131,7 @@ func setupLogger(logLevel string) (logr.Logger, *zap.Logger) {
 }
 
 // appaEnabledEnv names the one knob that turns OpenAPPA on. Both
-// runtime images and the quickstart entrypoint read this variable.
+// OpenAPPA kagent runtime images read this variable.
 const appaEnabledEnv = "APPA_ENABLED"
 
 // runtimeURLEnv names the OpenAPPA runtime a gated agent talks to.
@@ -345,37 +345,70 @@ func landLineageHeaders(ctx context.Context, sess adksession.Session) {
 // remote approval board, the runtime's whole consult window — so the
 // timeout must outlast the runtime's [externals] consult timeout.
 const remedyCallTimeoutSeconds = 300.0
+const appaGuideEnv = "APPA_GUIDE"
+const appaGuideMCPURLEnv = "APPA_GUIDE_MCP_URL"
 
-// withReservedToolset appends the engine's remedy-execution toolset to
-// the rendered config: the reserved execute_remedy_plan tool over
+// guideEnabled reads the appa-guide switch. Both the inventory, which
+// spells the management set only for the guide, and the toolset the
+// guide reaches it through read the same answer.
+func guideEnabled() (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(appaGuideEnv))) {
+	case "", "false":
+		return false, nil
+	case "true":
+		return true, nil
+	default:
+		return false, fmt.Errorf("%s must be true or false", appaGuideEnv)
+	}
+}
+
+// withReservedToolset appends the remedy-only runtime toolset to the rendered
+// config: execute_remedy_plan over
 // streamable HTTP at $APPA_RUNTIME_URL/mcp, built by the same stock
 // HttpTools path as every CRD MCP toolset.
-func withReservedToolset(agentConfig *adk.AgentConfig, runtimeURL string) {
+func withReservedToolset(agentConfig *adk.AgentConfig, runtimeURL string) error {
 	timeout := remedyCallTimeoutSeconds
+	url := strings.TrimRight(runtimeURL, "/") + "/mcp"
+	tools := []string{appakagentadk.ReservedTool}
+	guide, err := guideEnabled()
+	if err != nil {
+		return err
+	}
+	if guide {
+		url = strings.TrimSpace(os.Getenv(appaGuideMCPURLEnv))
+		if url == "" {
+			return fmt.Errorf("%s=true requires a nonempty %s", appaGuideEnv, appaGuideMCPURLEnv)
+		}
+		tools = append([]string(nil), appakagentadk.RuntimeTools...)
+	}
 	agentConfig.HttpTools = append(agentConfig.HttpTools, adk.HttpMcpServerConfig{
 		Params: adk.StreamableHTTPConnectionParams{
-			Url:            strings.TrimRight(runtimeURL, "/") + "/mcp",
+			Url:            url,
 			Timeout:        &timeout,
 			SseReadTimeout: &timeout,
 			Headers:        map[string]string{},
 		},
-		Tools: []string{appakagentadk.ReservedTool},
+		Tools: tools,
 	})
+	return nil
 }
 
 // applyConfigDeltas changes the rendered config before the stock
-// builder reads it: deltas 1 and 3. The reserved-tool toolset joins
+// builder reads it: deltas 1 and 3. The runtime-owned toolset joins
 // the config, so the stock HttpTools path constructs it like every
 // other MCP toolset. The image env then fills the OpenAI reasoning
 // effort the CRD cannot express. While the knob is off this function
 // changes nothing, so the stock builder gets the stock config.
-func applyConfigDeltas(gate gating, agentConfig *adk.AgentConfig, logger logr.Logger) {
+func applyConfigDeltas(gate gating, agentConfig *adk.AgentConfig, logger logr.Logger) error {
 	if !gate.enabled() {
-		return
+		return nil
 	}
-	withReservedToolset(agentConfig, gate.runtimeURL)
-	logger.Info("Wired the appa reserved-tool toolset", "url", gate.runtimeURL)
+	if err := withReservedToolset(agentConfig, gate.runtimeURL); err != nil {
+		return err
+	}
+	logger.Info("Wired the appa runtime-owned toolset", "url", gate.runtimeURL)
 	withReasoningEffort(agentConfig, os.Getenv(reasoningEffortEnv))
+	return nil
 }
 
 // appendAppaPlugin registers AppaPluginKagent after the stock plugins:
@@ -454,7 +487,10 @@ func main() {
 		"sseTools", len(agentConfig.SseTools),
 		"remoteAgents", len(agentConfig.RemoteAgents))
 
-	applyConfigDeltas(gate, agentConfig, logger)
+	if err := applyConfigDeltas(gate, agentConfig, logger); err != nil {
+		logger.Error(err, "Refused appa runtime tool configuration")
+		os.Exit(1)
+	}
 
 	kagentName := os.Getenv("KAGENT_NAME")
 	kagentNamespace := os.Getenv("KAGENT_NAMESPACE")
@@ -633,7 +669,12 @@ func loadAgentConfigs(gate gating, configDir string, logger logr.Logger) (*adk.A
 		logger.Error(err, "Failed to read agent config", "configDir", configDir)
 		os.Exit(1)
 	}
-	agentConfig, inventory, err := decodeGuarded(raw, os.Getenv(skillsFolderEnv))
+	guide, err := guideEnabled()
+	if err != nil {
+		logger.Error(err, "Refusing to start", "configDir", configDir)
+		os.Exit(1)
+	}
+	agentConfig, inventory, err := decodeGuarded(raw, os.Getenv(skillsFolderEnv), guide)
 	var refusal *configRefusal
 	if errors.As(err, &refusal) {
 		logger.Error(err, "Refusing to start", "configDir", configDir)

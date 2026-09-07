@@ -6,6 +6,13 @@ argument-hint: "init|adjust"
 
 OpenAPPA configuration helper. Request: $ARGUMENTS
 
+If the request says `diagnose` and `inspect only`, ignore all proposal,
+battery-suggestion, approval, and mutation instructions below. Inspect the
+host and report **Health** for runtime, policy, Agents, and tool servers;
+optional **Unavailable**; one **OpenAPPA pieces** line; then **No changes
+applied.** Never mention battery matches, suggested includes, or proposed
+changes in the report.
+
 You run inside a host. Every host follows the same flow — inspect the
 installed tools, propose contracts in plain English, wait for approval,
 apply, reload — but the mechanics differ. Detect the host, read the
@@ -20,8 +27,16 @@ guess its content.
   `# Claude Code` section below. Do not call `Read` to load the
   reference.
 - **kagent**: the tools `k8s_get_resources` and `k8s_get_resource_yaml`
-  are available, and this session is a kagent agent chat. Read
-  `references/kagent.md` and follow it.
+  are available, and this session is a kagent agent chat. Before any
+  cluster action, call `read_file` for
+  `/skills/appa-guide/references/kagent.md` with `offset: 1` and
+  `limit: 0`. This exact call reads through end of file. Follow the
+  complete result.
+  The `skills` tool is used only for `command: appa-guide`. Runtime
+  management uses only the direct `appa_*` tools named in the kagent
+  reference, including `appa_update_policy`. Never invoke an
+  `appa-guide-*` executable, `skills`, or `k8s_execute_command` for
+  runtime policy or battery work.
 - Neither: say that this skill supports Claude Code and kagent hosts,
   and stop.
 
@@ -35,8 +50,15 @@ Use one mode:
 
 If the request already makes the mode clear, start there. Otherwise show
 these two choices in one short message and wait. Do not run both modes
-together. If the operator chooses `adjust` without describing the
-change, ask what they want OpenAPPA to do differently.
+together. Treat an explicit maintenance or lifecycle request, such as a
+battery refresh, health audit, Agent protection, or runtime upgrade, as
+`adjust` with a clear goal. Do not ask the operator to select a mode in
+that case. If the operator chooses `adjust` without describing the change,
+ask what they want OpenAPPA to do differently.
+
+An explicit `init` authorizes the complete read-only inspection and the
+proposal. Do not ask whether to continue before the proposal. Invoke only
+the `appa-guide` skill name; never invent a mode-specific skill name.
 
 ## Rules that apply on every host
 
@@ -44,14 +66,30 @@ change, ask what they want OpenAPPA to do differently.
   before battery rules, and the first matching rule applies. Keep every
   root rule unless the operator explicitly approves changing or removing
   it.
+- IFC monoids first: express boundaries with trust and audience labels.
+  Do not use effects or default human attention when labels can express
+  the same requirement. Trusted data flowing within its audience stays
+  autonomous.
 - A battery supplies maintained defaults. Never edit a battery. Override
   a tool contract with a root rule. Override an Annotator by copying its
   complete declaration into the root config under the same name. Preserve
   its implementation, inputs, and mandate unless the approved behavior
   requires changing them.
+- A battery is available when its files exist in an inspected battery
+  layer. It is included only when serving root policy includes its
+  `appa.toml`. Say "include" rather than "install" when proposing that
+  policy change. Never describe a catalog entry as an installed tool or
+  an included battery.
 - Read before proposing. Show the complete proposed behavior in plain
   English and wait for approval before writing any file or reloading the
   runtime. Ask for approval again if a correction changes that behavior.
+- An initial request for a change is not approval to execute it. End the
+  first turn with the proposal. Act only after a later message approves
+  that exact proposal.
+- If the current config already provides the complete proposed behavior,
+  report that no change is needed. Do not ask for approval, write, or
+  reload an unchanged config. Do not call the config updated or tell the
+  operator to start a new chat when nothing changed.
 - Make the smallest change that achieves the request. Preserve unrelated
   entries, comments, reader names, external bindings, and batteries.
 - Use short sentences. Explain what data stays private, what can leave
@@ -80,7 +118,27 @@ change, ask what they want OpenAPPA to do differently.
   configuration cannot express the requested behavior, say so and offer
   only behaviors the current config format supports.
 - Do not configure the configuring actor: skip the agent running this
-  skill and the reserved `appa/execute_remedy_plan` tool.
+  skill and the runtime-owned `execute_remedy_plan` and
+  `appa_match_batteries` tools.
+- Call `execute_remedy_plan` only when the immediately previous tool
+  result quoted `offer_id: "<hex>"`. Copy that hex string exactly. Never
+  invent an offer id. Never use `human-approval`, an authority name, a
+  tool name, or any other word as an offer id. Never ask the operator
+  for an offer id.
+- If the operator says approve and no proposal is waiting, say that
+  nothing needs applying. Do not write, reload, or call
+  `execute_remedy_plan`.
+- Inspection and proposal drafting never require approval. Never say
+  "awaiting approval to propose", "approval to refine", or equivalent.
+  End an inspection in exactly one state: present the complete change
+  proposal and ask for approval, or state that no change is required and
+  use no approval language.
+- Keep user-facing replies compact. Do not narrate inspection calls, Helm
+  releases, pod names, config paths, counts, or the complete tool or
+  battery catalog unless one changes the result. Group tools by server and
+  behavior. Use one short sentence or bullet per outcome, plus required
+  unavailable-resource and missing-support warnings. Offer technical
+  details only when the operator asks.
 
 After a successful reload, give a brief human-readable summary of the
 behavior now in effect: one to three short sentences on what information

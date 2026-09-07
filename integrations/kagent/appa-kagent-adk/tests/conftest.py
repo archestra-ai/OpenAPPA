@@ -50,7 +50,18 @@ INVENTORY_CONFIG = {
     "http_tools": [
         {
             "params": {"url": "http://demo-tools.kagent.svc.cluster.local:3000/mcp"},
-            "tools": ["k8s_scale", "k8s_get_pods", "read_ledger", "k8s_annotate", "restart_deployment"],
+            "tools": [
+                "k8s_scale",
+                "k8s_get_pods",
+                "read_ledger",
+                "k8s_annotate",
+                "restart_deployment",
+                "first",
+                "second",
+                "stale",
+                "read_first",
+                "read_second",
+            ],
         }
     ],
     "remote_agents": [
@@ -59,7 +70,9 @@ INVENTORY_CONFIG = {
     ],
 }
 
-INVENTORY = ToolInventory.from_config(INVENTORY_CONFIG, environ={})
+# `APPA_GUIDE` spells appa-guide's management set, which the cases that
+# bind a management call's actor dispatch.
+INVENTORY = ToolInventory.from_config(INVENTORY_CONFIG, environ={"APPA_GUIDE": "true"})
 
 
 class FakeSession:

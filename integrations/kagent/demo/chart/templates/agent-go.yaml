@@ -2,11 +2,11 @@
 {{- include "appa-demo.requireDistinctAgentNames" . -}}
 # The go cell of the fleet: the same cluster-ops agent on kagent's go
 # runtime (spec.declarative.runtime: go), gated by the go plugin against
-# the same shared appa-runtime. kagent derives the image from
-# controller.agentImage by replacing the last path segment with
-# golang-adk; the chart README shows the build. APPA_ENABLED is the gate
-# knob of that image, and it is off by default. This is a gated demo, so
-# every agent below sets it to "true".
+# the same shared appa-runtime. On kagent 0.9.12, the controller derives
+# its image from controller.agentImage by replacing the last path segment
+# with golang-adk; the chart README shows the alias. APPA_ENABLED is the
+# gate knob of that image, and it is off by default. This is a gated demo,
+# so every agent below sets it to "true".
 # The go twin of release-manager: listed by cluster-ops-go, named by no
 # policy contract, so every delegation to it is denied at the spawn.
 apiVersion: kagent.dev/v1alpha2
@@ -81,7 +81,7 @@ metadata:
     {{- include "appa-demo.labels" . | nindent 4 }}
 spec:
   type: Declarative
-  description: The cluster-ops demo agent on the go runtime, gated by OpenAPPA through the go runtime image.
+  description: The cluster-ops demo Agent on Go, gated through the remote OpenAPPA runtime.
   declarative:
     runtime: go
     systemMessage: |
@@ -101,7 +101,8 @@ spec:
       otherwise accept the change. If the operator steers you to a
       different remedy in chat, follow the operator. After the remedy,
       retry the original call, and say in one sentence which remedy you
-      took. If a remedy fails, report the failure and stop.
+      took. If a block offers no remedy, report the refusal and stop;
+      never call ask_user. If a remedy fails, report the failure and stop.
     modelConfig: {{ .Values.modelConfig.name | quote }}
     tools:
       - type: McpServer

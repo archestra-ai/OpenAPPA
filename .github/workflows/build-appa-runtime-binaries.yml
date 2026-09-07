@@ -321,5 +321,6 @@ jobs:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.archive }}
           archive: false
+          overwrite: true
           if-no-files-found: error
           retention-days: 7

@@ -156,7 +156,7 @@ func topLevelJSONKeys(t reflect.Type) map[string]struct{} {
 // skillsFolder is the value of KAGENT_SKILLS_FOLDER: while it names a
 // directory the stock builder attaches its skills tools, and the
 // inventory spells them.
-func decodeGuarded(raw []byte, skillsFolder string) (*adk.AgentConfig, appakagentadk.Inventory, error) {
+func decodeGuarded(raw []byte, skillsFolder string, guide bool) (*adk.AgentConfig, appakagentadk.Inventory, error) {
 	if err := refuseUnsupported(raw); err != nil {
 		return nil, appakagentadk.Inventory{}, err
 	}
@@ -170,7 +170,7 @@ func decodeGuarded(raw []byte, skillsFolder string) (*adk.AgentConfig, appakagen
 	if err := refuseIgnoredValues(&agentConfig); err != nil {
 		return nil, appakagentadk.Inventory{}, err
 	}
-	inventory, err := appakagentadk.BuildInventory(inventorySpec(&agentConfig, skillsFolder))
+	inventory, err := appakagentadk.BuildInventory(inventorySpec(&agentConfig, skillsFolder, guide))
 	if err != nil {
 		return nil, appakagentadk.Inventory{}, refuseInventory(err)
 	}
@@ -186,7 +186,7 @@ func decodeGuarded(raw []byte, skillsFolder string) (*adk.AgentConfig, appakagen
 // the policy identity of an agent is its declared name, and the guard
 // binds the two no further. See builder.remoteAgent in inventory.go for
 // why the controller cannot render a name and a URL that disagree.
-func inventorySpec(agentConfig *adk.AgentConfig, skillsFolder string) appakagentadk.InventorySpec {
+func inventorySpec(agentConfig *adk.AgentConfig, skillsFolder string, guide bool) appakagentadk.InventorySpec {
 	var spec appakagentadk.InventorySpec
 	for index, server := range agentConfig.HttpTools {
 		spec.MCPServers = append(spec.MCPServers, appakagentadk.MCPServerSpec{
@@ -211,6 +211,7 @@ func inventorySpec(agentConfig *adk.AgentConfig, skillsFolder string) appakagent
 			Path: fmt.Sprintf("remote_agents[%d].name", index), Name: remoteAgent.Name,
 		})
 	}
+	spec.Guide = guide
 	spec.Builtins = appakagentadk.BuiltinGroups{
 		Memory:     agentConfig.Memory != nil,
 		Skills:     strings.TrimSpace(skillsFolder) != "",
@@ -317,7 +318,15 @@ func refuseReservedToolNames(agentConfig *adk.AgentConfig) error {
 // model would read two declarations of one name, and which one answers
 // is the builder's order rather than the policy's.
 func isReservedToolName(name string) bool {
-	return name == appakagentadk.ReturnTool || name == appakagentadk.ReservedTool
+	if name == appakagentadk.ReturnTool {
+		return true
+	}
+	for _, runtimeTool := range appakagentadk.RuntimeTools {
+		if name == runtimeTool {
+			return true
+		}
+	}
+	return false
 }
 
 // reservedToolAt names the position and the spelling of the first

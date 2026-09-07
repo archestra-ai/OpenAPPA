@@ -63,6 +63,12 @@ const manifestLane = "go"
 // ControlTool is the reserved tool's spelling on the wire.
 const ControlTool = "appa:execute_remedy_plan"
 
+// GuideToolset names appa-guide's management set on the wire. That set
+// is served over its own endpoint and appended to the rendered config
+// only after the inventory is built, so one fixed toolset name spells
+// it and a policy names it the way it names any other MCP tool.
+const GuideToolset = "appa-guide"
+
 const namespaceMark = "__NS__"
 
 // clusterDomain is the DNS domain a Kubernetes service name ends in.
@@ -241,6 +247,11 @@ type RemoteAgentSpec struct {
 
 // BuiltinGroups switches the manifest groups the rendered config and
 // the environment turn on. The always group needs no switch.
+// GuideSpelling is how a management tool of appa-guide crosses the wire.
+func GuideSpelling(name string) string {
+	return MCPSpelling(GuideToolset, name)
+}
+
 type BuiltinGroups struct {
 	Memory     bool
 	Skills     bool
@@ -252,6 +263,9 @@ type InventorySpec struct {
 	MCPServers   []MCPServerSpec
 	RemoteAgents []RemoteAgentSpec
 	Builtins     BuiltinGroups
+	// Guide is whether this agent serves appa-guide, whose management
+	// set crosses the same gate as every other tool.
+	Guide bool
 }
 
 // BuildInventory spells every tool the spec declares. A refusal is an
@@ -260,6 +274,13 @@ func BuildInventory(spec InventorySpec) (Inventory, error) {
 	b := builder{spellings: map[string]string{}, names: map[string]string{}, sources: map[string]string{}}
 	if err := b.add(ReservedTool, ControlTool, "the reserved tool"); err != nil {
 		return Inventory{}, err
+	}
+	if spec.Guide {
+		for _, name := range RuntimeTools[1:] {
+			if err := b.add(name, GuideSpelling(name), "the appa-guide management set"); err != nil {
+				return Inventory{}, err
+			}
+		}
 	}
 	for _, server := range spec.MCPServers {
 		if err := b.mcpServer(server); err != nil {

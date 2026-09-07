@@ -209,18 +209,6 @@ impl ToolAnnotation {
     }
 }
 
-/// The symbolic atoms a delta and its requirements name, whether the annotation is a
-/// compiled declaration or a produced answer.
-fn annotation_atoms<'a>(delta: &'a Delta, requires: &'a Requires) -> impl Iterator<Item = SymbolicAtom> + 'a {
-    delta.symbolic_atoms().chain(
-        requires
-            .audience_requirements()
-            .iter()
-            .filter_map(AudienceRequirement::declared)
-            .flat_map(DeclaredAudience::symbolic_atoms),
-    )
-}
-
 /// The semantic fields an Annotator produces for one call: the annotation minus the
 /// operational metadata, which is the declaration's to state and is never repeated in an
 /// answer or a record.
@@ -232,14 +220,6 @@ pub struct ProducedAnnotation {
     pub delta: Delta,
     pub emits: EffectSet,
     pub requires: Requires,
-}
-
-impl ProducedAnnotation {
-    /// The symbolic atoms this produced annotation names. A valid produced annotation is
-    /// literal and names none; the validator asks to enforce exactly that.
-    pub(crate) fn symbolic_atoms(&self) -> impl Iterator<Item = SymbolicAtom> + '_ {
-        annotation_atoms(&self.delta, &self.requires)
-    }
 }
 
 /// An Annotator's produced answer pinned to the exact call it judged: the annotator that

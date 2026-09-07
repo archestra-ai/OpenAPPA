@@ -61,6 +61,11 @@ LANE = "python"
 """This image's key in the shared builtin manifest."""
 
 SKILLS_FOLDER_ENV = "KAGENT_SKILLS_FOLDER"
+GUIDE_ENV = "APPA_GUIDE"
+# appa-guide's management set is served over its own endpoint and named
+# under one fixed toolset, so a policy names it the way it names any
+# other MCP tool.
+GUIDE_TOOLSET = "appa-guide"
 """The kagent runtime attaches its skills tools while this names a directory."""
 
 _MCP_KEYS = ("http_tools", "sse_tools")
@@ -128,6 +133,10 @@ def builtin_spelling(name: str) -> str:
 
 def gate_spelling(name: str) -> str:
     return f"gate:{name}"
+
+
+def guide_spelling(name: str) -> str:
+    return mcp_spelling(GUIDE_TOOLSET, name)
 
 
 def is_spawn(spelling: str) -> bool:
@@ -203,6 +212,9 @@ class ToolInventory:
         """
         builder = _Builder()
         builder.add(wire.RESERVED_TOOL, wire.CONTROL_TOOL, "the reserved tool")
+        if environ.get(GUIDE_ENV, "").strip().lower() == "true":
+            for name in sorted(wire.MANAGEMENT_TOOLS):
+                builder.add(name, guide_spelling(name), "the appa-guide management set")
         for key in _MCP_KEYS:
             for index, server in enumerate(_entries(config.get(key))):
                 builder.mcp_server(f"{key}.{index}", server)

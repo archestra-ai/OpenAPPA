@@ -11,9 +11,9 @@ against the locked sources on disk:
 That baseline is the one `go.mod` locks. The plan names the image
 built from it for every go cell, and only cell A-go runs. On cell A-go
 (kagent v0.9.12) the image runs under the `golang-adk` name the
-controller derives from `controller.agentImage`. The demo matrix rows
-for that cell record 17/17 before the port of the child return, and no
-run after it exists ([../e2e/README.md](../e2e/README.md)). No
+controller derives from `controller.agentImage`. Both demo matrix rows
+for that cell pass 18/18 after the per-parent child-return work
+([../e2e/README.md](../e2e/README.md)). No
 matrix row runs cell B1-go (v0.10.0-rc4) or cell B2-go (kagent main,
 adk/v2 v2.2.0). This file does not verify the B2 baseline or its
 configuration semantics.
@@ -437,7 +437,7 @@ scripted `refuse` on that `child_start`, not the runtime's refusal.
 `cmd/appa-kagent-adk-go/main.go` is the stock
 `kagent go/adk/cmd/main.go` (rc4) with seven marked deltas, the ones its
 header comment numbers. The first six are the `APPA_RUNTIME_URL`
-refusal, the reserved-tool toolset, the plugin appended last, the
+refusal, the runtime-owned toolset, the plugin appended last, the
 reasoning-effort fill, the lineage-header session service, and the
 review-shaped executor. The seventh is the config guard
 (`configguard.go`), which refuses a rendered config this image cannot
@@ -449,7 +449,7 @@ internal import from an outside module.
 
 - The stock main itself uses only exported packages
   (`kagent go/adk/cmd/main.go:15-25`), so the replay is exact.
-- The reserved-tool toolset rides the stock `HttpTools` path:
+- The runtime-owned toolset rides the stock `HttpTools` path:
   an appended `HttpMcpServerConfig` becomes a streamable-HTTP
   `mcptoolset` through `mcp.CreateToolsets`
   (`kagent go/adk/pkg/agent/agent.go:50`,

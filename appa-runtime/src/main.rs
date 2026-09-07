@@ -2,17 +2,21 @@
 //! parses flags, initializes a missing deployment config, opens the
 //! runtime, picks the adapter codec, and serves.
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
 use appa_runtime_api::AdapterName;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, Request, State};
+use axum::http::StatusCode;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use clap::Parser;
 use sha2::{Digest, Sha256};
@@ -51,22 +55,39 @@ struct Args {
     #[arg(long, env = "APPA_MODULES_DIR")]
     modules_dir: Option<PathBuf>,
 
+    /// Directories of bundled batteries, in lookup order. First directory
+    /// that contains `batteries/<name>/appa.toml`'s `<name>` wins. Colon
+    /// separated when set through `APPA_BATTERIES_DIR`.
+    #[arg(
+        long = "batteries-dir",
+        env = "APPA_BATTERIES_DIR",
+        value_delimiter = ':',
+        action = clap::ArgAction::Append
+    )]
+    batteries_dir: Vec<PathBuf>,
+
     #[arg(long, default_value = "127.0.0.1:8787")]
     listen: SocketAddr,
+
+    /// Optional dedicated listener for the kagent appa-guide MCP surface.
+    #[arg(long, env = "APPA_GUIDE_LISTEN")]
+    guide_listen: Option<SocketAddr>,
+
+    /// Host headers accepted by the MCP endpoint. Empty keeps rmcp's
+    /// loopback defaults. Shared deployments name each Service address.
+    #[arg(
+        long = "mcp-allowed-host",
+        env = "APPA_MCP_ALLOWED_HOST",
+        value_delimiter = ',',
+        action = clap::ArgAction::Append
+    )]
+    mcp_allowed_hosts: Vec<String>,
 
     #[arg(long, default_value_t = AdapterName::ClaudeCode, global = true)]
     adapter: AdapterName,
 
     #[arg(short, action = clap::ArgAction::Count)]
     verbose: u8,
-}
-
-fn require_loopback(addr: &SocketAddr) -> Result<(), String> {
-    if addr.ip().is_loopback() {
-        Ok(())
-    } else {
-        Err(format!("refusing to listen on non-loopback address {addr}"))
-    }
 }
 
 /// The derivation the runtime applies to every call of the host it serves. The one
@@ -151,6 +172,9 @@ struct AppState {
     runtime: Arc<Runtime>,
     adapter: appa_runtime_api::Adapter,
     config: PathBuf,
+    battery_dirs: Vec<PathBuf>,
+    battery_state: Arc<RwLock<mcp::BatteryState>>,
+    reload_gate: Arc<tokio::sync::Mutex<()>>,
     executable: Option<ExecutableAtStart>,
 }
 
@@ -201,11 +225,37 @@ fn health_answer(stale: bool, pid: u32) -> String {
     if stale { format!("stale {pid}") } else { "ok".to_owned() }
 }
 
+async fn batteries(State(state): State<AppState>) -> axum::Json<crate::batteries::BatteriesResponse> {
+    let catalog = state
+        .battery_state
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .catalog
+        .clone();
+    axum::Json(catalog)
+}
+
 async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (axum::http::StatusCode, String)> {
-    let config = Config::load(&state.config)
+    let _reload = state.reload_gate.lock().await;
+    let config = Config::load_from(&state.config, &state.battery_dirs)
         .map_err(|error| (axum::http::StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))?;
+    let battery_state = mcp::BatteryState {
+        catalog: crate::batteries::snapshot(&state.battery_dirs),
+        included: config.included_batteries().iter().cloned().collect(),
+        serving_tools: config.tool_names().into_iter().collect(),
+    };
+    let mut published = state
+        .battery_state
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // The matcher holds this lock while reading policy metadata. Keep it
+    // across the synchronous policy swap so no response can describe the
+    // old policy after the new one starts serving.
     match state.runtime.reload(config) {
-        Ok(reloaded) => Ok(axum::Json(reloaded)),
+        Ok(reloaded) => {
+            *published = battery_state;
+            Ok(axum::Json(reloaded))
+        }
         Err(refusal) => {
             tracing::warn!(%refusal, "the reload was refused; the running deployment keeps serving");
             Err((axum::http::StatusCode::UNPROCESSABLE_ENTITY, refusal.to_string()))
@@ -257,10 +307,6 @@ async fn serve(args: Args) -> ExitCode {
 
     let config_path = args.config.unwrap_or_else(|| PathBuf::from("appa.toml"));
 
-    if let Err(refusal) = require_loopback(&args.listen) {
-        eprintln!("appa runtime: {refusal}");
-        return ExitCode::FAILURE;
-    }
     match ensure_default_config(&config_path) {
         Ok(true) => tracing::info!(path = %config_path.display(), "created default configuration"),
         Ok(false) => {}
@@ -269,7 +315,14 @@ async fn serve(args: Args) -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    let config = match Config::load(&config_path) {
+    let battery_dirs = match crate::batteries::prepare(&args.batteries_dir) {
+        Ok(dirs) => dirs,
+        Err(error) => {
+            eprintln!("appa runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let config = match Config::load_from(&config_path, &battery_dirs) {
         Ok(config) => config,
         Err(error) => {
             eprintln!("appa runtime: {error}");
@@ -280,6 +333,11 @@ async fn serve(args: Args) -> ExitCode {
     // canonical identity the policy must name, its inverse spells a recorded name back for
     // the model, and its rule settles which contracts release a spawn.
     let adapter = served(args.adapter);
+    let battery_state = Arc::new(RwLock::new(mcp::BatteryState {
+        catalog: crate::batteries::snapshot(&battery_dirs),
+        included: config.included_batteries().iter().cloned().collect::<BTreeSet<_>>(),
+        serving_tools: config.tool_names().into_iter().collect(),
+    }));
     let runtime = match Runtime::open_served(config, args.db, args.modules_dir, adapter) {
         Ok(runtime) => Arc::new(runtime),
         Err(error) => {
@@ -292,16 +350,26 @@ async fn serve(args: Args) -> ExitCode {
         runtime: Arc::clone(&runtime),
         adapter,
         config: config_path,
+        battery_state: Arc::clone(&battery_state),
+        battery_dirs,
+        reload_gate: Arc::new(tokio::sync::Mutex::new(())),
         executable: ExecutableAtStart::of_this_process(),
     };
-    let app = axum::Router::new()
-        .route("/health", get(health))
+    let management = axum::Router::new()
         .route("/binary-fingerprint", get(binary_fingerprint))
         .route("/policy-key", get(policy_key))
         .route("/status", get(status))
-        .route("/hook", post(hook))
         .route("/reload", post(reload))
-        .nest_service("/mcp", mcp::service(runtime))
+        .route_layer(axum::middleware::from_fn(loopback_management_only));
+    let app = axum::Router::new()
+        .route("/health", get(health))
+        .route("/batteries", get(batteries))
+        .route("/hook", post(hook))
+        .nest_service(
+            "/mcp",
+            mcp::service_with_allowed_hosts(Arc::clone(&runtime), &args.mcp_allowed_hosts),
+        )
+        .merge(management)
         .with_state(state);
 
     let listener = match tokio::net::TcpListener::bind(args.listen).await {
@@ -311,17 +379,58 @@ async fn serve(args: Args) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let guide = if let Some(address) = args.guide_listen {
+        let listener = match tokio::net::TcpListener::bind(address).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                eprintln!("appa runtime: cannot bind guide listener {address}: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let app = axum::Router::new().nest_service(
+            "/guide-mcp",
+            mcp::guide_service_with_allowed_hosts(runtime, battery_state, &args.mcp_allowed_hosts),
+        );
+        Some((address, listener, app))
+    } else {
+        None
+    };
     tracing::info!(
         listen = %args.listen,
-        "appa-runtime serving /hook, /mcp, /status, /reload, /health, /binary-fingerprint, and /policy-key"
+        guide_listen = ?args.guide_listen,
+        "appa-runtime serving /hook, /mcp, /health, and /batteries; management routes require loopback"
     );
-    match axum::serve(listener, app).await {
+    let result = if let Some((address, guide_listener, guide_app)) = guide {
+        tracing::info!(listen = %address, "appa-runtime serving the vouched appa-guide MCP surface");
+        tokio::select! {
+            result = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()) => result,
+            result = axum::serve(guide_listener, guide_app.into_make_service()) => result,
+        }
+    } else {
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("appa runtime: server failed: {error}");
             ExitCode::FAILURE
         }
     }
+}
+
+async fn loopback_management_only(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !management_peer_is_allowed(peer) {
+        return (StatusCode::FORBIDDEN, "management routes require a loopback peer").into_response();
+    }
+    next.run(request).await
+}
+
+fn management_peer_is_allowed(peer: SocketAddr) -> bool {
+    peer.ip().is_loopback()
 }
 
 #[cfg(test)]
@@ -349,11 +458,42 @@ mod tests {
     }
 
     #[test]
-    fn a_non_loopback_listen_address_is_refused() {
-        assert!(require_loopback(&"127.0.0.1:8787".parse().expect("parses")).is_ok());
-        assert!(require_loopback(&"[::1]:8787".parse().expect("parses")).is_ok());
-        assert!(require_loopback(&"0.0.0.0:8787".parse().expect("parses")).is_err());
-        assert!(require_loopback(&"192.168.1.10:8787".parse().expect("parses")).is_err());
+    fn the_runtime_defaults_to_loopback_and_accepts_an_explicit_non_loopback_address() {
+        let default = Args::try_parse_from(["appa runtime"]).expect("the default runtime command parses");
+        assert_eq!(default.listen, "127.0.0.1:8787".parse().expect("the default parses"));
+        assert_eq!(
+            default.guide_listen, None,
+            "Claude Code exposes no guide management listener"
+        );
+
+        let shared = Args::try_parse_from(["appa runtime", "--listen", "0.0.0.0:18787"])
+            .expect("an explicit shared-runtime address parses");
+        assert_eq!(
+            shared.listen,
+            "0.0.0.0:18787".parse().expect("the shared address parses")
+        );
+        assert!(shared.mcp_allowed_hosts.is_empty());
+
+        let hosted = Args::try_parse_from([
+            "appa runtime",
+            "--guide-listen",
+            "0.0.0.0:18788",
+            "--mcp-allowed-host",
+            "appa-runtime.appa.svc.cluster.local:18787",
+        ])
+        .expect("an MCP Service host parses");
+        assert_eq!(
+            hosted.guide_listen,
+            Some("0.0.0.0:18788".parse().expect("guide address"))
+        );
+        assert_eq!(hosted.mcp_allowed_hosts, ["appa-runtime.appa.svc.cluster.local:18787"]);
+    }
+
+    #[test]
+    fn management_routes_accept_only_loopback_peers() {
+        assert!(management_peer_is_allowed("127.0.0.1:1234".parse().unwrap()));
+        assert!(management_peer_is_allowed("[::1]:1234".parse().unwrap()));
+        assert!(!management_peer_is_allowed("10.0.0.8:1234".parse().unwrap()));
     }
 
     #[test]

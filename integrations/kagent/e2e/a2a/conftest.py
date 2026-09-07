@@ -238,11 +238,16 @@ class Board:
         """Wait for the consult on `tool` to be parked, then rule on it; None if none came."""
         deadline = time.time() + timeout_s
         while time.time() < deadline:
-            for entry in self.pending(tool):
-                body = json.dumps({"id": entry["id"], "ruling": ruling, "reason": "ruled by the matrix"}).encode()
-                request = urllib.request.Request(self.url + "/decide", data=body, headers={"content-type": "application/json"})
-                with urllib.request.urlopen(request, timeout=5):
-                    return entry
+            try:
+                for entry in self.pending(tool):
+                    body = json.dumps({"id": entry["id"], "ruling": ruling, "reason": "ruled by the matrix"}).encode()
+                    request = urllib.request.Request(
+                        self.url + "/decide", data=body, headers={"content-type": "application/json"}
+                    )
+                    with urllib.request.urlopen(request, timeout=5):
+                        return entry
+            except OSError:
+                pass
             time.sleep(0.5)
         return None
 

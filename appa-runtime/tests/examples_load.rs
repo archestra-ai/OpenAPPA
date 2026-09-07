@@ -49,11 +49,6 @@ fn every_shipped_example_opens() {
 
 #[test]
 fn the_kagent_policies_open() {
-    // The demo policy binds the llm endpoint to APPA_LLM_API_KEY; the
-    // runtime refuses to load a config whose token is absent, so the
-    // test supplies a placeholder. Nothing consults it at open time,
-    // and no other test in this binary reads the variable.
-    unsafe { std::env::set_var("APPA_LLM_API_KEY", "examples-load") };
     opens(&repo_root().join("integrations/kagent/examples/kagent.appa.toml"));
     opens(&repo_root().join("integrations/kagent/demo/chart/files/demo.appa.toml"));
 }
@@ -146,6 +141,45 @@ fn the_initialized_default_composes_with_the_claude_code_battery() {
     Runtime::open(config, database, None).expect("the composed deployment opens");
 }
 
+/// The shipped default and battery leave `audiences` omitted, so each Annotator's mandate
+/// is the policy's whole audience vocabulary: the chain words and every reader a
+/// declaration names — a reader the deployer adds included.
+#[cfg(unix)]
+#[test]
+fn the_shipped_annotators_admit_every_audience_the_policy_writes() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    composed_with_the_battery(&dir);
+    let root = dir.path().join("appa.toml");
+    let mut composed = std::fs::read_to_string(&root).expect("the composed root is readable");
+    composed.push_str("\n[[policy.tool]]\nname = \"ReadPayroll\"\ndelta = { audience = [\"payroll@corp.example\"] }\n");
+    std::fs::write(&root, composed).expect("the root gains a reader-bearing declaration");
+    let config = Config::load(&root).expect("the extended config composes");
+    let policy = appa_policy::Config::from_toml_str(
+        &toml::to_string(config.policy_file().value()).expect("the composed policy renders"),
+    )
+    .expect("the composed policy loads");
+
+    for annotator in ["claude-code.bash-requirements", "claude-code.undeclared-tool"] {
+        let entries: Vec<String> = policy
+            .registry()
+            .annotator_mandate(&appa_engine::names::AnnotatorName::new(annotator))
+            .unwrap_or_else(|| panic!("{annotator} registers"))
+            .audiences()
+            .entries()
+            .collect();
+        for expected in ["self", "internal", "payroll@corp.example"] {
+            assert!(
+                entries.iter().any(|entry| entry == expected),
+                "{annotator} admits {expected}: {entries:?}"
+            );
+        }
+        assert!(
+            !entries.iter().any(|entry| entry == "public"),
+            "{annotator}: `public` is always admissible and never listed: {entries:?}"
+        );
+    }
+}
+
 #[cfg(unix)]
 fn call(tool: &str, argument: &str, value: &str) -> ProposedCall {
     ProposedCall {
@@ -223,6 +257,7 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
     );
     assert_eq!(review.len(), 1, "the offer is backed by the default human authority");
     assert!(feedback.contains("Submit for approval"));
+    assert!(feedback.contains("The confirmation card is not open yet"));
     assert!(review[0].text.contains("page.html"), "the review shows the exact call");
     assert!(
         review[0].text.contains("public"),

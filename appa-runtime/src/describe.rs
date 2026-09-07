@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use crate::config::{Config, Externals, Implementation, Section};
 
@@ -273,7 +273,7 @@ fn audience_description(compiled: &appa_policy::Config, bindings: Bindings<'_>) 
     }
 }
 
-fn inspect(path: &Path) -> (ConfigDescription, PolicyDescription) {
+fn inspect(path: &Path, battery_dirs: &[PathBuf]) -> (ConfigDescription, PolicyDescription) {
     let mut config = ConfigDescription {
         path: path.to_path_buf(),
         state: ConfigState::Missing,
@@ -317,7 +317,7 @@ fn inspect(path: &Path) -> (ConfigDescription, PolicyDescription) {
                     describe_policy_value(root_policy, Bindings::Raw(&root), &mut policy);
                 }
 
-                if let Ok(loaded) = Config::load(path) {
+                if let Ok(loaded) = Config::load_from(path, battery_dirs) {
                     config.state = ConfigState::Loadable;
                     config.diagnostic = None;
                     describe_policy_value(
@@ -359,20 +359,11 @@ fn describe_policy_value(policy_value: &toml::Value, bindings: Bindings<'_>, out
 }
 
 fn battery_name(path: &Path) -> Option<String> {
-    let parts: Vec<_> = path
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(part) => part.to_str(),
-            _ => None,
-        })
-        .collect();
-    parts
-        .windows(3)
-        .find_map(|window| (window[0] == "batteries" && window[2] == "appa.toml").then(|| window[1].to_string()))
+    crate::batteries::name_from_include(path)
 }
 
-pub fn render(path: &Path, adapter: &'static str) -> String {
-    let (config, policy) = inspect(path);
+pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: &'static str) -> String {
+    let (config, policy) = inspect(path, battery_dirs);
     let mut output = String::new();
     let _ = writeln!(output, "OpenAPPA world");
     let _ = writeln!(output, "Adapter: {adapter}");
@@ -478,6 +469,10 @@ pub fn render(path: &Path, adapter: &'static str) -> String {
     output
 }
 
+pub fn is_loadable(path: &Path, battery_dirs: &[PathBuf]) -> bool {
+    matches!(inspect(path, battery_dirs).0.state, ConfigState::Loadable)
+}
+
 fn list_or_none(items: &[String]) -> String {
     if items.is_empty() {
         "none".to_string()
@@ -495,9 +490,10 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("missing.toml");
 
-        let (config, policy) = inspect(&path);
+        let (config, policy) = inspect(&path, &[]);
 
         assert_eq!(config.state, ConfigState::Missing);
+        assert!(!is_loadable(&path, &[]));
         assert!(!path.exists());
         assert!(policy.tools.is_empty());
     }
@@ -505,7 +501,8 @@ mod tests {
     #[test]
     fn loadable_config_reports_batteries_tools_authorities_sources_and_identity() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let battery = directory.path().join("batteries/mail");
+        let batteries = directory.path().join("bundled-batteries");
+        let battery = batteries.join("mail");
         std::fs::create_dir_all(&battery).expect("battery directory");
         std::fs::write(
             battery.join("appa.toml"),
@@ -519,11 +516,13 @@ mod tests {
         )
         .expect("root config");
 
-        Config::load(&root).unwrap_or_else(|error| panic!("fixture must load: {error}"));
+        Config::load_from(&root, std::slice::from_ref(&batteries))
+            .unwrap_or_else(|error| panic!("fixture must load: {error}"));
 
-        let (config, policy) = inspect(&root);
+        let (config, policy) = inspect(&root, std::slice::from_ref(&batteries));
 
         assert_eq!(config.state, ConfigState::Loadable);
+        assert!(is_loadable(&root, std::slice::from_ref(&batteries)));
         assert_eq!(config.batteries, ["mail"]);
         assert_eq!(policy.tools, ["mail_read"]);
         assert_eq!(
@@ -569,7 +568,7 @@ mod tests {
                 binding_configured: true,
             }
         );
-        assert!(render(&root, "claude-code").contains(
+        assert!(render(&root, &[batteries], "claude-code").contains(
             "operator: builtin hitl; permits trust_below=trusted, audience_missing=public, effects_containing=[mail.sent], attention=[hitl]"
         ));
     }
@@ -581,8 +580,8 @@ mod tests {
         let secret = "super-secret-token";
         std::fs::write(&path, format!("token = \\\"{secret}")).expect("malformed config");
 
-        let (config, _) = inspect(&path);
-        let output = render(&path, "claude-code");
+        let (config, _) = inspect(&path, &[]);
+        let output = render(&path, &[], "claude-code");
 
         assert_eq!(config.state, ConfigState::Unparsable);
         assert!(!output.contains(secret));
@@ -591,7 +590,7 @@ mod tests {
     #[test]
     fn human_output_is_small_and_explicit_about_unknown_session_facts() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let output = render(&directory.path().join("appa.toml"), "claude-code");
+        let output = render(&directory.path().join("appa.toml"), &[], "claude-code");
 
         assert!(output.contains("Config:"));
         assert!(output.contains("Batteries: none"));

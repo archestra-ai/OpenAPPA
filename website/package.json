@@ -23,6 +23,7 @@
     "github-slugger": "^2.0.0",
     "gray-matter": "^4.0.3",
     "highlight.js": "^11.11.1",
+    "lowlight": "^3.3.0",
     "lucide-react": "^1.28.0",
     "mcp-handler": "^2.1.0",
     "nanoid": "^6.0.1",

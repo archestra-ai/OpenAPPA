@@ -29,7 +29,7 @@ from appa_kagent_adk.config_guard import ConfigRefused  # noqa: E402
 from appa_kagent_adk.gates import GatedCodeExecutor  # noqa: E402
 from appa_kagent_adk.inventory import ToolInventory  # noqa: E402
 from appa_kagent_adk.plugin import AppaPluginKagent  # noqa: E402
-from appa_kagent_adk.wire import RESERVED_TOOL  # noqa: E402
+from appa_kagent_adk.wire import RESERVED_TOOL, RUNTIME_TOOLS  # noqa: E402
 
 RUNTIME_URL = "http://127.0.0.1:8787"
 
@@ -156,6 +156,18 @@ def test_the_factory_wraps_code_execution_and_appends_the_reserved_toolset(confi
     assert reserved._connection_params.timeout == entrypoint.REMEDY_CALL_TIMEOUT_SECONDS, (
         "the remedy call outlasts a parked consult; ADK's five-second default would fail it at the client"
     )
+
+
+def test_only_appa_guide_receives_the_management_toolset(monkeypatch):
+    monkeypatch.setenv("APPA_GUIDE", "true")
+    monkeypatch.setenv("APPA_GUIDE_MCP_URL", "http://runtime:18788/guide-mcp")
+    guide = entrypoint._runtime_toolset(RUNTIME_URL)
+    assert guide.tool_filter == RUNTIME_TOOLS
+    assert guide._connection_params.url == "http://runtime:18788/guide-mcp"
+
+    monkeypatch.delenv("APPA_GUIDE_MCP_URL")
+    with pytest.raises(ConfigRefused, match="APPA_GUIDE_MCP_URL"):
+        entrypoint._runtime_toolset(RUNTIME_URL)
 
 
 def test_the_appa_plugin_needs_a_runtime_url():
