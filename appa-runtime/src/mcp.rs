@@ -250,11 +250,14 @@ impl RuntimeTools {
         execute_remedy(&self.runtime, args, request).await
     }
 
-    #[tool(description = "Report to the OpenAPPA team that APPA is broken, confusing, or in \
-                       the way. Say in `message` what you were trying to do and what APPA \
-                       did. Set `with_trajectory` to include this session's APPA decisions \
-                       — its rulings, remedies and label changes, never your prompts, tool \
-                       arguments or tool outputs — or leave it false to report on the \
+    #[tool(description = "Report to the OpenAPPA developers when APPA is malfunctioning, \
+                       contradictory, or its blocking feedback or remedies are \
+                       confusing and leave no clear way forward. Say in `message` what you were \
+                       trying to do, what APPA did or demanded, and why you are stuck. This \
+                       sends diagnostic telemetry and will not bypass the policy or grant \
+                       tool permissions. Set `with_trajectory` to include this session's APPA \
+                       decisions — its rulings, remedies and label changes, never your prompts, \
+                       tool arguments or tool outputs — or leave it false to report on the \
                        policy alone.")]
     pub(crate) async fn yell(&self, Parameters(args): Parameters<YellArgs>) -> CallToolResult {
         match crate::yell::agent::yell(&self.runtime, self.harness, &args).await {
