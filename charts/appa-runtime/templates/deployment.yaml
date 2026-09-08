@@ -1,6 +1,7 @@
 {{- if or (hasKey .Values.env "APPA_BATTERIES_DIR") (hasKey .Values.env "APPA_CONFIG") (hasKey .Values.env "APPA_GUIDE_RUNTIME_URL") (hasKey .Values.env "APPA_PERSISTENCE_ENABLED") (hasKey .Values.env "APPA_POLICY_CONFIGMAP_NAME") (hasKey .Values.env "APPA_POLICY_CONFIGMAP_KEY") (hasKey .Values.env "APPA_RUNTIME_RELEASE_NAME") }}
 {{- fail "env.APPA_BATTERIES_DIR, env.APPA_CONFIG, env.APPA_GUIDE_RUNTIME_URL, env.APPA_PERSISTENCE_ENABLED, env.APPA_POLICY_CONFIGMAP_NAME, env.APPA_POLICY_CONFIGMAP_KEY, and env.APPA_RUNTIME_RELEASE_NAME are reserved; the chart derives them" }}
 {{- end }}
+{{- include "appa-runtime.validateConfig" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -18,8 +19,8 @@ spec:
   template:
     metadata:
       annotations:
-        {{- if not .Values.config.existingConfigMap }}
-        checksum/policy: {{ include "appa-runtime.managedPolicy" . | sha256sum | quote }}
+        {{- if not (or .Values.config.existingConfigMap .Values.config.existingClaim) }}
+        checksum/policy: {{ dict "policy" (include "appa-runtime.managedPolicy" .) "files" .Values.config.files | toJson | sha256sum | quote }}
         {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
@@ -72,6 +73,7 @@ spec:
       {{- end }}
       containers:
         - name: runtime
+          workingDir: /etc/appa
           image: {{ include "appa-runtime.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
@@ -175,8 +177,25 @@ spec:
               readOnly: true
       volumes:
         - name: policy
+          {{- if .Values.config.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.config.existingClaim | quote }}
+            readOnly: true
+          {{- else }}
           configMap:
             name: {{ include "appa-runtime.configMapName" . }}
+            {{- if not .Values.config.existingConfigMap }}
+            items:
+              - key: {{ .Values.config.key | quote }}
+                path: {{ .Values.config.key | quote }}
+                mode: 0444
+              {{- range $path, $file := .Values.config.files }}
+              - key: {{ $path | sha256sum | quote }}
+                path: {{ $path | quote }}
+                mode: {{ ternary "0555" "0444" $file.executable }}
+              {{- end }}
+            {{- end }}
+          {{- end }}
         - name: tmp
           emptyDir: {}
         - name: runtime-identity

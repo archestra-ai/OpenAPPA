@@ -2,6 +2,67 @@
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{/* Validate the complete mounted tree before emitting any workload. */}}
+{{- define "appa-runtime.validateConfig" -}}
+{{- $config := .Values.config -}}
+{{- if or (not (regexMatch "^[A-Za-z0-9._-]+$" $config.key)) (hasPrefix ".." $config.key) (eq $config.key ".") (gt (len $config.key) 253) -}}
+{{- fail "config.key must be a single safe ConfigMap key" -}}
+{{- end -}}
+{{- if and $config.existingClaim (or $config.existingConfigMap $config.contents $config.files) -}}
+{{- fail "config.existingClaim is mutually exclusive with existingConfigMap, contents and files" -}}
+{{- end -}}
+{{- if and $config.existingClaim .Values.appaGuide.enabled -}}
+{{- fail "appaGuide requires a policy ConfigMap; config.existingClaim is unsupported" -}}
+{{- end -}}
+{{- if and $config.existingConfigMap $config.files -}}
+{{- fail "config.files requires a chart-managed ConfigMap" -}}
+{{- end -}}
+{{- $paths := dict $config.key true -}}
+{{- $binary := dict -}}
+{{- $pathBudget := 4096 -}}
+{{- range $path, $file := $config.files -}}
+{{- if or (contains "\\" $path) (contains ":" $path) (gt (len $path) 4096) (regexMatch "[[:cntrl:]]" $path) -}}
+{{- fail (printf "config.files path %q is not a safe relative path" $path) -}}
+{{- end -}}
+{{- range $part := splitList "/" $path -}}
+{{- if or (eq $part "") (eq $part ".") (hasPrefix ".." $part) (gt (len $part) 255) -}}
+{{- fail (printf "config.files path %q is not a safe relative path" $path) -}}
+{{- end -}}
+{{- end -}}
+{{- if hasKey $paths $path -}}
+{{- fail (printf "config.files path %q collides with config.key" $path) -}}
+{{- end -}}
+{{- $_ := set $paths $path true -}}
+{{- $key := sha256sum $path -}}
+{{- if eq $key $config.key -}}
+{{- fail "config.key collides with a generated config.files ConfigMap key" -}}
+{{- end -}}
+{{- if ne ($file.data | b64dec | b64enc) $file.data -}}
+{{- fail (printf "config.files[%q].data must be canonical base64" $path) -}}
+{{- end -}}
+{{- $_ := set $binary $key $file.data -}}
+{{- $pathBudget = add $pathBudget (len ($path | toJson)) 128 -}}
+{{- end -}}
+{{- range $path, $_ := $paths -}}
+{{- $parent := "" -}}
+{{- $parts := splitList "/" $path -}}
+{{- range $index, $part := $parts -}}
+{{- if lt $index (sub (len $parts) 1) -}}
+{{- $parent = ternary $part (printf "%s/%s" $parent $part) (eq $parent "") -}}
+{{- if hasKey $paths $parent -}}
+{{- fail (printf "config.files path %q has a file as its parent" $path) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if not (or $config.existingClaim $config.existingConfigMap) -}}
+{{- $payload := dict "data" (dict $config.key (include "appa-runtime.managedPolicy" .)) "binaryData" $binary -}}
+{{- if gt (add (len ($payload | toJson)) $pathBudget) 768000 -}}
+{{- fail "config tree exceeds the 750 KiB encoded budget; populate a volume and use config.existingClaim" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "appa-runtime.fullname" -}}
 {{- if .Values.fullnameOverride -}}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}

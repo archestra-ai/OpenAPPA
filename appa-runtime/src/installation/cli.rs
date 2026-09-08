@@ -51,12 +51,15 @@ pub struct Bundle {
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  appa plugin install claude-code\n  appa plugin install claude-code --revision <published-commit> --json\n  appa plugin install claude-code --from ./appa-bundle.tar.gz --sha256 <trusted-sha256>\n\nRegisters APPA with Claude and verifies its runtime. Never prompts. An explicit\nrevision updates the entire selected generation; a bundle restores its selection."
+    after_help = "Examples:\n  appa plugin install claude-code\n  appa plugin install kagent --config ./deployment/appa.toml --runtime both\n  appa plugin install claude-code --from ./appa-bundle.tar.gz --sha256 <trusted-sha256>\n\nClaude registration activates and verifies its runtime. Kagent prepares local\nHelm values, Agent snippets and image checks; it does not deploy to a cluster.\nNever prompts. An explicit revision updates the entire selected generation;\na bundle restores its selection."
 )]
 pub struct Install {
     /// Host plugin to install.
-    #[arg(value_parser = ["claude-code"])]
+    #[arg(value_parser = ["claude-code", "kagent"])]
     name: String,
+    /// Kagent agent runtimes to prepare; both on first install, otherwise retained.
+    #[arg(long, value_enum)]
+    runtime: Option<super::kagent_images::KagentRuntime>,
     #[command(flatten)]
     target: Target,
     #[command(flatten)]
@@ -95,7 +98,7 @@ pub struct BatteryRemove {
 )]
 pub struct PluginRemove {
     /// Host plugin whose installer-owned registration is removed.
-    #[arg(value_parser = ["claude-code"])]
+    #[arg(value_parser = ["claude-code", "kagent"])]
     name: String,
     #[command(flatten)]
     target: Target,
@@ -103,7 +106,7 @@ pub struct PluginRemove {
 
 pub fn remove_plugin(args: PluginRemove) -> ExitCode {
     let result = (|| {
-        let path = args.target.path();
+        let path = plugin_path(&args.target, &args.name)?;
         match Installation::inspect(&path) {
             Ok(None) => {
                 return Ok((None, serde_json::json!({"plugin":args.name,"state":"unchanged"})));
@@ -135,7 +138,7 @@ pub fn remove_plugin(args: PluginRemove) -> ExitCode {
             PackageKind::Plugin,
             &PackageName::parse(&args.name).map_err(|error| InstallError::Invalid(error.to_string()))?,
         )?;
-        eprintln!("appa: verifying ownership and removing Claude support...");
+        eprintln!("appa: verifying ownership and removing {} support...", args.name);
         installation.commit_installation(Some(&before), &before, &selection)?;
         Ok((
             Some(selection.commit().to_string()),
@@ -225,9 +228,10 @@ pub fn install_battery(args: BatteryInstall) -> ExitCode {
         }
         eprintln!("appa: validating and activating the selected policy...");
         installation.commit_installation(Some(&before), text.as_bytes(), &selection)?;
+        let prepared = prepared_directory(&installation)?;
         Ok((
             Some(selection.commit().to_string()),
-            serde_json::json!({"battery": args.name.as_str(), "state": "installed"}),
+            battery_result(args.name.as_str(), "installed", prepared),
         ))
     })();
     finish(&args.target, "battery.install".into(), result)
@@ -264,9 +268,10 @@ pub fn remove_battery(args: BatteryRemove) -> ExitCode {
         installation.validate_removal(&text, &acquired.marketplace().join(entry.path.as_str()))?;
         eprintln!("appa: validating and activating the remaining policy...");
         installation.commit_installation(Some(&before), text.as_bytes(), &selection)?;
+        let prepared = prepared_directory(&installation)?;
         Ok((
             Some(selection.commit().to_string()),
-            serde_json::json!({"battery": args.name.as_str(), "state": "removed"}),
+            battery_result(args.name.as_str(), "removed", prepared),
         ))
     })();
     finish(&args.target, "battery.remove".into(), result)
@@ -363,7 +368,10 @@ fn archive_digest(value: &str) -> Result<ArtifactDigest, String> {
 
 pub fn install(args: Install) -> ExitCode {
     let result = (|| {
-        let path = args.target.path();
+        if args.runtime.is_some() && args.name != "kagent" {
+            return Err(InstallError::Invalid("--runtime applies only to kagent".into()));
+        }
+        let path = plugin_path(&args.target, &args.name)?;
         if path.exists() {
             crate::config::Config::load(&path).map_err(|error| InstallError::Invalid(error.to_string()))?;
         }
@@ -373,13 +381,19 @@ pub fn install(args: Install) -> ExitCode {
         let current = installation.selection()?;
         let platform = Platform::current()
             .ok_or_else(|| InstallError::Invalid("this platform has no published runtime binary".into()))?;
-        let requirements = if current
-            .as_ref()
-            .is_some_and(|selection| selection.plugins.contains("kagent"))
-        {
-            Requirements::Both(platform)
-        } else {
-            Requirements::Claude(platform)
+        let claude = args.name == "claude-code"
+            || current
+                .as_ref()
+                .is_some_and(|selection| selection.plugins.contains("claude-code"));
+        let kagent = args.name == "kagent"
+            || current
+                .as_ref()
+                .is_some_and(|selection| selection.plugins.contains("kagent"));
+        let requirements = match (claude, kagent) {
+            (true, true) => Requirements::Both(platform),
+            (true, false) => Requirements::Claude(platform),
+            (false, true) => Requirements::Kagent,
+            (false, false) => unreachable!("parser requires a supported plugin"),
         };
         let acquired = args.source.acquire(&installation, current.as_ref(), requirements)?;
         installation.retain(&acquired)?;
@@ -418,18 +432,29 @@ pub fn install(args: Install) -> ExitCode {
             (selected, text)
         };
         selection.select(PackageKind::Plugin, &name);
+        if let Some(runtime) = args.runtime {
+            selection.kagent_runtime = Some(runtime);
+        }
         let text = selection.relocate(
             &text,
             acquired.generation().clone(),
             installation.config_path(),
             acquired.marketplace(),
         )?;
-        eprintln!("appa: verifying artifacts, registering Claude, and activating its runtime...");
+        eprintln!("appa: verifying artifacts and preparing selected plugins...");
         installation.commit_installation(before.as_deref(), text.as_bytes(), &selection)?;
-        Ok((
-            Some(selection.commit().to_string()),
-            serde_json::json!({"plugin": args.name, "state": "registered", "runtime": "verified"}),
-        ))
+        let result = if args.name == "kagent" {
+            let installed = installation
+                .selection()?
+                .ok_or_else(|| InstallError::Invalid("installation selection is missing".into()))?;
+            let digest = installed
+                .kagent_assets
+                .ok_or_else(|| InstallError::Invalid("kagent preparation is missing".into()))?;
+            serde_json::json!({"plugin":args.name,"state":"prepared","directory":installation.state.join("kagent").join(digest.hex()),"cluster":"unchanged"})
+        } else {
+            serde_json::json!({"plugin": args.name, "state": "registered", "runtime": "verified"})
+        };
+        Ok((Some(selection.commit().to_string()), result))
     })();
     finish(&args.target, "plugin.install".into(), result)
 }
@@ -443,7 +468,34 @@ pub fn init_claude_code() -> ExitCode {
             json: false,
         },
         source: Source::default(),
+        runtime: None,
     })
+}
+
+fn plugin_path(target: &Target, plugin: &str) -> Result<PathBuf, InstallError> {
+    if plugin == "kagent" && target.config.is_none() {
+        return Err(InstallError::Invalid(
+            "kagent requires --config <deployment/appa.toml> (or APPA_CONFIG); no cluster is selected automatically"
+                .into(),
+        ));
+    }
+    Ok(target.path())
+}
+
+fn prepared_directory(installation: &Installation) -> Result<Option<PathBuf>, InstallError> {
+    Ok(installation
+        .selection()?
+        .and_then(|selection| selection.kagent_assets)
+        .map(|digest| installation.state.join("kagent").join(digest.hex())))
+}
+
+fn battery_result(name: &str, state: &str, prepared: Option<PathBuf>) -> serde_json::Value {
+    let mut result = serde_json::json!({"battery":name,"state":state});
+    if let Some(directory) = prepared {
+        result["directory"] = serde_json::json!(directory);
+        result["cluster"] = serde_json::json!("unchanged");
+    }
+    result
 }
 
 #[derive(Serialize)]
@@ -620,6 +672,14 @@ fn finish(
                     .unwrap_or_default(),
                 receipt.deployment.display()
             )
+        } else if plugin == "kagent" {
+            let result = receipt.result.as_ref().expect("plugin result is present");
+            writeln!(
+                output,
+                "Prepared kagent for {} at {}. No cluster changes. Read KAGENT.md and CONFIGURATION.txt there before deploying.",
+                receipt.deployment.display(),
+                result["directory"].as_str().unwrap_or_default()
+            )
         } else {
             writeln!(
                 output,
@@ -629,14 +689,23 @@ fn finish(
             )
         }
     } else if let Some(battery) = receipt.result.as_ref().and_then(|result| result.get("battery")) {
-        let result = receipt.result.as_ref().expect("battery results are present");
-        writeln!(
-            output,
-            "Battery {}: {} for {}.",
-            battery.as_str().unwrap_or_default(),
-            result["state"].as_str().unwrap_or_default(),
-            receipt.deployment.display()
-        )
+        (|| {
+            let result = receipt.result.as_ref().expect("battery results are present");
+            writeln!(
+                output,
+                "Battery {}: {} for {}.",
+                battery.as_str().unwrap_or_default(),
+                result["state"].as_str().unwrap_or_default(),
+                receipt.deployment.display()
+            )?;
+            if let Some(directory) = result.get("directory").and_then(serde_json::Value::as_str) {
+                writeln!(
+                    output,
+                    "Updated kagent preparation: {directory}. Reapply explicitly; no cluster changes."
+                )?;
+            }
+            Ok(())
+        })()
     } else if let Some(archive) = receipt.result.as_ref().and_then(|result| result.get("archive")) {
         let result = receipt.result.as_ref().expect("bundle results are present");
         writeln!(

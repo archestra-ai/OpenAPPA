@@ -29,6 +29,40 @@ CI runs `bash scripts/appa-marketplace.sh --check` and fails when the catalog
 needs regeneration. Regeneration is a developer operation; it does not update
 installed deployments or contact a remote marketplace.
 
+## Prepare kagent
+
+```sh
+appa plugin install kagent --config ./deployment/appa.toml
+appa battery install github --config ./deployment/appa.toml
+```
+
+Installation prepares local Helm values, Agent snippets, an image lock and an
+operator-invoked image verifier. It never applies resources to a Kubernetes
+context. The result names a private directory under the deployment's `.appa/`
+state. Read its `KAGENT.md` and `CONFIGURATION.txt` before deploying.
+
+Both Python and Go are prepared by default. Use `--runtime python` or `--runtime
+go` when only one is needed; subsequent installs retain that choice. Go requires
+Linux amd64 nodes. Settings target kagent 0.9.12's native declarative agents;
+the controller image setting affects all its ordinary declarative agents.
+
+The runtime image is digest-pinned. Agent images use generation-specific tags;
+the verifier compares registry and running-image digests to the lock. This is
+verification, not Kubernetes enforcement: a mismatched agent image can start
+before a post-deployment check detects it.
+
+Small configuration trees are embedded in the generated ConfigMap values.
+The complete `assets/` tree is always present. Larger trees or empty command
+directories use an operator-populated read-only PVC; preparation explains that
+prerequisite. ConfigMaps are not secret storage. Supply credentials separately.
+
+Battery changes regenerate the prepared deployment. Reapply it explicitly to
+change a cluster. `appa plugin remove kagent --config ./deployment/appa.toml`
+removes the selected prepared files, preserving authored policy, retained
+packages, trajectory data and live cluster resources. Export/import use the same
+bundle command as Claude; container images and cluster credentials are separate
+prerequisites. No automatic updates occur.
+
 ## Custom files in offline bundles
 
 Official battery policies and helpers are bundled automatically. For your own

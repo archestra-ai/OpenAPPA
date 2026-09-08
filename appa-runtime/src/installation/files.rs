@@ -152,6 +152,31 @@ fn portable(path: &Path) -> Result<String, InstallError> {
 }
 
 impl Snapshot {
+    pub(super) fn executable_paths(&self) -> impl Iterator<Item = &str> {
+        self.manifest
+            .files
+            .iter()
+            .filter(|(_, member)| member.executable)
+            .map(|(name, _)| name.as_str())
+    }
+
+    pub(super) fn copy_for_deployment(&self, target: &Path) -> Result<(), InstallError> {
+        copy_package_tree(&self.root, target)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for (name, member) in &self.manifest.files {
+                let path = target.join(name);
+                fs::set_permissions(
+                    &path,
+                    fs::Permissions::from_mode(if member.executable { 0o755 } else { 0o644 }),
+                )
+                .map_err(|error| io("preserve helper executable mode", &path, error))?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn capture(
         installation: &Installation,
         selection: &Selection,
@@ -192,7 +217,14 @@ impl Snapshot {
                 }
             }
         }
-        let offset = |path: &Path| portable(&Path::new("tree").join(path.strip_prefix(&ancestor).map_err(invalid)?));
+        let offset = |path: &Path| {
+            let relative = path.strip_prefix(&ancestor).map_err(invalid)?;
+            if relative.as_os_str().is_empty() {
+                Ok("tree".to_owned())
+            } else {
+                portable(&Path::new("tree").join(relative))
+            }
+        };
         let mut manifest = Manifest {
             schema: 1,
             files: BTreeMap::new(),
@@ -372,14 +404,10 @@ impl Snapshot {
         Ok(())
     }
 
-    fn prefix(&self, installation: &Installation) -> String {
+    fn prefix(&self, config: &Path) -> String {
         format!(
             ".appa/{}/files/{}",
-            installation
-                .config
-                .file_name()
-                .expect("config filename")
-                .to_string_lossy(),
+            config.file_name().expect("config filename").to_string_lossy(),
             self.digest.hex()
         )
     }
@@ -439,6 +467,18 @@ impl Snapshot {
         installation: &Installation,
         exporting: bool,
     ) -> Result<String, InstallError> {
+        self.rebase_at(text, selection, &installation.config, exporting)
+    }
+
+    /// Render declared references for a destination without opening that path.
+    /// This also supports Linux container paths when preparation runs elsewhere.
+    pub(super) fn rebase_at(
+        &self,
+        text: &str,
+        selection: &Selection,
+        config: &Path,
+        exporting: bool,
+    ) -> Result<String, InstallError> {
         let mut document = document(text)?;
         for path in manual_includes(text, selection)? {
             let windows_prefix = path.as_bytes().get(1) == Some(&b':');
@@ -448,7 +488,7 @@ impl Snapshot {
                 ));
             }
         }
-        let prefix = self.prefix(installation);
+        let prefix = self.prefix(config);
         for (bundle, mappings) in [(true, &self.manifest.declared), (false, &self.manifest.includes)] {
             let expected: BTreeSet<_> = mappings
                 .iter()
@@ -494,7 +534,7 @@ impl Snapshot {
                 }
             }
         }
-        let base = installation.config.parent().expect("config parent");
+        let base = config.parent().ok_or_else(|| invalid("config has no parent"))?;
         let commands = crate::config::root_command_directories(text, base).map_err(invalid)?;
         if commands.keys().ne(self.manifest.commands.keys()) {
             return Err(invalid(
@@ -523,7 +563,11 @@ impl Snapshot {
                 let cwd = base.join(&prefix).join(offset);
                 origins.insert(
                     key,
-                    toml_edit::value(cwd.to_str().ok_or_else(|| invalid("snapshot cwd is not UTF-8"))?),
+                    toml_edit::value(
+                        cwd.to_str()
+                            .ok_or_else(|| invalid("snapshot cwd is not UTF-8"))?
+                            .replace(std::path::MAIN_SEPARATOR, "/"),
+                    ),
                 );
             }
             let mut metadata = toml_edit::Table::new();

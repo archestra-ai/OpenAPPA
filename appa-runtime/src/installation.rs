@@ -17,6 +17,8 @@ mod acquisition;
 mod battery;
 pub mod cli;
 mod files;
+mod kagent;
+mod kagent_images;
 pub mod native;
 pub use acquisition::{Acquired, Requirements};
 
@@ -68,6 +70,10 @@ pub struct Selection {
     aliases: Vec<battery::OwnedAlias>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     files: Option<ArtifactDigest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kagent_runtime: Option<kagent_images::KagentRuntime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kagent_assets: Option<ArtifactDigest>,
 }
 
 impl Selection {
@@ -137,6 +143,8 @@ impl Selection {
             includes: Vec::new(),
             aliases: Vec::new(),
             files: None,
+            kagent_runtime: None,
+            kagent_assets: None,
         }
     }
 
@@ -156,6 +164,9 @@ impl Selection {
     }
 
     pub fn select(&mut self, kind: PackageKind, name: &PackageName) {
+        if kind == PackageKind::Plugin && name.as_str() == "kagent" {
+            self.kagent_runtime.get_or_insert(kagent_images::KagentRuntime::Both);
+        }
         match kind {
             PackageKind::Plugin => &mut self.plugins,
             PackageKind::Battery => &mut self.batteries,
@@ -176,10 +187,21 @@ impl Selection {
             PackageKind::Battery => &mut self.batteries,
         }
         .remove(name.as_str());
+        if kind == PackageKind::Plugin && name.as_str() == "kagent" {
+            self.kagent_runtime = None;
+            self.kagent_assets = None;
+        }
         Ok(())
     }
 
     fn validate(&self) -> Result<(), InstallError> {
+        if self.kagent_runtime.is_some() != self.plugins.contains("kagent")
+            || (self.kagent_assets.is_some() && self.kagent_runtime.is_none())
+        {
+            return Err(InstallError::Invalid(
+                "kagent preparation does not match selected plugins".into(),
+            ));
+        }
         if self.schema != 1 {
             return Err(InstallError::Invalid("unsupported selection schema".into()));
         }
@@ -559,6 +581,7 @@ impl Installation {
         let mut selection = self
             .selection()?
             .ok_or_else(|| InstallError::Invalid("no installed selection to export".into()))?;
+        kagent::verify(self, &selection)?;
         let config = required_bytes(&self.config)?;
         selection.validate_owned_config(
             std::str::from_utf8(&config).map_err(|error| InstallError::Invalid(error.to_string()))?,
@@ -718,6 +741,11 @@ impl Installation {
         selection: &Selection,
     ) -> Result<(), InstallError> {
         self.recover_config()?;
+        let mut selection = selection.clone();
+        if let Some(previous) = self.selection()? {
+            kagent::verify(self, &previous)?;
+        }
+        selection.kagent_assets = kagent::prepare(self, &selection, after)?;
         let activation = if selection.plugins.contains("claude-code") {
             Activation::Claude
         } else if self
@@ -728,7 +756,7 @@ impl Installation {
         } else {
             Activation::None
         };
-        self.commit_with_activation(before, after, selection, activation)
+        self.commit_with_activation(before, after, &selection, activation)
     }
 
     fn commit_with_activation(
@@ -784,7 +812,7 @@ impl Installation {
             after: after.to_vec(),
             selection: selection.clone(),
             activation,
-            previous: if activation != Activation::None { previous } else { None },
+            previous,
         };
         atomic_write(
             &journal_path,
@@ -846,6 +874,7 @@ impl Installation {
         let current = optional_bytes(&self.config)?;
         if current.as_deref() == Some(&transaction.after) {
             let validate = || {
+                kagent::verify(self, &transaction.selection)?;
                 self.verify_selected_files(
                     &transaction.selection,
                     std::str::from_utf8(&transaction.after)
@@ -911,6 +940,14 @@ impl Installation {
                 &selected,
             )?;
             atomic_write(&self.state.join("active.json"), &selected)?;
+            if let Some(previous) = &transaction.previous {
+                kagent::remove_previous(self, previous, &transaction.selection).map_err(|error| {
+                    InstallError::Recovery {
+                        path: path.clone(),
+                        reason: error.to_string(),
+                    }
+                })?;
+            }
         } else if current != transaction.before {
             return Err(InstallError::Recovery {
                 path,

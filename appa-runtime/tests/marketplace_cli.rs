@@ -208,6 +208,10 @@ fn invalid_install_input_is_refused_before_creating_state_or_contacting_a_host()
 }
 
 fn deployment(root: &Path) -> std::path::PathBuf {
+    deployment_for(root, false)
+}
+
+fn deployment_for(root: &Path, kagent: bool) -> std::path::PathBuf {
     use appa_package::generation::{ArtifactDigest, Generation, Image, Platform, REPOSITORY};
     use appa_runtime::installation::{Installation, Selection};
     use std::collections::BTreeMap;
@@ -224,10 +228,28 @@ fn deployment(root: &Path) -> std::path::PathBuf {
         "[policy]\nversion=2\n[[policy.tool]]\nname='mcp/github/read'\n",
     )
     .unwrap();
-    let catalog = format!(
+    let mut catalog = format!(
         "schema=1\nname='appa'\n[packages.battery.github]\npath='batteries/github'\ndigest='{}'\n",
         appa_package::TreeDigest::of_tree(&battery).unwrap()
     );
+    if kagent {
+        let plugin_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace/plugins/kagent");
+        let plugin = source.join("plugins/kagent");
+        std::fs::create_dir_all(&plugin).unwrap();
+        for entry in appa_package::tree::walk(&plugin_source).unwrap() {
+            let target = plugin.join(entry.portable);
+            match entry.kind {
+                appa_package::tree::EntryKind::Directory => std::fs::create_dir_all(target).unwrap(),
+                appa_package::tree::EntryKind::File => {
+                    std::fs::copy(entry.absolute, target).unwrap();
+                }
+            }
+        }
+        catalog.push_str(&format!(
+            "[packages.plugin.kagent]\npath='plugins/kagent'\ndigest='{}'\n",
+            appa_package::TreeDigest::of_tree(&plugin).unwrap()
+        ));
+    }
     std::fs::write(source.join("marketplace.toml"), &catalog).unwrap();
     let mut archive = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast()));
     archive.append_dir_all(".", &source).unwrap();
@@ -247,6 +269,112 @@ fn deployment(root: &Path) -> std::path::PathBuf {
     let text = b"# authored policy\n[policy]\nversion=2\n[[policy.tool]]\nname='Custom'\n[externals]\ntimeout_ms=100\nmax_body_bytes=1024\n";
     installation.commit_config(None, text, &selection).unwrap();
     config
+}
+
+#[test]
+fn kagent_prepares_updates_roundtrips_offline_and_removes_without_host_activation() {
+    let source = tempfile::tempdir().unwrap();
+    let config = deployment_for(source.path(), true);
+    let config_name = config.to_str().unwrap();
+    let invoke = |args: &[&str]| {
+        let output = run(source.path(), args);
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let installed = invoke(&[
+        "plugin",
+        "install",
+        "kagent",
+        "--config",
+        config_name,
+        "--runtime",
+        "python",
+        "--json",
+    ]);
+    assert_eq!(installed["result"]["state"], "prepared");
+    assert_eq!(installed["result"]["cluster"], "unchanged");
+    let original = std::path::PathBuf::from(installed["result"]["directory"].as_str().unwrap());
+    assert!(original.join("agent-python.json").exists());
+    assert!(!original.join("agent-go.json").exists());
+    let repeated = invoke(&["plugin", "install", "kagent", "--config", config_name, "--json"]);
+    assert_eq!(repeated["result"]["directory"], installed["result"]["directory"]);
+    invoke(&["battery", "install", "github", "--config", config_name, "--json"]);
+    assert!(!original.exists(), "battery update replaces old prepared policy");
+    let refreshed = invoke(&["plugin", "install", "kagent", "--config", config_name, "--json"]);
+    let prepared = Path::new(refreshed["result"]["directory"].as_str().unwrap());
+    let values: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(prepared.join("runtime-values.json")).unwrap()).unwrap();
+    assert!(
+        values["config"]["contents"]
+            .as_str()
+            .unwrap()
+            .contains("batteries/github/appa.toml")
+    );
+    let archive = source.path().join("offline.tar.gz");
+    let exported = invoke(&[
+        "bundle",
+        "--config",
+        config_name,
+        "--output",
+        archive.to_str().unwrap(),
+        "--json",
+    ]);
+    let destination = tempfile::tempdir().unwrap();
+    let replica = destination.path().join("replica.toml");
+    let output = run(
+        destination.path(),
+        &[
+            "plugin",
+            "install",
+            "kagent",
+            "--config",
+            replica.to_str().unwrap(),
+            "--from",
+            archive.to_str().unwrap(),
+            "--sha256",
+            exported["result"]["sha256"].as_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let imported: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let replica_files = Path::new(imported["result"]["directory"].as_str().unwrap());
+    assert!(replica_files.join("agent-python.json").exists());
+    assert!(!replica_files.join("agent-go.json").exists());
+    let before = std::fs::read(&config).unwrap();
+    invoke(&["plugin", "remove", "kagent", "--config", config_name, "--json"]);
+    assert!(!prepared.exists());
+    assert_eq!(std::fs::read(&config).unwrap(), before);
+    assert_eq!(
+        invoke(&["plugin", "remove", "kagent", "--config", config_name, "--json"])["result"]["state"],
+        "unchanged"
+    );
+}
+
+#[test]
+fn kagent_requires_explicit_config_and_rejects_inapplicable_runtime_before_writes() {
+    let root = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["plugin", "install", "kagent", "--json"],
+        vec!["plugin", "remove", "kagent", "--json"],
+        vec!["plugin", "install", "claude-code", "--runtime", "go", "--json"],
+    ] {
+        let output = run(root.path(), &args);
+        assert_eq!(output.status.code(), Some(1));
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["status"], "error");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
 }
 
 #[test]

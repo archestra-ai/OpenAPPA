@@ -115,6 +115,7 @@ dependencies = [
  "appa-policy",
  "appa-runtime-api",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "flate2",
