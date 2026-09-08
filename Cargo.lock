@@ -104,16 +104,18 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "appa"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "appa-adapter-claude-code",
  "appa-adapter-kagent",
  "appa-builtin",
  "appa-engine",
  "appa-eventlog",
+ "appa-package",
  "appa-policy",
  "appa-runtime-api",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "flate2",
@@ -137,17 +139,21 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "toml_edit",
  "tracing",
  "tracing-subscriber",
  "url",
  "uuid",
+ "windows-sys 0.61.2",
+ "zip",
 ]
 
 [[package]]
 name = "appa-adapter-claude-code"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "appa-runtime-api",
+ "proptest",
  "serde",
  "serde_json",
  "tracing",
@@ -155,17 +161,16 @@ dependencies = [
 
 [[package]]
 name = "appa-adapter-kagent"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "appa-runtime-api",
- "serde",
+ "proptest",
  "serde_json",
- "tracing",
 ]
 
 [[package]]
 name = "appa-agent-python"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "appa",
  "appa-runtime-api",
@@ -180,7 +185,7 @@ dependencies = [
 
 [[package]]
 name = "appa-builtin"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -189,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "appa-engine"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "proptest",
  "serde",
@@ -202,10 +207,11 @@ dependencies = [
 
 [[package]]
 name = "appa-eventlog"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "appa-engine",
  "appa-policy",
+ "appa-runtime-api",
  "rusqlite",
  "serde",
  "serde_json",
@@ -215,7 +221,7 @@ dependencies = [
 
 [[package]]
 name = "appa-example-agent"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "appa",
  "appa-runtime-api",
@@ -244,10 +250,24 @@ name = "appa-module-fixture-bad"
 version = "0.0.0"
 
 [[package]]
+name = "appa-package"
+version = "0.16.0"
+dependencies = [
+ "appa-runtime-api",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
 name = "appa-policy"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "appa-engine",
+ "appa-runtime-api",
  "serde",
  "serde_json",
  "thiserror",
@@ -256,10 +276,19 @@ dependencies = [
 
 [[package]]
 name = "appa-runtime-api"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "arbitrary"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
+dependencies = [
+ "derive_arbitrary",
 ]
 
 [[package]]
@@ -698,6 +727,17 @@ name = "data-encoding"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
+
+[[package]]
+name = "derive_arbitrary"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e567bd82dcff979e4b03460c307b3cdc9e96fde3d73bed1496d2bc75d9dd62a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "digest"
@@ -2914,6 +2954,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "toml_edit"
+version = "0.25.13+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6975367e4d2ef766d86af01ffad14b622fecc8d4357a998fbc4deb6e9bacaf9b"
+dependencies = [
+ "indexmap",
+ "toml_datetime",
+ "toml_parser",
+ "toml_writer",
+ "winnow",
+]
+
+[[package]]
 name = "toml_parser"
 version = "1.1.3+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3477,6 +3530,9 @@ name = "winnow"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "wit-bindgen"
@@ -3601,6 +3657,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "zip"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb2a05c7c36fde6c09b08576c9f7fb4cda705990f73b58fe011abf7dfb24168b"
+dependencies = [
+ "arbitrary",
+ "crc32fast",
+ "flate2",
+ "indexmap",
+ "memchr",
 ]
 
 [[package]]

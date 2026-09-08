@@ -24,10 +24,12 @@ integrations/kagent/
 ├── e2e/                     # Live matrices against a Helm-installed stack
 │   ├── a2a/                 # Matrix tests over the A2A protocol
 │   └── ui/                  # Browser matrix tests driving the kagent dashboard
-├── examples/                # Reference policies (e.g. kagent.appa.toml)
-├── fixtures/                # Canonical wire event fixtures shared across languages
 └── IMPLEMENTATION.md        # Technical architecture and wire specifications
 ```
+
+The reference policy and the canonical wire event fixtures the two plugin
+lanes share are in the kagent plugin package,
+`marketplace/plugins/kagent/`.
 
 ### 1. Python Runtime (`appa-kagent-adk/`)
 Wraps kagent's published Python runtime container image. It ships `AppaPluginKagent`, a Google ADK `BasePlugin` that maps lifecycle callbacks to OpenAPPA `/hook` events. It appends the plugin and the `execute_remedy_plan` tool to the agent entrypoint.
@@ -35,8 +37,8 @@ Wraps kagent's published Python runtime container image. It ships `AppaPluginKag
 ### 2. Go Runtime (`appa-kagent-adk-go/`)
 Implements `AppaPluginKagent` for Google Go ADK v2. It provides a replacement runtime main that registers the plugin, manages session lineage headers across delegations, and coordinates human-in-the-loop approvals.
 
-### 3. Codec Crate (`appa-adapter-kagent`)
-The Rust codec crate lives at [`appa-adapter-kagent/`](../../appa-adapter-kagent) in the workspace root. It compiles directly into `appa-runtime` and parses wire events sent by `AppaPluginKagent`.
+### 3. Adapter Crate (`appa-adapter-kagent`)
+The Rust adapter crate lives at [`appa-adapter-kagent/`](../../appa-adapter-kagent) in the workspace root. It is compiled directly into `appa-runtime`. Both plugins post the canonical hook envelope ([`appa-runtime-api/src/wire.rs`](../../appa-runtime-api/src/wire.rs)) to `POST /hook`; the crate derives the canonical tool id and whether a call is a spawn from the structured tool spelling they send (`mcp:<toolset>/<tool>`, `agent:<namespace>/<agent>`, `builtin:<name>`, `gate:<name>`, `appa:execute_remedy_plan`).
 
 ### 4. Guide Skill (`../appa-guide/`)
 The `appa-guide` agent runs in kagent using Kubernetes tools and `appa_match_batteries`. It drafts policy in chat and updates the runtime ConfigMap under kagent confirmation cards.
@@ -66,7 +68,7 @@ helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-c
   --version 0.9.12 -n kagent --create-namespace --force-conflicts
 
 # 2. Install kagent with the appa plugin image
-APPA_VERSION=0.15.0 # x-release-please-version
+APPA_VERSION=0.16.0 # x-release-please-version
 OPENAI_API_KEY_B64="$(printf %s "$OPENAI_API_KEY" | base64 | tr -d '\n')"
 kubectl apply -f - <<EOF
 apiVersion: v1
@@ -83,6 +85,8 @@ unset OPENAI_API_KEY_B64
 helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
   --set registry=ghcr.io \
+  --set kmcp.podSecurityContext.runAsUser=65532 \
+  --set kmcp.podSecurityContext.runAsGroup=65532 \
   --set controller.agentImage.registry=europe-west1-docker.pkg.dev \
   --set controller.agentImage.repository=friendly-path-465518-r6/appa-public/appa-kagent-adk \
   --set providers.default=openAI \
@@ -106,6 +110,9 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --set controller.agentImage.tag="v$APPA_VERSION"
 BASH
 ```
+
+The explicit KMCP user and group preserve `runAsNonRoot` while avoiding
+`CreateContainerConfigError` with the bundled KMCP 0.3.0 image, which defaults to root.
 
 ### 2. Deploy appa-runtime
 

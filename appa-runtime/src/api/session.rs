@@ -20,16 +20,14 @@ use super::{
     SpawnRef, SpawnResultDecision, ToolCallDecision, ToolOutcome, ToolResultDecision, TrajectoryId,
 };
 
-/// The runtime's own control tool, recognized by its exact
-/// wire names: the bare name and each name the runtime's distribution
-/// channels produce — the directly registered MCP server and the
-/// `appa-runtime` plugin's server. Selecting an offer is not a checked
-/// flow. A lookalike on another server — say
-/// `mcp__evil__execute_remedy_plan` — is an ordinary checked call.
+/// The runtime's own control tool, recognized by its one canonical
+/// identity, `appa/execute_remedy_plan`: the served adapter derives it
+/// from the host's registered spelling of the runtime's MCP server, and
+/// nothing else derives it. Selecting an offer is not a checked flow. A
+/// lookalike on another server — say `mcp/evil/execute_remedy_plan` —
+/// is an ordinary checked call.
 pub(crate) fn is_control_tool(tool: &str) -> bool {
-    tool == "execute_remedy_plan"
-        || tool == "mcp__appa__execute_remedy_plan"
-        || tool == "mcp__plugin_appa-runtime_appa__execute_remedy_plan"
+    tool == appa_runtime_api::CONTROL_TOOL
 }
 
 /// Why a reported outcome named no reportable dispatch. The threat model puts
@@ -134,8 +132,10 @@ fn outcome_decision(decision: EngineDecision) -> Result<ToolResultDecision, Even
         Next::PresentToModel(Presentation::ReplaceOutput { placeholder, .. }) => {
             Ok(ToolResultDecision::Replace { placeholder })
         }
-        // An admitted value delivered in place of the raw output.
-        Next::PresentToModel(Presentation::Value { value }) => Ok(ToolResultDecision::Replace { placeholder: value }),
+        // An admitted value delivered in place of the raw output, as it crossed.
+        Next::PresentToModel(Presentation::Value { value }) => Ok(ToolResultDecision::Deliver { value }),
+        // The runtime's own words: the narrowing this result causes and the control call
+        // that accepts it.
         Next::PresentToModel(Presentation::Blocked { feedback, .. }) => {
             Ok(ToolResultDecision::Replace { placeholder: feedback })
         }
@@ -265,7 +265,10 @@ impl Session {
         if let Some(open) = self.substituted_release(&call)? {
             return self.claim_or_abandon(call, open).await;
         }
-        if spawn && self.inner.spawn_coverage() == super::SpawnCoverage::Declared && !self.names_tool(&call.tool)? {
+        if spawn
+            && self.inner.naming.spawn_coverage() == super::SpawnCoverage::Declared
+            && !self.names_tool(&call.tool)?
+        {
             tracing::debug!(trajectory = %self.trajectory.0, tool = %call.tool, "spawn denied: the policy names no such agent");
             return Err(EventError::UndeclaredSpawn {
                 tool: call.tool.clone(),
@@ -1481,7 +1484,7 @@ starting_label = { trust = "suspicious" }
         let policy = r#"
 version = 2
 [[policy.tool]]
-name = "execute_remedy_plan"
+name = "appa/execute_remedy_plan"
 "#;
         assert!(matches!(
             Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None),
@@ -1637,8 +1640,8 @@ name = "execute_remedy_plan"
             .expect("the re-reported outcome admits");
         assert_eq!(
             replaced,
-            ToolResultDecision::Replace {
-                placeholder: "scrubbed".to_string()
+            ToolResultDecision::Deliver {
+                value: "scrubbed".to_string()
             },
         );
         let log = runtime.log_facts(&root());
@@ -3379,8 +3382,8 @@ confined_results = ["leak"]
         let decision = run_sanitize_offer(&runtime, &mut session).await;
         assert_eq!(
             decision,
-            ToolResultDecision::Replace {
-                placeholder: "scrubbed".to_string()
+            ToolResultDecision::Deliver {
+                value: "scrubbed".to_string()
             },
             "the derivation is admitted and the raw is withheld",
         );
@@ -4808,9 +4811,9 @@ context_control = true
         let session = runtime.create_session(root()).expect("a fresh id opens");
         assert!(matches!(
             session
-                .on_tool_call(control_call("mcp__evil__execute_remedy_plan"), false)
+                .on_tool_call(control_call("mcp/evil/execute_remedy_plan"), false)
                 .await,
-            Err(EventError::UndeclaredTool { tool }) if tool == "mcp__evil__execute_remedy_plan",
+            Err(EventError::UndeclaredTool { tool }) if tool == "mcp/evil/execute_remedy_plan",
         ));
     }
 

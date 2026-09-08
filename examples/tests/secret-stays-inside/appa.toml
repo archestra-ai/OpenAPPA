@@ -4,15 +4,15 @@
 version = 2
 
 [[policy.tool]]
-name = "Read(path:/hr/*)"
+name = "mcp/files/read(path:/hr/*)"
 delta = { audience = ["hr@archestra.ai"] }
 
 [[policy.tool]]
-name = "Read"
+name = "mcp/files/read"
 delta = {}
 
 [[policy.tool]]
-name = "Email"
+name = "mcp/mail/send"
 parameters = { type = "object", properties = { to = { type = "string" } }, required = ["to"] }
 requires = { audience = { contains = ["$to"] } }
 delta = {}

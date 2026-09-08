@@ -73,6 +73,8 @@ helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-c
 echo "== helm install kagent $kagent_version"
 helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version "$kagent_version" -n "$namespace" \
+  --set kmcp.podSecurityContext.runAsUser=65532 \
+  --set kmcp.podSecurityContext.runAsGroup=65532 \
   --set controller.agentImage.registry=docker.io \
   --set controller.agentImage.repository=library/appa-kagent-adk \
   --set-string controller.agentImage.tag="$tag" \

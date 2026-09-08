@@ -1,7 +1,7 @@
 //! # appa-eventlog — the trajectory log, and where it is kept
 //!
 //! A root trajectory and its branches append to one shared log. That log holds
-//! every lasting fact of the system; the stored policy files are the only other durable state, and
+//! every lasting fact and host inventory observation; the stored policy files are the only other durable state, and
 //! everything else — a branch's parent, whether it has ended, which dispatch is open, whether an
 //! offer still stands — is read back from the log by the engine's projection.
 //!
@@ -44,6 +44,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 pub use appa_engine::fact::Fact;
 use appa_engine::profile::PolicyFileKey;
 use appa_engine::value::TrajectoryId;
+use appa_runtime_api::{AdapterName, inventory::ToolInventory};
 
 const SCHEMA_VERSION: i64 = 1;
 
@@ -72,6 +73,25 @@ pub struct Log {
     facts: Vec<Fact>,
     basis: u64,
     policy_file: Vec<u8>,
+    inventories: Vec<InventoryObservation>,
+}
+
+/// Identity evidence from one actor's host. This is not an engine fact or a
+/// policy update. It is appended at the same compare-and-swap position as facts,
+/// so admission cannot race past an uncommitted identity reservation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InventoryObservation {
+    pub actor: TrajectoryId,
+    pub adapter: AdapterName,
+    pub inventory: ToolInventory,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum Batch {
+    Facts(Vec<Fact>),
+    Inventory(InventoryObservation),
 }
 
 impl Log {
@@ -91,6 +111,12 @@ impl Log {
 
     pub fn policy_file(&self) -> &[u8] {
         &self.policy_file
+    }
+
+    /// Host observations in append order. Consumers validate them under the
+    /// opening configuration; no later observation changes earlier engine facts.
+    pub fn inventories(&self) -> &[InventoryObservation] {
+        &self.inventories
     }
 }
 
@@ -346,7 +372,17 @@ impl LogStore {
     /// Append records to the log `based_on` was read from, only if it still stands where that
     /// read left it. A conflict writes nothing; the caller reads again and replays.
     pub fn append(&self, based_on: &Log, facts: &[Fact]) -> Result<(), AppendError> {
-        let bytes = encode(facts);
+        self.append_bytes(based_on, encode(facts))
+    }
+
+    /// Reserve host identity evidence without modifying the opening policy or
+    /// fabricating an engine fact. A stale read writes nothing, just as append.
+    pub fn append_inventory(&self, based_on: &Log, observation: &InventoryObservation) -> Result<(), AppendError> {
+        let bytes = serde_json::to_vec(observation).expect("inventory observations contain only serializable fields");
+        self.append_bytes(based_on, bytes)
+    }
+
+    fn append_bytes(&self, based_on: &Log, bytes: Vec<u8>) -> Result<(), AppendError> {
         let mut connection = self.lock();
         #[cfg(feature = "fault-injection")]
         if self.contention_fires() {
@@ -511,13 +547,17 @@ fn stored(connection: &Connection, root: &TrajectoryId) -> Result<(Vec<Vec<u8>>,
             root: root.as_str().to_string(),
         });
     };
-    let key = match decode(first)?.first() {
-        Some(Fact::TrajectoryOpened { policy_file_key, .. }) => policy_file_key.clone(),
-        _ => {
-            return Err(ReadError::Undecodable(
-                "the log does not open with a TrajectoryOpened record".to_string(),
-            ));
-        }
+    let opening = match decode(first)? {
+        Batch::Facts(facts) => facts,
+        Batch::Inventory(_) => Vec::new(),
+    };
+    let Some(Fact::TrajectoryOpened {
+        policy_file_key: key, ..
+    }) = opening.first()
+    else {
+        return Err(ReadError::Undecodable(
+            "the log does not open with a TrajectoryOpened record".to_string(),
+        ));
     };
     let policy_file: Option<Vec<u8>> = connection
         .query_row(
@@ -537,14 +577,19 @@ fn stored(connection: &Connection, root: &TrajectoryId) -> Result<(Vec<Vec<u8>>,
 fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: Vec<u8>) -> Result<Log, ReadError> {
     let basis = batches.len() as u64;
     let mut facts = Vec::new();
+    let mut inventories = Vec::new();
     for batch in &batches {
-        facts.extend(decode(batch)?);
+        match decode(batch)? {
+            Batch::Facts(batch) => facts.extend(batch),
+            Batch::Inventory(observation) => inventories.push(observation),
+        }
     }
     Ok(Log {
         root: root.clone(),
         facts,
         basis,
         policy_file,
+        inventories,
     })
 }
 
@@ -552,7 +597,7 @@ fn encode(facts: &[Fact]) -> Vec<u8> {
     serde_json::to_vec(facts).expect("engine records serialize: every field is a serde type with no float or map key")
 }
 
-fn decode(bytes: &[u8]) -> Result<Vec<Fact>, ReadError> {
+fn decode(bytes: &[u8]) -> Result<Batch, ReadError> {
     serde_json::from_slice(bytes).map_err(|error| ReadError::Undecodable(error.to_string()))
 }
 
@@ -684,6 +729,68 @@ mod tests {
             other => panic!("expected a conflict, got {other:?}"),
         }
         assert_eq!(store.log(&root()).expect("the log reads").basis(), 2);
+    }
+
+    fn observed(actor: &str, server: &str) -> InventoryObservation {
+        InventoryObservation {
+            actor: TrajectoryId::new(actor),
+            adapter: AdapterName::Kagent,
+            inventory: ToolInventory {
+                tools: vec![appa_runtime_api::inventory::ObservedTool {
+                    name: "read".into(),
+                    tool: format!("mcp:{server}/read"),
+                }],
+                sources: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn inventory_and_fact_appends_share_one_compare_and_swap() {
+        let store = opened();
+        let stale = store.log(&root()).unwrap();
+        let observation = observed(root().as_str(), "demo");
+        store.append_inventory(&stale, &observation).unwrap();
+        assert!(matches!(
+            store.append(&stale, &punctuation()),
+            Err(AppendError::Conflict { .. })
+        ));
+        assert!(matches!(
+            store.append_inventory(&stale, &observation),
+            Err(AppendError::Conflict { .. })
+        ));
+        let seen = store.log(&root()).unwrap();
+        assert_eq!(seen.inventories(), &[observation]);
+        assert_eq!(seen.facts(), stale.facts());
+        assert_eq!(seen.policy_file(), stale.policy_file());
+        store.append(&seen, &punctuation()).unwrap();
+        assert!(matches!(
+            store.append_inventory(&seen, &observed("child", "other")),
+            Err(AppendError::Conflict { .. })
+        ));
+        assert_eq!(store.log(&root()).unwrap().inventories().len(), 1);
+    }
+
+    #[test]
+    fn inventory_scopes_survive_reopen_without_changing_the_policy_or_engine_facts() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Backend::Sqlite {
+            path: dir.path().join("inventory.db"),
+        };
+        let parent = observed(root().as_str(), "demo");
+        let child = observed("child", "other");
+        {
+            let store = LogStore::open(backend.clone()).unwrap();
+            store.create_root(opening(&root()), POLICY.as_bytes()).unwrap();
+            store.append_inventory(&store.log(&root()).unwrap(), &parent).unwrap();
+            store.append_inventory(&store.log(&root()).unwrap(), &child).unwrap();
+        }
+        let store = LogStore::open(backend).unwrap();
+        let log = store.log(&root()).unwrap();
+        assert_eq!(log.inventories(), &[parent, child]);
+        assert_eq!(log.basis(), 3);
+        assert_eq!(log.facts(), opening(&root()));
+        assert_eq!(log.policy_file(), POLICY.as_bytes());
     }
 
     #[test]

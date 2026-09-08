@@ -39,6 +39,7 @@ jobs:
       installer: ${{ steps.filter.outputs.installer }}
       corp: ${{ steps.filter.outputs.corp }}
       agentthreatbench: ${{ steps.filter.outputs.agentthreatbench }}
+      marketplace: ${{ steps.filter.outputs.marketplace }}
       receiver: ${{ steps.filter.outputs.receiver }}
     steps:
       # A pull request reads its file list from the API and needs no
@@ -60,7 +61,7 @@ jobs:
             python: &python
               - 'integrations/kagent/appa-kagent-adk/**'
               - 'integrations/kagent/tests/**'
-              - 'integrations/kagent/fixtures/**'
+              - 'marketplace/plugins/kagent/fixtures/**'
               - '.github/workflows/ci.yml'
             receiver:
               - 'receiver/**'
@@ -72,7 +73,7 @@ jobs:
               - '.github/workflows/ci.yml'
             go:
               - 'integrations/kagent/appa-kagent-adk-go/**'
-              - 'integrations/kagent/fixtures/**'
+              - 'marketplace/plugins/kagent/fixtures/**'
               - '.github/workflows/ci.yml'
             chart:
               - 'integrations/kagent/demo/chart/**'
@@ -99,16 +100,15 @@ jobs:
               - 'bench/corp-systems/**'
               - 'bench/corp/policies/**'
               - 'examples/**'
-              - 'batteries/**'
-              - 'integrations/claude-code/**'
+              - 'marketplace/batteries/**'
+              - 'marketplace/plugins/claude-code/**'
               - 'integrations/appa-guide/**'
-              - 'integrations/kagent/fixtures/**'
+              - 'marketplace/plugins/kagent/fixtures/**'
               - 'website/content/docs/contracts.md'
             plugin:
-              - 'integrations/claude-code/plugin/**'
-              - 'integrations/claude-code/.claude-plugin/**'
-              - '.claude-plugin/**'
-              - 'batteries/**'
+              - 'marketplace/plugins/claude-code/plugin/**'
+              - 'marketplace/plugins/claude-code/.claude-plugin/**'
+              - 'marketplace/batteries/**'
               - 'scripts/appa-stage-plugin-bundle.sh'
               - 'scripts/appa-install.sh'
               - 'scripts/appa-install-test.sh'
@@ -118,6 +118,8 @@ jobs:
               - 'scripts/test_appa_guide_runtime.py'
               - 'scripts/appa-oci-tags.py'
               - 'scripts/test_appa_oci_tags.py'
+              - 'scripts/appa-image-descriptor.py'
+              - 'scripts/test_appa_image_descriptor.py'
               - 'scripts/appa-gar-cleanup-policies.json'
               - '.github/actions/auth-to-gar/**'
               - '.github/actions/check-release-versions/**'
@@ -144,9 +146,18 @@ jobs:
             agentthreatbench:
               - *rust
               - 'bench/agentthreatbench/**'
+            marketplace:
+              - 'marketplace/**'
+              - 'appa-package/**'
+              - 'appa-runtime-api/**'
+              - 'scripts/appa-marketplace.sh'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
             integration: &integration
               - *python
-              - 'integrations/kagent/examples/**'
+              - 'appa-package/**'
+              - 'marketplace/plugins/kagent/**'
+              - 'integrations/kagent/appa-kagent-adk-go/**'
               - 'integrations/kagent/demo/demo_tools.py'
               - 'integrations/kagent/demo/mocks/**'
               - 'integrations/kagent/demo/chart/files/**'
@@ -165,6 +176,7 @@ jobs:
               - 'Cargo.lock'
             e2e:
               - *integration
+              - '.github/workflows/publish-oci-images.yml'
               - 'integrations/kagent/**'
               # Markdown in this tree does not change an image or the
               # A2A suite. Plugin Checks still reads the annotated
@@ -174,12 +186,11 @@ jobs:
               - 'appa-agent-python/**'
               - 'bench/**'
               - 'website-chat-playground/**'
-              - 'batteries/**'
               - 'website/content/docs/contracts.md'
               # The published image compiles a digest of the plugin
               # tree into the binary; these are the rest of the roots
               # appa-runtime/src/plugin_layout.rs maps.
-              - 'integrations/claude-code/**'
+              - 'marketplace/**'
               - 'integrations/appa-guide/**'
               - 'scripts/appa-refresh-batteries.py'
               - 'scripts/appa-guide-runtime.py'
@@ -202,19 +213,19 @@ jobs:
 
       - name: Check plugin shell syntax
         run: |
-          sh -n integrations/claude-code/plugin/hooks/ensure-runtime.sh \
-            integrations/claude-code/plugin/hooks/hook.sh \
-            integrations/claude-code/plugin/hooks/appa-paths.sh \
-            integrations/claude-code/plugin/statusline.sh \
+          sh -n marketplace/plugins/claude-code/plugin/hooks/ensure-runtime.sh \
+            marketplace/plugins/claude-code/plugin/hooks/hook.sh \
+            marketplace/plugins/claude-code/plugin/hooks/appa-paths.sh \
+            marketplace/plugins/claude-code/plugin/statusline.sh \
             scripts/appa-stage-plugin-bundle.sh \
             scripts/appa-install.sh \
             scripts/appa-install-test.sh
 
       - name: Lint plugin shell scripts
         run: |
-          shellcheck -x -s sh integrations/claude-code/plugin/hooks/ensure-runtime.sh \
-            integrations/claude-code/plugin/hooks/hook.sh \
-            integrations/claude-code/plugin/hooks/appa-paths.sh \
+          shellcheck -x -s sh marketplace/plugins/claude-code/plugin/hooks/ensure-runtime.sh \
+            marketplace/plugins/claude-code/plugin/hooks/hook.sh \
+            marketplace/plugins/claude-code/plugin/hooks/appa-paths.sh \
             scripts/appa-stage-plugin-bundle.sh \
             scripts/appa-install.sh \
             scripts/appa-install-test.sh
@@ -227,9 +238,9 @@ jobs:
         run: |
           $failed = $false
           foreach ($script in @(
-            "integrations/claude-code/plugin/hooks/hook.ps1",
-            "integrations/claude-code/plugin/hooks/appa-paths.ps1",
-            "integrations/claude-code/plugin/statusline.ps1"
+            "marketplace/plugins/claude-code/plugin/hooks/hook.ps1",
+            "marketplace/plugins/claude-code/plugin/hooks/appa-paths.ps1",
+            "marketplace/plugins/claude-code/plugin/statusline.ps1"
           )) {
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$errors) | Out-Null
@@ -242,24 +253,59 @@ jobs:
 
       - name: Validate plugin JSON
         run: |
-          jq -e .hooks integrations/claude-code/plugin/hooks/hooks.json >/dev/null
-          jq -e .hooks integrations/claude-code/plugin/hooks/hooks.windows.json >/dev/null
-          jq -e .plugins .claude-plugin/marketplace.json >/dev/null
-          jq -e .plugins integrations/claude-code/.claude-plugin/marketplace.json >/dev/null
-
-      - name: Test battery externals
-        run: |
-          for dir in $(dirname batteries/test_*.py batteries/*/test_*.py | sort -u); do
-            python3 -m unittest discover -s "$dir" -p 'test_*.py'
-          done
+          jq -e .hooks marketplace/plugins/claude-code/plugin/hooks/hooks.json >/dev/null
+          jq -e .hooks marketplace/plugins/claude-code/plugin/hooks/hooks.windows.json >/dev/null
+          jq -e .plugins marketplace/plugins/claude-code/.claude-plugin/marketplace.json >/dev/null
 
       - name: Test release battery refresh
         run: |
           python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --break-system-packages 'pyyaml==6.0.2'
-          python3 -m unittest scripts/test_appa_refresh_batteries.py scripts/test_appa_guide_runtime.py scripts/test_appa_oci_tags.py
+          python3 -m unittest scripts/test_appa_refresh_batteries.py scripts/test_appa_guide_runtime.py scripts/test_appa_oci_tags.py scripts/test_appa_image_descriptor.py
 
       - name: Check release versions
         uses: ./.github/actions/check-release-versions
+
+  marketplace-checks:
+    name: Marketplace Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: changes
+    if: needs.changes.outputs.marketplace == 'true'
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Rust
+        run: rustup show
+
+      - name: Cache marketplace builds
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: marketplace
+
+      - name: Manifest tests
+        run: cargo test -p appa-package --all-targets --locked
+
+      - name: Generated marketplace catalog
+        run: bash scripts/appa-marketplace.sh --check
+
+      # Every package validates, every recorded digest is still the digest of
+      # the directory it names, and no package directory goes unnamed. A digest
+      # that drifted from its package is the one failure that must not reach a
+      # release, so it fails the build rather than being regenerated silently.
+      - name: Marketplace against the packages it describes
+        run: cargo test -p appa --locked --test marketplace
+
+      # A package ships the externals its policy binds, and their tests sit
+      # beside them.
+      - name: Test package helpers
+        run: |
+          while IFS= read -r dir; do
+            python3 -m unittest discover -s "$dir" -p 'test_*.py'
+          done < <(find marketplace -type f -name 'test_*.py' -exec dirname {} + | sort -u)
 
   installer-checks:
     name: Installer Checks (${{ matrix.os }})
@@ -442,7 +488,9 @@ jobs:
         run: |
           cargo test --locked --package appa --lib init::
           cargo test --locked --package appa --lib plugin_bundle::
+          cargo test --locked --package appa --lib installation::
           cargo test --locked --package appa --test init_cli
+          cargo test --locked --package appa --test marketplace_cli
           cargo test --locked --package appa --test plugin_hooks
           cargo test --locked --package appa --test rendered_hooks
 
@@ -469,6 +517,9 @@ jobs:
 
       - name: Build runtime
         run: cargo build --locked --package appa
+
+      - name: Verify installer process containment
+        run: cargo test --locked --package appa --lib installation::native
 
       # Start from an empty directory, as the release package check does. The
       # generated policy must both open and omit the subprocess fallback this
@@ -652,10 +703,13 @@ jobs:
       # resolution (google-adk 1.31.1, a2a-sdk 0.3.x). The entrypoint tests
       # run only here; they skip on the bare lane above.
       - name: appa-kagent-adk tests, kagent v0.9.12 lane
+        env:
+          APPA_KAGENT_LANE: "1"
         run: >
           uv run --project integrations/kagent/appa-kagent-adk
           --with "kagent-adk @ git+https://github.com/kagent-dev/kagent@v0.9.12#subdirectory=python/packages/kagent-adk"
           --with "a2a-sdk>=0.3.23,<0.4" --with "google-adk==1.31.1" --with "mcp>=1.25,<2"
+          --with "pytest>=8" --with "pytest-asyncio"
           pytest integrations/kagent/appa-kagent-adk/tests
 
   kagent-go-checks:
@@ -766,7 +820,30 @@ jobs:
           uv run --project integrations/kagent/appa-kagent-adk
           --with "kagent-adk @ git+https://github.com/kagent-dev/kagent@v0.9.12#subdirectory=python/packages/kagent-adk"
           --with "a2a-sdk>=0.3.23,<0.4" --with "google-adk==1.31.1" --with "mcp>=1.25,<2"
+          --with "pytest>=8" --with "pytest-asyncio"
           pytest integrations/kagent/tests -q --basetemp "$APPA_INTEGRATION_BASETEMP"
+
+      - name: Authenticated MCP discovery lifecycle, Python
+        env:
+          APPA_TEST_RUNTIME_BIN: ${{ github.workspace }}/target/debug/appa
+        run: >
+          uv run --project integrations/kagent/appa-kagent-adk
+          --with "kagent-adk @ git+https://github.com/kagent-dev/kagent@v0.9.12#subdirectory=python/packages/kagent-adk"
+          --with "a2a-sdk>=0.3.23,<0.4" --with "google-adk==1.31.1" --with "mcp>=1.25,<2"
+          --with "pytest>=8" --with "pytest-asyncio"
+          pytest integrations/kagent/appa-kagent-adk/tests/test_mcp_lifecycle.py -q
+
+      - name: Setup Go for authenticated MCP lifecycle
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: integrations/kagent/appa-kagent-adk-go/go.mod
+          cache-dependency-path: integrations/kagent/appa-kagent-adk-go/go.sum
+
+      - name: Authenticated MCP discovery lifecycle, Go
+        working-directory: integrations/kagent/appa-kagent-adk-go
+        env:
+          APPA_TEST_RUNTIME_BIN: ${{ github.workspace }}/target/debug/appa
+        run: go test -count=1 -run TestMCPDiscoveryLifecycleAgainstRuntime .
 
       - name: Upload the trajectory database and the process logs
         if: failure()
@@ -930,6 +1007,81 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  marketplace-kagent-acceptance:
+    name: Marketplace kagent acceptance
+    needs: changes
+    if: needs.changes.outputs.marketplace == 'true' || needs.changes.outputs.e2e == 'true' || needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: integrations/kagent/appa-kagent-adk-go/go.mod
+          cache: false
+      - name: Setup acceptance tools
+        run: |
+          rustup show
+          go install sigs.k8s.io/kind@v0.27.0
+          go install github.com/google/go-containerregistry/cmd/crane@v0.20.3
+          helm version
+          kubectl version --client
+      - name: Setup fixture test environment
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: false
+      - name: Check fixture and evidence contracts
+        run: uv run --isolated --no-project --with 'mcp>=1.25,<2' --with pytest python -m pytest integrations/kagent/e2e/marketplace -q
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Build runtime
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: appa-runtime/Dockerfile
+          tags: appa-acceptance-runtime:ci
+          load: true
+          cache-from: type=gha,scope=appa-runtime
+      - name: Build Python plugin
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/appa-kagent-adk
+          tags: appa-acceptance-python:ci
+          load: true
+          cache-from: type=gha,scope=appa-kagent-adk
+      - name: Build Go plugin
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/appa-kagent-adk-go
+          tags: appa-acceptance-go:ci
+          load: true
+          cache-from: type=gha,scope=appa-kagent-adk-go
+      - name: Build deterministic model and GitHub fixtures
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/e2e/marketplace
+          tags: appa-acceptance-fixtures:ci
+          load: true
+      - name: Exercise prepared deployment and offline restore
+        env:
+          ACCEPTANCE_LOGS: ${{ runner.temp }}/appa-marketplace-acceptance
+        run: python3 integrations/kagent/e2e/marketplace/run.py "$ACCEPTANCE_LOGS"
+      - name: Upload acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: marketplace-kagent-acceptance
+          path: |
+            ${{ runner.temp }}/appa-marketplace-acceptance
+            !${{ runner.temp }}/appa-marketplace-acceptance/kubeconfig
+          if-no-files-found: ignore
+          retention-days: 7
+
   # All published images get an amd64 build here on every change
   # that can break them. Publishing itself happens in release.yml.
   kagent-images-build:
@@ -1026,7 +1178,7 @@ jobs:
           cache-from: type=gha,scope=appa-demo-mocks
           cache-to: type=gha,mode=max,scope=appa-demo-mocks
 
-  # The two multi-platform release images also build on the same native
+  # The four multi-platform release images also build on the same native
   # arm64 runner type the release workflow uses. No first arm build waits
   # until after a release tag exists.
   shared-images-arm-build:
@@ -1070,3 +1222,23 @@ jobs:
           push: false
           cache-from: type=gha,scope=appa-kagent-adk-arm64
           cache-to: type=gha,mode=max,scope=appa-kagent-adk-arm64
+
+      - name: Build the demo tools image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/demo
+          platforms: linux/arm64
+          tags: appa-demo-tools:ci-arm64
+          push: false
+          cache-from: type=gha,scope=appa-demo-tools-arm64
+          cache-to: type=gha,mode=max,scope=appa-demo-tools-arm64
+
+      - name: Build the demo mocks image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/demo/mocks
+          platforms: linux/arm64
+          tags: appa-demo-mocks:ci-arm64
+          push: false
+          cache-from: type=gha,scope=appa-demo-mocks-arm64
+          cache-to: type=gha,mode=max,scope=appa-demo-mocks-arm64

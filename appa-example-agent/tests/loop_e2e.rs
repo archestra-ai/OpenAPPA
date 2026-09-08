@@ -30,7 +30,8 @@ async fn agent(runtime: appa_runtime::api::Runtime, provider: &Provider, host: &
             appa_example_agent::HttpClient::loopback(),
         ),
         ToolShim::new(shim),
-        ToolCatalogue::new(tools.iter().map(|name| tool(name)).collect()),
+        ToolCatalogue::new(tools.iter().map(|name| tool(name)).collect())
+            .expect("the fixture tools leave the control name to the runtime"),
     )
     .with_head(TranscriptHead::new(vec![WireMessage::system("You are a fixture.")]))
     .with_limits(Limits {
@@ -290,10 +291,10 @@ context_control = true
 "#;
 
 fn delegating(agent: Agent) -> Agent {
-    agent.with_spawn_tool(SpawnTool {
-        name: ToolName::new("delegate"),
-        errand: ArgumentKey::new("task"),
-    })
+    agent.with_spawn_tool(
+        SpawnTool::new(ToolName::new("delegate"), ArgumentKey::new("task"))
+            .expect("the spawn tool leaves the control name to the runtime"),
+    )
 }
 
 #[tokio::test]

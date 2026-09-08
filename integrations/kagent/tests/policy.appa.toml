@@ -4,18 +4,22 @@
 # cluster-ops contract, delta, requirement, Authority, and sanitizer is
 # the demo's. Four deployment-only differences follow.
 #
-# 1. The two agent-tool contracts name the one child this suite builds,
-#    `kagent__NS__log_analyst`, under the wire spelling kagent
-#    dispatches it by. The demo policy carries a second entry for the
-#    go cell's child; this suite runs the python plugin only, so that
-#    entry is gone. The undeclared agent stays undeclared: the parent
-#    lists `kagent__NS__release_manager` as a tool, no contract names
-#    it, and every delegation to it is denied at the spawn.
+# 1. The agent contract names the one child this suite builds,
+#    `agent/kagent/log-analyst`. The demo policy carries a second entry
+#    for the go cell's child; this suite runs the python plugin only,
+#    so that entry is gone. The undeclared agent stays undeclared: the
+#    parent lists `release-manager` as a tool, no contract names
+#    `agent/kagent/release-manager`, and every delegation to it is
+#    denied at the spawn. Native MCP rules work with this suite's
+#    loopback endpoints without changing their policy names.
 # 2. The appa-guide tool declarations and command binding are absent.
 #    This local suite creates no configuring Agent.
-# 3. The command adapters use this process's Python executable and the
+# 3. Both sanitizers bind to the mock's `/sanitize` endpoint instead of
+#    `builtin = "llm"`, and `[externals.llm]` is gone. The derivation is
+#    then deterministic and the suite needs no model and no API key.
+# 4. The command adapters use this process's Python executable and the
 #    mock's loopback URL instead of the runtime image path and Service DNS.
-# 4. The consult timeouts are the harness's, not a deployment's.
+# 5. The consult timeouts are the harness's, not a deployment's.
 #
 include = ["batteries/github/appa.toml"]
 
@@ -128,7 +132,7 @@ attention = ["change-approval"]
 # --- kagent's own built-in tool ---
 
 [[policy.tool]]
-name = "ask_user"
+name = "host/kagent/ask_user"
 delta = {}
 
 # --- the delegated child ---
@@ -140,21 +144,62 @@ delta = {}
 # delegation. The child runs in its own branch under the floor the
 # parent declares at the spawn, and its value crosses at the child's own
 # stop. kagent dispatches an agent tool as
-# `<namespace>__NS__<agent name>`, hyphens as underscores.
-# Declare that spelling, the one the wire carries: the suite builds the
-# child in the `kagent` namespace under the name `log-analyst`.
+# `<namespace>__NS__<agent name>`, and the entrypoint spells it on the
+# wire as `agent:<namespace>/<agent name>`; the policy names the
+# canonical id: the suite builds the child in the `kagent` namespace
+# under the name `log-analyst`.
 [[policy.tool]]
-name = "kagent__NS__log_analyst"
+name = "agent/kagent/log-analyst"
 delta = {}
 
-# --- the entrypoint's synthetic tools ---
+# --- the entrypoint's gates ---
 
 [[policy.tool]]
-name = "appa_code_execution"
+name = "host/kagent-gate/code_execution"
 delta = {}
 
 [[policy.tool]]
-name = "appa_memory_persist"
+name = "host/kagent-gate/memory_persist"
+delta = {}
+
+# --- the configuring actor: the appa-guide agent ---
+# The guide agent runs the routing skill against these tools. Reads are
+# unrestricted; the policy write sits behind a person (kagent's Approve
+# card is the oncall authority's channel), and exec needs trusted data.
+# The skill's file helpers that it never uses (`host/kagent/bash`,
+# `host/kagent/write_file`, `host/kagent/edit_file`) stay undeclared, so
+# they are refused.
+[[policy.tool]]
+name = "k8s_get_resources"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_get_resource_yaml"
+delta = {}
+
+[[policy.tool]]
+name = "k8s_apply_manifest"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "k8s_execute_command"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+
+# kagent attaches every skill under the one `skills` tool; the guide runs as
+# `skills({"command": "appa-guide"})`.
+[[policy.tool]]
+name = "host/kagent/skills"
+delta = {}
+
+[[policy.tool]]
+name = "host/kagent/read_file"
 delta = {}
 
 # The runtime can withhold these tools' results and deliver a sanitized

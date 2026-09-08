@@ -11,6 +11,8 @@ use serde::Deserialize;
 #[derive(Debug, Clone)]
 pub struct Config {
     policy: PolicyFile,
+    pub(crate) server_aliases: BTreeMap<String, String>,
+    pub(crate) inventory: appa_runtime_api::inventory::ToolInventory,
     pub externals: Externals,
     /// Deployment knobs that describe this machine's reporting posture, not its policy.
     /// Deliberately outside [`PolicyFile`]: changing one must not move the policy file key
@@ -536,6 +538,13 @@ struct RawConfig {
     /// reaches [`PolicyFile::bytes`]. See [`Config::load`].
     #[serde(default)]
     reporting: RawReporting,
+    /// Offline packaging inputs, not part of the policy identity.
+    #[serde(default)]
+    bundle: RawBundle,
+    #[serde(default)]
+    server_aliases: BTreeMap<String, String>,
+    #[serde(default)]
+    appa_inventory: appa_runtime_api::inventory::ToolInventory,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -543,6 +552,33 @@ struct RawConfig {
 struct RawReporting {
     #[serde(default)]
     agent_yell: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBundle {
+    #[serde(default, deserialize_with = "bundle_files")]
+    files: Vec<String>,
+}
+
+fn bundle_files<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    let files = Vec::<String>::deserialize(deserializer)?;
+    let mut seen = std::collections::BTreeSet::new();
+    for file in &files {
+        let windows_prefix =
+            file.as_bytes().get(1) == Some(&b':') && file.as_bytes().first().is_some_and(u8::is_ascii_alphabetic);
+        if file.is_empty() || file.contains(['\\', '\0']) || Path::new(file).is_absolute() || windows_prefix {
+            return Err(serde::de::Error::custom(format!(
+                "bundle file {file:?} must be a nonempty relative source path using forward slashes"
+            )));
+        }
+        if !seen.insert(file) {
+            return Err(serde::de::Error::custom(format!(
+                "bundle file {file:?} is declared more than once"
+            )));
+        }
+    }
+    Ok(files)
 }
 
 #[derive(Debug, Deserialize)]
@@ -672,11 +708,6 @@ impl Config {
             .filter_map(declaration_name)
             .map(str::to_owned)
             .collect::<std::collections::BTreeSet<_>>();
-        if root.appa_composed.is_some() && !root.include.is_empty() {
-            return Err(ConfigError::InvalidComposedMetadata {
-                reason: "stored composition metadata cannot appear with include".to_string(),
-            });
-        }
         let mut origins = root_command_origins(&root, &source_dir)?;
         let mut seen = std::collections::BTreeSet::new();
         let mut included_batteries = std::collections::BTreeSet::new();
@@ -728,6 +759,13 @@ impl Config {
             .as_table_mut()
             .expect("RawConfig parsed the root as a table")
             .remove("reporting");
+        // Keep authored packaging inputs out of the composed policy, just as
+        // reporting settings remain local to the deployment root.
+        let _ = &root.bundle.files;
+        document
+            .as_table_mut()
+            .expect("RawConfig parsed the root as a table")
+            .remove("bundle");
 
         let composed = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
         let raw: RawConfig = toml::from_str(&composed).map_err(|source| ConfigError::UnparsablePolicy { source })?;
@@ -760,6 +798,27 @@ impl Config {
 
     pub fn policy_file(&self) -> &PolicyFile {
         &self.policy
+    }
+
+    /// Pin host observations beside the authored policy in the same stored snapshot.
+    /// No process-local alias map is needed to reopen or replay this session.
+    pub(crate) fn with_inventory(&self, inventory: appa_runtime_api::inventory::ToolInventory) -> Result<Self, String> {
+        let mut document: toml::Value =
+            toml::from_str(std::str::from_utf8(self.policy.bytes()).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+        document.as_table_mut().ok_or("policy document is not a table")?.insert(
+            "appa_inventory".into(),
+            toml::Value::try_from(&inventory).map_err(|error| error.to_string())?,
+        );
+        let mut config = self.clone();
+        config.policy = PolicyFile::new(
+            toml::to_string(&document)
+                .map_err(|error| error.to_string())?
+                .into_bytes(),
+            self.policy.value.clone(),
+        );
+        config.inventory = inventory;
+        Ok(config)
     }
 
     pub fn included_batteries(&self) -> &[String] {
@@ -831,6 +890,8 @@ impl Config {
         };
         Ok(Config {
             policy: PolicyFile::new(text.into_bytes(), raw.policy),
+            server_aliases: raw.server_aliases,
+            inventory: raw.appa_inventory,
             reporting,
             included_batteries,
             externals: Externals {
@@ -1017,8 +1078,19 @@ fn policy_version(policy: &toml::Value) -> Option<i64> {
     policy.as_table()?.get("version")?.as_integer()
 }
 
+/// Resolve root command origins without reading their working directories.
+/// The caller supplies the absolute directory of the declaring root config.
+pub(crate) fn root_command_directories(
+    text: &str,
+    source_dir: &Path,
+) -> Result<BTreeMap<String, PathBuf>, ConfigError> {
+    let root: RawConfig = toml::from_str(text).map_err(|source| ConfigError::UnparsablePolicy { source })?;
+    root_command_origins(&root, source_dir)
+}
+
 /// The working directory of every command entry the root declares: the root's own
-/// directory, or — for stored composed bytes — the directory the metadata recorded.
+/// directory, or the directory its metadata recorded. Included commands acquire
+/// their own origins during composition and are not keys in this root map.
 fn root_command_origins(root: &RawConfig, source_dir: &Path) -> Result<BTreeMap<String, PathBuf>, ConfigError> {
     let commands = root.externals.command_keys();
     let Some(metadata) = &root.appa_composed else {
@@ -1472,6 +1544,98 @@ fn is_loopback(url: &reqwest::Url) -> bool {
 mod tests {
     use super::*;
 
+    const BUNDLE_ROOT: &str = "[policy]\nversion=2\n[externals]\ntimeout_ms=5000\nmax_body_bytes=65536\n";
+
+    #[test]
+    fn bundle_files_do_not_change_policy_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, BUNDLE_ROOT).unwrap();
+        let before = Config::load(&path).unwrap();
+        std::fs::write(
+            &path,
+            format!("{BUNDLE_ROOT}[bundle]\nfiles=[\"local.py\", \"../shared/data.json\"]\n"),
+        )
+        .unwrap();
+        let after = Config::load(&path).unwrap();
+        assert_eq!(before.policy_file().bytes(), after.policy_file().bytes());
+        assert!(!String::from_utf8_lossy(after.policy_file().bytes()).contains("bundle"));
+    }
+
+    #[test]
+    fn bundle_files_reject_unknown_types_and_unsafe_source_paths() {
+        for table in [
+            "file=[]",
+            "files=\"helper.py\"",
+            "files=[1]",
+            "files=[\"\"]",
+            "files=[\"/absolute.py\"]",
+            "files=['C:/helper.py']",
+            "files=['C:helper.py']",
+            "files=['helper\\file.py']",
+            "files=['helper.py', 'helper.py']",
+        ] {
+            let text = format!("{BUNDLE_ROOT}[bundle]\n{table}\n");
+            assert!(toml::from_str::<RawConfig>(&text).is_err(), "accepted {table}");
+        }
+        assert!(toml::from_str::<RawConfig>(&format!("{BUNDLE_ROOT}[bundle]\n")).is_ok());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("appa.toml"),
+            format!("include=['included.toml']\n{BUNDLE_ROOT}"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("included.toml"),
+            "[policy]\nversion=2\n[bundle]\nfiles=[]\n",
+        )
+        .unwrap();
+        assert!(
+            matches!(Config::load(&dir.path().join("appa.toml")), Err(ConfigError::IncludedTopLevel { field, .. }) if field == "bundle")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn root_command_metadata_and_include_origins_compose() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_dir = dir.path().canonicalize().unwrap();
+        let command_dir = root_dir.join("snapshot-root");
+        let included_dir = root_dir.join("shared");
+        std::fs::create_dir(&included_dir).unwrap();
+        std::fs::write(
+            included_dir.join("policy.toml"),
+            "[policy]\nversion=2\n[externals.sanitizers.shared]\ncommand=['python3','helper.py']\n",
+        )
+        .unwrap();
+        let text = format!(
+            "include=['shared/policy.toml']\n{BUNDLE_ROOT}[externals.annotators.root]\ncommand=['python3','root.py']\n[appa_composed.command_cwd]\n'annotators.root'={}\n",
+            toml::Value::String(command_dir.to_str().unwrap().to_owned())
+        );
+        let origins = root_command_directories(&text, &root_dir).unwrap();
+        assert_eq!(
+            origins,
+            BTreeMap::from([("annotators.root".to_owned(), command_dir.clone())])
+        );
+        // No filesystem access to the recorded cwd is needed for composition.
+        assert!(!command_dir.exists());
+        std::fs::write(root_dir.join("appa.toml"), &text).unwrap();
+        let config = Config::load(&root_dir.join("appa.toml")).unwrap();
+        let AnnotatorImplementation::Command(root) = &config.externals.annotators["root"] else {
+            panic!("root command missing")
+        };
+        let Implementation::Command(shared) = &config.externals.sanitizers["shared"] else {
+            panic!("included command missing")
+        };
+        assert_eq!(root.cwd, command_dir);
+        assert_eq!(shared.cwd, included_dir);
+        let mismatched = text.replace("'annotators.root'=", "'sanitizers.shared'=");
+        assert!(matches!(
+            root_command_directories(&mismatched, &root_dir),
+            Err(ConfigError::InvalidComposedMetadata { .. })
+        ));
+    }
+
     const MINIMAL: &str = r#"
         [policy]
         anything = "the runtime does not interpret this"
@@ -1495,7 +1659,8 @@ mod tests {
     /// The transport one resolved entry selected, the same view over every section.
     enum Bound<'a> {
         Url,
-        Command(&'a ResolverCommand),
+        // Config rejects command bindings on non-Unix hosts.
+        Command(#[cfg_attr(not(unix), allow(dead_code))] &'a ResolverCommand),
         Builtin(&'a str),
     }
 

@@ -46,6 +46,20 @@ must_not_contain() {
   fi
 }
 
+must_refuse() {
+  reason=$1
+  shift
+  if render "$@"; then
+    echo "render unexpectedly accepted: $*" >&2
+    exit 1
+  fi
+  if [ -n "$reason" ] && ! grep -F -q -- "$reason" "$work/err"; then
+    echo "render refusal did not contain '$reason'" >&2
+    cat "$work/err" >&2
+    exit 1
+  fi
+}
+
 must_render
 expect 1 '^kind: Deployment$'
 expect 1 '^kind: Service$'
@@ -82,6 +96,8 @@ must_not_contain 'appa-guide-command'
 must_not_contain 'k8s_execute_command'
 must_contain 'name: APPA_CONFIG'
 must_contain 'value: "/etc/appa/appa.toml"'
+must_contain 'workingDir: /etc/appa'
+must_contain 'mode: 0444'
 must_contain 'name: APPA_GUIDE_RUNTIME_URL'
 must_contain 'value: "http://127.0.0.1:18787"'
 must_contain 'name: APPA_PERSISTENCE_ENABLED'
@@ -181,6 +197,63 @@ must_contain 'name: APPA_RUNTIME_RELEASE_NAME'
 must_not_contain 'name: appa-runtime-policy'
 must_not_contain 'checksum/policy:'
 must_not_contain 'appa.dev/packaged-policy-sha256:'
+
+# Complete small trees preserve relative paths and executable intent. Hashed
+# ConfigMap keys do not leak into the mounted filenames.
+tree='{"rules/policy.toml":{"data":"YWJj","executable":false},".appa/helpers/run":{"data":"IyEvYmluL3NoCg==","executable":true},"empty":{"data":"","executable":false}}'
+must_render --set-json "config.files=$tree"
+must_contain 'binaryData:'
+must_contain 'path: "rules/policy.toml"'
+must_contain 'path: ".appa/helpers/run"'
+must_contain 'path: "empty"'
+must_contain 'mode: 0555'
+expect 3 '^  "[a-f0-9]{64}":'
+checksum=$(grep 'checksum/policy:' "$work/out")
+must_render --set-json 'config.files={"rules/policy.toml":{"data":"YWJj","executable":true}}'
+other_checksum=$(grep 'checksum/policy:' "$work/out")
+[ "$checksum" != "$other_checksum" ] || { echo 'files did not affect checksum' >&2; exit 1; }
+checksum=$other_checksum
+must_render --set-json 'config.files={"rules/policy.toml":{"data":"YWJj","executable":false}}'
+[ "$checksum" != "$(grep 'checksum/policy:' "$work/out")" ] || { echo 'mode did not affect checksum' >&2; exit 1; }
+
+# A large tree is populated outside Helm and mounted read-only. This is not
+# the writable trajectory-data claim and does not create or populate a PVC.
+must_render --set config.existingClaim=prepared-tree --set config.key=policy.toml
+must_contain 'claimName: "prepared-tree"'
+must_contain 'readOnly: true'
+must_contain '/etc/appa/policy.toml'
+must_not_contain 'kind: ConfigMap'
+must_not_contain 'kind: PersistentVolumeClaim'
+must_not_contain 'checksum/policy:'
+must_refuse 'mutually exclusive' --set config.existingClaim=tree --set config.contents=policy
+must_refuse 'mutually exclusive' --set config.existingClaim=tree --set config.existingConfigMap=policy
+must_refuse 'mutually exclusive' --set config.existingClaim=tree --set-json "config.files=$tree"
+must_refuse 'appaGuide requires a policy ConfigMap' --set config.existingClaim=tree --set appaGuide.enabled=true
+must_refuse 'requires a chart-managed ConfigMap' --set config.existingConfigMap=policy --set-json "config.files=$tree"
+
+for path in '' '/absolute' 'a//b' 'a/' '.' '../x' 'a/./b' 'a/../b' '..data/x' 'a/..reserved' 'C:/x' 'a:b'; do
+  must_refuse 'not a safe relative path' --set-json "config.files={\"$path\":{\"data\":\"\",\"executable\":false}}"
+done
+must_refuse 'not a safe relative path' --set-json 'config.files={"a\\b":{"data":"","executable":false}}'
+must_refuse 'not a safe relative path' --set-json 'config.files={"a\nb":{"data":"","executable":false}}'
+must_refuse 'collides with config.key' --set-json 'config.files={"appa.toml":{"data":"","executable":false}}'
+must_refuse 'collides with a generated config.files ConfigMap key' \
+  --set-string config.key=2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881 \
+  --set-json 'config.files={"x":{"data":"","executable":false}}'
+must_refuse 'has a file as its parent' --set-json 'config.files={"appa.toml/x":{"data":"","executable":false}}'
+must_refuse 'has a file as its parent' --set-json 'config.files={"a":{"data":"","executable":false},"a/b":{"data":"","executable":false}}'
+for data in '!' 'YQ' 'YQ===' 'YR=='; do
+  must_refuse 'must be canonical base64' --set-json "config.files={\"x\":{\"data\":\"$data\",\"executable\":false}}"
+done
+must_refuse 'config.key must be a single safe ConfigMap key' --set-string config.key=../root
+# Helm versions use different JSON Schema validators and diagnostic prose.
+# These cases assert the contract (refusal), not a validator's wording.
+must_refuse '' --set-json 'config.files={"x":{"data":42,"executable":false}}'
+must_refuse '' --set-json 'config.files={"x":{"data":"","executable":"false"}}'
+must_refuse '' --set-json 'config.files={"x":{"data":""}}'
+# Valid canonical base64 exceeding the encoded budget (without huge argv).
+awk 'BEGIN { printf "config:\n  files:\n    large:\n      executable: false\n      data: \""; for (i=0; i<192000; i++) printf "AAAA"; print "\"" }' >"$work/large.yaml"
+must_refuse 'exceeds the 750 KiB encoded budget' -f "$work/large.yaml"
 
 printf '%s\n' 'include = ["batteries/slack/appa.toml"]' >"$work/policy.toml"
 must_render --set-file config.contents="$work/policy.toml"

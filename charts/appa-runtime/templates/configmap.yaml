@@ -1,4 +1,4 @@
-{{- if not .Values.config.existingConfigMap }}
+{{- if not (or .Values.config.existingConfigMap .Values.config.existingClaim) }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -12,6 +12,12 @@ metadata:
     appa.dev/packaged-policy-sha256: {{ $policyHash | quote }}
   {{- end }}
 data:
-  {{ .Values.config.key }}: |
+  {{ .Values.config.key | quote }}: |
 {{ include "appa-runtime.managedPolicy" . | indent 4 }}
+{{- with .Values.config.files }}
+binaryData:
+  {{- range $path, $file := . }}
+  {{ $path | sha256sum | quote }}: {{ $file.data | quote }}
+  {{- end }}
+{{- end }}
 {{- end }}

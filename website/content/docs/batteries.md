@@ -56,13 +56,13 @@ In this example, the Slack battery requires human approval for every message. Th
 ```toml
 # root config: trusted messages go to the engineering channel without a question
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_send_message(channel_id:C0ABC*)"
+name = "mcp/claude_ai_Slack/slack_send_message(channel_id:C0ABC*)"
 requires = { trust = "trusted" }
 delta = {}
 
 # included battery: everything else needs fresh human approval
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_send_message"
+name = "mcp/claude_ai_Slack/slack_send_message"
 requires = { trust = "trusted", attention = ["hitl"] }
 delta = {}
 ```
@@ -72,12 +72,12 @@ In another example, the battery labels all Slack history `internal`. A root rule
 ```toml
 # root config: a shared channel may contain outsiders' words
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_read_channel(channel_id:C0SHARED*)"
+name = "mcp/claude_ai_Slack/slack_read_channel(channel_id:C0SHARED*)"
 delta = { trust = "suspicious", audience = ["internal"] }
 
 # included battery: every other channel is internal and keeps its trust
 [[policy.tool]]
-name = "mcp__claude_ai_Slack__slack_read_channel"
+name = "mcp/claude_ai_Slack/slack_read_channel"
 delta = { audience = ["internal"] }
 ```
 
@@ -94,7 +94,7 @@ audiences = []
 marks = ["hitl"]
 
 [[policy.tool]]
-name = "Read"
+name = "host/claude-code/Read"
 annotator = "approve-hidden-file-read"
 
 [externals.annotators.approve-hidden-file-read]
@@ -109,7 +109,7 @@ This example uses `remove-email-addresses`. It calls a local Python script that 
 
 ```toml
 [[policy.tool]]
-name = "SendMessage"
+name = "mcp/messaging/SendMessage"
 tags = ["messages"]
 requires = { audience = { contains = ["public"] } }
 delta = {}
@@ -140,7 +140,7 @@ name = "approve-small-payment"
 attention = ["payment-approval"]
 
 [[policy.tool]]
-name = "SendPayment"
+name = "mcp/payments/SendPayment"
 requires = { attention = ["payment-approval"] }
 delta = {}
 
@@ -162,12 +162,12 @@ include = [
 version = 2
 
 [[policy.tool]]
-name = "Bash(command:kubectl)"
+name = "host/claude-code/Bash(command:kubectl)"
 requires = { attention = ["blocked"] }
 delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.tool]]
-name = "Bash(command:kubectl *)"
+name = "host/claude-code/Bash(command:kubectl *)"
 requires = { attention = ["blocked"] }
 delta = { trust = "suspicious", audience = ["internal"] }
 
@@ -178,7 +178,7 @@ audiences = []
 marks = ["hitl"]
 
 [[policy.tool]]
-name = "Read"
+name = "host/claude-code/Read"
 annotator = "local.read-sensitivity"
 
 [externals.annotators."local.read-sensitivity"]
@@ -187,6 +187,6 @@ command = ["python3", "./local/read-sensitivity.py"]
 
 No authority permits `blocked`, so both `kubectl` contracts have no remedy.
 Every other Bash call reaches the battery's model annotator. The root also
-replaces the battery's `Read` rules with a local script.
+replaces the battery's `host/claude-code/Read` rules with a local script.
 
 The battery files stay unchanged.

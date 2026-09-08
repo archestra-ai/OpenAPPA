@@ -33,16 +33,23 @@ This guide shows MCP server authors how to create and publish a battery for thei
 
 ## Add the battery files
 
-Create a folder under `batteries/`:
+Create a folder under `marketplace/batteries/`:
 
 ```text
-batteries/
+marketplace/batteries/
 `-- your-server/
     |-- README.md
+    |-- appa-package.toml
     |-- appa.toml
     |-- annotator.py
     `-- test_annotator.py
 ```
+
+`appa-package.toml` is the package manifest: the battery's name and
+description, the policy file, the hosts it is composed with, and the helper
+scripts its bindings name. Run `bash scripts/appa-marketplace.sh` to generate
+the catalog entry and content digest, then commit `marketplace/marketplace.toml`
+with the package. CI checks that the generated catalog is current.
 
 `appa.toml` contains the tool contracts. Add an annotator when a contract depends on the call's arguments. Add an audience source when the service's users or groups define who can receive data.
 
@@ -63,7 +70,7 @@ Test expected input, invalid input, provider errors, and missing data.
 For example, to test a Python battery:
 
 ```sh
-python3 -m unittest discover -s batteries/your-server -p 'test_*.py'
+python3 -m unittest discover -s marketplace/batteries/your-server -p 'test_*.py'
 ```
 
 After you add the battery to `examples/claude-code-battery/appa.toml`, check that the complete config still loads:
@@ -72,7 +79,7 @@ After you add the battery to `examples/claude-code-battery/appa.toml`, check tha
 cargo test -p appa --test examples_load
 ```
 
-This test detects invalid battery config and conflicts with other included batteries. CI also runs Python tests under `batteries/*/test_*.py`.
+This test detects invalid battery config and conflicts with other included batteries. CI also runs Python tests under `marketplace/batteries/*/test_*.py`.
 
 ### Integration test
 
@@ -96,7 +103,7 @@ ranks = ["suspicious"]
 audiences = ["github:internal"]
 
 [[policy.tool]]
-name = "mcp__github__get_file_contents"
+name = "mcp/github/get_file_contents"
 annotator = "github.repository-visibility"
 
 [externals.annotators."github.repository-visibility"]
@@ -117,13 +124,13 @@ trust_chain = ["suspicious", "trusted"]
 
 # This tool tests the trust change from the GitHub result.
 [[policy.tool]]
-name = "RunCommand"
+name = "mcp/shell/run_command"
 requires = { trust = "trusted" }
 delta = {}
 
 # This tool tests who can receive the GitHub result.
 [[policy.tool]]
-name = "Send"
+name = "mcp/mail/send"
 requires = { trust = "suspicious", audience = { contains = ["$to"] } }
 delta = {}
 
@@ -143,7 +150,7 @@ The `github-repository-visibility.appa` trace uses one public repository and one
 
 ```appa
 # Public repository content is suspicious, but it can remain public.
-mcp__github__get_file_contents {
+mcp/github/get_file_contents {
   owner: "your-org"
   repo: "your-public-repo"
   path: "README.md"
@@ -151,19 +158,19 @@ mcp__github__get_file_contents {
 expect allow
 
 # Suspicious content cannot enter a tool that requires trusted input.
-RunCommand {
+mcp/shell/run_command {
   command: "deploy"
 }
 expect deny
 
 # Public repository content can go to a public destination.
-Send {
+mcp/mail/send {
   to: "public"
 }
 expect allow
 
 # Private repository content narrows the audience.
-mcp__github__get_file_contents {
+mcp/github/get_file_contents {
   owner: "your-org"
   repo: "your-private-repo"
   path: "README.md"
@@ -171,13 +178,13 @@ mcp__github__get_file_contents {
 expect allow
 
 # Private repository content cannot go to a public destination.
-Send {
+mcp/mail/send {
   to: "public"
 }
 expect deny
 
 # The configured private-repository audience can receive the content.
-Send {
+mcp/mail/send {
   to: "github:internal"
 }
 expect allow
@@ -209,7 +216,7 @@ Open a pull request against `archestra-ai/OpenAPPA` `main`. Include:
 The pull request is ready for review when:
 
 1. Repository CI passes.
-2. Every contract uses the exact tool name and arguments from that server version.
+2. Every contract uses the canonical tool id (`mcp/<server>/<tool>`) and the exact arguments from that server version.
 3. Every script passes its tests and refuses invalid input.
 4. The test that loads all batteries passes.
 5. The catalogue card opens the battery documentation page.

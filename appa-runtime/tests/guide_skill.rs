@@ -90,7 +90,7 @@ fn the_kagent_reference_carries_the_full_flow() {
         "status.discoveredTools",
         "k8s_get_resource_yaml",
         "k8s_apply_manifest",
-        "__NS__",
+        "agent/<namespace>/<name>",
         "Approve/Reject card",
         "Never say the card remains open",
         "runtime mode is the only supported deployment",
@@ -218,15 +218,16 @@ fn only_the_runtime_chart_consumes_this_skill_package() {
     let policy = fs::read_to_string(demo.join("files/demo.appa.toml")).expect("the demo policy exists");
     assert!(policy.contains("name = \"k8s_apply_manifest\""));
     assert!(policy.contains("attention = [\"human-approval\"]"));
-    assert!(policy.contains("name = \"skills\""));
+    assert!(policy.contains("name = \"host/kagent/skills\""));
     assert!(
-        !policy.contains("name = \"bash\""),
+        !policy.contains("name = \"host/kagent/bash\""),
         "the unused skill helpers stay undeclared"
     );
 
-    let github = fs::read_to_string(root.join("batteries/github/appa.toml")).expect("the GitHub battery exists");
-    assert!(github.contains("name = \"mcp__github__get_file_contents\""));
-    assert!(github.contains("name = \"mcp__github__issue_write\""));
+    let github =
+        fs::read_to_string(root.join("marketplace/batteries/github/appa.toml")).expect("the GitHub battery exists");
+    assert!(github.contains("name = \"mcp/github/get_file_contents\""));
+    assert!(github.contains("name = \"mcp/github/issue_write\""));
     assert!(!github.contains("name = \"get_file_contents\""));
     assert!(!github.contains("name = \"issue_write\""));
 }
@@ -251,14 +252,17 @@ fn kagent_runtime_management_is_typed_vouched_and_least_privilege() {
         assert!(!policy.contains("k8s_get_resources(resource_type:configmap)"));
         assert!(!policy.contains("name = \"k8s_execute_command\""));
         assert!(!policy.contains("k8s_get_resource_yaml(resource_type:configmap)"));
-        for tool in ["appa_get_runtime_state", "appa_match_batteries"] {
+        for tool in [
+            "mcp/appa-guide/appa_get_runtime_state",
+            "mcp/appa-guide/appa_match_batteries",
+        ] {
             assert!(policy.contains(&format!("name = \"{tool}\"")));
         }
         for tool in [
-            "appa_include_battery",
-            "appa_update_policy",
-            "appa_reload_policy",
-            "appa_refresh_batteries",
+            "mcp/appa-guide/appa_include_battery",
+            "mcp/appa-guide/appa_update_policy",
+            "mcp/appa-guide/appa_reload_policy",
+            "mcp/appa-guide/appa_refresh_batteries",
         ] {
             let declaration = policy
                 .split("[[policy.tool]]")
@@ -290,7 +294,7 @@ fn kagent_runtime_management_is_typed_vouched_and_least_privilege() {
 fn the_claude_plugin_has_no_second_source_copy() {
     assert!(
         !repo_root()
-            .join("integrations/claude-code/plugin/skills/appa-guide")
+            .join("marketplace/plugins/claude-code/plugin/skills/appa-guide")
             .exists(),
         "the Claude plugin materializes the canonical skill at staging time; a source copy would drift"
     );

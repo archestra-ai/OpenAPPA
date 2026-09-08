@@ -1,27 +1,27 @@
 # A public read is safe. HR data must go through the redactor before an email.
-Read {
+mcp/files/read {
   path: "/docs/handbook.md"
 }
 expect allow
 
-Email {
+mcp/mail/send {
   to: "x@other.com"
   body: "the handbook"
 }
 expect allow
 
-Read {
+mcp/files/read {
   path: "/hr/salaries.csv"
 }
 expect allow
 
-Email {
+mcp/mail/send {
   to: "x@other.com"
   body: "see attached"
 }
 expect sanitizer redactor
 
-Email {
+mcp/mail/send {
   to: "y@other.com"
   body: "and this"
 }

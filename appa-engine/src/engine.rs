@@ -111,7 +111,8 @@ impl Engine {
     pub fn open_vectors(&self) -> Vec<OpenVector> {
         let tools = self
             .registry
-            .tool_names()
+            .tools()
+            .map(|declaration| declaration.name())
             .chain(self.registry.provider_run_annotations().map(|tool| &tool.name));
         profile::derive_open_vectors(self.profile(), tools)
     }
@@ -3192,7 +3193,7 @@ mod tests {
     /// The policy's wildcard: `name = "*"`, no metadata, routed through `by`.
     fn wildcard(by: &str) -> crate::contract::ToolDeclaration {
         crate::contract::ToolDeclaration::Annotated {
-            name: ToolName::new(crate::registry::WILDCARD_TOOL_NAME),
+            name: ToolName::new(crate::registry::WILDCARD_SPELLING),
             tags: vec![],
             description: None,
             parameters: crate::params::ToolParameters::open(),
@@ -9439,6 +9440,40 @@ mod tests {
             covered.validate_replay(&forged_ordinal),
             Err(TransitionRefusal::MisdecidedBatch)
         );
+    }
+
+    #[test]
+    fn replay_rejects_a_dispatch_switched_to_a_later_overlapping_contract() {
+        let e = engine(vec![plain_tool("mcp/*/read"), plain_tool("mcp/demo/read")]);
+        let records = vec![opened(&e)];
+        let view = e.view(&traj(), records.clone(), 1).unwrap();
+        let call = e.resolve_call(ToolName::new("mcp/demo/read"), b"{}").unwrap();
+        let decision = e
+            .handle(
+                &view,
+                EngineEvent::Proposals(ProposalBatch {
+                    id: crate::transition::ProposalBatchId::new("overlap"),
+                    trajectory: traj(),
+                    provider_results: Vec::new(),
+                    proposals: vec![raw(&call)],
+                    spawn: None,
+                    offer_nonce: nonce(),
+                    evidence: Vec::new(),
+                    audience: crate::audience::AudienceEvidence::default(),
+                }),
+            )
+            .unwrap();
+        let mut log = [records, decision.append.unwrap().into_unsealed()].concat();
+        e.validate_replay(&log).unwrap();
+        let mut changed = false;
+        for fact in &mut log {
+            if let Fact::DispatchOpened { declaration, .. } = fact {
+                *declaration = crate::value::ToolDeclarationId::new(1).unwrap();
+                changed = true;
+            }
+        }
+        assert!(changed);
+        assert_eq!(e.validate_replay(&log), Err(TransitionRefusal::UnbackedDecision));
     }
 
     #[test]
