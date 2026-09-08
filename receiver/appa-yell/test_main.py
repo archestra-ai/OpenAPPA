@@ -16,6 +16,8 @@ from pathlib import Path
 
 import functions_framework
 import pytest
+from flask import Request
+from werkzeug.test import EnvironBuilder
 
 import main
 
@@ -235,29 +237,43 @@ def test_the_salt_is_the_one_the_client_compiles_in():
     assert compiled == (Path(__file__).parent / "salt.txt").resolve()
 
 
-def test_format_slack_message_with_empty_trajectory():
-    doc = one_report(message="something broke", trajectory={"omitted_reason": "no_recent_trajectory"})
-    msg = main.format_slack_message(doc, "abcd1234abcd", "release", "test-bucket")
-    assert msg.startswith("something broke\n\n")
-    assert "*Trajectory*: no" in msg
+@pytest.mark.parametrize(
+    ("trajectory", "expected_status"),
+    [
+        ({"omitted_reason": "no_recent_trajectory"}, "no"),
+        ({"facts": [{"seq": 1}], "runtime_events": [{"event": "x"}]}, "yes"),
+    ],
+)
+def test_format_slack_payload_structure(trajectory, expected_status):
+    doc = one_report(message="something broke", trajectory=trajectory)
+    payload = main.format_slack_payload(doc, "abcd1234abcd", "release", "test-bucket")
+
+    # The caller message sits in a plain_text section block (no mrkdwn, no mention parsing)
+    assert payload["blocks"][0]["type"] == "section"
+    assert payload["blocks"][0]["text"] == {"type": "plain_text", "text": "something broke", "emoji": False}
+
+    # The context footer carries metadata and the GCS object link
+    context = payload["blocks"][1]["elements"][0]["text"]
+    assert f"*Trajectory*: {expected_status}" in context
     expected_url = (
         "https://console.cloud.google.com/storage/browser/_details/test-bucket/reports/release/abcd1234abcd.json.gz"
     )
-    assert f"*Gzip*: <{expected_url}|reports/release/abcd1234abcd.json.gz>" in msg
+    assert f"<{expected_url}|reports/release/abcd1234abcd.json.gz>" in context
 
 
-def test_format_slack_message_with_non_empty_trajectory():
-    doc = one_report(
-        message="tool failed",
-        trajectory={"facts": [{"seq": 1}], "runtime_events": [{"event": "x"}]},
+def test_sanitize_message_for_slack_breaks_mentions_and_truncates():
+    # Mentions are broken with zero-width space
+    assert (
+        main.sanitize_message_for_slack("@channel test @here <@U123>")
+        == "@\u200bchannel test @\u200bhere <@\u200bU123>"
     )
-    msg = main.format_slack_message(doc, "11223344", "commit", "test-bucket")
-    assert msg.startswith("tool failed\n\n")
-    assert "*Trajectory*: yes" in msg
-    expected_url = (
-        "https://console.cloud.google.com/storage/browser/_details/test-bucket/reports/commit/11223344.json.gz"
-    )
-    assert f"*Gzip*: <{expected_url}|reports/commit/11223344.json.gz>" in msg
+    assert main.sanitize_message_for_slack("   ") == "(empty message)"
+
+    # Oversized messages are truncated to avoid Block Kit limit
+    long_msg = "x" * 3000
+    sanitized = main.sanitize_message_for_slack(long_msg)
+    assert len(sanitized) < 3000
+    assert sanitized.endswith("… (truncated)")
 
 
 def test_notify_slack_sends_payload_when_configured(monkeypatch):
@@ -277,29 +293,61 @@ def test_notify_slack_sends_payload_when_configured(monkeypatch):
     monkeypatch.setenv("APPA_YELL_SLACK_WEBHOOK", "https://hooks.slack.com/services/T/B/X")
     monkeypatch.setenv("APPA_YELL_BUCKET", "my-reports")
     monkeypatch.setattr(main.urllib.request, "urlopen", dummy_urlopen)
+    monkeypatch.setattr(main, "_allow_slack_dispatch", lambda: True)
 
     doc = one_report(message="alert test", trajectory={"omitted_reason": "none"})
-    main.notify_slack(doc, "deadbeef", "release")
+    assert main.notify_slack(doc, "deadbeef", "release") is True
 
     assert len(sent) == 1
     req, timeout = sent[0]
     assert req.full_url == "https://hooks.slack.com/services/T/B/X"
-    assert timeout == 3
+    assert timeout == 1.5
     body = json.loads(req.data.decode("utf-8"))
-    assert "alert test" in body["text"]
-    assert "*Trajectory*: no" in body["text"]
-    expected_link = (
-        "https://console.cloud.google.com/storage/browser/_details/my-reports/reports/release/deadbeef.json.gz"
-    )
-    assert expected_link in body["text"]
+    assert body == main.format_slack_payload(doc, "deadbeef", "release", "my-reports")
 
 
 def test_notify_slack_silent_when_not_configured(monkeypatch):
     called = []
     monkeypatch.delenv("APPA_YELL_SLACK_WEBHOOK", raising=False)
     monkeypatch.setattr(main.urllib.request, "urlopen", lambda *a, **kw: called.append(True))
-    main.notify_slack(one_report(), "deadbeef", "release")
+    assert main.notify_slack(one_report(), "deadbeef", "release") is False
     assert not called
+
+
+def test_notify_slack_skips_when_bucket_unset(monkeypatch):
+    called = []
+    monkeypatch.setenv("APPA_YELL_SLACK_WEBHOOK", "https://hooks.slack.com/services/T/B/X")
+    monkeypatch.delenv("APPA_YELL_BUCKET", raising=False)
+    monkeypatch.setattr(main.urllib.request, "urlopen", lambda *a, **kw: called.append(True))
+    assert main.notify_slack(one_report(), "deadbeef", "release") is False
+    assert not called
+
+
+def test_notify_slack_rate_limiting(monkeypatch):
+    dispatched = []
+
+    class DummyResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setenv("APPA_YELL_SLACK_WEBHOOK", "https://hooks.slack.com/services/T/B/X")
+    monkeypatch.setenv("APPA_YELL_BUCKET", "my-reports")
+    monkeypatch.setattr(main.urllib.request, "urlopen", lambda *a, **kw: DummyResponse())
+
+    with main._SLACK_LOCK:
+        main._SLACK_DISPATCH_TIMESTAMPS.clear()
+
+    doc = one_report(message="spam")
+    for _ in range(main.SLACK_RATE_LIMIT_BURST):
+        dispatched.append(main.notify_slack(doc, "d1", "release"))
+    # One more within window must be rejected by rate limiter
+    rejected = main.notify_slack(doc, "d2", "release")
+
+    assert all(dispatched)
+    assert rejected is False
 
 
 def test_notify_slack_failure_does_not_raise(monkeypatch):
@@ -307,6 +355,48 @@ def test_notify_slack_failure_does_not_raise(monkeypatch):
         raise OSError("connection error")
 
     monkeypatch.setenv("APPA_YELL_SLACK_WEBHOOK", "https://hooks.slack.com/services/T/B/X")
+    monkeypatch.setenv("APPA_YELL_BUCKET", "my-reports")
     monkeypatch.setattr(main.urllib.request, "urlopen", failing_urlopen)
+    monkeypatch.setattr(main, "_allow_slack_dispatch", lambda: True)
+
     # Must not raise
-    main.notify_slack(one_report(), "deadbeef", "release")
+    assert main.notify_slack(one_report(), "deadbeef", "release") is False
+
+
+def _make_post_request(doc: dict) -> Request:
+    plain = json.dumps(doc).encode()
+    sig = "v1=" + hmac.new(main.SALT, plain, hashlib.sha256).hexdigest()
+    builder = EnvironBuilder(
+        method="POST",
+        data=gzip.compress(plain),
+        headers={
+            "Content-Type": "application/json",
+            "Content-Encoding": "gzip",
+            "X-Appa-Signature": sig,
+        },
+    )
+    return Request(builder.get_environ())
+
+
+def test_receive_dispatches_slack_on_new_report(monkeypatch):
+    dispatched = []
+    monkeypatch.setattr(main, "store", lambda plain, compressed, kind: ("fake-digest-1234", False))
+    monkeypatch.setattr(main, "notify_slack", lambda doc, digest, kind: dispatched.append((digest, kind)))
+
+    doc = one_report()
+    body, status, headers = main.receive(_make_post_request(doc))
+    assert status == 200
+    assert body["receipt_id"] == "r-fake-digest-1234"
+    assert dispatched == [("fake-digest-1234", "local")]
+
+
+def test_receive_skips_slack_on_duplicate(monkeypatch):
+    dispatched = []
+    monkeypatch.setattr(main, "store", lambda plain, compressed, kind: ("fake-digest-1234", True))
+    monkeypatch.setattr(main, "notify_slack", lambda doc, digest, kind: dispatched.append((digest, kind)))
+
+    doc = one_report()
+    body, status, headers = main.receive(_make_post_request(doc))
+    assert status == 200
+    assert body["duplicate"] is True
+    assert dispatched == []

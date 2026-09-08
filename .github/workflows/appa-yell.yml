@@ -65,10 +65,7 @@ jobs:
           SLACK_WEBHOOK: ${{ secrets.APPA_YELL_SLACK_WEBHOOK }}
         run: |
           # CLOUDSDK_CORE_PROJECT is set by the auth step from the deploy identity.
-          env_args=()
-          if [ -n "$SLACK_WEBHOOK" ]; then
-            env_args+=(--update-env-vars "APPA_YELL_SLACK_WEBHOOK=$SLACK_WEBHOOK")
-          fi
+          # Always set APPA_YELL_SLACK_WEBHOOK so deleting the secret clears the variable.
           gcloud functions deploy "$FUNCTION" \
             --gen2 \
             --region "$REGION" \
@@ -76,7 +73,7 @@ jobs:
             --runtime python312 \
             --entry-point receive \
             --build-service-account "projects/$CLOUDSDK_CORE_PROJECT/serviceAccounts/appa-yell-build@$CLOUDSDK_CORE_PROJECT.iam.gserviceaccount.com" \
-            "${env_args[@]}"
+            --update-env-vars "APPA_YELL_SLACK_WEBHOOK=$SLACK_WEBHOOK"
 
       - name: Smoke test the deployed endpoint
         env:
