@@ -510,14 +510,13 @@ Do not append a second summary.
 ## Explain current policy
 
 If the operator asks to view or explain the current policy (e.g. `show policy`, `explain policy`, `what is the current policy?`):
-1. First explain to the user that you are inspecting the current policy.
-2. Call `appa_get_runtime_state` to read the serving policy and included batteries.
-3. Summarize the active policy in plain English:
-   - What tools are permitted for protected agents.
-   - What tools require human approval.
-   - What tools or inputs are labeled suspicious.
-   - What batteries are included.
-Do not propose any changes or ask for approval unless the operator asks to modify a rule.
+1. First explain to the user that you are inspecting the current policy and protected agents.
+2. Call `k8s_get_resources(resource_type: "agent")` and `appa_get_runtime_state` to read the serving policy and agents.
+3. Summarize in plain, human English:
+   - **Protected agents**: List which agents are currently protected with OpenAPPA (`APPA_ENABLED=true`), such as `ops-assistant` and `appa-guide`, and note any unprotected agents.
+   - **Active policy rules**: Explain what tools are permitted, what requires human approval, and what inputs are labeled suspicious.
+   - **Included batteries**: List any included batteries (or state that none are currently included).
+Do not confuse protected agents with subagent delegations. Do not propose changes or ask for approval unless the operator asks to modify a rule.
 
 The final reply uses these headings: **Observed tools** (or **Discovered tools & agents**), **Battery
 reconciliation** (or **Policy recommendations**), **Suggested includes**, optional **Exceptions**,
