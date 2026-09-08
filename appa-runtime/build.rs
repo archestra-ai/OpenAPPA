@@ -22,10 +22,20 @@ fn main() {
     let commit = git(repository, &["rev-parse", "HEAD"]);
     let dirty = plugin_is_dirty(repository);
     if release.is_some() {
+        // Release identity covers runtime code as well as plugin mappings.
+        // Recheck on incremental release builds too, including newly added files.
+        println!("cargo:rerun-if-changed={}", repository.display());
         assert!(
-            commit.is_some() && !dirty,
+            commit.is_some()
+                && git(repository, &["status", "--porcelain=v1", "--untracked-files=all"])
+                    .is_some_and(|status| status.trim().is_empty()),
             "a release build requires a clean Git checkout"
         );
+    }
+    // A release tag locates artifacts; the commit is the marketplace generation.
+    // Emit both on release builds rather than losing the commit at the return below.
+    if !dirty && let Some(commit) = &commit {
+        println!("cargo:rustc-env=APPA_BUILD_COMMIT={commit}");
     }
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR"));
@@ -66,8 +76,7 @@ fn main() {
     println!("cargo:rustc-env=APPA_YELL_COMPILED_ENDPOINT=");
 
     match (commit, dirty) {
-        (Some(commit), false) => {
-            println!("cargo:rustc-env=APPA_BUILD_COMMIT={commit}");
+        (Some(_), false) => {
             println!("cargo:rustc-env=APPA_PLUGIN_SOURCE_KIND=commit");
         }
         _ => {

@@ -5,6 +5,7 @@
 //! It shares the protocol vocabulary with `appa-runtime-api`, but never
 //! depends on the runtime implementation, so a build script can call it.
 
+pub mod generation;
 pub mod tree;
 
 mod digest;

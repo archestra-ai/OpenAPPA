@@ -28,13 +28,12 @@ use appa_package::tree::{
 
 /// The one place a debug-only seam reads the environment.
 ///
-/// Three seams exist -- the endpoint, the release download base and the source
-/// archive base -- and each of them is this function. `[profile.release]` pins
+/// Test seams for endpoint and acquisition URLs all use this function. `[profile.release]` pins
 /// `debug-assertions = false`, so a shipped binary reads no environment here at
 /// all. The release workflow proves that on the packaged artifact by feeding it
 /// a malformed `APPA_ENDPOINT` and requiring it to be ignored; that single probe
-/// stands for all three seams only for as long as this is the only gate.
-fn debug_override(name: &str) -> Option<String> {
+/// stands for these seams only for as long as this is the only gate.
+pub(crate) fn debug_override(name: &str) -> Option<String> {
     if cfg!(debug_assertions) {
         env::var(name).ok()
     } else {
@@ -242,12 +241,49 @@ impl BuildIdentity<'static> {
 #[derive(Debug, Clone)]
 pub(crate) enum PluginSource {
     Explicit(PathBuf),
-    Release { reference: String, digest: PluginDigest },
-    Commit { commit: String, digest: PluginDigest },
-    Local { root: PathBuf, digest: PluginDigest },
+    VerifiedArchive {
+        path: PathBuf,
+        reference: String,
+        tree_digest: PluginDigest,
+    },
+    Release {
+        reference: String,
+        digest: PluginDigest,
+    },
+    Commit {
+        commit: String,
+        digest: PluginDigest,
+    },
+    Local {
+        root: PathBuf,
+        digest: PluginDigest,
+    },
 }
 
 impl PluginSource {
+    /// Offline native activation keeps this binary's compiled identity check.
+    /// The developer's Explicit override is deliberately not used here.
+    pub(crate) fn verified_archive(path: &Path) -> Result<Self, PluginBundleError> {
+        let identity = BuildIdentity::compiled()?;
+        let expected = identity.release_digest.ok_or(PluginBundleError::MissingBuildIdentity)?;
+        let actual = digest_of_file(path)?;
+        if actual != expected {
+            return Err(PluginBundleError::DigestMismatch {
+                url: path.display().to_string(),
+                expected,
+                actual,
+            });
+        }
+        Ok(Self::VerifiedArchive {
+            path: path.to_owned(),
+            reference: identity
+                .release_ref
+                .ok_or(PluginBundleError::MissingReleaseRef)?
+                .to_owned(),
+            tree_digest: identity.tree_digest.ok_or(PluginBundleError::MissingBuildIdentity)?,
+        })
+    }
+
     /// `--plugin-source` when given, otherwise this build's immutable twin.
     pub fn resolve(explicit: Option<&str>) -> Result<Self, PluginBundleError> {
         Self::decide(explicit, BuildIdentity::compiled()?)
@@ -314,8 +350,8 @@ fn strip_extended_prefix(path: &Path) -> PathBuf {
 /// Structural validation, applied identically to a `--plugin-source` tree, a
 /// freshly extracted archive, and an existing deployment considered for reuse.
 ///
-/// This checks shape, not content: a tree whose `batteries/` files were edited in
-/// place passes. Reuse pairs it with a byte comparison of the one generated file.
+/// This checks shape, not content. Reuse also compares the complete rendered
+/// tree with the freshly verified source.
 fn validate_tree(root: &Path, shape: TreeShape) -> Result<(), PluginBundleError> {
     let invalid = |reason: String| PluginBundleError::InvalidSource {
         path: root.to_path_buf(),
@@ -492,6 +528,8 @@ pub enum Population<'a> {
     Repository { root: &'a Path, expected: PluginDigest },
     /// A verified release archive, extracted.
     Archive(&'a Path),
+    /// A local archive checked against this binary's compiled source tree.
+    VerifiedArchive { path: &'a Path, expected: PluginDigest },
 }
 
 /// A published, immutable deployment directory: what Claude registers.
@@ -534,13 +572,16 @@ pub fn materialize(
                     reason: error.to_string(),
                 })?;
             }
-            Population::Archive(archive) => extract_archive(archive, &incoming)?,
+            Population::Archive(archive) | Population::VerifiedArchive { path: archive, .. } => {
+                extract_archive(archive, &incoming)?
+            }
         }
         validate_tree(&incoming, TreeShape::Source)?;
         // After staging, before rendering: the source identity must not depend
         // on the paths about to be rendered into it.
         let source_digest = canonical_source_digest(&incoming)?;
-        if let Population::Repository { root, expected } = population
+        if let Population::Repository { root, expected } | Population::VerifiedArchive { path: root, expected } =
+            population
             && source_digest != expected
         {
             return Err(PluginBundleError::SourceDigestMismatch {
@@ -570,9 +611,13 @@ pub fn materialize(
         }
     };
 
+    if let Err(error) = render(&incoming, &plan) {
+        discard_reservation(&incoming);
+        return Err(error);
+    }
     let published = deployments_dir.join(digest.to_string());
     if published.is_dir() {
-        match reusable(&published, &plan) {
+        match reusable(&published, &incoming) {
             Ok(()) => {
                 discard_reservation(&incoming);
                 return Ok(Deployment { root: published });
@@ -582,11 +627,6 @@ pub fn materialize(
                 quarantine(deployments_dir, &published)?;
             }
         }
-    }
-
-    if let Err(error) = render(&incoming, &plan) {
-        discard_reservation(&incoming);
-        return Err(error);
     }
 
     match fs::rename(&incoming, &published) {
@@ -626,20 +666,14 @@ fn discard_reservation(incoming: &Path) {
 
 /// Whether an existing deployment can be reused as-is.
 ///
-/// Structural validation plus a byte comparison of both generated files. Both
-/// are checked on every platform, not just the one whose hooks are active here:
-/// a deployment is a single artifact, and a stale PowerShell paths file would
-/// otherwise survive every rerun performed from a POSIX host. This is
-/// deliberately not a content hash of every file: a tree whose `batteries/`
-/// contents were edited in place is not detected, and init's convergence claim
-/// is scoped to match.
-fn reusable(published: &Path, plan: &DeploymentPlan) -> Result<(), String> {
+/// The source has already been verified and rendered for these exact paths.
+/// Compare every entry so edited hooks or policy cannot survive cache reuse.
+fn reusable(published: &Path, rendered: &Path) -> Result<(), String> {
     validate_tree(published, TreeShape::Deployment).map_err(|error| error.to_string())?;
-    for (name, expected) in [(PATHS_SH, paths_sh(plan)), (PATHS_PS1, paths_ps1(plan))] {
-        let current = fs::read(published.join(name)).map_err(|error| format!("{name} is unreadable: {error}"))?;
-        if current != expected.into_bytes() {
-            return Err(format!("{name} is stale"));
-        }
+    let actual = canonical_tree_digest(published).map_err(|error| error.to_string())?;
+    let expected = canonical_tree_digest(rendered).map_err(|error| error.to_string())?;
+    if actual != expected {
+        return Err("rendered deployment contents changed".into());
     }
     Ok(())
 }
@@ -719,12 +753,33 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), PluginBundleError>
 /// Unpack a verified archive. Absolute paths, `..` components and anything that
 /// is not a regular file or directory are refused; entry count and total
 /// uncompressed bytes are capped. Modes come from init, not from the archive.
-fn extract_archive(archive: &Path, destination: &Path) -> Result<(), PluginBundleError> {
+pub(crate) fn extract_archive(archive: &Path, destination: &Path) -> Result<(), PluginBundleError> {
+    extract_bounded(archive, destination, MAX_UNCOMPRESSED_BYTES, MAX_ENTRIES)
+}
+
+pub(crate) fn extract_bundle_archive(archive: &Path, destination: &Path) -> Result<(), PluginBundleError> {
+    // A complete marketplace may already use its entry allowance. The bundle
+    // adds its descriptor, selection, config, artifact files and directories.
+    extract_bounded(archive, destination, 512 * 1024 * 1024, MAX_ENTRIES + 32)
+}
+
+fn extract_bounded(
+    archive: &Path,
+    destination: &Path,
+    max_bytes: u64,
+    max_entries: usize,
+) -> Result<(), PluginBundleError> {
     let file = fs::File::open(archive).map_err(|source| PluginBundleError::ReadSource {
         path: archive.to_path_buf(),
         source,
     })?;
-    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    // Include headers/padding in a second bound, including PAX records the tar
+    // reader consumes internally before yielding a regular entry.
+    let decoded = std::io::Read::take(
+        flate2::read::GzDecoder::new(file),
+        max_bytes + (max_entries as u64 * 1024),
+    );
+    let mut tar = tar::Archive::new(decoded);
     let malformed = |reason: String| PluginBundleError::MalformedArchive {
         path: archive.to_path_buf(),
         reason,
@@ -735,17 +790,16 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), PluginBundl
 
     let mut count = 0usize;
     let mut total = 0u64;
+    let mut seen = std::collections::BTreeSet::new();
     for entry in entries {
         let mut entry = entry.map_err(|error| malformed(format!("unreadable entry: {error}")))?;
         count += 1;
-        if count > MAX_ENTRIES {
-            return Err(malformed(format!("it holds more than {MAX_ENTRIES} entries")));
+        if count > max_entries {
+            return Err(malformed(format!("it holds more than {max_entries} entries")));
         }
         total = total.saturating_add(entry.size());
-        if total > MAX_UNCOMPRESSED_BYTES {
-            return Err(malformed(format!(
-                "it unpacks to more than {MAX_UNCOMPRESSED_BYTES} bytes"
-            )));
+        if total > max_bytes {
+            return Err(malformed(format!("it unpacks to more than {max_bytes} bytes")));
         }
 
         let kind = entry.header().entry_type();
@@ -763,12 +817,16 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), PluginBundl
         let relative = match safe_relative(&path) {
             EntryPath::Relative(relative) => relative,
             // A `./` root entry carries no content of its own.
-            EntryPath::ArchiveRoot => continue,
+            EntryPath::ArchiveRoot if kind == tar::EntryType::Directory => continue,
+            EntryPath::ArchiveRoot => return Err(malformed("only a directory may name the archive root".into())),
             EntryPath::Escaping => {
                 return Err(malformed(format!("{} escapes the archive root", path.display())));
             }
         };
         let target = destination.join(&relative);
+        if !seen.insert(relative) {
+            return Err(malformed(format!("{} occurs more than once", path.display())));
+        }
         let write = |source: std::io::Error| PluginBundleError::WriteDeployment {
             path: target.clone(),
             source,
@@ -783,7 +841,11 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), PluginBundl
                         source,
                     })?;
                 }
-                let mut out = fs::File::create(&target).map_err(write)?;
+                let mut out = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&target)
+                    .map_err(write)?;
                 std::io::copy(&mut entry, &mut out).map_err(|source| PluginBundleError::WriteDeployment {
                     path: target.clone(),
                     source,
@@ -1208,6 +1270,10 @@ fn digest_of_file(path: &Path) -> Result<PluginDigest, PluginBundleError> {
 /// Init is the synchronous CLI path and never runs under an existing reactor, so
 /// this owns a current-thread runtime for the duration of the fetch.
 fn download(url: &str, destination: &Path) -> Result<(), PluginBundleError> {
+    download_bounded(url, destination, MAX_ARCHIVE_BYTES)
+}
+
+pub(crate) fn download_bounded(url: &str, destination: &Path, max_bytes: u64) -> Result<(), PluginBundleError> {
     crate::tls::install_crypto_provider();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1222,10 +1288,20 @@ fn download(url: &str, destination: &Path) -> Result<(), PluginBundleError> {
             url: url.to_owned(),
             reason,
         };
+        let https_only = url.starts_with("https://");
         let client = reqwest::Client::builder()
+            .user_agent(concat!("appa/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.previous().len() >= MAX_REDIRECTS {
+                    return attempt.error("too many artifact redirects");
+                }
+                if https_only && attempt.url().scheme() != "https" {
+                    return attempt.error("an authenticated artifact request cannot redirect to plaintext HTTP");
+                }
+                attempt.follow()
+            }))
             .build()
             .map_err(|error| failed(error.to_string()))?;
 
@@ -1239,10 +1315,10 @@ fn download(url: &str, destination: &Path) -> Result<(), PluginBundleError> {
             return Err(failed(format!("the release responded {status}")));
         }
         if let Some(length) = response.content_length()
-            && length > MAX_ARCHIVE_BYTES
+            && length > max_bytes
         {
             return Err(failed(format!(
-                "it declares {length} bytes, more than the {MAX_ARCHIVE_BYTES} accepted"
+                "it declares {length} bytes, more than the {max_bytes} accepted"
             )));
         }
 
@@ -1254,8 +1330,8 @@ fn download(url: &str, destination: &Path) -> Result<(), PluginBundleError> {
         let mut stream = response;
         while let Some(chunk) = stream.chunk().await.map_err(|error| failed(error.to_string()))? {
             written = written.saturating_add(chunk.len() as u64);
-            if written > MAX_ARCHIVE_BYTES {
-                return Err(failed(format!("it exceeds the {MAX_ARCHIVE_BYTES} bytes accepted")));
+            if written > max_bytes {
+                return Err(failed(format!("it exceeds the {max_bytes} bytes accepted")));
             }
             std::io::Write::write_all(&mut file, &chunk).map_err(|source| PluginBundleError::WriteDeployment {
                 path: destination.to_path_buf(),
@@ -1454,6 +1530,22 @@ mod tests {
         assert!(quarantined[0].path().join("tree").is_dir());
     }
 
+    #[test]
+    fn edited_policy_and_hooks_do_not_survive_native_cache_reuse() {
+        for name in ["batteries/README.md", "plugin/hooks/hook.sh"] {
+            let source = tempfile::tempdir().unwrap();
+            let deployments = tempfile::tempdir().unwrap();
+            sample_tree(source.path());
+            let first = deploy(source.path(), deployments.path(), DEFAULT_ENDPOINT_URL);
+            let expected = fs::read(first.root.join(name)).unwrap();
+            fs::write(first.root.join(name), b"edited cached content").unwrap();
+            let repaired = deploy(source.path(), deployments.path(), DEFAULT_ENDPOINT_URL);
+            assert_eq!(first.root, repaired.root);
+            assert_eq!(fs::read(repaired.root.join(name)).unwrap(), expected);
+            assert_eq!(fs::read_dir(deployments.path()).unwrap().count(), 2);
+        }
+    }
+
     /// Either generated paths file, whichever platform's hooks are active on the
     /// host running init. A deployment is one artifact: a PowerShell paths file
     /// left stale would otherwise survive every rerun performed from POSIX.
@@ -1588,6 +1680,26 @@ mod tests {
         assert_eq!(
             canonical_source_digest(&scripted).unwrap(),
             canonical_source_digest(&mapped).unwrap()
+        );
+        // Exercise the actual shell archive boundary too. BSD tar otherwise
+        // serializes macOS extended attributes as extra AppleDouble files.
+        let archive = directory.path().join("plugin.tar.gz");
+        let status = std::process::Command::new("tar")
+            .env("COPYFILE_DISABLE", "1")
+            .arg("-C")
+            .arg(&scripted)
+            .arg("-czf")
+            .arg(&archive)
+            .arg(".")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let extracted = directory.path().join("extracted");
+        fs::create_dir(&extracted).unwrap();
+        extract_archive(&archive, &extracted).unwrap();
+        assert_eq!(
+            canonical_source_digest(&mapped).unwrap(),
+            canonical_source_digest(&extracted).unwrap()
         );
     }
 
@@ -1773,6 +1885,58 @@ mod tests {
         // The platform selection removes the map this platform does not use.
         assert!(!deployment.root.join(WINDOWS_HOOKS).is_file());
         fs::remove_file(&archive).unwrap();
+    }
+
+    #[test]
+    fn deployment_bundles_have_room_for_metadata_beyond_the_package_entry_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("bundle.tar.gz");
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            fs::File::create(&archive).unwrap(),
+            flate2::Compression::fast(),
+        ));
+        for index in 0..=MAX_ENTRIES {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(0);
+            header.set_mode(0o600);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, format!("entry-{index}"), std::io::empty())
+                .unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap();
+        let packages = root.path().join("packages");
+        let bundle = root.path().join("bundle");
+        fs::create_dir(&packages).unwrap();
+        fs::create_dir(&bundle).unwrap();
+        assert!(extract_archive(&archive, &packages).is_err());
+        extract_bundle_archive(&archive, &bundle).unwrap();
+        assert_eq!(fs::read_dir(bundle).unwrap().count(), MAX_ENTRIES + 1);
+    }
+
+    #[test]
+    fn extraction_refuses_duplicate_paths_without_overwriting_the_first_file() {
+        for second in ["file", "./file"] {
+            let source = tempfile::tempdir().unwrap();
+            let destination = tempfile::tempdir().unwrap();
+            let archive = source.path().join("bundle.tar.gz");
+            let packed = fs::File::create(&archive).unwrap();
+            let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(packed, flate2::Compression::fast()));
+            for (name, bytes) in [("file", b"first".as_slice()), (second, b"second".as_slice())] {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(bytes.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder.append_data(&mut header, name, bytes).unwrap();
+            }
+            builder.into_inner().unwrap().finish().unwrap();
+
+            assert!(matches!(
+                extract_archive(&archive, destination.path()),
+                Err(PluginBundleError::MalformedArchive { .. })
+            ));
+            assert_eq!(fs::read(destination.path().join("file")).unwrap(), b"first");
+        }
     }
 
     /// Every required file, refused at validation rather than partway through an

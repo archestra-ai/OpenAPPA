@@ -457,6 +457,24 @@ pub(super) fn reconcile_policy(
     Ok(RuntimeOutcome::Reloaded)
 }
 
+pub(super) fn reconcile_prepared_policy(
+    endpoint: &Endpoint,
+    config: &Path,
+    composed: &ComposedPolicy,
+) -> Result<RuntimeOutcome, InitError> {
+    if policy_divergence(composed, &serving_policy_key(endpoint)?).is_none() {
+        return Ok(RuntimeOutcome::Healthy);
+    }
+    reload_policy(endpoint, config)?;
+    if policy_divergence(composed, &serving_policy_key(endpoint)?).is_some() {
+        return Err(InitError::PolicyKey {
+            endpoint: endpoint.url().to_owned(),
+            message: "runtime did not confirm the prepared policy after reload".into(),
+        });
+    }
+    Ok(RuntimeOutcome::Reloaded)
+}
+
 /// Why a serving runtime may not be answering under the file this init validated, or
 /// `None` when it demonstrably is.
 ///

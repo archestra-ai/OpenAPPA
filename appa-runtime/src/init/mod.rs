@@ -16,8 +16,10 @@ mod config;
 mod endpoint;
 mod paths;
 mod receipt;
+mod removal;
 
 pub use self::paths::installed_config_path;
+pub use self::removal::claude_code_remove;
 
 use self::claude::{
     cleanup_plugin_recovery, install_statusline, installed_plugin_installations, installed_plugin_root,
@@ -62,6 +64,8 @@ pub enum InitError {
     UnloadableConfig { path: PathBuf, source: Box<ConfigError> },
     #[error("Claude's plugin registry at {path} is invalid: {message}")]
     PluginRegistry { path: PathBuf, message: String },
+    #[error("cannot change APPA integration state at {path}: {message}")]
+    NativeState { path: PathBuf, message: String },
     #[error("Claude installed {PLUGIN}, but its installed plugin directory is unavailable")]
     MissingPlugin,
     #[error("Claude reports {count} installed copies of {PLUGIN}; initialization requires exactly one user copy")]
@@ -104,13 +108,47 @@ pub enum InitError {
 /// and the deployment are written before that clearing; all three are additive
 /// and none of them is what Claude reads.
 pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
+    progress("resolving the matching plugin");
+    install_claude(PluginSource::resolve(explicit_source)?, Configuration::Initialize)
+}
+
+/// Activate a previously validated deployment with this release binary and
+/// its matching native archive. Never asks questions or fetches packages.
+pub fn claude_code_prepared(
+    config: &Path,
+    archive: &Path,
+    previous_binary: Option<&Path>,
+) -> Result<String, InitError> {
+    let config = std::path::absolute(config).map_err(|source| InitError::AbsolutePath {
+        path: config.to_owned(),
+        source,
+    })?;
+    crate::config::Config::load(&config).map_err(|source| InitError::UnloadableConfig {
+        path: config.clone(),
+        source: Box::new(source),
+    })?;
+    install_claude(
+        PluginSource::verified_archive(archive)?,
+        Configuration::Prepared {
+            config,
+            previous_binary: previous_binary.map(Path::to_owned),
+        },
+    )
+}
+
+enum Configuration {
+    Initialize,
+    Prepared {
+        config: PathBuf,
+        previous_binary: Option<PathBuf>,
+    },
+}
+
+fn install_claude(source: PluginSource, configuration: Configuration) -> Result<String, InitError> {
     let appa = env::current_exe().map_err(InitError::CurrentExecutable)?;
     let endpoint = Endpoint::resolve()?;
-
-    // 1. Resolve and verify the source. Nothing outside a temp file has changed.
-    progress("resolving the matching plugin");
-    let source = PluginSource::resolve(explicit_source)?;
     let paths = deployment_paths()?;
+    let _profile_lock = lock_claude_profile(&paths.claude_dir)?;
     let installations = installed_plugin_installations(&paths.claude_dir)?;
     let marketplaces = run_claude(["plugin", "marketplace", "list"], None)?;
 
@@ -128,14 +166,20 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
             source,
         }
     })?;
-    let config = paths.config_dir.join("appa.toml");
-    let config_outcome = match create_default_config(&config)? {
-        ConfigOutcome::Kept => offer_config_rewrite(&config)?,
-        created => created,
+    let (config, config_outcome) = match &configuration {
+        Configuration::Prepared { config, .. } => (config.clone(), ConfigOutcome::Kept),
+        Configuration::Initialize => {
+            let config = paths.config_dir.join("appa.toml");
+            let outcome = match create_default_config(&config)? {
+                ConfigOutcome::Kept => offer_config_rewrite(&config)?,
+                created => created,
+            };
+            if outcome != ConfigOutcome::Kept {
+                offer_agent_yell(&config)?;
+            }
+            (config, outcome)
+        }
     };
-    if config_outcome != ConfigOutcome::Kept {
-        offer_agent_yell(&config)?;
-    }
     let composed_policy = verify_config(&config)?;
 
     // 3. Materialize the deployment, or validate and reuse an existing one.
@@ -153,6 +197,10 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     };
     let deployment = match &source {
         PluginSource::Explicit(path) => deploy(Population::Tree(path))?,
+        PluginSource::VerifiedArchive { path, tree_digest, .. } => deploy(Population::VerifiedArchive {
+            path,
+            expected: *tree_digest,
+        })?,
         PluginSource::Release { reference, digest } => {
             let archive = plugin_bundle::ensure_archive(
                 *digest,
@@ -184,13 +232,30 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     progress("checking the runtime endpoint");
     //    A runtime whose binary an install replaced on disk still owns the
     //    endpoint, and its health answer names the stale pid.
-    clear_stale_endpoint(&endpoint)?;
-    //    A healthy runtime from another build is stopped only after an explicit
-    //    confirmation and only when it identifies a same-user appa pid.
-    clear_foreign_endpoint(&appa, &config, &endpoint)?;
+    if matches!(configuration, Configuration::Initialize) {
+        clear_stale_endpoint(&endpoint)?;
+        //    A healthy runtime from another build is stopped only after an explicit
+        //    confirmation and only when it identifies a same-user appa pid.
+        clear_foreign_endpoint(&appa, &config, &endpoint)?;
+    } else if endpoint_health(&endpoint)?.is_some() {
+        // A prepared install cannot answer an interactive question on behalf
+        // of a different deployment. Updates stop their proven prior runtime
+        // in the outer installation transaction before reaching activation.
+        if let Err(current_error) = verify_runtime_deployment(&appa, &config, &endpoint) {
+            let Configuration::Prepared {
+                previous_binary: Some(previous),
+                ..
+            } = &configuration
+            else {
+                return Err(current_error);
+            };
+            let pid = verify_runtime_deployment(previous, &config, &endpoint)?;
+            stop_owned_appa_runtime(pid, &endpoint)?;
+        }
+    }
 
     // 5. Snapshot for recovery and disarm the launcher.
-    let launcher_dir = appa.parent().unwrap_or(&paths.install_dir);
+    let launcher_dir = &paths.install_dir;
     let recovery = prepare_plugin_recovery(&installations, &paths.data_dir)?;
     if recovery.is_some() {
         install_disabled_clappa(launcher_dir)?;
@@ -207,12 +272,12 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     let switch = replace_plugin(&deployment.root, &marketplaces, &installations).and_then(|()| {
         switch_over(
             &appa,
-            &deployed_appa,
             &config,
             &composed_policy,
             &endpoint,
             &paths,
             &mut compensation,
+            &configuration,
         )
     });
     let runtime_outcome = match switch {
@@ -249,6 +314,45 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     .render(Style::of_stdout()))
 }
 
+/// Different deployment configs may target one Claude profile. Serialize the
+/// native mutation on that shared profile, not only on each config's store.
+fn lock_claude_profile(directory: &Path) -> Result<fs::File, InitError> {
+    fs::create_dir_all(directory).map_err(|source| InitError::WriteFile {
+        path: directory.to_owned(),
+        source,
+    })?;
+    let path = directory.join(".appa-install.lock");
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(&path).map_err(|source| InitError::WriteFile {
+        path: path.clone(),
+        source,
+    })?;
+    if !file
+        .metadata()
+        .map_err(|source| InitError::WriteFile {
+            path: path.clone(),
+            source,
+        })?
+        .is_file()
+    {
+        return Err(InitError::NativeState {
+            path,
+            message: "profile lock must be a regular file".into(),
+        });
+    }
+    file.try_lock().map_err(|error| InitError::NativeState {
+        path,
+        message: format!("cannot lock Claude profile; another APPA operation may be running: {error}"),
+    })?;
+    Ok(file)
+}
+
 /// The steps after the Claude switch, each recording what it changed.
 ///
 /// The runtime this plugin is bound to must also be serving this deployment's
@@ -259,14 +363,15 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
 /// stands.
 fn switch_over(
     appa: &Path,
-    deployed_appa: &Path,
     config: &Path,
     composed_policy: &ComposedPolicy,
     endpoint: &Endpoint,
     paths: &DeploymentPaths,
     compensation: &mut Compensation,
+    configuration: &Configuration,
 ) -> Result<RuntimeOutcome, InitError> {
-    install_runtime(appa, deployed_appa, compensation)?;
+    let deployed_appa = paths.data_dir.join("bin").join(appa_filename());
+    install_runtime(appa, &deployed_appa, compensation)?;
     let plugin_root = installed_plugin_root(&paths.claude_dir)?;
     install_statusline(&plugin_root, paths, compensation)?;
     progress("starting the runtime");
@@ -274,14 +379,17 @@ fn switch_over(
     // user's; anything the starter brings up after silence is init's to stop.
     let running_before = endpoint_health(endpoint)?.is_some_and(|answer| answer == "ok");
     start_runtime(&plugin_root)?;
-    let pid = verify_runtime_deployment(deployed_appa, config, endpoint)?;
+    let pid = verify_runtime_deployment(&deployed_appa, config, endpoint)?;
     if !running_before {
         compensation.record(Undo::Runtime {
             pid,
             endpoint: endpoint.clone(),
         });
     }
-    reconcile_policy(endpoint, config, composed_policy)
+    match configuration {
+        Configuration::Initialize => reconcile_policy(endpoint, config, composed_policy),
+        Configuration::Prepared { .. } => endpoint::reconcile_prepared_policy(endpoint, config, composed_policy),
+    }
 }
 
 /// What the switch has changed on disk and in process state, so a failure can
@@ -577,18 +685,14 @@ impl Confirmation {
     }
 }
 
+#[cfg(windows)]
+const CLAPPA: (&str, &str) = ("clappa.cmd", "@echo off\r\nset APPA_GATE=1\r\nclaude %*\r\n");
+#[cfg(not(windows))]
+const CLAPPA: (&str, &str) = ("clappa", "#!/bin/sh\nexec env APPA_GATE=1 claude \"$@\"\n");
+
 fn install_clappa(install_dir: &Path) -> Result<PathBuf, InitError> {
-    #[cfg(windows)]
-    let (path, contents) = (
-        install_dir.join("clappa.cmd"),
-        "@echo off\r\nset APPA_GATE=1\r\nclaude %*\r\n",
-    );
-    #[cfg(not(windows))]
-    let (path, contents) = (
-        install_dir.join("clappa"),
-        "#!/bin/sh\nexec env APPA_GATE=1 claude \"$@\"\n",
-    );
-    fs::write(&path, contents).map_err(|source| InitError::WriteFile {
+    let path = install_dir.join(CLAPPA.0);
+    fs::write(&path, CLAPPA.1).map_err(|source| InitError::WriteFile {
         path: path.clone(),
         source,
     })?;
@@ -630,6 +734,16 @@ fn install_disabled_clappa(install_dir: &Path) -> Result<(), InitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_profile_lock_serializes_different_deployment_operations() {
+        let root = tempfile::tempdir().unwrap();
+        let first = lock_claude_profile(root.path()).unwrap();
+        assert!(lock_claude_profile(root.path()).is_err());
+        drop(first);
+        assert!(root.path().join(".appa-install.lock").is_file());
+        assert!(lock_claude_profile(root.path()).is_ok());
+    }
 
     #[test]
     fn an_empty_answer_takes_the_default_and_end_of_input_refuses() {

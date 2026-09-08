@@ -14,6 +14,7 @@ pub(super) fn source_label(source: &PluginSource, deployment: &Deployment) -> St
     let origin = match source {
         PluginSource::Explicit(path) => format!("{} (development source)", friendly_path(path)),
         PluginSource::Release { reference, .. } => format!("appa {reference} release plugin"),
+        PluginSource::VerifiedArchive { reference, .. } => format!("appa {reference} verified local plugin"),
         PluginSource::Commit { commit, .. } => format!("OpenAPPA commit {}", &commit[..commit.len().min(12)]),
         PluginSource::Local { root, .. } => format!("{} (dirty development source)", friendly_path(root)),
     };

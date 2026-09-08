@@ -1,0 +1,300 @@
+//! Black-box stream and filesystem contracts for marketplace commands.
+
+use std::path::Path;
+use std::process::{Command, Output};
+
+fn run(root: &Path, args: &[&str]) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_appa"))
+        .args(args)
+        .current_dir(root)
+        .env("HOME", root)
+        .env("APPA_CONFIG_DIR", root.join("config"))
+        .env_remove("APPA_CONFIG")
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!("marketplace command exceeded its test deadline: {output:?}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn local_list_is_structured_and_does_not_initialize_an_installation() {
+    let root = tempfile::tempdir().unwrap();
+    for kind in ["plugin", "battery"] {
+        let output = run(root.path(), &[kind, "list", "--json"]);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(document["status"], "ok");
+        assert_eq!(document["operation"], format!("{kind}.list"));
+        assert_eq!(document["result"]["packages"], serde_json::json!([]));
+        assert!(document.get("error").is_none());
+        assert!(output.stderr.is_empty());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn removing_an_unselected_plugin_is_read_only_and_idempotent() {
+    let root = tempfile::tempdir().unwrap();
+    for _ in 0..2 {
+        let output = run(root.path(), &["plugin", "remove", "claude-code", "--json"]);
+        assert!(output.status.success());
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["operation"], "plugin.remove");
+        assert_eq!(result["result"]["state"], "unchanged");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn plugin_removal_requires_the_selected_native_artifact_before_changing_state() {
+    let root = tempfile::tempdir().unwrap();
+    let config = deployment(root.path());
+    let active = root.path().join("config/.appa/appa.toml/active.json");
+    let mut selection: serde_json::Value = serde_json::from_slice(&std::fs::read(&active).unwrap()).unwrap();
+    selection["plugins"] = serde_json::json!(["claude-code"]);
+    let selected = serde_json::to_vec(&selection).unwrap();
+    std::fs::write(&active, &selected).unwrap();
+    let before = std::fs::read(&config).unwrap();
+    let output = run(root.path(), &["plugin", "remove", "claude-code", "--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(std::fs::read(&config).unwrap(), before);
+    assert_eq!(std::fs::read(&active).unwrap(), selected);
+    assert!(!active.parent().unwrap().join("transaction.json").exists());
+}
+
+#[test]
+fn corrupt_selection_returns_one_error_envelope_and_preserves_bytes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("config/.appa/appa.toml");
+    std::fs::create_dir_all(&state).unwrap();
+    let active = state.join("active.json");
+    std::fs::write(&active, b"broken").unwrap();
+    let output = run(root.path(), &["plugin", "list", "--json"]);
+    assert_eq!(output.status.code(), Some(1));
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["status"], "error");
+    assert_eq!(document["error"]["code"], "invalid_input");
+    assert!(document.get("result").is_none());
+    assert_eq!(std::fs::read(active).unwrap(), b"broken");
+    assert!(!state.join("install.lock").exists());
+}
+
+#[test]
+fn pending_transaction_is_reported_as_recovery_not_a_successful_stale_list() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("config/.appa/appa.toml");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(state.join("transaction.json"), b"pending").unwrap();
+    let output = run(root.path(), &["plugin", "list", "--json"]);
+    assert_eq!(output.status.code(), Some(3));
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["error"]["recovery_required"], true);
+    assert_eq!(std::fs::read(state.join("transaction.json")).unwrap(), b"pending");
+}
+
+#[test]
+fn help_works_without_a_config_and_unknown_options_do_not_mutate() {
+    let root = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["plugin", "list", "--help"],
+        vec!["battery", "list", "--help"],
+        vec!["bundle", "--help"],
+        vec!["plugin", "install", "--help"],
+    ] {
+        let output = run(root.path(), &args);
+        assert!(output.status.success());
+        assert!(!output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+    }
+    let output = run(root.path(), &["plugin", "list", "--nonsense"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let output = run(root.path(), &["plugin", "list", "--nonsense", "--json"]);
+    assert_eq!(output.status.code(), Some(2));
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["error"]["code"], "usage");
+    assert!(output.stderr.is_empty());
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn invalid_install_input_is_refused_before_creating_state_or_contacting_a_host() {
+    let root = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["plugin", "install", "claude-code", "--revision", "main", "--json"],
+        vec!["plugin", "install", "claude-code", "--from", "missing.tar.gz", "--json"],
+        vec![
+            "plugin",
+            "install",
+            "claude-code",
+            "--from",
+            "missing.tar.gz",
+            "--sha256",
+            "bad",
+            "--json",
+        ],
+    ] {
+        let output = run(root.path(), &args);
+        assert_eq!(output.status.code(), Some(2));
+        let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(document["error"]["code"], "usage");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+    std::fs::create_dir(root.path().join("config")).unwrap();
+    std::fs::write(root.path().join("config/appa.toml"), b"broken = [").unwrap();
+    let output = run(root.path(), &["plugin", "install", "claude-code", "--json"]);
+    assert_eq!(output.status.code(), Some(1));
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["error"]["code"], "invalid_input");
+    assert!(!root.path().join("config/.appa").exists());
+}
+
+fn deployment(root: &Path) -> std::path::PathBuf {
+    use appa_package::generation::{ArtifactDigest, Generation, Image, Platform, REPOSITORY};
+    use appa_runtime::installation::{Installation, Selection};
+    use std::collections::BTreeMap;
+    let source = root.join("source");
+    let battery = source.join("batteries/github");
+    std::fs::create_dir_all(&battery).unwrap();
+    std::fs::write(
+        battery.join("appa-package.toml"),
+        "schema=1\nname='github'\ndescription='test'\n[battery]\npolicy='appa.toml'\nhosts=['claude-code','kagent']\n",
+    )
+    .unwrap();
+    std::fs::write(
+        battery.join("appa.toml"),
+        "[policy]\nversion=2\n[[policy.tool]]\nname='mcp/github/read'\n",
+    )
+    .unwrap();
+    let catalog = format!(
+        "schema=1\nname='appa'\n[packages.battery.github]\npath='batteries/github'\ndigest='{}'\n",
+        appa_package::TreeDigest::of_tree(&battery).unwrap()
+    );
+    std::fs::write(source.join("marketplace.toml"), &catalog).unwrap();
+    let mut archive = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast()));
+    archive.append_dir_all(".", &source).unwrap();
+    let archive = archive.into_inner().unwrap().finish().unwrap();
+    let digest = ArtifactDigest::of_bytes(&archive);
+    let descriptor = serde_json::json!({"schema":1,"repository":REPOSITORY,"commit":"a".repeat(40),"release":"v1.0.0","protocol":appa_package::PROTOCOL,
+        "catalog":ArtifactDigest::of_bytes(catalog.as_bytes()),"marketplace":digest,"claude_plugin":digest,"runtime_chart":digest,
+        "binaries":Platform::ALL.into_iter().map(|platform|(platform,digest.clone())).collect::<BTreeMap<_,_>>(),
+        "images":Image::ALL.into_iter().map(|image|(image,serde_json::json!({"digest":digest,"platforms":{"linux/amd64":digest}}))).collect::<BTreeMap<_,_>>()});
+    let generation = Generation::parse(&serde_json::to_vec(&descriptor).unwrap()).unwrap();
+    let config = root.join("config/appa.toml");
+    let installation = Installation::open(&config).unwrap();
+    installation.publish_packages(&source, &generation).unwrap();
+    std::fs::create_dir_all(installation.state_path().join("artifacts")).unwrap();
+    std::fs::write(installation.state_path().join("artifacts").join(digest.hex()), archive).unwrap();
+    let selection = Selection::empty(generation, Platform::current().unwrap());
+    let text = b"# authored policy\n[policy]\nversion=2\n[[policy.tool]]\nname='Custom'\n[externals]\ntimeout_ms=100\nmax_body_bytes=1024\n";
+    installation.commit_config(None, text, &selection).unwrap();
+    config
+}
+
+#[test]
+fn battery_install_and_remove_update_the_real_policy_without_network_or_host_registration() {
+    let root = tempfile::tempdir().unwrap();
+    let config = deployment(root.path());
+    let original = std::fs::read_to_string(&config).unwrap();
+    let output = run(
+        root.path(),
+        &["battery", "install", "github", "--server", "work-github", "--json"],
+    );
+    assert!(
+        output.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["result"]["state"], "installed");
+    let after = std::fs::read_to_string(&config).unwrap();
+    assert!(after.contains(&original));
+    let effective = appa_runtime::config::Config::load(&config).unwrap();
+    assert_eq!(
+        effective.policy_file().value()["tool"][0]["name"].as_str(),
+        Some("Custom")
+    );
+    assert_eq!(
+        effective.policy_file().value()["tool"][1]["name"].as_str(),
+        Some("mcp/github/read")
+    );
+    let repeated = run(root.path(), &["battery", "install", "github", "--json"]);
+    assert!(repeated.status.success());
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), after);
+    let removed = run(root.path(), &["battery", "remove", "github", "--json"]);
+    assert!(removed.status.success(), "{}", String::from_utf8_lossy(&removed.stdout));
+    let effective = appa_runtime::config::Config::load(&config).unwrap();
+    assert_eq!(effective.policy_file().value()["tool"].as_array().unwrap().len(), 1);
+    assert!(std::fs::read_to_string(&config).unwrap().contains(&original));
+}
+
+#[test]
+fn removal_refuses_a_manual_include_instead_of_claiming_the_battery_is_gone() {
+    let root = tempfile::tempdir().unwrap();
+    let config = deployment(root.path());
+    let original = std::fs::read_to_string(&config).unwrap();
+    let text = format!(
+        "include=['.appa/appa.toml/generations/{}/marketplace/batteries/github/appa.toml']\n{original}",
+        "a".repeat(40)
+    );
+    std::fs::write(&config, &text).unwrap();
+    assert!(
+        run(root.path(), &["battery", "install", "github", "--json"])
+            .status
+            .success()
+    );
+    let before = std::fs::read(&config).unwrap();
+    let removed = run(root.path(), &["battery", "remove", "github", "--json"]);
+    assert_eq!(removed.status.code(), Some(1));
+    assert_eq!(std::fs::read(&config).unwrap(), before);
+    let listed = run(root.path(), &["battery", "list", "--json"]);
+    let document: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(document["result"]["packages"][0]["name"], "github");
+}
+
+#[test]
+fn human_battery_and_bundle_results_are_text_with_copyable_identifiers() {
+    let root = tempfile::tempdir().unwrap();
+    let config = deployment(root.path());
+    let installed = run(root.path(), &["battery", "install", "github"]);
+    assert!(installed.status.success());
+    let text = String::from_utf8(installed.stdout).unwrap();
+    assert!(text.contains("github"));
+    assert!(text.contains(config.to_str().unwrap()));
+    assert!(serde_json::from_str::<serde_json::Value>(&text).is_err());
+    assert!(
+        !installed.stderr.is_empty(),
+        "artifact verification has a progress phase"
+    );
+    let archive = root.path().join("export.tar.gz");
+    let exported = run(root.path(), &["bundle", "--output", archive.to_str().unwrap()]);
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    let text = String::from_utf8(exported.stdout).unwrap();
+    assert!(text.contains(archive.to_str().unwrap()));
+    let digest = appa_package::generation::ArtifactDigest::of_bytes(&std::fs::read(&archive).unwrap());
+    assert!(text.contains(digest.hex()));
+    assert!(serde_json::from_str::<serde_json::Value>(&text).is_err());
+}

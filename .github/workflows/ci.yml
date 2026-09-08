@@ -118,6 +118,8 @@ jobs:
               - 'scripts/test_appa_guide_runtime.py'
               - 'scripts/appa-oci-tags.py'
               - 'scripts/test_appa_oci_tags.py'
+              - 'scripts/appa-image-descriptor.py'
+              - 'scripts/test_appa_image_descriptor.py'
               - 'scripts/appa-gar-cleanup-policies.json'
               - '.github/actions/auth-to-gar/**'
               - '.github/actions/check-release-versions/**'
@@ -257,7 +259,7 @@ jobs:
       - name: Test release battery refresh
         run: |
           python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --break-system-packages 'pyyaml==6.0.2'
-          python3 -m unittest scripts/test_appa_refresh_batteries.py scripts/test_appa_guide_runtime.py scripts/test_appa_oci_tags.py
+          python3 -m unittest scripts/test_appa_refresh_batteries.py scripts/test_appa_guide_runtime.py scripts/test_appa_oci_tags.py scripts/test_appa_image_descriptor.py
 
       - name: Check release versions
         uses: ./.github/actions/check-release-versions
@@ -485,7 +487,9 @@ jobs:
         run: |
           cargo test --locked --package appa --lib init::
           cargo test --locked --package appa --lib plugin_bundle::
+          cargo test --locked --package appa --lib installation::
           cargo test --locked --package appa --test init_cli
+          cargo test --locked --package appa --test marketplace_cli
           cargo test --locked --package appa --test plugin_hooks
           cargo test --locked --package appa --test rendered_hooks
 

@@ -107,7 +107,7 @@ pub(super) fn installed_plugin_root(claude_dir: &Path) -> Result<PathBuf, InitEr
         .ok_or(InitError::MissingPlugin)
 }
 
-fn plugin_registry(claude_dir: &Path) -> Result<Value, InitError> {
+pub(super) fn plugin_registry(claude_dir: &Path) -> Result<Value, InitError> {
     let path = claude_dir.join("plugins/installed_plugins.json");
     if !path.exists() {
         return Ok(Value::Object(Map::new()));

@@ -254,7 +254,26 @@ jobs:
             docker buildx imagetools inspect --raw \
               "${REGISTRY}/${image}:${tags[0]}" \
               | jq -e '[.manifests[].platform | select(.os == "linux") | .architecture] | sort == ["amd64", "arm64"]'
+            # Record the root plus platform manifests from this exact digest.
+            # The release descriptor is assembled only after every build ends.
+            digest=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${REGISTRY}/${image}:${tags[0]}")
+            case "$image" in
+              appa-runtime) role=runtime ;;
+              appa-kagent-adk) role=python ;;
+            esac
+            mkdir -p /tmp/appa-generation-images
+            docker buildx imagetools inspect --raw "${REGISTRY}/${image}@${digest}" \
+              | python3 scripts/appa-image-descriptor.py "$digest" \
+              > "/tmp/appa-generation-images/${role}.json"
           done
+
+      - name: Upload shared image identities
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: generation-images-shared
+          path: /tmp/appa-generation-images/*.json
+          if-no-files-found: error
+          retention-days: 7
 
   publish-images:
     name: Publish container images
@@ -401,3 +420,15 @@ jobs:
             echo "::error::golang-adk resolves to ${alias_digest}, not ${GO_DIGEST}"
             exit 1
           fi
+          mkdir -p /tmp/appa-generation-images
+          docker buildx imagetools inspect --raw "${REGISTRY}/golang-adk@${GO_DIGEST}" \
+            | python3 scripts/appa-image-descriptor.py "$GO_DIGEST" --single-platform linux/amd64 \
+            > /tmp/appa-generation-images/go.json
+
+      - name: Upload Go image identity
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: generation-images-go
+          path: /tmp/appa-generation-images/go.json
+          if-no-files-found: error
+          retention-days: 7

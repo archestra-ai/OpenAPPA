@@ -186,6 +186,16 @@ fn launcher_is_armed(fixture: &Fixture) -> bool {
 }
 
 #[test]
+fn launcher_uses_the_install_directory_not_the_source_binary_cache() {
+    let fixture = Fixture::new();
+    let launchers = fixture.root.join("launchers");
+    let output = fixture.init().env("APPA_INSTALL_DIR", &launchers).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(launchers.join("clappa").is_file());
+    assert!(!fixture.bin.join("clappa").exists());
+}
+
+#[test]
 fn a_failure_before_the_statusline_puts_the_previous_binary_back() {
     let fixture = Fixture::new();
     let before = previous_install(&fixture);
