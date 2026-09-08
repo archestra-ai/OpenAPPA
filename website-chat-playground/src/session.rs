@@ -113,11 +113,10 @@ pub enum CreateError {
     Deployment(#[from] Box<ConfigError>),
 }
 
-/// The models the playground may spend the service's key on — the four the
-/// benchmark table names.
+/// The models the playground may spend the service's key on.
 pub const ALLOWED_MODELS: [&str; 4] = [
     "openai/gpt-4o",
-    "openai/gpt-5.6-luna",
+    "openai/gpt-5.6-terra",
     "google/gemini-3.5-flash-lite",
     "qwen/qwen-3.6-35b",
 ];

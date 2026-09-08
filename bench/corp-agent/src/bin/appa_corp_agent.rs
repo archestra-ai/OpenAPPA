@@ -66,7 +66,7 @@ struct Args {
     prompt: String,
 
     /// OpenRouter model id.
-    #[arg(long, env = "APPA_DEMO_MODEL", default_value = "openai/gpt-5.6-luna")]
+    #[arg(long, env = "APPA_DEMO_MODEL", default_value = "openai/gpt-5.6-terra")]
     model: String,
 
     /// OpenRouter API key. Falls back to $OPENROUTER_API_KEY or a `.env` file.
@@ -428,7 +428,7 @@ mod tests {
             "appa-corp-agent",
             "summarise the open deploy tickets",
             "--model",
-            "openai/gpt-5.6-luna",
+            "openai/gpt-5.6-terra",
             "--data-root",
             "/episode/data",
             "--sink-root",

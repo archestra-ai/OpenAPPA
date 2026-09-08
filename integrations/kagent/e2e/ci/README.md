@@ -53,7 +53,7 @@ images after the load, which a 14 GB CI runner needs.
 One key and endpoint serve the Agents through the e2e ModelConfig. The
 demo sanitizers are deterministic mock policy services and consume no
 model credential. The default Agent model matches the public playground:
-`openai/gpt-5.6-luna` through OpenRouter.
+`openai/gpt-5.6-terra` through OpenRouter.
 
 The Agent model must support function calling. Sanitizer support and
 structured model output are not prerequisites for this matrix.

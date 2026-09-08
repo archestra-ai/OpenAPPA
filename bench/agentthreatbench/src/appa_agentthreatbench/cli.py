@@ -5,7 +5,7 @@ import argparse
 from appa_agentthreatbench.runner import SMOKE_SAMPLE_IDS, preflight, run_complete
 from appa_agentthreatbench.tasks import AGENT_PROMPT_PROFILES, ARMS, TASK_TYPES, complete_dataset
 
-DEFAULT_MODEL = "openrouter/openai/gpt-5.6-luna"
+DEFAULT_MODEL = "openrouter/openai/gpt-5.6-terra"
 REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 TASK_TYPE_CHOICES = ("all", *TASK_TYPES)
 ARM_CHOICES = ("all", "openappa", *ARMS)

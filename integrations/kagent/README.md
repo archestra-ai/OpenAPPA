@@ -43,7 +43,7 @@ The `appa-guide` agent runs in kagent using Kubernetes tools and `appa_match_bat
 
 ## Quickstart
 
-These commands require Helm v4 to support server-side apply.
+These commands require Helm v4 to support server-side apply. They configure OpenAI specifically. For another provider, use that provider's kagent configuration and ModelConfig instead of the `providers.openAI.*` values. The public [kagent guide](../../website/content/docs/kagent.md) documents required registry and Git egress, supported image architectures, and the existing-cluster installation path.
 
 ### 1. Install kagent with the OpenAPPA plugin
 
@@ -56,6 +56,9 @@ export OPENAI_API_KEY="<your-api-key>"
 Deploy the CRDs, provider secret, and controller:
 
 ```sh
+bash <<'BASH'
+set -euo pipefail
+
 : "${OPENAI_API_KEY:?Set OPENAI_API_KEY before installing kagent}"
 
 # 1. Install kagent CRDs
@@ -79,12 +82,13 @@ unset OPENAI_API_KEY_B64
 
 helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
+  --set registry=ghcr.io \
   --set controller.agentImage.registry=europe-west1-docker.pkg.dev \
   --set controller.agentImage.repository=friendly-path-465518-r6/appa-public/appa-kagent-adk \
   --set providers.default=openAI \
   --set-string providers.openAI.apiKeySecretRef=kagent-openai \
   --set-string providers.openAI.apiKeySecretKey=OPENAI_API_KEY \
-  --set-string providers.openAI.model=gpt-5.6-luna \
+  --set-string providers.openAI.model=gpt-5.6-terra \
   --set k8s-agent.enabled=false \
   --set kgateway-agent.enabled=false \
   --set istio-agent.enabled=false \
@@ -100,11 +104,17 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --force-conflicts \
   --wait --timeout 10m \
   --set controller.agentImage.tag="v$APPA_VERSION"
+BASH
 ```
 
 ### 2. Deploy appa-runtime
 
 ```sh
+bash <<'BASH'
+set -euo pipefail
+
+APPA_VERSION=0.15.0 # x-release-please-version
+
 helm upgrade --install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
   --version "$APPA_VERSION" -n appa --create-namespace \
   --set persistence.enabled=true \
@@ -112,11 +122,19 @@ helm upgrade --install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-p
   --set appaGuide.namespace=kagent \
   --set-string appaGuide.reasoningEffort=none \
   --force-conflicts --wait --timeout 10m
+BASH
 ```
+
+`appaGuide.reasoningEffort=none` fills an otherwise unset OpenAI `reasoning_effort`. It is required by `gpt-5.6-terra` for function tools. A ModelConfig value takes precedence, and non-OpenAI models are unchanged.
 
 ### 3. Deploy demo fixtures
 
 ```sh
+bash <<'BASH'
+set -euo pipefail
+
+APPA_VERSION=0.15.0 # x-release-please-version
+
 helm upgrade --install appa-kagent-demo \
   oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-kagent-demo \
   --version "$APPA_VERSION" -n kagent \
@@ -124,6 +142,7 @@ helm upgrade --install appa-kagent-demo \
   --set-string modelConfig.name=default-model-config \
   --set-string runtime.reasoningEffort=none \
   --force-conflicts --wait --timeout 10m
+BASH
 ```
 
 ### 4. Enable gating on an agent
@@ -150,15 +169,22 @@ If `APPA_RUNTIME_URL` is unreachable, tool calls stop fail-closed before executi
 
 ### 5. Open the interactive demo
 
-Forward the dashboard:
+Forward the dashboard. This command stays in the foreground; `Ctrl-C` stops only the local forward:
 
 ```sh
 kubectl port-forward -n kagent svc/kagent-ui 8080:8080
 ```
 
 1. Open `http://localhost:8080/agents/kagent/appa-guide/chat` and send `init`.
-2. Review the proposed policy and approve the confirmation card.
-3. Open `cluster-ops` to run the demonstration scenarios. See [demo/SCENARIOS.md](demo/SCENARIOS.md).
+2. Review the complete proposal. In a later message, approve that exact proposal and ask the guide to open its confirmation card.
+3. Approve the native kagent card. The guide writes, synchronizes, and reloads the policy, or leaves the prior policy serving on rejection or failure.
+4. Start a new `cluster-ops` chat to use the activated policy. Existing Trajectories retain their policy snapshot. See [demo/SCENARIOS.md](demo/SCENARIOS.md).
+
+### 6. Uninstall
+
+The three scoped cleanup blocks in the public [kagent guide](../../website/content/docs/kagent.md#uninstall) are canonical. They remove only the demo release, restore and verify stock Agent images before a separately requested runtime removal, or remove kagent and its cluster-scoped CRDs.
+
+The runtime PVC is retained by default. Inspect its StorageClass reclaim policy before deleting the PVC. Removing `kagent-crds` is cluster-wide and can affect custom resources in every namespace.
 
 ## Building from source
 
