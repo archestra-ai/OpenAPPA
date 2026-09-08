@@ -376,18 +376,18 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: &'static str) -> D
         "kagent" => Some(appa_adapter_kagent::adapter()),
         _ => None,
     };
-    if let Some(loaded) = &loaded {
-        if let Some(served) = served {
-            let resolved = crate::tool_validation::resolve(
-                loaded.policy_file().value(),
-                served,
-                &loaded.inventory,
-                &loaded.server_aliases,
-            );
-            let authored_tools = policy.tools.clone();
-            describe_policy_value(&resolved.policy, Bindings::Loaded(&loaded.externals), &mut policy);
-            policy.tools = authored_tools;
-        }
+    if let Some(loaded) = &loaded
+        && let Some(served) = served
+    {
+        let resolved = crate::tool_validation::resolve(
+            loaded.policy_file().value(),
+            served,
+            &loaded.inventory,
+            &loaded.server_aliases,
+        );
+        let authored_tools = policy.tools.clone();
+        describe_policy_value(&resolved.policy, Bindings::Loaded(&loaded.externals), &mut policy);
+        policy.tools = authored_tools;
     }
     let validation = match (loaded, served) {
         (Some(loaded), Some(served)) => {
