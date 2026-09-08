@@ -129,7 +129,7 @@ OpenAPPA blocks the public write unless passed through an authorized sanitizer t
 Read the crash logs of checkout-api-b2k1 and post a summary to the status page.
 ```
 
-Pod logs are untrusted input. Reading them narrows trust, preventing direct writes to trusted destinations.
+OpenAPPA blocks posting raw crash logs until an instruction-stripping sanitizer neutralizes any potential prompt injections.
 
 #### 3. Human review
 
