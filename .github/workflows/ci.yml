@@ -153,6 +153,7 @@ jobs:
               - '.github/workflows/ci.yml'
             integration: &integration
               - *python
+              - 'appa-package/**'
               - 'marketplace/plugins/kagent/**'
               - 'integrations/kagent/appa-kagent-adk-go/**'
               - 'integrations/kagent/demo/demo_tools.py'
@@ -277,6 +278,11 @@ jobs:
       - name: Setup Rust
         run: rustup show
 
+      - name: Cache marketplace builds
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: marketplace
+
       - name: Manifest tests
         run: cargo test -p appa-package --all-targets --locked
 
@@ -294,9 +300,9 @@ jobs:
       # beside them.
       - name: Test package helpers
         run: |
-          for dir in $(dirname marketplace/*/test_*.py marketplace/*/*/test_*.py | sort -u); do
+          while IFS= read -r dir; do
             python3 -m unittest discover -s "$dir" -p 'test_*.py'
-          done
+          done < <(find marketplace -type f -name 'test_*.py' -exec dirname {} + | sort -u)
 
   installer-checks:
     name: Installer Checks (${{ matrix.os }})

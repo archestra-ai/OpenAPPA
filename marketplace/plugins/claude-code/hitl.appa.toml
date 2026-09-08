@@ -1,6 +1,8 @@
 # Example deployment for protecting a Claude Code session, with a human
-# authority on one tool. Read `claude-code.appa.toml` first: this file
-# is that policy plus the `hitl` wiring.
+# authority on one tool. Read `default.appa.toml` first. This is a
+# separate demonstration policy, not an approval overlay on that baseline:
+# it uses static Bash/Read contracts and omits the baseline's public-audience
+# requirements on Artifact, WebFetch, and WebSearch.
 #
 # Creating a GitHub issue — `mcp/github/issue_write` — carries an
 # attention mark. An attention mark is a requirement no label can
@@ -20,8 +22,7 @@
 # `appa/execute_remedy_plan` with the offer id from the feedback, and a
 # dialog appears carrying the issue title and body it would post.
 # Accepting rules; declining ends every offer naming `operator` for
-# that exact call; cancelling leaves the offer standing
-#.
+# that exact call; cancelling leaves the offer standing.
 #
 # Coverage this deployment does not claim: `gh issue create`
 # through `Bash` reaches the same sink without the mark, because the

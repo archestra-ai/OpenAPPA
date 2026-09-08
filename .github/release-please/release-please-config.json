@@ -74,6 +74,10 @@
       "force-tag-creation": true,
       "extra-files": [
         {
+          "type": "generic",
+          "path": "marketplace/plugins/kagent/appa-package.toml"
+        },
+        {
           "type": "toml",
           "path": "Cargo.toml",
           "jsonpath": "$.workspace.package.version"

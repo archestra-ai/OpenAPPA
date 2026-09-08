@@ -8,4 +8,4 @@ protocol = 1
 default_policy = "default.appa.toml"
 # Tags, not digests: the release workflow publishes both at the release
 # version, and nothing pins them by digest yet.
-images = { adk = "ghcr.io/archestra-ai/appa-kagent-adk:0.8.0", adk-go = "ghcr.io/archestra-ai/appa-kagent-adk-go:0.8.0" }
+images = { adk = "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk:v0.14.1", adk-go = "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk-go:v0.14.1" } # x-release-please-version

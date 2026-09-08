@@ -28,6 +28,22 @@ fn manifest() -> Marketplace {
     Marketplace::read(&marketplace_root().join("marketplace.toml")).expect("the marketplace manifest reads")
 }
 
+#[test]
+fn kagent_package_images_follow_the_release_registry_and_version() {
+    let package = validate_package(&marketplace_root().join("plugins/kagent")).unwrap();
+    let Role::Plugin(appa_package::Plugin::Kagent { images, .. }) = package.role else {
+        panic!("the kagent package declares kagent images");
+    };
+    for (name, reference) in images {
+        let expected = format!(
+            "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-{}:v{}",
+            name.as_str(),
+            env!("CARGO_PKG_VERSION"),
+        );
+        assert_eq!(reference.as_str(), expected);
+    }
+}
+
 /// Every package the manifest names is a package: it parses, its declared paths
 /// exist, its policy names only namespaces it covers, and it runs only helpers
 /// it ships.
@@ -264,6 +280,18 @@ fn a_battery_that_validates_loads() {
     let no = false;
     let fragments = [
         ("a plain battery", yes, yes, body(tool, "")),
+        (
+            "a server-qualified native battery contract",
+            yes,
+            yes,
+            body("[[policy.tool]]\nname = 'read(path:docs*)'\nserver = 'probe'\n", ""),
+        ),
+        (
+            "a native battery contract outside its owned namespace",
+            no,
+            yes,
+            body("[[policy.tool]]\nname = 'read'\nserver = 'other'\n", ""),
+        ),
         ("a battery that runs its helper", yes, yes, body(tool, &command)),
         (
             "a provider credential this package owns",

@@ -41,6 +41,7 @@ jobs:
         with:
           filters: |
             images:
+              - 'appa-package/**'
               - 'appa-runtime/**'
               - 'appa-runtime-api/**'
               - 'appa-engine/**'
