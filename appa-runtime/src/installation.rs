@@ -743,7 +743,14 @@ impl Installation {
         self.recover_config()?;
         let mut selection = selection.clone();
         if let Some(previous) = self.selection()? {
-            kagent::verify(self, &previous)?;
+            let already_removed = selection.kagent_runtime.is_none()
+                && previous.kagent_assets.as_ref().is_some_and(|digest| {
+                    fs::symlink_metadata(self.state.join("kagent").join(digest.hex()))
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                });
+            if !already_removed {
+                kagent::verify(self, &previous)?;
+            }
         }
         selection.kagent_assets = kagent::prepare(self, &selection, after)?;
         let activation = if selection.plugins.contains("claude-code") {

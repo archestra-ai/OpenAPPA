@@ -84,6 +84,10 @@ pub(super) fn verify(installation: &Installation, selection: &Selection) -> Resu
     if let Some(digest) = &selection.kagent_assets {
         require_directory_or_absent(&installation.state.join("kagent"))?;
         let root = directory(installation, digest);
+        require_directory_or_absent(&root)?;
+        if !root.exists() {
+            return Err(InstallError::Changed(root));
+        }
         if identity(&root)? != *digest {
             return Err(InstallError::Changed(root));
         }
@@ -104,7 +108,10 @@ pub(super) fn remove_previous(
         require_directory_or_absent(&installation.state.join("kagent"))?;
         require_directory_or_absent(&root)?;
         if root.exists() {
-            verify(installation, previous)?;
+            verify(installation, previous).map_err(|error| InstallError::Recovery {
+                path: root.clone(),
+                reason: format!("new selection is active, but superseded prepared files were preserved: {error}. Restore their original contents, or move this exact directory outside the installation store, then retry the command"),
+            })?;
             fs::remove_dir_all(&root).map_err(|error| io("remove superseded prepared deployment", &root, error))?;
             sync_directory(root.parent().expect("prepared directory has parent"))?;
         }
@@ -435,6 +442,61 @@ mod tests {
         atomic_write(&installation.state.join("transaction.json"), &json(&journal).unwrap()).unwrap();
         installation.recover_config().unwrap();
         assert_eq!(installation.selection().unwrap().unwrap(), next);
+    }
+
+    #[test]
+    fn missing_assets_do_not_block_removing_an_already_absent_preparation() {
+        let root = tempfile::tempdir().unwrap();
+        let (installation, selection) = installation(root.path());
+        installation
+            .commit_installation(None, CONFIG.as_bytes(), &selection)
+            .unwrap();
+        let mut selected = installation.selection().unwrap().unwrap();
+        let path = directory(&installation, selected.kagent_assets.as_ref().unwrap());
+        fs::remove_dir_all(&path).unwrap();
+        assert!(matches!(verify(&installation, &selected), Err(InstallError::Changed(found)) if found == path));
+        selected
+            .deselect(PackageKind::Plugin, &PackageName::parse("kagent").unwrap())
+            .unwrap();
+        installation
+            .commit_installation(Some(CONFIG.as_bytes()), CONFIG.as_bytes(), &selected)
+            .unwrap();
+        assert_eq!(installation.selection().unwrap().unwrap(), selected);
+        assert_eq!(fs::read(installation.config_path()).unwrap(), CONFIG.as_bytes());
+    }
+
+    #[test]
+    fn recovery_preserves_modified_superseded_files_until_operator_moves_them() {
+        let root = tempfile::tempdir().unwrap();
+        let (installation, selection) = installation(root.path());
+        installation
+            .commit_installation(None, CONFIG.as_bytes(), &selection)
+            .unwrap();
+        let previous = installation.selection().unwrap().unwrap();
+        let old = directory(&installation, previous.kagent_assets.as_ref().unwrap());
+        let mut next = previous.clone();
+        next.deselect(PackageKind::Plugin, &PackageName::parse("kagent").unwrap())
+            .unwrap();
+        let journal = ConfigTransaction {
+            before: Some(CONFIG.as_bytes().to_vec()),
+            after: CONFIG.as_bytes().to_vec(),
+            selection: next.clone(),
+            activation: Activation::None,
+            previous: Some(previous),
+        };
+        atomic_write(&installation.state.join("transaction.json"), &json(&journal).unwrap()).unwrap();
+        fs::write(old.join("operator-note"), b"preserve this").unwrap();
+        assert!(matches!(
+            installation.recover_config(),
+            Err(InstallError::Recovery { .. })
+        ));
+        assert_eq!(installation.selection().unwrap().unwrap(), next);
+        assert_eq!(fs::read(old.join("operator-note")).unwrap(), b"preserve this");
+        let retained = root.path().join("operator-copy");
+        fs::rename(&old, &retained).unwrap();
+        installation.recover_config().unwrap();
+        assert!(!installation.state.join("transaction.json").exists());
+        assert_eq!(fs::read(retained.join("operator-note")).unwrap(), b"preserve this");
     }
 
     #[cfg(unix)]
