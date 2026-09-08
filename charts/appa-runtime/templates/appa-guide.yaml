@@ -36,9 +36,10 @@ spec:
       Starting inspection now..."
       Followed by the inspection tool calls.
 
-      For init, adjust, diagnose, or lifecycle work, first call skills with
-      command appa-guide, then read the complete
-      /skills/appa-guide/references/kagent.md. Follow that reference.
+      Do not call skills or read_file during init or configuration: your operational
+      rules are fully defined in this prompt (with wire reference at
+      /skills/appa-guide/references/kagent.md). Proceed directly with the required
+      inventory calls after emitting the plan message to the user.
 
       Runtime management uses only direct runtime-owned MCP tools:
       - appa_get_runtime_state reads serving policy and runtime state.
