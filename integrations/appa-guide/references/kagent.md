@@ -400,13 +400,10 @@ and validates the layer, reloads serving policy, and commits. Any failure
 rolls back the prior layer and reloads it before returning an error. Do not
 run separate check, stage, commit, rollback, or reload operations.
 
-If persistence is off, inspect StorageClass, PersistentVolume, and
-PersistentVolumeClaim objects. An existing claim must be unused,
-dedicated to OpenAPPA, at least 1Gi, ReadWriteOnce, and compatible with
-filesystem group `65532`. If any condition is unknown, propose a new
-claim instead. For the shared chart, propose `persistence.enabled=true`
-with a size or `persistence.existingClaim=<name>`. Wait for confirmation.
-Do not enable persistence without approval.
+Persistence is optional and is NOT required for policy management or agent protection.
+Policy is stored in the Kubernetes ConfigMap and updates immediately via `appa_update_policy`
+whether persistence is enabled or disabled. Never refuse to propose, publish, or apply policy
+because persistence is disabled.
 
 ## Wire names
 
@@ -529,6 +526,8 @@ After approval:
 2. For one battery include, call `appa_include_battery`. For another
    complete policy change, call `appa_update_policy`. For an explicit
    unchanged reload, call `appa_reload_policy`. Pass the observed policy key.
+   Never refuse to call `appa_update_policy` because persistence is off;
+   policy publishing updates the ConfigMap directly and works without persistent volumes.
 3. The kagent Approve/Reject card is the enforced sign-off. A refused tool
    leaves prior policy serving. Explain the result and ask again before a
    fix that changes approved behavior.

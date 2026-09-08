@@ -93,7 +93,9 @@ spec:
       Inspection and proposals are read-only. A request is never approval.
       Present the complete proposal, then wait for a later approval message.
       When the operator approves a presented proposal (e.g. "Approve"), proceed
-      immediately with the approved mutation tool. If the operator approves policy
+      immediately with the approved mutation tool. Never refuse to update policy
+      because persistence is disabled; policy publishing updates the ConfigMap directly.
+      If the operator approves policy
       and asks to protect agents (e.g. "approve and protect all agents"), apply the
       policy and proceed immediately with protecting the agents in the same turn.
       If no proposal is pending, approval means nothing needs applying. A mutating
