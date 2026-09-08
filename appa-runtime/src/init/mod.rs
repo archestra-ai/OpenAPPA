@@ -506,7 +506,7 @@ fn progress(message: &str) {
 /// Copy the binary to its deployed path, keeping the bytes it replaces beside it
 /// as `appa.prev` until the install stands.
 fn install_runtime(source: &Path, target: &Path, compensation: &mut Compensation) -> Result<(), InitError> {
-    if same_file(source, target) {
+    if same_file(source, target) || runtime_contents_match(source, target)? {
         return Ok(());
     }
     let previous = if target.exists() {
@@ -557,6 +557,47 @@ fn install_runtime(source: &Path, target: &Path, compensation: &mut Compensation
         });
     }
     Ok(())
+}
+
+fn runtime_contents_match(source: &Path, target: &Path) -> Result<bool, InitError> {
+    let target_metadata = match fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.is_file() => metadata,
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => {
+            return Err(InitError::InstallRuntime {
+                path: target.to_owned(),
+                source,
+            });
+        }
+    };
+    let source_metadata = fs::metadata(source).map_err(|error| InitError::InstallRuntime {
+        path: source.to_owned(),
+        source: error,
+    })?;
+    if source_metadata.len() != target_metadata.len() {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if source_metadata.permissions().mode() & 0o111 != target_metadata.permissions().mode() & 0o111 {
+            return Ok(false);
+        }
+    }
+    let digest = |path: &Path| {
+        let file = crate::installation::open_regular(path).map_err(|error| InitError::NativeState {
+            path: path.to_owned(),
+            message: error.to_string(),
+        })?;
+        appa_package::generation::ArtifactDigest::of_reader(file, 512 * 1024 * 1024).map_err(|source| {
+            InitError::InstallRuntime {
+                path: path.to_owned(),
+                source,
+            }
+        })
+    };
+    Ok(digest(source)? == digest(target)?)
 }
 
 /// Terminate every `appa` process whose resolved executable is `target`, and
@@ -733,6 +774,45 @@ fn install_disabled_clappa(install_dir: &Path) -> Result<(), InitError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn identical_runtime_copies_do_not_replace_files_or_create_undo_state() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("installed");
+        std::fs::write(&source, b"same runtime").unwrap();
+        std::fs::write(&target, b"same runtime").unwrap();
+        let backup = target.with_extension("prev");
+        std::fs::write(&backup, b"retained backup").unwrap();
+        let before = std::fs::metadata(&target).unwrap().modified().unwrap();
+        let mut compensation = super::Compensation::default();
+        super::install_runtime(&source, &target, &mut compensation).unwrap();
+        assert!(compensation.done.is_empty());
+        assert_eq!(std::fs::read(&backup).unwrap(), b"retained backup");
+        assert_eq!(std::fs::metadata(&target).unwrap().modified().unwrap(), before);
+        std::fs::write(&target, b"different!!!").unwrap();
+        assert!(!super::runtime_contents_match(&source, &target).unwrap());
+        assert!(!super::runtime_contents_match(&source, &root.path().join("missing")).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identical_runtime_bytes_still_require_executable_permission_repair() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("installed");
+        for path in [&source, &target] {
+            std::fs::write(path, b"same runtime").unwrap();
+        }
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!super::runtime_contents_match(&source, &target).unwrap());
+        let mut compensation = super::Compensation::default();
+        super::install_runtime(&source, &target, &mut compensation).unwrap();
+        assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o111, 0o111);
+        compensation.commit();
+    }
+
     use super::*;
 
     #[test]

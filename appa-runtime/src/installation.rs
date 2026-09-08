@@ -955,7 +955,7 @@ pub(crate) fn optional_bytes(path: &Path) -> Result<Option<Vec<u8>>, InstallErro
     Ok(Some(bytes))
 }
 
-fn open_regular(path: &Path) -> Result<File, InstallError> {
+pub(crate) fn open_regular(path: &Path) -> Result<File, InstallError> {
     require_file_or_absent(path)?;
     let mut options = OpenOptions::new();
     options.read(true);
