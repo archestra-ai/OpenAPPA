@@ -32,6 +32,22 @@ def test_nested_mcp_json_refusal_is_counted_once():
     assert runner.denial_count("the model claims it was denied") == 0
 
 
+def test_native_adk_text_refusal_requires_tool_feedback_and_no_mcp_call():
+    blocked = "[appa] Blocked: this call cannot run yet.\n\nWhy:\n  - session trust would fall: trusted -> suspicious"
+    state = {"requests": [{"index": 0, "messages": []},
+                          {"index": 1, "messages": [{"role": "tool", "content": blocked}]}],
+             "invocations": []}
+    runner.assert_evidence(state, 2, 0, 0, 1)
+    for role, content in (("assistant", blocked), ("tool", "connection refused"),
+                          ("tool", "the model claims: " + blocked)):
+        broken = deepcopy(state)
+        broken["requests"][-1]["messages"] = [{"role": role, "content": content}]
+        with pytest.raises(RuntimeError):
+            runner.assert_evidence(broken, 2, 0, 0, 1)
+    with pytest.raises(RuntimeError):
+        runner.assert_evidence(dict(state, invocations=[{"tool": "get_file_contents"}]), 2, 0, 0, 1)
+
+
 def test_missing_container_logs_do_not_skip_other_diagnostics_or_cleanup(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()

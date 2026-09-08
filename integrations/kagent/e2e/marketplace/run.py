@@ -41,7 +41,8 @@ def denial_count(value):
         try:
             return denial_count(json.loads(value))
         except (ValueError, RecursionError):
-            return 0
+            # The Python ADK OpenAI adapter unwraps the plugin's result field.
+            return int(value.startswith("[appa] Blocked:"))
     if isinstance(value, list):
         return sum(denial_count(item) for item in value)
     if isinstance(value, dict):
