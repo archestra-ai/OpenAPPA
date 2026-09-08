@@ -127,10 +127,12 @@ def fill_reasoning_effort(config: dict, environ=os.environ) -> None:
     through to the API as-is.
 
     The fill is an OpenAPPA delta, so only the gated mode applies it.
+    Defaults to "none" for OpenAI models when unset to prevent 400 errors
+    on function tool calls.
     """
-    effort = environ.get(REASONING_EFFORT_ENV, "").strip()
+    effort = environ.get(REASONING_EFFORT_ENV, "").strip() or "none"
     model = config.get("model")
-    if not effort or not isinstance(model, dict) or model.get("type") != "openai":
+    if not isinstance(model, dict) or model.get("type") != "openai":
         return
     if model.get("reasoning_effort") is None:
         model["reasoning_effort"] = effort

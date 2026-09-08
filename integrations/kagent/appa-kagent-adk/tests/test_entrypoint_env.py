@@ -19,10 +19,10 @@ def test_a_value_the_crd_set_wins_over_the_env():
     assert config["model"]["reasoning_effort"] == "low"
 
 
-def test_no_env_leaves_the_rendered_config_untouched():
+def test_no_env_defaults_openai_models_to_none():
     config = _config({"type": "openai", "model": "gpt-5.6-terra"})
     fill_reasoning_effort(config, {})
-    assert "reasoning_effort" not in config["model"]
+    assert config["model"]["reasoning_effort"] == "none"
 
 
 def test_a_model_of_another_type_is_untouched():
