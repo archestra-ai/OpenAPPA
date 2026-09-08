@@ -127,6 +127,12 @@ pub fn remove_plugin(args: PluginRemove) -> ExitCode {
         let mut selection = installation
             .selection()?
             .ok_or_else(|| InstallError::Invalid("selection disappeared before removal".into()))?;
+        if !selection.plugins.contains(&args.name) {
+            return Ok((
+                Some(selection.commit().to_string()),
+                serde_json::json!({"plugin":args.name,"state":"unchanged"}),
+            ));
+        }
         let before = super::required_bytes(installation.config_path())?;
         selection.deselect(
             PackageKind::Plugin,

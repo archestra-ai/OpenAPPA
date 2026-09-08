@@ -24,58 +24,46 @@ pub fn claude_code_remove(config: &Path, archive: &Path) -> Result<(), InitError
     let PluginSource::VerifiedArchive { path, tree_digest, .. } = source else {
         unreachable!("verified_archive constructs only VerifiedArchive")
     };
+    let scratch = tempfile::tempdir().map_err(|source| InitError::WriteFile {
+        path: std::env::temp_dir(),
+        source,
+    })?;
     let deployment = plugin_bundle::materialize(
         Population::VerifiedArchive {
             path: &path,
             expected: tree_digest,
         },
-        &paths.data_dir.join("deployments"),
+        scratch.path(),
         &paths.data_dir.join("bin").join(appa_filename()),
         config,
         &paths.data_dir,
         &Endpoint::resolve()?,
     )?;
+    let registered_root = paths.data_dir.join("deployments").join(
+        deployment
+            .root
+            .file_name()
+            .expect("materialize names a deployment by its digest"),
+    );
     let registry_path = paths.claude_dir.join("plugins/installed_plugins.json");
     let registry = plugin_registry(&paths.claude_dir)?;
     let installed = selected_registration(&registry, &registry_path)?;
     if installed {
         let root = installed_plugin_root(&paths.claude_dir)?;
-        if appa_package::tree::canonical_tree_digest(&root).map_err(plugin_bundle::PluginBundleError::from)?
-            != appa_package::tree::canonical_tree_digest(&deployment.root.join("plugin"))
-                .map_err(plugin_bundle::PluginBundleError::from)?
-        {
-            return Err(conflict(
-                &registry_path,
-                "registered APPA plugin differs from this deployment; leaving it unchanged",
-            ));
-        }
+        verify_plugin(&root, &deployment.root.join("plugin"), &registry_path)?;
     }
     let marketplace_path = paths.claude_dir.join("plugins/known_marketplaces.json");
     let mut marketplace = read_json(&marketplace_path)?;
     let registered_marketplace = match marketplace.get(MARKETPLACE) {
         None => false,
         Some(entry) => {
-            if entry["source"]["source"] != "directory" || entry["source"]["path"].as_str() != deployment.root.to_str()
-            {
-                return Err(conflict(
-                    &marketplace_path,
-                    "APPA marketplace belongs to a different deployment; leaving it unchanged",
-                ));
-            }
+            verify_marketplace(entry, &registered_root, &marketplace_path)?;
             true
         }
     };
     let launcher = paths.install_dir.join(CLAPPA.0);
     let launcher_before = file_before(&launcher)?;
-    if launcher_before
-        .as_deref()
-        .is_some_and(|bytes| bytes != CLAPPA.1.as_bytes() && bytes != REMOVING.as_bytes())
-    {
-        return Err(conflict(
-            &launcher,
-            "launcher was edited; resolve it before removing the plugin",
-        ));
-    }
+    verify_launcher(launcher_before.as_deref(), &launcher)?;
 
     // Disable the protected entrypoint before unregistering its hooks. A crash
     // must not leave a working-looking clappa that starts unprotected Claude.
@@ -107,6 +95,44 @@ pub fn claude_code_remove(config: &Path, archive: &Path) -> Result<(), InitError
             ));
         }
         fs::remove_file(&launcher).map_err(|source| InitError::WriteFile { path: launcher, source })?;
+    }
+    Ok(())
+}
+
+fn verify_plugin(root: &Path, expected: &Path, registry: &Path) -> Result<(), InitError> {
+    if appa_package::tree::canonical_tree_digest(root).map_err(plugin_bundle::PluginBundleError::from)?
+        != appa_package::tree::canonical_tree_digest(expected).map_err(plugin_bundle::PluginBundleError::from)?
+    {
+        return Err(conflict(
+            registry,
+            "registered APPA plugin differs from this deployment; leaving it unchanged",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_marketplace(entry: &Value, expected: &Path, registry: &Path) -> Result<(), InitError> {
+    let matches = entry["source"]["path"].as_str().is_some_and(|path| {
+        let path = Path::new(path);
+        // The exact recorded location is also valid after its directory was
+        // removed. Aliases must resolve to the same existing directory.
+        path == expected || super::paths::same_file(path, expected)
+    });
+    if entry["source"]["source"] != "directory" || !matches {
+        return Err(conflict(
+            registry,
+            "APPA marketplace belongs to a different deployment; leaving it unchanged",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_launcher(bytes: Option<&[u8]>, path: &Path) -> Result<(), InitError> {
+    if bytes.is_some_and(|bytes| bytes != CLAPPA.1.as_bytes() && bytes != REMOVING.as_bytes()) {
+        return Err(conflict(
+            path,
+            "launcher was edited; resolve it before removing the plugin",
+        ));
     }
     Ok(())
 }
@@ -204,6 +230,61 @@ fn remove_statusline(paths: &super::paths::DeploymentPaths, plugin: &Path) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removal_checks_full_plugin_contents_without_modifying_them() {
+        let root = tempfile::tempdir().unwrap();
+        let installed = root.path().join("installed");
+        let expected = root.path().join("expected");
+        for path in [&installed, &expected] {
+            fs::create_dir(path).unwrap();
+            fs::write(path.join("hook.sh"), "original").unwrap();
+        }
+        let registry = root.path().join("registry.json");
+        verify_plugin(&installed, &expected, &registry).unwrap();
+        fs::write(installed.join("hook.sh"), "customized").unwrap();
+        assert!(verify_plugin(&installed, &expected, &registry).is_err());
+        assert_eq!(fs::read(installed.join("hook.sh")).unwrap(), b"customized");
+        fs::write(installed.join("hook.sh"), "original").unwrap();
+        fs::write(installed.join("extra.sh"), "extra executable").unwrap();
+        assert!(verify_plugin(&installed, &expected, &registry).is_err());
+    }
+
+    #[test]
+    fn removal_accepts_only_owned_marketplace_and_launcher_states() {
+        let root = tempfile::tempdir().unwrap();
+        let expected = root.path().join("deployment");
+        let registry = root.path().join("registry.json");
+        let entry = serde_json::json!({"source":{"source":"directory","path":expected}});
+        // A missing deployment directory must not be recreated to remove its
+        // exact registration, including on replay after interruption.
+        verify_marketplace(&entry, &expected, &registry).unwrap();
+        assert!(!expected.exists());
+        let foreign = serde_json::json!({"source":{"source":"directory","path":root.path()}});
+        assert!(verify_marketplace(&foreign, &expected, &registry).is_err());
+        let remote = serde_json::json!({"source":{"source":"github","path":expected}});
+        assert!(verify_marketplace(&remote, &expected, &registry).is_err());
+        let launcher = root.path().join(CLAPPA.0);
+        for bytes in [None, Some(CLAPPA.1.as_bytes()), Some(REMOVING.as_bytes())] {
+            verify_launcher(bytes, &launcher).unwrap();
+        }
+        assert!(verify_launcher(Some(b"custom launcher"), &launcher).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removal_accepts_marketplace_alias_only_for_same_existing_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let expected = root.path().join("deployment");
+        let alias = root.path().join("alias");
+        let registry = root.path().join("registry.json");
+        fs::create_dir(&expected).unwrap();
+        std::os::unix::fs::symlink(&expected, &alias).unwrap();
+        let entry = serde_json::json!({"source":{"source":"directory","path":alias}});
+        verify_marketplace(&entry, &expected, &registry).unwrap();
+        fs::remove_dir(&expected).unwrap();
+        assert!(verify_marketplace(&entry, &expected, &registry).is_err());
+    }
 
     #[test]
     fn removal_refuses_ambiguous_or_non_user_registrations() {
