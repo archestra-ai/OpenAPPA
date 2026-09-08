@@ -161,6 +161,26 @@ def require(condition, message):
     if not condition:
         raise ValueError(message)
 
+def stop(process):
+    try:
+        if os.name == 'posix':
+            try:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except PermissionError:
+                    # Darwin reports EPERM for a group containing only zombies.
+                    # Reap the exited leader, then require the group to be gone.
+                    if sys.platform != 'darwin' or process.poll() is None:
+                        raise
+                    os.killpg(process.pid, 0)
+                    raise
+            except ProcessLookupError:
+                pass
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=2)
+
 def run(argv):
     require(time.monotonic() < DEADLINE, 'verification exceeded total time budget')
     output = queue.Queue(maxsize=8)
@@ -199,14 +219,7 @@ def run(argv):
         require(code == 0, 'external read failed: ' + argv[0])
         return buffers[0].decode('utf-8')
     finally:
-        if os.name == 'posix':
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        if process.poll() is None:
-            process.kill()
-        process.wait(timeout=2)
+        stop(process)
 
 def reference(entry, registry):
     repository = entry['repository']
@@ -450,6 +463,42 @@ mod tests {
         }
 
         const PODS: &[&str] = &["--pods-only", "--context", "test-context", "--namespace", "kagent"];
+
+        #[test]
+        fn emitted_helper_reaps_exited_and_live_processes() {
+            let fixture = Fixture::new();
+            let output = Command::new("python3")
+                .arg("-c")
+                .arg(
+                    r#"
+import runpy
+import subprocess
+import sys
+import time
+stop = runpy.run_path(sys.argv[1])['stop']
+for _ in range(16):
+    child = subprocess.Popen([sys.executable, '-c', 'pass'],
+                             stdout=subprocess.PIPE, start_new_session=True)
+    # Observe zombie state without reaping the group leader.
+    assert child.stdout.read() == b''
+    deadline = time.monotonic() + 5
+    while not subprocess.check_output(['ps', '-o', 'stat=', '-p', str(child.pid)],
+                                      timeout=2).strip().startswith(b'Z'):
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    stop(child)
+    assert child.returncode == 0
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+                         start_new_session=True)
+stop(child)
+assert child.returncode != 0
+"#,
+                )
+                .arg(fixture.root.path().join("verify-images.py"))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        }
 
         #[test]
         fn emitted_helper_checks_registry_and_each_platform_via_real_subprocesses() {
