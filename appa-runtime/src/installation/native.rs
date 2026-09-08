@@ -3,7 +3,9 @@
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::ExitCode;
+#[cfg(not(windows))]
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use appa_package::generation::{ArtifactDigest, Generation, Platform};
@@ -12,6 +14,13 @@ use serde::{Deserialize, Serialize};
 use super::{InstallError, Installation, acquisition, io, open_regular, require_directory_or_absent, sync_directory};
 
 const MAX_BINARY_BYTES: u64 = 512 * 1024 * 1024;
+
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use windows::NativeChild;
+#[cfg(all(test, windows))]
+mod windows_tests;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -201,11 +210,13 @@ fn extract_windows_binary(archive: &Path, target: &Path) -> Result<(), InstallEr
     Ok(())
 }
 
+#[cfg(not(windows))]
 struct NativeChild {
     child: std::process::Child,
     completed: bool,
 }
 
+#[cfg(not(windows))]
 impl NativeChild {
     fn terminate(&mut self) -> std::io::Result<()> {
         #[cfg(unix)]
@@ -214,19 +225,6 @@ impl NativeChild {
             let result = unsafe { libc::kill(-(self.child.id() as i32), libc::SIGKILL) };
             if result != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
                 return Err(std::io::Error::last_os_error());
-            }
-        }
-        #[cfg(windows)]
-        {
-            let status = Command::new("taskkill")
-                .args(["/PID", &self.child.id().to_string(), "/T", "/F"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()?;
-            if !status.success() {
-                return Err(std::io::Error::other(
-                    "could not terminate native activation process tree",
-                ));
             }
         }
         self.child.wait()?;
@@ -273,6 +271,7 @@ mod tests {
     }
 }
 
+#[cfg(not(windows))]
 impl Drop for NativeChild {
     fn drop(&mut self) {
         if !self.completed
@@ -283,9 +282,13 @@ impl Drop for NativeChild {
     }
 }
 
-fn invoke(binary: &Path, arguments: &[&std::ffi::OsStr], timeout: Duration) -> Result<Vec<u8>, InstallError> {
-    let mut stdout = tempfile::tempfile().map_err(|error| io("capture native result", binary, error))?;
-    let mut stderr = tempfile::tempfile().map_err(|error| io("capture native diagnostics", binary, error))?;
+#[cfg(not(windows))]
+fn spawn(
+    binary: &Path,
+    arguments: &[&std::ffi::OsStr],
+    stdout: &File,
+    stderr: &File,
+) -> Result<NativeChild, InstallError> {
     let mut command = Command::new(binary);
     command
         .args(arguments)
@@ -305,12 +308,22 @@ fn invoke(binary: &Path, arguments: &[&std::ffi::OsStr], timeout: Duration) -> R
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let mut process = NativeChild {
+    Ok(NativeChild {
         child: command
             .spawn()
             .map_err(|error| io("run selected binary", binary, error))?,
         completed: false,
-    };
+    })
+}
+
+fn invoke(binary: &Path, arguments: &[&std::ffi::OsStr], timeout: Duration) -> Result<Vec<u8>, InstallError> {
+    let mut stdout = tempfile::tempfile().map_err(|error| io("capture native result", binary, error))?;
+    let mut stderr = tempfile::tempfile().map_err(|error| io("capture native diagnostics", binary, error))?;
+    #[cfg(not(windows))]
+    let mut process = spawn(binary, arguments, &stdout, &stderr)?;
+    #[cfg(windows)]
+    let mut process = NativeChild::spawn(binary, arguments, &stdout, &stderr)
+        .map_err(|error| io("run selected binary", binary, error))?;
     let deadline = Instant::now() + timeout;
     let status = loop {
         if stdout
@@ -332,17 +345,20 @@ fn invoke(binary: &Path, arguments: &[&std::ffi::OsStr], timeout: Duration) -> R
                 reason: "selected binary output exceeded its byte limit; owned subprocesses were stopped".into(),
             });
         }
-        if let Some(status) = process
-            .child
-            .try_wait()
-            .map_err(|error| io("wait for selected binary", binary, error))?
-        {
+        #[cfg(not(windows))]
+        let status = process.child.try_wait();
+        #[cfg(windows)]
+        let status = process.try_wait();
+        if let Some(status) = status.map_err(|error| io("wait for selected binary", binary, error))? {
             if !status.success() {
                 process
                     .terminate()
                     .map_err(|error| io("stop failed native command", binary, error))?;
             }
-            process.completed = true;
+            #[cfg(not(windows))]
+            {
+                process.completed = true;
+            }
             break status;
         }
         if Instant::now() >= deadline {
@@ -383,6 +399,26 @@ fn invoke(binary: &Path, arguments: &[&std::ffi::OsStr], timeout: Duration) -> R
             path: binary.to_owned(),
             reason: format!("native command exited with {status}: {}", message.trim()),
         });
+    }
+    #[cfg(windows)]
+    {
+        // Descendants may include the runtime. Release them only after the
+        // successful command's captured result passes validation.
+        if stderr
+            .metadata()
+            .map_err(|error| io("inspect native diagnostics", binary, error))?
+            .len()
+            > 65536
+        {
+            return Err(InstallError::Recovery {
+                path: binary.to_owned(),
+                reason: "selected binary diagnostics exceeded their byte limit".into(),
+            });
+        }
+        process.complete().map_err(|error| InstallError::Recovery {
+            path: binary.to_owned(),
+            reason: format!("could not release the successful native command's runtime: {error}"),
+        })?;
     }
     Ok(output)
 }

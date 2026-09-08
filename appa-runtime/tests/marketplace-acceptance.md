@@ -6,6 +6,25 @@ Claude profile. The native installer invokes the real `claude plugin` commands.
 Disable Claude automatic updates and official marketplace auto-installation for
 an offline test. No model session or provider credentials are needed.
 
+## Windows subprocess containment
+
+Run `cargo test --locked --package appa --lib installation::native` on Windows
+10 or newer. The Windows CI deployment job runs this before its runtime smoke
+check. These tests launch real Rust fixtures and Windows PowerShell, including
+the hook's `Start-Process -WindowStyle Hidden` path. They check descendant
+termination after a failed primary exits, timeout/output-limit cleanup, supervisor
+exit with nested jobs, argument fidelity, and runtime-child survival on success.
+
+The installer assigns each selected native command to its own job at process
+creation. Failure cleanup terminates that job and waits at most five seconds for
+it to empty. A failed cleanup remains an error, not a rollback claim. Successful
+commands release kill-on-close only after captured output validation. An enclosing
+job, such as a CI runner's job, can still impose its own lifetime restrictions.
+
+Cross-target compilation does not verify these operating-system behaviors. A
+successful Windows test run is required in addition to the native installation
+and policy-enforcement checks below.
+
 ## Native Claude and GitHub
 
 1. Install a verified bundle with `appa plugin install claude-code --from

@@ -517,6 +517,9 @@ jobs:
       - name: Build runtime
         run: cargo build --locked --package appa
 
+      - name: Verify installer process containment
+        run: cargo test --locked --package appa --lib installation::native
+
       # Start from an empty directory, as the release package check does. The
       # generated policy must both open and omit the subprocess fallback this
       # platform cannot serve.

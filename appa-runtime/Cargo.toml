@@ -64,6 +64,9 @@ rig-agent = { version = "0.42", default-features = false }
 # Depended on only to name the crypto provider; see the workspace manifest.
 rustls = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
 # `build.rs` includes `src/plugin_layout.rs`, which re-exports the canonical
 # tree digest from the marketplace crate.
 [build-dependencies]
