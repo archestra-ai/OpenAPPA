@@ -99,12 +99,11 @@ Invoke only the `appa-guide` skill name; never invent a mode-specific skill name
   entries, comments, reader names, external bindings, and batteries.
 - Use short sentences. Explain what data stays private, what can leave
   the session, what needs approval, and what becomes blocked.
-- Explain before acting: in every interaction (init, adjust, protect,
-  diagnose, refresh, or answering any user request), always explain yourself
-  to the user first before actually acting. Your very first response turn to
-  any user message must include a clear, user-friendly text message describing
-  what you are about to do, before or alongside any tool calls. Never execute
-  tools silently without explaining your plan to the user first.
+- Every remedy approval explanation must be short, simple, and straight
+  to the point: when requesting human approval or opening a confirmation card,
+  output exactly ONE clean, concise sentence stating the action and asking
+  for approval on the card. Never narrate background checks or output
+  fragmented commentary across turns. Run background calls silently.
 - Use human, user-friendly language without jargon. Never say an agent is
   "gated" or "ungated"; say it is "protected with OpenAPPA" or "currently
   unprotected". Avoid bureaucratic phrases like "battery reconciliation",

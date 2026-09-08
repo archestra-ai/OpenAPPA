@@ -152,7 +152,11 @@ error.
   mutation.
 - When a blocked tool result quotes `offer_id: "<hex>"`, call
   `execute_remedy_plan` immediately with that exact hex string. That
-  call opens the Approve/Reject card. Wait for its ruling. Never
+  call opens the Approve/Reject card. Every remedy approval explanation
+  must be short, simple, and straight to the point: output exactly ONE
+  concise sentence stating the action and asking for card approval.
+  Never narrate background checks or output multiple commentary sentences.
+  Wait for its ruling. Never
   summarize the offer as a substitute for opening the card. Never use
   `human-approval` or any other word as an offer id.   If the operator
   rejects it, stop that operation. Report that it was rejected and did
