@@ -36,6 +36,19 @@ fn as_policy(fence: &str) -> String {
     }
 }
 
+/// The guide shows both raw policy fragments and full deployment files under `[policy]`.
+/// If a deployment file is shown, extract its policy table; otherwise wrap with `version = 2`.
+fn policy_of_fence(fence: &str, table: &toml::Table) -> String {
+    if let Some(policy) = table.get("policy") {
+        if policy.get("version").is_some() {
+            return toml::to_string(policy).expect("a parsed table renders");
+        }
+        let policy_str = toml::to_string(policy).expect("a parsed table renders");
+        return format!("version = 2\n\n{policy_str}");
+    }
+    as_policy(fence)
+}
+
 /// A fence holding only `[externals.…]` entries is a deployment-binding example. The policy
 /// dialect this crate loads has no `[externals]` table — the deployment owns it — so such a
 /// fence answers only to TOML syntax here.
@@ -55,7 +68,7 @@ fn every_toml_fence_in_the_policy_reference_loads() {
         if is_externals_example(&table) {
             continue;
         }
-        let policy = as_policy(fence);
+        let policy = policy_of_fence(fence, &table);
         if let Err(error) = Config::from_toml_str(&policy) {
             panic!("a policy example does not load: {error}\n{policy}");
         }
