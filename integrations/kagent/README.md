@@ -79,6 +79,8 @@ unset OPENAI_API_KEY_B64
 
 helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
+  --set kmcp.podSecurityContext.runAsUser=65532 \
+  --set kmcp.podSecurityContext.runAsGroup=65532 \
   --set controller.agentImage.registry=europe-west1-docker.pkg.dev \
   --set controller.agentImage.repository=friendly-path-465518-r6/appa-public/appa-kagent-adk \
   --set providers.default=openAI \
@@ -101,6 +103,9 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --wait --timeout 10m \
   --set controller.agentImage.tag="v$APPA_VERSION"
 ```
+
+The explicit KMCP user and group preserve `runAsNonRoot` while avoiding
+`CreateContainerConfigError` with the bundled KMCP 0.3.0 image, which defaults to root.
 
 ### 2. Deploy appa-runtime
 
