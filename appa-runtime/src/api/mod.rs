@@ -466,6 +466,8 @@ impl Deployment {
         use appa_engine::audience::AudienceEvidence;
 
         let audience = self.resident.registry().audience();
+        // Both batches are built before they settle: a future borrowing its spec does not
+        // type-check through the stream adapter as a lazy map.
         let selectors: Vec<_> = audience
             .referenced_selectors()
             .into_iter()
@@ -476,11 +478,10 @@ impl Deployment {
             lookups: Vec::new(),
         };
         let owed = audience.member_lookups_owed(&evidence);
-        let lookups: Vec<_> = owed
-            .iter()
-            .map(|spec| self.probe_lookup(audience, &evidence.sources, spec))
-            .collect();
-        settle_batch(lookups).await.into_iter().collect::<Result<Vec<_>, _>>()?;
+        let lookups: Vec<_> = owed.iter().map(|spec| self.probe_lookup(audience, spec)).collect();
+        for lookup in settle_batch(lookups).await {
+            lookup?;
+        }
         Ok(())
     }
 
@@ -524,17 +525,16 @@ impl Deployment {
         Ok(claims)
     }
 
-    /// One owed lookup, asked of the entry the member's provider names and validated against
-    /// the sources that reported the member, exactly as the live pin is.
+    /// One owed lookup, asked of the entry the member's provider names; its principal is
+    /// held to the same shape rule the live pin applies.
     async fn probe_lookup(
         &self,
         audience: &appa_engine::audience::AudienceRegistry,
-        sources: &[appa_engine::audience::SourceClaims],
         spec: &appa_engine::audience::LookupSpec,
-    ) -> Result<appa_engine::audience::MemberLookup, ProbeError> {
+    ) -> Result<(), ProbeError> {
         use crate::consult::{Consult, LookupAnswer};
         use crate::external::ConsultOutcome;
-        use appa_engine::audience::{AudienceEvidence, MemberLookup};
+        use appa_engine::audience::well_formed_reader;
         use appa_engine::label::ReaderId;
 
         let refused = |reason: String| ProbeError::Lookup {
@@ -551,19 +551,14 @@ impl Deployment {
                 .map(ReaderId::new),
             ConsultOutcome::NoAnswer(reason) => return Err(refused(reason.diagnostic())),
         };
-        let lookup = MemberLookup {
-            provider: spec.provider.clone(),
-            member: spec.member.clone(),
-            principal,
-        };
-        let evidence = AudienceEvidence {
-            sources: sources.to_vec(),
-            lookups: vec![lookup.clone()],
-        };
-        audience
-            .expansions(&evidence)
-            .map_err(|refusal| refused(refusal.to_string()))?;
-        Ok(lookup)
+        match principal {
+            Some(principal) if !well_formed_reader(&spec.provider, &principal) => Err(refused(format!(
+                "the answer names principal {:?}, which is neither an address nor a {}-qualified id",
+                principal.as_str(),
+                spec.provider
+            ))),
+            _ => Ok(()),
+        }
     }
 
     /// A probed selector or owed lookup names a provider the policy registered.

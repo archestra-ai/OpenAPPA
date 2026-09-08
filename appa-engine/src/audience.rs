@@ -640,13 +640,16 @@ impl AudienceRegistry {
     /// The owed lookups this evidence does not yet pin: what the next round must ask before
     /// the selectors that report those members can answer.
     pub fn member_lookups_owed(&self, evidence: &AudienceEvidence) -> BTreeSet<LookupSpec> {
+        let pinned: BTreeSet<LookupSpec> = evidence
+            .lookups
+            .iter()
+            .map(|lookup| LookupSpec {
+                provider: lookup.provider.clone(),
+                member: lookup.member.clone(),
+            })
+            .collect();
         let mut owed = self.owed_lookups(evidence);
-        owed.retain(|spec| {
-            !evidence
-                .lookups
-                .iter()
-                .any(|lookup| lookup.provider == spec.provider && lookup.member == spec.member)
-        });
+        owed.retain(|spec| !pinned.contains(spec));
         owed
     }
 
