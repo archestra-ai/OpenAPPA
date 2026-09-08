@@ -14,127 +14,127 @@ version = 2
 # --- meeting content: internal ---
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__list_meetings"
+name = "mcp/claude_ai_Grain/list_meetings"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__list_attended_meetings"
+name = "mcp/claude_ai_Grain/list_attended_meetings"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__fetch_meeting"
+name = "mcp/claude_ai_Grain/fetch_meeting"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__fetch_meeting_transcript"
+name = "mcp/claude_ai_Grain/fetch_meeting_transcript"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__fetch_meeting_notes"
+name = "mcp/claude_ai_Grain/fetch_meeting_notes"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__fetch_meeting_action_items"
+name = "mcp/claude_ai_Grain/fetch_meeting_action_items"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__fetch_user_recording_notes"
+name = "mcp/claude_ai_Grain/fetch_user_recording_notes"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__search_in_transcripts"
+name = "mcp/claude_ai_Grain/search_in_transcripts"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__fetch_meeting_coaching_feedback"
+name = "mcp/claude_ai_Grain/fetch_meeting_coaching_feedback"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__list_coaching_feedback"
+name = "mcp/claude_ai_Grain/list_coaching_feedback"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__list_clips"
+name = "mcp/claude_ai_Grain/list_clips"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__list_collections"
+name = "mcp/claude_ai_Grain/list_collections"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__fetch_collection"
+name = "mcp/claude_ai_Grain/fetch_collection"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__list_stories"
+name = "mcp/claude_ai_Grain/list_stories"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__fetch_story"
+name = "mcp/claude_ai_Grain/fetch_story"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__search_companies"
+name = "mcp/claude_ai_Grain/search_companies"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__search_persons"
+name = "mcp/claude_ai_Grain/search_persons"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__get_dossier_for_company"
+name = "mcp/claude_ai_Grain/get_dossier_for_company"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__list_all_deals"
+name = "mcp/claude_ai_Grain/list_all_deals"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__list_open_deals"
+name = "mcp/claude_ai_Grain/list_open_deals"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__fetch_deal"
+name = "mcp/claude_ai_Grain/fetch_deal"
 
 [policy.tool.delta]
 audience = ["internal"]
@@ -142,55 +142,55 @@ audience = ["internal"]
 # --- workspace directory and settings: internal ---
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__list_workspace_users"
+name = "mcp/claude_ai_Grain/list_workspace_users"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__list_smart_topics"
+name = "mcp/claude_ai_Grain/list_smart_topics"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__list_team_settings"
+name = "mcp/claude_ai_Grain/list_team_settings"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__list_user_settings"
+name = "mcp/claude_ai_Grain/list_user_settings"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__my_settings"
+name = "mcp/claude_ai_Grain/my_settings"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__my_team"
+name = "mcp/claude_ai_Grain/my_team"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__myself"
+name = "mcp/claude_ai_Grain/myself"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__workspace_settings"
+name = "mcp/claude_ai_Grain/workspace_settings"
 
 [policy.tool.delta]
 audience = ["internal"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__workspace_seat_info"
+name = "mcp/claude_ai_Grain/workspace_seat_info"
 
 [policy.tool.delta]
 audience = ["internal"]
@@ -198,13 +198,13 @@ audience = ["internal"]
 # --- links: turns ids into URLs, carries no content ---
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__resolve_urls"
+name = "mcp/claude_ai_Grain/resolve_urls"
 delta = {}
 
 # --- writes that stay inside the workspace ---
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__create_clip"
+name = "mcp/claude_ai_Grain/create_clip"
 delta = {}
 
 [policy.tool.requires]
@@ -212,7 +212,7 @@ trust = "trusted"
 audience = { contains = ["internal"] }
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__create_story"
+name = "mcp/claude_ai_Grain/create_story"
 delta = {}
 
 [policy.tool.requires]
@@ -220,7 +220,7 @@ trust = "trusted"
 audience = { contains = ["internal"] }
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__add_clips_to_story"
+name = "mcp/claude_ai_Grain/add_clips_to_story"
 delta = {}
 
 [policy.tool.requires]
@@ -228,7 +228,7 @@ trust = "trusted"
 audience = { contains = ["internal"] }
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__create_collection"
+name = "mcp/claude_ai_Grain/create_collection"
 delta = {}
 
 [policy.tool.requires]
@@ -236,7 +236,7 @@ trust = "trusted"
 audience = { contains = ["internal"] }
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__add_recordings_to_collection"
+name = "mcp/claude_ai_Grain/add_recordings_to_collection"
 delta = {}
 
 [policy.tool.requires]
@@ -244,7 +244,7 @@ trust = "trusted"
 audience = { contains = ["internal"] }
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__tag_meetings"
+name = "mcp/claude_ai_Grain/tag_meetings"
 delta = {}
 
 [policy.tool.requires]
@@ -252,7 +252,7 @@ trust = "trusted"
 audience = { contains = ["internal"] }
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__create_smart_topic"
+name = "mcp/claude_ai_Grain/create_smart_topic"
 delta = {}
 
 [policy.tool.requires]
@@ -262,14 +262,14 @@ audience = { contains = ["internal"] }
 # --- sharing outward: a person decides ---
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__update_collection_share_state"
+name = "mcp/claude_ai_Grain/update_collection_share_state"
 delta = {}
 
 [policy.tool.requires]
 trust = "trusted"
 attention = ["hitl"]
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__invite_to_workspace"
+name = "mcp/claude_ai_Grain/invite_to_workspace"
 delta = {}
 
 [policy.tool.requires]
@@ -279,7 +279,7 @@ attention = ["hitl"]
 # --- workspace administration: a person decides ---
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__assign_paid_seat_to_users"
+name = "mcp/claude_ai_Grain/assign_paid_seat_to_users"
 delta = {}
 
 [policy.tool.requires]
@@ -287,7 +287,7 @@ trust = "trusted"
 attention = ["hitl"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__unassign_paid_seat_from_users"
+name = "mcp/claude_ai_Grain/unassign_paid_seat_from_users"
 delta = {}
 
 [policy.tool.requires]
@@ -295,7 +295,7 @@ trust = "trusted"
 attention = ["hitl"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__create_team"
+name = "mcp/claude_ai_Grain/create_team"
 delta = {}
 
 [policy.tool.requires]
@@ -303,7 +303,7 @@ trust = "trusted"
 attention = ["hitl"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__move_users_to_team"
+name = "mcp/claude_ai_Grain/move_users_to_team"
 delta = {}
 
 [policy.tool.requires]
@@ -311,7 +311,7 @@ trust = "trusted"
 attention = ["hitl"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__remove_user_from_team"
+name = "mcp/claude_ai_Grain/remove_user_from_team"
 delta = {}
 
 [policy.tool.requires]
@@ -319,7 +319,7 @@ trust = "trusted"
 attention = ["hitl"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__update_my_settings"
+name = "mcp/claude_ai_Grain/update_my_settings"
 delta = {}
 
 [policy.tool.requires]
@@ -327,7 +327,7 @@ trust = "trusted"
 attention = ["hitl"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__update_user_settings"
+name = "mcp/claude_ai_Grain/update_user_settings"
 delta = {}
 
 [policy.tool.requires]
@@ -335,7 +335,7 @@ trust = "trusted"
 attention = ["hitl"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__update_team_settings"
+name = "mcp/claude_ai_Grain/update_team_settings"
 delta = {}
 
 [policy.tool.requires]
@@ -343,7 +343,7 @@ trust = "trusted"
 attention = ["hitl"]
 
 [[policy.tool]]
-name = "mcp__claude_ai_Grain__update_workspace_settings"
+name = "mcp/claude_ai_Grain/update_workspace_settings"
 delta = {}
 
 [policy.tool.requires]

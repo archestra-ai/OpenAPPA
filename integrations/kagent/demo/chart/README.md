@@ -47,6 +47,15 @@ behavior and the matched GitHub battery. Reply with approval, then approve
 the enforced kagent confirmation card. Typed runtime MCP operations update
 and reload the complete runtime-owned policy.
 
+The policy names the delegated children by their canonical ids,
+`agent/<namespace>/<child>`
+([files/demo.appa.toml](files/demo.appa.toml)), rendered from the release
+namespace, `agents.childName` and `agents.go.childName`. The names must be
+DNS-1123 labels ([values.schema.json](values.schema.json)). The seeded
+showcase chats are captured transcripts and keep the `kagent__NS__…`
+function-call names of their capture: that is how kagent renders an agent
+tool, and the entrypoint maps it to the `agent/…` id the policy names.
+
 The demo ConfigMap is never mounted or served directly. Installing or
 upgrading this chart cannot change runtime policy.
 

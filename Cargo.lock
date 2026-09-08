@@ -148,6 +148,7 @@ name = "appa-adapter-claude-code"
 version = "0.16.0"
 dependencies = [
  "appa-runtime-api",
+ "proptest",
  "serde",
  "serde_json",
  "tracing",
@@ -158,9 +159,8 @@ name = "appa-adapter-kagent"
 version = "0.16.0"
 dependencies = [
  "appa-runtime-api",
- "serde",
+ "proptest",
  "serde_json",
- "tracing",
 ]
 
 [[package]]
@@ -206,6 +206,7 @@ version = "0.16.0"
 dependencies = [
  "appa-engine",
  "appa-policy",
+ "appa-runtime-api",
  "rusqlite",
  "serde",
  "serde_json",
@@ -248,6 +249,7 @@ name = "appa-policy"
 version = "0.16.0"
 dependencies = [
  "appa-engine",
+ "appa-runtime-api",
  "serde",
  "serde_json",
  "thiserror",

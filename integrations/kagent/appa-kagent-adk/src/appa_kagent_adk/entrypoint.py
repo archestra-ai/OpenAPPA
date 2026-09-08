@@ -16,11 +16,13 @@ It replays the stock kagent startup — the same public calls
 adds the OpenAPPA construction deltas:
 
 1. Refuse what the runtime cannot gate: unknown config fields, compiled
-   ``sub_agents``, a divergent compaction summarizer (``config_guard``).
+   ``sub_agents`` and a divergent compaction summarizer (``config_guard``).
 2. Bring the out-of-band flows under the tool gate: wrap the code
    executor and the memory persist callback (``gates``).
-3. Rebuild the stock plugin list with the stock conditions, then append
-   ``AppaPluginKagent`` last.
+3. Keep configured builtin and agent identities; discover MCP metadata
+   through the stock authenticated toolsets before activation and model
+   requests. Validate coverage and preserve accepted identities. Rebuild
+   the stock plugin list and append ``AppaPluginKagent`` last.
 4. Append the runtime-owned remedy and battery-matcher toolset over
    ``$APPA_RUNTIME_URL/mcp``.
 5. Fill the OpenAI model's ``reasoning_effort`` from
@@ -49,6 +51,7 @@ import pydantic
 
 from .config_guard import ConfigRefused
 from .identity import SessionIdentity
+from .inventory import ToolInventory, guide_enabled
 from .plugin import AppaPluginKagent
 from .wire import RESERVED_TOOL, RUNTIME_TOOLS
 
@@ -72,6 +75,9 @@ STOCK_STARTUP = (
     f"{ENABLED_ENV} is not true. This agent runs UNGATED as the stock kagent runtime, "
     f"and no OpenAPPA policy applies. Set {ENABLED_ENV}=true to gate this agent."
 )
+# What the gated startup fixed before the model runs: the names the
+# wire can carry.
+GATED_INVENTORY = "the gated inventory spells %d tools"
 # The one combination worth naming: a runtime URL that gates nothing.
 IGNORED_RUNTIME_URL = (
     f"{RUNTIME_URL_ENV} is set, and this agent ignores it. The agent runs UNGATED because {ENABLED_ENV} is not true."
@@ -247,13 +253,22 @@ def build_server(filepath: str, runtime_url: str):
     config_guard.refuse_unsupported(config, AgentConfig)
     agent_config = AgentConfig.model_validate(config)
     config_guard.refuse_divergent_summarizer(agent_config)
+    inventory = ToolInventory.from_config(config)
+    logger.info(GATED_INVENTORY, len(inventory.spellings))
     agent_card = AgentCard.model_validate(_read_document(filepath, "agent-card.json"))
 
     app_cfg = KAgentConfig()
     sts_integration, plugins = _stock_plugins(agent_config)
 
     identity = SessionIdentity()
-    plugin = AppaPluginKagent(runtime_url, identity=identity)
+    base_inventory = ToolInventory(
+        {
+            name: spelling
+            for name, spelling in inventory.spellings.items()
+            if not spelling.startswith("mcp:") or spelling.startswith("mcp:appa-guide/")
+        }
+    )
+    plugin = AppaPluginKagent(runtime_url, inventory=base_inventory, identity=identity)
     # Appended last: no stock plugin overrides a gated callback. The
     # callbacks the stock plugins do override (before_run, after_run,
     # before_model) return None, so the chain reaches this plugin.
@@ -264,10 +279,17 @@ def build_server(filepath: str, runtime_url: str):
         stock_cli.maybe_add_skills_with_config(root_agent, agent_config)
         if root_agent.code_executor is not None:
             root_agent.code_executor = gates.GatedCodeExecutor(
-                root_agent.code_executor, gates.SyncHookGate(runtime_url, identity)
+                root_agent.code_executor, gates.SyncHookGate(runtime_url, identity, inventory)
             )
         if gates.gate_memory_persist(root_agent, plugin):
             logger.info("the memory persist callback crosses the tool gate")
+        from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
+
+        from .mcp_lifecycle import MCPDiscovery
+
+        sources = [tool for tool in root_agent.tools if isinstance(tool, McpToolset)]
+        root_agent.tools = [tool for tool in root_agent.tools if not isinstance(tool, McpToolset)]
+        root_agent.tools.append(MCPDiscovery(sources, plugin))
         root_agent.tools.append(_runtime_toolset(runtime_url))
         return root_agent
 
@@ -291,7 +313,7 @@ def _runtime_toolset(runtime_url: str):
     from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnectionParams
     from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 
-    guide = os.environ.get("APPA_GUIDE", "").strip().lower() == "true"
+    guide = guide_enabled()
     endpoint = runtime_url.rstrip("/") + "/mcp"
     tools = [RESERVED_TOOL]
     if guide:

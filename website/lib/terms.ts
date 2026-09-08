@@ -39,9 +39,21 @@ const TERMS = {
   remedies:
     "Actionable paths returned on a policy refusal explaining how to unblock execution safely (e.g. human approval, sanitizer, or narrowing acceptance).",
 
+  /* Tool identity */
+  "canonical tool id":
+    "The identity APPA records for a tool: <family>/<namespace>/<tool>, with families mcp, host, and agent. Policies accept canonical or host-native names. An unqualified kagent rule can span MCP servers; server restricts it to one connection. Discovery supplies evidence, not permission. A trajectory retains its opening policy and accepted tool identities.",
+  "<family>/<namespace>/<tool>":
+    "The shape of a canonical tool id. The family is mcp, host, or agent; each segment matches [A-Za-z0-9_.-]+; a namespace never contains __. The one id outside these families is appa/execute_remedy_plan.",
+  "appa/execute_remedy_plan":
+    "The runtime's own control tool, the one member of the appa family. A policy cannot declare it; the runtime recognizes it before any contract and runs the remedy plan the call quotes.",
+  adapter:
+    "The runtime's translation layer for host events and tool identities. It derives canonical tool ids, spawn-ness, and child names. The heavier host lifecycle belongs to a plugin; Claude Code and kagent are the initial hosts.",
+  "raw tool spelling":
+    "The host's spelling for a tool, such as mcp__github__create_issue in Claude Code. The agent keeps its normal names, and policies may use native names too. The adapter translates wire spellings to canonical identities for recording and back for model-facing suggestions.",
+
   /* Tool contracts */
   "Tool(argument:pattern)":
-    "An ordered tool contract selector. A selector holds one or more comma-separated argument:pattern clauses, and a contract matches only when every clause matches its own top-level string argument. OpenAPPA uses the first matching contract. An asterisk matches any text; a bare tool name is the fallback. A sanitizer rewrite that selects another contract is judged as a new call under it.",
+    "An ordered tool contract selector. Every argument:pattern clause must match its top-level string argument. OpenAPPA uses the first matching contract in authored order, including overlapping native and canonical names. An asterisk matches any argument text; a bare name is the fallback. A sanitizer rewrite selecting another contract is judged under that contract.",
   delta:
     "The label contribution of an admitted call result. A delta never expands permissions: it intersects reader sets, lowers the trust rank, or leaves the trajectory label unchanged.",
   requires:

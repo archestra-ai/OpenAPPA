@@ -73,6 +73,8 @@ expect_env() {
 
 # The defaults render only demo-owned fixtures. appa-runtime owns the
 # runtime, serving policy, persistence, provider configuration, and guide.
+# The policy declares both children by their canonical ids,
+# agent/<namespace>/<child>.
 must_render kagent
 expect 2 '^kind: Deployment$'
 expect 2 '^kind: Service$'
@@ -94,9 +96,9 @@ expect 1 "image: europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public
 expect 1 '^        runAsNonRoot: true$'
 expect 1 '^            readOnlyRootFilesystem: true$'
 expect 5 'http://appa-demo-mocks\.kagent\.svc\.cluster\.local:8081/'
-expect 1 '^    name = "skills"$'
-expect 1 '^    name = "kagent__NS__log_analyst"$'
-expect 1 '^    name = "kagent__NS__log_analyst_go"$'
+expect 1 '^    name = "host/kagent/skills"$'
+expect 1 '^    name = "agent/kagent/log-analyst"$'
+expect 1 '^    name = "agent/kagent/log-analyst-go"$'
 expect 1 '^            - mcp__github__get_file_contents$'
 expect 1 '^            - mcp__github__issue_write$'
 
@@ -144,8 +146,8 @@ expect 2 'name: "123"$'
 # The go child Agent and the go parent's agent-tool reference.
 expect 2 'name: "null"$'
 expect 6 '^    modelConfig: "123"$'
-expect 1 '^    name = "123__NS__123"$'
-expect 1 '^    name = "123__NS__null"$'
+expect 1 '^    name = "agent/123/123"$'
+expect 1 '^    name = "agent/123/null"$'
 
 # Required external references fail before Kubernetes sees an unusable Agent.
 must_refuse "missing property 'url'" kagent --set runtime.url=null

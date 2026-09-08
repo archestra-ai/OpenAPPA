@@ -67,6 +67,8 @@ pub enum ConfigError {
         tool: String,
         source: appa_engine::params::ParamsError,
     },
+    #[error("tool {tool}: invalid MCP server qualifier: {reason}")]
+    ToolServer { tool: String, reason: String },
     #[error("tool {tool} declares effect {kind:?} twice — `effects` is a set")]
     DuplicateEffect { tool: String, kind: String },
     #[error("annotator name {0:?} is empty")]
@@ -260,6 +262,8 @@ pub struct Config {
     boundary_label: Label,
     /// Every registered `[[annotator]]`, with its runtime-owned hint, builtin, and input mapping.
     annotators: BTreeMap<AnnotatorName, AnnotatorBinding>,
+    /// Every tool a `[deployment]` field names, as authored, with the field it was named in.
+    deployment_tools: Vec<(&'static str, String)>,
 }
 
 impl Config {
@@ -357,8 +361,24 @@ impl Config {
         }
         let audience = convert_audience(raw.audience, raw.identity)?;
         let mut tools = Vec::new();
+        let mut qualified: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
         for t in raw.tool {
-            tools.push(t.convert(&trust_chain)?);
+            let authored = t
+                .name
+                .split('(')
+                .next()
+                .expect("split always yields one entry")
+                .to_string();
+            let tool = t.convert(&trust_chain)?;
+            qualified.entry(authored).or_default().insert(
+                tool.name()
+                    .as_str()
+                    .split('(')
+                    .next()
+                    .expect("split always yields one entry")
+                    .to_string(),
+            );
+            tools.push(tool);
         }
         // An input mapping is validated against every tool that routes through its Annotator:
         // a mapped argument must be a required top-level property of that tool's schema, and a
@@ -413,9 +433,27 @@ impl Config {
             Some(cap) => PlannerCap::new(cap).ok_or(ConfigError::ZeroPlannerCap)?,
         };
 
-        let profile = match raw.deployment {
-            Some(deployment) => deployment.convert(&trust_chain)?,
-            None => ProfileDeclaration::no_coverage(&trust_chain),
+        let (profile, deployment_tools) = match raw.deployment {
+            Some(mut deployment) => {
+                for names in [
+                    &mut deployment.confined_results,
+                    &mut deployment.assumed_tools,
+                    &mut deployment.provider_run_tools,
+                ] {
+                    *names = std::mem::take(names)
+                        .into_iter()
+                        .flat_map(|name| {
+                            qualified
+                                .get(&name)
+                                .map(|names| names.iter().cloned().collect())
+                                .unwrap_or_else(|| vec![name])
+                        })
+                        .collect();
+                }
+                let named = deployment.tool_names();
+                (deployment.convert(&trust_chain)?, named)
+            }
+            None => (ProfileDeclaration::no_coverage(&trust_chain), Vec::new()),
         };
 
         let registry_config = RegistryConfig {
@@ -448,6 +486,7 @@ impl Config {
             registry_config,
             boundary_label,
             annotators,
+            deployment_tools,
         })
     }
 
@@ -467,6 +506,15 @@ impl Config {
 
     pub fn registry_config(&self) -> &RegistryConfig {
         &self.registry_config
+    }
+
+    /// Every tool a `[deployment]` field names, as authored, paired with the field's
+    /// spelling. Each name is matched against a tool identity exactly, so a deployment
+    /// that requires a naming convention checks these beside the contracts.
+    pub fn deployment_tool_names(&self) -> impl Iterator<Item = (&'static str, &str)> {
+        self.deployment_tools
+            .iter()
+            .map(|(field, name)| (*field, name.as_str()))
     }
 
     /// Every `[[annotator]]` the policy registers — the validated superset of every annotator
@@ -536,6 +584,20 @@ enum RawStartingAudience {
 }
 
 impl RawDeployment {
+    /// Every field of this table that names a tool, with the field's spelling. The list
+    /// lives beside the fields themselves, so a field added here reaches every reader
+    /// that checks how a deployment names tools.
+    fn tool_names(&self) -> Vec<(&'static str, String)> {
+        [
+            ("[deployment] assumed_tools", &self.assumed_tools),
+            ("[deployment] provider_run_tools", &self.provider_run_tools),
+            ("[deployment] confined_results", &self.confined_results),
+        ]
+        .into_iter()
+        .flat_map(|(field, names)| names.iter().map(move |name| (field, name.clone())))
+        .collect()
+    }
+
     fn convert(self, chain: &TrustChain) -> Result<ProfileDeclaration, ConfigError> {
         let neutral = neutral_starting_label(chain);
         let starting_label = match self.starting_label {
@@ -803,6 +865,7 @@ fn top_trust(chain: &TrustChain) -> Trust {
 #[serde(deny_unknown_fields)]
 struct RawTool {
     name: String,
+    server: Option<String>,
     description: Option<String>,
     #[serde(default)]
     tags: Vec<String>,
@@ -818,7 +881,21 @@ struct RawTool {
 }
 
 impl RawTool {
-    fn convert(self, chain: &TrustChain) -> Result<ToolDeclaration, ConfigError> {
+    fn convert(mut self, chain: &TrustChain) -> Result<ToolDeclaration, ConfigError> {
+        if let Some(server) = self.server.take() {
+            let boundary = self.name.find('(').unwrap_or(self.name.len());
+            let (name, selector) = self.name.split_at(boundary);
+            let invalid = |reason: String| ConfigError::ToolServer {
+                tool: self.name.clone(),
+                reason,
+            };
+            if name.starts_with("mcp__") || name.contains('/') {
+                return Err(invalid("use a short tool name with server".into()));
+            }
+            let id = appa_runtime_api::CanonicalTool::of("mcp", &server, name)
+                .map_err(|error| invalid(error.to_string()))?;
+            self.name = format!("{id}{selector}");
+        }
         let ctx = || format!("tool {}", self.name);
         if self.implementation.is_some() {
             return Err(ConfigError::ForbiddenInlineBinding {
@@ -1255,6 +1332,56 @@ confined_results = ["lookup"]
     }
 
     #[test]
+    fn server_qualification_preserves_the_contract_and_deployment_references() {
+        let qualified = DECLARATIONS.replace("name = \"lookup\"", "name = \"lookup\"\nserver = \"demo\"");
+        let canonical = DECLARATIONS.replace("\"lookup\"", "\"mcp/demo/lookup\"");
+        let qualified = Config::from_toml_str(&qualified).unwrap();
+        let canonical = Config::from_toml_str(&canonical).unwrap();
+        assert_eq!(qualified.engine().identity(), canonical.engine().identity());
+        assert!(
+            qualified
+                .engine()
+                .profile()
+                .confines_result(&ToolName::new("mcp/demo/lookup"))
+        );
+        assert!(
+            !qualified
+                .engine()
+                .profile()
+                .confines_result(&ToolName::new("mcp/other/lookup"))
+        );
+    }
+
+    #[test]
+    fn server_qualification_preserves_argument_selectors() {
+        let native = "version = 2\n[[tool]]\nname = 'read(path:private*)'\nserver = 'demo'\ndescription = 'selected contract'\ntags = ['files']\n";
+        let canonical = native
+            .replace("read(path:private*)", "mcp/demo/read(path:private*)")
+            .replace("server = 'demo'\n", "");
+        assert_eq!(
+            Config::from_toml_str(native).unwrap().engine().identity(),
+            Config::from_toml_str(&canonical).unwrap().engine().identity()
+        );
+    }
+
+    #[test]
+    fn server_qualification_rejects_ambiguous_or_unspellable_names() {
+        for (name, server) in [
+            ("mcp/other/read", "demo"),
+            ("mcp__other__read", "demo"),
+            ("read", ""),
+            ("read", "bad/server"),
+            ("*", "demo"),
+        ] {
+            let policy = format!("version = 2\n[[tool]]\nname = '{name}'\nserver = '{server}'\n");
+            assert!(
+                matches!(Config::from_toml_str(&policy), Err(ConfigError::ToolServer { .. })),
+                "{name:?} / {server:?}"
+            );
+        }
+    }
+
+    #[test]
     fn every_inline_implementation_site_is_refused() {
         let cases = [
             (
@@ -1523,6 +1650,12 @@ confined_results = ["lookup"]
             config.registry().classify(&appa_engine::value::ToolName::new("ghost")),
             Some(appa_engine::registry::ToolKind::Wildcard)
         );
+        assert_ne!(
+            config.registry().classify(&appa_engine::value::ToolName::new("*")),
+            Some(appa_engine::registry::ToolKind::Declared),
+            "the wildcard's spelling names no tool"
+        );
+        assert_eq!(config.registry().tools().count(), 0, "the wildcard is in no listing");
     }
 
     #[test]
@@ -1569,6 +1702,15 @@ confined_results = ["lookup"]
                 "wildcard metadata {metadata:?} must be refused"
             );
         }
+        let selected = "version = 2\n[[annotator]]\nname = \"any\"\n\
+                        [[tool]]\nname = \"*(path:*)\"\nannotator = \"any\"\n";
+        assert!(
+            matches!(
+                Config::from_toml_str(selected),
+                Err(ConfigError::Registry(LoadError::WildcardMetadata))
+            ),
+            "a wildcard with an argument selector must be refused"
+        );
     }
 
     #[test]

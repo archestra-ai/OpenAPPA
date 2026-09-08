@@ -9,6 +9,10 @@
 # human-review authority. Serve it from one
 # `appa-runtime` that every agent pod reaches, so a parent and its
 # delegated child land in one trajectory.
+#
+# MCP rules use native tool names; source identities stay internal to the
+# plugin. Agent contracts, builtins and entrypoint gates below retain their
+# canonical names. Both forms are valid in one policy.
 
 [policy]
 version = 2
@@ -116,7 +120,7 @@ attention = ["change-approval"]
 # --- kagent's own built-in tool ---
 
 [[policy.tool]]
-name = "ask_user"
+name = "host/kagent/ask_user"
 delta = {}
 
 # --- the delegated child ---
@@ -126,29 +130,28 @@ delta = {}
 # The wildcard covers no spawn. So the release-manager agent, which
 # both parents also list and no entry here names, is denied at every
 # delegation. The child's branch narrows independently of the parent.
-# Its return crosses at the parent's gate. kagent dispatches an agent
-# tool as `<namespace>__NS__<agent name>`, hyphens as underscores.
-# Declare that spelling, the one the wire carries. The chart fills the
-# three sentinels when it renders this file (templates/_helpers.tpl).
-# The NAMESPACE sentinel comes from the release namespace, CHILD from
-# `agents.childName`, and CHILD_GO from `agents.go.childName`.
+# Its return crosses at the parent's gate. An agent called as a tool is
+# `agent/<namespace>/<agent name>`. The chart fills both names when it
+# renders this file (templates/_helpers.tpl): the namespace from the
+# release namespace, the agent from `agents.childName` and
+# `agents.go.childName`.
 [[policy.tool]]
-name = "kagent__NS__log_analyst"
+name = "agent/kagent/log-analyst"
 delta = {}
 
-# The go cell's delegated child, under the same spelling rule.
+# The go cell's delegated child, under the same rule.
 [[policy.tool]]
-name = "kagent__NS__log_analyst_go"
+name = "agent/kagent/log-analyst-go"
 delta = {}
 
-# --- the entrypoint's synthetic tools ---
+# --- the entrypoint's gates ---
 
 [[policy.tool]]
-name = "appa_code_execution"
+name = "host/kagent-gate/code_execution"
 delta = {}
 
 [[policy.tool]]
-name = "appa_memory_persist"
+name = "host/kagent-gate/memory_persist"
 delta = {}
 
 # --- the configuring actor: the appa-guide agent ---
@@ -158,8 +161,9 @@ delta = {}
 # Approve card is the oncall authority's channel). The command annotator
 # permits read-only inspection and puts every state-changing helper behind
 # that same person.
-# The skill's file helpers that it never uses (bash, write_file,
-# edit_file) stay undeclared, so they are refused.
+# The skill's file helpers that it never uses (`host/kagent/bash`,
+# `host/kagent/write_file`, `host/kagent/edit_file`) stay undeclared, so
+# they are refused.
 [[policy.tool]]
 name = "k8s_get_resources(resource_type:agent)"
 delta = {}
@@ -279,32 +283,26 @@ delta = {}
 trust = "trusted"
 attention = ["human-approval"]
 
+# kagent attaches every skill under the one `skills` tool; the guide runs as
+# `skills({"command": "appa-guide"})`.
 [[policy.tool]]
-name = "skills"
+name = "host/kagent/skills"
 delta = {}
 
 [[policy.tool]]
-name = "read_file"
+name = "host/kagent/read_file"
 delta = {}
 
 [[policy.tool]]
-name = "appa_match_batteries"
+name = "mcp/appa-guide/appa_match_batteries"
 delta = {}
 
 [[policy.tool]]
-name = "appa_get_runtime_state"
+name = "mcp/appa-guide/appa_get_runtime_state"
 delta = {}
 
 [[policy.tool]]
-name = "appa_include_battery"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-attention = ["human-approval"]
-
-[[policy.tool]]
-name = "appa_reload_policy"
+name = "mcp/appa-guide/appa_include_battery"
 delta = {}
 
 [policy.tool.requires]
@@ -312,7 +310,7 @@ trust = "trusted"
 attention = ["human-approval"]
 
 [[policy.tool]]
-name = "appa_update_policy"
+name = "mcp/appa-guide/appa_reload_policy"
 delta = {}
 
 [policy.tool.requires]
@@ -320,7 +318,15 @@ trust = "trusted"
 attention = ["human-approval"]
 
 [[policy.tool]]
-name = "appa_refresh_batteries"
+name = "mcp/appa-guide/appa_update_policy"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "mcp/appa-guide/appa_refresh_batteries"
 delta = {}
 
 [policy.tool.requires]

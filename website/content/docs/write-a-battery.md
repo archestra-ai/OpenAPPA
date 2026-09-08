@@ -96,7 +96,7 @@ ranks = ["suspicious"]
 audiences = ["github:internal"]
 
 [[policy.tool]]
-name = "mcp__github__get_file_contents"
+name = "mcp/github/get_file_contents"
 annotator = "github.repository-visibility"
 
 [externals.annotators."github.repository-visibility"]
@@ -117,13 +117,13 @@ trust_chain = ["suspicious", "trusted"]
 
 # This tool tests the trust change from the GitHub result.
 [[policy.tool]]
-name = "RunCommand"
+name = "mcp/shell/run_command"
 requires = { trust = "trusted" }
 delta = {}
 
 # This tool tests who can receive the GitHub result.
 [[policy.tool]]
-name = "Send"
+name = "mcp/mail/send"
 requires = { trust = "suspicious", audience = { contains = ["$to"] } }
 delta = {}
 
@@ -143,7 +143,7 @@ The `github-repository-visibility.appa` trace uses one public repository and one
 
 ```appa
 # Public repository content is suspicious, but it can remain public.
-mcp__github__get_file_contents {
+mcp/github/get_file_contents {
   owner: "your-org"
   repo: "your-public-repo"
   path: "README.md"
@@ -151,19 +151,19 @@ mcp__github__get_file_contents {
 expect allow
 
 # Suspicious content cannot enter a tool that requires trusted input.
-RunCommand {
+mcp/shell/run_command {
   command: "deploy"
 }
 expect deny
 
 # Public repository content can go to a public destination.
-Send {
+mcp/mail/send {
   to: "public"
 }
 expect allow
 
 # Private repository content narrows the audience.
-mcp__github__get_file_contents {
+mcp/github/get_file_contents {
   owner: "your-org"
   repo: "your-private-repo"
   path: "README.md"
@@ -171,13 +171,13 @@ mcp__github__get_file_contents {
 expect allow
 
 # Private repository content cannot go to a public destination.
-Send {
+mcp/mail/send {
   to: "public"
 }
 expect deny
 
 # The configured private-repository audience can receive the content.
-Send {
+mcp/mail/send {
   to: "github:internal"
 }
 expect allow
@@ -209,7 +209,7 @@ Open a pull request against `archestra-ai/OpenAPPA` `main`. Include:
 The pull request is ready for review when:
 
 1. Repository CI passes.
-2. Every contract uses the exact tool name and arguments from that server version.
+2. Every contract uses the canonical tool id (`mcp/<server>/<tool>`) and the exact arguments from that server version.
 3. Every script passes its tests and refuses invalid input.
 4. The test that loads all batteries passes.
 5. The catalogue card opens the battery documentation page.

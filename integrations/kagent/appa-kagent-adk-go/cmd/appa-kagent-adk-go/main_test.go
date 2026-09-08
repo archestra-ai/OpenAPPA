@@ -247,7 +247,7 @@ func TestTheKnobDecidesThePluginRegistration(t *testing.T) {
 			runnerConfig := adkrunner.Config{
 				PluginConfig: adkrunner.PluginConfig{Plugins: []*adkplugin.Plugin{stock}},
 			}
-			if err := appendAppaPlugin(tc.gate, &runnerConfig, deltaConfig(), logr.Discard()); err != nil {
+			if err := appendAppaPlugin(tc.gate, &runnerConfig, appakagentadk.Inventory{}, logr.Discard(), nil); err != nil {
 				t.Fatal(err)
 			}
 			plugins := runnerConfig.PluginConfig.Plugins
@@ -311,9 +311,12 @@ func TestTheKnobOffLoadsThroughTheStockLoader(t *testing.T) {
 		t.Fatalf("the stock loader accepts this config: %v", err)
 	}
 
-	loaded, card := loadAgentConfigs(gateOff, dir, logr.Discard())
+	loaded, inventory, card := loadAgentConfigs(gateOff, dir, logr.Discard())
 	if !reflect.DeepEqual(loaded, stockLoaded) {
 		t.Errorf("the ungated load must be the stock load: got %+v", loaded)
+	}
+	if inventory.Len() != 0 {
+		t.Errorf("the ungated load builds no inventory, got %d spellings", inventory.Len())
 	}
 	if !reflect.DeepEqual(card, stockCardLoaded) {
 		t.Errorf("the ungated card must be the stock card: got %+v", card)
@@ -358,15 +361,56 @@ func TestOnlyAppaGuideReceivesTheManagementToolset(t *testing.T) {
 	}
 }
 
-func TestSpawnToolNamesFollowTheStockBuilder(t *testing.T) {
+func TestTheInventorySpecFollowsTheStockBuilder(t *testing.T) {
+	shared := true
 	agentConfig := &adk.AgentConfig{
+		HttpTools: []adk.HttpMcpServerConfig{{
+			Params: adk.StreamableHTTPConnectionParams{Url: "http://demo-tools:8080/mcp"}, Tools: []string{"list_pods"},
+		}},
+		SseTools: []adk.SseMcpServerConfig{{
+			Params: adk.SseConnectionParams{Url: "http://kagent-tool-server:8084/sse"}, Tools: []string{"k8s_get_resources"},
+		}},
 		RemoteAgents: []adk.RemoteAgentConfig{
-			{Name: "billing-agent", Url: "http://billing.agents:8080"},
+			{Name: "kagent__NS__billing_agent", Url: "http://billing.agents:8080"},
 			{Name: "skipped-agent"}, // no URL: the stock builder skips it
 		},
+		Memory:     &adk.MemoryConfig{},
+		ShareTools: &shared,
 	}
-	if got := spawnToolNames(agentConfig); !reflect.DeepEqual(got, []string{"billing-agent"}) {
-		t.Errorf("spawn names must match what the stock builder wires, got %v", got)
+	want := appakagentadk.InventorySpec{
+		MCPServers: []appakagentadk.MCPServerSpec{
+			{Path: "http_tools[0]", URL: "http://demo-tools:8080/mcp", Tools: []string{"list_pods"}},
+			{Path: "sse_tools[0]", URL: "http://kagent-tool-server:8084/sse", Tools: []string{"k8s_get_resources"}},
+		},
+		RemoteAgents: []appakagentadk.RemoteAgentSpec{{Path: "remote_agents[0].name", Name: "kagent__NS__billing_agent"}},
+		Builtins:     appakagentadk.BuiltinGroups{Memory: true, Skills: true, ShareTools: true},
+	}
+	if got := inventorySpec(agentConfig, "/skills", false); !reflect.DeepEqual(got, want) {
+		t.Errorf("the spec drifted from what the stock builder wires:\n got %+v\n want %+v", got, want)
+	}
+	plain := inventorySpec(&adk.AgentConfig{}, " ", false)
+	if plain.Builtins != (appakagentadk.BuiltinGroups{}) {
+		t.Errorf("no memory, no skills folder and no share tools switch nothing on, got %+v", plain.Builtins)
+	}
+}
+
+func TestTheGuardHandsBackTheInventoryOfTheStockConfig(t *testing.T) {
+	_, inventory, err := decodeGuarded([]byte(stockConfig), "", false)
+	if err != nil {
+		t.Fatalf("the stock config must be accepted: %v", err)
+	}
+	for name, want := range map[string]string{
+		"list_pods":                "mcp:server-6002d1e9f1adde3a363a0bbe9756f105ebebe91cd46e98b1e5218fb32ccf0f64/list_pods",
+		"kagent__NS__log_analyst":  "agent:kagent/log-analyst",
+		"ask_user":                 "builtin:ask_user",
+		appakagentadk.ReservedTool: appakagentadk.ControlTool,
+	} {
+		if got, known := inventory.Spelling(name); !known || got != want {
+			t.Errorf("%s spells as %q (%v), want %q", name, got, known, want)
+		}
+	}
+	if _, known := inventory.Spelling("load_memory"); known {
+		t.Error("the stock config declares no memory, so the memory builtins stay out")
 	}
 }
 
@@ -493,7 +537,7 @@ const stockConfig = `{
 	"instruction": "help with the cluster",
 	"http_tools": [{"params": {"url": "http://demo-tools:8080/mcp"}, "tools": ["list_pods"]}],
 	"sse_tools": [],
-	"remote_agents": [{"name": "log-analyst", "url": "http://log-analyst:8080"}],
+	"remote_agents": [{"name": "kagent__NS__log_analyst", "url": "http://log-analyst:8080"}],
 	"execute_code": false,
 	"stream": true,
 	"memory": null,
@@ -589,7 +633,7 @@ func TestTheConfigGuardRefusesWhatThisImageCannotRunAsDeclared(t *testing.T) {
 		// as top-level keys.
 		{name: "nested unknown keys are not refused", config: `{"model": {"type": "openai", "model": "gpt-5.2", "bogus": 1},
 			"description": "", "instruction": "x",
-			"http_tools": [{"params": {"url": "http://demo-tools:8080/mcp", "bogus": true}, "tools": []}]}`},
+			"http_tools": [{"params": {"url": "http://demo-tools:8080/mcp", "bogus": true}, "tools": ["list_pods"]}]}`},
 
 		// -- execute_code --
 		{name: "execute_code true is refused", config: withKey(t, stockConfig, "execute_code", `true`),
@@ -612,7 +656,7 @@ func TestTheConfigGuardRefusesWhatThisImageCannotRunAsDeclared(t *testing.T) {
 			refused: true, kind: reservedToolName, keys: []string{"sse_tools[0].tools[0]"}},
 		{name: "a remote agent named appa_return is refused",
 			config: withKey(t, stockConfig, "remote_agents",
-				`[{"name": "log-analyst", "url": "http://log-analyst:8080"}, {"name": "appa_return", "url": "http://x:8080"}]`),
+				`[{"name": "kagent__NS__log_analyst", "url": "http://log-analyst:8080"}, {"name": "appa_return", "url": "http://x:8080"}]`),
 			refused: true, kind: reservedToolName, keys: []string{"remote_agents[1].name"}},
 		{name: "an APPA-owned tool name wins over a value refusal",
 			config: withKey(t, withKey(t, stockConfig, "execute_code", `true`), "http_tools",
@@ -671,10 +715,27 @@ func TestTheConfigGuardRefusesWhatThisImageCannotRunAsDeclared(t *testing.T) {
 		// stock decoder cannot decode fails as a decode error first.
 		{name: "a config the stock decoder cannot decode is the decoder's error",
 			config: withKey(t, withKey(t, stockConfig, "execute_code", `true`), "model", `{"type": "bogus"}`), parse: true},
+		// The inventory runs last: a gated agent names every tool it
+		// can call, and a name the wire cannot spell never reaches it.
+		{name: "an MCP server without a tool filter awaits discovery",
+			config: withKey(t, stockConfig, "http_tools", `[{"params": {"url": "https://mcp.example.com/mcp"}}]`)},
+		{name: "an MCP server with an empty tool filter awaits discovery",
+			config: withKey(t, stockConfig, "http_tools", `[{"params": {"url": "http://demo-tools:8080/mcp"}, "tools": []}]`)},
+		{name: "a remote agent outside the rendered shape is refused",
+			config:  withKey(t, stockConfig, "remote_agents", `[{"name": "log-analyst", "url": "http://log-analyst:8080"}]`),
+			refused: true, kind: unspellableTool, keys: []string{"remote_agents[0].name"}},
+		{name: "a tool name declared by two servers is refused",
+			config: withKey(t, stockConfig, "http_tools",
+				`[{"params": {"url": "http://demo-tools:8080/mcp"}, "tools": ["list_pods"]}, {"params": {"url": "http://other:8080/mcp"}, "tools": ["list_pods"]}]`),
+			refused: true, kind: unspellableTool, keys: []string{"http_tools[1]"}},
+		{name: "the reserved-name refusal wins over the inventory",
+			config: withKey(t, stockConfig, "http_tools",
+				`[{"params": {"url": "http://demo-tools:8080/mcp"}, "tools": ["appa_return"]}, {"params": {"url": "http://other:8080/mcp"}}]`),
+			refused: true, kind: reservedToolName, keys: []string{"http_tools[0].tools[0]"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := decodeGuarded([]byte(tc.config))
+			got, _, err := decodeGuarded([]byte(tc.config), "", false)
 			var refusal *configRefusal
 			isRefusal := errors.As(err, &refusal)
 			if tc.parse {
@@ -811,6 +872,11 @@ func TestTheRuntimeRefusesToStartOnAnUnsupportedConfig(t *testing.T) {
 		{"a tool that takes an APPA-owned name",
 			withKey(t, stockConfig, "remote_agents", `[{"name": "appa_return", "url": "http://log-analyst:8080"}]`),
 			"appa_return", deliverUnderConfigDir},
+		// Omitted filters are supported: discovery supplies tool metadata
+		// later, so config validation must reach the stock card loader.
+		{"an MCP server without a tool filter reaches the agent card loader",
+			withKey(t, stockConfig, "http_tools", `[{"params": {"url": "http://demo-tools:8080/mcp"}}]`),
+			"agent card", deliverUnderConfigDir},
 		// An accepted config passes the stock validation and reaches
 		// the agent card, the one stock load left on disk. No card is
 		// written, so that load is the failure the runtime reports.

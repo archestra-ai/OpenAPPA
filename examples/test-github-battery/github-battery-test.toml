@@ -5,12 +5,12 @@ version = 2
 trust_chain = ["suspicious", "trusted"]
 
 [[policy.tool]]
-name = "RunCommand"
+name = "mcp/shell/run_command"
 requires = { trust = "trusted" }
 delta = {}
 
 [[policy.tool]]
-name = "Send"
+name = "mcp/mail/send"
 requires = { trust = "suspicious", audience = { contains = ["$to"] } }
 delta = {}
 

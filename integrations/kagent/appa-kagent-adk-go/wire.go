@@ -1,18 +1,25 @@
-// The adapter wire: event construction and decision parsing.
+// The hook wire: event construction and decision parsing.
 //
-// One JSON object per callback crosses POST $APPA_RUNTIME_URL/hook.
-// The appa-adapter-kagent codec in the runtime parses these events and
-// renders every answer as one decision envelope. This file owns both
-// shapes on the go side and imports no ADK code, so the wire stays
-// testable against the shared fixtures
+// One JSON object per callback crosses POST $APPA_RUNTIME_URL/hook, in
+// the canonical envelope every adapter shares
+// (appa-runtime-api/src/wire.rs): protocol is the wire version and
+// adapter names this plugin's adapter, and the runtime refuses an event
+// that carries another pair. This file owns the event shape and the
+// decision envelope on the go side and imports no ADK code, so the wire
+// stays testable against the shared fixtures
 // (integrations/kagent/fixtures/wire-events.jsonl) without an agent
 // runtime.
 //
 // Ids are the harness's own: root_id is the ADK session id of the
 // root trajectory (in a delegated child workload, the root id read
 // from the inbound call metadata), and child_id is the delegated
-// child scope's own id. The codec applies the `kagent:` prefix; this
+// child scope's own id. The runtime applies the `kagent:` prefix; this
 // file never does.
+//
+// A tool crosses under its structured spelling, never its bare ADK
+// name (inventory.go). The runtime derives the canonical tool and
+// whether the call is a spawn from that spelling; the wire asserts
+// neither.
 
 package appakagentadk
 
@@ -21,11 +28,22 @@ import (
 	"fmt"
 )
 
+// Protocol is the hook wire version this plugin speaks.
+const Protocol = 1
+
+// Adapter is the adapter name every event carries.
+const Adapter = "kagent"
+
+func envelope(kind string) map[string]any {
+	return map[string]any{"protocol": Protocol, "adapter": Adapter, "event": kind}
+}
+
 // An empty childID means the emitting scope is the root itself: the
 // field stays off the wire, exactly as the python builders omit a None
 // child_id.
 func event(kind, rootID, childID string) map[string]any {
-	wire := map[string]any{"event": kind, "root_id": rootID}
+	wire := envelope(kind)
+	wire["root_id"] = rootID
 	if childID != "" {
 		wire["child_id"] = childID
 	}
@@ -34,11 +52,11 @@ func event(kind, rootID, childID string) map[string]any {
 
 // pingEvent is the liveness probe: parses to no event, answers 200 {}.
 func pingEvent() map[string]any {
-	return map[string]any{"event": "ping"}
+	return envelope("ping")
 }
 
 func sessionStartEvent(rootID string) map[string]any {
-	return map[string]any{"event": "session_start", "root_id": rootID}
+	return event("session_start", rootID, "")
 }
 
 func promptEvent(rootID, text, childID string) map[string]any {
@@ -51,14 +69,14 @@ func turnEndEvent(rootID, childID string) map[string]any {
 	return event("turn_end", rootID, childID)
 }
 
-// toolCallEvent is a proposed call. ruling (approve or deny) rides only
-// the control call whose offer a person ruled on through kagent's own
-// confirmation; the runtime spends it as the human authority's answer.
-func toolCallEvent(rootID, tool string, arguments any, spawn bool, childID string, ruling string) map[string]any {
+// toolCallEvent is a proposed call of tool, under its structured
+// spelling. ruling (approve or deny) rides only the control call whose
+// offer a person ruled on through kagent's own confirmation; the
+// runtime spends it as the human authority's answer.
+func toolCallEvent(rootID, tool string, arguments any, childID string, ruling string) map[string]any {
 	wire := event("tool_call", rootID, childID)
 	wire["tool"] = tool
 	wire["arguments"] = arguments
-	wire["spawn"] = spawn
 	if ruling != "" {
 		wire["ruling"] = ruling
 	}
@@ -88,7 +106,7 @@ func spawnResultEvent(rootID, tool string, arguments, outcome any, spawnedID, va
 }
 
 func childStartEvent(rootID, childID, spawnBinding string) map[string]any {
-	wire := map[string]any{"event": "child_start", "root_id": rootID, "child_id": childID}
+	wire := event("child_start", rootID, childID)
 	if spawnBinding != "" {
 		wire["spawn_binding"] = spawnBinding
 	}
@@ -97,18 +115,28 @@ func childStartEvent(rootID, childID, spawnBinding string) map[string]any {
 
 // childEndEvent is the child's stop, carrying the value it returns to
 // its parent. An empty value is a child that returns nothing, and the
-// codec reads an absent one the same way.
+// runtime reads an absent one the same way.
 func childEndEvent(rootID, childID, value string) map[string]any {
-	wire := map[string]any{"event": "child_end", "root_id": rootID, "child_id": childID}
+	wire := event("child_end", rootID, childID)
 	if value != "" {
 		wire["value"] = value
 	}
 	return wire
 }
 
-// successOutcome carries the tool response as spelled.
+// successOutcome carries the tool response as spelled. The body is
+// exactly the body field, nil (JSON null) included; a success that
+// carries no body at all is successWithoutBodyOutcome, never this with
+// the field left off.
 func successOutcome(body any) map[string]any {
 	return map[string]any{"status": "success", "body": body}
+}
+
+// successWithoutBodyOutcome is a success whose body the wire does not
+// carry. Distinct from a body that is null: the tool succeeded and the
+// runtime holds no value from it.
+func successWithoutBodyOutcome() map[string]any {
+	return map[string]any{"status": "success_without_body"}
 }
 
 func failureOutcome(message string) map[string]any {
@@ -136,14 +164,27 @@ func wireErrorf(format string, args ...any) *WireError {
 // Decision is one parsed decision envelope.
 //
 // Kind is the wire spelling (ack, allow_call, pass_control, deny_call,
-// block, replace_output, child_return, context, refuse); the payload
-// field, where the kind carries one, lands in the matching attribute.
+// block, replace_output, deliver_value, child_return, context, refuse);
+// the payload field, where the kind carries one, lands in the matching
+// attribute.
+//
+// A decision that stands in for a result says which of two contents it
+// carries. deliver_value and child_return carry a Value the engine
+// admitted, and the plugin delivers those bytes as they crossed.
+// replace_output, deny_call, block and refuse carry the runtime's own
+// words, which name tools by the spelling the plugin sent, so the
+// plugin spells them back before the model reads them.
 type Decision struct {
 	Kind     string
 	Feedback string
 	Reason   string
-	Output   string
-	Value    string
+	// Output rides a replace_output: the runtime's own words in place of
+	// the result, which the plugin spells back into names the model
+	// dispatches.
+	Output string
+	// Value rides a deliver_value and a child_return: the value the
+	// engine admitted, which reaches the model as it crossed.
+	Value string
 	// Text rides a context: what the harness hands the actor the event
 	// names, which at a child's start is the return contract it works
 	// under.
@@ -202,6 +243,7 @@ var decisionPayloads = map[string]string{
 	"deny_call":      "feedback",
 	"block":          "reason",
 	"replace_output": "output",
+	"deliver_value":  "value",
 	"child_return":   "value",
 	"context":        "text",
 	"refuse":         "detail",
@@ -217,6 +259,16 @@ func parseDecision(body []byte) (Decision, error) {
 	}
 	if parsed == nil {
 		return Decision{}, wireErrorf("the decision envelope is not an object")
+	}
+	// The version is an integer on the wire. Into map[string]any every
+	// JSON number decodes as float64, so 1.0 and 1 are one value there;
+	// a typed decode of the field alone is what tells them apart, and it
+	// refuses a bool, a string and a fraction alike.
+	var envelope struct {
+		Protocol *int `json:"protocol"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Protocol == nil || *envelope.Protocol != Protocol {
+		return Decision{}, wireErrorf("a decision under a protocol outside the wire: %v", parsed["protocol"])
 	}
 	kind, ok := parsed["decision"].(string)
 	if !ok {

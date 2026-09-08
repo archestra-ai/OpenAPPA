@@ -9,7 +9,7 @@ include = ["batteries/mail/appa.toml"]
 version = 2
 
 [[policy.tool]]
-name = "root"
+name = "host/claude-code/Read"
 delta = {}
 
 [externals]
@@ -121,8 +121,8 @@ fn write_battery(root: &Path, name: &str, tool: &str) -> PathBuf {
 fn get_batteries_lists_bundled_names_and_tools() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let batteries = dir.path().join("batteries");
-    write_battery(&batteries, "mail", "send_mail");
-    write_battery(&batteries, "chat", "post_message");
+    write_battery(&batteries, "mail", "mcp/mail/send_mail");
+    write_battery(&batteries, "chat", "mcp/chat/post_message");
     let config = dir.path().join("appa.toml");
     std::fs::write(&config, CONFIG).expect("root config");
     let mut server = start(&config, &dir.path().join("appa.db"), &batteries, free_port());
@@ -134,13 +134,13 @@ fn get_batteries_lists_bundled_names_and_tools() {
         value,
         serde_json::json!({
             "batteries": [
-                {"name": "chat", "tools": ["post_message"]},
-                {"name": "mail", "tools": ["send_mail"]}
+                {"name": "chat", "tools": ["mcp/chat/post_message"]},
+                {"name": "mail", "tools": ["mcp/mail/send_mail"]}
             ]
         })
     );
 
-    write_battery(&batteries, "mail", "send_mail_v2");
+    write_battery(&batteries, "mail", "mcp/mail/send_mail_v2");
     let unchanged = http(&format!("{}/batteries", server.url), "GET", None).expect("the cached catalog answers");
     assert!(unchanged.contains("send_mail"));
     assert!(!unchanged.contains("send_mail_v2"));
