@@ -51,6 +51,11 @@ Use the existing `appa bundle --output ./deployment.tar.gz` command. Import with
 `appa plugin install claude-code --from ./deployment.tar.gz --sha256 <trusted-digest>`.
 The archive contains configuration and custom files: keep it private.
 
+Export checks the completed archive against the importer's extraction limits
+before publishing it. The output filesystem needs temporary space for the
+compressed archive and up to 512 MiB of extracted content. A bundle whose combined
+payload exceeds the import limit is refused even if it compresses below that limit.
+
 Import preserves relative layouts and command working directories in a verified
 snapshot under the deployment's `.appa/` directory. It does not overwrite sibling
 files, rewrite command arguments, install interpreters or libraries, or obtain

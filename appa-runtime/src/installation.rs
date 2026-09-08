@@ -618,6 +618,15 @@ impl Installation {
                 .finish()
                 .map_err(|error| io("finish compressed bundle", output, error))?;
         }
+        // Individually valid artifacts can exceed the importer's aggregate
+        // payload budget even when the compressed export is small. Check the
+        // actual archive with the same extractor before publishing it.
+        let preflight = tempfile::tempdir_in(parent).map_err(|error| io("stage export validation", output, error))?;
+        crate::plugin_bundle::extract_bundle_archive(stage.path(), preflight.path())
+            .map_err(|error| InstallError::Invalid(error.to_string()))?;
+        preflight
+            .close()
+            .map_err(|error| io("remove export validation files", parent, error))?;
         if optional_bytes(&self.config)?.as_deref() != Some(config.as_slice()) {
             return Err(InstallError::Changed(self.config.clone()));
         }
@@ -1157,6 +1166,62 @@ fn verify_packages(root: &Path, generation: &Generation) -> Result<Vec<Package>,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_refuses_a_compressible_bundle_above_the_import_payload_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let package = source.path().join("plugins/kagent");
+        fs::create_dir_all(package.parent().unwrap()).unwrap();
+        copy_package_tree(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace/plugins/kagent"),
+            &package,
+        )
+        .unwrap();
+        let catalog = format!(
+            "schema = 1\nname = 'appa'\n[packages.plugin.kagent]\npath = 'plugins/kagent'\ndigest = '{}'\n",
+            TreeDigest::of_tree(&package).unwrap()
+        );
+        fs::write(source.path().join("marketplace.toml"), &catalog).unwrap();
+        let installation = Installation::open(&root.path().join("appa.toml")).unwrap();
+        let artifacts = installation.state.join("artifacts");
+        fs::create_dir_all(&artifacts).unwrap();
+        fs::write(artifacts.join(ArtifactDigest::of_bytes(b"artifact").hex()), b"artifact").unwrap();
+        // Export treats already verified release artifacts as opaque bytes.
+        // One individually permitted artifact consumes the whole import budget;
+        // config/catalog metadata push the aggregate over it. Zeros compress well.
+        let staged = artifacts.join("large");
+        File::create(&staged).unwrap().set_len(512 * 1024 * 1024).unwrap();
+        let digest = ArtifactDigest::of_reader(File::open(&staged).unwrap(), 512 * 1024 * 1024).unwrap();
+        fs::rename(&staged, artifacts.join(digest.hex())).unwrap();
+        let mut document = serde_json::to_value(generation(catalog.as_bytes())).unwrap();
+        document["runtime_chart"] = serde_json::to_value(&digest).unwrap();
+        let generation = Generation::parse(&serde_json::to_vec(&document).unwrap()).unwrap();
+        installation.publish_packages(source.path(), &generation).unwrap();
+        let mut selection = Selection::empty(generation, Platform::MacArm64);
+        selection.select(PackageKind::Plugin, &PackageName::parse("kagent").unwrap());
+        let config = b"[policy]\nversion=2\n[externals]\ntimeout_ms=100\nmax_body_bytes=1024\n";
+        installation.commit_config(None, config, &selection).unwrap();
+        let before = fs::read(installation.state.join("active.json")).unwrap();
+        let output = root.path().join("bundle.tar.gz");
+        assert!(matches!(
+            installation.export_bundle(&output),
+            Err(InstallError::Invalid(_))
+        ));
+        assert!(!output.exists(), "an unimportable bundle must not be published");
+        assert_eq!(fs::read(&installation.config).unwrap(), config);
+        assert_eq!(fs::read(installation.state.join("active.json")).unwrap(), before);
+        assert!(!installation.state.join("transaction.json").exists());
+        let mut retained: Vec<_> = fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        retained.sort();
+        assert_eq!(
+            retained,
+            [std::ffi::OsString::from(".appa"), std::ffi::OsString::from("appa.toml")]
+        );
+    }
 
     #[test]
     fn package_files_use_the_tree_budget_not_the_state_record_budget() {
