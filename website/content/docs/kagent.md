@@ -43,7 +43,7 @@ Deploy the kagent controller, `appa-runtime`, and the demonstration fleet in one
 
 ```sh
 : "${OPENAI_API_KEY:?Set OPENAI_API_KEY before installing kagent}"
-APPA_VERSION=0.14.1 # x-release-please-version
+APPA_VERSION=0.16.0 # x-release-please-version
 
 # 1. Install kagent CRDs and OpenAI secret
 helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-crds \
@@ -65,6 +65,8 @@ unset OPENAI_API_KEY_B64
 # 2. Install kagent with the OpenAPPA plugin image
 helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
+  --set kmcp.podSecurityContext.runAsUser=65532 \
+  --set kmcp.podSecurityContext.runAsGroup=65532 \
   --set controller.agentImage.registry=europe-west1-docker.pkg.dev \
   --set controller.agentImage.repository=friendly-path-465518-r6/appa-public/appa-kagent-adk \
   --set controller.agentImage.tag="v$APPA_VERSION" \
@@ -105,6 +107,9 @@ helm upgrade --install appa-kagent-demo \
   --set-string runtime.reasoningEffort=none \
   --force-conflicts --wait --timeout 10m
 ```
+
+The explicit KMCP user and group preserve `runAsNonRoot` while avoiding
+`CreateContainerConfigError` with the bundled KMCP 0.3.0 image, which defaults to root.
 
 The runtime service listens at `http://appa-runtime.appa.svc.cluster.local:18787`.
 
@@ -241,11 +246,13 @@ To protect existing kagent workloads without downtime, follow these steps:
 Update the kagent controller to use the OpenAPPA plugin image, and deploy `appa-runtime` with `appa-guide`:
 
 ```sh
-APPA_VERSION=0.14.1 # x-release-please-version
+APPA_VERSION=0.16.0 # x-release-please-version
 
 # 1. Update the kagent controller to use the OpenAPPA plugin image
 helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent --reuse-values \
+  --set kmcp.podSecurityContext.runAsUser=65532 \
+  --set kmcp.podSecurityContext.runAsGroup=65532 \
   --set controller.agentImage.registry=europe-west1-docker.pkg.dev \
   --set controller.agentImage.repository=friendly-path-465518-r6/appa-public/appa-kagent-adk \
   --set controller.agentImage.tag="v$APPA_VERSION" \

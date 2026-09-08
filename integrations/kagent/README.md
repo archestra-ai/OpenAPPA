@@ -65,7 +65,7 @@ helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-c
   --version 0.9.12 -n kagent --create-namespace --force-conflicts
 
 # 2. Install kagent with the appa plugin image
-APPA_VERSION=0.14.1 # x-release-please-version
+APPA_VERSION=0.16.0 # x-release-please-version
 OPENAI_API_KEY_B64="$(printf %s "$OPENAI_API_KEY" | base64 | tr -d '\n')"
 kubectl apply -f - <<EOF
 apiVersion: v1
@@ -81,6 +81,8 @@ unset OPENAI_API_KEY_B64
 
 helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
+  --set kmcp.podSecurityContext.runAsUser=65532 \
+  --set kmcp.podSecurityContext.runAsGroup=65532 \
   --set controller.agentImage.registry=europe-west1-docker.pkg.dev \
   --set controller.agentImage.repository=friendly-path-465518-r6/appa-public/appa-kagent-adk \
   --set providers.default=openAI \
@@ -103,6 +105,9 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --wait --timeout 10m \
   --set controller.agentImage.tag="v$APPA_VERSION"
 ```
+
+The explicit KMCP user and group preserve `runAsNonRoot` while avoiding
+`CreateContainerConfigError` with the bundled KMCP 0.3.0 image, which defaults to root.
 
 ### 2. Deploy appa-runtime
 
