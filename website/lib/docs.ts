@@ -103,7 +103,7 @@ export function substituteKagentDevSnippets(content: string): string {
   );
 
   // 4. appa-runtime existing agents: OCI pull -> local chart path
-  result = result.replace(
+  result = result.replaceAll(
     `helm upgrade --install appa-runtime \\
   oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \\
   --version "$APPA_VERSION" -n "$RUNTIME_NAMESPACE" --create-namespace \\`,

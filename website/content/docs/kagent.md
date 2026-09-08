@@ -6,38 +6,38 @@ order: 6
 description: Protect kagent declarative Python Agents with OpenAPPA policy.
 ---
 
-[kagent](https://kagent.dev/docs/kagent/introduction/what-is-kagent/) runs AI agents natively on [Kubernetes](https://kubernetes.io/docs/home/). OpenAPPA adds flow control to these [Agents](https://kagent.dev/docs/kagent/concepts/agents/), checking tool calls, sub-agents, and retrieved data against deterministic policy before any action runs.
+[kagent](https://kagent.dev/docs/kagent/introduction/what-is-kagent/) runs AI agents natively on [Kubernetes](https://kubernetes.io/docs/home/). OpenAPPA adds flow control to these [Agents](https://kagent.dev/docs/kagent/concepts/agents/), checking tool calls, subagents, and data flows against deterministic policy before any action runs.
 
 ## How it works
 
 :::fig-kagent:::
 
-OpenAPPA kagent runtime ADK plugin intercepts tool calls and subagents before they run, as well as their results:
+The OpenAPPA plugin intercepts tool calls, subagents, and return values before they execute:
 
-- **Enforce policy:** Blocked actions stop immediately. When human review is required, kagent negotiates human approval in the chat or via A2A.
-- **Isolate subagents:** Outputs from subagents are checked against policy before the parent agent is allowed to see them.
+- **Enforce policy:** Denied actions stop immediately. When human review is required, kagent requests approval in chat or via A2A.
+- **Isolate subagents:** Subagent outputs are validated against policy before the parent agent can see them.
 - **Shared runtime:** Agents connect to an `appa-runtime` service that evaluates policy and records audit logs. New policies apply automatically to new chats.
 
 ## Quickstart
 
-The quickstart installs the kagent controller and agent runtime with the OpenAPPA plugin, the `appa-runtime` service with a pre-configured policy, and demo agents with tools for the showcase scenarios.
+Installs the kagent controller and agent runtime with the OpenAPPA plugin, a pre-configured `appa-runtime` service, and demo agents with tools for showcase scenarios.
 
-*(Already have kagent running? Skip to [Protect existing agents](#protect-existing-agents).)*
+*(Already running kagent? Skip to [Protect existing agents](#protect-existing-agents).)*
 
 #### Prerequisites
 
 - [kind](https://kind.sigs.k8s.io/docs/user/quick-start/) (or any local [Kubernetes cluster](https://kubernetes.io/docs/setup/)), [Helm](https://helm.sh/docs/intro/install/) v4, and [kubectl](https://kubernetes.io/docs/tasks/tools/).
-- An [OpenAI API key](https://platform.openai.com/api-keys) (other [supported providers](https://kagent.dev/docs/kagent/supported-providers/) need their own kagent provider settings, Secret, and [ModelConfig](https://kagent.dev/docs/kagent/resources/api-ref/#modelconfig)).
+- An [OpenAI API key](https://platform.openai.com/api-keys) (or another [supported provider](https://kagent.dev/docs/kagent/supported-providers/)).
 
 #### 1. Deploy the demo stack
 
-Make sure your `OPENAI_API_KEY` is exported:
+Export your OpenAI API key:
 
 ```sh
 export OPENAI_API_KEY="your-api-key"
 ```
 
-Then deploy the stack:
+Deploy the demo:
 
 ```sh
 APPA_VERSION=0.15.0 # x-release-please-version
@@ -104,17 +104,17 @@ To clean up the demo later, see [Uninstall](#uninstall).
 
 #### 2. Open the dashboard
 
-Forward the kagent dashboard to your machine:
+Forward the dashboard:
 
 ```sh
 kubectl port-forward -n kagent svc/kagent-ui 8080:8080
 ```
 
-Open [http://localhost:8080](http://localhost:8080), select **Agents**, **`cluster-ops`**, and **Chat** to test the demonstration scenarios below.
+Open [http://localhost:8080](http://localhost:8080), select **Agents** &rarr; **`cluster-ops`** &rarr; **Chat**, and try the demonstration scenarios below.
 
 ## Demonstration scenarios
 
-In the kagent dashboard ([http://localhost:8080](http://localhost:8080)), select **Agents**, **`cluster-ops`**, and **Chat**. You can inspect pre-recorded runs from the chat history dropdown, or start a new chat to test the prompts live:
+In the dashboard ([http://localhost:8080](http://localhost:8080)), open **Agents** &rarr; **`cluster-ops`** &rarr; **Chat**. Inspect pre-recorded runs in chat history, or start a new chat to test the prompts live:
 
 #### 1. Confidential read
 
@@ -138,7 +138,7 @@ OpenAPPA blocks posting raw crash logs until an instruction-stripping sanitizer 
 Restart the checkout-api deployment.
 ```
 
-Restarting a deployment is a sensitive action. The `oncall` authority requires explicit approval through the native confirmation card before the restart proceeds.
+Restarting a deployment requires approval. OpenAPPA pops up an interactive **Approve / Reject** card in chat before the restart proceeds.
 
 #### 4. Remote change board
 
@@ -207,11 +207,11 @@ A standard read operation with no sensitive data or external risks flows through
 
 ## Protect existing agents
 
-If you already have kagent running with your own agents, use `appa-guide` to configure policy and protect them conversationally.
+If you already run kagent with your own agents, use `appa-guide` to configure policy and protect them conversationally.
 
 #### 1. Deploy the plugin image and runtime
 
-Update the kagent controller to use the `appa-kagent-adk` plugin image and deploy `appa-runtime`:
+Update the controller with the `appa-kagent-adk` plugin image and deploy `appa-runtime`:
 
 ```sh
 APPA_VERSION=0.15.0 # x-release-please-version
@@ -244,7 +244,7 @@ kubectl wait agent/appa-guide -n "$KAGENT_NAMESPACE" \
 echo ""
 ```
 
-To retain trajectory audit logs and persist battery updates (`refresh batteries`) across pod restarts, deploy with persistent storage instead (requires a `ReadWriteOnce` [StorageClass](https://kubernetes.io/docs/concepts/storage/storage-classes/)):
+To retain trajectory audit logs and battery updates across restarts, enable persistence (requires a `ReadWriteOnce` [StorageClass](https://kubernetes.io/docs/concepts/storage/storage-classes/)):
 
 ```sh
 helm upgrade --install appa-runtime \
@@ -262,49 +262,43 @@ echo ""
 
 To remove the plugin and runtime later, see [Restore stock images and remove OpenAPPA](#restore-stock-images-and-remove-openappa).
 
-#### 2. Initialize policy and batteries with appa-guide
+#### 2. Initialize policy with appa-guide
 
-Forward the kagent dashboard:
+Forward the dashboard:
 
 ```sh
 kubectl port-forward -n kagent svc/kagent-ui 8080:8080
 ```
 
-Open [http://localhost:8080](http://localhost:8080), select **Agents**, **appa-guide**, and **Chat**, then send:
+Open [http://localhost:8080](http://localhost:8080), select **Agents** &rarr; **appa-guide** &rarr; **Chat**, and send:
 
 ```text
 init
 ```
 
-`appa-guide` inspects the tools and MCP servers discovered in your cluster, matches relevant [batteries](/batteries) (such as GitHub or Slack), and drafts a tailored policy configuration.
+`appa-guide` scans your cluster tools, matches relevant [batteries](/batteries) (like GitHub or Slack), and drafts starting policy rules.
 
-To activate the policy:
-1. Approve the proposal in chat (for example: `Approve the proposed policy`).
-2. An **Approve / Reject** confirmation card will appear in the dashboard. Click **Approve**.
-
-Once approved, the runtime activates and serves the new policy immediately.
+Click **Approve** on the confirmation card to activate the policy.
 
 #### 3. Protect your agents with appa-guide
 
-In the same chat with `appa-guide`, ask it to protect any of your existing agents:
+In chat with `appa-guide`, protect an existing agent:
 
 ```text
 protect <your-agent-name>
 ```
 
-You can also protect every declarative agent at once:
+Or protect every declarative agent at once:
 
 ```text
 protect all agents
 ```
 
-`appa-guide` inspects the agent manifest, proposes setting `APPA_ENABLED=true` and `APPA_RUNTIME_URL="http://appa-runtime.appa.svc.cluster.local:18787"`, and presents the exact manifest diff for confirmation.
-
-Reply with approval in chat, then click **Approve** on the native confirmation card. `appa-guide` applies the manifest and verifies the pod rollout.
+`appa-guide` inspects the agent, presents the configuration diff, and prompts for card approval to apply it.
 
 #### Manual configuration (GitOps)
 
-If you manage your agents via GitOps manifests rather than `appa-guide`, add the environment variables directly to the Agent resource:
+To configure agents via GitOps, add these environment variables to the Agent spec:
 
 ```yaml
 spec:
@@ -317,35 +311,33 @@ spec:
           value: "http://appa-runtime.appa.svc.cluster.local:18787"
 ```
 
-When `APPA_ENABLED` is true, all tool calls route through OpenAPPA. If the runtime is unreachable, the agent fails closed to prevent unauthorized actions. Setting `APPA_ENABLED=false` or leaving it unset runs the agent without gating.
+When `APPA_ENABLED` is true, all tool calls route through OpenAPPA (failing closed if unreachable). Unset or `false` runs the agent without protection.
 
 #### Multiple policies across agent groups
 
-Agents that point to the same `APPA_RUNTIME_URL` share a policy deployment. If you need distinct policies for different teams or agent groups, deploy separate `appa-runtime` Helm releases (for example, `appa-runtime-finance`, `appa-runtime-ops`) in their respective namespaces, each with its own service URL.
+Agents sharing an `APPA_RUNTIME_URL` share a policy. To give agent groups distinct policies, deploy separate `appa-runtime` releases, each with its own service URL.
 
 ## Manage policy with appa-guide
 
-Use `appa-guide` in the kagent chat to inspect and modify policies conversationally instead of editing raw ConfigMaps:
+Use `appa-guide` in chat to inspect and modify policies conversationally:
 
-- **`init`**: Scans available tools and generates a tailored policy configuration.
+- **`init`**: Scans tools and generates a starting policy.
 - **`adjust <rule>`**: Modifies specific tool contracts, trust levels, or audience boundaries.
 - **`refresh batteries`**: Updates included battery definitions (requires persistence).
 - **`diagnose the OpenAPPA integration`**: Runs read-only health checks on connectivity and configuration.
 
-To prevent unintended modifications, policy changes require two confirmations: first in chat, then on the native confirmation card. Once confirmed, the runtime validates and applies the configuration immediately. New policies take effect on subsequent chats.
+Changes take effect immediately once approved on the native confirmation card.
 
 ## Troubleshooting
 
-- **Tools do not appear in kagent:** Check the status of your tool server: `kubectl get remotemcpserver/demo-tools -n kagent -o yaml`. Wait until `status.discoveredTools` is populated before running `init`.
-- **`skills-init` container fails:** Inspect the pod logs: `kubectl logs -n kagent -l kagent=appa-guide -c skills-init`. If a directory conflict occurs, check for duplicate skill names or let the controller restart the pod.
+- **Tools do not appear:** Inspect your tool server: `kubectl get remotemcpserver -n kagent -o yaml`. Ensure `status.discoveredTools` is populated before running `init`.
+- **Agent pod fails to start:** Inspect the pod logs: `kubectl logs -n kagent -l kagent=appa-guide`.
 
 ## Uninstall
 
-Choose the cleanup option that matches what you installed:
-
 #### Remove only the demo release
 
-Removes the demo releases and mock tools, leaving the cluster configuration intact:
+Removes demo releases and mock tools:
 
 ```sh
 helm uninstall appa-kagent-demo -n kagent --ignore-not-found
@@ -355,7 +347,7 @@ echo ""
 
 #### Restore stock images and remove OpenAPPA
 
-Restores the kagent controller to stock images and uninstalls `appa-runtime` (persistent PVCs are retained):
+Restores the controller to stock images and uninstalls `appa-runtime`:
 
 ```sh
 kubectl delete agent appa-guide -n kagent --ignore-not-found --wait
@@ -374,8 +366,6 @@ echo ""
 ```
 
 #### Remove kagent and its CRDs
-
-Completely uninstalls the kagent controller and removes cluster-wide CustomResourceDefinitions:
 
 ```sh
 helm uninstall kagent -n kagent --ignore-not-found

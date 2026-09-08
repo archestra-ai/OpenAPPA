@@ -146,4 +146,18 @@ spec:
           value: "true"
         - name: APPA_GUIDE_MCP_URL
           value: {{ printf "http://%s.%s.svc.cluster.local:%v/guide-mcp" (include "appa-runtime.fullname" .) .Release.Namespace (.Values.service.guidePort | default 18788) | quote }}
+      volumeMounts:
+        - name: appa-guide-skill-root
+          mountPath: /skills/appa-guide/SKILL.md
+          subPath: SKILL.md
+        - name: appa-guide-skill-ref
+          mountPath: /skills/appa-guide/references/kagent.md
+          subPath: kagent.md
+      volumes:
+        - name: appa-guide-skill-root
+          configMap:
+            name: {{ .Values.appaGuide.name }}-skill
+        - name: appa-guide-skill-ref
+          configMap:
+            name: {{ .Values.appaGuide.name }}-skill
 {{- end }}
