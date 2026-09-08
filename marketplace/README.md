@@ -99,6 +99,10 @@ packages, trajectory data and live cluster resources. Export/import use the same
 bundle command as Claude; container images and cluster credentials are separate
 prerequisites. No automatic updates occur.
 
+The separately published `appa-kagent-demo` chart is a demonstration, not an
+installed generation artifact. Its release checksum is in `SHA256SUMS`; the
+marketplace installs and bundles only the runtime chart.
+
 ## Custom files in offline bundles
 
 Official battery policies and helpers are bundled automatically. For your own

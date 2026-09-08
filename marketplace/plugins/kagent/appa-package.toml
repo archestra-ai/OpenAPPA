@@ -6,6 +6,6 @@ description = "Gates a kagent agent pod through the Google ADK plugin API: every
 host = "kagent"
 protocol = 1
 default_policy = "default.appa.toml"
-# Tags, not digests: the release workflow publishes both at the release
-# version, and nothing pins them by digest yet.
-images = { adk = "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk:v0.14.1", adk-go = "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk-go:v0.14.1" } # x-release-please-version
+# The generation descriptor locks registry and platform digests for these
+# release images. The Go image also publishes the alias kagent derives.
+images = { adk = "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk:v0.16.0", adk-go = "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk-go:v0.16.0" } # x-release-please-version

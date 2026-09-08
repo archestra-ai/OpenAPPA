@@ -326,6 +326,7 @@ jobs:
             case "$image" in
               appa-runtime) role=runtime ;;
               appa-kagent-adk) role=python ;;
+              *) continue ;;
             esac
             mkdir -p /tmp/appa-generation-images
             docker buildx imagetools inspect --raw "${REGISTRY}/${image}@${digest}" \
