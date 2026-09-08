@@ -175,13 +175,11 @@ A standard read operation that satisfies all audience and trust requirements flo
 
 ## Protect existing agents
 
-If you already have kagent running in your cluster, protecting an agent requires two pieces:
-1. **OpenAPPA adapter image:** Update the kagent controller to use the `appa-kagent-adk` adapter image.
-2. **Environment variables:** Set `APPA_ENABLED=true` and `APPA_RUNTIME_URL` on each agent you want to protect.
+If you already have kagent running with your own agents, use `appa-guide` to configure policy and protect them conversationally.
 
 #### 1. Deploy the adapter image and runtime
 
-This configuration deploys the shared runtime and updates the controller. It enables persistent storage for audit logs and battery updates (requires a `ReadWriteOnce` [StorageClass](https://kubernetes.io/docs/concepts/storage/storage-classes/)):
+Update the kagent controller to use the `appa-kagent-adk` adapter image, and deploy `appa-runtime` with persistence enabled for audit logs and battery updates (requires a `ReadWriteOnce` [StorageClass](https://kubernetes.io/docs/concepts/storage/storage-classes/)):
 
 ```sh
 APPA_VERSION=0.15.0 # x-release-please-version
@@ -215,9 +213,49 @@ kubectl wait agent/appa-guide -n "$KAGENT_NAMESPACE" \
 
 To remove the adapter and runtime later, see [Restore stock images and remove OpenAPPA](#restore-stock-images-and-remove-openappa).
 
-#### 2. Configure your agent
+#### 2. Initialize policy and batteries with appa-guide
 
-Set the two required environment variables on your agent:
+Forward the kagent dashboard:
+
+```sh
+kubectl port-forward -n kagent svc/kagent-ui 8080:8080
+```
+
+Open [http://localhost:8080](http://localhost:8080), select **Agents**, **appa-guide**, and **Chat**, then send:
+
+```text
+init
+```
+
+`appa-guide` inspects the tools and MCP servers discovered in your cluster, matches relevant [batteries](/batteries) (such as GitHub or Slack), and drafts a tailored policy configuration.
+
+To activate the policy:
+1. Approve the proposal in chat (for example: `Approve the proposed policy`).
+2. An **Approve / Reject** confirmation card will appear in the dashboard. Click **Approve**.
+
+Once approved, the runtime activates and serves the new policy immediately.
+
+#### 3. Protect your agents with appa-guide
+
+In the same chat with `appa-guide`, ask it to protect any of your existing agents:
+
+```text
+protect <your-agent-name>
+```
+
+You can also protect every declarative agent at once:
+
+```text
+protect all agents
+```
+
+`appa-guide` inspects the agent manifest, proposes setting `APPA_ENABLED=true` and `APPA_RUNTIME_URL="http://appa-runtime.appa.svc.cluster.local:18787"`, and presents the exact manifest diff for confirmation.
+
+Reply with approval in chat, then click **Approve** on the native confirmation card. `appa-guide` applies the manifest and verifies the pod rollout.
+
+#### Manual configuration (GitOps)
+
+If you manage your agents via GitOps manifests rather than `appa-guide`, add the environment variables directly to the Agent resource:
 
 ```yaml
 spec:
@@ -229,14 +267,6 @@ spec:
         - name: APPA_RUNTIME_URL
           value: "http://appa-runtime.appa.svc.cluster.local:18787"
 ```
-
-You can also ask `appa-guide` in chat to configure your agent:
-
-```text
-protect <your-agent-name>
-```
-
-The guide will inspect the agent, propose adding these environment variables, and show the exact manifest for confirmation.
 
 When `APPA_ENABLED` is true, all tool calls route through OpenAPPA. If the runtime is unreachable, the agent fails closed to prevent unauthorized actions. Setting `APPA_ENABLED=false` or leaving it unset runs the agent without gating.
 
