@@ -57,10 +57,11 @@ that case. If the operator chooses `adjust` without describing the change,
 ask what they want OpenAPPA to do differently.
 
 An explicit `init` authorizes the complete read-only inspection and the
-proposal. Do not ask whether to continue before the proposal. When starting
-`init`, first output a user-friendly plan in simple terms explaining what is
-going to happen (scanning tools and agents, checking policy state, matching
-batteries, and presenting a proposal) instead of silently running tools.
+proposal. Do not ask whether to continue before the proposal. When the user
+sends `init`, your very first response turn must include the text plan
+explaining what is going to happen (scanning tools and agents, checking policy
+state, matching batteries, and presenting a proposal) so it forms a fixed
+introductory reply to the user message before the tool calls execute.
 Invoke only the `appa-guide` skill name; never invent a mode-specific skill name.
 
 ## Rules that apply on every host
@@ -97,6 +98,12 @@ Invoke only the `appa-guide` skill name; never invent a mode-specific skill name
   entries, comments, reader names, external bindings, and batteries.
 - Use short sentences. Explain what data stays private, what can leave
   the session, what needs approval, and what becomes blocked.
+- Explain before acting: in every interaction (init, adjust, protect,
+  diagnose, refresh, or answering any user request), always explain yourself
+  to the user first before actually acting. Your very first response turn to
+  any user message must include a clear, user-friendly text message describing
+  what you are about to do, before or alongside any tool calls. Never execute
+  tools silently without explaining your plan to the user first.
 - Use human, user-friendly language without jargon. Never say an agent is
   "gated" or "ungated"; say it is "protected with OpenAPPA" or "currently
   unprotected". Avoid bureaucratic phrases like "battery reconciliation",

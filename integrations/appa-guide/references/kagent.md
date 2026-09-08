@@ -542,7 +542,7 @@ state-changing tool. The runtime policy independently enforces the same
 approval on apply, patch, delete, Helm upgrade, and Helm uninstall.
 The initial request is not approval, even when it uses an imperative verb.
 
-- **Protect one Agent**: read its complete environment list. Preserve every
+- **Protect one Agent**: when the operator asks to protect an agent, first output a friendly message explaining what you are about to do (inspect the agent manifest, configure the OpenAPPA environment variables, and show the proposal for approval). Then read its complete environment list. Preserve every
   existing entry. First list `resource_type: agent` across all namespaces
   with `output: json` and select the exact observed name. Never search in
   the runtime namespace by default. If the name exists in more than one
