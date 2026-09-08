@@ -872,11 +872,11 @@ func TestTheRuntimeRefusesToStartOnAnUnsupportedConfig(t *testing.T) {
 		{"a tool that takes an APPA-owned name",
 			withKey(t, stockConfig, "remote_agents", `[{"name": "appa_return", "url": "http://log-analyst:8080"}]`),
 			"appa_return", deliverUnderConfigDir},
-		// And the inventory: an MCP server the gate cannot name the
-		// tools of refuses the start, not the first call.
-		{"an MCP server without a tool filter",
+		// Omitted filters are supported: discovery supplies tool metadata
+		// later, so config validation must reach the stock card loader.
+		{"an MCP server without a tool filter reaches the agent card loader",
 			withKey(t, stockConfig, "http_tools", `[{"params": {"url": "http://demo-tools:8080/mcp"}}]`),
-			"tool filter", deliverUnderConfigDir},
+			"agent card", deliverUnderConfigDir},
 		// An accepted config passes the stock validation and reaches
 		// the agent card, the one stock load left on disk. No card is
 		// written, so that load is the failure the runtime reports.

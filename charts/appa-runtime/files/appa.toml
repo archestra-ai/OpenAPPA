@@ -8,87 +8,87 @@ version = 2
 # Kubernetes inspection is restricted to the resource types appa-guide
 # needs. Secret objects and unknown kinds match no contract.
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_get_resources(resource_type:agent)"
+name = "k8s_get_resources(resource_type:agent)"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_get_resources(resource_type:remotemcpserver)"
+name = "k8s_get_resources(resource_type:remotemcpserver)"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_get_resources(resource_type:pod)"
+name = "k8s_get_resources(resource_type:pod)"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_get_resources(resource_type:service)"
+name = "k8s_get_resources(resource_type:service)"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_get_resources(resource_type:deployment)"
+name = "k8s_get_resources(resource_type:deployment)"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_get_resources(resource_type:job)"
+name = "k8s_get_resources(resource_type:job)"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_get_resources(resource_type:persistentvolumeclaim)"
+name = "k8s_get_resources(resource_type:persistentvolumeclaim)"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_get_resources(resource_type:persistentvolume)"
+name = "k8s_get_resources(resource_type:persistentvolume)"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_get_resources(resource_type:storageclass)"
+name = "k8s_get_resources(resource_type:storageclass)"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_get_resources(resource_type:namespace)"
+name = "k8s_get_resources(resource_type:namespace)"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_get_resource_yaml(resource_type:agent)"
+name = "k8s_get_resource_yaml(resource_type:agent)"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_get_resource_yaml(resource_type:remotemcpserver)"
+name = "k8s_get_resource_yaml(resource_type:remotemcpserver)"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_get_resource_yaml(resource_type:pod)"
+name = "k8s_get_resource_yaml(resource_type:pod)"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_get_resource_yaml(resource_type:service)"
+name = "k8s_get_resource_yaml(resource_type:service)"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_get_resource_yaml(resource_type:deployment)"
+name = "k8s_get_resource_yaml(resource_type:deployment)"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_get_resource_yaml(resource_type:job)"
+name = "k8s_get_resource_yaml(resource_type:job)"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_get_resource_yaml(resource_type:persistentvolumeclaim)"
+name = "k8s_get_resource_yaml(resource_type:persistentvolumeclaim)"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_get_resource_yaml(resource_type:persistentvolume)"
+name = "k8s_get_resource_yaml(resource_type:persistentvolume)"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_get_resource_yaml(resource_type:storageclass)"
+name = "k8s_get_resource_yaml(resource_type:storageclass)"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_apply_manifest"
+name = "k8s_apply_manifest"
 annotator = "appa-guide-apply"
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_delete_resource"
+name = "k8s_delete_resource"
 delta = {}
 
 [policy.tool.requires]
@@ -103,15 +103,15 @@ marks = ["human-approval"]
 effects = []
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/helm_list_releases"
+name = "helm_list_releases"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/helm_get_release(resource:manifest)"
+name = "helm_get_release(resource:manifest)"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/helm_upgrade"
+name = "helm_upgrade"
 delta = {}
 
 [policy.tool.requires]
@@ -119,7 +119,7 @@ trust = "trusted"
 attention = ["human-approval"]
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/helm_uninstall"
+name = "helm_uninstall"
 delta = {}
 
 [policy.tool.requires]
