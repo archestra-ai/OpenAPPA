@@ -193,11 +193,13 @@ The backslash tells OpenAPPA that the comma belongs to the query value. It does 
 Use single quotes around the name to preserve backslashes as written. If you use double quotes, TOML requires each backslash to be doubled. These two lines mean the same thing:
 
 ```toml
+[[policy.tool]]
 # Single quotes:
 name = 'search(query:a\,b)'
 ```
 
 ```toml
+[[policy.tool]]
 # Equivalent form with double quotes:
 name = "search(query:a\\,b)"
 ```
@@ -211,6 +213,10 @@ OpenAPPA selects a contract before it validates the contract's `parameters` sche
 The tool name `"*"` covers tool names that the policy does not declare. The current format requires an annotator for this entry:
 
 ```toml
+[[policy.annotator]]
+name = "classify_unknown_tool"
+ranks = ["suspicious"]
+
 [[policy.tool]]
 name = "*"
 annotator = "classify_unknown_tool"
@@ -771,6 +777,9 @@ A sanitizer can change either the audience or the trust rank of its result. Its 
 For example, the following declaration permits a sanitizer to validate or clean suspicious data and return a trusted result:
 
 ```toml
+[policy.deployment]
+context_control = true
+
 [[policy.sanitizer]]
 name = "vouch-fetched-text"
 on = ["tool_output"]
@@ -872,6 +881,9 @@ Each field in `permits` allows the authority to approve a different type of requ
 For example, these permissions let an authority approve a call that needs `trusted` data, a public audience, an exception for an earlier `email.sent` effect, or `finance-signoff`:
 
 ```toml
+[[policy.authority]]
+name = "finance-officer"
+
 [policy.authority.permits]
 trust_below = "trusted"
 audience_missing = ["public"]
@@ -1109,6 +1121,10 @@ These settings describe what the agent integration can control: which tool resul
 [policy.deployment]
 confined_results = ["get_ticket_from_crm"]
 context_control = true
+
+[[policy.tool]]
+name = "get_ticket_from_crm"
+delta = { audience = ["internal"] }
 ```
 
 `confined_results` lists tools whose results the integration can withhold from the agent.
