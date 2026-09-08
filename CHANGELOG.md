@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.16.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.15.0...v0.16.0) (2026-09-08)
+
+
+### Features
+
+* **yell:** default send prompt to [Y/n] and forward reports to Slack ([#259](https://github.com/archestra-ai/OpenAPPA/issues/259)) ([cd7e05b](https://github.com/archestra-ai/OpenAPPA/commit/cd7e05b2d2df202f1092f6d26471b695c4f22a55))
+
+
+### Bug Fixes
+
+* **kagent:** unblock non-root and ARM64 demo quickstarts ([#260](https://github.com/archestra-ai/OpenAPPA/issues/260)) ([f1fc206](https://github.com/archestra-ai/OpenAPPA/commit/f1fc2068a76b0e0aea298968a12aa662b10653c2))
+
 ## [0.15.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.14.1...v0.15.0) (2026-09-08)
 
 
