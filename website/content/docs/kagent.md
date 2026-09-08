@@ -97,6 +97,7 @@ kubectl rollout status deployment/appa-runtime -n "$KAGENT_NAMESPACE" --timeout=
 kubectl rollout status deployment/cluster-ops -n "$KAGENT_NAMESPACE" --timeout=5m
 kubectl wait remotemcpserver/demo-tools -n "$KAGENT_NAMESPACE" \
   --for=jsonpath='{.status.discoveredTools[0].name}' --timeout=2m
+echo ""
 ```
 
 To clean up the demo later, see [Uninstall](#uninstall).
@@ -240,6 +241,7 @@ helm upgrade --install appa-runtime \
 kubectl rollout status deployment/appa-runtime -n "$RUNTIME_NAMESPACE" --timeout=5m
 kubectl wait agent/appa-guide -n "$KAGENT_NAMESPACE" \
   --for=condition=Ready=True --timeout=5m
+echo ""
 ```
 
 To retain trajectory audit logs and persist battery updates (`refresh batteries`) across pod restarts, deploy with persistent storage instead (requires a `ReadWriteOnce` [StorageClass](https://kubernetes.io/docs/concepts/storage/storage-classes/)):
@@ -255,6 +257,7 @@ helm upgrade --install appa-runtime \
   --set-string appaGuide.toolServer.name=kagent-tool-server \
   --set-string appaGuide.reasoningEffort=none \
   --force-conflicts --wait --timeout 10m
+echo ""
 ```
 
 To remove the plugin and runtime later, see [Restore stock images and remove OpenAPPA](#restore-stock-images-and-remove-openappa).
@@ -347,6 +350,7 @@ Removes the demo releases and mock tools, leaving the cluster configuration inta
 ```sh
 helm uninstall appa-kagent-demo -n kagent --ignore-not-found
 helm uninstall appa-runtime -n kagent --ignore-not-found
+echo ""
 ```
 
 #### Restore stock images and remove OpenAPPA
@@ -366,6 +370,7 @@ kubectl get deployment -A -l kagent \
   -o 'custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name,IMAGES:.spec.template.spec.containers[*].image'
 # After verifying every affected Agent uses ghcr.io/kagent-dev/kagent/app:0.9.12:
 helm uninstall appa-runtime -n appa --ignore-not-found
+echo ""
 ```
 
 #### Remove kagent and its CRDs
@@ -375,6 +380,7 @@ Completely uninstalls the kagent controller and removes cluster-wide CustomResou
 ```sh
 helm uninstall kagent -n kagent --ignore-not-found
 helm uninstall kagent-crds -n kagent --ignore-not-found
+echo ""
 ```
 
 ## Where next
