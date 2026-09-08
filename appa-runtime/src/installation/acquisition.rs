@@ -34,6 +34,7 @@ pub struct Acquired {
 pub struct Imported {
     selection: Selection,
     config: String,
+    snapshot: Option<super::files::Snapshot>,
 }
 
 impl Imported {
@@ -42,6 +43,18 @@ impl Imported {
     }
     pub fn config(&self) -> &str {
         &self.config
+    }
+
+    pub fn configuration(&self, installation: &super::Installation) -> Result<(Selection, String), InstallError> {
+        let config = if let Some(snapshot) = &self.snapshot {
+            // Check all authored mappings before publishing even immutable files.
+            let config = snapshot.rebase(&self.config, &self.selection, installation, false)?;
+            snapshot.publish(installation)?;
+            config
+        } else {
+            self.config.clone()
+        };
+        Ok((self.selection.clone(), config))
     }
 }
 
@@ -126,6 +139,19 @@ impl Acquired {
         let config = String::from_utf8(super::required_bytes(&unpacked.join("config.toml"))?)
             .map_err(|error| InstallError::Invalid(error.to_string()))?;
         selection.validate_owned_config(&config)?;
+        let snapshot = selection
+            .files
+            .as_ref()
+            .map(|digest| super::files::Snapshot::read(unpacked.join("snapshot"), digest))
+            .transpose()?;
+        if snapshot.is_none() && unpacked.join("snapshot").exists() {
+            return Err(InstallError::Invalid("bundle has an unselected custom snapshot".into()));
+        }
+        if snapshot.is_none() && super::files::requires_snapshot(&config, &selection)? {
+            return Err(InstallError::Invalid(
+                "bundle is missing its declared custom files or manual includes".into(),
+            ));
+        }
         let marketplace = unpacked.join("marketplace");
         selection.validate_packages(&marketplace)?;
         let mut archives = BTreeMap::new();
@@ -139,7 +165,11 @@ impl Acquired {
             generation,
             marketplace,
             archives,
-            imported: Some(Imported { selection, config }),
+            imported: Some(Imported {
+                selection,
+                config,
+                snapshot,
+            }),
         })
     }
 

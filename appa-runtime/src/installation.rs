@@ -16,6 +16,7 @@ const MAX_STATE_BYTES: u64 = 4 * 1024 * 1024;
 mod acquisition;
 mod battery;
 pub mod cli;
+mod files;
 pub mod native;
 pub use acquisition::{Acquired, Requirements};
 
@@ -65,6 +66,8 @@ pub struct Selection {
     batteries: BTreeSet<String>,
     includes: Vec<OwnedInclude>,
     aliases: Vec<battery::OwnedAlias>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    files: Option<ArtifactDigest>,
 }
 
 impl Selection {
@@ -133,6 +136,7 @@ impl Selection {
             batteries: BTreeSet::new(),
             includes: Vec::new(),
             aliases: Vec::new(),
+            files: None,
         }
     }
 
@@ -552,7 +556,7 @@ impl Installation {
                 reason: "finish the pending installation before exporting".into(),
             });
         }
-        let selection = self
+        let mut selection = self
             .selection()?
             .ok_or_else(|| InstallError::Invalid("no installed selection to export".into()))?;
         let config = required_bytes(&self.config)?;
@@ -560,6 +564,15 @@ impl Installation {
             std::str::from_utf8(&config).map_err(|error| InstallError::Invalid(error.to_string()))?,
         )?;
         crate::config::Config::load(&self.config).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let text = std::str::from_utf8(&config).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let (snapshot, exported_config) = if let Some(snapshot) = self.selected_files(&selection)? {
+            self.verify_selected_files(&selection, text)?;
+            let portable = snapshot.rebase(text, &selection, self, true)?;
+            (Some(snapshot), portable.into_bytes())
+        } else {
+            (files::Snapshot::capture(self, &selection, text)?, config.clone())
+        };
+        selection.files = snapshot.as_ref().map(|snapshot| snapshot.digest.clone());
         let generation_root = self.state.join("generations").join(selection.commit().as_str());
         let marketplace = generation_root.join("marketplace");
         selection.validate_packages(&marketplace)?;
@@ -582,7 +595,12 @@ impl Installation {
                 &serde_json::to_vec(selection.generation())
                     .map_err(|error| InstallError::Invalid(error.to_string()))?,
             )?;
-            append_bytes(&mut archive, "config.toml", &config)?;
+            append_bytes(&mut archive, "config.toml", &exported_config)?;
+            if let Some(snapshot) = &snapshot {
+                archive
+                    .append_dir_all("snapshot", &snapshot.root)
+                    .map_err(|error| io("archive custom files", &snapshot.root, error))?;
+            }
             archive
                 .append_dir_all("marketplace", &marketplace)
                 .map_err(|error| io("archive packages", &marketplace, error))?;
@@ -602,6 +620,9 @@ impl Installation {
         }
         if optional_bytes(&self.config)?.as_deref() != Some(config.as_slice()) {
             return Err(InstallError::Changed(self.config.clone()));
+        }
+        if let Some(snapshot) = &snapshot {
+            snapshot.verify_sources()?;
         }
         stage
             .as_file()
@@ -713,6 +734,10 @@ impl Installation {
         selection.validate_owned_config(
             std::str::from_utf8(after).map_err(|error| InstallError::Invalid(error.to_string()))?,
         )?;
+        self.verify_selected_files(
+            selection,
+            std::str::from_utf8(after).map_err(|error| InstallError::Invalid(error.to_string()))?,
+        )?;
         if !selection.plugins.is_empty() || !selection.batteries.is_empty() {
             selection.validate_packages(
                 &self
@@ -812,6 +837,11 @@ impl Installation {
         let current = optional_bytes(&self.config)?;
         if current.as_deref() == Some(&transaction.after) {
             let validate = || {
+                self.verify_selected_files(
+                    &transaction.selection,
+                    std::str::from_utf8(&transaction.after)
+                        .map_err(|error| InstallError::Invalid(error.to_string()))?,
+                )?;
                 transaction.selection.validate_owned_config(
                     std::str::from_utf8(&transaction.after)
                         .map_err(|error| InstallError::Invalid(error.to_string()))?,

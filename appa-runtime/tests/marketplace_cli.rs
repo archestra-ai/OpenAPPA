@@ -250,6 +250,105 @@ fn deployment(root: &Path) -> std::path::PathBuf {
 }
 
 #[test]
+fn explicit_custom_files_roundtrip_through_the_existing_bundle_commands() {
+    let source = tempfile::tempdir().unwrap();
+    let config = deployment(source.path());
+    let original = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, format!("{original}\n[bundle]\nfiles=['helper.txt']\n")).unwrap();
+    let bundle = source.path().join("bundle.tar.gz");
+    // Missing declarations fail as one machine envelope, without publishing output.
+    let missing = run(
+        source.path(),
+        &["bundle", "--output", bundle.to_str().unwrap(), "--json"],
+    );
+    assert_eq!(missing.status.code(), Some(1));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&missing.stdout).unwrap()["status"],
+        "error"
+    );
+    assert!(!bundle.exists());
+    std::fs::write(source.path().join("config/helper.txt"), "portable data").unwrap();
+    std::fs::write(source.path().join("config/secret.txt"), "private neighbor").unwrap();
+    assert!(
+        run(source.path(), &["battery", "install", "github", "--json"])
+            .status
+            .success()
+    );
+    let exported = run(
+        source.path(),
+        &["bundle", "--output", bundle.to_str().unwrap(), "--json"],
+    );
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stdout)
+    );
+    let receipt: serde_json::Value = serde_json::from_slice(&exported.stdout).unwrap();
+    let checksum = receipt["result"]["sha256"].as_str().unwrap();
+    std::fs::remove_file(source.path().join("config/helper.txt")).unwrap();
+    let replica = tempfile::tempdir().unwrap();
+    let replica_config = replica.path().join("config/appa.toml");
+    {
+        use appa_runtime::installation::{Acquired, Installation, Selection};
+        let acquired = Acquired::import(
+            &bundle,
+            &appa_package::generation::ArtifactDigest::parse(&format!("sha256:{checksum}")).unwrap(),
+        )
+        .unwrap();
+        let target = Installation::open(&replica_config).unwrap();
+        target.retain(&acquired).unwrap();
+        let empty = Selection::empty(
+            acquired.generation().clone(),
+            appa_package::generation::Platform::current().unwrap(),
+        );
+        target.commit_config(None, original.as_bytes(), &empty).unwrap();
+    }
+    std::fs::write(replica.path().join("config/helper.txt"), "do not overwrite").unwrap();
+    let imported = run(
+        replica.path(),
+        &[
+            "battery",
+            "install",
+            "github",
+            "--from",
+            bundle.to_str().unwrap(),
+            "--sha256",
+            checksum,
+            "--json",
+        ],
+    );
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stdout)
+    );
+    let text = std::fs::read_to_string(&replica_config).unwrap();
+    let parsed: toml::Value = toml::from_str(&text).unwrap();
+    let file = replica_config
+        .parent()
+        .unwrap()
+        .join(parsed["bundle"]["files"][0].as_str().unwrap());
+    assert_eq!(std::fs::read_to_string(file).unwrap(), "portable data");
+    assert_eq!(
+        std::fs::read_to_string(replica.path().join("config/helper.txt")).unwrap(),
+        "do not overwrite"
+    );
+    assert!(!replica.path().join("config/secret.txt").exists());
+    let rebundle = replica.path().join("again.tar.gz");
+    let output = run(
+        replica.path(),
+        &["bundle", "--output", rebundle.to_str().unwrap(), "--json"],
+    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+    assert!(
+        run(replica.path(), &["battery", "remove", "github", "--json"])
+            .status
+            .success()
+    );
+    assert!(appa_runtime::config::Config::load(&replica_config).is_ok());
+}
+
+#[test]
 fn battery_install_and_remove_update_the_real_policy_without_network_or_host_registration() {
     let root = tempfile::tempdir().unwrap();
     let config = deployment(root.path());

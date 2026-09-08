@@ -759,8 +759,9 @@ pub(crate) fn extract_archive(archive: &Path, destination: &Path) -> Result<(), 
 
 pub(crate) fn extract_bundle_archive(archive: &Path, destination: &Path) -> Result<(), PluginBundleError> {
     // A complete marketplace may already use its entry allowance. The bundle
-    // adds its descriptor, selection, config, artifact files and directories.
-    extract_bounded(archive, destination, 512 * 1024 * 1024, MAX_ENTRIES + 32)
+    // adds a separately bounded custom-file snapshot, descriptor, selection,
+    // config, artifact files and directories.
+    extract_bounded(archive, destination, 512 * 1024 * 1024, MAX_ENTRIES * 2 + 32)
 }
 
 fn extract_bounded(

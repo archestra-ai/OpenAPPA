@@ -39,7 +39,7 @@ pub struct List {
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Example:\n  appa bundle --config ./deployment/appa.toml --output ./appa-bundle.tar.gz --json\n\nThe archive includes your configuration: treat it as private. Container images\nare separate prerequisites; a kagent bundle alone is not an air-gapped deployment."
+    after_help = "Example:\n  appa bundle --config ./deployment/appa.toml --output ./appa-bundle.tar.gz --json\n\nList custom scripts and data in [bundle].files in your config; manual policy\nincludes are carried automatically. Interpreters, installed packages, credentials\nand container images are separate prerequisites. The archive includes your\nconfiguration: treat it as private."
 )]
 pub struct Bundle {
     #[command(flatten)]
@@ -191,7 +191,7 @@ pub fn install_battery(args: BatteryInstall) -> ExitCode {
                         "bundle does not select the requested battery".into(),
                     ));
                 }
-                (imported.selection().clone(), imported.config().to_owned())
+                imported.configuration(&installation)?
             }
             None => (
                 current,
@@ -390,7 +390,7 @@ pub fn install(args: Install) -> ExitCode {
                     "the bundle does not select the requested plugin".into(),
                 ));
             }
-            (imported.selection().clone(), imported.config().to_owned())
+            imported.configuration(&installation)?
         } else {
             let selected = current.unwrap_or_else(|| Selection::empty(acquired.generation().clone(), platform));
             let text = match before.as_deref() {
