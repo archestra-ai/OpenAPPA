@@ -391,23 +391,13 @@ Preserve an argument suffix after translation. For example,
 Check what each matched battery expects the root config to provide.
 Record anything missing in **Needed for this to work**.
 
-If the operator asks to refresh batteries, first verify that the data
-volume and persisted release layer are present in
-`appa_get_runtime_state.battery_refresh`. Without both, refuse the refresh
-and offer to enable persistence.
-
-During `init`, reconcile against the battery layers already present. If
-persistent refresh is supported, state that a verified latest-release
-refresh is available as a separate approved operation. After
-a completed refresh, rerun cluster inventory and battery reconciliation,
-then propose newly matched includes. A refresh never includes a battery
-by itself.
-
-After approval, call `appa_refresh_batteries` with the proposal's policy
-key. It fetches the latest stable release, verifies `SHA256SUMS`, stages
-and validates the layer, reloads serving policy, and commits. Any failure
-rolls back the prior layer and reloads it before returning an error. Do not
-run separate check, stage, commit, rollback, or reload operations.
+When the operator asks to refresh batteries:
+1. Verify `appa_get_runtime_state.battery_refresh.persistent` is true. If persistence is off, explain that refreshing batteries requires persistent storage.
+2. Proceed directly in a single turn (prompt -> card approval -> done): immediately call `appa_refresh_batteries` with the serving policy key.
+3. The call is blocked because it requires human authorization, returning an offer id.
+4. Call `execute_remedy_plan` with that offer id to open the confirmation card, emitting: "I have prepared the battery refresh. Please approve the confirmation card to apply the update."
+5. Do not stop the turn prematurely with text or wait for chat approval before calling the tool that opens the card.
+6. When the operator approves the card (`execute_remedy_plan` returns `Authorized`), immediately call `appa_refresh_batteries` again with the arguments to execute the refresh. It fetches the latest stable release, verifies `SHA256SUMS`, stages and validates the layer, reloads serving policy, and commits. Any failure rolls back the prior layer and reloads it before returning an error. Do not run separate check, stage, commit, rollback, or reload operations. After a completed refresh, rerun cluster inventory and battery reconciliation, then propose newly matched includes. A refresh never includes a battery by itself.
 
 Persistence is optional and is NOT required for policy management or agent protection.
 Policy is stored in the Kubernetes ConfigMap and updates immediately via `appa_update_policy`
