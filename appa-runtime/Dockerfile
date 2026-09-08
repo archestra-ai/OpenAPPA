@@ -9,6 +9,13 @@
 #   docker run -e APPA_MCP_ALLOWED_HOST=localhost:18787,127.0.0.1:18787 -p 18787:18787 appa-runtime
 #   (build context: the repository root)
 #
+# `appa yell` from inside the image sends to APPA_YELL_ENDPOINT, given as a
+# build argument and exported to the running process. The binary itself is a
+# development build with nothing compiled in — a release-style build would
+# also need the release plugin digest and would switch how the binary resolves
+# its plugin, neither of which a container wants — so the address rides as the
+# runtime override the binary honours. Left empty, the image cannot send.
+#
 # Each FROM pins its base image by digest. The tag beside the digest names the version.
 
 FROM rust:1.96-bookworm@sha256:a339861ae23e9abb272cea45dfafde21760d2ce6577a70f8a926153677902663 AS builder
@@ -55,6 +62,8 @@ RUN chmod 0755 /usr/local/bin/appa-refresh-batteries /opt/appa/appa-guide-runtim
        done
 
 USER 65532:65532
+ARG APPA_YELL_ENDPOINT=
+ENV APPA_YELL_ENDPOINT=${APPA_YELL_ENDPOINT}
 ENV APPA_CONFIG=/etc/appa/appa.toml
 ENV APPA_DB=/var/lib/appa/appa.db
 ENV APPA_BATTERIES_DIR=/opt/appa/batteries

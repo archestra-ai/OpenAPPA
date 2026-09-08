@@ -50,8 +50,8 @@ func TestEachClassSpellsItsTools(t *testing.T) {
 		RemoteAgents: []RemoteAgentSpec{{Path: "remote_agents[0].name", Name: "kagent__NS__log_analyst"}},
 	})
 	for name, want := range map[string]string{
-		"list_pods":               "mcp:demo-tools/list_pods",
-		"k8s_get_resources":       "mcp:kagent-tool-server/k8s_get_resources",
+		"list_pods":               sourceSpelling(t, demoTools.URL, "list_pods"),
+		"k8s_get_resources":       sourceSpelling(t, "https://kagent-tool-server:8084/sse", "k8s_get_resources"),
 		"kagent__NS__log_analyst": "agent:kagent/log-analyst",
 		"ask_user":                "builtin:ask_user",
 		ReservedTool:              ControlTool,
@@ -85,10 +85,21 @@ func TestARemoteAgentNameUnmanglesBothLabels(t *testing.T) {
 	}
 }
 
-func TestAnMCPEntryWithoutAToolFilterIsRefused(t *testing.T) {
+func sourceSpelling(t *testing.T, endpoint, name string) string {
+	t.Helper()
+	id, err := mcpSourceID(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return MCPSpelling(id, name)
+}
+
+func TestAnMCPEntryWithoutAToolFilterRequiresDiscovery(t *testing.T) {
 	for _, tools := range [][]string{nil, {}} {
-		mustRefuse(t, InventorySpec{MCPServers: []MCPServerSpec{{Path: "http_tools[0]", URL: "http://demo-tools:3000/mcp", Tools: tools}}},
-			UnfilteredToolset, "http_tools[0]")
+		inventory := mustBuild(t, InventorySpec{MCPServers: []MCPServerSpec{{Path: "http_tools[0]", URL: "https://mcp.example.com/mcp", Tools: tools}}})
+		if _, known := inventory.Spelling("unobserved"); known {
+			t.Fatal("omitted filter granted a tool")
+		}
 	}
 }
 
@@ -99,7 +110,7 @@ func TestANameTheWireCannotSpellIsRefused(t *testing.T) {
 		UnspellableName, "http_tools[0]")
 	mustRefuse(t, InventorySpec{MCPServers: []MCPServerSpec{{Path: "http_tools[0]", URL: "http://demo-tools:3000/mcp", Tools: []string{"list pods"}}}},
 		UnspellableName, "http_tools[0].tools[0]")
-	mustRefuse(t, InventorySpec{MCPServers: []MCPServerSpec{{Path: "http_tools[0]", URL: "http://demo__tools:3000/mcp", Tools: []string{"a"}}}},
+	mustRefuse(t, InventorySpec{MCPServers: []MCPServerSpec{{Path: "http_tools[0]", URL: "file:///mcp", Tools: []string{"a"}}}},
 		UnspellableName, "http_tools[0]")
 	// A boundary period ends the spelling run short, so Despell could
 	// never match the spelling of such a name back.
@@ -113,59 +124,30 @@ func TestANameTheWireCannotSpellIsRefused(t *testing.T) {
 	}
 }
 
-func TestAnInClusterEndpointNamesItsToolset(t *testing.T) {
-	for _, host := range []string{
-		"demo-tools",
-		"demo-tools.kagent.svc",
-		"demo-tools.kagent.svc.cluster.local",
-		"demo-tools.kagent.svc.cluster.local.",
-		"localhost",
-		"127.0.0.1",
+func TestConfiguredEndpointsHaveDistinctStableIdentities(t *testing.T) {
+	seen := make(map[string]bool)
+	for _, endpoint := range []string{
+		"http://demo-tools:3000/mcp",
+		"http://demo-tools.team-a.svc:3000/mcp",
+		"http://demo-tools.team-b.svc:3000/mcp",
+		"https://demo-tools.example.com/mcp",
+		"https://demo-tools.example.com/other",
+		"http://[::1]:3000/mcp",
 	} {
-		inventory := mustBuild(t, InventorySpec{MCPServers: []MCPServerSpec{
-			{Path: "http_tools[0]", URL: "http://" + host + ":3000/mcp", Tools: []string{"list_pods"}},
-		}})
-		label, _, _ := strings.Cut(host, ".")
-		if got, known := inventory.Spelling("list_pods"); !known || got != MCPSpelling(label, "list_pods") {
-			t.Errorf("%s spells its toolset %q (%v), want %q", host, got, known, MCPSpelling(label, "list_pods"))
+		inventory := mustBuild(t, InventorySpec{MCPServers: []MCPServerSpec{{Path: "http_tools[0]", URL: endpoint, Tools: []string{"list_pods"}}}})
+		spelling, known := inventory.Spelling("list_pods")
+		if !known || seen[spelling] || spelling != sourceSpelling(t, endpoint, "list_pods") {
+			t.Fatalf("unstable or colliding source: %s", endpoint)
 		}
+		seen[spelling] = true
 	}
 }
 
-// DNS is case-insensitive, so the same service reaches the same policy
-// identity however the URL spells it.
-func TestAHostWrittenInAnotherCaseIsTheSameToolset(t *testing.T) {
-	inventory := mustBuild(t, InventorySpec{MCPServers: []MCPServerSpec{
-		{Path: "http_tools[0]", URL: "http://DEMO-TOOLS.kagent.svc.cluster.local:3000/mcp", Tools: []string{"list_pods"}},
-	}})
-	want := MCPSpelling("demo-tools", "list_pods")
-	if got, known := inventory.Spelling("list_pods"); !known || got != want {
-		t.Errorf("an uppercase host spells %q (%v), want %q", got, known, want)
-	}
-}
-
-// The toolset is the host's first label, so a foreign endpoint under
-// that label would take the policy identity of the in-cluster service.
-func TestAnMCPEndpointOutsideTheClusterIsRefused(t *testing.T) {
-	for _, host := range []string{
-		"demo-tools.attacker.example.com",
-		// Two labels is a registrable domain, and a namespaced service
-		// address is one label short of one. The .svc form says the same
-		// thing and cannot be bought.
-		"demo-tools.com",
-		"demo-tools.kagent",
-		"demo-tools.kagent.example.com",
-		"demo-tools.kagent.svc.attacker.com",
-		"demo-tools.kagent.pod.cluster.local",
-		"demo-tools.kagent.svc.cluster.local.attacker.com",
-		"192.0.2.10",
-	} {
-		spec := InventorySpec{MCPServers: []MCPServerSpec{
-			{Path: "http_tools[0]", URL: "http://" + host + ":3000/mcp", Tools: []string{"list_pods"}},
-		}}
-		mustRefuse(t, spec, ForeignAuthority, "http_tools[0]")
-		if _, err := BuildInventory(spec); err == nil || !strings.Contains(err.Error(), host) {
-			t.Errorf("the refusal names the endpoint it read, got %v", err)
+func TestInvalidEndpointErrorsDoNotExposeCredentials(t *testing.T) {
+	for _, endpoint := range []string{"file:///mcp", "https://user:secret@example.com/mcp", "https://example.com/mcp#secret", "not-a-url"} {
+		_, err := BuildInventory(InventorySpec{MCPServers: []MCPServerSpec{{Path: "http_tools[0]", URL: endpoint}}})
+		if err == nil || strings.Contains(err.Error(), "secret") {
+			t.Fatalf("unsafe endpoint validation: %v", err)
 		}
 	}
 }
@@ -216,7 +198,7 @@ func TestDespellReplacesAWholeSpellingAndLeavesEveryLongerIdentifier(t *testing.
 		MCPServers:   []MCPServerSpec{demoTools},
 		RemoteAgents: []RemoteAgentSpec{{Path: "remote_agents[0].name", Name: "kagent__NS__log_analyst"}},
 	})
-	const listPods = "mcp:demo-tools/list_pods"
+	listPods := sourceSpelling(t, demoTools.URL, "list_pods")
 	const logAnalyst = "agent:kagent/log-analyst"
 	for _, row := range []struct{ id, text, want string }{
 		// The plain cases: a spelling the runtime named, whole.

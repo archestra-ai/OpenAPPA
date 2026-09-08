@@ -132,7 +132,6 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "serde_json_canonicalizer",
  "sha2",
  "tar",
  "tempfile",
@@ -208,6 +207,7 @@ version = "0.14.1"
 dependencies = [
  "appa-engine",
  "appa-policy",
+ "appa-runtime-api",
  "rusqlite",
  "serde",
  "serde_json",
@@ -262,6 +262,7 @@ name = "appa-policy"
 version = "0.14.1"
 dependencies = [
  "appa-engine",
+ "appa-runtime-api",
  "serde",
  "serde_json",
  "thiserror",

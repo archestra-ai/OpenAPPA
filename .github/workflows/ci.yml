@@ -154,6 +154,7 @@ jobs:
             integration: &integration
               - *python
               - 'marketplace/plugins/kagent/**'
+              - 'integrations/kagent/appa-kagent-adk-go/**'
               - 'integrations/kagent/demo/demo_tools.py'
               - 'integrations/kagent/demo/mocks/**'
               - 'integrations/kagent/demo/chart/files/**'
@@ -807,6 +808,28 @@ jobs:
           --with "a2a-sdk>=0.3.23,<0.4" --with "google-adk==1.31.1" --with "mcp>=1.25,<2"
           --with "pytest>=8" --with "pytest-asyncio"
           pytest integrations/kagent/tests -q --basetemp "$APPA_INTEGRATION_BASETEMP"
+
+      - name: Authenticated MCP discovery lifecycle, Python
+        env:
+          APPA_TEST_RUNTIME_BIN: ${{ github.workspace }}/target/debug/appa
+        run: >
+          uv run --project integrations/kagent/appa-kagent-adk
+          --with "kagent-adk @ git+https://github.com/kagent-dev/kagent@v0.9.12#subdirectory=python/packages/kagent-adk"
+          --with "a2a-sdk>=0.3.23,<0.4" --with "google-adk==1.31.1" --with "mcp>=1.25,<2"
+          --with "pytest>=8" --with "pytest-asyncio"
+          pytest integrations/kagent/appa-kagent-adk/tests/test_mcp_lifecycle.py -q
+
+      - name: Setup Go for authenticated MCP lifecycle
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: integrations/kagent/appa-kagent-adk-go/go.mod
+          cache-dependency-path: integrations/kagent/appa-kagent-adk-go/go.sum
+
+      - name: Authenticated MCP discovery lifecycle, Go
+        working-directory: integrations/kagent/appa-kagent-adk-go
+        env:
+          APPA_TEST_RUNTIME_BIN: ${{ github.workspace }}/target/debug/appa
+        run: go test -count=1 -run TestMCPDiscoveryLifecycleAgainstRuntime .
 
       - name: Upload the trajectory database and the process logs
         if: failure()

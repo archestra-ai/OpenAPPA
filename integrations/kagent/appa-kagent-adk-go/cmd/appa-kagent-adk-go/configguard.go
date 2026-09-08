@@ -47,9 +47,6 @@ const (
 	contextCompaction
 	// reservedToolName: a declared tool carries an APPA-owned name.
 	reservedToolName
-	// unfilteredToolset: an MCP entry declares no tool filter, so the
-	// gate cannot name the tools the server would hand the agent.
-	unfilteredToolset
 	// unspellableTool: a declared tool name the wire cannot spell, or
 	// one raw name declared twice.
 	unspellableTool
@@ -88,9 +85,6 @@ func (r *configRefusal) Error() string {
 	case reservedToolName:
 		return fmt.Sprintf("config.json declares a tool named %s at %s, and OpenAPPA owns that name. Rename the tool.",
 			r.feature, r.keys[0])
-	case unfilteredToolset:
-		return fmt.Sprintf("config.json declares the MCP server at %s with no tool filter, and the gate names only what the "+
-			"config declares. List under tools every tool of this server the agent may call.", r.keys[0])
 	case unspellableTool:
 		return "config.json declares a tool the wire cannot spell: " + r.detail
 	default:
@@ -227,12 +221,7 @@ func refuseInventory(err error) error {
 	if !errors.As(err, &refusal) {
 		return err
 	}
-	switch refusal.Kind {
-	case appakagentadk.UnfilteredToolset:
-		return &configRefusal{kind: unfilteredToolset, keys: []string{refusal.Path}}
-	default:
-		return &configRefusal{kind: unspellableTool, keys: []string{refusal.Path}, feature: refusal.Name, detail: refusal.Error()}
-	}
+	return &configRefusal{kind: unspellableTool, keys: []string{refusal.Path}, feature: refusal.Name, detail: refusal.Error()}
 }
 
 // refuseUnsupported refuses a raw config.json whose top-level keys this

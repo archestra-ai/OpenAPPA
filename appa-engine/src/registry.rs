@@ -545,6 +545,8 @@ pub enum LoadError {
         slot: crate::profile::CoverageSlot,
         tool: String,
     },
+    #[error("overlapping tool rules {first} and {second} declare incompatible executors")]
+    ConflictingToolExecutors { first: String, second: String },
     #[error(
         "tool {tool} is provider-run and cannot be a confined result point: its result reaches the model inside the inference call, before any host could withhold it"
     )]
@@ -869,6 +871,11 @@ pub struct Registry {
     trust_chain: TrustChain,
     audience_vocabulary: AudienceVocabulary,
     tools: BTreeMap<ToolName, Vec<(ToolMatcher, ToolDeclaration)>>,
+    /// Declaration order is significant when precise and server-independent
+    /// names overlap. Entries point into the immutable per-name variant lists.
+    tool_order: Vec<(ToolName, usize)>,
+    /// Only leaves with a server-independent rule need cross-name lookup.
+    mcp_order: BTreeMap<String, Vec<(ToolName, usize)>>,
     provider_run: BTreeMap<ToolName, ToolAnnotation>,
     /// The wildcard declaration, when the policy writes one: the Annotated declaration every
     /// tool call the policy does not name exactly resolves to. In no listing or vector; the
@@ -895,6 +902,24 @@ impl Registry {
         profile: crate::profile::DeploymentProfile,
     ) -> Result<Registry, LoadError> {
         config.trust_chain.validate()?;
+        for declaration in &config.tools {
+            let (ContractName::Named(name), _) = parse_tool_selector(declaration.name().as_str())? else {
+                continue;
+            };
+            if name.is_name_selector() {
+                for (exception, class) in profile.executor_exceptions() {
+                    if name.matches_name(exception)
+                        && profile.executor_class(&name) != *class
+                        && (profile.is_provider_run(&name) || *class == crate::profile::ExecutorClass::ProviderRun)
+                    {
+                        return Err(LoadError::ConflictingToolExecutors {
+                            first: name.as_str().into(),
+                            second: exception.as_str().into(),
+                        });
+                    }
+                }
+            }
+        }
         let audience_vocabulary = configured_audience_vocabulary(&config, &profile);
         let audience = validated_audience_registry(&config.audience)?;
         for clause in profile.starting_label().audience.clauses() {
@@ -955,6 +980,7 @@ impl Registry {
         }
 
         let mut tools: BTreeMap<ToolName, Vec<(ToolMatcher, ToolDeclaration)>> = BTreeMap::new();
+        let mut tool_order = Vec::new();
         let mut provider_run: BTreeMap<ToolName, ToolAnnotation> = BTreeMap::new();
         let mut wildcard: Option<ToolDeclaration> = None;
         for mut declaration in config.tools {
@@ -1012,6 +1038,12 @@ impl Registry {
                     return Err(LoadError::ProviderRunAnnotated(declaration.name().as_str().to_string()));
                 };
                 let name = tool.name.clone();
+                if provider_run
+                    .keys()
+                    .any(|rule| rule.matches_name(&name) || name.matches_name(rule))
+                {
+                    return Err(LoadError::DuplicateTool(name.as_str().to_string()));
+                }
                 if provider_run.insert(name.clone(), tool).is_some() {
                     return Err(LoadError::DuplicateTool(name.as_str().to_string()));
                 }
@@ -1020,6 +1052,7 @@ impl Registry {
                 if ToolDeclarationId::new(variants.len()).is_none() {
                     return Err(LoadError::TooManyToolVariants(declaration.name().as_str().to_string()));
                 }
+                tool_order.push((declaration.name().clone(), variants.len()));
                 variants.push((matcher, declaration));
             }
         }
@@ -1056,7 +1089,12 @@ impl Registry {
             MembershipContext::new(audience.within_assertions(), audience.providers(), &no_expansions);
 
         let sanitizer_list: Vec<Sanitizer> = sanitizers.values().cloned().collect();
-        let checkable_tools: Vec<&ToolDeclaration> = tools.values().flatten().map(|(_, d)| d).collect();
+        let checkable_tools: Vec<&ToolDeclaration> = tools
+            .iter()
+            .filter(|(name, _)| !name.is_name_selector())
+            .flat_map(|(_, variants)| variants)
+            .map(|(_, d)| d)
+            .collect();
         for declaration in tools.values().flatten().map(|(_, d)| d).chain(wildcard.as_ref()) {
             let count = worst_case_plan_alternatives(
                 declaration,
@@ -1140,10 +1178,33 @@ impl Registry {
             })
             .collect();
 
+        // Exact-only policies retain their existing canonical name order. With
+        // overlapping names the authored order is part of the policy identity.
+        if !tools.keys().any(ToolName::is_name_selector) {
+            tool_order.sort_by(|(a, _), (b, _)| a.cmp(b));
+        }
+        let mut mcp_order: BTreeMap<String, Vec<(ToolName, usize)>> = tools
+            .keys()
+            .filter(|name| name.is_name_selector())
+            .filter_map(|name| {
+                name.as_str()
+                    .strip_prefix("mcp/*/")
+                    .map(|leaf| (leaf.to_string(), Vec::new()))
+            })
+            .collect();
+        for (name, ordinal) in &tool_order {
+            if let Some((_, leaf)) = name.as_str().strip_prefix("mcp/").and_then(|name| name.split_once('/')) {
+                if let Some(ordered) = mcp_order.get_mut(leaf) {
+                    ordered.push((name.clone(), *ordinal));
+                }
+            }
+        }
         Ok(Registry {
             trust_chain: config.trust_chain,
             audience_vocabulary,
             tools,
+            tool_order,
+            mcp_order,
             provider_run,
             wildcard,
             annotators,
@@ -1225,11 +1286,11 @@ impl Registry {
     /// policy that writes the wildcard, rather than resolving to the contract that covers
     /// everything else.
     pub fn classify(&self, name: &ToolName) -> Option<ToolKind> {
-        if name.as_str() == WILDCARD_SPELLING {
+        if name.as_str() == WILDCARD_SPELLING || name.is_name_selector() {
             None
-        } else if self.tools.contains_key(name) {
+        } else if self.tools.contains_key(name) || self.matching_variants(name.clone()).next().is_some() {
             Some(ToolKind::Declared)
-        } else if self.provider_run.contains_key(name) {
+        } else if self.provider_run.keys().any(|rule| rule.matches_name(name)) {
             Some(ToolKind::ProviderRun)
         } else if self.wildcard.is_some() {
             Some(ToolKind::Wildcard)
@@ -1249,7 +1310,7 @@ impl Registry {
     #[cfg(test)]
     pub(crate) fn tool(&self, name: &ToolName) -> Option<&ToolDeclaration> {
         match self.classify(name)? {
-            ToolKind::Declared => self.tools.get(name)?.first().map(|(_, d)| d),
+            ToolKind::Declared => self.matching_variants(name.clone()).next().map(|(_, d)| d),
             ToolKind::ProviderRun => None,
             ToolKind::Wildcard => self.wildcard.as_ref(),
         }
@@ -1259,7 +1320,7 @@ impl Registry {
     /// ordinal zero; a record naming another ordinal for it is forged.
     pub(crate) fn keyed_tool(&self, name: &ToolName, id: ToolDeclarationId) -> Option<&ToolDeclaration> {
         match self.classify(name)? {
-            ToolKind::Declared => self.tools.get(name)?.get(id.ordinal()).map(|(_, d)| d),
+            ToolKind::Declared => self.matching_variants(name.clone()).nth(id.ordinal()).map(|(_, d)| d),
             ToolKind::ProviderRun => None,
             ToolKind::Wildcard => (id.ordinal() == 0).then_some(self.wildcard.as_ref()).flatten(),
         }
@@ -1285,7 +1346,15 @@ impl Registry {
             Some(pinned) => Some(std::borrow::Cow::Owned(
                 pinned.tool_annotation(declaration, call.tool()),
             )),
-            None => declaration.declared().map(std::borrow::Cow::Borrowed),
+            None => declaration.declared().map(|annotation| {
+                if annotation.name == *call.tool() {
+                    std::borrow::Cow::Borrowed(annotation)
+                } else {
+                    let mut annotation = annotation.clone();
+                    annotation.name = call.tool().clone();
+                    std::borrow::Cow::Owned(annotation)
+                }
+            }),
         }
     }
 
@@ -1296,9 +1365,7 @@ impl Registry {
     ) -> Option<(ToolDeclarationId, &ToolDeclaration)> {
         match self.classify(name)? {
             ToolKind::Declared => {
-                self.tools
-                    .get(name)?
-                    .iter()
+                self.matching_variants(name.clone())
                     .enumerate()
                     .find_map(|(ordinal, (matcher, declaration))| {
                         if matcher.matches(arguments) {
@@ -1328,14 +1395,33 @@ impl Registry {
     }
 
     pub fn variants(&self, name: &ToolName) -> impl Iterator<Item = &ToolDeclaration> {
-        self.tools.get(name).into_iter().flatten().map(|(_, d)| d)
+        self.matching_variants(name.clone()).map(|(_, d)| d)
+    }
+
+    fn matching_variants(&self, name: ToolName) -> impl Iterator<Item = &(ToolMatcher, ToolDeclaration)> {
+        let overlap = name
+            .as_str()
+            .strip_prefix("mcp/")
+            .and_then(|name| name.split_once('/'))
+            .and_then(|(_, leaf)| self.mcp_order.get(leaf));
+        let exact = if overlap.is_none() { self.tools.get(&name) } else { None };
+        exact.into_iter().flatten().chain(
+            overlap
+                .into_iter()
+                .flatten()
+                .filter(move |(rule, _)| rule.matches_name(&name))
+                .map(|(rule, ordinal)| &self.tools[rule][*ordinal]),
+        )
     }
 
     /// The declared annotation of a provider-run tool: never checked or planned; its
     /// static `delta` is what an exposed result is admitted under. Always static — a
     /// provider-run declaration routing through an Annotator is refused at load.
     pub fn provider_run_annotation(&self, name: &ToolName) -> Option<&ToolAnnotation> {
-        self.provider_run.get(name)
+        self.provider_run
+            .iter()
+            .find(|(rule, _)| rule.matches_name(name))
+            .map(|(_, annotation)| annotation)
     }
 
     pub fn provider_run_annotations(&self) -> impl Iterator<Item = &ToolAnnotation> {
@@ -1347,16 +1433,16 @@ impl Registry {
     }
 
     pub(crate) fn tool_names(&self) -> impl Iterator<Item = &ToolName> {
-        self.tools.keys()
+        self.tools.keys().filter(|name| !name.is_name_selector())
     }
 
     /// Every declaration the policy identity hashes over: the ordered contracts and, when
     /// the policy writes one, the wildcard — its presence and its annotator change what an
     /// unwritten tool call does, so two policies differing only there are different policies.
     pub(crate) fn semantic_tools(&self) -> impl Iterator<Item = (&ToolMatcher, &ToolDeclaration)> {
-        self.tools
-            .values()
-            .flatten()
+        self.tool_order
+            .iter()
+            .map(|(name, ordinal)| &self.tools[name][*ordinal])
             .map(|(matcher, d)| (matcher, d))
             .chain(self.wildcard.iter().map(|d| (&ToolMatcher::Bare, d)))
     }
@@ -2363,6 +2449,69 @@ mod tests {
                 "{malformed:?}"
             );
         }
+    }
+
+    #[test]
+    fn server_independent_names_match_only_concrete_mcp_tools() {
+        let mut cfg = base();
+        cfg.tools = declared(vec![tool("mcp/*/read")]);
+        let registry = Registry::build_covered(cfg).unwrap();
+        for name in ["mcp/demo/read", "mcp/other/read", "mcp/a.b-c/read"] {
+            assert_eq!(registry.classify(&ToolName::new(name)), Some(ToolKind::Declared));
+        }
+        for name in [
+            "read",
+            "host/kagent/read",
+            "agent/demo/read",
+            "appa/execute_remedy_plan",
+            "mcp/*/read",
+            "mcp//read",
+            "mcp/demo/write",
+            "mcp/demo/read/extra",
+            "mcp/a__b/read",
+        ] {
+            assert_eq!(registry.classify(&ToolName::new(name)), None, "{name}");
+        }
+        assert_eq!(
+            registry.tool_names().count(),
+            0,
+            "a rule selector is not a redispatch target"
+        );
+        let mut cfg = base();
+        cfg.tools = declared(vec![tool("mcp/*/.read.")]);
+        let dotted = Registry::build_covered(cfg).unwrap();
+        assert_eq!(
+            dotted.classify(&ToolName::new("mcp/.server./.read.")),
+            Some(ToolKind::Declared)
+        );
+        assert_eq!(dotted.tool_names().count(), 0);
+    }
+
+    #[test]
+    fn overlapping_names_preserve_authored_order_and_canonical_annotation_identity() {
+        let actual = ToolName::new("mcp/demo/read");
+        let broad = "mcp/*/read(path:private*)";
+        let precise = "mcp/demo/read";
+        for names in [[broad, precise], [precise, broad]] {
+            let mut cfg = base();
+            cfg.tools = declared(names.iter().map(|name| tool(name)).collect());
+            let registry = Registry::build_covered(cfg).unwrap();
+            let arguments = crate::params::CanonicalArguments::parse(br#"{"path":"private.txt"}"#).unwrap();
+            let (id, selected) = registry.select_tool(&actual, arguments.value()).unwrap();
+            assert_eq!(id.ordinal(), 0);
+            assert_eq!(selected.name().as_str(), names[0].split('(').next().unwrap());
+            let call = crate::value::ResolvedCall::new_keyed(actual.clone(), id, arguments);
+            assert_eq!(registry.declaration(&call), Some(selected));
+            assert!(registry.selection_matches(&call));
+            assert_eq!(registry.annotation_of(&call).unwrap().name, actual);
+        }
+        let mut cfg = base();
+        cfg.tools = declared(vec![tool(broad), tool(precise)]);
+        let registry = Registry::build_covered(cfg).unwrap();
+        let (id, _) = registry
+            .select_tool(&actual, &serde_json::json!({"path":"public.txt"}))
+            .unwrap();
+        assert_eq!(id.ordinal(), 1, "argument mismatch moves to the next authored contract");
     }
 
     #[test]

@@ -14,6 +14,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -172,6 +173,21 @@ def validated(plain: bytes) -> dict[str, Any]:
     return document
 
 
+def build_kind(document: dict[str, Any]) -> str:
+    """Which kind of build sent this: `release`, `commit` or `local` today, and whatever
+    a newer runtime says tomorrow.
+
+    Reports are filed under it, so a release's reports and a developer's own runs sit
+    apart behind one endpoint. Refused rather than guessed when the build says nothing:
+    this becomes a path segment, and only a plain word may be one.
+    """
+    match document["build"]:
+        case {"source": {"kind": str() as kind}} if re.fullmatch(r"[a-z][a-z0-9_]{0,31}", kind):
+            return kind
+        case _:
+            raise Refusal(400, "the build names no source kind")
+
+
 def entries(document: dict[str, Any]) -> int:
     """How many facts and runtime events the document carries, if it carries any."""
     trajectory = document.get("trajectory")
@@ -180,10 +196,11 @@ def entries(document: dict[str, Any]) -> int:
     return sum(len(trajectory[key]) for key in ("facts", "runtime_events") if isinstance(trajectory.get(key), list))
 
 
-def store(plain: bytes, compressed: bytes) -> tuple[str, bool]:
+def store(plain: bytes, compressed: bytes, kind: str) -> tuple[str, bool]:
     """Write one report exactly once, and say whether it was already here.
 
-    The name is the digest of the document, so a retry of the same bytes is the
+    The name is the digest of the document, under the kind of build that sent it,
+    so a retry of the same bytes is the
     same object and two different reports can never be the same one. That also
     keeps a caller from choosing where its report lands: `report_id` is written
     by whoever sent it, and naming objects by it would let one caller overwrite
@@ -197,7 +214,7 @@ def store(plain: bytes, compressed: bytes) -> tuple[str, bool]:
         # Resolved inside the guard: building the client authenticates, and an
         # instance that cannot reach its credentials is a storage failure like
         # any other rather than an unhandled exception on a public surface.
-        blob = bucket().blob(f"reports/{digest}.json.gz")
+        blob = bucket().blob(f"reports/{kind}/{digest}.json.gz")
         # Declared with the upload rather than patched onto it afterwards: a
         # second call could fail against an object that is already stored, and
         # this function would answer with a refusal for a report it had kept.
@@ -226,7 +243,8 @@ def receive(request: Any) -> tuple[Any, int, dict[str, str]]:
         plain, compressed = plain_body(request)
         signed(plain, request.headers.get("X-Appa-Signature"))
         document = validated(plain)
-        digest, duplicate = store(plain, compressed)
+        kind = build_kind(document)
+        digest, duplicate = store(plain, compressed, kind)
     except Refusal as refusal:
         return {"error": refusal.detail}, refusal.status, json_headers
 
@@ -235,6 +253,7 @@ def receive(request: Any) -> tuple[Any, int, dict[str, str]]:
         extra={
             "duplicate": duplicate,
             "author": document["origin"].get("kind"),
+            "build": kind,
             "bytes": len(plain),
             "entries": entries(document),
         },

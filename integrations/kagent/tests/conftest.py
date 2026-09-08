@@ -656,9 +656,7 @@ def demo_tools_url(workdir) -> Iterator[str]:
     command = [sys.executable, str(DEMO_TOOLS), "--host", "127.0.0.1", "--port", str(port)]
     with _process(command, workdir / "demo-tools.log"):
         _wait_tcp("127.0.0.1", port)
-        # localhost, not the loopback address: the entrypoint names the
-        # toolset by the host label of this URL, and the policy names
-        # the tools `mcp/localhost/<tool>`.
+        # Native policy rules do not depend on this fixture's endpoint.
         yield f"http://localhost:{port}/mcp"
 
 
@@ -674,7 +672,7 @@ def _stage_github_battery(destination: Path) -> None:
     """
     shutil.copytree(REPO_ROOT / "marketplace" / "batteries" / "github", destination)
     policy = destination / "appa.toml"
-    policy.write_text(policy.read_text().replace("mcp/github/", "mcp/localhost/mcp__github__"))
+    policy.write_text(policy.read_text().replace("mcp/github/", "mcp__github__"))
 
 
 @pytest.fixture(scope="session")
@@ -747,7 +745,7 @@ class Stack:
 
 
 @pytest.fixture(scope="session")
-def stack(workdir, runtime_url, demo_tools_url) -> Iterator[Stack]:
+def stack(workdir, runtime_url, demo_tools_url, request) -> Iterator[Stack]:
     """The parent and the child, built and served exactly as a pod builds them."""
     patcher = pytest.MonkeyPatch()
     stock_build = KAgentApp.build
@@ -770,9 +768,11 @@ def stack(workdir, runtime_url, demo_tools_url) -> Iterator[Stack]:
         },
         f"{child_base}/",
     )
-    # Both remote agents resolve to the child's card. The undeclared one
-    # is denied at the spawn, before any card is fetched, so the URL it
-    # carries is never reached — it exists to make the tool listable.
+    # The invalid-startup regression adds a known uncovered remote agent.
+    # Ordinary lifecycle cases advertise only policy-covered tools.
+    remotes = [{"name": CHILD_TOOL, "url": child_base, "description": CHILD_DESCRIPTION}]
+    if getattr(request, "param", False):
+        remotes.append({"name": UNDECLARED_TOOL, "url": child_base, "description": UNDECLARED_DESCRIPTION})
     parent_dir = _write_config(
         workdir / "parent",
         PARENT,
@@ -781,10 +781,7 @@ def stack(workdir, runtime_url, demo_tools_url) -> Iterator[Stack]:
             "description": PARENT_DESCRIPTION,
             "instruction": PARENT_INSTRUCTION,
             "http_tools": [{"params": {"url": demo_tools_url}, "tools": PARENT_TOOLS}],
-            "remote_agents": [
-                {"name": CHILD_TOOL, "url": child_base, "description": CHILD_DESCRIPTION},
-                {"name": UNDECLARED_TOOL, "url": child_base, "description": UNDECLARED_DESCRIPTION},
-            ],
+            "remote_agents": remotes,
         },
         f"{parent_base}/",
     )

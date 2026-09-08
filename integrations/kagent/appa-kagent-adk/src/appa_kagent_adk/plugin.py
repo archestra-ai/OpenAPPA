@@ -148,6 +148,7 @@ class AppaPluginKagent(BasePlugin):
         self._client_factory = client_factory or (lambda: httpx.AsyncClient(timeout=_GATED_TIMEOUT_SECONDS))
         self._client = self._client_factory()
         self._inventory = inventory
+        self._discovery_runs = {}
         # Shared with the entrypoint gates. The gates classify from the
         # session state, which the kagent executor lands before each
         # run, so a synthetic call lands in the trajectory the run
@@ -284,11 +285,15 @@ class AppaPluginKagent(BasePlugin):
     def _is_fresh(self, session: Any) -> bool:
         return self._identity.is_fresh(session)
 
-    def _spelling(self, tool: Any) -> str | None:
+    def _spelling(self, tool: Any, context=None) -> str | None:
         """The wire spelling of a dispatched tool, or None outside the inventory."""
+        if context is not None and (discovery := self._discovery_runs.get(context.invocation_id)) is not None:
+            found = discovery.state(context.invocation_id).identities.get(tool)
+            if found is not None:
+                return found
         return self._inventory.spelling(tool.name)
 
-    def _for_model(self, text: str | None) -> str:
+    def _for_model(self, text: str | None, context=None) -> str:
         """Runtime text as the model must read it.
 
         A tool crosses the wire under its spelling, and the runtime
@@ -297,7 +302,10 @@ class AppaPluginKagent(BasePlugin):
         ADK name, so every runtime string this plugin hands the model
         goes through the inventory first.
         """
-        return self._inventory.despell(text or "")
+        inventory = self._inventory
+        if context is not None and (discovery := self._discovery_runs.get(context.invocation_id)) is not None:
+            inventory = discovery.state(context.invocation_id).names
+        return inventory.despell(text or "")
 
     def _claim_scope(self, invocation_id: str, agent_name: str) -> bool:
         """Whether this agent scope is the invocation's own: the first scope it opened, or a re-entry of it.
@@ -326,6 +334,9 @@ class AppaPluginKagent(BasePlugin):
         self._review_authorized_invocations.discard(invocation_id)
         self._init_invocations.discard(invocation_id)
         self._battery_suggestions.pop(invocation_id, None)
+        discovery = self._discovery_runs.pop(invocation_id, None)
+        if discovery is not None:
+            discovery.runs.pop(invocation_id, None)
 
     # -- synthetic gates for the entrypoint wrappers ------------------
 
@@ -394,15 +405,30 @@ class AppaPluginKagent(BasePlugin):
         if _is_chat_approval(message):
             self._review_authorized_invocations.add(invocation_context.invocation_id)
         root_id, child_id = self._identity.open_invocation(invocation_context)
+        from google.adk.agents.readonly_context import ReadonlyContext
+
+        from .mcp_lifecycle import MCPDiscovery
+
+        discovery = next(
+            (tool for tool in getattr(invocation_context.agent, "tools", []) if isinstance(tool, MCPDiscovery)), None
+        )
+        state = None
+        if discovery is not None:
+            state = await discovery.prepare(
+                ReadonlyContext(invocation_context),
+                allow_new=child_id is None and self._is_fresh(invocation_context.session),
+            )
         contract = None
         opening = self._opening(invocation_context.session, root_id, child_id)
         if opening is not None:
+            if state is not None:
+                opening["inventory"] = state.evidence
             decision = await self._post(opening)
             if decision.kind == "context" and child_id is not None:
                 # The return policy of the fork needs words. The child
                 # reads them in front of the request its parent sent, and
                 # that request stands unchanged.
-                contract = self._for_model(decision.text)
+                contract = self._for_model(decision.text, invocation_context)
             elif decision.kind != "ack":
                 raise AppaFailClosed(f"appa refused the session: {decision.detail or decision.kind}")
             if child_id is not None:
@@ -410,6 +436,8 @@ class AppaPluginKagent(BasePlugin):
                 # answers ack too, so a repeat after a plugin restart
                 # changes nothing.
                 self._opened.add((root_id, child_id))
+        if state is not None:
+            state.opened = True
         decision = await self._post(wire.prompt(root_id, _content_text(user_message), child_id))
         if decision.kind == "block":
             raise AppaFailClosed(f"appa blocked the prompt: {decision.reason}")
@@ -589,7 +617,7 @@ class AppaPluginKagent(BasePlugin):
             # the same name from anywhere else is somebody else's, and
             # it crosses the gate like any other.
             return None
-        spelled = self._spelling(tool)
+        spelled = self._spelling(tool, tool_context)
         if spelled is None:
             # A name the inventory never saw has no spelling on the wire,
             # so nothing crosses: the gate refuses it here and the model
@@ -628,6 +656,8 @@ class AppaPluginKagent(BasePlugin):
                         self._rejected_controls.setdefault(tool_context.invocation_id, set()).add(call_id)
         await self._acquire_dispatch(root_id, child_id, tool_context)
         call = wire.tool_call(root_id, spelled, _plain_json(tool_args), child_id, ruling=ruling)
+        if (discovery := self._discovery_runs.get(tool_context.invocation_id)) is not None:
+            call["inventory"] = discovery.state(tool_context.invocation_id).evidence
         try:
             decision = await self._post(call)
             route = _return_offer(decision)
@@ -649,7 +679,7 @@ class AppaPluginKagent(BasePlugin):
             # a "content" or "result" key, and any other shape reaches the
             # model as an EMPTY tool message — the model then cannot see
             # why the call was blocked, or the remedy offer it quotes.
-            return {"result": self._for_model(decision.feedback), _DENY_KEY: _DENIED}
+            return {"result": self._for_model(decision.feedback, tool_context), _DENY_KEY: _DENIED}
         self._release_tool_dispatch(tool_context)
         raise AppaFailClosed(f"appa answered the tool call with {decision.detail or decision.kind}")
 
@@ -668,7 +698,7 @@ class AppaPluginKagent(BasePlugin):
             # the `appa` key included.
             self._release_tool_dispatch(tool_context)
             return None
-        spelled = self._spelling(tool)
+        spelled = self._spelling(tool, tool_context)
         if spelled is None:
             raise AppaFailClosed(f"the tool {tool.name} is outside the gated inventory, and its result cannot cross")
         if tool.name == wire.BATTERY_MATCH_TOOL:
@@ -706,15 +736,15 @@ class AppaPluginKagent(BasePlugin):
                     # the parent receives what the runtime admitted.
                     return {"result": decision.value}
                 if decision.kind == "replace_output":
-                    return {"result": self._for_model(decision.output)}
+                    return {"result": self._for_model(decision.output, tool_context)}
                 if decision.kind == "block":
-                    return _withheld(self._for_model(decision.reason))
+                    return _withheld(self._for_model(decision.reason, tool_context))
                 raise AppaFailClosed(f"appa answered the spawn result with {decision.detail or decision.kind}")
             decision = await self._post(wire.tool_result(root_id, spelled, arguments, outcome, child_id))
             if decision.kind == "ack":
                 if rejected:
                     return {"result": _REVIEW_REJECTED, _DENY_KEY: _DENIED}
-                return self._remedy_rendering(tool, result)
+                return self._remedy_rendering(tool, result, tool_context)
             if decision.kind == "deliver_value":
                 # The admitted value of a confined or sanitized result, as
                 # it crossed. Spelling it back would hand the model other
@@ -723,14 +753,14 @@ class AppaPluginKagent(BasePlugin):
             if decision.kind == "replace_output":
                 # The runtime's own words about this result, which name the
                 # control tool by a spelling ADK cannot dispatch.
-                return {"result": self._for_model(decision.output)}
+                return {"result": self._for_model(decision.output, tool_context)}
             if decision.kind == "block":
-                return _withheld(self._for_model(decision.reason))
+                return _withheld(self._for_model(decision.reason, tool_context))
             raise AppaFailClosed(f"appa answered the tool result with {decision.detail or decision.kind}")
         finally:
             self._release_tool_dispatch(tool_context)
 
-    def _remedy_rendering(self, tool: Any, result: Any) -> Any:
+    def _remedy_rendering(self, tool: Any, result: Any, context=None) -> Any:
         """The reserved tool's own answer, spelled for the model, or None to leave a result alone.
 
         The runtime writes that answer itself and names the released
@@ -739,14 +769,14 @@ class AppaPluginKagent(BasePlugin):
         """
         if tool.name != wire.RESERVED_TOOL or result is None:
             return None
-        return _despelled(result, self._inventory.despell)
+        return _despelled(result, lambda text: self._for_model(text, context))
 
     async def on_tool_error_callback(self, *, tool, tool_args, tool_context, error):
         # The failure closes the dispatch here. ADK runs the result gate
         # of a handled failure too, and that second report would
         # double-count one dispatch.
         self._settle(tool_context)
-        spelled = self._spelling(tool)
+        spelled = self._spelling(tool, tool_context)
         if spelled is None:
             raise AppaFailClosed(f"the tool {tool.name} is outside the gated inventory, and its failure cannot cross")
         root_id, child_id = self._ids(tool_context)
@@ -759,9 +789,9 @@ class AppaPluginKagent(BasePlugin):
             if decision.kind == "deliver_value":
                 return {"result": decision.value}
             if decision.kind == "replace_output":
-                return {"result": self._for_model(decision.output)}
+                return {"result": self._for_model(decision.output, tool_context)}
             if decision.kind == "block":
-                return _withheld(self._for_model(decision.reason))
+                return _withheld(self._for_model(decision.reason, tool_context))
             raise AppaFailClosed(f"appa answered the tool failure with {decision.detail or decision.kind}")
         finally:
             self._release_tool_dispatch(tool_context)
@@ -817,7 +847,7 @@ class AppaPluginKagent(BasePlugin):
         if decision.kind == "ack":
             return self._crossing(tool_context.invocation_id, text)
         if decision.kind == "block":
-            return {"result": _RETURN_BLOCKED.format(reason=self._for_model(decision.reason))}
+            return {"result": _RETURN_BLOCKED.format(reason=self._for_model(decision.reason, tool_context))}
         raise AppaFailClosed(f"appa answered the child end with {decision.detail or decision.kind}")
 
     def _crossing(self, invocation_id: str, value: str) -> dict[str, Any]:

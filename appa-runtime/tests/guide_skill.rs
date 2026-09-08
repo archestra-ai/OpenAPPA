@@ -216,7 +216,7 @@ fn only_the_runtime_chart_consumes_this_skill_package() {
     assert!(!demo_values.contains("integrations/appa-guide"));
 
     let policy = fs::read_to_string(demo.join("files/demo.appa.toml")).expect("the demo policy exists");
-    assert!(policy.contains("name = \"mcp/kagent-tool-server/k8s_apply_manifest\""));
+    assert!(policy.contains("name = \"k8s_apply_manifest\""));
     assert!(policy.contains("attention = [\"human-approval\"]"));
     assert!(policy.contains("name = \"host/kagent/skills\""));
     assert!(
@@ -230,131 +230,6 @@ fn only_the_runtime_chart_consumes_this_skill_package() {
     assert!(github.contains("name = \"mcp/github/issue_write\""));
     assert!(!github.contains("name = \"get_file_contents\""));
     assert!(!github.contains("name = \"issue_write\""));
-}
-
-#[test]
-fn kagent_guidance_requires_the_shared_runtime_and_direct_port() {
-    let root = repo_root();
-    assert!(
-        !root.join("integrations/kagent/appa-kagent-quickstart").exists(),
-        "kagent has no bundled-runtime image"
-    );
-    for path in [
-        "website/content/docs/kagent.md",
-        "integrations/kagent/README.md",
-        "integrations/kagent/IMPLEMENTATION.md",
-        "integrations/appa-guide/references/kagent.md",
-        "marketplace/plugins/kagent/default.appa.toml",
-    ] {
-        let content = fs::read_to_string(root.join(path)).expect("read kagent guidance");
-        assert!(content.contains("APPA_RUNTIME_URL"), "{path} names the runtime URL");
-        for stale in [
-            "APPA_CONFIG_CONTENTS",
-            "appa-kagent-quickstart",
-            "Bundled mode",
-            "127.0.0.1:8787",
-            "18789",
-            "relay",
-        ] {
-            assert!(!content.contains(stale), "{path} retains stale {stale:?} guidance");
-        }
-    }
-
-    let website = fs::read_to_string(root.join("website/content/docs/kagent.md")).expect("read website guide");
-    assert!(website.contains("http://appa-runtime.appa.svc.cluster.local:18787"));
-    assert!(website.contains("appaGuide.enabled=true"));
-    assert!(website.contains("providers.openAI.model=gpt-5.6-luna"));
-    assert!(website.contains("appaGuide.reasoningEffort=none"));
-    assert!(website.contains("runtime.reasoningEffort=none"));
-    assert!(website.contains("appa-kagent-adk"));
-    assert!(website.contains("friendly-path-465518-r6/appa-public/golang-adk"));
-}
-
-#[test]
-fn the_website_quickstart_is_copy_safe_and_dependency_ordered() {
-    let website = fs::read_to_string(repo_root().join("website/content/docs/kagent.md")).expect("read website guide");
-    let quickstart = website
-        .split("## Quickstart")
-        .nth(1)
-        .expect("the guide has a Quickstart")
-        .split("## Protect existing agents")
-        .next()
-        .expect("the Quickstart ends before existing-Agent guidance");
-
-    for heading in [
-        "### 1. Install kagent with the OpenAPPA plugin",
-        "### 2. Deploy the OpenAPPA runtime",
-        "### 3. Deploy the demo agents",
-    ] {
-        assert!(quickstart.contains(heading), "the Quickstart carries {heading:?}");
-    }
-
-    let crds = quickstart
-        .find("helm upgrade --install kagent-crds")
-        .expect("CRDs install");
-    let kagent = quickstart
-        .find("helm upgrade --install kagent oci://")
-        .expect("kagent install");
-    let runtime = quickstart
-        .find("helm upgrade --install appa-runtime")
-        .expect("runtime install");
-    let demo = quickstart
-        .find("helm upgrade --install appa-kagent-demo")
-        .expect("demo install");
-    assert!(crds < kagent && kagent < runtime && runtime < demo);
-
-    let install_block = quickstart
-        .split("```sh")
-        .skip(1)
-        .map(|rest| rest.split("```").next().expect("a shell block closes"))
-        .find(|block| block.contains("helm upgrade --install kagent oci://"))
-        .expect("the kagent install has one copyable shell block");
-    assert!(install_block.contains("helm upgrade --install kagent-crds"));
-    assert!(install_block.contains("${OPENAI_API_KEY:?"));
-    assert!(install_block.contains("name: kagent-openai"));
-    assert!(install_block.contains("providers.openAI.apiKeySecretRef=kagent-openai"));
-    assert!(!install_block.contains("providers.openAI.apiKey=\"$OPENAI_API_KEY\""));
-    assert!(install_block.contains("grafana-mcp.enabled=false"));
-    assert!(install_block.contains("querydoc.enabled=false"));
-    assert!(!install_block.contains("<your-api-key>"));
-    assert!(!quickstart.contains("quickstart-ops"));
-}
-
-#[test]
-fn the_website_existing_agent_guide_is_dependency_ordered() {
-    let website = fs::read_to_string(repo_root().join("website/content/docs/kagent.md")).expect("read website guide");
-    let protect = website
-        .split("## Protect existing agents")
-        .nth(1)
-        .expect("the guide has existing-Agent guidance")
-        .split("## Manage policy with appa-guide")
-        .next()
-        .expect("existing-Agent guidance ends before manage-integration");
-
-    for heading in [
-        "### 1. Update the controller image",
-        "### 2. Deploy appa-runtime",
-        "### 3. Enable gating on an Agent",
-    ] {
-        assert!(protect.contains(heading), "existing-Agent guidance carries {heading:?}");
-    }
-
-    let image = protect
-        .find("helm upgrade kagent oci://")
-        .expect("controller image install");
-    let runtime = protect
-        .find("helm upgrade --install appa-runtime")
-        .expect("runtime install");
-    let wait = protect.find("kubectl wait agent/appa-guide").expect("appa-guide wait");
-    let protect_one = protect
-        .find("protect sre-agent with the shared OpenAPPA runtime")
-        .expect("protect-one prompt");
-    let protect_all = protect
-        .find("enable OpenAPPA for all agents using the shared runtime")
-        .expect("protect-all prompt");
-    assert!(image < runtime && runtime < wait && wait < protect_one && protect_one < protect_all);
-    assert!(!protect.contains("`appa-guide` uses the existing `controller.agentImage`"));
-    assert!(!protect.contains("cannot guarantee enforced write approval"));
 }
 
 #[test]

@@ -417,13 +417,14 @@ func applyConfigDeltas(gate gating, agentConfig *adk.AgentConfig, logger logr.Lo
 // So a plugin appended last never short-circuits a gate. While the
 // knob is off the plugin list stays the stock list. The inventory is
 // the one the config guard built from the rendered config.
-func appendAppaPlugin(gate gating, runnerConfig *adkrunner.Config, inventory appakagentadk.Inventory, logger logr.Logger) error {
+func appendAppaPlugin(gate gating, runnerConfig *adkrunner.Config, inventory appakagentadk.Inventory, logger logr.Logger, discovery *appakagentadk.MCPDiscovery) error {
 	if !gate.enabled() {
 		return nil
 	}
 	appaPlugin, err := appakagentadk.New(appakagentadk.Config{
 		RuntimeURL: gate.runtimeURL,
 		Inventory:  inventory,
+		Discovery:  discovery,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create AppaPluginKagent: %w", err)
@@ -577,7 +578,13 @@ func main() {
 		logger.Info("Memory service enabled", "appName", appName)
 	}
 
-	runnerConfig, err := runnerpkg.CreateRunnerConfig(ctx, agentConfig, sessionService, appName, memoryService, kagentURL, httpClient)
+	var runnerConfig adkrunner.Config
+	var discovery *appakagentadk.MCPDiscovery
+	if gate.enabled() {
+		runnerConfig, discovery, err = appakagentadk.CreateDiscoveryRunnerConfig(ctx, agentConfig, sessionService, appName, memoryService, kagentURL, httpClient)
+	} else {
+		runnerConfig, err = runnerpkg.CreateRunnerConfig(ctx, agentConfig, sessionService, appName, memoryService, kagentURL, httpClient)
+	}
 	if err != nil {
 		logger.Error(err, "Failed to create Google ADK Runner config")
 		os.Exit(1)
@@ -590,7 +597,7 @@ func main() {
 	runnerConfig.SessionService = withLineageHeaders(gate, runnerConfig.SessionService)
 	executorSessionService := withLineageHeaders(gate, sessionService)
 
-	if err := appendAppaPlugin(gate, &runnerConfig, inventory, logger); err != nil {
+	if err := appendAppaPlugin(gate, &runnerConfig, inventory, logger, discovery); err != nil {
 		logger.Error(err, "Failed to register AppaPluginKagent")
 		os.Exit(1)
 	}

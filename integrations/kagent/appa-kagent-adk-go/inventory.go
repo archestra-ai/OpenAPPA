@@ -1,51 +1,14 @@
-// The tool inventory: every name ADK can dispatch on this agent, and
-// its spelling on the wire.
-//
-// The plugin gates a tool under a structured spelling, never under the
-// bare name ADK dispatches it by: an MCP tool as mcp:<toolset>/<tool>,
-// a remote agent as agent:<namespace>/<agent>, a tool the kagent
-// runtime attaches itself as builtin:<name>, an out-of-band flow the
-// runtime main gates as gate:<name>, and the runtime's own control
-// tool as appa:execute_remedy_plan. The runtime derives the canonical
-// tool and whether the call is a spawn from that spelling.
-//
-// The runtime main builds the inventory once at startup from the
-// rendered config, so what the wire can name is fixed before the model
-// runs. A call of a name outside it is refused at the gate, never
-// forwarded.
-//
-// The inverse travels with it. The runtime names a tool back to the
-// model by the spelling it received, which is not a name the model can
-// call, so Despell spells it into the name ADK dispatches. The builder
-// owns both directions and refuses a config whose two raw names spell
-// alike, so every spelling the wire carries names one tool the model
-// can call.
-//
-//   - An MCP entry names its tools in its tool filter, and a gated agent
-//     must carry one: without it the server decides the tool list at
-//     runtime, and the gate cannot name what it did not see. The toolset
-//     is the first DNS label of the server host in the entry's URL, the
-//     name the RemoteMCPServer resource carries in the cluster. The
-//     builder refuses an endpoint outside the accepted hosts — the
-//     Kubernetes service forms of that same name, and loopback — so the
-//     address is a cluster service form and not an arbitrary host. It
-//     establishes no more than that: the toolset is the first label
-//     alone, so a service of the same name in another namespace spells
-//     the same identity, and an ExternalName Service resolves an
-//     accepted address to a name outside the cluster.
-//   - kagent renders a remote agent's tool name as
-//     <namespace>__NS__<agent> with hyphens as underscores. Both halves
-//     are DNS-1123 labels, which carry no underscore, so the real names
-//     come back exactly. The rendering is not injective over every name
-//     a config can carry — team_a__NS__x and team-a__NS__x spell alike —
-//     and the builder refuses the pair rather than lose one.
-//   - The builtins come from builtins.json, the manifest pinned to the
-//     kagent go module this image wraps, in groups the rendered config
-//     and the runtime's environment switch on.
+// Configured tool names and their wire identities. MCP filters are optional:
+// invocation-owned discovery supplies authenticated observations before model
+// exposure, and APPA validates every call. Endpoint identities use the full URL;
+// no hostname is treated as evidence of a provider or policy permission.
+// Remote agents retain kagent's namespace/name mapping. Builtins come from the
+// pinned manifest. The inverse renders runtime guidance in host-native names.
 
 package appakagentadk
 
 import (
+	"crypto/sha256"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -70,12 +33,6 @@ const ControlTool = "appa:execute_remedy_plan"
 const GuideToolset = "appa-guide"
 
 const namespaceMark = "__NS__"
-
-// clusterDomain is the DNS domain a Kubernetes service name ends in.
-// The toolset name is the first label of the MCP host, so a host
-// outside the cluster would claim the policy identity of the
-// in-cluster service of that name.
-const clusterDomain = "cluster.local"
 
 // segmentRun is one segment of a wire spelling as it stands in a
 // runtime string: a run that starts and ends on a core character and
@@ -193,17 +150,12 @@ func (i Inventory) Despell(text string) string {
 type InventoryRefusalKind int
 
 const (
-	// UnfilteredToolset: an MCP entry declares no tool filter.
-	UnfilteredToolset InventoryRefusalKind = iota
-	// UnspellableName: a declared name the wire cannot spell.
-	UnspellableName
+	// UnspellableName: a declared name or endpoint the wire cannot represent.
+	UnspellableName InventoryRefusalKind = iota
 	// DuplicateName: one raw name declared twice.
 	DuplicateName
 	// CollidingSpelling: two raw names that spell alike on the wire.
 	CollidingSpelling
-	// ForeignAuthority: an MCP endpoint the cluster does not serve,
-	// whose host would claim the toolset name of an in-cluster service.
-	ForeignAuthority
 )
 
 // InventoryRefusal is BuildInventory's error: which refusal fired, the
@@ -217,9 +169,6 @@ type InventoryRefusal struct {
 
 func (r *InventoryRefusal) Error() string {
 	switch r.Kind {
-	case UnfilteredToolset:
-		return fmt.Sprintf("%s declares no tool filter, and the gate names only what the config declares: "+
-			"list under tools every tool of this server the agent may call", r.Path)
 	case DuplicateName:
 		return fmt.Sprintf("the config declares the tool name %q twice (%s), and the gate cannot tell the two apart: rename one of them",
 			r.Name, r.Detail)
@@ -358,24 +307,9 @@ func (b *builder) add(name, spelling, source string) error {
 }
 
 func (b *builder) mcpServer(server MCPServerSpec) error {
-	host, hosted := hostOf(server.URL)
-	toolset, spellable := toolsetOf(host)
-	// A doubled underscore is the mark kagent reserves, so the runtime
-	// admits no canonical id whose namespace carries one.
-	if !hosted || !spellable || strings.Contains(toolset, "__") {
-		return &InventoryRefusal{Kind: UnspellableName, Path: server.Path, Name: server.URL,
-			Detail: fmt.Sprintf("the toolset name is the first label of the server host in the URL, and %q carries none the wire can spell", server.URL)}
-	}
-	if !inCluster(host) {
-		return &InventoryRefusal{Kind: ForeignAuthority, Path: server.Path, Name: server.URL,
-			Detail: fmt.Sprintf("%q is served outside the cluster, and its tools would claim the policy identity "+
-				"mcp/%s/<tool> of the in-cluster %q: an MCP endpoint is named <service>, "+
-				"<service>.<namespace>, <service>.<namespace>.svc, <service>.<namespace>.svc.cluster.local, "+
-				"localhost, or 127.0.0.1",
-				server.URL, toolset, toolset)}
-	}
-	if len(server.Tools) == 0 {
-		return &InventoryRefusal{Kind: UnfilteredToolset, Path: server.Path}
+	toolset, err := mcpSourceID(server.URL)
+	if err != nil {
+		return &InventoryRefusal{Kind: UnspellableName, Path: server.Path, Detail: err.Error()}
 	}
 	for position, name := range server.Tools {
 		if !segment.MatchString(name) {
@@ -387,6 +321,17 @@ func (b *builder) mcpServer(server MCPServerSpec) error {
 		}
 	}
 	return nil
+}
+
+// A configured endpoint identifies a source, never a provider or permission.
+// Discovery validates observed tools before exposure; runtime admission checks
+// each call again. Omitting a config filter grants no tool permission.
+func mcpSourceID(endpoint string) (string, error) {
+	parsed, err := url.Parse(endpoint)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || parsed.User != nil || parsed.Fragment != "" {
+		return "", fmt.Errorf("MCP endpoint must be an HTTP(S) URL without userinfo or a fragment")
+	}
+	return fmt.Sprintf("server-%x", sha256.Sum256([]byte(endpoint))), nil
 }
 
 // remoteAgent spells one remote agent by the name the entry carries.
@@ -418,76 +363,4 @@ func (b *builder) remoteAgent(remote RemoteAgentSpec) error {
 			Detail: fmt.Sprintf("the remote agent name %q is outside what the wire can spell", remote.Name)}
 	}
 	return b.add(remote.Name, AgentSpelling(namespace, agent), remote.Path)
-}
-
-// hostOf is the lowercased host of a server URL, without its trailing
-// root dot; false where the URL carries no host.
-//
-// DNS is case-insensitive, so the same service written in another case
-// must reach the same policy identity, and lowercasing here is the one
-// place that settles it — as urlsplit does for the python lane. A
-// trailing dot is the absolute form of the same name, naming the root
-// of the DNS tree rather than a search domain, so it is dropped for the
-// same reason.
-func hostOf(raw string) (string, bool) {
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		return "", false
-	}
-	host := strings.ToLower(parsed.Hostname())
-	host = strings.TrimSuffix(host, ".")
-	if host == "" {
-		return "", false
-	}
-	return host, true
-}
-
-// toolsetOf is the toolset name a host claims: its first label, where
-// the wire can spell it.
-func toolsetOf(host string) (string, bool) {
-	label, _, _ := strings.Cut(host, ".")
-	if !segment.MatchString(label) {
-		return "", false
-	}
-	return label, true
-}
-
-// inCluster reports whether host is a Kubernetes service form of the
-// service its first label names.
-//
-// The accepted forms are cluster service addresses that resolve through
-// cluster DNS, and every other host is refused, so the endpoint an MCP
-// entry names is a service of the cluster rather than an arbitrary
-// host.
-//
-// <service>.<namespace> is not among them. It is one label short of a
-// registrable public domain name, and nothing here tells the two apart,
-// so accepting it would let <toolset>.<tld> — an endpoint the cluster
-// does not resolve and the attacker does — take the policy identity of
-// the in-cluster service that toolset names. The .svc forms say the
-// same thing unambiguously, so a namespaced address is written with
-// .svc.
-//
-// A single label stays accepted: it resolves only through cluster DNS,
-// in the pod's own namespace, and cannot be a public domain.
-//
-// This still pins no single Service. The toolset is the first label
-// alone, so the same service name in another namespace reaches the same
-// policy identity, and an ExternalName Service resolves an accepted
-// address to a name outside the cluster. Closing that needs the
-// RemoteMCPServer resource name, which the rendered config does not
-// carry.
-func inCluster(host string) bool {
-	if host == "localhost" || host == "127.0.0.1" {
-		return true
-	}
-	labels := strings.Split(host, ".")
-	switch {
-	case len(labels) == 1:
-		return true
-	case len(labels) < 3 || labels[2] != "svc":
-		return false
-	default:
-		return len(labels) == 3 || strings.Join(labels[3:], ".") == clusterDomain
-	}
 }

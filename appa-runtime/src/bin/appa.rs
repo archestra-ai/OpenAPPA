@@ -129,8 +129,8 @@ fn main() -> ExitCode {
         } => {
             let config = config.unwrap_or_else(appa_runtime::init::installed_config_path);
             let description = appa_runtime::describe::render(&config, &batteries_dir, adapter.as_str());
-            print!("{description}");
-            if check && !appa_runtime::describe::is_loadable(&config, &batteries_dir) {
+            print!("{}", description.text);
+            if check && !description.valid {
                 ExitCode::FAILURE
             } else {
                 ExitCode::SUCCESS

@@ -507,11 +507,11 @@ func TestEachParentOpensTheSharedChildSessionUnderItsOwnRoot(t *testing.T) {
 	want := []map[string]any{
 		{"protocol": float64(1), "adapter": "kagent", "event": "child_start", "root_id": "root-1", "child_id": "child-ctx"},
 		{"protocol": float64(1), "adapter": "kagent", "event": "prompt", "root_id": "root-1", "child_id": "child-ctx", "text": "total the invoices"},
-		{"protocol": float64(1), "adapter": "kagent", "event": "tool_call", "root_id": "root-1", "child_id": "child-ctx", "tool": "mcp:demo-tools/read_ledger", "arguments": map[string]any{}},
+		{"protocol": float64(1), "adapter": "kagent", "event": "tool_call", "root_id": "root-1", "child_id": "child-ctx", "tool": "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/read_ledger", "arguments": map[string]any{}},
 		{"protocol": float64(1), "adapter": "kagent", "event": "turn_end", "root_id": "root-1", "child_id": "child-ctx"},
 		{"protocol": float64(1), "adapter": "kagent", "event": "child_start", "root_id": "root-2", "child_id": "child-ctx"},
 		{"protocol": float64(1), "adapter": "kagent", "event": "prompt", "root_id": "root-2", "child_id": "child-ctx", "text": "list the pods"},
-		{"protocol": float64(1), "adapter": "kagent", "event": "tool_call", "root_id": "root-2", "child_id": "child-ctx", "tool": "mcp:demo-tools/k8s_get_pods", "arguments": map[string]any{}},
+		{"protocol": float64(1), "adapter": "kagent", "event": "tool_call", "root_id": "root-2", "child_id": "child-ctx", "tool": "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/k8s_get_pods", "arguments": map[string]any{}},
 		{"protocol": float64(1), "adapter": "kagent", "event": "turn_end", "root_id": "root-2", "child_id": "child-ctx"},
 	}
 	if got := h.recorded(); !reflect.DeepEqual(got, want) {
@@ -609,7 +609,7 @@ func TestAnAllowedCallPassesAndADeniedCallAnswersTheModel(t *testing.T) {
 		"adapter":   "kagent",
 		"event":     "tool_call",
 		"root_id":   "s1",
-		"tool":      "mcp:demo-tools/k8s_scale",
+		"tool":      "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/k8s_scale",
 		"arguments": map[string]any{"replicas": float64(3)},
 	}
 	if got := h.recorded()[0]; !reflect.DeepEqual(got, wantEvent) {
@@ -671,7 +671,7 @@ func TestEveryToolCrossesUnderItsInventorySpellingAndAssertsNoSpawn(t *testing.T
 			t.Errorf("every event carries the envelope, got %v", event)
 		}
 	}
-	want := []string{"agent:kagent/billing-agent", "mcp:demo-tools/k8s_scale", "builtin:ask_user"}
+	want := []string{"agent:kagent/billing-agent", "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/k8s_scale", "builtin:ask_user"}
 	if !reflect.DeepEqual(tools, want) {
 		t.Errorf("the spellings drifted: got %v, want %v", tools, want)
 	}
@@ -809,7 +809,7 @@ func TestAToolResultCrossesAndEnforcesEachAnswer(t *testing.T) {
 		"adapter":   "kagent",
 		"event":     "tool_result",
 		"root_id":   "s1",
-		"tool":      "mcp:demo-tools/k8s_get_pods",
+		"tool":      "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/k8s_get_pods",
 		"arguments": map[string]any{"namespace": "prod"},
 		"outcome":   map[string]any{"status": "success", "body": map[string]any{"pods": []any{"api-1"}}},
 	}
@@ -894,7 +894,7 @@ func TestADenyNamesTheToolTheModelDispatches(t *testing.T) {
 		spelled    string
 		dispatched string
 	}{
-		{"mcp", "mcp:demo-tools/k8s_get_pods", "k8s_get_pods"},
+		{"mcp", "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/k8s_get_pods", "k8s_get_pods"},
 		{"agent", "agent:kagent/log-analyst", "kagent__NS__log_analyst"},
 		{"builtin", "builtin:ask_user", "ask_user"},
 		{"reserved", "appa:execute_remedy_plan", "execute_remedy_plan"},
@@ -923,7 +923,7 @@ func TestADenyLeavesWhatTheInventoryNeverSpelled(t *testing.T) {
 	}{
 		{"a-gate-the-model-cannot-dispatch", fmt.Sprintf(blockText, "gate:code_execution")},
 		{"another-toolset", fmt.Sprintf(blockText, "mcp:other-server/k8s_get_pods")},
-		{"a-longer-name", fmt.Sprintf(blockText, "mcp:demo-tools/k8s_get_pods_v2")},
+		{"a-longer-name", fmt.Sprintf(blockText, "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/k8s_get_pods_v2")},
 		{"a-longer-agent", fmt.Sprintf(blockText, "agent:kagent/log-analyst-standby")},
 		{"no-spelling-at-all", "[appa] Blocked. The trajectory reads ops-only material."},
 	} {
@@ -950,7 +950,7 @@ func TestTheRemedyAnswerNamesTheToolTheModelDispatches(t *testing.T) {
 	p := pluginOver(t, h)
 	authorized := "[appa] Authorized. Call the %s tool again with exactly these arguments: {}"
 	answer := map[string]any{"content": []any{map[string]any{
-		"type": "text", "text": fmt.Sprintf(authorized, "mcp:demo-tools/k8s_get_pods"),
+		"type": "text", "text": fmt.Sprintf(authorized, "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/k8s_get_pods"),
 	}}}
 	returned, err := p.afterTool(
 		newFakeContext(newFakeSession("s1")), &fakeTool{ReservedTool},
@@ -972,7 +972,7 @@ func TestTheRemedyAnswerNamesTheToolTheModelDispatches(t *testing.T) {
 
 func TestAWithheldResultNamesTheToolTheModelDispatches(t *testing.T) {
 	h := newHook(t, map[string]any{
-		"protocol": 1, "decision": "block", "reason": "run mcp:demo-tools/read_ledger first",
+		"protocol": 1, "decision": "block", "reason": "run mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/read_ledger first",
 	})
 	p := pluginOver(t, h)
 	returned, err := p.afterTool(
@@ -991,7 +991,7 @@ func TestAWithheldResultNamesTheToolTheModelDispatches(t *testing.T) {
 // what the runtime crossed for the parent, not text addressed to the
 // model, so it is replayed byte for byte.
 func TestTheBytesOfAChildReturnCrossAsTheRuntimeCrossedThem(t *testing.T) {
-	value := "the analyst read mcp:demo-tools/read_ledger"
+	value := "the analyst read mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/read_ledger"
 	h := newHook(t, map[string]any{"protocol": 1, "decision": "child_return", "value": value})
 	p := pluginOver(t, h)
 	returned, err := p.afterTool(
@@ -1077,7 +1077,7 @@ func TestAnAdmittedValueReachesTheModelAsTheRuntimeAdmittedIt(t *testing.T) {
 	// deliver_value carries the value the engine admitted. The inventory
 	// would rewrite the spellings this one quotes, and the model must
 	// still read the bytes that crossed.
-	admitted := `the ledger names mcp:demo-tools/read_ledger and appa:execute_remedy_plan`
+	admitted := `the ledger names mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/read_ledger and appa:execute_remedy_plan`
 	h := newHook(t, map[string]any{"protocol": 1, "decision": "deliver_value", "value": admitted})
 	p := pluginOver(t, h)
 	returned, err := p.afterTool(
@@ -1096,7 +1096,7 @@ func TestAReplacedOutputReachesTheModelInNamesItCanDispatch(t *testing.T) {
 	// replace_output carries the runtime's own staged-narrowing text,
 	// which names tools by the spelling the wire carries. The model
 	// dispatches the ADK name.
-	spelled := `take mcp:demo-tools/read_ledger through appa:execute_remedy_plan(offer_id: "o1")`
+	spelled := `take mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/read_ledger through appa:execute_remedy_plan(offer_id: "o1")`
 	h := newHook(t, map[string]any{"protocol": 1, "decision": "replace_output", "output": spelled})
 	p := pluginOver(t, h)
 	returned, err := p.afterTool(

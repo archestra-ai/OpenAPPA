@@ -10,13 +10,10 @@
 # this file. Every protected Agent sets `APPA_ENABLED=true` and
 # `APPA_RUNTIME_URL`.
 #
-# A tool is named by its canonical id. An MCP tool is
-# `mcp/<toolset>/<tool>`, where `<toolset>` is the name of the
-# `RemoteMCPServer` (or `ToolServer`) object the agent lists it from:
-# this file assumes the demo toolset is served by a `RemoteMCPServer`
-# named `demo-tools`, as the demo chart creates it. kagent's own
-# built-in tools are `host/kagent/<tool>`, and the entrypoint's gates
-# are `host/kagent-gate/<gate>`.
+# MCP contracts use the agent's native tool names. The plugin discovers
+# their configured sources before activation; it does not infer a provider
+# from a hostname. A rule can add `server` to constrain one connection.
+# kagent builtins and entrypoint gates below use their canonical names.
 #
 # It names no agent: on kagent an agent called as a tool runs as a child
 # only under a contract that names it, wildcard or not, so delegation to
@@ -32,17 +29,17 @@ version = 2
 # --- in-cluster reads that stay inside the session ---
 
 [[policy.tool]]
-name = "mcp/demo-tools/list_pods"
+name = "list_pods"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/demo-tools/read_configmap"
+name = "read_configmap"
 delta = {}
 
 # Secret material stays with operators: results carry the ops audience,
 # and a sink that publishes wider cannot receive them undeclared.
 [[policy.tool]]
-name = "mcp/demo-tools/read_secret"
+name = "read_secret"
 delta = { audience = ["ops"] }
 
 # --- ingress authored outside the session ---
@@ -50,11 +47,11 @@ delta = { audience = ["ops"] }
 # Logs carry whatever the workloads printed — including text written to
 # steer an agent that reads them.
 [[policy.tool]]
-name = "mcp/demo-tools/get_pod_logs"
+name = "get_pod_logs"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp/demo-tools/check_status_page"
+name = "check_status_page"
 delta = { trust = "suspicious" }
 
 # --- the outward sink ---
@@ -62,7 +59,7 @@ delta = { trust = "suspicious" }
 # A status update publishes to everyone: the flow must be readable by
 # everyone and must not derive from an untrusted source.
 [[policy.tool]]
-name = "mcp/demo-tools/post_status_update"
+name = "post_status_update"
 delta = {}
 
 [policy.tool.requires]
@@ -72,7 +69,7 @@ audience = { contains = ["public"] }
 # --- an effectful action behind a person ---
 
 [[policy.tool]]
-name = "mcp/demo-tools/restart_deployment"
+name = "restart_deployment"
 delta = {}
 
 [policy.tool.requires]

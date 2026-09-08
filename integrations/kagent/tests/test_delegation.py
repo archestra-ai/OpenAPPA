@@ -31,7 +31,7 @@ import uuid
 
 import pytest
 
-from conftest import CHILD_FAILURE, CHILD_TOOL, INJECTION, UNDECLARED_TOOL
+from conftest import CHILD_FAILURE, CHILD_TOOL, INJECTION
 
 # The parent's prompts, and the `request` each delegation carries. The
 # child's script is keyed by that request, so the two must agree.
@@ -58,11 +58,9 @@ LATE = "one more thing about the status page"
 RESERVED = "execute_remedy_plan"
 
 # The runtime's own words, quoted where a case turns on which one came
-# back. `NOT_DECLARED` is the denial at an unnamed spawn
-# (`appa-runtime/src/api/mod.rs`, `UndeclaredSpawn`). `SPAWN_NOT_TAKEN`
+# back. `SPAWN_NOT_TAKEN`
 # is the refusal that means the runtime tied no child to this parent's
 # prepared fork, so nothing crossed and the delegation did not happen.
-NOT_DECLARED = "not declared by the policy"
 SPAWN_NOT_TAKEN = "the spawn did not take"
 
 # The APPA-owned tool a child scope stops through, and the plugin's own
@@ -299,36 +297,23 @@ def test_nothing_a_child_says_after_returning_nothing_reaches_its_parent(stack):
     assert task.confirmation() is None, "no person is asked about a delegation"
 
 
-def test_a_delegation_the_policy_never_names_is_denied_at_the_spawn(stack):
-    """The release manager is a tool the parent lists and no contract
-    names. On kagent an agent runs as a child only under a contract that
-    names it, and the wildcard covers no spawn. The runtime denies the
-    call before it dispatches, so there is no return menu to route and
-    no fork to bind.
-
-    No child session opens. Both remote agents in this suite resolve to
-    the child's port, and an entry there with no registered script
-    answers with the harness's own line. That line never appears.
-    """
-    task = stack.say(
-        DELEGATE_UNDECLARED,
-        [
-            {"tool": UNDECLARED_TOOL, "args": {"request": BUMP}},
-            {"text": "The delegation was denied, so I did nothing."},
-        ],
-    )
-
-    assert task.state == "completed"
-    assert task.calls(UNDECLARED_TOOL), "the parent proposed the delegation"
-    responses = task.responses(UNDECLARED_TOOL)
-    assert responses, "the reserved answer reached the parent's model"
-    denied = responses[0]
-    assert denied.get("appa") == "denied", f"the delegation is denied, not run: {denied}"
-    assert NOT_DECLARED in str(denied.get("result", "")), f"the runtime's own reason reaches the model: {denied}"
-    assert "subagent_session_id" not in denied, f"no child session opened: {denied}"
-    assert "[harness]" not in task.everything(), "the child app was never entered"
-    assert not task.calls(RESERVED), "a denied spawn offers no return to declare"
-    assert task.confirmation() is None, "a denied spawn asks nobody"
+@pytest.mark.parametrize("stack", [True], indirect=True)
+def test_a_known_uncovered_agent_is_rejected_before_model_execution(stack):
+    """An advertised agent without a contract is a known activation error."""
+    body = json.dumps({
+        "jsonrpc": "2.0", "id": str(uuid.uuid4()), "method": "message/send",
+        "params": {"message": {
+            "role": "user", "kind": "message", "messageId": str(uuid.uuid4()),
+            "parts": [{"kind": "text", "text": DELEGATE_UNDECLARED}],
+        }},
+    }).encode()
+    request = urllib.request.Request(stack.agent.url, data=body, headers={"content-type": "application/json"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        answer = json.load(response)
+    result = answer.get("result", {})
+    assert answer.get("error") or result.get("status", {}).get("state") == "failed", answer
+    assert stack.child_turns() == [], "no uncovered delegation reaches a child"
+    assert "not covered by policy" in json.dumps(answer), answer
 
 
 def test_two_parents_delegate_in_turn_into_one_child_session(stack, one_child_session):

@@ -34,7 +34,10 @@ ROLLBACK_SILENT = "roll back the checkout-api deployment for a silent board"
 # The change board waits on the canonical tool id, the name the policy
 # carries — a consult names the call the runtime derived, not the bare
 # name kagent dispatches.
-ROLLBACK_CONSULT = "mcp/localhost/rollback_deployment"
+def rollback_consult(endpoint):
+    from appa_kagent_adk.inventory import mcp_source_id
+
+    return f"mcp/{mcp_source_id(endpoint)}/rollback_deployment"
 
 # The offer actions the runtime renders (`appa-runtime/src/engine.rs`,
 # `remedy_instruction`). A `{"remedy": ...}` turn names one of them.
@@ -297,12 +300,12 @@ def test_the_release_window_authority_denies_the_out_of_window_scale(stack):
         assert "scaled" not in body, f"the cluster action never ran: {body}"
 
 
-def test_the_remote_change_board_approves_and_the_rollback_runs(stack, board):
+def test_the_remote_change_board_approves_and_the_rollback_runs(stack, board, demo_tools_url):
     """An authority backed by people out of band. The consult parks at the
     change board while the task runs, a member rules on the board's own
     channel, and the ruling releases the exact call. The A2A task never
     suspends, because the person sits on the remote side."""
-    member = board.rule_in_background(ROLLBACK_CONSULT, "approve")
+    member = board.rule_in_background(rollback_consult(demo_tools_url), "approve")
     task = stack.say(
         ROLLBACK_APPROVED,
         [
@@ -329,10 +332,10 @@ def test_the_remote_change_board_approves_and_the_rollback_runs(stack, board):
     assert "rolled_back" in json.dumps(rollbacks[1]), f"the approved rollback runs: {rollbacks[1]}"
 
 
-def test_the_remote_change_board_denies_and_the_rollback_stays_blocked(stack, board):
+def test_the_remote_change_board_denies_and_the_rollback_stays_blocked(stack, board, demo_tools_url):
     """The same conversation, a denying board. The ruling is the board's,
     so the plan grants nothing and the deployment is never rolled back."""
-    member = board.rule_in_background(ROLLBACK_CONSULT, "deny")
+    member = board.rule_in_background(rollback_consult(demo_tools_url), "deny")
     task = stack.say(
         ROLLBACK_DENIED,
         [

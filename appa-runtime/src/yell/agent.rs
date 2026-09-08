@@ -9,8 +9,6 @@
 //! Nothing is written to disk here. `appa yell` keeps a file because a person is asked to
 //! read it before it leaves; nobody reads an agent's, so a report that does not send is gone.
 
-use sha2::Digest;
-
 use crate::api::{Actor, PermitKey, Runtime};
 use crate::runtime_cli::Adapter;
 
@@ -34,16 +32,11 @@ pub(crate) struct YellArgs {
 }
 
 impl YellArgs {
-    /// The key this call is vouched under: a digest of the call itself, because the tool
-    /// takes no id and the arguments are the only thing the hook and the tool both see.
-    ///
-    /// RFC 8785 over the parsed arguments, not over the bytes either side received: the
-    /// harness and the MCP client serialize the same call differently, and the digest has to
-    /// survive that. A digest rather than the text, so nothing a person wrote is a map key.
+    /// The key this call is vouched under: the call itself, because the tool takes no id and
+    /// the arguments are the only thing the hook and the tool both see.
     pub(crate) fn ticket(&self) -> PermitKey {
         let value = serde_json::to_value(self).expect("two owned scalars always serialize");
-        let digest = sha2::Sha256::digest(appa_engine::params::canonical_bytes(&value));
-        PermitKey::Yell(format!("{digest:x}"))
+        PermitKey::call("yell", &value)
     }
 
     /// The tool input a harness reported, read as this call. `None` when it is not one:
@@ -91,7 +84,7 @@ pub(crate) async fn yell(runtime: &std::sync::Arc<Runtime>, harness: Adapter, ar
     let Ok(finished) = runtime.report_off_thread(request).await else {
         return Outcome::Oversize;
     };
-    let Some(receiver) = client::Receiver::resolve() else {
+    let Some((receiver, _)) = client::Receiver::resolve() else {
         return Outcome::Undeliverable(SendFailure::NoReceiver);
     };
     match client::send(&finished, &receiver).await {
@@ -151,7 +144,7 @@ mod tests {
     #[test]
     fn a_ticket_is_not_an_offer_id() {
         let ticket = args("x", true).ticket();
-        let PermitKey::Yell(digest) = ticket.clone() else {
+        let PermitKey::Call(digest) = ticket.clone() else {
             panic!("a yell ticket");
         };
         assert_ne!(ticket, PermitKey::Offer(digest));
