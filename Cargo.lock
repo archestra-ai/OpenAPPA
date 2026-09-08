@@ -251,7 +251,7 @@ version = "0.0.0"
 
 [[package]]
 name = "appa-package"
-version = "0.14.1"
+version = "0.16.0"
 dependencies = [
  "appa-runtime-api",
  "serde",
