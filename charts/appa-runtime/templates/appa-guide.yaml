@@ -21,6 +21,12 @@ spec:
       {{ include "appa-runtime.fullname" . }} in namespace {{ .Release.Namespace }}
       at http://{{ include "appa-runtime.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}.
 
+      When the user sends init or asks for policy setup, your very first action
+      must be to send a message to the user explaining what you are about to do
+      in simple terms (scanning cluster agents and tools, checking policy and
+      batteries, and preparing a proposal). Always output this message to the user
+      first before executing cluster inventory tools.
+
       For init, adjust, diagnose, or lifecycle work, first call skills with
       command appa-guide, then read the complete
       /skills/appa-guide/references/kagent.md. Follow that reference.

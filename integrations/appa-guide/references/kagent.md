@@ -34,6 +34,17 @@ before a write or reload.
 
 ### Required init checklist
 
+When the operator sends `init`, your very first action must be to output a message to the user explaining what you are about to do in simple, friendly terms:
+"I am starting the initial OpenAPPA setup. Here is what I will do:
+1. Scan your cluster for active agents, tool servers, and MCP tools.
+2. Check the OpenAPPA runtime policy and available security batteries.
+3. Match discovered tools against security rules.
+4. Present a tailored policy proposal for your review and approval.
+
+Starting inspection now..."
+
+Do not execute cluster inventory tools before sending this plan message to the user.
+
 Do not present an init result until all these steps succeed or their
 unavailable state is reported:
 
