@@ -366,7 +366,7 @@ hint = "Report only what the text states as fact — the errors and their timest
 trust = { from = "suspicious", to = "trusted" }
 
 [externals]
-timeout_ms = 30000
+timeout_ms = 130000
 review_timeout_ms = 600000
 max_body_bytes = 262144
 

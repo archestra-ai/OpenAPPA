@@ -22,7 +22,7 @@ mocks:
   # Seconds a change-board consult waits for a member's ruling before it
   # answers nothing. Inside the policy's externals.timeout_ms (30 s in
   # the demo policy).
-  approvalWindowSeconds: 25
+  approvalWindowSeconds: 120
 
 tools:
   image:

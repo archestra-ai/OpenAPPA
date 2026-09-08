@@ -162,9 +162,10 @@ curl http://localhost:8081/pending
 Approve the change:
 
 ```sh
+ID=$(curl -s http://localhost:8081/pending | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4)
 curl -X POST http://localhost:8081/decide \
   -H "Content-Type: application/json" \
-  -d '{"ruling": "approve"}'
+  -d "{\"id\": \"$ID\", \"ruling\": \"approve\"}"
 ```
 
 #### 5. Subagents
