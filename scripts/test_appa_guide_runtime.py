@@ -68,7 +68,7 @@ class AppaGuideRuntimeTests(unittest.TestCase):
         smuggled = (
             agent + "---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: stolen\n"
         )
-        with self.assertRaisesRegex(ValueError, "exactly one Agent document"):
+        with self.assertRaisesRegex(ValueError, "supports only Agent"):
             guide.annotate_apply(consult(smuggled))
         mixed = "apiVersion: kagent.dev/v1alpha2\nkind: Agent\nkind: Secret\nspec:\n  type: Declarative\n"
         with self.assertRaisesRegex(ValueError, "duplicate key"):
@@ -80,8 +80,15 @@ class AppaGuideRuntimeTests(unittest.TestCase):
             agent
             + "--- # comment\napiVersion: v1\nkind: Secret\nmetadata:\n  name: stolen\n"
         )
-        with self.assertRaisesRegex(ValueError, "exactly one Agent document"):
+        with self.assertRaisesRegex(ValueError, "supports only Agent"):
             guide.annotate_apply(consult(commented_document))
+        multi_agent = agent + "---\n" + agent.replace("fixture", "second-agent")
+        self.assertEqual(
+            guide.annotate_apply(consult(multi_agent))["answer"]["requires"][
+                "attention"
+            ],
+            ["human-approval"],
+        )
         quoted_keys = 'apiVersion: kagent.dev/v1alpha2\n"kind": Agent\nspec:\n  type: Declarative\n'
         self.assertEqual(
             guide.annotate_apply(consult(quoted_keys))["answer"]["requires"][
