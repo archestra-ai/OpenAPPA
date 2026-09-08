@@ -36,7 +36,7 @@
 //! the plan from the live views and matches it by value, so an offer whose
 //! basis has moved declines instead of executing.
 
-use appa_engine::audience::{AudienceEvidence, IdentityImplementation, IdentityMapping, MemberClaims, SelectorSpec};
+use appa_engine::audience::{AudienceEvidence, MemberLookup, SelectorSpec, SourceClaims};
 use appa_engine::contract::{
     AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, PinnedAnnotation, ProducedAnnotation,
     RecipientSpec, Requires, ToolDeclaration,
@@ -156,18 +156,12 @@ pub enum ExternalRequest {
         /// declaration.
         templates: Vec<String>,
     },
-    /// One member lookup at its provider's source: the claims for one qualified reader.
+    /// One member lookup: the principal for one qualified reader, asked of the entry the
+    /// deployment routes `provider`'s lookups to.
     MemberLookup {
         provider: String,
         member: String,
         templates: Vec<String>,
-    },
-    /// One custom identity canonicalization: the principal for one member's claims. Only a
-    /// policy-selected custom implementation is consulted; the shipped `verified-email`
-    /// normalization is deterministic and recomputed by the engine.
-    Identity {
-        implementation: String,
-        claims: MemberClaims,
     },
 }
 
@@ -198,19 +192,14 @@ pub enum ExternalEvidence {
     AudienceSource {
         provider: String,
         selector: String,
-        members: Option<Vec<MemberClaims>>,
+        members: Option<Vec<ReaderId>>,
     },
     MemberLookup {
         provider: String,
         member: String,
-        /// `None`: the consult produced no answer. `Some(None)`: the provider definitively
-        /// does not know the member, who keeps its qualified identity.
-        claims: Option<Option<MemberClaims>>,
-    },
-    Identity {
-        implementation: String,
-        id: String,
-        principal: Option<ReaderId>,
+        /// `None`: the consult produced no answer. `Some(None)`: the answering entry
+        /// definitively does not know the member, who keeps its qualified identity.
+        principal: Option<Option<ReaderId>>,
     },
 }
 
@@ -478,32 +467,17 @@ impl From<&appa_engine::audience::EvidenceRefusal> for ReplayRefusalClass {
             appa_engine::audience::EvidenceRefusal::DuplicateLookup { .. } => {
                 ReplayRefusalClass("evidence_duplicate_lookup")
             }
-            appa_engine::audience::EvidenceRefusal::DuplicateIdentity { .. } => {
-                ReplayRefusalClass("evidence_duplicate_identity")
-            }
-            appa_engine::audience::EvidenceRefusal::ForeignMember { .. } => {
-                ReplayRefusalClass("evidence_foreign_member")
+            appa_engine::audience::EvidenceRefusal::MalformedMember { .. } => {
+                ReplayRefusalClass("evidence_malformed_member")
             }
             appa_engine::audience::EvidenceRefusal::ForeignLookup { .. } => {
                 ReplayRefusalClass("evidence_foreign_lookup")
             }
-            appa_engine::audience::EvidenceRefusal::ForeignLookupClaims { .. } => {
-                ReplayRefusalClass("evidence_foreign_lookup_claims")
+            appa_engine::audience::EvidenceRefusal::MalformedPrincipal { .. } => {
+                ReplayRefusalClass("evidence_malformed_principal")
             }
             appa_engine::audience::EvidenceRefusal::DuplicateMember { .. } => {
                 ReplayRefusalClass("evidence_duplicate_member")
-            }
-            appa_engine::audience::EvidenceRefusal::ConflictingClaims { .. } => {
-                ReplayRefusalClass("evidence_conflicting_claims")
-            }
-            appa_engine::audience::EvidenceRefusal::ReservedPrincipal { .. } => {
-                ReplayRefusalClass("evidence_reserved_principal")
-            }
-            appa_engine::audience::EvidenceRefusal::MalformedEmail { .. } => {
-                ReplayRefusalClass("evidence_malformed_email")
-            }
-            appa_engine::audience::EvidenceRefusal::UnmappedIdentity { .. } => {
-                ReplayRefusalClass("evidence_unmapped_identity")
             }
             appa_engine::audience::EvidenceRefusal::UnroutableSelector { .. } => {
                 ReplayRefusalClass("evidence_unroutable_selector")
@@ -2145,14 +2119,9 @@ impl RuntimeEngine {
     /// The selector templates the policy registers for one provider, for a consult's
     /// declaration. Every primitive a consult asks for names a registered provider.
     fn templates_of(&self, provider: &str) -> Result<Vec<String>, EngineRefusal> {
-        self.engine
-            .registry()
-            .audience()
-            .templates(provider)
-            .map(|templates| templates.iter().map(|template| template.as_str().to_string()).collect())
-            .ok_or_else(|| EngineRefusal::Invariant {
-                detail: format!("a consult names the unregistered audience provider {provider}"),
-            })
+        selector_templates(self.engine.registry().audience(), provider).ok_or_else(|| EngineRefusal::Invariant {
+            detail: format!("a consult names the unregistered audience provider {provider}"),
+        })
     }
 
     /// One act judged under its audience evidence: the evidence gathered from the consult
@@ -2186,13 +2155,15 @@ impl RuntimeEngine {
         }
     }
 
-    /// One act's audience evidence, gathered from the consult answers: the source claims,
-    /// member lookups, and — under a custom identity implementation — the identity mappings
-    /// for every claimed member. A failed consult stays runtime-side as a recorded no-answer;
-    /// an answer no registered source could have served is dropped rather than carried into
-    /// an act it would refuse. The gathered payload is pre-validated against the same test
-    /// replay applies — the engine's, which is the one rule on duplicate or foreign answers
-    /// — so an inadmissible answer is an operational refusal here, never an engine error.
+    /// One act's audience evidence, gathered from the consult answers: the source claims and
+    /// the member lookups. A failed consult stays runtime-side as a recorded no-answer; an
+    /// answer no registered source could have served is dropped rather than carried into an
+    /// act it would refuse. The gathered payload is pre-validated against the same test
+    /// replay applies — the engine's, which is the one rule on duplicate or malformed
+    /// answers — so an inadmissible answer is an operational refusal here, never an engine
+    /// error. Under a redirected provider every qualified member a source reports seats
+    /// through its lookup; the lookups still owed are this round's consults, asked before
+    /// the act is judged.
     fn act_audience(&self, evidence: &[ExternalEvidence]) -> Result<ActAudience, AudienceFailure> {
         let audience = self.engine.registry().audience();
         let mut payload = AudienceEvidence::default();
@@ -2210,16 +2181,11 @@ impl RuntimeEngine {
                     if !routable {
                         continue;
                     }
-                    // A claim outside the source's own provider namespace is a broken
-                    // answer; conservatively, the selector was not answered.
-                    let members = members
-                        .clone()
-                        .filter(|members| members.iter().all(|member| qualified_by(provider, &member.id)));
                     match members {
-                        Some(members) => payload.sources.push(appa_engine::audience::SourceClaims {
+                        Some(members) => payload.sources.push(SourceClaims {
                             provider: provider.clone(),
                             selector: selector.clone(),
-                            members,
+                            members: members.clone(),
                         }),
                         None => {
                             unanswered.selectors.insert(SelectorSpec {
@@ -2232,105 +2198,54 @@ impl RuntimeEngine {
                 ExternalEvidence::MemberLookup {
                     provider,
                     member,
-                    claims,
+                    principal,
                 } => {
                     if !audience.providers().contains(provider) || !qualified_by(provider, member) {
                         continue;
                     }
-                    // Claims for an id other than the member asked are a broken answer — a
-                    // source could otherwise canonicalize its member to another provider's
-                    // namespace, or pre-seat an identity mapping for a member it does not
-                    // own. Conservatively, the member was not answered.
-                    let claims = match claims {
-                        Some(Some(answered)) if answered.id != *member => None,
-                        other => other.clone(),
-                    };
-                    match claims {
-                        Some(claims) => payload.lookups.push(appa_engine::audience::MemberLookup {
+                    match principal {
+                        Some(principal) => payload.lookups.push(MemberLookup {
                             provider: provider.clone(),
                             member: member.clone(),
-                            claims,
+                            principal: principal.clone(),
                         }),
                         None => {
                             unanswered.members.insert(member.clone());
                         }
                     }
                 }
-                ExternalEvidence::Identity {
-                    implementation,
-                    id,
-                    principal,
-                } => {
-                    let named = match audience.identity() {
-                        IdentityImplementation::Custom(name) => name.as_str() == implementation,
-                        IdentityImplementation::VerifiedEmail => false,
-                    };
-                    if !named {
-                        continue;
-                    }
-                    match principal {
-                        Some(principal) => payload.identity.push(IdentityMapping {
-                            id: id.clone(),
-                            principal: principal.clone(),
-                        }),
-                        None => {
-                            unanswered.identities.insert(id.clone());
-                        }
-                    }
-                }
                 _ => {}
             }
         }
-        // Under a custom identity implementation every claimed member canonicalizes through
-        // a pinned mapping; the ones still unmapped are this round's identity consults.
-        if let IdentityImplementation::Custom(name) = audience.identity() {
-            let mut requests: Vec<ExternalRequest> = Vec::new();
-            // One question per id, asked about the folded claim the engine will canonicalize
-            // through: a member reported twice, once silently, is one member.
-            let claimed = match appa_engine::audience::folded_claims(&payload) {
-                Ok(folded) => folded,
-                Err(refusal) => {
-                    tracing::debug!(%refusal, "gathered audience evidence refused");
-                    return Err(AudienceFailure::Refused(format!(
-                        "the gathered audience evidence is not admissible: {}",
-                        refusal_class(&refusal)
-                    )));
-                }
-            };
-            for claims in claimed.values() {
-                if payload.identity.iter().any(|mapping| mapping.id == claims.id) {
-                    continue;
-                }
-                if unanswered.identities.contains(&claims.id) {
-                    // The member id is directory data the model has not seen: it stays
-                    // out of the model-visible refusal.
-                    tracing::debug!(implementation = name.as_str(), id = %claims.id, "identity gave no principal");
-                    return Err(AudienceFailure::Refused(format!(
-                        "identity implementation {} gave no principal for a claimed member",
-                        name.as_str(),
-                    )));
-                }
-                let request = ExternalRequest::Identity {
-                    implementation: name.as_str().to_string(),
-                    claims: claims.clone(),
-                };
-                if !requests.contains(&request) {
-                    requests.push(request);
-                }
-            }
-            if !requests.is_empty() {
-                return Err(AudienceFailure::Consult(requests));
-            }
-        }
         if let Err(refusal) = audience.expansions(&payload) {
-            // The refusal's own Display can carry directory data (member ids, claimed
-            // emails) the model has not seen; the model-visible detail names only the
-            // failure class and its provider/selector.
+            // The refusal's own Display can carry directory data (member ids, principals)
+            // the model has not seen; the model-visible detail names only the failure class
+            // and its provider/selector.
             tracing::debug!(%refusal, "gathered audience evidence refused");
             return Err(AudienceFailure::Refused(format!(
                 "the gathered audience evidence is not admissible: {}",
                 refusal_class(&refusal)
             )));
+        }
+        let mut requests: Vec<ExternalRequest> = Vec::new();
+        for owed in audience.member_lookups_owed(&payload) {
+            if unanswered.members.contains(&owed.member) {
+                // The member is directory data the model has not seen.
+                return Err(AudienceFailure::Refused(format!(
+                    "audience source {} gave no answer for a member lookup",
+                    owed.provider
+                )));
+            }
+            let templates = selector_templates(audience, &owed.provider)
+                .expect("an owed lookup names the registered provider of a pinned source");
+            requests.push(ExternalRequest::MemberLookup {
+                provider: owed.provider,
+                member: owed.member,
+                templates,
+            });
+        }
+        if !requests.is_empty() {
+            return Err(AudienceFailure::Consult(requests));
         }
         Ok(ActAudience { payload, unanswered })
     }
@@ -2399,7 +2314,7 @@ impl RuntimeEngine {
 
 /// One model-visible line for an evidence refusal: the failure class and, where they are
 /// policy or argument data the model already holds, the provider and selector — never a
-/// member id or a claimed email, which are directory data.
+/// member id or a principal, which are directory data.
 fn refusal_class(refusal: &appa_engine::audience::EvidenceRefusal) -> String {
     use appa_engine::audience::EvidenceRefusal;
     match refusal {
@@ -2407,30 +2322,21 @@ fn refusal_class(refusal: &appa_engine::audience::EvidenceRefusal) -> String {
             format!("two answers for selector {provider}:{selector} in one operation")
         }
         EvidenceRefusal::DuplicateLookup { .. } => "two lookups for one member in one operation".to_string(),
-        EvidenceRefusal::DuplicateIdentity { .. } => {
-            "two identity mappings for one member in one operation".to_string()
-        }
-        EvidenceRefusal::ForeignMember { provider, selector, .. } => {
-            format!("selector {provider}:{selector} reports a member outside its own provider namespace")
+        EvidenceRefusal::MalformedMember { provider, selector, .. } => {
+            format!(
+                "selector {provider}:{selector} reports a member that is neither an address nor a {provider}-qualified id"
+            )
         }
         EvidenceRefusal::ForeignLookup { provider, .. } => {
             format!("a lookup under provider {provider} answers outside that namespace")
         }
-        EvidenceRefusal::ForeignLookupClaims { provider, .. } => {
-            format!("a lookup under provider {provider} carries claims for a different id")
+        EvidenceRefusal::MalformedPrincipal { provider, .. } => {
+            format!(
+                "a lookup under provider {provider} names a principal that is neither an address nor a {provider}-qualified id"
+            )
         }
         EvidenceRefusal::DuplicateMember { provider, selector, .. } => {
             format!("selector {provider}:{selector} reports one member twice in one answer")
-        }
-        EvidenceRefusal::ReservedPrincipal { .. } => "an identity mapping names a reserved principal".to_string(),
-        EvidenceRefusal::ConflictingClaims { .. } => {
-            "one member carries conflicting verified-email claims in one operation".to_string()
-        }
-        EvidenceRefusal::MalformedEmail { .. } => {
-            "a member claims a verified email that does not parse as one address".to_string()
-        }
-        EvidenceRefusal::UnmappedIdentity { .. } => {
-            "the identity implementation returned no mapping for a claimed member".to_string()
         }
         EvidenceRefusal::UnroutableSelector { provider, selector } => {
             format!("no registered audience source serves selector {provider}:{selector}")
@@ -2564,7 +2470,7 @@ enum AudienceRound<T> {
     Failed(TransitionError),
 }
 
-/// Why an act cannot carry audience evidence yet: the identity consults still owed, or the
+/// Why an act cannot carry audience evidence yet: the member lookups still owed, or the
 /// operational refusal a failed or inadmissible answer forces.
 enum AudienceFailure {
     Consult(Vec<ExternalRequest>),
@@ -2578,13 +2484,22 @@ struct ActAudience {
     unanswered: Unanswered,
 }
 
+/// The selector templates the policy registers for one provider, as a consult's declaration
+/// carries them; `None` for a provider no source registers.
+pub(crate) fn selector_templates(
+    audience: &appa_engine::audience::AudienceRegistry,
+    provider: &str,
+) -> Option<Vec<String>> {
+    audience
+        .templates(provider)
+        .map(|templates| templates.iter().map(|template| template.as_str().to_string()).collect())
+}
+
 #[derive(Debug, Default)]
 struct Unanswered {
     selectors: BTreeSet<SelectorSpec>,
     /// Qualified members whose lookup produced no answer.
     members: BTreeSet<String>,
-    /// Member ids the custom identity implementation gave no principal for.
-    identities: BTreeSet<String>,
 }
 
 fn deny(text: String) -> EngineDecision {

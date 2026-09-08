@@ -94,13 +94,12 @@ enum AudienceSide {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AudienceDescription {
     /// One entry per registered source: the provider, its advertised selector templates,
-    /// and whether `[externals.audience.<provider>]` binds it.
+    /// whether `[externals.audience.<provider>]` binds it, and where its lookups go.
     sources: Vec<SourceDescription>,
     self_from: Vec<String>,
     internal_from: Vec<String>,
-    /// One entry per `[[audience.group]]`: `@name`, its `within` target, and its selectors.
+    /// One entry per `[audience.group.<name>]`: `@name`, its `within` target, and its selectors.
     groups: Vec<GroupDescription>,
-    identity: IdentityDescription,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,6 +107,8 @@ struct SourceDescription {
     provider: String,
     templates: Vec<String>,
     binding_configured: bool,
+    /// The entry the provider's member lookups are sent to, when not the provider's own.
+    lookup: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,12 +116,6 @@ struct GroupDescription {
     name: String,
     within: Option<&'static str>,
     from: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum IdentityDescription {
-    VerifiedEmail,
-    Custom { name: String, binding_configured: bool },
 }
 
 /// Where the `[externals]` bindings are read from: the loaded configuration, or the raw TOML
@@ -139,7 +134,6 @@ impl Bindings<'_> {
                 Section::Sanitizers => externals.sanitizers.contains_key(name),
                 Section::Annotators => externals.annotators.contains_key(name),
                 Section::Audience => externals.audience.contains_key(name),
-                Section::Identity => externals.identity.contains_key(name),
             },
             Bindings::Raw(root) => root
                 .get("externals")
@@ -226,7 +220,23 @@ fn authority_descriptions(compiled: &appa_policy::Config, bindings: Bindings<'_>
     authorities
 }
 
-/// The declared audience configuration, with each source's and the identity's binding status.
+impl Bindings<'_> {
+    /// The `lookup` an audience entry names, from the loaded bindings or the raw table.
+    fn lookup_target(self, provider: &str) -> Option<String> {
+        match self {
+            Bindings::Loaded(externals) => externals.audience.get(provider)?.lookup.clone(),
+            Bindings::Raw(root) => root
+                .get("externals")?
+                .get(Section::Audience.name())?
+                .get(provider)?
+                .get("lookup")?
+                .as_str()
+                .map(str::to_string),
+        }
+    }
+}
+
+/// The declared audience configuration, with each source's binding status.
 fn audience_description(compiled: &appa_policy::Config, bindings: Bindings<'_>) -> AudienceDescription {
     let audience = compiled.registry().audience();
     let spelled = |spec: &appa_engine::audience::SelectorSpec| spec.to_string();
@@ -243,6 +253,7 @@ fn audience_description(compiled: &appa_policy::Config, bindings: Bindings<'_>) 
                     .map(|template| template.as_str().to_string())
                     .collect(),
                 binding_configured: bindings.bound(Section::Audience, provider),
+                lookup: bindings.lookup_target(provider),
             })
             .collect(),
         self_from: audience
@@ -263,13 +274,6 @@ fn audience_description(compiled: &appa_policy::Config, bindings: Bindings<'_>) 
                 from: group.from.iter().map(spelled).collect(),
             })
             .collect(),
-        identity: match audience.identity() {
-            appa_engine::audience::IdentityImplementation::VerifiedEmail => IdentityDescription::VerifiedEmail,
-            appa_engine::audience::IdentityImplementation::Custom(name) => IdentityDescription::Custom {
-                name: name.as_str().to_string(),
-                binding_configured: bindings.bound(Section::Identity, name.as_str()),
-            },
-        },
     }
 }
 
@@ -416,9 +420,14 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: &'static str) -> S
                     } else {
                         "binding missing"
                     };
+                    let lookups = source
+                        .lookup
+                        .as_deref()
+                        .map(|target| format!("; lookups via {target}"))
+                        .unwrap_or_default();
                     let _ = writeln!(
                         output,
-                        "  {}: {} ({binding})",
+                        "  {}: {} ({binding}{lookups})",
                         source.provider,
                         source.templates.join(", ")
                     );
@@ -433,22 +442,6 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: &'static str) -> S
                 for group in &audience.groups {
                     let within = group.within.map(|target| format!(" ⊆ {target}")).unwrap_or_default();
                     let _ = writeln!(output, "  {}{} from {}", group.name, within, group.from.join(", "));
-                }
-            }
-            match &audience.identity {
-                IdentityDescription::VerifiedEmail => {
-                    let _ = writeln!(output, "Identity: verified-email (built-in)");
-                }
-                IdentityDescription::Custom {
-                    name,
-                    binding_configured,
-                } => {
-                    let binding = if *binding_configured {
-                        "binding configured"
-                    } else {
-                        "binding missing"
-                    };
-                    let _ = writeln!(output, "Identity: {name} ({binding})");
                 }
             }
         }
@@ -499,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn loadable_config_reports_batteries_tools_authorities_sources_and_identity() {
+    fn loadable_config_reports_batteries_tools_authorities_and_sources() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let batteries = directory.path().join("bundled-batteries");
         let battery = batteries.join("mail");
@@ -512,7 +505,7 @@ mod tests {
         let root = directory.path().join("appa.toml");
         std::fs::write(
             &root,
-            "include = [\"batteries/mail/appa.toml\"]\n[policy]\nversion = 2\n[policy.audience.self]\nfrom = [\"slack:viewer\"]\n[[policy.audience.group]]\nname = \"finance\"\nwithin = \"internal\"\nfrom = [\"slack:user-group/finance\"]\n[policy.identity]\nimplementation = \"corp-identity\"\n[[policy.authority]]\nname = \"operator\"\n[policy.authority.permits]\ntrust_below = \"trusted\"\naudience_missing = [\"public\"]\neffects_containing = [\"mail.sent\"]\nattention = [\"hitl\"]\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n[externals.authorities.operator]\nbuiltin = \"hitl\"\n[externals.audience.slack]\ncommand = [\"true\"]\n[externals.identity.corp-identity]\ncommand = [\"true\"]\n",
+            "include = [\"batteries/mail/appa.toml\"]\n[policy]\nversion = 2\n[policy.audience]\nself = [\"slack:viewer\"]\n[policy.audience.group.finance]\nwithin = \"internal\"\nfrom = [\"slack:user-group/finance\"]\n[[policy.authority]]\nname = \"operator\"\n[policy.authority.permits]\ntrust_below = \"trusted\"\naudience_missing = [\"public\"]\neffects_containing = [\"mail.sent\"]\nattention = [\"hitl\"]\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n[externals.authorities.operator]\nbuiltin = \"hitl\"\n[externals.audience.slack]\ncommand = [\"true\"]\nlookup = \"people\"\n[externals.audience.people]\nreaders = { \"slack:U1\" = \"alice@corp.example\" }\n",
         )
         .expect("root config");
 
@@ -549,6 +542,7 @@ mod tests {
                     "user-group/<handle>".to_string()
                 ],
                 binding_configured: true,
+                lookup: Some("people".to_string()),
             }]
         );
         assert_eq!(audience.self_from, ["slack:viewer"]);
@@ -561,16 +555,15 @@ mod tests {
                 from: vec!["slack:user-group/finance".to_string()],
             }]
         );
-        assert_eq!(
-            audience.identity,
-            IdentityDescription::Custom {
-                name: "corp-identity".to_string(),
-                binding_configured: true,
-            }
-        );
-        assert!(render(&root, &[batteries], "claude-code").contains(
+        let rendered = render(&root, &[batteries], "claude-code");
+        assert!(rendered.contains(
             "operator: builtin hitl; permits trust_below=trusted, audience_missing=public, effects_containing=[mail.sent], attention=[hitl]"
         ));
+        assert!(
+            rendered
+                .contains("slack: viewer, full-members, user-group/<handle> (binding configured; lookups via people)"),
+            "{rendered}"
+        );
     }
 
     #[test]

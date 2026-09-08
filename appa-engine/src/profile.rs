@@ -425,8 +425,7 @@ fn identity_document(registry: &RegistryConfig, profile: &DeploymentProfile) -> 
         "trust_chain": registry.trust_chain,
         "authorities": authorities,
         "sanitizers": sanitizers,
-        // Which sources feed each audience and who resolves identity are part of what the
-        // policy means.
+        // Which sources feed each audience is part of what the policy means.
         "audience": registry.audience,
         "deployment": profile,
     })
@@ -468,8 +467,10 @@ pub(crate) fn validate_coverage(registry: &Registry, declaration: &ProfileDeclar
     check_rank(chain, Some(profile.starting_label.trust), || {
         "deployment starting label".to_string()
     })?;
+    // The registry build already gathered this label's selectors for the probe.
     check_routable(
         registry.audience(),
+        &mut BTreeSet::new(),
         profile.starting_label.audience.symbolic_atoms(),
         || "deployment starting label".to_string(),
     )?;

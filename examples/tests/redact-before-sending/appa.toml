@@ -4,7 +4,7 @@
 #
 # The HR desk is a literal reader here, not the built-in `internal`: a
 # sanitizer's `from` needs the members of the audience it moves from, and
-# `internal` has members only when an `[audience.internal]` source is bound.
+# `internal` has members only when a `[policy.audience] internal` source is bound.
 
 [policy]
 version = 2

@@ -1,9 +1,9 @@
-"""Cross-battery acceptance: the shipped audience-source scripts produce
-member claims whose verified emails drive the engine's verified-email
-identity rule — same attested address, same principal; different or
-absent address, distinct identities. The engine-side normalization is
-tested in appa-engine; these tests pin the claims the real scripts
-emit from recorded provider payloads, with no network.
+"""Cross-battery acceptance: the member id an audience source reports is
+the reader. Two providers that attest the same address report the same
+reader, so their audiences merge on it; a member without an attested
+address is its provider-qualified id, which merges with nothing. These
+tests pin the members the real scripts emit from recorded provider
+payloads, with no network.
 """
 
 import importlib.util
@@ -39,8 +39,8 @@ def fixture_api(responses):
     return call
 
 
-class CrossBatteryIdentityTests(unittest.TestCase):
-    def test_workspace_and_slack_attest_the_same_corporate_address(self):
+class CrossBatteryReaderTests(unittest.TestCase):
+    def test_workspace_and_slack_attesting_the_same_address_report_the_same_reader(self):
         workspace = WORKSPACE.answer(
             fixture_api([(WORKSPACE.USERINFO_URL, {}, {"email": "alice@corp.com", "email_verified": True})]),
             {"selector": "viewer"},
@@ -66,8 +66,8 @@ class CrossBatteryIdentityTests(unittest.TestCase):
             {"selector": "viewer"},
         )["members"][0]
 
-        self.assertNotEqual(workspace["id"], slack["id"])
-        self.assertEqual(workspace["verified_email"], slack["verified_email"])
+        self.assertEqual(workspace, "alice@corp.com")
+        self.assertEqual(slack, workspace)
 
     def test_a_personal_github_address_stays_distinct_from_the_corporate_one(self):
         github = GITHUB.answer(
@@ -84,9 +84,9 @@ class CrossBatteryIdentityTests(unittest.TestCase):
             {"selector": "viewer"},
         )["members"][0]
 
-        self.assertNotEqual(github["verified_email"], workspace["verified_email"])
+        self.assertNotEqual(github, workspace)
 
-    def test_an_identity_without_a_verified_address_stays_qualified(self):
+    def test_a_member_without_an_attested_address_is_its_qualified_id(self):
         slack = SLACK.answer(
             fixture_api(
                 [
@@ -106,8 +106,8 @@ class CrossBatteryIdentityTests(unittest.TestCase):
             {"selector": "viewer"},
         )["members"][0]
 
-        self.assertEqual(slack, {"id": "slack:U9"})
-        self.assertEqual(github, {"id": "github:alice"})
+        self.assertEqual(slack, "slack:U9")
+        self.assertEqual(github, "github:alice")
 
 
 if __name__ == "__main__":

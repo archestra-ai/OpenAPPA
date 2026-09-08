@@ -256,6 +256,25 @@ pub enum OpenError {
     Storage(String),
 }
 
+/// Why a deployment refused to serve after loading: a source the policy references gave no
+/// answer or an answer outside the reader shape rule, for a selector or for a member lookup
+/// its selectors owe.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ProbeError {
+    #[error("audience source {provider} failed the probe of selector {selector}: {reason}")]
+    Selector {
+        provider: String,
+        selector: String,
+        reason: String,
+    },
+    #[error("audience source {provider} failed the probe of member lookup {member}: {reason}")]
+    Lookup {
+        provider: String,
+        member: String,
+        reason: String,
+    },
+}
+
 /// Every lifecycle misuse is one typed error; the adapter renders it
 /// as a deny.
 #[derive(Debug, thiserror::Error)]
@@ -437,6 +456,126 @@ impl Deployment {
         PolicyEngine::Resident(&self.resident)
     }
 
+    /// Read every selector the policy references once, through the bound sources, and look
+    /// up every member those answers owe through the entries that answer them; hold each
+    /// answer to the reader shape rule. A source that fails or reports a malformed reader is
+    /// a misconfiguration to refuse before this deployment serves, not a no-answer to
+    /// discover under an agent. Replay never runs this: it reads pins.
+    async fn probe_sources(&self) -> Result<(), ProbeError> {
+        use appa_engine::audience::AudienceEvidence;
+        use futures_util::{StreamExt, TryStreamExt};
+
+        let audience = self.resident.registry().audience();
+        let selectors = audience
+            .referenced_selectors()
+            .into_iter()
+            .map(|spec| self.probe_selector(audience, spec));
+        let evidence = AudienceEvidence {
+            sources: futures_util::future::try_join_all(selectors).await?,
+            lookups: Vec::new(),
+        };
+        // Owed lookups run as many at a time as a command backend admits: a consult's
+        // deadline covers its wait for a permit, so a wider fan-out would time out in the
+        // queue rather than run.
+        let owed = audience.member_lookups_owed(&evidence);
+        let lookups: Vec<_> = owed
+            .iter()
+            .map(|spec| self.probe_lookup(audience, &evidence.sources, spec))
+            .collect();
+        futures_util::stream::iter(lookups)
+            .buffered(crate::external::COMMAND_CONSULT_PERMITS)
+            .try_collect::<Vec<_>>()
+            .await?;
+        Ok(())
+    }
+
+    async fn probe_selector(
+        &self,
+        audience: &appa_engine::audience::AudienceRegistry,
+        spec: &appa_engine::audience::SelectorSpec,
+    ) -> Result<appa_engine::audience::SourceClaims, ProbeError> {
+        use crate::consult::{Consult, MembersAnswer};
+        use crate::external::ConsultOutcome;
+        use appa_engine::audience::{AudienceEvidence, SourceClaims};
+        use appa_engine::label::ReaderId;
+
+        let refused = |reason: String| ProbeError::Selector {
+            provider: spec.provider.clone(),
+            selector: spec.selector.clone(),
+            reason,
+        };
+        let consult = Consult::audience_selector(
+            &spec.provider,
+            &spec.selector,
+            self.templates_of(audience, &spec.provider),
+        );
+        let answer = match self.externals.consult(&consult, None, None).await {
+            ConsultOutcome::Answer(answer) => MembersAnswer::from_wire(&answer)
+                .ok_or_else(|| refused("the answer is not {\"members\": [\"<reader>\", ...]}".to_string()))?,
+            ConsultOutcome::NoAnswer(reason) => return Err(refused(reason.diagnostic())),
+        };
+        let claims = SourceClaims {
+            provider: spec.provider.clone(),
+            selector: spec.selector.clone(),
+            members: answer.members.into_iter().map(ReaderId::new).collect(),
+        };
+        let evidence = AudienceEvidence {
+            sources: vec![claims.clone()],
+            lookups: Vec::new(),
+        };
+        audience
+            .expansions(&evidence)
+            .map_err(|refusal| refused(refusal.to_string()))?;
+        Ok(claims)
+    }
+
+    /// One owed lookup, asked of the entry the member's provider names and validated against
+    /// the sources that reported the member, exactly as the live pin is.
+    async fn probe_lookup(
+        &self,
+        audience: &appa_engine::audience::AudienceRegistry,
+        sources: &[appa_engine::audience::SourceClaims],
+        spec: &appa_engine::audience::LookupSpec,
+    ) -> Result<appa_engine::audience::MemberLookup, ProbeError> {
+        use crate::consult::{Consult, LookupAnswer};
+        use crate::external::ConsultOutcome;
+        use appa_engine::audience::{AudienceEvidence, MemberLookup};
+        use appa_engine::label::ReaderId;
+
+        let refused = |reason: String| ProbeError::Lookup {
+            provider: spec.provider.clone(),
+            member: spec.member.clone(),
+            reason,
+        };
+        let answering = self.config.externals.lookup_target(&spec.provider);
+        let consult = Consult::member_lookup(answering, &spec.member, self.templates_of(audience, &spec.provider));
+        let principal = match self.externals.consult(&consult, None, None).await {
+            ConsultOutcome::Answer(answer) => LookupAnswer::from_wire(&answer)
+                .ok_or_else(|| refused("the answer is not {\"principal\": \"<reader>\" | null}".to_string()))?
+                .principal
+                .map(ReaderId::new),
+            ConsultOutcome::NoAnswer(reason) => return Err(refused(reason.diagnostic())),
+        };
+        let lookup = MemberLookup {
+            provider: spec.provider.clone(),
+            member: spec.member.clone(),
+            principal,
+        };
+        let evidence = AudienceEvidence {
+            sources: sources.to_vec(),
+            lookups: vec![lookup.clone()],
+        };
+        audience
+            .expansions(&evidence)
+            .map_err(|refusal| refused(refusal.to_string()))?;
+        Ok(lookup)
+    }
+
+    /// A probed selector or owed lookup names a provider the policy registered.
+    fn templates_of(&self, audience: &appa_engine::audience::AudienceRegistry, provider: &str) -> Vec<String> {
+        crate::engine::selector_templates(audience, provider).expect("the probe reads only registered providers")
+    }
+
     fn root_opening(&self, trajectory: &TrajectoryId) -> Vec<appa_engine::fact::Fact> {
         self.resident
             .root_opening(trajectory, self.config.policy_file().bytes())
@@ -452,6 +591,19 @@ pub struct Reloaded {
     /// `false` when the new file's bytes are the ones already serving:
     /// the reload still ran every gate, and swapped an equal deployment.
     pub changed: bool,
+}
+
+/// A deployment loaded for a reload and not yet serving: the previous one keeps serving
+/// until [`Runtime::install`], and a failed probe here leaves it untouched.
+pub struct PreparedReload {
+    deployment: Arc<Deployment>,
+}
+
+impl PreparedReload {
+    /// [`Runtime::probe_sources`] over the prepared deployment.
+    pub async fn probe_sources(&self) -> Result<(), ProbeError> {
+        self.deployment.probe_sources().await
+    }
 }
 
 pub struct Runtime {
@@ -717,7 +869,7 @@ impl Runtime {
     /// The deployment `appa replay` runs: the same session and engine over a log that lives
     /// only as long as this value, with every authority and sanitizer answered in process —
     /// approve, and the body unchanged — as if the bound party had. Annotators, audience
-    /// sources, and identity stay bound as configured. Nothing of the run survives the process.
+    /// sources, and lookups stay bound as configured. Nothing of the run survives the process.
     pub fn open_in_memory(config: Config, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
         let mut prepared = Prepared::new(config, modules)?;
         prepared.deployment.stand_in_for_remedies();
@@ -737,15 +889,36 @@ impl Runtime {
         crate::engine::policy_file_key(serving.config.policy_file().bytes())
     }
 
+    /// Consult every selector the serving policy references once, and refuse on the first
+    /// source that fails or answers outside the reader shape rule. `serve` runs this after
+    /// [`Runtime::open`] and before it binds a listener, so a broken source stops the start.
+    pub async fn probe_sources(&self) -> Result<(), ProbeError> {
+        self.inner.deployment().probe_sources().await
+    }
+
     /// Replace the serving deployment with the one this configuration
     /// declares, without stopping the process (
     /// reloading a policy). The caller reads the file; the runtime never
     /// learns where a configuration came from, so an embedding host
-    /// reloads a composed policy the same way.
+    /// reloads a composed policy the same way. A host that probes the new
+    /// sources first prepares, probes, then installs.
     pub fn reload(&self, config: Config) -> Result<Reloaded, OpenError> {
+        Ok(self.install(self.prepare_reload(config)?))
+    }
+
+    /// Load the deployment a configuration declares without installing it: every open-time
+    /// gate runs, and the result is held for a probe before [`Runtime::install`] swaps it in.
+    pub fn prepare_reload(&self, config: Config) -> Result<PreparedReload, OpenError> {
         let deployment = Deployment::load(config, &self.inner.modules, self.inner.gates.clone())?;
+        Ok(PreparedReload {
+            deployment: Arc::new(deployment),
+        })
+    }
+
+    /// Swap a prepared deployment in as the serving one.
+    pub fn install(&self, prepared: PreparedReload) -> Reloaded {
+        let deployment = prepared.deployment;
         let identity = deployment.resident().identity_hex();
-        let deployment = Arc::new(deployment);
         // The gate's bound and the serving snapshot change as one transition under the
         // deployment lock, so two reloads racing cannot leave the gate bound by the
         // deployment that lost.
@@ -787,11 +960,11 @@ impl Runtime {
                 changed,
             },
         );
-        Ok(Reloaded {
+        Reloaded {
             policy_key: key,
             policy_identity: identity,
             changed,
-        })
+        }
     }
 
     /// Opens a fresh root. Refuses an id whose log already exists: a
@@ -1470,22 +1643,35 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
         }
     }
     bound_exactly("annotator", bound_by_deployment.into_iter(), &externals.annotators)?;
+    // Every provider the policy references is bound, and so is every entry a provider's
+    // `lookup` names. A roster answers member lookups only, so a provider whose selectors
+    // the policy reads never binds one.
+    let providers: std::collections::BTreeSet<&str> = rc
+        .audience
+        .sources
+        .iter()
+        .map(|source| source.provider.as_str())
+        .collect();
+    let targets: std::collections::BTreeSet<&str> = providers
+        .iter()
+        .filter_map(|provider| externals.audience.get(*provider))
+        .filter_map(|binding| binding.lookup.as_deref())
+        .collect();
     bound_exactly(
         "audience source",
-        rc.audience.sources.iter().map(|source| source.provider.as_str()),
+        providers.iter().chain(targets.iter()).copied(),
         &externals.audience,
     )?;
-    // The shipped `verified-email` implementation is engine-computed and takes no binding;
-    // only a policy-selected custom implementation binds, exactly once.
-    let custom_identity = match &rc.audience.identity {
-        Some(appa_engine::audience::IdentityImplementation::Custom(name)) => Some(name.as_str()),
-        Some(appa_engine::audience::IdentityImplementation::VerifiedEmail) | None => None,
-    };
-    bound_exactly(
-        "identity implementation",
-        custom_identity.into_iter(),
-        &externals.identity,
-    )?;
+    for provider in providers {
+        if matches!(
+            externals.audience[provider].implementation,
+            crate::config::AudienceImplementation::Readers(_)
+        ) {
+            return Err(OpenError::UnsupportedPolicy(format!(
+                "[externals.audience.{provider}] is a readers table, but the policy reads selectors from {provider}; a roster answers member lookups only"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -1522,7 +1708,34 @@ fn no_undeclared<'a, Implementation>(
 fn compile_policy(config: &Config) -> Result<appa_policy::Config, OpenError> {
     let text = toml::to_string(config.policy_file().value())
         .map_err(|error| OpenError::UnsupportedPolicy(format!("the policy table does not serialize: {error}")))?;
-    appa_policy::Config::from_toml_str(&text).map_err(|error| OpenError::Policy(Box::new(error)))
+    let lookup_providers = config
+        .externals
+        .audience
+        .iter()
+        .filter(|(_, binding)| binding.lookup.is_some())
+        .map(|(name, _)| name.clone())
+        .collect();
+    appa_policy::Config::from_toml_str_routed(&text, lookup_providers)
+        .map_err(|error| OpenError::Policy(Box::new(error)))
+}
+
+/// The providers whose member lookups a stored policy file redirects: the audience entries
+/// that carry a `lookup` — the same keys `compile_policy` reads off the loaded bindings, read
+/// here from the stored document so a retired file compiles under the routing it was written
+/// with.
+fn lookup_providers_of(document: &toml::Value) -> std::collections::BTreeSet<String> {
+    document
+        .get("externals")
+        .and_then(|externals| externals.get("audience"))
+        .and_then(toml::Value::as_table)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|(_, entry)| entry.get("lookup").is_some())
+                .map(|(name, _)| name.clone())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The `[policy]` table of a stored policy file, with the key of the bytes it came from.
@@ -1547,7 +1760,8 @@ fn compile_stored_policy(bytes: &[u8]) -> Result<appa_policy::Config, String> {
         .ok_or("the stored policy file has no [policy] table")?;
     let text =
         toml::to_string(policy).map_err(|error| format!("the stored policy table does not serialize: {error}"))?;
-    appa_policy::Config::from_toml_str(&text).map_err(|error| format!("the stored policy does not load: {error}"))
+    appa_policy::Config::from_toml_str_routed(&text, lookup_providers_of(&value))
+        .map_err(|error| format!("the stored policy does not load: {error}"))
 }
 
 /// Plain-data fixtures for tests outside this module, so they can name

@@ -230,7 +230,7 @@ Each audience entry can be one of the following:
 |---|---|
 | `"public"`, `"internal"`, `"self"` | Built-in audiences: everyone (`public`), the organization (`internal`), or the identity OpenAPPA acts for (`self`). |
 | `"@name"`, `"@provider:selector"` | A configured group, such as `"@finance"`, or a group read directly from a source, such as `"@slack:user-group/oncall"`. |
-| Other strings, such as `"alice@example.com"` | A literal reader ID, compared exactly after [identity resolution](#identity-resolution). For example, `"finance"` is a reader ID; `"@finance"` refers to a group. |
+| Other strings, such as `"alice@example.com"` | A literal [reader ID](#reader-ids), compared exactly. For example, `"finance"` is a reader ID; `"@finance"` refers to a group. |
 
 For example, `audience = ["@finance", "alice@example.com"]` includes all members of `finance` and the individual reader `alice@example.com`.
 
@@ -259,22 +259,20 @@ The argument can contain a literal reader, `public`, `self`, `internal`, or an `
 
 Membership answers: who belongs to this audience? OpenAPPA asks an external membership service for the members. For example, that service can read the members of a Slack group.
 
-Each `from` entry has the form `provider:selector`. The provider identifies the service configured under `[externals.audience.<provider>]`. The selector tells that service which identity or group to read.
+Under `[policy.audience]`, `self` and `internal` list the selectors that supply their members. `[policy.audience.group.<name>]` declares a named group with `within` and `from`.
+
+Each selector entry has the form `provider:selector`. The provider identifies the service configured under `[externals.audience.<provider>]`. The selector tells that service which reader or group to read.
 
 The example below uses a Google Workspace membership service to define `self`, `internal`, and `@finance`:
 
 ```toml
-# Use the Google Workspace viewer as self.
-[policy.audience.self]
-from = ["google-workspace:viewer"]
-
-# Use Google Workspace organization members as internal.
-[policy.audience.internal]
-from = ["google-workspace:full-members"]
+# Use the Google Workspace viewer as self and organization members as internal.
+[policy.audience]
+self = ["google-workspace:viewer"]
+internal = ["google-workspace:full-members"]
 
 # Define @finance from a Workspace group and declare it part of internal.
-[[policy.audience.group]]
-name = "finance"
+[policy.audience.group.finance]
 within = "internal"
 from = ["google-workspace:group/finance@corp.com"]
 
@@ -297,24 +295,24 @@ The current implementation has a fixed set of providers and selector formats. Yo
 
 Choose a selector based on the audience you configure:
 
-| Audience section | Selectors you can use in `from` |
+| Audience key | Selectors you can use |
 |---|---|
-| `[policy.audience.self]` | `viewer`: the identity OpenAPPA acts for. |
-| `[policy.audience.internal]` | `full-members` for Google Workspace or Slack; `org/<org>/members` for GitHub. For example, `github:org/acme/members` makes members of `acme` internal. Members of other GitHub organizations are not included by this source. |
-| `[[policy.audience.group]]` | A specific group or an organization's members, using any of the formats above except `viewer`. |
+| `self` | `viewer`: the identity OpenAPPA acts for. |
+| `internal` | `full-members` for Google Workspace or Slack; `org/<org>/members` for GitHub. For example, `github:org/acme/members` makes members of `acme` internal. Members of other GitHub organizations are not included by this source. |
+| `group.<name>.from` | A specific group or an organization's members, using any of the formats above except `viewer`. |
 
-OpenAPPA rejects the configuration if you use a selector in the wrong section. For example, `slack:viewer` cannot define `internal`.
+OpenAPPA rejects the configuration if you use a selector in the wrong key. For example, `slack:viewer` cannot define `internal`. The load error for a selector that matches no format lists the formats the provider understands.
 
-If `from` contains several sources, the audience includes members from any of them. For example, `from = ["google-workspace:full-members", "slack:full-members"]` includes members returned by either service.
+If a key lists several sources, the audience includes members from any of them. For example, `internal = ["google-workspace:full-members", "slack:full-members"]` includes members returned by either service.
 
 In the `finance` example, `within = "internal"` declares that every member of `finance` is internal. OpenAPPA trusts this declaration; it does not check each member against the sources for `internal` or check their email domain. A group can declare `within = "self"` or `within = "internal"`.
 
-You can use `"@slack:user-group/oncall"` directly instead of declaring a named group such as `@oncall` in `[[policy.audience.group]]`. It refers to the Slack group `oncall`. To use this reference, at least one `from` entry must use the `slack` provider:
+You can use `"@slack:user-group/oncall"` directly instead of declaring a named group such as `@oncall` under `[policy.audience.group.<name>]`. It refers to the Slack group `oncall`. To use this reference, at least one selector must use the `slack` provider:
 
 ```toml
 # Use Slack workspace members as internal.
-[policy.audience.internal]
-from = ["slack:full-members"]
+[policy.audience]
+internal = ["slack:full-members"]
 
 # Restrict incident details to the Slack oncall group.
 [[policy.tool]]
@@ -326,13 +324,25 @@ delta = { audience = ["@slack:user-group/oncall"] }
 url = "https://audience.corp/slack"
 ```
 
-OpenAPPA rejects policy references to undeclared named audiences, providers not used in `from`, or unsupported selector formats.
+OpenAPPA rejects policy references to undeclared named audiences, providers not used in any selector, or unsupported selector formats.
+
+##### Reader IDs
+
+A reader ID is a string that OpenAPPA compares exactly. The membership service decides the reader ID for each member: the email address the provider verified for the account, otherwise `<provider>:<id>`, such as `slack:U012345` or `github:alice`. The shipped Slack, GitHub, and Google Workspace services do this. The GitHub service reports organization and team members by profile email where the member publishes one, otherwise as `github:<login>`.
+
+The membership service is responsible for verifying who owns an address. OpenAPPA trusts the service; it does not verify ownership itself. Two services that report the same verified address name the same reader. A member reported by provider ID merges with nothing else.
+
+OpenAPPA converts the domain of an address to lowercase. It leaves the part before `@` unchanged, including dots and `+suffix` values. It does not merge aliases or treat personal and corporate addresses as the same reader.
+
+Every reader ID in an answer must be a well-formed email address or `<provider>:<non-empty>` under the answering provider. An ID with a `:` before its `@` is a qualified ID, not an address. Any other value, such as `"finance"`, refuses the whole answer as an operational failure that names the provider and selector. OpenAPPA records no decision for a refused answer.
+
+A service that reports one account under two different addresses within one operation yields two reader IDs for one person. The result is a narrower audience, never a wider one.
 
 ##### Membership request protocol
 
 Audience providers support HTTP endpoints and local commands.
 
-OpenAPPA can ask the membership service for a group's members or for details about one member. The examples below show the request data and response data. For the complete JSON request and response format, see [The consult request](#the-consult-request).
+OpenAPPA can ask the membership service for a group's members or for the reader ID behind one member. The examples below show the request data and response data. For the complete JSON request and response format, see [The consult request](#the-consult-request).
 
 To read the members of the Slack `oncall` group, OpenAPPA sends:
 
@@ -340,15 +350,13 @@ To read the members of the Slack `oncall` group, OpenAPPA sends:
 {"selector": "user-group/oncall"}
 ```
 
-The service returns the members and their identity details:
+The service returns the members as reader IDs:
 
 ```json
-{
-  "members": [
-    {"id": "slack:U1", "verified_email": "a@corp.com"}
-  ]
-}
+{"members": ["a@corp.com", "slack:U2"]}
 ```
+
+The service returns `{"members": []}` when a group has no members. This is a successful response.
 
 To look up one member, OpenAPPA sends:
 
@@ -356,84 +364,41 @@ To look up one member, OpenAPPA sends:
 {"member": "slack:U1"}
 ```
 
-The service returns that member's identity details under `claims`:
+The service returns that member's reader ID under `principal`:
 
 ```json
-{
-  "claims": {
-    "id": "slack:U1",
-    "verified_email": "a@corp.com"
-  }
-}
+{"principal": "a@corp.com"}
 ```
 
-If the service cannot find the member, it returns `{"claims": null}`.
+If the service cannot find the member, it returns `{"principal": null}`. The member then keeps its ID as written. A non-null `principal` must satisfy the [reader ID rule](#reader-ids).
 
-The service returns `{"members": []}` when a group has no members. This is a successful response. If the service fails or takes too long to respond, OpenAPPA cannot complete the audience check and stops the operation.
+If the service fails, takes too long to respond, or returns an invalid answer, OpenAPPA cannot complete the audience check and stops the operation. OpenAPPA records membership responses with the decision that requested them.
 
-#### Identity resolution
+##### Map members with `lookup` and `readers`
 
-Membership services can identify the same person as `google-workspace:alice@corp.com`, `slack:U012345`, or `github:alice`. Identity resolution maps these identities to a common reader ID, such as `alice@corp.com`, which OpenAPPA uses to check audience conditions.
+By default, a provider's own service answers member lookups. Set `lookup = "<name>"` on a provider to send its member lookups to another `[externals.audience.<name>]` entry. That entry has exactly one of `readers`, `command`, or `url`. A `readers` entry is an inline table from `<provider>:<id>` to reader ID. OpenAPPA answers from that table without calling a service.
 
-This applies only to members returned by services for `self`, `internal`, and groups, including directly referenced groups. Audience names remain unchanged. Literal reader IDs in the policy or tool arguments are compared directly, without identity resolution.
-
-##### Default implementation
-
-`verified-email` is OpenAPPA's default identity implementation. OpenAPPA uses it automatically if you omit `[policy.identity]`.
-
-It reads the membership service's `verified_email` field, checks that it has a valid email format, and uses that address as the reader ID. If the field is absent, it keeps the provider ID.
-
-The membership service is responsible for verifying who owns the email address. OpenAPPA trusts that service's claim; it does not verify ownership itself. A value such as `"finance"` or `"id63234"` in `verified_email` causes an error because it is not an email address. OpenAPPA does not fall back to the provider ID when this field is invalid.
-
-This configuration explicitly selects the default implementation:
+The example below maps GitHub members to corporate addresses with a `readers` table:
 
 ```toml
-[policy.identity]
-implementation = "verified-email"
+[policy.audience]
+self = ["github:viewer"]
+internal = ["github:org/acme/members"]
+
+[externals.audience.github]
+command = ["python3", "batteries/github/audience-source.py"]
+token_env = "APPA_PROVIDER_GITHUB_TOKEN"
+lookup = "people"
+
+[externals.audience.people]
+readers = { "github:alice" = "alice@corp.com" }
 ```
 
-For example, a Slack member and a GitHub member with the verified email `alice@corp.com` become the same reader. A Slack member without a verified email keeps an ID such as `slack:U012345`. OpenAPPA makes no additional network requests for this step.
+For a provider with `lookup`, OpenAPPA also looks up every group member that is not an email address. With the configuration above, the member `github:alice` reported for `org/acme/members` becomes the reader `alice@corp.com`. A `null` answer, or a member absent from a `readers` table, leaves the member as written. OpenAPPA records lookup answers with the decision like other membership responses.
 
-OpenAPPA converts the email domain to lowercase. It leaves the part before `@` unchanged, including dots and `+suffix` values. It does not merge aliases or treat personal and corporate addresses as the same identity.
+##### Source probe at start and reload
 
-##### Custom implementation
-
-To apply your own identity rules, configure an external identity service. For example, your service could map `github:alice` and `slack:U012345` to the same reader ID, `alice@corp.com`:
-
-```toml
-# Use the corp-identity service to resolve member identities.
-[policy.identity]
-implementation = "corp-identity"
-
-# Set the service endpoint.
-[externals.identity.corp-identity]
-url = "https://identity.corp/resolve"
-```
-
-The `implementation` name must match the name under `[externals.identity.<name>]`. Identity services support HTTP endpoints and local commands.
-
-##### Identity resolution protocol
-
-OpenAPPA sends one member's identity details to the service configured under `[externals.identity.corp-identity]`. The service returns one reader ID. The examples below show the request data and response data. For the complete JSON format, see [The consult request](#the-consult-request).
-
-For a Slack member, OpenAPPA sends:
-
-```json
-{
-  "id": "slack:U012345",
-  "verified_email": "alice@corp.com"
-}
-```
-
-The service returns the reader ID in the `principal` field:
-
-```json
-{"principal": "alice@corp.com"}
-```
-
-The `verified_email` field is omitted when the member has no verified email. The service must return one valid reader ID for each member and must return the same result for the same input. OpenAPPA saves the response with the decision that requested it.
-
-If the service fails, takes too long to respond, or returns an invalid answer, OpenAPPA cannot complete the identity check and stops the operation.
+Before it serves a configuration, and before it switches to a reloaded one, OpenAPPA reads every selector the policy references once, looks up every member those answers owe through the configured `lookup` entry, and applies the reader ID rule to each answer. A service that fails or returns a malformed reader ID stops the start or the reload with the provider, the selector or member, and the reason. A failed reload leaves the previous configuration serving. Replay does not probe.
 
 ### Trust
 
@@ -989,8 +954,8 @@ version = 2
 context_control = true
 confined_results = ["get_ticket_from_crm"]
 
-[policy.audience.internal]
-from = ["google-workspace:full-members"]
+[policy.audience]
+internal = ["google-workspace:full-members"]
 
 [[policy.tool]]
 name = "get_ticket_from_crm"
@@ -1118,8 +1083,7 @@ The available settings depend on the component's role:
 | `authorities` | Exactly one of `url`, `command`, or `builtin`. | Optional. Without a binding, the authority returns no answer. |
 | `sanitizers` | Exactly one of `url`, `command`, or `builtin`. | Required, except for `attest-schema`. |
 | `annotators` | Exactly one of `url` or `command`. | Required unless the declaration specifies a builtin. |
-| `audience` | Exactly one of `url` or `command`. | Required for each referenced provider. |
-| `identity` | Exactly one of `url` or `command`. | Required for custom implementations. No binding for `verified-email`. |
+| `audience` | Exactly one of `url`, `command`, or `readers`; optional `lookup`. | Required for each referenced provider and each `lookup` target. `readers` is allowed only on a `lookup` target. |
 
 OpenAPPA rejects an external component name that the policy does not declare, or a component that is missing its required implementation. For annotators, `builtin` belongs on `[[policy.annotator]]`, not under `[externals]`.
 
@@ -1165,10 +1129,10 @@ A consult request is a JSON request that OpenAPPA sends to an external component
 | Key | Meaning |
 |---|---|
 | `version` | Protocol version. Must be `1`. |
-| `kind` | `authority`, `sanitizer`, `annotation`, `audience`, or `identity`. |
+| `kind` | `authority`, `sanitizer`, `annotation`, or `audience`. |
 | `name` | The component name declared in the policy. |
 | `declaration` | Policy instructions and limits for the component. The agent does not supply them. |
-| `artifact` | Request data: the tool call to review, data to clean, or membership details to look up. |
+| `artifact` | Request data: the tool call to review, data to clean, or the selector or member to look up. |
 
 Each component uses these fields differently:
 
@@ -1177,8 +1141,7 @@ Each component uses these fields differently:
 | `authority` | `hint`, `permits` | `tool`, `arguments`, `requirements` | `ruling`, optional `reason` |
 | `sanitizer` | `hint`, `on`, `permits`; `parameters` for input rewrites | `tool` when known, `body` | `body` |
 | `annotation` | `hint`, `inputs`, `trust_ranks`, `audiences`, `attention_marks`, `effects` | `args` | `delta`, `requires`, `emits` |
-| `audience` | `templates` | `selector` or `member` | `members` or `claims` |
-| `identity` | Empty | Member claims: `id`, optional `verified_email` | `principal` |
+| `audience` | `templates` | `selector` or `member` | `members` or `principal` |
 
 For an audience request, `declaration.templates` lists the selector formats that OpenAPPA registers for the provider, such as `viewer` and `user-group/<handle>`. The service reads the requested selector or member ID from `artifact` and returns its result under `answer`.
 

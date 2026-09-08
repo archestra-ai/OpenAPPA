@@ -267,6 +267,20 @@ async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (
         included: config.included_batteries().iter().cloned().collect(),
         serving_tools: config.tool_names().into_iter().collect(),
     };
+    let refused = |refusal: String| {
+        tracing::warn!(%refusal, "the reload was refused; the running deployment keeps serving");
+        (axum::http::StatusCode::UNPROCESSABLE_ENTITY, refusal)
+    };
+    let prepared = state
+        .runtime
+        .prepare_reload(config)
+        .map_err(|refusal| refused(refusal.to_string()))?;
+    // The new sources are probed before anything swaps, and before the battery lock below
+    // is taken: nothing holds a std lock across the await.
+    prepared
+        .probe_sources()
+        .await
+        .map_err(|refusal| refused(refusal.to_string()))?;
     let mut published = state
         .battery_state
         .write()
@@ -274,16 +288,9 @@ async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (
     // The matcher holds this lock while reading policy metadata. Keep it
     // across the synchronous policy swap so no response can describe the
     // old policy after the new one starts serving.
-    match state.runtime.reload(config) {
-        Ok(reloaded) => {
-            *published = battery_state;
-            Ok(axum::Json(reloaded))
-        }
-        Err(refusal) => {
-            tracing::warn!(%refusal, "the reload was refused; the running deployment keeps serving");
-            Err((axum::http::StatusCode::UNPROCESSABLE_ENTITY, refusal.to_string()))
-        }
-    }
+    let reloaded = state.runtime.install(prepared);
+    *published = battery_state;
+    Ok(axum::Json(reloaded))
 }
 
 #[derive(serde::Deserialize)]
@@ -416,6 +423,12 @@ async fn serve(args: Args) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Every audience source the policy references answers once before the runtime serves:
+    // a source that is down or reports a malformed reader stops the start here.
+    if let Err(error) = runtime.probe_sources().await {
+        eprintln!("appa runtime: {error}");
+        return ExitCode::FAILURE;
+    }
 
     let state = AppState {
         runtime: Arc::clone(&runtime),

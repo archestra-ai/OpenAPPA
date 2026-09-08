@@ -31,33 +31,32 @@ root config if you enable those sets.
 **`audience-source.py`** — the `github` audience source. It answers the
 stock catalog's selectors over the GitHub REST API:
 
-- `github:viewer` — the token's own principal, with its primary
-  verified email from `/user/emails`. Feeds `self`.
+- `github:viewer` — the token's own reader: its primary verified email
+  from `/user/emails`, else `github:<login>`. Feeds `self`.
 - `github:org/<org>/members` — one organization's members, bots
   excluded. Feeds `internal`, and only for the organizations a policy
   names — membership in unrelated, open-source, or personal
   organizations never implies `internal`.
 - `github:org/<org>/team/<team>` — one organization team, by slug.
-  Feeds `[[audience.group]]` entries.
+  Feeds `group` entries.
 
-It also answers the member lookup that canonicalizes a
-`github:<login>` reader. Only the viewer carries a verified email: a
-profile's public email is whatever its owner typed, so every other
-member keeps the bare `github:<login>` identity and distinct
-identities never merge by guess.
+A member is the email address GitHub verifies for the account, else
+`github:<login>`, which merges with no other provider's reader. For an
+organization or team member that is the email published on its
+profile, read with one `/users/<login>` call per member, eight at a
+time: GitHub lets an account publish only a verified address there. The member lookup
+resolves a `github:<login>` member the same way and answers `null`
+for a login GitHub does not know.
 
 The source is not wired by this file: audience mappings are root-only,
 and the binding must sit beside them. In the root config:
 
 ```toml
-[policy.audience.self]
-from = ["github:viewer"]
+[policy.audience]
+self = ["github:viewer"]
+internal = ["github:org/archestra-ai/members"]
 
-[policy.audience.internal]
-from = ["github:org/archestra-ai/members"]
-
-[[policy.audience.group]]
-name = "finance"
+[policy.audience.group.finance]
 within = "internal"
 from = ["github:org/archestra-ai/team/finance"]
 

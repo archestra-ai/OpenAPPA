@@ -877,13 +877,17 @@ impl Registry {
     ) -> Result<Registry, LoadError> {
         config.trust_chain.validate()?;
         let audience_vocabulary = configured_audience_vocabulary(&config, &profile);
-        let audience = validated_audience_registry(&config.audience)?;
+        let mut audience = validated_audience_registry(&config.audience)?;
+        let mut direct = BTreeSet::new();
         for clause in profile.starting_label().audience.clauses() {
             check_literal(clause.readers(), || "starting label".to_string())?;
         }
-        check_routable(&audience, profile.starting_label().audience.symbolic_atoms(), || {
-            "starting label".to_string()
-        })?;
+        check_routable(
+            &audience,
+            &mut direct,
+            profile.starting_label().audience.symbolic_atoms(),
+            || "starting label".to_string(),
+        )?;
 
         // Sanitizers index first: the child return-sanitizer binding validates against them.
         let mut sanitizers = BTreeMap::new();
@@ -909,8 +913,8 @@ impl Registry {
                     }
                 }
                 DeclaredTransition::Audience { from_includes, to } => {
-                    check_declared(&audience, from_includes, || format!("{} from", context()))?;
-                    check_declared(&audience, to, || format!("{} to", context()))?;
+                    check_declared(&audience, &mut direct, from_includes, || format!("{} from", context()))?;
+                    check_declared(&audience, &mut direct, to, || format!("{} to", context()))?;
                 }
             }
             check_hint(sanitizer.hint.as_ref(), context)?;
@@ -927,7 +931,7 @@ impl Registry {
                 check_rank(&config.trust_chain, Some(*rank), context)?;
             }
             if let Some(audiences) = &annotator.audiences {
-                check_routable(&audience, audiences.group_atoms(), context)?;
+                check_routable(&audience, &mut direct, audiences.group_atoms(), context)?;
             }
             let name = annotator.name.clone();
             if annotator_declarations.insert(name.clone(), annotator).is_some() {
@@ -981,17 +985,21 @@ impl Registry {
                         format!("tool {} trust floor", tool.name.as_str())
                     })?;
                     if let Some(declared) = tool.delta.audience.as_ref() {
-                        check_declared(&audience, declared, || format!("tool {} delta", tool.name.as_str()))?;
+                        check_declared(&audience, &mut direct, declared, || {
+                            format!("tool {} delta", tool.name.as_str())
+                        })?;
                     }
                     for requirement in tool.requires.audience_requirements() {
                         match requirement {
                             AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => {
-                                check_declared(&audience, recipients, || {
+                                check_declared(&audience, &mut direct, recipients, || {
                                     format!("tool {} contains", tool.name.as_str())
                                 })?;
                             }
                             AudienceRequirement::Cap(cap) => {
-                                check_declared(&audience, cap, || format!("tool {} within", tool.name.as_str()))?;
+                                check_declared(&audience, &mut direct, cap, || {
+                                    format!("tool {} within", tool.name.as_str())
+                                })?;
                             }
                             AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => {}
                         }
@@ -1035,7 +1043,7 @@ impl Registry {
                 format!("authority {} trust ceiling", authority.name.as_str())
             })?;
             if let Some(ceiling) = &authority.mandate.reader_ceiling {
-                check_declared(&audience, ceiling, || {
+                check_declared(&audience, &mut direct, ceiling, || {
                     format!("authority {} reader ceiling", authority.name.as_str())
                 })?;
             }
@@ -1142,6 +1150,7 @@ impl Registry {
             })
             .collect();
 
+        audience.direct = direct;
         Ok(Registry {
             trust_chain: config.trust_chain,
             audience_vocabulary,
@@ -1445,8 +1454,8 @@ fn validated_audience_registry(config: &AudienceConfig) -> Result<AudienceRegist
         }
         Ok(())
     };
-    sourced(&config.self_from, "[audience.self]")?;
-    sourced(&config.internal_from, "[audience.internal]")?;
+    sourced(&config.self_from, "[audience] self")?;
+    sourced(&config.internal_from, "[audience] internal")?;
     for group in &config.groups {
         sourced(&group.from, &format!("named audience @{}", group.name.as_str()))?;
     }
@@ -1469,9 +1478,11 @@ fn check_selector(
 
 /// Every group reference a policy declaration writes must resolve at load: a named audience
 /// must be configured, and a source-qualified selector must match a template of its
-/// registered provider. Chain words and readers pass — they are always meaningful.
+/// registered provider. Chain words and readers pass — they are always meaningful. Each
+/// routed selector joins `direct`, the set the source probe reads.
 pub(crate) fn check_routable(
     registry: &AudienceRegistry,
+    direct: &mut BTreeSet<SelectorSpec>,
     atoms: impl IntoIterator<Item = SymbolicAtom>,
     context: impl Fn() -> String,
 ) -> Result<(), LoadError> {
@@ -1487,17 +1498,13 @@ pub(crate) fn check_routable(
                 Unroutable::UnknownGroup(name.clone())
             }
             GroupRef::Source { provider, selector } => {
-                match check_selector(
-                    registry,
-                    &SelectorSpec {
-                        provider: provider.clone(),
-                        selector: selector.clone(),
-                    },
-                    &context,
-                ) {
-                    Ok(()) => continue,
-                    Err(error) => return Err(error),
-                }
+                let spec = SelectorSpec {
+                    provider: provider.clone(),
+                    selector: selector.clone(),
+                };
+                check_selector(registry, &spec, &context)?;
+                direct.insert(spec);
+                continue;
             }
         };
         return Err(LoadError::UnroutableAudience {
@@ -1513,13 +1520,14 @@ pub(crate) fn check_routable(
 /// references route.
 fn check_declared(
     registry: &AudienceRegistry,
+    direct: &mut BTreeSet<SelectorSpec>,
     declared: &DeclaredAudience,
     context: impl Fn() -> String + Copy,
 ) -> Result<(), LoadError> {
     if let DeclaredAudience::Union(clause) = declared {
         check_literal(clause.readers(), context)?;
     }
-    check_routable(registry, declared.symbolic_atoms(), context)
+    check_routable(registry, direct, declared.symbolic_atoms(), context)
 }
 
 fn check_literal(readers: &BTreeSet<ReaderId>, context: impl Fn() -> String) -> Result<(), LoadError> {
@@ -2126,6 +2134,21 @@ mod tests {
         cfg.authorities = vec![officer];
         cfg.sanitizers = vec![redact];
         let registry = Registry::build_covered(cfg).expect("the surfaces load");
+        // The probe's reading list: every configured group source and the one selector a
+        // declaration routes directly.
+        assert_eq!(
+            registry
+                .audience()
+                .referenced_selectors()
+                .iter()
+                .map(|spec| format!("{}:{}", spec.provider, spec.selector))
+                .collect::<Vec<_>>(),
+            [
+                "slack:user-group/oncall",
+                "slack:user-group/team",
+                "slack:user-group/unreferenced",
+            ]
+        );
         let open = registry
             .annotator_mandate(&AnnotatorName::new("open"))
             .expect("open is registered");

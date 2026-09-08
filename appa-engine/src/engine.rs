@@ -10620,14 +10620,12 @@ mod tests {
         raw(&call("send", json!({ "to": to })))
     }
 
-    fn slack_member(id: &str, email: Option<&str>) -> crate::audience::MemberClaims {
-        crate::audience::MemberClaims {
-            id: id.to_string(),
-            verified_email: email.map(str::to_string),
-        }
+    /// The reader Slack reports for one account: its confirmed address, else its id.
+    fn slack_member(id: &str, email: Option<&str>) -> ReaderId {
+        ReaderId::new(email.unwrap_or(id))
     }
 
-    fn user_group(handle: &str, members: Vec<crate::audience::MemberClaims>) -> crate::audience::SourceClaims {
+    fn user_group(handle: &str, members: Vec<ReaderId>) -> crate::audience::SourceClaims {
         crate::audience::SourceClaims {
             provider: "slack".to_string(),
             selector: format!("user-group/{handle}"),
@@ -10920,7 +10918,7 @@ mod tests {
     fn audience_evidence_is_batch_payload() {
         let e = audience_engine(vec![], known(TRUSTED, Audience::restricted([corp_reader("alice")])));
         let log = vec![opened(&e)];
-        let team = |member: crate::audience::MemberClaims| source_evidence(vec![user_group("team", vec![member])]);
+        let team = |member: ReaderId| source_evidence(vec![user_group("team", vec![member])]);
         let first = e
             .handle(
                 &viewing(&e, &log),
@@ -11054,7 +11052,7 @@ mod tests {
             "the produced cap is read extensionally, so the act asks for exactly its group"
         );
 
-        let team = |members: Vec<crate::audience::MemberClaims>| source_evidence(vec![user_group("team", members)]);
+        let team = |members: Vec<ReaderId>| source_evidence(vec![user_group("team", members)]);
         let evidence = team(vec![slack_member("slack:UA", Some("alice@corp.com"))]);
         let decision = e
             .handle(&viewing(&e, &log), batch_with(evidence.clone()))
@@ -11246,7 +11244,7 @@ mod tests {
         );
     }
 
-    fn wide_as_reported() -> Vec<crate::audience::MemberClaims> {
+    fn wide_as_reported() -> Vec<ReaderId> {
         vec![
             slack_member("slack:UA", Some("alice@corp.com")),
             slack_member("slack:UC", Some("carol@other.com")),
@@ -11312,25 +11310,6 @@ mod tests {
                 crate::audience::EvidenceRefusal::ContradictedPin { .. }
             ))
         ));
-    }
-
-    /// Two admissible evidence sets can still disagree once merged — the pinned selector and
-    /// a fresh one report the same member under different verified addresses. The spend
-    /// refuses the merged reading as it refuses any other conflicting claim.
-    #[test]
-    fn a_spend_refuses_a_merged_reading_whose_claims_conflict() {
-        let conflicting = source_evidence(vec![user_group(
-            "narrow",
-            vec![slack_member("slack:UA", Some("mallory@other.com"))],
-        )]);
-        assert_eq!(
-            spending_under_pins(conflicting).err(),
-            Some(TransitionError::ForeignEvidence(
-                crate::audience::EvidenceRefusal::ConflictingClaims {
-                    id: "slack:UA".to_string()
-                }
-            ))
-        );
     }
 
     #[test]
@@ -13634,7 +13613,7 @@ mod tests {
                 lookups: vec![crate::audience::MemberLookup {
                     provider: "slack".to_string(),
                     member: "slack:U1".to_string(),
-                    claims: Some(slack_member("slack:U1", None)),
+                    principal: Some(slack_member("slack:U1", None)),
                 }],
                 ..source_evidence(vec![user_group("team", vec![slack_member("slack:U1", None)])])
             };

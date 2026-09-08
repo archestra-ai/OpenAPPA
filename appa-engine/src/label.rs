@@ -36,12 +36,11 @@ impl Trust {
 
 /// A literal reader identity — an opaque atom to the pure algebra. Restricted audiences
 /// intersect and compare readers exactly, so equality is exact string equality; a
-/// provider-qualified reader (`slack:U012345`) is canonicalized to its principal by the
-/// deployment's identity implementation *before* it reaches a comparison, and the pinned
-/// principal is what an audience holds. An email address is that principal already: a
-/// reader written as one denotes the same person a verified-email claim resolves to, so
-/// `alice@corp.com` in a policy, in a tool argument, and behind a directory's verified
-/// claim are one reader. Four spellings are reserved and never readers: `public` (the
+/// provider-qualified reader (`slack:U012345`) is canonicalized to its principal by a
+/// pinned member lookup *before* it reaches a comparison, and the pinned principal is what
+/// an audience holds. An email address is that principal already: a source reports a
+/// member as the address the provider verified for it, so `alice@corp.com` in a policy, in
+/// a tool argument, and in a directory's answer are one reader. Four spellings are reserved and never readers: `public` (the
 /// universal audience state), `self` and `internal` (the built-in chain), and any leading
 /// `@` (a group reference). The constructor cannot enforce that, so the rule is
 /// [`is_literal`](ReaderId::is_literal), applied on every ingress that builds a reader set:
@@ -97,7 +96,7 @@ impl ReaderId {
 
     /// A reader that denotes itself under *every* deployment: it carries no provider prefix
     /// a source could own. Email principals qualify — an address holds no `:` — which is
-    /// why a directory's verified claim and a policy-written address compare directly. Only
+    /// why a directory-reported address and a policy-written address compare directly. Only
     /// stable readers may participate in permanent canonicalization's exact intersection: a
     /// qualified reader's meaning is an operation-pinned principal, and canonical label
     /// equality must never depend on it.
@@ -584,9 +583,9 @@ pub struct MembershipNeeded {
 }
 
 /// The membership answers one operation reads: one exact reader set per group or chain
-/// atom, post-identity and post-closure, and one principal per canonicalized reader. Built
-/// by the operation's driver from pinned primitive evidence — source answers, member
-/// lookups, identity mappings — and rebuilt identically on replay, so a live decision and
+/// atom, post-lookup and post-closure, and one principal per canonicalized reader. Built
+/// by the operation's driver from pinned primitive evidence — source answers and member
+/// lookups — and rebuilt identically on replay, so a live decision and
 /// its replay read the same directory answers. An empty set is a valid answer.
 ///
 /// Every ask — answered or not — lands in the reads log, so after a decision runs the log
@@ -1408,8 +1407,8 @@ mod tests {
             Trust::new(1),
             Audience::of_clauses([clause([ChainAudience::Internal], [], [])]),
         );
-        // $recipient = slack:U012345, where Slack reports Alice's verified corporate email
-        // and the internal closure holds her principal: the cross-provider case end-to-end.
+        // $recipient = slack:U012345, where Slack's lookup reports Alice's corporate
+        // address and the internal closure holds it: the cross-provider case end-to-end.
         let recipient = DeclaredAudience::restricted([reader("slack:U012345")]);
         let unanswered = Expansions::new(
             [(

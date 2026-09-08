@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import threading
 import unittest
 
 
@@ -16,14 +17,17 @@ def fixture_api(responses):
     """A call answering from recorded GitHub REST payloads, in order."""
 
     remaining = list(responses)
+    # Profile reads arrive from a pool of threads.
+    lock = threading.Lock()
 
     def call(path, **params):
-        for index, (fixture_path, fixture_params, response) in enumerate(remaining):
-            if fixture_path == path and fixture_params == params:
-                remaining.pop(index)
-                if isinstance(response, Exception):
-                    raise response
-                return response
+        with lock:
+            for index, (fixture_path, fixture_params, response) in enumerate(remaining):
+                if fixture_path == path and fixture_params == params:
+                    remaining.pop(index)
+                    if isinstance(response, Exception):
+                        raise response
+                    return response
         raise AssertionError(f"unexpected call {path} {params}")
 
     return call
@@ -33,8 +37,13 @@ def user(login, type="User"):
     return {"login": login, "type": type}
 
 
+def profile(login, email=None):
+    """The `/users/{login}` fixture: GitHub reports an unpublished email as null."""
+    return (f"/users/{login}", {}, {"login": login, "type": "User", "email": email})
+
+
 class SelectorTests(unittest.TestCase):
-    def test_viewer_carries_the_tokens_own_verified_primary_email(self):
+    def test_viewer_is_the_tokens_own_verified_primary_email(self):
         call = fixture_api(
             [
                 ("/user", {}, user("alice")),
@@ -49,24 +58,18 @@ class SelectorTests(unittest.TestCase):
                 ),
             ]
         )
-        self.assertEqual(
-            AUDIENCE_SOURCE.answer(call, {"selector": "viewer"}),
-            {"members": [{"id": "github:alice", "verified_email": "alice@gmail.com"}]},
-        )
+        self.assertEqual(AUDIENCE_SOURCE.answer(call, {"selector": "viewer"}), {"members": ["alice@gmail.com"]})
 
-    def test_a_viewer_without_readable_emails_keeps_the_bare_identity(self):
+    def test_a_viewer_without_readable_emails_keeps_the_qualified_id(self):
         call = fixture_api(
             [
                 ("/user", {}, user("alice")),
                 ("/user/emails", {}, AUDIENCE_SOURCE.Forbidden("/user/emails")),
             ]
         )
-        self.assertEqual(
-            AUDIENCE_SOURCE.answer(call, {"selector": "viewer"}),
-            {"members": [{"id": "github:alice"}]},
-        )
+        self.assertEqual(AUDIENCE_SOURCE.answer(call, {"selector": "viewer"}), {"members": ["github:alice"]})
 
-    def test_org_members_are_bare_identities_bots_excluded(self):
+    def test_org_members_are_profile_emails_or_qualified_ids_bots_excluded(self):
         first_page = [user(f"member-{index}") for index in range(100)]
         call = fixture_api(
             [
@@ -74,16 +77,20 @@ class SelectorTests(unittest.TestCase):
                 (
                     "/orgs/archestra-ai/members",
                     {"per_page": 100, "page": 2},
-                    [user("alice"), user("ci-robot", type="Bot")],
+                    [user("alice"), user("bob"), user("ci-robot", type="Bot")],
                 ),
+                *[profile(f"member-{index}") for index in range(100)],
+                profile("alice", "alice@corp.com"),
+                profile("bob", ""),
             ]
         )
         answer = AUDIENCE_SOURCE.answer(call, {"selector": "org/archestra-ai/members"})
-        self.assertEqual(len(answer["members"]), 101)
-        self.assertIn({"id": "github:alice"}, answer["members"])
-        self.assertNotIn({"id": "github:ci-robot"}, answer["members"])
-        for claims in answer["members"]:
-            self.assertNotIn("verified_email", claims)
+        self.assertEqual(len(answer["members"]), 102)
+        self.assertIn("alice@corp.com", answer["members"])
+        self.assertIn("github:bob", answer["members"])
+        self.assertIn("github:member-7", answer["members"])
+        self.assertNotIn("github:ci-robot", answer["members"])
+        self.assertNotIn("github:alice", answer["members"])
 
     def test_a_team_reports_its_own_membership(self):
         call = fixture_api(
@@ -92,13 +99,25 @@ class SelectorTests(unittest.TestCase):
                     "/orgs/archestra-ai/teams/finance/members",
                     {"per_page": 100, "page": 1},
                     [user("alice"), user("bob")],
-                )
+                ),
+                profile("alice", "alice@corp.com"),
+                profile("bob"),
             ]
         )
         self.assertEqual(
             AUDIENCE_SOURCE.answer(call, {"selector": "org/archestra-ai/team/finance"}),
-            {"members": [{"id": "github:alice"}, {"id": "github:bob"}]},
+            {"members": ["alice@corp.com", "github:bob"]},
         )
+
+    def test_a_member_whose_profile_cannot_be_read_is_a_failure_not_a_guess(self):
+        call = fixture_api(
+            [
+                ("/orgs/archestra-ai/teams/finance/members", {"per_page": 100, "page": 1}, [user("alice")]),
+                ("/users/alice", {}, AUDIENCE_SOURCE.NotFound("/users/alice")),
+            ]
+        )
+        with self.assertRaises(AUDIENCE_SOURCE.NotFound):
+            AUDIENCE_SOURCE.answer(call, {"selector": "org/archestra-ai/team/finance"})
 
     def test_an_unknown_org_or_team_is_a_failure_not_an_empty_answer(self):
         call = fixture_api(
@@ -121,16 +140,20 @@ class SelectorTests(unittest.TestCase):
 
 
 class MemberLookupTests(unittest.TestCase):
-    def test_a_known_member_echoes_the_queried_spelling_never_a_profile_email(self):
-        call = fixture_api([("/users/alice", {}, {"login": "Alice", "email": "spoof@corp.com"})])
+    def test_a_member_with_a_published_email_resolves_to_it(self):
+        call = fixture_api([profile("Alice", "alice@corp.com")])
         self.assertEqual(
-            AUDIENCE_SOURCE.answer(call, {"member": "github:alice"}),
-            {"claims": {"id": "github:alice"}},
+            AUDIENCE_SOURCE.answer(call, {"member": "github:Alice"}),
+            {"principal": "alice@corp.com"},
         )
+
+    def test_a_member_without_a_published_email_is_the_reader_as_written(self):
+        call = fixture_api([("/users/alice", {}, {"login": "Alice", "type": "User", "email": None})])
+        self.assertEqual(AUDIENCE_SOURCE.answer(call, {"member": "github:alice"}), {"principal": "github:alice"})
 
     def test_an_unknown_member_is_a_definitive_null(self):
         call = fixture_api([("/users/ghost", {}, AUDIENCE_SOURCE.NotFound("/users/ghost"))])
-        self.assertEqual(AUDIENCE_SOURCE.answer(call, {"member": "github:ghost"}), {"claims": None})
+        self.assertEqual(AUDIENCE_SOURCE.answer(call, {"member": "github:ghost"}), {"principal": None})
 
     def test_a_foreign_or_bare_member_spelling_is_refused(self):
         call = fixture_api([])

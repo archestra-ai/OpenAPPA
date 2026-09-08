@@ -6,14 +6,14 @@ use std::sync::Arc;
 use crate::elicit::Elicitation;
 
 use crate::consult::{
-    AnnotationAnswer, AnnotationArtifact, AudienceSourceArtifact, AudienceSourceDeclaration, Consult, ConsultBody,
-    LookupAnswer, MembersAnswer, PrincipalAnswer, SanitizerAnswer,
+    AnnotationAnswer, AnnotationArtifact, Consult, ConsultBody, LookupAnswer, MembersAnswer, SanitizerAnswer,
 };
 use crate::engine::{
     AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback, ForkStatus,
     Liveness, Next, OfferNonce, OpenDispatch, Presentation, RemedyArguments, engine_id,
 };
 use crate::external::ConsultOutcome;
+use appa_engine::label::ReaderId;
 
 use super::{
     ChildReturnDecision, Deployment, EventError, ExactCall, Inner, OfferId, OutcomeBody, ProposedCall, RemedyDecision,
@@ -1030,19 +1030,10 @@ impl Session {
                 selector,
                 templates,
             } => {
-                let consult = Consult {
-                    name: provider.clone(),
-                    body: ConsultBody::AudienceSource {
-                        declaration: AudienceSourceDeclaration {
-                            templates: templates.clone(),
-                        },
-                        artifact: AudienceSourceArtifact::Selector {
-                            selector: selector.clone(),
-                        },
-                    },
-                };
+                let consult = Consult::audience_selector(provider, selector, templates.clone());
                 let members = match self.timed_consult(&consult, None, None).await {
-                    ConsultOutcome::Answer(answer) => MembersAnswer::from_wire(&answer).map(|answer| answer.members),
+                    ConsultOutcome::Answer(answer) => MembersAnswer::from_wire(&answer)
+                        .map(|answer| answer.members.into_iter().map(ReaderId::new).collect()),
                     ConsultOutcome::NoAnswer(_) => None,
                 };
                 ExternalEvidence::AudienceSource {
@@ -1056,40 +1047,19 @@ impl Session {
                 member,
                 templates,
             } => {
-                let consult = Consult {
-                    name: provider.clone(),
-                    body: ConsultBody::AudienceSource {
-                        declaration: AudienceSourceDeclaration {
-                            templates: templates.clone(),
-                        },
-                        artifact: AudienceSourceArtifact::Member { member: member.clone() },
-                    },
-                };
-                let claims = match self.timed_consult(&consult, None, None).await {
-                    ConsultOutcome::Answer(answer) => LookupAnswer::from_wire(&answer).map(|answer| answer.claims),
+                // The entry the deployment routes this provider's lookups to answers; the
+                // evidence stays keyed by the member's own provider.
+                let answering = self.deployment.config.externals.lookup_target(provider);
+                let consult = Consult::member_lookup(answering, member, templates.clone());
+                let principal = match self.timed_consult(&consult, None, None).await {
+                    ConsultOutcome::Answer(answer) => {
+                        LookupAnswer::from_wire(&answer).map(|answer| answer.principal.map(ReaderId::new))
+                    }
                     ConsultOutcome::NoAnswer(_) => None,
                 };
                 ExternalEvidence::MemberLookup {
                     provider: provider.clone(),
                     member: member.clone(),
-                    claims,
-                }
-            }
-            ExternalRequest::Identity { implementation, claims } => {
-                let consult = Consult {
-                    name: implementation.clone(),
-                    body: ConsultBody::Identity {
-                        artifact: claims.clone(),
-                    },
-                };
-                let principal = match self.timed_consult(&consult, None, None).await {
-                    ConsultOutcome::Answer(answer) => PrincipalAnswer::from_wire(&answer)
-                        .map(|answer| appa_engine::label::ReaderId::new(answer.principal)),
-                    ConsultOutcome::NoAnswer(_) => None,
-                };
-                ExternalEvidence::Identity {
-                    implementation: implementation.clone(),
-                    id: claims.id.clone(),
                     principal,
                 }
             }
@@ -2022,7 +1992,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
                 post(|| async {
                     axum::Json(serde_json::json!({
                         "version": 1,
-                        "answer": {"members": [{"id": "slack:U1", "verified_email": "alice@corp.example"}]}
+                        "answer": {"members": ["alice@corp.example"]}
                     }))
                 }),
             );
@@ -2038,8 +2008,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let policy = r#"
 version = 2
 
-[[policy.audience.group]]
-name = "team"
+[policy.audience.group.team]
 from = ["slack:user-group/team"]
 
 [[policy.tool]]

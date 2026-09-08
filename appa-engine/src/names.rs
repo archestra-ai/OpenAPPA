@@ -36,7 +36,6 @@ impl SanitizerName {
 }
 
 name_newtype!(AnnotatorName);
-name_newtype!(IdentityImplementationName);
 name_newtype!(GroupName);
 
 impl std::fmt::Display for GroupName {

@@ -57,20 +57,18 @@ const TERMS = {
   public:
     "The reserved unrestricted audience state, not a reader ID: no audience restriction applies. An agent with public reach can send data to any outbound destination. As a placeholder argument it names the Public audience, which only a Public trajectory includes. Never a group member.",
   "@name":
-    "A mention of a symbolic audience: @finance names a configured [[policy.audience.group]], and @provider:selector reads a source collection directly. The mention stays symbolic in labels and the log; membership is read from the configured sources per act and pinned.",
+    "A mention of a symbolic audience: @finance names a configured [policy.audience.group.<name>], and @provider:selector reads a source collection directly. The mention stays symbolic in labels and the log; membership is read from the configured sources per act and pinned.",
   "@finance":
     "A mention of a configured named audience. It stays symbolic in labels and the log; its membership is read from the audience sources per act and pinned.",
-  "[[policy.audience.group]]":
-    "One configured named audience: its bare name (mentioned as @name), an optional within assertion into a built-in audience, and the from selectors that supply its members. Multiple sources are unioned.",
-  "[policy.audience.self]":
-    "Configures the self audience: the identity OpenAPPA acts for. Uses viewer selectors to read that identity from the configured sources. Results from multiple sources are combined.",
-  "[policy.audience.internal]":
-    "The mapping of the built-in internal audience: full-membership collections, and for GitHub only explicitly selected organizations. Multiple sources are unioned.",
+  "[policy.audience]":
+    "Maps the built-in audiences to membership sources. self lists viewer selectors for the identity OpenAPPA acts for; internal lists full-membership collections, and for GitHub only explicitly selected organizations. Multiple sources are unioned.",
+  "[policy.audience.group.<name>]":
+    "One configured named audience, mentioned as @name: an optional within assertion into a built-in audience, and the from selectors that supply its members. Multiple sources are unioned.",
   self: "The identity OpenAPPA acts for. This can be a person or a service. The configured viewer sources supply its reader IDs, which are combined into the self audience.",
-  "[policy.identity]":
-    "Selects how OpenAPPA converts member details into reader IDs. If omitted, OpenAPPA uses verified-email. To use your own service, set implementation to its name and configure it under [externals.identity.<name>].",
-  "verified-email":
-    "Uses the membership service's verified_email field as the reader ID. The service must verify who owns the email; OpenAPPA only checks its format. A value such as finance causes an error. If the field is absent, OpenAPPA keeps the provider ID. This is the default identity implementation.",
+  lookup:
+    "On [externals.audience.<provider>]: the name of another [externals.audience.<name>] entry that answers this provider's member lookups. OpenAPPA then also looks up every group member of that provider that is not an email address.",
+  readers:
+    "On an [externals.audience.<name>] entry that a lookup names: an inline table from <provider>:<id> to reader ID. OpenAPPA answers member lookups from it without calling a service. A member absent from the table keeps its ID.",
   inputs:
     "The values an annotator reads, each mapped from $tool_call on its declaration. Without an explicit mapping, the annotator reads the complete tool call: name, description when declared, and arguments.",
   ranks:
@@ -88,7 +86,7 @@ const TERMS = {
   declaration:
     "Instructions and limits that OpenAPPA includes in a consult request. These come from the policy, not from the agent. Their fields depend on the component receiving the request.",
   artifact:
-    "The request data sent to a component: for example, a tool call to review, text to clean, or a member's identity details.",
+    "The request data sent to a component: for example, a tool call to review, text to clean, or a member to look up.",
   internal:
     "Data for members of the organization, as defined by the policy. After reading it, the agent needs a permitted remedy to share data outside that audience.",
   "{public, trusted}":
@@ -104,7 +102,7 @@ const TERMS = {
   contains:
     "Under requires.audience: the current audience must include these readers; a $arg placeholder is allowed only here. Under requires.effects: the trajectory already recorded this effect.",
   within:
-    "Under requires.audience: the current audience must sit within this audience; a tool_input rewrite cannot clear it. On an [[policy.audience.group]]: the trusted policy assertion that the group sits within a built-in audience (self or internal).",
+    "Under requires.audience: the current audience must sit within this audience; a tool_input rewrite cannot clear it. On a [policy.audience.group.<name>]: the trusted policy assertion that the group sits within a built-in audience (self or internal).",
   excludes:
     "Blocks a call if a listed effect is already recorded or declared by another call that has been allowed but has not finished.",
   tags: "Names that connect tools to authorities and sanitizers. One matching tag is enough. Without tags, an authority or sanitizer is not limited to particular tools. Attention approvals use permits.attention instead.",
@@ -143,7 +141,7 @@ const TERMS = {
   from: "In a sanitizer's permits: for audience, the readers the source audience must contain; for trust, the rank the source must meet or exceed.",
   to: "The audience or trust rank assigned to a sanitizer's result.",
   resolver:
-    "The implementation answering for one registered external: the endpoint, command, builtin, or model behind an authority, sanitizer, annotator, audience source, or identity binding.",
+    "The implementation answering for one registered external: the endpoint, command, builtin, or model behind an authority, sanitizer, annotator, or audience source.",
   return_schema:
     "The JSON Schema a parent supplies when selecting an attest-schema plan. It specifies the fields and values the child may return. The child receives these requirements when it starts.",
   "attest-schema":
