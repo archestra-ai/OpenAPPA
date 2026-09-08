@@ -148,7 +148,20 @@ const CLAUDE_CONSULT_PERMITS: usize = 4;
 
 /// How many `command` consults may run at once across a runtime: every trajectory's
 /// pending consults fan out together, and each is a process.
-pub(crate) const COMMAND_CONSULT_PERMITS: usize = 8;
+const COMMAND_CONSULT_PERMITS: usize = 8;
+
+/// Settle a batch of consults, every sibling included, as many at a time as the
+/// command gate admits. A consult's deadline covers its wait for a permit, so a wider
+/// fan-out would time out in the queue rather than run; a narrower one would cost a
+/// batch the sum of its members instead of its slowest.
+pub(crate) async fn settle_batch<F: std::future::Future>(consults: impl IntoIterator<Item = F>) -> Vec<F::Output> {
+    use futures_util::StreamExt;
+
+    futures_util::stream::iter(consults)
+        .buffered(COMMAND_CONSULT_PERMITS)
+        .collect()
+        .await
+}
 
 /// The per-runtime gates on consults that cost a process or a provider request, shared by
 /// every deployment snapshot the runtime serves: a reload's old and new snapshots contend

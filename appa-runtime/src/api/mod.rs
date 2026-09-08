@@ -462,30 +462,25 @@ impl Deployment {
     /// a misconfiguration to refuse before this deployment serves, not a no-answer to
     /// discover under an agent. Replay never runs this: it reads pins.
     async fn probe_sources(&self) -> Result<(), ProbeError> {
+        use crate::external::settle_batch;
         use appa_engine::audience::AudienceEvidence;
-        use futures_util::{StreamExt, TryStreamExt};
 
         let audience = self.resident.registry().audience();
-        let selectors = audience
+        let selectors: Vec<_> = audience
             .referenced_selectors()
             .into_iter()
-            .map(|spec| self.probe_selector(audience, spec));
+            .map(|spec| self.probe_selector(audience, spec))
+            .collect();
         let evidence = AudienceEvidence {
-            sources: futures_util::future::try_join_all(selectors).await?,
+            sources: settle_batch(selectors).await.into_iter().collect::<Result<_, _>>()?,
             lookups: Vec::new(),
         };
-        // Owed lookups run as many at a time as a command backend admits: a consult's
-        // deadline covers its wait for a permit, so a wider fan-out would time out in the
-        // queue rather than run.
         let owed = audience.member_lookups_owed(&evidence);
         let lookups: Vec<_> = owed
             .iter()
             .map(|spec| self.probe_lookup(audience, &evidence.sources, spec))
             .collect();
-        futures_util::stream::iter(lookups)
-            .buffered(crate::external::COMMAND_CONSULT_PERMITS)
-            .try_collect::<Vec<_>>()
-            .await?;
+        settle_batch(lookups).await.into_iter().collect::<Result<Vec<_>, _>>()?;
         Ok(())
     }
 

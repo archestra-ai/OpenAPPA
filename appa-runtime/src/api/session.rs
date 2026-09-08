@@ -803,11 +803,11 @@ impl Session {
                 // reviewer they stay serial: one staged review on screen at a time.
                 Next::ResolveExternal(requests) => match elicitation {
                     None => {
-                        // Batch-terminal: join_all settles every sibling first; any
-                        // no-answer then aborts the invocation, discarding the
-                        // siblings' answers, before another engine round or any append.
+                        // Batch-terminal: every sibling settles first; any no-answer
+                        // then aborts the invocation, discarding the siblings' answers,
+                        // before another engine round or any append.
                         let consults = requests.into_iter().map(|request| self.consult(request, None, None));
-                        for answered in futures_util::future::join_all(consults).await {
+                        for answered in crate::external::settle_batch(consults).await {
                             evidence.push(answered?);
                         }
                     }
