@@ -78,22 +78,18 @@ jobs:
             arch: amd64
             platform: linux/amd64
             runner: ubuntu-latest
-            context: integrations/kagent/demo
           - image: appa-demo-tools
             arch: arm64
             platform: linux/arm64
             runner: ubuntu-24.04-arm
-            context: integrations/kagent/demo
           - image: appa-demo-mocks
             arch: amd64
             platform: linux/amd64
             runner: ubuntu-latest
-            context: integrations/kagent/demo/mocks
           - image: appa-demo-mocks
             arch: arm64
             platform: linux/arm64
             runner: ubuntu-24.04-arm
-            context: integrations/kagent/demo/mocks
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
@@ -172,12 +168,29 @@ jobs:
             org.opencontainers.image.revision=${{ inputs.source_commit }}
             org.opencontainers.image.version=${{ inputs.version_label }}
 
-      - name: Build and push demo image leg
-        if: ${{ matrix.image == 'appa-demo-tools' || matrix.image == 'appa-demo-mocks' }}
-        id: build-demo
+      - name: Build and push appa-demo-tools leg
+        if: ${{ matrix.image == 'appa-demo-tools' }}
+        id: build-tools
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
-          context: ${{ matrix.context }}
+          context: integrations/kagent/demo
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
+          provenance: true
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=min,scope=${{ matrix.image }}-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ inputs.source_commit }}
+            org.opencontainers.image.version=${{ inputs.version_label }}
+
+      - name: Build and push appa-demo-mocks leg
+        if: ${{ matrix.image == 'appa-demo-mocks' }}
+        id: build-mocks
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/demo/mocks
           platforms: ${{ matrix.platform }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
           provenance: true
@@ -193,9 +206,10 @@ jobs:
         env:
           RUNTIME_DIGEST: ${{ steps.build-runtime.outputs.digest }}
           ADK_DIGEST: ${{ steps.build-adk.outputs.digest }}
-          DEMO_DIGEST: ${{ steps.build-demo.outputs.digest }}
+          TOOLS_DIGEST: ${{ steps.build-tools.outputs.digest }}
+          MOCKS_DIGEST: ${{ steps.build-mocks.outputs.digest }}
         run: |
-          DIGEST=${RUNTIME_DIGEST:-${ADK_DIGEST:-$DEMO_DIGEST}}
+          DIGEST=${RUNTIME_DIGEST:-${ADK_DIGEST:-${TOOLS_DIGEST:-$MOCKS_DIGEST}}}
           if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "::error::image build did not report a digest"
             exit 1
