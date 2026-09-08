@@ -188,13 +188,13 @@ Look up the public-oncall-rotation runbook.
 
 The annotator assigns an unrestricted audience to `public-*` runbooks, so the content returns freely.
 
-**Blocked internal runbook:**
+**Internal runbook with restricted remedy:**
 
 ```text
 Look up the ops-database-failover runbook.
 ```
 
-The annotator tags `ops-*` runbooks as internal, so OpenAPPA blocks the tool call to prevent operational data from entering the session.
+The annotator tags `ops-*` runbooks as internal. OpenAPPA blocks the unconstrained read and requires the agent to accept a restricted-reader remedy before retrieving the operational runbook.
 
 #### 7. Permitted read
 
