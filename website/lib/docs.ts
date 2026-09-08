@@ -41,6 +41,97 @@ export interface DocCategory {
   docs: DocPage[];
 }
 
+export function isDevMode(): boolean {
+  return process.env.NODE_ENV !== "production" || process.env.NEXT_PUBLIC_DEV_MODE === "true";
+}
+
+export function substituteKagentDevSnippets(content: string): string {
+  let result = content;
+
+  // 1. Controller agentImage: remote registry -> local build Never
+  result = result.replaceAll(
+    `  --set controller.agentImage.registry=europe-west1-docker.pkg.dev \\
+  --set controller.agentImage.repository=friendly-path-465518-r6/appa-public/appa-kagent-adk \\
+  --set-string controller.agentImage.tag="v$APPA_VERSION"`,
+    `  --set controller.agentImage.registry=docker.io \\
+  --set controller.agentImage.repository=library/appa-kagent-adk \\
+  --set-string controller.agentImage.tag=dev \\
+  --set controller.agentImage.pullPolicy=Never`
+  );
+
+  // 2. appa-kagent-demo: OCI pull -> local chart path with local image overrides
+  result = result.replace(
+    `helm upgrade --install appa-kagent-demo \\
+  oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-kagent-demo \\
+  --version "$APPA_VERSION" -n "$KAGENT_NAMESPACE" \\
+  --set-string runtime.url="http://appa-runtime.$KAGENT_NAMESPACE.svc.cluster.local:18787" \\
+  --set-string modelConfig.name=default-model-config \\
+  --set-string runtime.reasoningEffort=none \\
+  --force-conflicts --wait --timeout 10m`,
+    `helm upgrade --install appa-kagent-demo \\
+  ./integrations/kagent/demo/chart \\
+  -n "$KAGENT_NAMESPACE" \\
+  --set-string runtime.url="http://appa-runtime.$KAGENT_NAMESPACE.svc.cluster.local:18787" \\
+  --set-string modelConfig.name=default-model-config \\
+  --set-string runtime.reasoningEffort=none \\
+  --set tools.image.repository=docker.io/library/appa-demo-tools \\
+  --set-string tools.image.tag=dev \\
+  --set tools.image.pullPolicy=Never \\
+  --set mocks.image.repository=docker.io/library/appa-demo-mocks \\
+  --set-string mocks.image.tag=dev \\
+  --set mocks.image.pullPolicy=Never \\
+  --force-conflicts --wait --timeout 10m`
+  );
+
+  // 3. appa-runtime quickstart: OCI pull -> local chart path with local image override
+  result = result.replace(
+    `helm upgrade --install appa-runtime \\
+  oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \\
+  --version "$APPA_VERSION" -n "$KAGENT_NAMESPACE" \\
+  --set persistence.enabled=false \\
+  --set config.existingConfigMap=appa-kagent-demo-policy \\
+  --force-conflicts --wait --timeout 10m`,
+    `helm upgrade --install appa-runtime \\
+  ./charts/appa-runtime \\
+  -n "$KAGENT_NAMESPACE" \\
+  --set persistence.enabled=false \\
+  --set image.repository=docker.io/library/appa-runtime \\
+  --set-string image.tag=dev \\
+  --set image.pullPolicy=Never \\
+  --set config.existingConfigMap=appa-kagent-demo-policy \\
+  --force-conflicts --wait --timeout 10m`
+  );
+
+  // 4. appa-runtime existing agents: OCI pull -> local chart path
+  result = result.replace(
+    `helm upgrade --install appa-runtime \\
+  oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \\
+  --version "$APPA_VERSION" -n "$RUNTIME_NAMESPACE" --create-namespace \\`,
+    `helm upgrade --install appa-runtime \\
+  ./charts/appa-runtime \\
+  -n "$RUNTIME_NAMESPACE" --create-namespace \\
+  --set image.repository=docker.io/library/appa-runtime \\
+  --set-string image.tag=dev \\
+  --set image.pullPolicy=Never \\`
+  );
+
+  // 5. Add local build commands before helm commands in quickstart
+  result = result.replace(
+    `kubectl config current-context\n`,
+    `# Build images and load into kind
+docker build -t appa-kagent-adk:dev integrations/kagent/appa-kagent-adk
+docker build -t appa-demo-tools:dev integrations/kagent/demo
+docker build -t appa-demo-mocks:dev integrations/kagent/demo/mocks
+docker build -f appa-runtime/Dockerfile -t appa-runtime:dev .
+kind load docker-image appa-kagent-adk:dev appa-demo-tools:dev appa-demo-mocks:dev appa-runtime:dev
+
+kubectl config current-context
+`
+  );
+
+  return result;
+}
+
 export function getAllDocs(): DocPage[] {
   const files = fs.readdirSync(DOCS_DIR).filter((f) => f.endsWith(".md"));
   const docs = files.map((file) => {
@@ -49,7 +140,10 @@ export function getAllDocs(): DocPage[] {
     const fm = data as DocFrontMatter;
     // Strip release-please markers so public docs and clipboard copies stay clean,
     // while git source files retain the markers for the release pipeline.
-    const cleanContent = content.replace(/[ \t]*#\s*x-release-please-[a-z0-9_-]+/g, "");
+    let cleanContent = content.replace(/[ \t]*#\s*x-release-please-[a-z0-9_-]+/g, "");
+    if (file === "kagent.md" && isDevMode()) {
+      cleanContent = substituteKagentDevSnippets(cleanContent);
+    }
     return {
       slug: file.replace(/\.md$/, ""),
       title: fm.title,

@@ -12,6 +12,7 @@
 
 [policy]
 version = 2
+include = ["batteries/github/appa.toml"]
 
 # --- in-cluster reads that stay inside the session ---
 

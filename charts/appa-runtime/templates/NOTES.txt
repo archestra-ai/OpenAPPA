@@ -1,17 +1,14 @@
-OpenAPPA runtime {{ .Chart.AppVersion }} is the shared gate in this namespace.
+OpenAPPA runtime {{ .Chart.AppVersion }} deployed in namespace {{ .Release.Namespace }}.
 
-Agents reach it at:
-
+Service URL:
   http://{{ include "appa-runtime.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
 
-Set that URL as APPA_RUNTIME_URL on each gated agent, with APPA_ENABLED=true.
+To protect an agent, set these environment variables in the Agent resource:
+  APPA_ENABLED: "true"
+  APPA_RUNTIME_URL: "http://{{ include "appa-runtime.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
+{{- if .Values.appaGuide.enabled }}
 
-Available batteries: GET /batteries on that address.
-Persistent volume: {{ if .Values.persistence.enabled }}on ({{ include "appa-runtime.pvcName" . }}){{ else }}off — the skill will not refresh batteries{{ end }}.
-{{- if and .Values.persistence.enabled .Values.persistence.keep (not .Values.persistence.existingClaim) }}
-The chart-created PVC stays after helm uninstall because persistence.keep is true.
-{{- end }}
-Policy upgrades: {{ if .Values.config.existingConfigMap }}operator-owned ConfigMap {{ .Values.config.existingConfigMap }}{{ else if .Values.config.contents }}Helm replaces the key from config.contents{{ else }}Helm replaces an unchanged packaged bootstrap and preserves a key appa-guide changed{{ end }}.
-{{- if .Values.persistence.enabled }}
-The skill refreshes /var/lib/appa/release-batteries from the latest verified semver release and preserves /var/lib/appa/batteries.
+To configure policy with appa-guide:
+  1. Forward the dashboard: kubectl port-forward -n {{ .Values.appaGuide.namespace }} svc/kagent-ui 8080:8080
+  2. Open http://localhost:8080, select Agents -> appa-guide -> Chat, and send: init
 {{- end }}

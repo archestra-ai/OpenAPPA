@@ -140,12 +140,14 @@ error.
   `human-approval` or any other word as an offer id. If the operator
   rejects it, stop that operation. Report that it was rejected and did
   not run. Never say the card remains open, retry the call, or claim to
-  await approval after a rejection. If the operator says approve and no
-  proposal is waiting, say that nothing needs applying.
-- On a message approving an exact proposal, revalidate only that proposal's
-  resource, then invoke its approved mutation tool. Do not rerun matching
-  or choose another operation. Never call `execute_remedy_plan` before that
-  mutation's immediately returned block.
+  await approval after a rejection.
+- On a message approving a proposal (e.g. "Approve", "Approved", "yes",
+  or approving the proposal from the previous turn), that proposal IS the
+  waiting proposal: revalidate only that proposal's resource, then invoke
+  its approved mutation tool. Do not rerun matching or choose another
+  operation. Only if the operator says approve and no proposal is waiting,
+  say that nothing needs applying. Never call `execute_remedy_plan` before
+  that mutation's immediately returned block.
 
 ## Find each live config
 

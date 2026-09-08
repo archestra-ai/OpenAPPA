@@ -125,9 +125,11 @@ the `appa-guide` skill name; never invent a mode-specific skill name.
   invent an offer id. Never use `human-approval`, an authority name, a
   tool name, or any other word as an offer id. Never ask the operator
   for an offer id.
-- If the operator says approve and no proposal is waiting, say that
-  nothing needs applying. Do not write, reload, or call
-  `execute_remedy_plan`.
+- When the operator sends an approval (e.g. "Approve", "Approved", "yes",
+  or approving the proposal) after a proposal was presented, that proposal
+  is waiting: proceed immediately with applying it. Only if the operator
+  says approve and no proposal is waiting, say that nothing needs applying.
+  Do not write, reload, or call `execute_remedy_plan` before approval.
 - Inspection and proposal drafting never require approval. Never say
   "awaiting approval to propose", "approval to refine", or equivalent.
   End an inspection in exactly one state: present the complete change

@@ -145,7 +145,7 @@ helm upgrade --install appa-kagent-demo \
 BASH
 ```
 
-### 4. Enable gating on an agent
+### 4. Configure an agent with OpenAPPA
 
 Set `APPA_ENABLED=true` and provide the runtime URL:
 
@@ -153,7 +153,7 @@ Set `APPA_ENABLED=true` and provide the runtime URL:
 apiVersion: kagent.dev/v1alpha2
 kind: Agent
 metadata:
-  name: sre-agent
+  name: <your-agent-name>
   namespace: kagent
 spec:
   declarative:

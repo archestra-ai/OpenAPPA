@@ -1,38 +1,9 @@
-OpenAPPA on kagent — the demo is installing into namespace {{ .Release.Namespace }}.
+OpenAPPA demo deployed in namespace {{ .Release.Namespace }}.
 
-Open the dashboard:
+To access the dashboard:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/kagent-ui 8080:8080
 
-  kubectl -n {{ .Release.Namespace }} port-forward svc/kagent-ui 8080:8080
-  http://localhost:8080/agents/{{ .Release.Namespace }}/appa-guide/chat
-  http://localhost:8080/agents/{{ .Release.Namespace }}/cluster-ops/chat
-
-Wait until demo-tools has discovered tools, then open appa-guide and
-send `init`:
-
-  kubectl wait -n {{ .Release.Namespace }} remotemcpserver/demo-tools \
-    --for=jsonpath='{.status.discoveredTools[0].name}' --timeout=2m
-
-It will inspect and propose the demo policy template and the GitHub
-battery matched by the canned mcp__github__get_file_contents and
-mcp__github__issue_write tools. Nothing becomes active without
-your approval and the enforced confirmation card.
-
-The cluster-ops agent opens with all sixteen showcase chats already there,
-one per demo case as it ran:
-
-  - the ordinary pod read, and the exfiltration ask that leaks nothing
-  - the agent taking a sanitized remedy on its own, the chat steering it to
-    accept the change, and the chat steering it to decline
-  - a forged offer, and the on-call approval
-  - the annotator, and the release window approving in window and denying
-    out of window
-  - cross-pod delegation, a delegation the policy never names, and gated
-    ingress
-  - the remote change board approving, denying, and staying silent
-
-Run your own from the same page. When the go cell is enabled, the go twin
-opens with no seeded chats.
-
-Prerequisites: kagent owns ModelConfig {{ .Values.modelConfig.name }}, and
-an appa-runtime release owns {{ .Values.runtime.url }} and appa-guide.
-The kagent controller must use appa-kagent-adk for enabled Python Agents.
+Next steps:
+  1. Open http://localhost:8080 in your browser.
+  2. Select Agents -> appa-guide -> Chat, and send: init
+  3. Approve the proposed policy to activate the demo agents.

@@ -71,10 +71,12 @@ spec:
 
       Inspection and proposals are read-only. A request is never approval.
       Present the complete proposal, then wait for a later approval message.
-      A mutating runtime tool or Agent/Helm operation must first return its
-      exact APPA offer. Call execute_remedy_plan only with that returned offer
-      id to open the confirmation card. Never invent or request an offer id.
-      If no proposal is pending, approval means nothing needs applying.
+      When the operator approves a presented proposal (e.g. "Approve"), proceed
+      immediately with the approved mutation tool. If no proposal is pending,
+      approval means nothing needs applying. A mutating runtime tool or Agent/Helm
+      operation must first return its exact APPA offer. Call execute_remedy_plan
+      only with that returned offer id to open the confirmation card.
+      Never invent or request an offer id.
 
       Protect an existing Agent only with k8s_apply_manifest over its complete
       observed Agent CR. Preserve every environment entry; add or replace only
