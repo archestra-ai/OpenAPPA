@@ -91,7 +91,10 @@ Plain `claude` sessions stay untouched.
 
 Setup, upgrade and uninstall: [Claude Code
 integration](https://openappa.com/claude-code) ·
-[`integrations/claude-code`](integrations/claude-code/README.md).
+[`marketplace/plugins/claude-code`](marketplace/plugins/claude-code/README.md).
+
+Plugin and battery installation, explicit generation updates, offline bundles,
+and kagent deployment preparation: [marketplace guide](marketplace/README.md).
 
 ## When APPA is in the way
 

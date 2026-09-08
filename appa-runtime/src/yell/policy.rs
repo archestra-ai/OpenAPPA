@@ -381,8 +381,8 @@ mod tests {
     /// Deployment configurations, each composing (through its includes) to a policy a
     /// deployment could run.
     const DEPLOYMENTS: &[&str] = &[
-        "integrations/claude-code/examples/claude-code.appa.toml",
-        "integrations/claude-code/examples/claude-code-hitl.appa.toml",
+        "marketplace/plugins/claude-code/default.appa.toml",
+        "marketplace/plugins/claude-code/hitl.appa.toml",
         "examples/claude-code-battery/appa.toml",
         "bench/corp/policies/appa.toml",
         "bench/corp/policies/open.toml",

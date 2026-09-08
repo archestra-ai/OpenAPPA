@@ -14,6 +14,39 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Internal release identity used when activating a selected binary.
+    #[command(hide = true)]
+    BuildInfo,
+    /// Internal noninteractive native activation after package verification.
+    #[command(hide = true)]
+    ActivateClaude {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        archive: PathBuf,
+        #[arg(long)]
+        previous_binary: Option<PathBuf>,
+    },
+    /// Internal journalled removal using the selected release executable.
+    #[command(hide = true)]
+    RemoveClaude {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        archive: PathBuf,
+    },
+    /// Inspect host plugin packages for a deployment.
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommand,
+    },
+    /// Inspect policy battery packages for a deployment.
+    Battery {
+        #[command(subcommand)]
+        command: PackageCommand,
+    },
+    /// Export a locked deployment and its artifacts for offline installation.
+    Bundle(appa_runtime::installation::cli::Bundle),
     /// Describe the configuration facts available to a human or configuring agent.
     Describe {
         #[arg(long, env = "APPA_CONFIG")]
@@ -94,6 +127,26 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum PackageCommand {
+    /// List selected packages offline, or explicitly fetch the available catalog.
+    List(appa_runtime::installation::cli::List),
+    /// Add a battery's policy to this deployment in one operation.
+    Install(appa_runtime::installation::cli::BatteryInstall),
+    /// Remove only unchanged installer-owned battery configuration.
+    Remove(appa_runtime::installation::cli::BatteryRemove),
+}
+
+#[derive(Subcommand)]
+enum PluginCommand {
+    /// List selected plugins offline, or explicitly fetch the available catalog.
+    List(appa_runtime::installation::cli::List),
+    /// Install a verified host plugin and its matching runtime.
+    Install(appa_runtime::installation::cli::Install),
+    /// Remove only installer-owned host support; preserve policy and data.
+    Remove(appa_runtime::installation::cli::PluginRemove),
+}
+
+#[derive(Subcommand)]
 enum Harness {
     /// Install this build's Claude Code plugin and initialize its local deployment.
     ClaudeCode {
@@ -109,7 +162,69 @@ fn main() -> ExitCode {
         return appa_runtime::runtime_cli::run_from(args);
     }
 
-    match Args::parse().command {
+    let parsed = match Args::try_parse() {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            let help = matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            );
+            let marketplace = env::args_os()
+                .nth(1)
+                .is_some_and(|command| ["plugin", "battery", "bundle"].iter().any(|name| command == *name));
+            if !help && marketplace && env::args_os().any(|argument| argument == "--json") {
+                return appa_runtime::installation::cli::usage_error(&error);
+            }
+            let code = error.exit_code();
+            if error.print().is_err() {
+                return ExitCode::FAILURE;
+            }
+            return ExitCode::from(code as u8);
+        }
+    };
+    match parsed.command {
+        Command::BuildInfo => appa_runtime::installation::native::build_info(),
+        Command::ActivateClaude {
+            config,
+            archive,
+            previous_binary,
+        } => match appa_runtime::init::claude_code_prepared(&config, &archive, previous_binary.as_deref()) {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("appa: {error}");
+                if matches!(error, appa_runtime::init::InitError::PluginRecovery { .. }) {
+                    ExitCode::from(3)
+                } else {
+                    ExitCode::FAILURE
+                }
+            }
+        },
+        Command::Plugin {
+            command: PluginCommand::List(args),
+        } => appa_runtime::installation::cli::list(appa_package::PackageKind::Plugin, args),
+        Command::Plugin {
+            command: PluginCommand::Install(args),
+        } => appa_runtime::installation::cli::install(args),
+        Command::Plugin {
+            command: PluginCommand::Remove(args),
+        } => appa_runtime::installation::cli::remove_plugin(args),
+        Command::RemoveClaude { config, archive } => match appa_runtime::init::claude_code_remove(&config, &archive) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("appa: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Command::Battery {
+            command: PackageCommand::List(args),
+        } => appa_runtime::installation::cli::list(appa_package::PackageKind::Battery, args),
+        Command::Battery {
+            command: PackageCommand::Install(args),
+        } => appa_runtime::installation::cli::install_battery(args),
+        Command::Battery {
+            command: PackageCommand::Remove(args),
+        } => appa_runtime::installation::cli::remove_battery(args),
+        Command::Bundle(args) => appa_runtime::installation::cli::bundle(args),
         Command::Hook { url, turn_end } => appa_runtime::hook_client::run(&url, turn_end),
         Command::Yell { url, yes, message } => appa_runtime::yell::cli::run(&url, yes, message),
         Command::Replay {
@@ -136,6 +251,9 @@ fn main() -> ExitCode {
                 ExitCode::SUCCESS
             }
         }
+        Command::Init {
+            harness: Harness::ClaudeCode { plugin_source },
+        } if plugin_source.is_none() => appa_runtime::installation::cli::init_claude_code(),
         Command::Init {
             harness: Harness::ClaudeCode { plugin_source },
         } => match appa_runtime::init::claude_code(plugin_source.as_deref()) {
