@@ -62,6 +62,8 @@ pub enum PackageError {
     PolicyField { policy: PathBuf, field: String },
     #[error("{policy} declares a `policy.{kind}` without a name")]
     PolicyUnnamedDeclaration { policy: PathBuf, kind: &'static str },
+    #[error("{policy} has an invalid server qualifier on `{contract}`; use a short MCP tool name and one server namespace")]
+    PolicyServer { policy: PathBuf, contract: String },
     #[error("{policy} declares `include`, which only a deployment root declares")]
     PolicyInclude { policy: PathBuf },
     #[error("{policy} declares `externals.{key}`, which only a deployment root declares")]
@@ -264,7 +266,7 @@ fn check_policy(
         .flat_map(|namespace| ["mcp", "host", "agent"].map(|family| format!("{family}/{namespace}/")))
         .collect();
     check_named(policy, &document)?;
-    for contract in declared_contracts(&document) {
+    for contract in declared_contracts(policy, &document)? {
         if !covered.iter().any(|prefix| contract.starts_with(prefix)) {
             return Err(PackageError::PolicyForeignContract {
                 policy: policy.to_path_buf(),
@@ -398,10 +400,19 @@ fn check_named(policy: &Path, document: &Value) -> Result<(), PackageError> {
 /// The tool contract names a policy declares. Only `[[policy.tool]]` names a
 /// contract; the other declaration arrays name annotators, authorities and
 /// sanitizers, which are identifiers and belong to no namespace.
-fn declared_contracts(document: &Value) -> Vec<String> {
+fn declared_contracts(policy: &Path, document: &Value) -> Result<Vec<String>, PackageError> {
     declarations(document, "tool")
-        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
-        .map(str::to_owned)
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(|name| (tool, name)))
+        .map(|(tool, name)| {
+            let Some(server) = tool.get("server") else {
+                return Ok(name.to_owned());
+            };
+            let invalid = || PackageError::PolicyServer { policy: policy.to_path_buf(), contract: name.to_owned() };
+            let server = server.as_str().ok_or_else(invalid)?;
+            let (bare, suffix) = name.find('(').map_or((name, ""), |index| (&name[..index], &name[index..]));
+            let canonical = appa_runtime_api::CanonicalTool::of("mcp", server, bare).map_err(|_| invalid())?;
+            Ok(format!("{}{suffix}", canonical.as_str()))
+        })
         .collect()
 }
 
@@ -438,6 +449,25 @@ mod tests {
         fs::write(directory.path().join("appa.toml"), policy).unwrap();
         fs::write(directory.path().join("audience-source.py"), "print('{}')\n").unwrap();
         directory
+    }
+
+    #[test]
+    fn server_qualified_native_battery_rules_stay_inside_owned_namespaces() {
+        let native = BATTERY_POLICY.replace("name = \"mcp/github/get_me\"", "name = \"get_me(owner:me)\"\nserver = \"github\"");
+        assert!(validate_package(battery(&native).path()).is_ok());
+        let foreign = native.replace("server = \"github\"", "server = \"other\"");
+        assert!(matches!(validate_package(battery(&foreign).path()), Err(PackageError::PolicyForeignContract { .. })));
+        for rule in [
+            "name = \"get_me\"\nserver = 3",
+            "name = \"get_me\"\nserver = \"bad/server\"",
+            "name = \"mcp/github/get_me\"\nserver = \"github\"",
+            "name = \"*\"\nserver = \"github\"",
+        ] {
+            let policy = BATTERY_POLICY.replace("name = \"mcp/github/get_me\"", rule);
+            assert!(matches!(validate_package(battery(&policy).path()), Err(PackageError::PolicyServer { .. })));
+        }
+        let unscoped = BATTERY_POLICY.replace("mcp/github/get_me", "get_me");
+        assert!(matches!(validate_package(battery(&unscoped).path()), Err(PackageError::PolicyForeignContract { .. })));
     }
 
     fn claude_code_adapter() -> tempfile::TempDir {
