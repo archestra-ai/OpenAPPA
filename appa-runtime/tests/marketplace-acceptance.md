@@ -66,6 +66,23 @@ check. The unrelated Claude plugin and recorded trajectories must survive both
 switches. Restoring the older generation must restore its owned include paths
 without changing authored policy.
 
+## Verified Claude registration reuse
+
+After a successful install, record bytes and modification times of Claude's
+APPA registry, marketplace registry, settings, deployed binary, statusline and
+`clappa`. Repeat the same plugin install. The verified native files must remain
+unchanged; runtime health and the configured policy must still be verified.
+Installing or removing a battery must reload policy without reinstalling the
+matching native plugin. Disabled or mismatched registrations require repair.
+
+For the reused-registration failure path, inject a runtime startup failure.
+Check that registration is retained, any changed owned files are restored, and
+protected hooks refuse calls when the runtime is unavailable. Retry with the
+prerequisite restored and verify enforcement. This path does not unregister a
+plugin it did not replace. The library subprocess regression separately checks
+successful reuse and startup-failure compensation with controlled native tools;
+it is not a replacement for this real-Claude check.
+
 ## Native removal failure and retry
 
 With APPA registered, put a test `claude` wrapper first on PATH. Make it refuse

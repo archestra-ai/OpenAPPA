@@ -17,13 +17,16 @@ mod endpoint;
 mod paths;
 mod receipt;
 mod removal;
+#[cfg(test)]
+mod reuse_tests;
 
 pub use self::paths::installed_config_path;
 pub use self::removal::claude_code_remove;
 
 use self::claude::{
     cleanup_plugin_recovery, install_statusline, installed_plugin_installations, installed_plugin_root,
-    prepare_plugin_recovery, replace_plugin, run_claude, start_runtime, undo_plugin_switch,
+    prepare_plugin_recovery, registered_deployment_matches, replace_plugin, run_claude, start_runtime,
+    undo_plugin_switch,
 };
 use self::config::{
     ComposedPolicy, ConfigOutcome, create_default_config, discard_file, offer_agent_yell, offer_config_rewrite,
@@ -226,6 +229,9 @@ fn install_claude(source: PluginSource, configuration: Configuration) -> Result<
         })?,
     };
 
+    let reuse_registration = matches!(configuration, Configuration::Prepared { .. })
+        && registered_deployment_matches(&paths.claude_dir, &deployment.root)?;
+
     // 4. Clear the endpoint before Claude is switched over. A runtime that will not
     //    stop aborts init here, rather than leaving a new plugin registered
     //    against an old runtime that a rerun cannot dislodge.
@@ -254,9 +260,14 @@ fn install_claude(source: PluginSource, configuration: Configuration) -> Result<
         }
     }
 
-    // 5. Snapshot for recovery and disarm the launcher.
+    // Reusing a verified registration leaves its hooks in place. Only a
+    // registration replacement needs a native snapshot and launcher disarming.
     let launcher_dir = &paths.install_dir;
-    let recovery = prepare_plugin_recovery(&installations, &paths.data_dir)?;
+    let recovery = if reuse_registration {
+        None
+    } else {
+        prepare_plugin_recovery(&installations, &paths.data_dir)?
+    };
     if recovery.is_some() {
         install_disabled_clappa(launcher_dir)?;
     }
@@ -267,9 +278,18 @@ fn install_claude(source: PluginSource, configuration: Configuration) -> Result<
     //    the skew this bundle exists to prevent. Every step records what it
     //    changed, and a failure unwinds those changes in reverse before the
     //    plugin switch itself is undone.
-    progress("updating the Claude Code plugin");
+    progress(if reuse_registration {
+        "verified the registered Claude Code plugin"
+    } else {
+        "updating the Claude Code plugin"
+    });
     let mut compensation = Compensation::default();
-    let switch = replace_plugin(&deployment.root, &marketplaces, &installations).and_then(|()| {
+    let registration = if reuse_registration {
+        Ok(())
+    } else {
+        replace_plugin(&deployment.root, &marketplaces, &installations)
+    };
+    let switch = registration.and_then(|()| {
         switch_over(
             &appa,
             &config,
@@ -288,7 +308,11 @@ fn install_claude(source: PluginSource, configuration: Configuration) -> Result<
         Err(operation) => {
             // Both recoveries are attempted; the first failure is the one reported.
             let unwound = compensation.unwind();
-            let restored = undo_plugin_switch(recovery.as_ref(), launcher_dir);
+            let restored = if reuse_registration {
+                Ok(())
+            } else {
+                undo_plugin_switch(recovery.as_ref(), launcher_dir)
+            };
             if let Err(recovery_error) = unwound.and(restored) {
                 return Err(InitError::PluginRecovery {
                     operation: Box::new(operation),
@@ -299,9 +323,8 @@ fn install_claude(source: PluginSource, configuration: Configuration) -> Result<
         }
     };
 
-    // 7. Only now is the launcher armed. Every earlier return leaves `clappa`
-    //    absent on a first install and disabled on an upgrade, so a session
-    //    started against a half-installed bundle cannot be a protected one.
+    // Arm new/replaced installations only after verification. A reused
+    // registration keeps its existing launcher and enforcing hooks throughout.
     install_clappa(launcher_dir)?;
     cleanup_plugin_recovery(recovery.as_ref());
 
@@ -740,6 +763,25 @@ const CLAPPA: (&str, &str) = ("clappa", "#!/bin/sh\nexec env APPA_GATE=1 claude 
 
 fn install_clappa(install_dir: &Path) -> Result<PathBuf, InitError> {
     let path = install_dir.join(CLAPPA.0);
+    let existing = crate::installation::optional_bytes(&path).map_err(|error| InitError::NativeState {
+        path: path.clone(),
+        message: error.to_string(),
+    })?;
+    if existing.as_deref() == Some(CLAPPA.1.as_bytes()) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = fs::metadata(&path).map_err(|source| InitError::WriteFile {
+                path: path.clone(),
+                source,
+            })?;
+            if metadata.permissions().mode() & 0o111 == 0o111 {
+                return Ok(path);
+            }
+        }
+        #[cfg(not(unix))]
+        return Ok(path);
+    }
     fs::write(&path, CLAPPA.1).map_err(|source| InitError::WriteFile {
         path: path.clone(),
         source,
@@ -837,6 +879,32 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn launcher_reuse_preserves_mtime_but_repairs_disabled_contents_and_permissions() {
+        let root = tempfile::tempdir().unwrap();
+        let path = install_clappa(root.path()).unwrap();
+        let sentinel = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1234567890);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(sentinel)
+            .unwrap();
+        install_clappa(root.path()).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), sentinel);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+            install_clappa(root.path()).unwrap();
+            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o111, 0o111);
+        }
+        install_disabled_clappa(root.path()).unwrap();
+        assert_ne!(fs::read(&path).unwrap(), CLAPPA.1.as_bytes());
+        install_clappa(root.path()).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), CLAPPA.1.as_bytes());
+    }
 
     #[test]
     fn native_profile_lock_serializes_different_deployment_operations() {
