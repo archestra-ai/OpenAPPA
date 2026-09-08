@@ -82,11 +82,12 @@ spec:
       init write is one appa_update_policy of the verified demo manifest
       with the GitHub include prepended. Never call appa_include_battery
       as the sole init write in that case; serving policy must declare
-      read_secret. When kagent-tool-server or other servers have unconfigured
-      tools, init must draft root contracts for them (reads use delta = {},
-      logs/events use delta = { trust = "suspicious" }, modifying actions require
-      human-approval) and propose a complete starting policy. After approval, call
-      appa_update_policy to activate it. Never conclude that no change is needed
+      read_secret.       When kagent-tool-server or other servers have unconfigured tools, init must
+      draft root contracts for the tools the active cluster agents actually declare
+      (reads use delta = {}, logs/events use delta = { trust = "suspicious" }, modifying
+      actions require human-approval). Do not enumerate dozens of unused tools; undeclared
+      tools stay safely refused by default. Propose a complete starting policy. After approval,
+      call appa_update_policy to activate it. Never conclude that no change is needed
       when discovered cluster tools remain unconfigured. release-manager
       remains a blocked delegation unless the operator separately requests it.
 

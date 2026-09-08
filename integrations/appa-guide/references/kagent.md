@@ -450,11 +450,12 @@ root config nor a translated battery declaration covers.
 
 When `init` inspects tools (whether from `kagent-tool-server`, `demo-tools`, or any other server) and `appa_match_batteries` returns `unconfigured_tools`:
 The initial bootstrap policy only contains `appa-guide`'s internal inspection actions. Other cluster tools remain undeclared and refused.
-`init` MUST draft a starting policy covering all discovered tools attached to agents or discovered on accepted servers:
-1. Generate tool contracts:
+`init` MUST draft a starting policy covering the tools declared by the cluster's active Agents (from their `spec.declarative.tools`):
+1. Generate tool contracts for the agent tools:
    - Queries and reads (`k8s_get_*`, `k8s_describe_*`, `list_*`, `read_*`): permitted (`delta = {}`).
    - Pod logs, cluster events, and diagnostic feeds (`k8s_get_pod_logs`, `k8s_get_events`): incoming cluster data (`delta = { trust = "suspicious" }`).
-   - Cluster changes and destructive actions (`k8s_apply_manifest`, `k8s_delete_resource`, `k8s_patch_*`): require human approval (`requires = { trust = "trusted", attention = ["human-approval"] }`, `delta = {}`).
+   - Cluster changes and destructive actions (`k8s_delete_resource`): require human approval (`requires = { trust = "trusted", attention = ["human-approval"] }`, `delta = {}`).
+   Do NOT enumerate dozens of unused tools from servers that no agent declares; undeclared tools stay safely refused by default under least privilege. Keep the policy compact and concise.
 2. Construct the full starting policy: keep the guide's internal bootstrap declarations, append the new `[[policy.tool]]` contracts, and declare the `oncall` authority (`builtin = "hitl"`). Include any matched batteries.
 3. Present the proposal in human, user-friendly language:
    - **Discovered tools & agents**: list the discovered tools and state which agents are protected with OpenAPPA and which are unprotected. Never use the words "gated" or "ungated".
