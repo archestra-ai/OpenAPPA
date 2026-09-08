@@ -571,6 +571,13 @@ fn runtime_contents_match(source: &Path, target: &Path) -> Result<bool, InitErro
             });
         }
     };
+    // current_exe may name the invocation symlink on some platforms. Resolve
+    // that source only; the managed destination must remain a regular file.
+    let resolved_source = fs::canonicalize(source).map_err(|error| InitError::InstallRuntime {
+        path: source.to_owned(),
+        source: error,
+    })?;
+    let source = resolved_source.as_path();
     let source_metadata = fs::metadata(source).map_err(|error| InitError::InstallRuntime {
         path: source.to_owned(),
         source: error,
@@ -792,6 +799,22 @@ mod tests {
         std::fs::write(&target, b"different!!!").unwrap();
         assert!(!super::runtime_contents_match(&source, &target).unwrap());
         assert!(!super::runtime_contents_match(&source, &root.path().join("missing")).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_comparison_accepts_the_executables_source_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("executable");
+        let source = root.path().join("command");
+        let target = root.path().join("installed");
+        std::fs::write(&executable, b"same runtime").unwrap();
+        std::fs::write(&target, b"same runtime").unwrap();
+        std::os::unix::fs::symlink(&executable, &source).unwrap();
+        assert!(super::runtime_contents_match(&source, &target).unwrap());
+        let target_alias = root.path().join("target-alias");
+        std::os::unix::fs::symlink(&target, &target_alias).unwrap();
+        assert!(!super::runtime_contents_match(&source, &target_alias).unwrap());
     }
 
     #[cfg(unix)]
