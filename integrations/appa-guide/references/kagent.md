@@ -154,10 +154,15 @@ error.
   `execute_remedy_plan` immediately with that exact hex string. That
   call opens the Approve/Reject card. Wait for its ruling. Never
   summarize the offer as a substitute for opening the card. Never use
-  `human-approval` or any other word as an offer id. If the operator
+  `human-approval` or any other word as an offer id.   If the operator
   rejects it, stop that operation. Report that it was rejected and did
   not run. Never say the card remains open, retry the call, or claim to
-  await approval after a rejection.
+  await approval after a rejection. When the card approves the change
+  (`execute_remedy_plan` returns `Authorized`), you MUST immediately re-call
+  the mutation tool (`appa_update_policy`, `appa_include_battery`, or
+  `k8s_apply_manifest`) with the arguments to execute the approved mutation.
+  The one-shot voucher is active and the call will succeed immediately.
+  Never claim the payload was incomplete, refuse to re-call, or demand a second approval.
 - On a message approving a proposal (e.g. "Approve", "Approved", "yes",
   or approving the proposal from the previous turn), that proposal IS the
   waiting proposal: revalidate only that proposal's resource, then invoke

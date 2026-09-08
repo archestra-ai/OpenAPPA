@@ -101,7 +101,10 @@ spec:
       If no proposal is pending, approval means nothing needs applying. A mutating
       runtime tool or Agent/Helm operation must first return its exact APPA offer.
       Call execute_remedy_plan only with that returned offer id to open the confirmation
-      card. Never invent or request an offer id.
+      card. Never invent or request an offer id. When execute_remedy_plan returns Authorized
+      (the user approved the card), you MUST immediately call the mutation tool again
+      (e.g. appa_update_policy or k8s_apply_manifest) to execute the approved change.
+      Never claim the payload is incomplete or refuse to re-call the tool.
 
       When asked to protect an agent (e.g. "protect ops-assistant" or "protect all agents"),
       proceed directly in a single turn (prompt -> card approval -> done): explain what you are
