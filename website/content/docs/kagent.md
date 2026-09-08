@@ -208,9 +208,9 @@ A standard read operation with no sensitive data or external risks flows through
 
 If you already have kagent running with your own agents, use `appa-guide` to configure policy and protect them conversationally.
 
-#### 1. Deploy the adapter image and runtime
+#### 1. Deploy the plugin image and runtime
 
-Update the kagent controller to use the `appa-kagent-adk` adapter image and deploy `appa-runtime`. Persistent storage is optional—keep `persistence.enabled=false` for an ephemeral setup without StorageClass requirements, or set it to `true` to retain trajectory audit logs across pod restarts (requires a `ReadWriteOnce` [StorageClass](https://kubernetes.io/docs/concepts/storage/storage-classes/)):
+Update the kagent controller to use the `appa-kagent-adk` plugin image and deploy `appa-runtime`:
 
 ```sh
 APPA_VERSION=0.15.0 # x-release-please-version
@@ -242,7 +242,22 @@ kubectl wait agent/appa-guide -n "$KAGENT_NAMESPACE" \
   --for=condition=Ready=True --timeout=5m
 ```
 
-To remove the adapter and runtime later, see [Restore stock images and remove OpenAPPA](#restore-stock-images-and-remove-openappa).
+To retain trajectory audit logs across pod restarts, deploy with persistent storage instead (requires a `ReadWriteOnce` [StorageClass](https://kubernetes.io/docs/concepts/storage/storage-classes/)):
+
+```sh
+helm upgrade --install appa-runtime \
+  oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
+  --version "$APPA_VERSION" -n "$RUNTIME_NAMESPACE" --create-namespace \
+  --set persistence.enabled=true \
+  --set appaGuide.enabled=true \
+  --set appaGuide.namespace="$KAGENT_NAMESPACE" \
+  --set-string appaGuide.modelConfig=default-model-config \
+  --set-string appaGuide.toolServer.name=kagent-tool-server \
+  --set-string appaGuide.reasoningEffort=none \
+  --force-conflicts --wait --timeout 10m
+```
+
+To remove the plugin and runtime later, see [Restore stock images and remove OpenAPPA](#restore-stock-images-and-remove-openappa).
 
 #### 2. Initialize policy and batteries with appa-guide
 
@@ -368,4 +383,4 @@ helm uninstall kagent-crds -n kagent --ignore-not-found
 - [Policy configuration](/contracts) - Syntax for tools, annotators, and authorities.
 - [What is a battery](/batteries) - Maintained policy bundles.
 - [Validation](/validation) - Offline policy validation and replay.
-- [Kagent implementation details](https://github.com/archestra-ai/OpenAPPA/blob/main/integrations/kagent/IMPLEMENTATION.md) - Adapter lifecycle and wire protocol.
+- [Kagent implementation details](https://github.com/archestra-ai/OpenAPPA/blob/main/integrations/kagent/IMPLEMENTATION.md) - Plugin lifecycle and wire protocol.
