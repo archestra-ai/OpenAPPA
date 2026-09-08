@@ -586,6 +586,7 @@ pub(super) fn verify_runtime_deployment(runtime: &Path, config: &Path, endpoint:
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::fs;
     use std::path::PathBuf;
 
@@ -672,7 +673,6 @@ mod tests {
     /// A loopback fixture serving `answers` in turn, with the request lines it served. A
     /// probe's path is part of the contract it has with the runtime, so a test that cares
     /// which endpoint init asks reads them.
-    #[cfg(unix)]
     fn recorded_answers(answers: Vec<String>) -> (Endpoint, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         use std::io::{Read, Write};
         use std::net::TcpListener;
