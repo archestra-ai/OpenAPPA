@@ -493,10 +493,8 @@ pub(crate) fn validate_coverage(registry: &Registry, declaration: &ProfileDeclar
     check_rank(chain, Some(profile.starting_label.trust), || {
         "deployment starting label".to_string()
     })?;
-    // The registry build already gathered this label's selectors for the probe.
     check_routable(
         registry.audience(),
-        &mut BTreeSet::new(),
         profile.starting_label.audience.symbolic_atoms(),
         || "deployment starting label".to_string(),
     )?;
