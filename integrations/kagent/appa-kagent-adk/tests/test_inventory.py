@@ -20,7 +20,8 @@ from appa_kagent_adk.inventory import (
 )
 
 KAGENT = Path(__file__).parent.parent.parent
-SHARED_MANIFEST = KAGENT / "fixtures" / "kagent-builtins.json"
+REPOSITORY = KAGENT.parent.parent
+SHARED_MANIFEST = REPOSITORY / "marketplace" / "plugins" / "kagent" / "fixtures" / "kagent-builtins.json"
 GO_MANIFEST = KAGENT / "appa-kagent-adk-go" / "builtins.json"
 PYTHON_MANIFEST = KAGENT / "appa-kagent-adk" / "src" / "appa_kagent_adk" / "builtins.json"
 

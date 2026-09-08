@@ -16,12 +16,17 @@ mod config;
 mod endpoint;
 mod paths;
 mod receipt;
+mod removal;
+#[cfg(test)]
+mod reuse_tests;
 
 pub use self::paths::installed_config_path;
+pub use self::removal::claude_code_remove;
 
 use self::claude::{
     cleanup_plugin_recovery, install_statusline, installed_plugin_installations, installed_plugin_root,
-    prepare_plugin_recovery, replace_plugin, run_claude, start_runtime, undo_plugin_switch,
+    prepare_plugin_recovery, registered_deployment_matches, replace_plugin, run_claude, start_runtime,
+    undo_plugin_switch,
 };
 use self::config::{
     ComposedPolicy, ConfigOutcome, create_default_config, discard_file, offer_agent_yell, offer_config_rewrite,
@@ -62,6 +67,8 @@ pub enum InitError {
     UnloadableConfig { path: PathBuf, source: Box<ConfigError> },
     #[error("Claude's plugin registry at {path} is invalid: {message}")]
     PluginRegistry { path: PathBuf, message: String },
+    #[error("cannot change APPA integration state at {path}: {message}")]
+    NativeState { path: PathBuf, message: String },
     #[error("Claude installed {PLUGIN}, but its installed plugin directory is unavailable")]
     MissingPlugin,
     #[error("Claude reports {count} installed copies of {PLUGIN}; initialization requires exactly one user copy")]
@@ -104,13 +111,47 @@ pub enum InitError {
 /// and the deployment are written before that clearing; all three are additive
 /// and none of them is what Claude reads.
 pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
+    progress("resolving the matching plugin");
+    install_claude(PluginSource::resolve(explicit_source)?, Configuration::Initialize)
+}
+
+/// Activate a previously validated deployment with this release binary and
+/// its matching native archive. Never asks questions or fetches packages.
+pub fn claude_code_prepared(
+    config: &Path,
+    archive: &Path,
+    previous_binary: Option<&Path>,
+) -> Result<String, InitError> {
+    let config = std::path::absolute(config).map_err(|source| InitError::AbsolutePath {
+        path: config.to_owned(),
+        source,
+    })?;
+    crate::config::Config::load(&config).map_err(|source| InitError::UnloadableConfig {
+        path: config.clone(),
+        source: Box::new(source),
+    })?;
+    install_claude(
+        PluginSource::verified_archive(archive)?,
+        Configuration::Prepared {
+            config,
+            previous_binary: previous_binary.map(Path::to_owned),
+        },
+    )
+}
+
+enum Configuration {
+    Initialize,
+    Prepared {
+        config: PathBuf,
+        previous_binary: Option<PathBuf>,
+    },
+}
+
+fn install_claude(source: PluginSource, configuration: Configuration) -> Result<String, InitError> {
     let appa = env::current_exe().map_err(InitError::CurrentExecutable)?;
     let endpoint = Endpoint::resolve()?;
-
-    // 1. Resolve and verify the source. Nothing outside a temp file has changed.
-    progress("resolving the matching plugin");
-    let source = PluginSource::resolve(explicit_source)?;
     let paths = deployment_paths()?;
+    let _profile_lock = lock_claude_profile(&paths.claude_dir)?;
     let installations = installed_plugin_installations(&paths.claude_dir)?;
     let marketplaces = run_claude(["plugin", "marketplace", "list"], None)?;
 
@@ -128,14 +169,20 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
             source,
         }
     })?;
-    let config = paths.config_dir.join("appa.toml");
-    let config_outcome = match create_default_config(&config)? {
-        ConfigOutcome::Kept => offer_config_rewrite(&config)?,
-        created => created,
+    let (config, config_outcome) = match &configuration {
+        Configuration::Prepared { config, .. } => (config.clone(), ConfigOutcome::Kept),
+        Configuration::Initialize => {
+            let config = paths.config_dir.join("appa.toml");
+            let outcome = match create_default_config(&config)? {
+                ConfigOutcome::Kept => offer_config_rewrite(&config)?,
+                created => created,
+            };
+            if outcome != ConfigOutcome::Kept {
+                offer_agent_yell(&config)?;
+            }
+            (config, outcome)
+        }
     };
-    if config_outcome != ConfigOutcome::Kept {
-        offer_agent_yell(&config)?;
-    }
     let composed_policy = verify_config(&config)?;
 
     // 3. Materialize the deployment, or validate and reuse an existing one.
@@ -153,6 +200,10 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     };
     let deployment = match &source {
         PluginSource::Explicit(path) => deploy(Population::Tree(path))?,
+        PluginSource::VerifiedArchive { path, tree_digest, .. } => deploy(Population::VerifiedArchive {
+            path,
+            expected: *tree_digest,
+        })?,
         PluginSource::Release { reference, digest } => {
             let archive = plugin_bundle::ensure_archive(
                 *digest,
@@ -178,20 +229,45 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
         })?,
     };
 
+    let reuse_registration = matches!(configuration, Configuration::Prepared { .. })
+        && registered_deployment_matches(&paths.claude_dir, &deployment.root)?;
+
     // 4. Clear the endpoint before Claude is switched over. A runtime that will not
     //    stop aborts init here, rather than leaving a new plugin registered
     //    against an old runtime that a rerun cannot dislodge.
     progress("checking the runtime endpoint");
     //    A runtime whose binary an install replaced on disk still owns the
     //    endpoint, and its health answer names the stale pid.
-    clear_stale_endpoint(&endpoint)?;
-    //    A healthy runtime from another build is stopped only after an explicit
-    //    confirmation and only when it identifies a same-user appa pid.
-    clear_foreign_endpoint(&appa, &config, &endpoint)?;
+    if matches!(configuration, Configuration::Initialize) {
+        clear_stale_endpoint(&endpoint)?;
+        //    A healthy runtime from another build is stopped only after an explicit
+        //    confirmation and only when it identifies a same-user appa pid.
+        clear_foreign_endpoint(&appa, &config, &endpoint)?;
+    } else if endpoint_health(&endpoint)?.is_some() {
+        // A prepared install cannot answer an interactive question on behalf
+        // of a different deployment. Updates stop their proven prior runtime
+        // in the outer installation transaction before reaching activation.
+        if let Err(current_error) = verify_runtime_deployment(&appa, &config, &endpoint) {
+            let Configuration::Prepared {
+                previous_binary: Some(previous),
+                ..
+            } = &configuration
+            else {
+                return Err(current_error);
+            };
+            let pid = verify_runtime_deployment(previous, &config, &endpoint)?;
+            stop_owned_appa_runtime(pid, &endpoint)?;
+        }
+    }
 
-    // 5. Snapshot for recovery and disarm the launcher.
-    let launcher_dir = appa.parent().unwrap_or(&paths.install_dir);
-    let recovery = prepare_plugin_recovery(&installations, &paths.data_dir)?;
+    // Reusing a verified registration leaves its hooks in place. Only a
+    // registration replacement needs a native snapshot and launcher disarming.
+    let launcher_dir = &paths.install_dir;
+    let recovery = if reuse_registration {
+        None
+    } else {
+        prepare_plugin_recovery(&installations, &paths.data_dir)?
+    };
     if recovery.is_some() {
         install_disabled_clappa(launcher_dir)?;
     }
@@ -202,17 +278,26 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     //    the skew this bundle exists to prevent. Every step records what it
     //    changed, and a failure unwinds those changes in reverse before the
     //    plugin switch itself is undone.
-    progress("updating the Claude Code plugin");
+    progress(if reuse_registration {
+        "verified the registered Claude Code plugin"
+    } else {
+        "updating the Claude Code plugin"
+    });
     let mut compensation = Compensation::default();
-    let switch = replace_plugin(&deployment.root, &marketplaces, &installations).and_then(|()| {
+    let registration = if reuse_registration {
+        Ok(())
+    } else {
+        replace_plugin(&deployment.root, &marketplaces, &installations)
+    };
+    let switch = registration.and_then(|()| {
         switch_over(
             &appa,
-            &deployed_appa,
             &config,
             &composed_policy,
             &endpoint,
             &paths,
             &mut compensation,
+            &configuration,
         )
     });
     let runtime_outcome = match switch {
@@ -223,7 +308,11 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
         Err(operation) => {
             // Both recoveries are attempted; the first failure is the one reported.
             let unwound = compensation.unwind();
-            let restored = undo_plugin_switch(recovery.as_ref(), launcher_dir);
+            let restored = if reuse_registration {
+                Ok(())
+            } else {
+                undo_plugin_switch(recovery.as_ref(), launcher_dir)
+            };
             if let Err(recovery_error) = unwound.and(restored) {
                 return Err(InitError::PluginRecovery {
                     operation: Box::new(operation),
@@ -234,9 +323,8 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
         }
     };
 
-    // 7. Only now is the launcher armed. Every earlier return leaves `clappa`
-    //    absent on a first install and disabled on an upgrade, so a session
-    //    started against a half-installed bundle cannot be a protected one.
+    // Arm new/replaced installations only after verification. A reused
+    // registration keeps its existing launcher and enforcing hooks throughout.
     install_clappa(launcher_dir)?;
     cleanup_plugin_recovery(recovery.as_ref());
 
@@ -249,6 +337,45 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
     .render(Style::of_stdout()))
 }
 
+/// Different deployment configs may target one Claude profile. Serialize the
+/// native mutation on that shared profile, not only on each config's store.
+fn lock_claude_profile(directory: &Path) -> Result<fs::File, InitError> {
+    fs::create_dir_all(directory).map_err(|source| InitError::WriteFile {
+        path: directory.to_owned(),
+        source,
+    })?;
+    let path = directory.join(".appa-install.lock");
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(&path).map_err(|source| InitError::WriteFile {
+        path: path.clone(),
+        source,
+    })?;
+    if !file
+        .metadata()
+        .map_err(|source| InitError::WriteFile {
+            path: path.clone(),
+            source,
+        })?
+        .is_file()
+    {
+        return Err(InitError::NativeState {
+            path,
+            message: "profile lock must be a regular file".into(),
+        });
+    }
+    file.try_lock().map_err(|error| InitError::NativeState {
+        path,
+        message: format!("cannot lock Claude profile; another APPA operation may be running: {error}"),
+    })?;
+    Ok(file)
+}
+
 /// The steps after the Claude switch, each recording what it changed.
 ///
 /// The runtime this plugin is bound to must also be serving this deployment's
@@ -259,14 +386,15 @@ pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
 /// stands.
 fn switch_over(
     appa: &Path,
-    deployed_appa: &Path,
     config: &Path,
     composed_policy: &ComposedPolicy,
     endpoint: &Endpoint,
     paths: &DeploymentPaths,
     compensation: &mut Compensation,
+    configuration: &Configuration,
 ) -> Result<RuntimeOutcome, InitError> {
-    install_runtime(appa, deployed_appa, compensation)?;
+    let deployed_appa = paths.data_dir.join("bin").join(appa_filename());
+    install_runtime(appa, &deployed_appa, compensation)?;
     let plugin_root = installed_plugin_root(&paths.claude_dir)?;
     install_statusline(&plugin_root, paths, compensation)?;
     progress("starting the runtime");
@@ -274,14 +402,17 @@ fn switch_over(
     // user's; anything the starter brings up after silence is init's to stop.
     let running_before = endpoint_health(endpoint)?.is_some_and(|answer| answer == "ok");
     start_runtime(&plugin_root)?;
-    let pid = verify_runtime_deployment(deployed_appa, config, endpoint)?;
+    let pid = verify_runtime_deployment(&deployed_appa, config, endpoint)?;
     if !running_before {
         compensation.record(Undo::Runtime {
             pid,
             endpoint: endpoint.clone(),
         });
     }
-    reconcile_policy(endpoint, config, composed_policy)
+    match configuration {
+        Configuration::Initialize => reconcile_policy(endpoint, config, composed_policy),
+        Configuration::Prepared { .. } => endpoint::reconcile_prepared_policy(endpoint, config, composed_policy),
+    }
 }
 
 /// What the switch has changed on disk and in process state, so a failure can
@@ -398,7 +529,7 @@ fn progress(message: &str) {
 /// Copy the binary to its deployed path, keeping the bytes it replaces beside it
 /// as `appa.prev` until the install stands.
 fn install_runtime(source: &Path, target: &Path, compensation: &mut Compensation) -> Result<(), InitError> {
-    if same_file(source, target) {
+    if same_file(source, target) || runtime_contents_match(source, target)? {
         return Ok(());
     }
     let previous = if target.exists() {
@@ -449,6 +580,54 @@ fn install_runtime(source: &Path, target: &Path, compensation: &mut Compensation
         });
     }
     Ok(())
+}
+
+fn runtime_contents_match(source: &Path, target: &Path) -> Result<bool, InitError> {
+    let target_metadata = match fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.is_file() => metadata,
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => {
+            return Err(InitError::InstallRuntime {
+                path: target.to_owned(),
+                source,
+            });
+        }
+    };
+    // current_exe may name the invocation symlink on some platforms. Resolve
+    // that source only; the managed destination must remain a regular file.
+    let resolved_source = fs::canonicalize(source).map_err(|error| InitError::InstallRuntime {
+        path: source.to_owned(),
+        source: error,
+    })?;
+    let source = resolved_source.as_path();
+    let source_metadata = fs::metadata(source).map_err(|error| InitError::InstallRuntime {
+        path: source.to_owned(),
+        source: error,
+    })?;
+    if source_metadata.len() != target_metadata.len() {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if source_metadata.permissions().mode() & 0o111 != target_metadata.permissions().mode() & 0o111 {
+            return Ok(false);
+        }
+    }
+    let digest = |path: &Path| {
+        let file = crate::installation::open_regular(path).map_err(|error| InitError::NativeState {
+            path: path.to_owned(),
+            message: error.to_string(),
+        })?;
+        appa_package::generation::ArtifactDigest::of_reader(file, 512 * 1024 * 1024).map_err(|source| {
+            InitError::InstallRuntime {
+                path: path.to_owned(),
+                source,
+            }
+        })
+    };
+    Ok(digest(source)? == digest(target)?)
 }
 
 /// Terminate every `appa` process whose resolved executable is `target`, and
@@ -577,18 +756,33 @@ impl Confirmation {
     }
 }
 
+#[cfg(windows)]
+const CLAPPA: (&str, &str) = ("clappa.cmd", "@echo off\r\nset APPA_GATE=1\r\nclaude %*\r\n");
+#[cfg(not(windows))]
+const CLAPPA: (&str, &str) = ("clappa", "#!/bin/sh\nexec env APPA_GATE=1 claude \"$@\"\n");
+
 fn install_clappa(install_dir: &Path) -> Result<PathBuf, InitError> {
-    #[cfg(windows)]
-    let (path, contents) = (
-        install_dir.join("clappa.cmd"),
-        "@echo off\r\nset APPA_GATE=1\r\nclaude %*\r\n",
-    );
-    #[cfg(not(windows))]
-    let (path, contents) = (
-        install_dir.join("clappa"),
-        "#!/bin/sh\nexec env APPA_GATE=1 claude \"$@\"\n",
-    );
-    fs::write(&path, contents).map_err(|source| InitError::WriteFile {
+    let path = install_dir.join(CLAPPA.0);
+    let existing = crate::installation::optional_bytes(&path).map_err(|error| InitError::NativeState {
+        path: path.clone(),
+        message: error.to_string(),
+    })?;
+    if existing.as_deref() == Some(CLAPPA.1.as_bytes()) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = fs::metadata(&path).map_err(|source| InitError::WriteFile {
+                path: path.clone(),
+                source,
+            })?;
+            if metadata.permissions().mode() & 0o111 == 0o111 {
+                return Ok(path);
+            }
+        }
+        #[cfg(not(unix))]
+        return Ok(path);
+    }
+    fs::write(&path, CLAPPA.1).map_err(|source| InitError::WriteFile {
         path: path.clone(),
         source,
     })?;
@@ -629,7 +823,98 @@ fn install_disabled_clappa(install_dir: &Path) -> Result<(), InitError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn identical_runtime_copies_do_not_replace_files_or_create_undo_state() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("installed");
+        std::fs::write(&source, b"same runtime").unwrap();
+        std::fs::write(&target, b"same runtime").unwrap();
+        let backup = target.with_extension("prev");
+        std::fs::write(&backup, b"retained backup").unwrap();
+        let before = std::fs::metadata(&target).unwrap().modified().unwrap();
+        let mut compensation = super::Compensation::default();
+        super::install_runtime(&source, &target, &mut compensation).unwrap();
+        assert!(compensation.done.is_empty());
+        assert_eq!(std::fs::read(&backup).unwrap(), b"retained backup");
+        assert_eq!(std::fs::metadata(&target).unwrap().modified().unwrap(), before);
+        std::fs::write(&target, b"different!!!").unwrap();
+        assert!(!super::runtime_contents_match(&source, &target).unwrap());
+        assert!(!super::runtime_contents_match(&source, &root.path().join("missing")).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_comparison_accepts_the_executables_source_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("executable");
+        let source = root.path().join("command");
+        let target = root.path().join("installed");
+        std::fs::write(&executable, b"same runtime").unwrap();
+        std::fs::write(&target, b"same runtime").unwrap();
+        std::os::unix::fs::symlink(&executable, &source).unwrap();
+        assert!(super::runtime_contents_match(&source, &target).unwrap());
+        let target_alias = root.path().join("target-alias");
+        std::os::unix::fs::symlink(&target, &target_alias).unwrap();
+        assert!(!super::runtime_contents_match(&source, &target_alias).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identical_runtime_bytes_still_require_executable_permission_repair() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("installed");
+        for path in [&source, &target] {
+            std::fs::write(path, b"same runtime").unwrap();
+        }
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!super::runtime_contents_match(&source, &target).unwrap());
+        let mut compensation = super::Compensation::default();
+        super::install_runtime(&source, &target, &mut compensation).unwrap();
+        assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o111, 0o111);
+        compensation.commit();
+    }
+
     use super::*;
+
+    #[test]
+    fn launcher_reuse_preserves_mtime_but_repairs_disabled_contents_and_permissions() {
+        let root = tempfile::tempdir().unwrap();
+        let path = install_clappa(root.path()).unwrap();
+        let sentinel = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1234567890);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(sentinel)
+            .unwrap();
+        install_clappa(root.path()).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), sentinel);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+            install_clappa(root.path()).unwrap();
+            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o111, 0o111);
+        }
+        install_disabled_clappa(root.path()).unwrap();
+        assert_ne!(fs::read(&path).unwrap(), CLAPPA.1.as_bytes());
+        install_clappa(root.path()).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), CLAPPA.1.as_bytes());
+    }
+
+    #[test]
+    fn native_profile_lock_serializes_different_deployment_operations() {
+        let root = tempfile::tempdir().unwrap();
+        let first = lock_claude_profile(root.path()).unwrap();
+        assert!(lock_claude_profile(root.path()).is_err());
+        drop(first);
+        assert!(root.path().join(".appa-install.lock").is_file());
+        assert!(lock_claude_profile(root.path()).is_ok());
+    }
 
     #[test]
     fn an_empty_answer_takes_the_default_and_end_of_input_refuses() {

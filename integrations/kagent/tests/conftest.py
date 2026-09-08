@@ -670,7 +670,7 @@ def _stage_github_battery(destination: Path) -> None:
     identity is restated: the contracts, sanitizers and trust rules the
     tests exercise are the shipped battery's own.
     """
-    shutil.copytree(REPO_ROOT / "batteries" / "github", destination)
+    shutil.copytree(REPO_ROOT / "marketplace" / "batteries" / "github", destination)
     policy = destination / "appa.toml"
     policy.write_text(policy.read_text().replace("mcp/github/", "mcp__github__"))
 

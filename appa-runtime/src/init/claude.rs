@@ -107,7 +107,7 @@ pub(super) fn installed_plugin_root(claude_dir: &Path) -> Result<PathBuf, InitEr
         .ok_or(InitError::MissingPlugin)
 }
 
-fn plugin_registry(claude_dir: &Path) -> Result<Value, InitError> {
+pub(super) fn plugin_registry(claude_dir: &Path) -> Result<Value, InitError> {
     let path = claude_dir.join("plugins/installed_plugins.json");
     if !path.exists() {
         return Ok(Value::Object(Map::new()));
@@ -120,6 +120,158 @@ fn plugin_registry(claude_dir: &Path) -> Result<Value, InitError> {
         path,
         message: error.to_string(),
     })
+}
+
+/// Reuse only a complete, enabled native registration of the verified tree.
+/// Ordinary drift goes through installation's repair path; unreadable or
+/// malformed state is not evidence that it is safe to replace a registration.
+pub(super) fn registered_deployment_matches(claude_dir: &Path, deployment: &Path) -> Result<bool, InitError> {
+    let registry_path = claude_dir.join("plugins/installed_plugins.json");
+    let registry = native_object(&registry_path)?;
+    let Some(plugins) = registry.get("plugins") else {
+        return Ok(false);
+    };
+    let plugins = plugins
+        .as_object()
+        .ok_or_else(|| native_error(&registry_path, "plugins must be an object"))?;
+    let Some(entries) = plugins.get(PLUGIN) else {
+        return Ok(false);
+    };
+    let entries = entries
+        .as_array()
+        .ok_or_else(|| native_error(&registry_path, "APPA registrations must be an array"))?;
+    for entry in entries {
+        let entry = entry
+            .as_object()
+            .ok_or_else(|| native_error(&registry_path, "APPA registration must be an object"))?;
+        for field in ["scope", "installPath", "projectPath"] {
+            if entry.get(field).is_some_and(|value| !value.is_string()) {
+                return Err(native_error(&registry_path, &format!("{field} must be a string")));
+            }
+        }
+    }
+    if entries.len() != 1 || entries[0].get("scope").and_then(Value::as_str) != Some("user") {
+        return Ok(false);
+    }
+    let Some(installed) = entries[0].get("installPath").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    let installed = Path::new(installed);
+    match fs::metadata(installed) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => {
+            return Err(InitError::WriteFile {
+                path: installed.to_owned(),
+                source,
+            });
+        }
+    }
+    if appa_package::tree::canonical_tree_digest(installed).map_err(crate::plugin_bundle::PluginBundleError::from)?
+        != appa_package::tree::canonical_tree_digest(&deployment.join("plugin"))
+            .map_err(crate::plugin_bundle::PluginBundleError::from)?
+    {
+        return Ok(false);
+    }
+    let marketplace_path = claude_dir.join("plugins/known_marketplaces.json");
+    let marketplaces = native_object(&marketplace_path)?;
+    let Some(entry) = marketplaces.get(MARKETPLACE) else {
+        return Ok(false);
+    };
+    if !marketplace_matches(entry, deployment, &marketplace_path)? {
+        return Ok(false);
+    }
+    let settings_path = claude_dir.join("settings.json");
+    let settings = native_object(&settings_path)?;
+    if let Some(extra) = settings.get("extraKnownMarketplaces") {
+        let extra = extra
+            .as_object()
+            .ok_or_else(|| native_error(&settings_path, "extraKnownMarketplaces must be an object"))?;
+        if let Some(entry) = extra.get(MARKETPLACE)
+            && !marketplace_matches(entry, deployment, &settings_path)?
+        {
+            return Ok(false);
+        }
+    }
+    let Some(enabled) = settings.get("enabledPlugins") else {
+        return Ok(false);
+    };
+    let enabled = enabled
+        .as_object()
+        .ok_or_else(|| native_error(&settings_path, "enabledPlugins must be an object"))?;
+    match enabled.get(PLUGIN) {
+        Some(Value::Bool(enabled)) => Ok(*enabled),
+        None => Ok(false),
+        Some(_) => Err(native_error(
+            &settings_path,
+            "APPA enabledPlugins value must be a boolean",
+        )),
+    }
+}
+
+fn native_error(path: &Path, message: &str) -> InitError {
+    InitError::NativeState {
+        path: path.to_owned(),
+        message: message.to_owned(),
+    }
+}
+
+fn native_bytes(path: &Path) -> Result<Option<Vec<u8>>, InitError> {
+    crate::installation::optional_bytes(path).map_err(|error| native_error(path, &error.to_string()))
+}
+
+fn native_object(path: &Path) -> Result<Map<String, Value>, InitError> {
+    let Some(bytes) = native_bytes(path)? else {
+        return Ok(Map::new());
+    };
+    let value: Value = serde_json::from_slice(&bytes).map_err(|error| native_error(path, &error.to_string()))?;
+    value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| native_error(path, "expected a JSON object"))
+}
+
+fn marketplace_matches(entry: &Value, deployment: &Path, registry: &Path) -> Result<bool, InitError> {
+    let entry = entry
+        .as_object()
+        .ok_or_else(|| native_error(registry, "APPA marketplace must be an object"))?;
+    let Some(source) = entry.get("source") else {
+        return Ok(false);
+    };
+    let source = source
+        .as_object()
+        .ok_or_else(|| native_error(registry, "APPA marketplace source must be an object"))?;
+    for field in ["source", "path"] {
+        if source.get(field).is_some_and(|value| !value.is_string()) {
+            return Err(native_error(
+                registry,
+                &format!("APPA marketplace source {field} must be a string"),
+            ));
+        }
+    }
+    if source.get("source").and_then(Value::as_str) != Some("directory") {
+        return Ok(false);
+    }
+    let Some(path) = source.get("path").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    let path = Path::new(path);
+    let actual = match fs::canonicalize(path) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => {
+            return Err(InitError::WriteFile {
+                path: path.to_owned(),
+                source,
+            });
+        }
+    };
+    let expected = fs::canonicalize(deployment).map_err(|source| InitError::WriteFile {
+        path: deployment.to_owned(),
+        source,
+    })?;
+    Ok(actual == expected)
 }
 
 pub(super) struct PluginRecovery {
@@ -312,23 +464,40 @@ pub(super) fn install_statusline(
     }
 
     let settings_path = paths.claude_dir.join("settings.json");
-    let mut settings = if settings_path.exists() {
-        let bytes = fs::read(&settings_path).map_err(|source| InitError::WriteFile {
-            path: settings_path.clone(),
-            source,
-        })?;
-        serde_json::from_slice::<Value>(&bytes).map_err(|error| InitError::PluginRegistry {
-            path: settings_path.clone(),
-            message: error.to_string(),
-        })?
-    } else {
-        Value::Object(Map::new())
-    };
+    let mut settings = Value::Object(native_object(&settings_path)?);
     let existing = settings
         .get("statusLine")
         .and_then(|line| line.get("command"))
         .and_then(Value::as_str);
     if existing.is_some_and(|command| !command.contains("appa-statusline")) {
+        return Ok(());
+    }
+    #[cfg(windows)]
+    let statusline_command = format!(
+        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{}\"",
+        target.display()
+    );
+    #[cfg(not(windows))]
+    let statusline_command = target.to_string_lossy().into_owned();
+    let source_bytes = native_bytes(&source)?.ok_or_else(|| InitError::MissingPluginFile(source.clone()))?;
+    if existing == Some(statusline_command.as_str())
+        && settings["statusLine"]["type"] == "command"
+        && native_bytes(&target)?.as_deref() == Some(source_bytes.as_slice())
+    {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = fs::metadata(&target)
+                .map_err(|source| InitError::WriteFile {
+                    path: target.clone(),
+                    source,
+                })?
+                .permissions();
+            if permissions.mode() & 0o111 == 0o111 {
+                return Ok(());
+            }
+        }
+        #[cfg(not(unix))]
         return Ok(());
     }
     for path in [&target, &settings_path] {
@@ -355,13 +524,6 @@ pub(super) fn install_statusline(
         path: settings_path.clone(),
         message: "the root must be an object".to_owned(),
     })?;
-    #[cfg(windows)]
-    let statusline_command = format!(
-        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{}\"",
-        target.display()
-    );
-    #[cfg(not(windows))]
-    let statusline_command = target.to_string_lossy().into_owned();
     object.insert(
         "statusLine".to_owned(),
         serde_json::json!({"type": "command", "command": statusline_command}),
@@ -425,6 +587,207 @@ pub(super) fn start_runtime(plugin_root: &Path) -> Result<(), InitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_json(path: &Path, value: Value) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+
+    fn registered_fixture(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let claude = root.join("claude");
+        let deployment = root.join("deployment");
+        let installed = root.join("installed");
+        for directory in [deployment.join("plugin"), installed.clone()] {
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(directory.join("hook.sh"), "verified hook").unwrap();
+        }
+        write_json(
+            &claude.join("plugins/installed_plugins.json"),
+            serde_json::json!({
+                "version": 2, "plugins": { (PLUGIN): [{"scope": "user", "installPath": installed}] }
+            }),
+        );
+        write_json(
+            &claude.join("plugins/known_marketplaces.json"),
+            serde_json::json!({
+                (MARKETPLACE): {"source": {"source": "directory", "path": deployment}}
+            }),
+        );
+        write_json(
+            &claude.join("settings.json"),
+            serde_json::json!({"enabledPlugins": {(PLUGIN): true}}),
+        );
+        (claude, deployment, installed)
+    }
+
+    #[test]
+    fn registration_reuse_requires_the_complete_verified_tree_and_enabled_plugin() {
+        let root = tempfile::tempdir().unwrap();
+        let (claude, deployment, installed) = registered_fixture(root.path());
+        assert!(registered_deployment_matches(&claude, &deployment).unwrap());
+        fs::write(installed.join("extra"), "unexpected").unwrap();
+        assert!(!registered_deployment_matches(&claude, &deployment).unwrap());
+        fs::remove_file(installed.join("extra")).unwrap();
+        write_json(
+            &claude.join("settings.json"),
+            serde_json::json!({"enabledPlugins": {(PLUGIN): false}}),
+        );
+        assert!(!registered_deployment_matches(&claude, &deployment).unwrap());
+        write_json(
+            &claude.join("settings.json"),
+            serde_json::json!({
+                "enabledPlugins": {(PLUGIN): true},
+                "extraKnownMarketplaces": {(MARKETPLACE): {"source": {"source": "directory", "path": installed}}}
+            }),
+        );
+        assert!(!registered_deployment_matches(&claude, &deployment).unwrap());
+    }
+
+    #[test]
+    fn registration_reuse_distinguishes_missing_state_from_malformed_state() {
+        let root = tempfile::tempdir().unwrap();
+        let (claude, deployment, _) = registered_fixture(root.path());
+        let registry = claude.join("plugins/installed_plugins.json");
+        for value in [
+            serde_json::json!([]),
+            serde_json::json!({"plugins": []}),
+            serde_json::json!({"plugins": {(PLUGIN): {}}}),
+            serde_json::json!({"plugins": {(PLUGIN): [{"scope": false}]}}),
+        ] {
+            write_json(&registry, value);
+            assert!(registered_deployment_matches(&claude, &deployment).is_err());
+        }
+        fs::write(&registry, "{").unwrap();
+        assert!(registered_deployment_matches(&claude, &deployment).is_err());
+        fs::remove_file(&registry).unwrap();
+        assert!(!registered_deployment_matches(&claude, &deployment).unwrap());
+        let (claude, deployment, _) = registered_fixture(root.path());
+        write_json(
+            &claude.join("settings.json"),
+            serde_json::json!({"enabledPlugins": {(PLUGIN): "true"}}),
+        );
+        assert!(registered_deployment_matches(&claude, &deployment).is_err());
+        fs::create_dir_all(claude.join("invalid")).unwrap();
+        fs::remove_file(&registry).unwrap();
+        fs::create_dir(&registry).unwrap();
+        assert!(registered_deployment_matches(&claude, &deployment).is_err());
+    }
+
+    #[test]
+    fn registration_reuse_requires_one_user_scope_and_an_existing_plugin_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let (claude, deployment, installed) = registered_fixture(root.path());
+        let registry = claude.join("plugins/installed_plugins.json");
+        for entries in [
+            serde_json::json!([]),
+            serde_json::json!([{"scope": "project", "installPath": installed}]),
+            serde_json::json!([{"scope": "user", "installPath": installed}, {"scope": "user", "installPath": installed}]),
+            serde_json::json!([{"scope": "user"}]),
+            serde_json::json!([{"scope": "user", "installPath": root.path().join("absent")}]),
+            serde_json::json!([{"scope": "user", "installPath": installed.join("hook.sh")}]),
+        ] {
+            write_json(&registry, serde_json::json!({"plugins": {(PLUGIN): entries}}));
+            assert!(!registered_deployment_matches(&claude, &deployment).unwrap());
+        }
+        write_json(
+            &registry,
+            serde_json::json!({"plugins": {(PLUGIN): [{"scope": "user", "installPath": installed}]}}),
+        );
+        assert!(registered_deployment_matches(&claude, &deployment).unwrap());
+    }
+
+    #[test]
+    fn registration_reuse_accepts_filesystem_alias_and_checks_extra_source() {
+        let root = tempfile::tempdir().unwrap();
+        let (claude, deployment, _) = registered_fixture(root.path());
+        let alias = deployment.join("plugin/..");
+        let source = serde_json::json!({"source": {"source": "directory", "path": alias}});
+        write_json(
+            &claude.join("plugins/known_marketplaces.json"),
+            serde_json::json!({(MARKETPLACE): source}),
+        );
+        write_json(
+            &claude.join("settings.json"),
+            serde_json::json!({
+                "enabledPlugins": {(PLUGIN): true}, "extraKnownMarketplaces": {(MARKETPLACE): source}
+            }),
+        );
+        assert!(registered_deployment_matches(&claude, &deployment).unwrap());
+        write_json(
+            &claude.join("plugins/known_marketplaces.json"),
+            serde_json::json!({(MARKETPLACE): {"source": []}}),
+        );
+        assert!(registered_deployment_matches(&claude, &deployment).is_err());
+    }
+
+    #[test]
+    fn unchanged_statusline_does_not_write_or_record_compensation() {
+        let root = tempfile::tempdir().unwrap();
+        let plugin = root.path().join("plugin");
+        let paths = DeploymentPaths {
+            install_dir: root.path().join("bin"),
+            config_dir: root.path().join("config"),
+            data_dir: root.path().join("data"),
+            claude_dir: root.path().join("claude"),
+        };
+        fs::create_dir_all(&plugin).unwrap();
+        fs::create_dir_all(&paths.install_dir).unwrap();
+        #[cfg(windows)]
+        let (source, target) = ("statusline.ps1", "appa-statusline.ps1");
+        #[cfg(not(windows))]
+        let (source, target) = ("statusline.sh", "appa-statusline.sh");
+        fs::write(plugin.join(source), "verified statusline").unwrap();
+        install_statusline(&plugin, &paths, &mut Compensation::default()).unwrap();
+        let settings_path = paths.claude_dir.join("settings.json");
+        let bytes = fs::read(&settings_path).unwrap();
+        let target_path = paths.install_dir.join(target);
+        let sentinel = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        for path in [&settings_path, &target_path] {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(sentinel))
+                .unwrap();
+        }
+        let settings_modified = fs::metadata(&settings_path).unwrap().modified().unwrap();
+        let target_modified = fs::metadata(&target_path).unwrap().modified().unwrap();
+        let mut compensation = Compensation::default();
+        install_statusline(&plugin, &paths, &mut compensation).unwrap();
+        assert!(compensation.done.is_empty());
+        assert_eq!(fs::read(&settings_path).unwrap(), bytes);
+        assert_eq!(
+            fs::metadata(&settings_path).unwrap().modified().unwrap(),
+            settings_modified
+        );
+        assert_eq!(fs::metadata(&target_path).unwrap().modified().unwrap(), target_modified);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&target_path, fs::Permissions::from_mode(0o644)).unwrap();
+            let mut repair = Compensation::default();
+            install_statusline(&plugin, &paths, &mut repair).unwrap();
+            assert_eq!(repair.done.len(), 2);
+            assert_eq!(fs::metadata(&target_path).unwrap().permissions().mode() & 0o777, 0o755);
+            assert_eq!(fs::read(&target_path).unwrap(), b"verified statusline");
+        }
+        fs::write(paths.install_dir.join(target), "changed").unwrap();
+        install_statusline(&plugin, &paths, &mut compensation).unwrap();
+        assert_eq!(compensation.done.len(), 2);
+        assert_eq!(
+            fs::read(paths.install_dir.join(target)).unwrap(),
+            b"verified statusline"
+        );
+        write_json(
+            &settings_path,
+            serde_json::json!({"statusLine": {"type": "command", "command": "my-custom-statusline"}}),
+        );
+        let bytes = fs::read(&settings_path).unwrap();
+        let mut compensation = Compensation::default();
+        install_statusline(&plugin, &paths, &mut compensation).unwrap();
+        assert!(compensation.done.is_empty());
+        assert_eq!(fs::read(&settings_path).unwrap(), bytes);
+    }
 
     #[test]
     fn marketplace_line_matches_only_the_named_marketplace() {

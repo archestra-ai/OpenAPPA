@@ -457,6 +457,24 @@ pub(super) fn reconcile_policy(
     Ok(RuntimeOutcome::Reloaded)
 }
 
+pub(super) fn reconcile_prepared_policy(
+    endpoint: &Endpoint,
+    config: &Path,
+    composed: &ComposedPolicy,
+) -> Result<RuntimeOutcome, InitError> {
+    if policy_divergence(composed, &serving_policy_key(endpoint)?).is_none() {
+        return Ok(RuntimeOutcome::Healthy);
+    }
+    reload_policy(endpoint, config)?;
+    if policy_divergence(composed, &serving_policy_key(endpoint)?).is_some() {
+        return Err(InitError::PolicyKey {
+            endpoint: endpoint.url().to_owned(),
+            message: "runtime did not confirm the prepared policy after reload".into(),
+        });
+    }
+    Ok(RuntimeOutcome::Reloaded)
+}
+
 /// Why a serving runtime may not be answering under the file this init validated, or
 /// `None` when it demonstrably is.
 ///
@@ -568,6 +586,7 @@ pub(super) fn verify_runtime_deployment(runtime: &Path, config: &Path, endpoint:
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::fs;
     use std::path::PathBuf;
 
@@ -654,7 +673,6 @@ mod tests {
     /// A loopback fixture serving `answers` in turn, with the request lines it served. A
     /// probe's path is part of the contract it has with the runtime, so a test that cares
     /// which endpoint init asks reads them.
-    #[cfg(unix)]
     fn recorded_answers(answers: Vec<String>) -> (Endpoint, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         use std::io::{Read, Write};
         use std::net::TcpListener;
