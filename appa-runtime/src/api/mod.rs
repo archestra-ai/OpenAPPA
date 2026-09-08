@@ -456,11 +456,13 @@ impl Deployment {
         PolicyEngine::Resident(&self.resident)
     }
 
-    /// Read every selector the policy references once, through the bound sources, and look
-    /// up every member those answers owe through the entries that answer them; hold each
-    /// answer to the reader shape rule. A source that fails or reports a malformed reader is
-    /// a misconfiguration to refuse before this deployment serves, not a no-answer to
-    /// discover under an agent. Replay never runs this: it reads pins.
+    /// Read every selector the policy references once, through the bound sources, and ask
+    /// each lookup entry for one member those answers owe; hold each answer to the reader
+    /// shape rule. A source that fails or reports a malformed reader is a misconfiguration to
+    /// refuse before this deployment serves, not a no-answer to discover under an agent. One
+    /// lookup per provider proves the entry answers in shape at a cost that does not grow
+    /// with the directory; a member it later answers badly refuses that act. Replay never
+    /// runs this: it reads pins.
     async fn probe_sources(&self) -> Result<(), ProbeError> {
         use crate::external::settle_batch;
         use appa_engine::audience::AudienceEvidence;
@@ -478,7 +480,12 @@ impl Deployment {
             lookups: Vec::new(),
         };
         let owed = audience.member_lookups_owed(&evidence);
-        let lookups: Vec<_> = owed.iter().map(|spec| self.probe_lookup(audience, spec)).collect();
+        let mut probed: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        let lookups: Vec<_> = owed
+            .iter()
+            .filter(|spec| probed.insert(spec.provider.as_str()))
+            .map(|spec| self.probe_lookup(audience, spec))
+            .collect();
         for lookup in settle_batch(lookups).await {
             lookup?;
         }

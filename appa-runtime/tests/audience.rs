@@ -343,10 +343,10 @@ async fn the_probe_reads_every_referenced_selector_and_refuses_a_malformed_sourc
     );
 }
 
-/// The probe also asks the lookup entry for every qualified member the selectors report,
-/// once per member, and holds the principal to the shape rule.
+/// The probe also asks the lookup entry for one qualified member the selectors report,
+/// whatever their number, and holds the principal to the shape rule.
 #[tokio::test]
-async fn the_probe_looks_up_every_member_the_selectors_owe() {
+async fn the_probe_asks_each_lookup_entry_for_one_owed_member() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (url, source) = serve_source().await;
     let path = dir.path().join("appa.toml");
@@ -355,7 +355,7 @@ async fn the_probe_looks_up_every_member_the_selectors_owe() {
     let config = Config::load(&path).expect("the fixture validates");
     let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
 
-    source.members(Some(vec!["alice@corp.example", "slack:U-bob"]));
+    source.members(Some(vec!["alice@corp.example", "slack:U-bob", "slack:U-carol"]));
     source.principal(Some(Some("bob@corp.example")));
     runtime
         .probe_sources()
@@ -366,11 +366,7 @@ async fn the_probe_looks_up_every_member_the_selectors_owe() {
         .into_iter()
         .filter(|request| request["artifact"]["member"].is_string())
         .collect();
-    assert_eq!(
-        lookups.len(),
-        1,
-        "one member, reported by three selectors, is looked up once"
-    );
+    assert_eq!(lookups.len(), 1, "two owed members under one provider cost one lookup");
     assert_eq!(lookups[0]["name"], "people");
     assert_eq!(lookups[0]["artifact"], serde_json::json!({ "member": "slack:U-bob" }));
 
