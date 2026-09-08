@@ -208,6 +208,19 @@ func TestMCPDiscoveryLifecycleAgainstRuntime(t *testing.T) {
 	if request.Tools["read"] == nil || request.Tools["late"] == nil || request.Tools["uncovered"] != nil {
 		t.Fatalf("restart lost pinned validation: %v", request.Tools)
 	}
+	// Listing must retain the stock ADK reconnect behavior after a lost session.
+	for session := range server.Sessions() {
+		if err := session.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request = &model.LLMRequest{}
+	if err := restarted.ProcessRequest(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	if restarted.run(ctx.InvocationID()).observations[0].discovery.Status != DiscoveryComplete {
+		t.Fatal("metadata discovery did not reconnect the host session")
+	}
 	// The same uncovered tool is a known configuration error for a NEW
 	// trajectory. No MCP execution occurs and failed startup closes its sessions.
 	initial := &MCPDiscovery{connections: discovery.connections, runs: make(map[string]*mcpRun)}

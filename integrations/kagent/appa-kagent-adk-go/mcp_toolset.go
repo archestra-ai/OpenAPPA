@@ -62,6 +62,11 @@ func newDiscoveredToolset(transport mcp.Transport, filter []string) (*discovered
 			if err != nil {
 				return nil, err
 			}
+			if result.Status == DiscoveryUnavailable && result.failure != nil {
+				// ADK owns retry/reconnection. Only classify a failed connection
+				// as unknown after its normal reconnect attempt has completed.
+				return nil, result.failure
+			}
 			visible := make([]*mcp.Tool, 0, len(result.Tools))
 			for _, candidate := range result.Tools {
 				if !mcpAppOnly(candidate.Meta) {
@@ -91,6 +96,9 @@ func (set *discoveredToolset) discover(ctx agent.ReadonlyContext) ([]tool.Tool, 
 		return nil, observation, nil
 	}
 	if err != nil && observation.session == nil {
+		return nil, observation, nil
+	}
+	if err != nil && observation.discovery.Status == DiscoveryUnavailable && observation.discovery.failure != nil {
 		return nil, observation, nil
 	}
 	return tools, observation, err
