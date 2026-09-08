@@ -188,6 +188,17 @@ async fn hook(
     (status, axum::Json(body))
 }
 
+async fn validate_tools(
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    let (status, report) = crate::tool_validation::answer(&state.runtime, state.adapter, &body);
+    (
+        axum::http::StatusCode::from_u16(status).expect("validation answers carry valid status codes"),
+        axum::Json(report),
+    )
+}
+
 /// `ok` while this process serves the executable installed on disk; `stale <pid>` once an
 /// install replaced that file, naming the process to stop before starting the new build.
 async fn health(State(state): State<AppState>) -> String {
@@ -419,6 +430,12 @@ async fn serve(args: Args) -> ExitCode {
         .route("/health", get(health))
         .route("/batteries", get(batteries))
         .route("/hook", post(hook))
+        .route(
+            "/validate",
+            post(validate_tools).layer(axum::extract::DefaultBodyLimit::max(
+                appa_runtime_api::inventory::MAX_INVENTORY_BYTES,
+            )),
+        )
         .nest_service(
             "/mcp",
             mcp::service_with_allowed_hosts(Arc::clone(&runtime), &args.mcp_allowed_hosts, args.adapter),

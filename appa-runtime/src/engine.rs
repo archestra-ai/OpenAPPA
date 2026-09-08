@@ -772,6 +772,7 @@ impl RuntimeEngine {
         let provider_run = registry.provider_run_annotations().map(|annotation| &annotation.name);
         declared
             .chain(provider_run)
+            .filter(|name| !name.is_name_selector())
             .map(|name| name.as_str().to_string())
             .collect()
     }

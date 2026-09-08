@@ -2,6 +2,7 @@
 //! adapters share, and the canonical hook wire ([`wire`]) that carries
 //! it between a host's adapter and the runtime.
 
+pub mod inventory;
 mod wire;
 
 pub use wire::{

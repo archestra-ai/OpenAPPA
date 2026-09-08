@@ -216,7 +216,7 @@ fn only_the_runtime_chart_consumes_this_skill_package() {
     assert!(!demo_values.contains("integrations/appa-guide"));
 
     let policy = fs::read_to_string(demo.join("files/demo.appa.toml")).expect("the demo policy exists");
-    assert!(policy.contains("name = \"mcp/kagent-tool-server/k8s_apply_manifest\""));
+    assert!(policy.contains("name = \"k8s_apply_manifest\""));
     assert!(policy.contains("attention = [\"human-approval\"]"));
     assert!(policy.contains("name = \"host/kagent/skills\""));
     assert!(

@@ -18,6 +18,32 @@ impl ToolName {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Internal normalization of a host-native MCP rule, not a callable name.
+    /// Only the server component varies; this is not a general glob language.
+    pub fn is_name_selector(&self) -> bool {
+        self.0.strip_prefix("mcp/*/").is_some_and(valid_tool_segment)
+    }
+
+    pub(crate) fn matches_name(&self, actual: &ToolName) -> bool {
+        if self == actual {
+            return true;
+        }
+        let Some(leaf) = self.0.strip_prefix("mcp/*/").filter(|_| self.is_name_selector()) else {
+            return false;
+        };
+        let Some((server, tool)) = actual.0.strip_prefix("mcp/").and_then(|rest| rest.split_once('/')) else {
+            return false;
+        };
+        valid_tool_segment(server) && !server.contains("__") && tool == leaf
+    }
+}
+
+fn valid_tool_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

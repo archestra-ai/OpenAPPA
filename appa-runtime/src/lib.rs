@@ -15,6 +15,7 @@ pub mod replay;
 #[path = "main.rs"]
 pub mod runtime_cli;
 pub mod tls;
+pub mod tool_validation;
 
 mod builtins;
 mod consult;

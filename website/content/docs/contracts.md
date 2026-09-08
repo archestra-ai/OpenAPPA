@@ -113,7 +113,7 @@ Any source or identity failure — timeout, network error, invalid answer — ha
 
 ### Tool names
 
-A policy names a tool by its canonical tool id. The id has three segments: `<family>/<namespace>/<tool>`. The family is `mcp`, `host`, or `agent`. Each segment matches `[A-Za-z0-9_.-]+`. A namespace segment never contains `__`.
+A policy can use a host-native name or a canonical tool id. Canonical ids have three segments: `<family>/<namespace>/<tool>`. The family is `mcp`, `host`, or `agent`. Each segment matches `[A-Za-z0-9_.-]+`. A namespace segment never contains `__`.
 
 | Family | Names | Example |
 |---|---|---|
@@ -123,24 +123,41 @@ A policy names a tool by its canonical tool id. The id has three segments: `<fam
 
 `appa/execute_remedy_plan` is the runtime's own control tool, the one member of the `appa` family. A policy cannot declare it: the runtime recognizes it before any contract, and a `[[tool]]` entry that names it refuses the policy at load. The wildcard entry `name = "*"` is not a canonical id; it covers every tool the policy does not name (see [the wildcard](#example-cover-the-long-tail-with-a-wildcard)).
 
-The host spells a tool its own way. That raw tool spelling never reaches the policy. An adapter connects a host to APPA, and the runtime derives the canonical id from the adapter and the raw spelling of each call. The mapping runs both ways: where the runtime tells the model to run a tool, it names the raw spelling that host dispatches. Claude Code and kagent are the initial adapters:
+The agent keeps using its host's tool names. A plugin implements the host lifecycle; the runtime's adapter translates tool identities and events. The runtime records canonical ids, even when the policy uses native names. Where it tells the model to run a tool, it uses the host's dispatch spelling. Claude Code and kagent have these mappings:
 
 | Adapter | Raw tool spelling | Canonical tool id |
 |---|---|---|
 | Claude Code | `mcp__<server>__<tool>` — split at the first `__` after `mcp__` | `mcp/<server>/<tool>` |
 | Claude Code | A built-in tool: `Bash`, `Read`, `Edit`, `Agent`, … | `host/claude-code/<name>` |
 | Claude Code | The remedy tool of the APPA plugin | `appa/execute_remedy_plan` |
-| kagent | A tool of the `RemoteMCPServer` or `ToolServer` served at `<toolset>` | `mcp/<toolset>/<tool>` |
+| kagent | A tool discovered from a configured MCP endpoint | `mcp/<source-id>/<tool>` |
 | kagent | An agent called as a tool | `agent/<namespace>/<agent>` |
 | kagent | A kagent built-in, such as `ask_user`, `load_memory`, `save_memory`, `prefetch_memory`, or a skill tool | `host/kagent/<name>` |
 | kagent | The entrypoint gates | `host/kagent-gate/code_execution`, `host/kagent-gate/memory_persist` |
 | kagent | The remedy tool | `appa/execute_remedy_plan` |
 
-The runtime refuses to serve a policy whose tool contracts are not canonical. Which calls start a child trajectory is the runtime's derivation from the adapter (Claude Code's `Agent`, a kagent agent called as a tool); a policy does not declare it.
+Claude Code names such as `Bash` and `mcp__github__create_issue` identify precise tools. An unqualified kagent rule such as `read_secret` applies to that native name across MCP servers and kagent's own tools. It does not cover remote-agent delegation. A newly discovered tool can use an existing rule without restarting the trajectory or changing its opening policy.
+
+Use `server` when a rule should apply to one MCP connection:
+
+```toml
+[[tool]]
+name = "read_secret"
+server = "demo-tools"
+delta = { trust = "suspicious" }
+```
+
+This rule identifies `mcp/demo-tools/read_secret`. Deployment-level `[server_aliases]` can map a policy's server name to a configured connection identity. APPA does not infer a provider from a hostname or server metadata. A server qualifier cannot repair duplicate host dispatch names; the host must distinguish those tools.
+
+kagent derives a default source ID from the exact configured endpoint URL. Native rules do not require that ID. Discovery supplies evidence, not permission: known tools need policy coverage, unavailable sources remain unknown, and later calls still pass runtime enforcement. A trajectory retains its opening policy and accepted identities.
+
+Native names also work in `confined_results`, `assumed_tools`, and `provider_run_tools`. Coverage reports distinguish a rule spanning servers from an observed concrete tool. Overlapping declarations with incompatible provider-run execution settings are rejected.
+
+Which calls start a child trajectory is the runtime's derivation from the adapter (Claude Code's `Agent`, a kagent agent called as a tool); a policy does not declare it.
 
 ### Ordered tool contracts
 
-A policy can declare several contracts for one tool. OpenAPPA tests them in declaration order and uses the first matching contract.
+A policy can declare several contracts for one tool. OpenAPPA tests them in declaration order and uses the first matching contract. This order also applies when native and canonical declarations overlap; canonical spelling does not give a rule priority.
 
 ```toml
 [[tool]]
@@ -387,7 +404,7 @@ A tool contract is short: a name, a `delta`, and often `effects` and a `[tool.re
 
 ## Tools
 
-A `[[tool]]` entry defines its canonical tool id as `name` (see [Tool names](#tool-names)) and `description`, then its output restrictions (`delta`), side effects (`effects`), and dispatch conditions (`requires`) — or the `annotator` that produces that whole contract per call.
+A `[[tool]]` entry defines its native name or canonical tool id as `name` (see [Tool names](#tool-names)) and `description`, then its output restrictions (`delta`), side effects (`effects`), and dispatch conditions (`requires`) — or the `annotator` that produces that whole contract per call.
 
 ```toml
 [[tool]]

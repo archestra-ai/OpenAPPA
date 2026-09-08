@@ -1,48 +1,14 @@
-"""The tool inventory: every name ADK can dispatch on this agent, and its spelling on the wire.
+"""Configured names and wire identities; MCP discovery supplies observed tools.
 
-The plugin gates a tool under a structured spelling, never under the
-bare name ADK dispatches it by: an MCP tool as ``mcp:<toolset>/<tool>``,
-a remote agent as ``agent:<namespace>/<agent>``, a tool the kagent
-runtime attaches itself as ``builtin:<name>``, an out-of-band flow the
-entrypoint gates as ``gate:<name>``, and the runtime's own control tool
-as ``appa:execute_remedy_plan``. The runtime derives the canonical tool
-and whether the call is a spawn from that spelling.
-
-The entrypoint builds the inventory once at startup from the rendered
-config, so what the wire can name is fixed before the model runs.
-A call of a name outside it is refused at the gate, never forwarded.
-
-The inverse travels with it. The runtime names a tool back to the model
-by the spelling it received, which is not a name the model can call, so
-``despell`` spells it into the name ADK dispatches. The builder owns
-both directions and refuses a config whose two raw names spell alike,
-so every spelling the wire carries names one tool the model can call.
-
-- An MCP entry (``http_tools``, ``sse_tools``) names its tools in its
-  ``tools`` filter, and a gated agent must carry one: without it the
-  server decides the tool list at runtime, and the gate cannot name
-  what it did not see. The toolset is the first DNS label of the server
-  host in ``params.url``, the name the RemoteMCPServer resource carries
-  in the cluster. The builder refuses an endpoint outside the accepted
-  hosts — the Kubernetes service forms of that same name, and loopback
-  — so the address is a cluster service form and not an arbitrary host.
-  It establishes no more than that: the toolset is the first label
-  alone, so a service of the same name in another namespace spells the
-  same identity, and an ``ExternalName`` Service resolves an accepted
-  address to a name outside the cluster.
-- kagent renders a remote agent's tool name as
-  ``<namespace>__NS__<agent>`` with hyphens as underscores. Both halves
-  are DNS-1123 labels, which carry no underscore, so the real names
-  come back exactly. The rendering is not injective over every name a
-  config can carry — ``team_a__NS__x`` and ``team-a__NS__x`` spell
-  alike — and the builder refuses the pair rather than lose one.
-- The builtins come from ``builtins.json``, the manifest pinned to the
-  kagent-adk version this image wraps, in groups the rendered config
-  and the runtime's environment switch on.
+Optional MCP filters are not permission. The host validates authenticated metadata
+before model exposure and the runtime checks every call. Full endpoint identities
+never infer a provider from a hostname. Remote-agent and builtin mappings retain
+kagent\'s native conventions. The inverse renders guidance in host-native names.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -97,12 +63,6 @@ _CLASSES = ("mcp", "agent", "builtin", "gate", wire.CONTROL_TOOL.split(":", 1)[0
 # ``despell`` replaces one only where the identifier continues on
 # neither side.
 _SPELLED = re.compile(rf"(?:{'|'.join(_CLASSES)}):{_SEGMENT_RUN}(?:/{_SEGMENT_RUN})?")
-# The cluster-internal authorities an MCP endpoint may carry. The
-# toolset name is the first label of the host, so a host outside the
-# cluster would claim the policy identity of the in-cluster service of
-# that name.
-_CLUSTER_DOMAIN = ("cluster", "local")
-_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1"})
 
 
 def _char(text: str, index: int) -> str:
@@ -118,6 +78,25 @@ def _continues(adjacent: str, beyond: str) -> bool:
     the ends of the text.
     """
     return adjacent in _CORE or (adjacent in _SEPARATOR and beyond in _CORE)
+
+
+def mcp_source_id(endpoint: str) -> str:
+    try:
+        parsed = urlsplit(endpoint)
+        valid = (
+            isinstance(endpoint, str)
+            and parsed.scheme in ("http", "https")
+            and parsed.hostname
+            and not parsed.username
+            and not parsed.password
+            and not parsed.fragment
+        )
+        _ = parsed.port
+    except (TypeError, ValueError):
+        valid = False
+    if not valid:
+        raise ConfigRefused("MCP endpoint must be an HTTP(S) URL without userinfo or a fragment")
+    return "server-" + hashlib.sha256(endpoint.encode("utf-8")).hexdigest()
 
 
 def mcp_spelling(toolset: str, tool: str) -> str:
@@ -224,7 +203,7 @@ class ToolInventory:
     def from_config(cls, config: Mapping[str, Any], environ: Mapping[str, str] = os.environ) -> ToolInventory:
         """Build the inventory of a rendered kagent config.
 
-        Raises ``ConfigRefused`` for an MCP entry without a tool filter,
+        Raises ``ConfigRefused`` for an invalid configured endpoint,
         a name the wire cannot spell, a raw name declared twice, and two
         raw names that spell alike.
         """
@@ -291,28 +270,13 @@ class _Builder:
     def mcp_server(self, path: str, server: dict[str, Any]) -> None:
         params = server.get("params")
         url = params.get("url") if isinstance(params, dict) else None
-        host = _host_of(url if isinstance(url, str) else "")
-        toolset = _toolset_of(host) if host is not None else None
-        # A doubled underscore is the mark kagent reserves, so the runtime
-        # admits no canonical id whose namespace carries one.
-        if host is None or toolset is None or "__" in toolset:
-            raise ConfigRefused(
-                f"{path}: the toolset name is the first label of the server host in params.url, and "
-                f"{url!r} carries none the wire can spell"
-            )
-        if not _in_cluster(host):
-            raise ConfigRefused(
-                f"{path}: {url!r} is served outside the cluster, and its tools would claim the policy "
-                f"identity mcp/{toolset}/<tool> of the in-cluster {toolset!r} — an MCP endpoint is named "
-                "<service>, <service>.<namespace>, <service>.<namespace>.svc, "
-                "<service>.<namespace>.svc.cluster.local, localhost, or 127.0.0.1"
-            )
-        names = server.get("tools")
-        if not isinstance(names, list) or not names or not all(isinstance(name, str) for name in names):
-            raise ConfigRefused(
-                f"{path} declares no tool filter, and the gate names only what the config declares — "
-                "list under `tools` every tool of this server the agent may call"
-            )
+        try:
+            toolset = mcp_source_id(url)
+        except ConfigRefused as error:
+            raise ConfigRefused(f"{path}: {error}") from None
+        names = server.get("tools") or []
+        if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+            raise ConfigRefused(f"{path}.tools must be a list of tool names")
         for position, name in enumerate(names):
             if not _SEGMENT.match(name):
                 raise ConfigRefused(
@@ -362,63 +326,3 @@ class _Builder:
         if not _SEGMENT.match(namespace) or not _SEGMENT.match(agent):
             raise ConfigRefused(f"{path}.name: the remote agent name {name!r} is outside what the wire can spell")
         self.add(name, agent_spelling(namespace, agent), path)
-
-
-def _host_of(url: str) -> str | None:
-    """The lowercased host of a server URL, or None where it carries none.
-
-    A trailing dot is the absolute form of the same name — it names the
-    root of the DNS tree rather than a search domain — so it is dropped
-    and the two forms reach one policy identity.
-    """
-    try:
-        host = urlsplit(url).hostname
-    except ValueError:
-        return None
-    if not host:
-        return None
-    relative = host[:-1] if host.endswith(".") else host
-    return relative or None
-
-
-def _toolset_of(host: str) -> str | None:
-    """The toolset name a host claims: its first label, where the wire can spell it."""
-    label = host.split(".", 1)[0]
-    return label if _SEGMENT.match(label) else None
-
-
-def _in_cluster(host: str) -> bool:
-    """Whether ``host`` is a Kubernetes service form of the service its first label names.
-
-    The accepted forms are cluster service addresses that resolve
-    through cluster DNS, and every other host is refused, so the
-    endpoint an MCP entry names is a service of the cluster rather than
-    an arbitrary host.
-
-    ``<service>.<namespace>`` is not among them. It is one label short
-    of a registrable public domain name, and nothing here tells the two
-    apart, so accepting it would let ``<toolset>.<tld>`` -- an endpoint
-    the cluster does not resolve and the attacker does -- take the
-    policy identity of the in-cluster service that toolset names. The
-    ``.svc`` forms say the same thing and say it unambiguously, so a
-    namespaced address is written with ``.svc``.
-
-    A single label stays accepted: it resolves only through cluster DNS,
-    in the pod's own namespace, and cannot be a public domain.
-
-    This still pins no single Service. The toolset is the first label
-    alone, so the same service name in another namespace reaches the
-    same policy identity, and an ``ExternalName`` Service resolves an
-    accepted address to a name outside the cluster. Closing that needs
-    the ``RemoteMCPServer`` resource name, which the rendered config
-    does not carry.
-    """
-    if host in _LOOPBACK_HOSTS:
-        return True
-    match tuple(host.split(".")):
-        case (_,) | (_, _, "svc"):
-            return True
-        case (_, _, "svc", *domain):
-            return tuple(domain) == _CLUSTER_DOMAIN
-        case _:
-            return False

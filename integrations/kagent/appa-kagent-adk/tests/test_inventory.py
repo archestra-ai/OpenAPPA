@@ -1,7 +1,6 @@
 """The tool inventory: what a rendered config lets the wire name, and how."""
 
 import json
-import re
 import time
 from pathlib import Path
 
@@ -10,7 +9,15 @@ import pytest
 from appa_kagent_adk import wire
 from appa_kagent_adk.config_guard import ConfigRefused
 from appa_kagent_adk.gates import CODE_EXECUTION_TOOL, MEMORY_PERSIST_TOOL
-from appa_kagent_adk.inventory import GUIDE_ENV, SKILLS_FOLDER_ENV, ToolInventory, builtin_manifest, is_spawn
+from appa_kagent_adk.inventory import (
+    GUIDE_ENV,
+    SKILLS_FOLDER_ENV,
+    ToolInventory,
+    builtin_manifest,
+    is_spawn,
+    mcp_source_id,
+    mcp_spelling,
+)
 
 KAGENT = Path(__file__).parent.parent.parent
 SHARED_MANIFEST = KAGENT / "fixtures" / "kagent-builtins.json"
@@ -31,8 +38,10 @@ def test_each_class_spells_its_tools():
         sse_tools=[{"params": {"url": "https://kagent-tool-server:8084/sse"}, "tools": ["k8s_get_resources"]}],
         remote_agents=[{"name": "kagent__NS__log_analyst", "url": "http://log-analyst:8080"}],
     )
-    assert built.spelling("list_pods") == "mcp:demo-tools/list_pods"
-    assert built.spelling("k8s_get_resources") == "mcp:kagent-tool-server/k8s_get_resources"
+    assert built.spelling("list_pods") == mcp_spelling(mcp_source_id(DEMO_TOOLS["params"]["url"]), "list_pods")
+    assert built.spelling("k8s_get_resources") == mcp_spelling(
+        mcp_source_id("https://kagent-tool-server:8084/sse"), "k8s_get_resources"
+    )
     assert built.spelling("kagent__NS__log_analyst") == "agent:kagent/log-analyst"
     assert built.spelling("ask_user") == "builtin:ask_user"
     assert built.spelling(wire.RESERVED_TOOL) == wire.CONTROL_TOOL
@@ -42,7 +51,7 @@ def test_each_class_spells_its_tools():
 
 def test_only_the_agent_class_is_a_spawn():
     assert is_spawn("agent:kagent/log-analyst")
-    assert not is_spawn("mcp:demo-tools/list_pods")
+    assert not is_spawn(mcp_spelling(mcp_source_id(DEMO_TOOLS["params"]["url"]), "list_pods"))
     assert not is_spawn("builtin:ask_user")
     assert not is_spawn(wire.CONTROL_TOOL)
 
@@ -60,9 +69,12 @@ def test_a_remote_agent_name_unmangles_both_labels():
         pytest.param({"params": {"url": "http://demo-tools:3000/mcp"}, "tools": "list_pods"}, id="not-a-list"),
     ],
 )
-def test_an_mcp_entry_without_a_tool_filter_is_refused(server):
-    with pytest.raises(ConfigRefused, match=r"http_tools\.0"):
-        inventory(http_tools=[server])
+def test_optional_mcp_filter_is_validated(server):
+    if isinstance(server.get("tools"), str):
+        with pytest.raises(ConfigRefused):
+            inventory(http_tools=[server])
+    else:
+        assert inventory(http_tools=[server]).spelling("unobserved") is None
 
 
 @pytest.mark.parametrize(
@@ -71,9 +83,7 @@ def test_an_mcp_entry_without_a_tool_filter_is_refused(server):
         pytest.param({"params": {}, "tools": ["a"]}, id="no-url"),
         pytest.param({"params": {"url": "/mcp"}, "tools": ["a"]}, id="no-host"),
         pytest.param({"params": {"url": "http://demo-tools:3000/mcp"}, "tools": ["list pods"]}, id="tool-with-space"),
-        pytest.param(
-            {"params": {"url": "http://demo__tools:3000/mcp"}, "tools": ["a"]}, id="host-with-the-reserved-mark"
-        ),
+        pytest.param({"params": {"url": "file:///mcp"}, "tools": ["a"]}, id="unsupported-transport"),
         # A boundary period ends the spelling run short, so despell
         # could never match the spelling of such a name back.
         pytest.param({"params": {"url": "http://demo-tools:3000/mcp"}, "tools": [".status"]}, id="a-leading-period"),
@@ -99,15 +109,13 @@ def test_a_name_the_wire_cannot_spell_is_refused(server):
 )
 def test_an_in_cluster_endpoint_names_its_toolset(host):
     built = inventory(http_tools=[{"params": {"url": f"http://{host}:3000/mcp"}, "tools": ["list_pods"]}])
-    assert built.spelling("list_pods") == f"mcp:{host.split('.')[0]}/list_pods"
+    assert built.spelling("list_pods") == mcp_spelling(mcp_source_id(f"http://{host}:3000/mcp"), "list_pods")
 
 
-def test_a_host_written_in_another_case_is_the_same_toolset():
-    """DNS is case-insensitive, so the same service reaches the same policy
-    identity however the URL spells it."""
+def test_source_identity_is_stable_for_the_exact_configured_url():
     url = "http://DEMO-TOOLS.kagent.svc.cluster.local:3000/mcp"
     built = inventory(http_tools=[{"params": {"url": url}, "tools": ["list_pods"]}])
-    assert built.spelling("list_pods") == "mcp:demo-tools/list_pods"
+    assert built.spelling("list_pods") == mcp_spelling(mcp_source_id(url), "list_pods")
 
 
 @pytest.mark.parametrize(
@@ -128,12 +136,11 @@ def test_a_host_written_in_another_case_is_the_same_toolset():
         pytest.param("192.0.2.10", id="an-address-outside-loopback"),
     ],
 )
-def test_an_mcp_endpoint_outside_the_cluster_is_refused(host):
-    """The toolset is the host's first label, so a foreign endpoint under that
-    label would take the policy identity of the in-cluster service."""
-    server = {"params": {"url": f"http://{host}:3000/mcp"}, "tools": ["list_pods"]}
-    with pytest.raises(ConfigRefused, match=re.escape(host)):
-        inventory(http_tools=[server])
+def test_configured_external_endpoint_cannot_claim_cluster_identity(host):
+    endpoint = f"http://{host}:3000/mcp"
+    built = inventory(http_tools=[{"params": {"url": endpoint}, "tools": ["list_pods"]}])
+    assert built.spelling("list_pods") == mcp_spelling(mcp_source_id(endpoint), "list_pods")
+    assert mcp_source_id(endpoint) != mcp_source_id(DEMO_TOOLS["params"]["url"])
 
 
 @pytest.mark.parametrize("name", ["log-analyst", "__NS__log_analyst", "kagent__NS__", "a__NS__b__NS__c"])
@@ -193,9 +200,14 @@ def test_the_inventory_carries_one_bijection_no_caller_can_contradict():
     with pytest.raises(TypeError):
         built.spellings["list_pods"] = "mcp:other/list_pods"
     with pytest.raises(TypeError):
-        built.names["mcp:demo-tools/list_pods"] = "other"
+        built.names[mcp_spelling(mcp_source_id(DEMO_TOOLS["params"]["url"]), "list_pods")] = "other"
     with pytest.raises(ValueError):
-        ToolInventory({"list_pods": "mcp:demo-tools/list_pods", "list_pods_v2": "mcp:demo-tools/list_pods"})
+        ToolInventory(
+            {
+                "list_pods": mcp_spelling(mcp_source_id(DEMO_TOOLS["params"]["url"]), "list_pods"),
+                "list_pods_v2": mcp_spelling(mcp_source_id(DEMO_TOOLS["params"]["url"]), "list_pods"),
+            }
+        )
 
 
 def test_every_spelling_despells_back_to_the_name_adk_dispatches():
@@ -207,7 +219,7 @@ def test_every_spelling_despells_back_to_the_name_adk_dispatches():
         assert built.despell(f"call {spelling} now") == f"call {name} now"
 
 
-LIST_PODS = "mcp:demo-tools/list_pods"
+LIST_PODS = mcp_spelling(mcp_source_id(DEMO_TOOLS["params"]["url"]), "list_pods")
 LOG_ANALYST = "agent:kagent/log-analyst"
 
 

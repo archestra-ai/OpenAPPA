@@ -247,7 +247,7 @@ func TestTheKnobDecidesThePluginRegistration(t *testing.T) {
 			runnerConfig := adkrunner.Config{
 				PluginConfig: adkrunner.PluginConfig{Plugins: []*adkplugin.Plugin{stock}},
 			}
-			if err := appendAppaPlugin(tc.gate, &runnerConfig, appakagentadk.Inventory{}, logr.Discard()); err != nil {
+			if err := appendAppaPlugin(tc.gate, &runnerConfig, appakagentadk.Inventory{}, logr.Discard(), nil); err != nil {
 				t.Fatal(err)
 			}
 			plugins := runnerConfig.PluginConfig.Plugins
@@ -400,7 +400,7 @@ func TestTheGuardHandsBackTheInventoryOfTheStockConfig(t *testing.T) {
 		t.Fatalf("the stock config must be accepted: %v", err)
 	}
 	for name, want := range map[string]string{
-		"list_pods":                "mcp:demo-tools/list_pods",
+		"list_pods":                "mcp:server-6002d1e9f1adde3a363a0bbe9756f105ebebe91cd46e98b1e5218fb32ccf0f64/list_pods",
 		"kagent__NS__log_analyst":  "agent:kagent/log-analyst",
 		"ask_user":                 "builtin:ask_user",
 		appakagentadk.ReservedTool: appakagentadk.ControlTool,
@@ -717,12 +717,10 @@ func TestTheConfigGuardRefusesWhatThisImageCannotRunAsDeclared(t *testing.T) {
 			config: withKey(t, withKey(t, stockConfig, "execute_code", `true`), "model", `{"type": "bogus"}`), parse: true},
 		// The inventory runs last: a gated agent names every tool it
 		// can call, and a name the wire cannot spell never reaches it.
-		{name: "an MCP server without a tool filter is refused",
-			config:  withKey(t, stockConfig, "http_tools", `[{"params": {"url": "http://demo-tools:8080/mcp"}}]`),
-			refused: true, kind: unfilteredToolset, keys: []string{"http_tools[0]"}},
-		{name: "an MCP server with an empty tool filter is refused",
-			config:  withKey(t, stockConfig, "http_tools", `[{"params": {"url": "http://demo-tools:8080/mcp"}, "tools": []}]`),
-			refused: true, kind: unfilteredToolset, keys: []string{"http_tools[0]"}},
+		{name: "an MCP server without a tool filter awaits discovery",
+			config: withKey(t, stockConfig, "http_tools", `[{"params": {"url": "https://mcp.example.com/mcp"}}]`)},
+		{name: "an MCP server with an empty tool filter awaits discovery",
+			config: withKey(t, stockConfig, "http_tools", `[{"params": {"url": "http://demo-tools:8080/mcp"}, "tools": []}]`)},
 		{name: "a remote agent outside the rendered shape is refused",
 			config:  withKey(t, stockConfig, "remote_agents", `[{"name": "log-analyst", "url": "http://log-analyst:8080"}]`),
 			refused: true, kind: unspellableTool, keys: []string{"remote_agents[0].name"}},

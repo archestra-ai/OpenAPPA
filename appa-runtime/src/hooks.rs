@@ -41,8 +41,64 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> (u16, 
             return (409, serde_json::json!({ "error": detail }));
         }
     };
-    let Accepted { event, names_children } = accepted;
+    let Accepted {
+        event,
+        names_children,
+        inventory,
+    } = accepted;
     let root = hook_root(&event).clone();
+    if let Some(inventory) = inventory {
+        if matches!(event, HookEvent::ChildStart { .. }) {
+            let checked = runtime.check_inventory(&root, *adapter, &inventory).and_then(|report| {
+                if report.is_valid() {
+                    Ok(())
+                } else {
+                    let mut errors = report.errors;
+                    errors.extend(report.tools.into_iter().filter_map(|tool| match tool.status {
+                        crate::tool_validation::ToolStatus::Invalid { reason } => {
+                            Some(format!("{}: {reason}", tool.tool))
+                        }
+                        _ => None,
+                    }));
+                    Err(EventError::InventoryRefused(errors.join("; ")))
+                }
+            });
+            if let Err(error) = checked {
+                let (kind, tool) = hook_shape(&event);
+                runtime.record(Some(&root), bare_hook(kind, HookOutcome::Refused, tool));
+                return (409, wire(&refuse(error.to_string())));
+            }
+        }
+        let actor = match &event {
+            HookEvent::SessionStart { root } => Actor {
+                root: root.clone(),
+                child: None,
+            },
+            HookEvent::ChildStart { root, child, .. } => Actor {
+                root: root.clone(),
+                child: Some(child.clone()),
+            },
+            HookEvent::ToolCall { actor, .. } => actor.clone(),
+            _ => unreachable!("wire validation restricts inventory to starts and tool calls"),
+        };
+        let observed = match runtime.session(&root, &root) {
+            Ok(_) => runtime.observe_inventory(&actor, *adapter, &inventory),
+            Err(EventError::UnknownTrajectory) if actor.child.is_none() => {
+                match runtime.create_session_with_inventory(root.clone(), inventory.clone()) {
+                    Ok(_) | Err(EventError::TrajectoryExists) => {
+                        runtime.observe_inventory(&actor, *adapter, &inventory)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        };
+        if let Err(error) = observed {
+            let (kind, tool) = hook_shape(&event);
+            runtime.record(Some(&root), bare_hook(kind, HookOutcome::Refused, tool));
+            return (409, wire(&refuse(error.to_string())));
+        }
+    }
     if let HookEvent::ToolCall { actor, call, .. } = &event {
         let early = match runtime.opened_among(&actor.root, &names_children) {
             Ok(Some(child)) => {

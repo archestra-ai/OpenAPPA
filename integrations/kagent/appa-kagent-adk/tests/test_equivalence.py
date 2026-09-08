@@ -283,7 +283,11 @@ def test_the_gated_startup_builds_the_stock_agent_and_appends_the_plugin_last(
     assert [type(plugin) for plugin in gated_plugins] == stock_plugin_types + [AppaPluginKagent]
 
     assert tool_names(gated) == tool_names(stock)
-    assert len(gated.tools) == len(stock.tools) + 1
+    from appa_kagent_adk.mcp_lifecycle import MCPDiscovery
+
+    assert len(gated.tools) == len(stock.tools) + 2
+    assert isinstance(gated.tools[-2], MCPDiscovery)
+    assert gated.tools[-2].sources == ()
     reserved = gated.tools[-1]
     assert isinstance(reserved, McpToolset)
     assert reserved.tool_filter == [RESERVED_TOOL]

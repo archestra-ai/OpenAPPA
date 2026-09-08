@@ -385,12 +385,15 @@ pub struct WireEvent {
     pub value: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_binding: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory: Option<crate::inventory::ToolInventory>,
 }
 
 /// A parsed wire event with what the server derived from it.
 #[derive(Debug, Clone)]
 pub struct Accepted {
     pub event: HookEvent,
+    pub inventory: Option<crate::inventory::ToolInventory>,
     /// Set on a tool call only; empty otherwise, because a tool call is
     /// the one event whose named children are asked for.
     pub names_children: Vec<TrajectoryId>,
@@ -416,6 +419,7 @@ impl WireEvent {
             spawned_id: None,
             value: None,
             spawn_binding: None,
+            inventory: None,
         }
     }
 
@@ -578,6 +582,17 @@ impl WireEvent {
             )));
         }
         let name = self.event;
+        if let Some(inventory) = &self.inventory {
+            if !matches!(
+                name,
+                EventName::SessionStart | EventName::ChildStart | EventName::ToolCall
+            ) {
+                return Err(malformed(
+                    "inventory may accompany session start, child start, or a tool call only",
+                ));
+            }
+            inventory.validate(*served)?;
+        }
         // A field the named event does not read crosses to no reader.
         // Refusing it here keeps one claim per envelope: a result is
         // reported by a result event, a ruling is spent by the call
@@ -608,6 +623,7 @@ impl WireEvent {
             spawned_id,
             value,
             spawn_binding,
+            inventory,
             ..
         } = self;
         let root = || -> Result<TrajectoryId, ParseRefusal> {
@@ -650,6 +666,7 @@ impl WireEvent {
 
         let accepted = |event: HookEvent| {
             Ok(Some(Accepted {
+                inventory: inventory.clone(),
                 event,
                 names_children: Vec::new(),
             }))
@@ -683,6 +700,7 @@ impl WireEvent {
                 let names_children = (served.names_children)(&actor, &raw);
                 let spawn = derived.spawn;
                 Ok(Some(Accepted {
+                    inventory,
                     event: HookEvent::ToolCall {
                         actor,
                         call: ProposedCall {
@@ -1071,6 +1089,87 @@ mod tests {
         names_children: unasked_children,
         spell,
     };
+
+    #[test]
+    fn opening_inventory_round_trips_and_rejects_ambiguous_dispatch() {
+        let body = br#"{"protocol":1,"adapter":"kagent","event":"session_start","root_id":"r1","inventory":{"tools":[{"name":"read","tool":"read"}],"sources":[{"server":"test","status":"partial","dynamic":true}]}}"#;
+        let event = WireEvent::read(body).unwrap();
+        let encoded = serde_json::to_vec(&event).unwrap();
+        let accepted = WireEvent::read(&encoded).unwrap().into_event(&SERVED).unwrap().unwrap();
+        let inventory = accepted.inventory.unwrap();
+        assert_eq!(inventory.tools.len(), 1);
+        assert!(inventory.sources[0].dynamic);
+        let mut ambiguous = inventory.clone();
+        ambiguous.tools.push(crate::inventory::ObservedTool {
+            name: "read".into(),
+            tool: "other".into(),
+        });
+        assert!(ambiguous.validate(SERVED).is_err());
+        let mut duplicate = inventory;
+        duplicate.tools.push(duplicate.tools[0].clone());
+        assert!(duplicate.validate(SERVED).is_ok());
+    }
+
+    #[test]
+    fn later_observations_are_additive_and_cannot_rebind_old_names() {
+        use crate::inventory::{ObservedTool, ToolInventory};
+        let initial = ToolInventory {
+            tools: vec![ObservedTool {
+                name: "read".into(),
+                tool: "read".into(),
+            }],
+            ..ToolInventory::default()
+        };
+        let later = ToolInventory {
+            tools: vec![ObservedTool {
+                name: "write".into(),
+                tool: "write".into(),
+            }],
+            ..ToolInventory::default()
+        };
+        let combined = initial.extending(&later, SERVED).unwrap();
+        assert_eq!(combined.tools.len(), 2);
+        assert_eq!(combined.extending(&later, SERVED).unwrap(), combined);
+        assert_eq!(combined.extending(&ToolInventory::default(), SERVED).unwrap(), combined);
+        let rebound = ToolInventory {
+            tools: vec![ObservedTool {
+                name: "read".into(),
+                tool: "other".into(),
+            }],
+            ..ToolInventory::default()
+        };
+        assert!(combined.extending(&rebound, SERVED).is_err());
+        assert_eq!(combined.tools[0].tool, "read");
+        let alias = ToolInventory {
+            tools: vec![ObservedTool {
+                name: "different-name".into(),
+                tool: "read".into(),
+            }],
+            ..ToolInventory::default()
+        };
+        assert!(combined.extending(&alias, SERVED).is_err());
+    }
+
+    #[test]
+    fn inventory_on_an_event_that_does_not_consume_it_is_refused() {
+        for event in ["ping", "prompt", "turn_end", "tool_result", "child_end"] {
+            let body = serde_json::json!({"protocol":1,"adapter":"kagent","event":event,"root_id":"r1","inventory":{}});
+            assert!(
+                WireEvent::read(&serde_json::to_vec(&body).unwrap())
+                    .unwrap()
+                    .into_event(&SERVED)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn a_child_start_carries_its_own_inventory() {
+        let body = br#"{"protocol":1,"adapter":"kagent","event":"child_start","root_id":"r1","child_id":"c1","inventory":{"tools":[{"name":"read","tool":"read"}]}}"#;
+        let accepted = WireEvent::read(body).unwrap().into_event(&SERVED).unwrap().unwrap();
+        assert!(matches!(accepted.event, HookEvent::ChildStart { .. }));
+        assert_eq!(accepted.inventory.unwrap().tools[0].name, "read");
+    }
 
     #[test]
     fn a_tool_call_crosses_with_its_raw_spelling_and_returns_derived() {

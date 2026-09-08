@@ -191,6 +191,7 @@ type Config struct {
 	// HTTPClient overrides the transport; nil means a default client.
 	// Timeouts are per request, so the client needs none of its own.
 	HTTPClient *http.Client
+	Discovery  *MCPDiscovery
 }
 
 // AppaPluginKagent posts one wire event per gated ADK callback and
@@ -201,6 +202,7 @@ type AppaPluginKagent struct {
 	mcpURL    string
 	client    *http.Client
 	inventory Inventory
+	discovery *MCPDiscovery
 	// returnTool is the tool a child scope stops through. adk-go
 	// resolves the call from the request the plugin registered it on.
 	returnTool *returnGate
@@ -300,6 +302,19 @@ func New(cfg Config) (*AppaPluginKagent, error) {
 		answered:         map[string]struct{}{},
 	}
 	p.returnTool = &returnGate{plugin: p}
+	p.discovery = cfg.Discovery
+	if p.discovery != nil {
+		p.discovery.plugin = p
+		base := Inventory{spellings: make(map[string]string), names: make(map[string]string)}
+		for name, spelling := range p.inventory.spellings {
+			if strings.HasPrefix(spelling, "mcp:") && !strings.HasPrefix(spelling, "mcp:"+GuideToolset+"/") {
+				continue
+			}
+			base.spellings[name] = spelling
+			base.names[spelling] = name
+		}
+		p.inventory = base
+	}
 	p.remedyCall = p.remedyOverMCP
 	return p, nil
 }
@@ -689,6 +704,9 @@ func isFresh(sess session.Session) bool {
 // spelling is the wire spelling of a dispatched tool; false outside the
 // inventory.
 func (p *AppaPluginKagent) spelling(t tool.Tool) (string, bool) {
+	if discovered, ok := t.(*discoveredMCPTool); ok {
+		return discovered.spelling, true
+	}
 	return p.inventory.Spelling(t.Name())
 }
 
@@ -699,7 +717,13 @@ func (p *AppaPluginKagent) spelling(t tool.Tool) (string, bool) {
 // the remedy releases. The model dispatches the raw ADK name, so every
 // runtime string this plugin hands the model goes through the
 // inventory first.
-func (p *AppaPluginKagent) forModel(text string) string {
+func (p *AppaPluginKagent) forModel(ctx context.Context, text string) string {
+	if invocation, ok := ctx.(interface{ InvocationID() string }); ok && p.discovery != nil {
+		run := p.discovery.run(invocation.InvocationID())
+		run.mu.Lock()
+		defer run.mu.Unlock()
+		return run.names.Despell(text)
+	}
 	return p.inventory.Despell(text)
 }
 
@@ -709,11 +733,11 @@ func (p *AppaPluginKagent) forModel(text string) string {
 // The runtime writes that answer itself and names the released tool in
 // it, by the spelling this plugin sent. Every other tool spells its own
 // result, and the plugin hands it on untouched.
-func (p *AppaPluginKagent) remedyRendering(t tool.Tool, result map[string]any) map[string]any {
+func (p *AppaPluginKagent) remedyRendering(ctx context.Context, t tool.Tool, result map[string]any) map[string]any {
 	if t.Name() != ReservedTool || result == nil {
 		return nil
 	}
-	spelled, _ := despelled(result, p.inventory.Despell).(map[string]any)
+	spelled, _ := despelled(result, func(text string) string { return p.forModel(ctx, text) }).(map[string]any)
 	return spelled
 }
 
@@ -812,6 +836,14 @@ func (p *AppaPluginKagent) openScope(ctx context.Context, sess session.Session, 
 	if opening == nil {
 		return "", nil
 	}
+	if p.discovery != nil {
+		if invocation, ok := ctx.(interface{ InvocationID() string }); ok {
+			run := p.discovery.run(invocation.InvocationID())
+			run.mu.Lock()
+			opening["inventory"] = run.inventory
+			run.mu.Unlock()
+		}
+	}
 	decision, err := p.post(ctx, opening)
 	if err != nil {
 		return "", err
@@ -822,7 +854,7 @@ func (p *AppaPluginKagent) openScope(ctx context.Context, sess session.Session, 
 		// The return policy of the fork needs words. The child reads
 		// them in front of the request its parent sent, and that
 		// request stands unchanged.
-		contract = p.forModel(decision.Text)
+		contract = p.forModel(ctx, decision.Text)
 	case decision.Kind != "ack":
 		return "", failClosed("appa refused the session: %s", decision.describe())
 	}
@@ -835,14 +867,31 @@ func (p *AppaPluginKagent) openScope(ctx context.Context, sess session.Session, 
 	return contract, nil
 }
 
-func (p *AppaPluginKagent) onUserMessage(ictx agent.InvocationContext, userMessage *genai.Content) (*genai.Content, error) {
+func (p *AppaPluginKagent) onUserMessage(ictx agent.InvocationContext, userMessage *genai.Content) (result *genai.Content, resultErr error) {
+	defer func() {
+		if resultErr != nil && p.discovery != nil {
+			p.discovery.close(ictx.InvocationID())
+		}
+	}()
 	if isChatApproval(contentText(userMessage)) {
 		p.authorizeReview(ictx.InvocationID())
 	}
 	ids := p.openInvocation(ictx)
+	if p.discovery != nil {
+		_, err := p.discovery.prepare(agent.NewContext(ictx), ids, ids.childID != "" || !isFresh(ictx.Session()))
+		if err != nil {
+			return nil, err
+		}
+	}
 	contract, err := p.openScope(ictx, ictx.Session(), ids)
 	if err != nil {
 		return nil, err
+	}
+	if p.discovery != nil {
+		run := p.discovery.run(ictx.InvocationID())
+		run.mu.Lock()
+		run.opened = true
+		run.mu.Unlock()
 	}
 	decision, err := p.post(ictx, promptEvent(ids.rootID, contentText(userMessage), ids.childID))
 	if err != nil {
@@ -1240,6 +1289,12 @@ func (p *AppaPluginKagent) beforeTool(ctx agent.Context, t tool.Tool, args map[s
 		}
 	}
 	call := toolCallEvent(ids.rootID, spelled, plainJSON(orEmpty(args)), ids.childID, ruling)
+	if p.discovery != nil {
+		run := p.discovery.run(ctx.InvocationID())
+		run.mu.Lock()
+		call["inventory"] = run.inventory
+		run.mu.Unlock()
+	}
 	decision, err := p.post(ctx, call)
 	if err != nil {
 		return nil, err
@@ -1256,7 +1311,7 @@ func (p *AppaPluginKagent) beforeTool(ctx agent.Context, t tool.Tool, args map[s
 	case "deny_call":
 		p.rememberReviews(ctx.InvocationID(), decision.Review)
 		p.answerOwn(ctx.FunctionCallID())
-		return map[string]any{"result": p.forModel(decision.Feedback), denyKey: denied}, nil
+		return map[string]any{"result": p.forModel(ctx, decision.Feedback), denyKey: denied}, nil
 	default:
 		return nil, failClosed("appa answered the tool call with %s", decision.describe())
 	}
@@ -1318,9 +1373,9 @@ func (p *AppaPluginKagent) afterTool(ctx agent.Context, t tool.Tool, args, resul
 			// the parent receives what the runtime admitted.
 			return map[string]any{"result": decision.Value}, nil
 		case "replace_output":
-			return map[string]any{"result": p.forModel(decision.Output)}, nil
+			return map[string]any{"result": p.forModel(ctx, decision.Output)}, nil
 		case "block":
-			return withheldResult(p.forModel(decision.Reason)), nil
+			return withheldResult(p.forModel(ctx, decision.Reason)), nil
 		default:
 			return nil, failClosed("appa answered the spawn result with %s", decision.describe())
 		}
@@ -1331,7 +1386,7 @@ func (p *AppaPluginKagent) afterTool(ctx agent.Context, t tool.Tool, args, resul
 	}
 	switch decision.Kind {
 	case "ack":
-		return p.remedyRendering(t, result), nil
+		return p.remedyRendering(ctx, t, result), nil
 	case "deliver_value":
 		// The admitted value of a confined or sanitized result, as it
 		// crossed. Spelling it back would hand the model other bytes
@@ -1340,9 +1395,9 @@ func (p *AppaPluginKagent) afterTool(ctx agent.Context, t tool.Tool, args, resul
 	case "replace_output":
 		// The runtime's own words about this result, which name the
 		// control tool by a spelling the ADK cannot dispatch.
-		return map[string]any{"result": p.forModel(decision.Output)}, nil
+		return map[string]any{"result": p.forModel(ctx, decision.Output)}, nil
 	case "block":
-		return withheldResult(p.forModel(decision.Reason)), nil
+		return withheldResult(p.forModel(ctx, decision.Reason)), nil
 	default:
 		return nil, failClosed("appa answered the tool result with %s", decision.describe())
 	}
@@ -1374,9 +1429,9 @@ func (p *AppaPluginKagent) onToolError(ctx agent.Context, t tool.Tool, args map[
 	case "deliver_value":
 		return map[string]any{"result": decision.Value}, nil
 	case "replace_output":
-		return map[string]any{"result": p.forModel(decision.Output)}, nil
+		return map[string]any{"result": p.forModel(ctx, decision.Output)}, nil
 	case "block":
-		return withheldResult(p.forModel(decision.Reason)), nil
+		return withheldResult(p.forModel(ctx, decision.Reason)), nil
 	default:
 		return nil, failClosed("appa answered the tool failure with %s", decision.describe())
 	}
@@ -1455,7 +1510,7 @@ func (p *AppaPluginKagent) holdTheReturn(ctx agent.Context, text string) (map[st
 		}
 		return p.crossing(ctx.InvocationID(), decision.Value), nil
 	case "block":
-		return map[string]any{"result": fmt.Sprintf(returnBlocked, p.forModel(decision.Reason))}, nil
+		return map[string]any{"result": fmt.Sprintf(returnBlocked, p.forModel(ctx, decision.Reason))}, nil
 	default:
 		return nil, failClosed("appa answered the child end with %s", decision.describe())
 	}
@@ -1547,6 +1602,9 @@ func (p *AppaPluginKagent) afterRun(ictx agent.InvocationContext) {
 	p.closeInvocation(ictx.InvocationID())
 	p.dropCrossed(ictx.InvocationID())
 	p.clearInvocationReviews(ictx.InvocationID())
+	if p.discovery != nil {
+		p.discovery.close(ictx.InvocationID())
+	}
 }
 
 func isChatApproval(text string) bool {

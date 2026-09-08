@@ -10,8 +10,8 @@
 #    so that entry is gone. The undeclared agent stays undeclared: the
 #    parent lists `release-manager` as a tool, no contract names
 #    `agent/kagent/release-manager`, and every delegation to it is
-#    denied at the spawn. The demo tools run on loopback here, so their
-#    toolset is `localhost`, the host label of the server URL.
+#    denied at the spawn. Native MCP rules work with this suite's
+#    loopback endpoints without changing their policy names.
 # 2. The appa-guide tool declarations and command binding are absent.
 #    This local suite creates no configuring Agent.
 # 3. Both sanitizers bind to the mock's `/sanitize` endpoint instead of
@@ -32,31 +32,31 @@ version = 2
 # --- in-cluster reads that stay inside the session ---
 
 [[policy.tool]]
-name = "mcp/localhost/list_pods"
+name = "list_pods"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/localhost/read_configmap"
+name = "read_configmap"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/localhost/read_secret"
+name = "read_secret"
 delta = { audience = ["ops"] }
 
 # --- ingress authored outside the session ---
 
 [[policy.tool]]
-name = "mcp/localhost/get_pod_logs"
+name = "get_pod_logs"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp/localhost/check_status_page"
+name = "check_status_page"
 delta = { trust = "suspicious" }
 
 # --- the outward sink ---
 
 [[policy.tool]]
-name = "mcp/localhost/post_status_update"
+name = "post_status_update"
 delta = {}
 
 [policy.tool.requires]
@@ -66,7 +66,7 @@ audience = { contains = ["public"] }
 # --- an effectful action behind a person ---
 
 [[policy.tool]]
-name = "mcp/localhost/restart_deployment"
+name = "restart_deployment"
 delta = {}
 
 [policy.tool.requires]
@@ -86,7 +86,7 @@ marks = []
 effects = []
 
 [[policy.tool]]
-name = "mcp/localhost/lookup_runbook"
+name = "lookup_runbook"
 annotator = "runbook-readers"
 
 # --- an effectful action behind a human-less authority ---
@@ -94,7 +94,7 @@ annotator = "runbook-readers"
 # The release-window bot rules per call: approve inside the window
 # (catalog-cache in the demo data), deny outside it.
 [[policy.tool]]
-name = "mcp/localhost/scale_deployment"
+name = "scale_deployment"
 delta = {}
 
 [policy.tool.requires]
@@ -115,7 +115,7 @@ attention = ["release-window"]
 # (approve, deny, or nobody within the consult window — then no answer,
 # and the offer stands).
 [[policy.tool]]
-name = "mcp/localhost/rollback_deployment"
+name = "rollback_deployment"
 delta = {}
 
 [policy.tool.requires]
@@ -170,15 +170,15 @@ delta = {}
 # `host/kagent/write_file`, `host/kagent/edit_file`) stay undeclared, so
 # they are refused.
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_get_resources"
+name = "k8s_get_resources"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_get_resource_yaml"
+name = "k8s_get_resource_yaml"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_apply_manifest"
+name = "k8s_apply_manifest"
 delta = {}
 
 [policy.tool.requires]
@@ -186,7 +186,7 @@ trust = "trusted"
 attention = ["human-approval"]
 
 [[policy.tool]]
-name = "mcp/kagent-tool-server/k8s_execute_command"
+name = "k8s_execute_command"
 delta = {}
 
 [policy.tool.requires]
@@ -207,7 +207,7 @@ delta = {}
 # the application point the output sanitizers register on.
 [policy.deployment]
 context_control = true
-confined_results = ["mcp/localhost/read_secret", "mcp/localhost/get_pod_logs", "mcp/localhost/check_status_page"]
+confined_results = ["read_secret", "get_pod_logs", "check_status_page"]
 
 # --- the human behind human-approval ---
 

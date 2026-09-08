@@ -78,7 +78,10 @@ def test_a_denied_code_run_names_the_tool_the_model_dispatches():
     """The stderr of a refused run is what the model reads, so the
     redispatch line of the block names the tool ADK dispatches, not the
     spelling the gate sent."""
-    block = "[appa] Blocked.\n  - Run mcp:demo-tools/k8s_get_pods first; it clears: the source is untrusted."
+    block = (
+        "[appa] Blocked.\n  - Run mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/"
+        "k8s_get_pods first; it clears: the source is untrusted."
+    )
     hook = Hook({"protocol": 1, "decision": "deny_call", "feedback": block})
     executor = GatedCodeExecutor(FakeExecutor(), gate_over(hook))
     result = executor.execute_code(FakeInvocationContext(FakeSession("s1")), FakeCodeInput("import socket"))

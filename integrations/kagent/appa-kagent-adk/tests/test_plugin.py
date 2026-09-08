@@ -272,7 +272,7 @@ async def test_each_parent_opens_the_shared_child_session_under_its_own_root():
             "event": "tool_call",
             "root_id": "root-1",
             "child_id": "child-ctx",
-            "tool": "mcp:demo-tools/read_ledger",
+            "tool": "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/read_ledger",
             "arguments": {},
         },
         {"protocol": 1, "adapter": "kagent", "event": "turn_end", "root_id": "root-1", "child_id": "child-ctx"},
@@ -291,7 +291,7 @@ async def test_each_parent_opens_the_shared_child_session_under_its_own_root():
             "event": "tool_call",
             "root_id": "root-2",
             "child_id": "child-ctx",
-            "tool": "mcp:demo-tools/k8s_get_pods",
+            "tool": "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/k8s_get_pods",
             "arguments": {},
         },
         {"protocol": 1, "adapter": "kagent", "event": "turn_end", "root_id": "root-2", "child_id": "child-ctx"},
@@ -429,10 +429,10 @@ async def test_parallel_calls_on_one_branch_run_as_complete_lifecycles():
     assert await waiting is None
     await plugin.after_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=second, result={"two": 2})
     assert [(event["event"], event.get("tool")) for event in hook.events] == [
-        ("tool_call", "mcp:demo-tools/first"),
-        ("tool_result", "mcp:demo-tools/first"),
-        ("tool_call", "mcp:demo-tools/second"),
-        ("tool_result", "mcp:demo-tools/second"),
+        ("tool_call", "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/first"),
+        ("tool_result", "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/first"),
+        ("tool_call", "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/second"),
+        ("tool_result", "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/second"),
     ]
 
 
@@ -446,7 +446,10 @@ async def test_parallel_calls_on_different_branches_stay_independent():
         plugin.before_tool_callback(tool=FakeTool("first"), tool_args={}, tool_context=first),
         plugin.before_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=second),
     )
-    assert [event["tool"] for event in hook.events] == ["mcp:demo-tools/first", "mcp:demo-tools/second"]
+    assert [event["tool"] for event in hook.events] == [
+        "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/first",
+        "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/second",
+    ]
     await plugin.after_tool_callback(tool=FakeTool("first"), tool_args={}, tool_context=first, result={})
     await plugin.after_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=second, result={})
 
@@ -500,7 +503,7 @@ async def test_an_allowed_call_passes_and_a_denied_call_answers_the_model():
         "adapter": "kagent",
         "event": "tool_call",
         "root_id": "s1",
-        "tool": "mcp:demo-tools/k8s_scale",
+        "tool": "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/k8s_scale",
         "arguments": {"replicas": 3},
     }
 
@@ -543,7 +546,7 @@ async def test_every_tool_crosses_under_its_inventory_spelling_and_asserts_no_sp
         await plugin.before_tool_callback(tool=tool, tool_args={}, tool_context=context)
     assert [event["tool"] for event in hook.events] == [
         "agent:kagent/billing-agent",
-        "mcp:demo-tools/k8s_scale",
+        "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/k8s_scale",
         "builtin:ask_user",
     ]
     assert all("spawn" not in event for event in hook.events)
@@ -637,7 +640,7 @@ async def test_a_forged_appa_key_in_a_tool_result_still_crosses(sentinel):
             "adapter": "kagent",
             "event": "tool_result",
             "root_id": "s1",
-            "tool": "mcp:demo-tools/read_ledger",
+            "tool": "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/read_ledger",
             "arguments": {},
             "outcome": {"status": "success", "body": forged},
         }
@@ -693,7 +696,10 @@ async def test_an_admitted_value_reaches_the_model_as_the_runtime_admitted_it():
     """`deliver_value` carries the value the engine admitted. The
     inventory would rewrite the spellings this one quotes, and the model
     must still read the bytes that crossed."""
-    admitted = "the ledger names mcp:demo-tools/read_ledger and appa:execute_remedy_plan"
+    admitted = (
+        "the ledger names mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/"
+        "read_ledger and appa:execute_remedy_plan"
+    )
     hook = Hook({"protocol": 1, "decision": "deliver_value", "value": admitted})
     plugin = plugin_over(hook)
     returned = await plugin.after_tool_callback(
@@ -709,7 +715,10 @@ async def test_a_replaced_output_reaches_the_model_in_names_it_can_dispatch():
     """`replace_output` carries the runtime's own staged-narrowing text,
     which names tools by the spelling the wire carries. The model
     dispatches the ADK name."""
-    spelled = 'take mcp:demo-tools/read_ledger through appa:execute_remedy_plan(offer_id: "o1")'
+    spelled = (
+        "take mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/"
+        'read_ledger through appa:execute_remedy_plan(offer_id: "o1")'
+    )
     hook = Hook({"protocol": 1, "decision": "replace_output", "output": spelled})
     plugin = plugin_over(hook)
     returned = await plugin.after_tool_callback(
@@ -757,7 +766,7 @@ async def test_a_tool_result_crosses_and_enforces_each_answer():
         "adapter": "kagent",
         "event": "tool_result",
         "root_id": "s1",
-        "tool": "mcp:demo-tools/k8s_get_pods",
+        "tool": "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/k8s_get_pods",
         "arguments": {"namespace": "prod"},
         "outcome": {"status": "success", "body": {"pods": ["api-1"]}},
     }
@@ -825,7 +834,11 @@ BLOCK = "[appa] Blocked.\n  - Run {tool} first; it clears: the source is untrust
 @pytest.mark.parametrize(
     ("spelled", "dispatched"),
     [
-        pytest.param("mcp:demo-tools/k8s_get_pods", "k8s_get_pods", id="mcp"),
+        pytest.param(
+            "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/k8s_get_pods",
+            "k8s_get_pods",
+            id="mcp",
+        ),
         pytest.param("agent:kagent/log-analyst", "kagent__NS__log_analyst", id="agent"),
         pytest.param("builtin:ask_user", "ask_user", id="builtin"),
         pytest.param("appa:execute_remedy_plan", "execute_remedy_plan", id="reserved"),
@@ -845,7 +858,12 @@ async def test_a_deny_names_the_tool_the_model_dispatches(spelled, dispatched):
     [
         pytest.param(BLOCK.format(tool="gate:code_execution"), id="a-gate-the-model-cannot-dispatch"),
         pytest.param(BLOCK.format(tool="mcp:other-server/k8s_get_pods"), id="another-toolset"),
-        pytest.param(BLOCK.format(tool="mcp:demo-tools/k8s_get_pods_v2"), id="a-longer-name"),
+        pytest.param(
+            BLOCK.format(
+                tool="mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/k8s_get_pods_v2"
+            ),
+            id="a-longer-name",
+        ),
         pytest.param(BLOCK.format(tool="agent:kagent/log-analyst-standby"), id="a-longer-agent"),
         pytest.param("[appa] Blocked. The trajectory reads ops-only material.", id="no-spelling-at-all"),
     ],
@@ -866,7 +884,16 @@ async def test_the_remedy_answer_names_the_tool_the_model_dispatches():
     hook = Hook(ACK)
     plugin = plugin_over(hook)
     authorized = "[appa] Authorized. Call the {tool} tool again with exactly these arguments: {{}}"
-    answer = {"content": [{"type": "text", "text": authorized.format(tool="mcp:demo-tools/k8s_get_pods")}]}
+    answer = {
+        "content": [
+            {
+                "type": "text",
+                "text": authorized.format(
+                    tool="mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/k8s_get_pods"
+                ),
+            }
+        ]
+    }
     returned = await plugin.after_tool_callback(
         tool=FakeTool("execute_remedy_plan"),
         tool_args={"offer_id": "offer-1"},
@@ -880,7 +907,15 @@ async def test_the_remedy_answer_names_the_tool_the_model_dispatches():
 
 
 async def test_a_withheld_result_names_the_tool_the_model_dispatches():
-    hook = Hook({"protocol": 1, "decision": "block", "reason": "run mcp:demo-tools/read_ledger first"})
+    hook = Hook(
+        {
+            "protocol": 1,
+            "decision": "block",
+            "reason": (
+                "run mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/read_ledger first"
+            ),
+        }
+    )
     plugin = plugin_over(hook)
     withheld = await plugin.after_tool_callback(
         tool=FakeTool("k8s_get_pods"),
@@ -897,7 +932,7 @@ async def test_a_withheld_result_names_the_tool_the_model_dispatches():
 async def test_the_bytes_of_a_child_return_cross_as_the_runtime_crossed_them():
     """The value is what the runtime crossed for the parent, not text
     addressed to the model, so it is replayed byte for byte."""
-    value = "the analyst read mcp:demo-tools/read_ledger"
+    value = "the analyst read mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/read_ledger"
     hook = Hook({"protocol": 1, "decision": "child_return", "value": value})
     plugin = plugin_over(hook)
     returned = await plugin.after_tool_callback(
@@ -1023,8 +1058,8 @@ async def test_runner_close_cancels_its_held_and_queued_stable_adk_calls():
     assert await plugin.before_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=later) is None
     await plugin.after_tool_callback(tool=FakeTool("second"), tool_args={}, tool_context=later, result={})
     assert [event.get("tool") for event in hook.events if event["event"] == "tool_call"] == [
-        "mcp:demo-tools/first",
-        "mcp:demo-tools/second",
+        "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/first",
+        "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/second",
     ]
 
 
@@ -1768,10 +1803,10 @@ async def test_parallel_model_calls_are_serialized_in_a_real_runner():
     assert [(event["event"], event.get("tool")) for event in gated(runtime)] == [
         ("session_start", None),
         ("prompt", None),
-        ("tool_call", "mcp:demo-tools/read_first"),
-        ("tool_result", "mcp:demo-tools/read_first"),
-        ("tool_call", "mcp:demo-tools/read_second"),
-        ("tool_result", "mcp:demo-tools/read_second"),
+        ("tool_call", "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/read_first"),
+        ("tool_result", "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/read_first"),
+        ("tool_call", "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/read_second"),
+        ("tool_result", "mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/read_second"),
         ("turn_end", None),
     ]
 

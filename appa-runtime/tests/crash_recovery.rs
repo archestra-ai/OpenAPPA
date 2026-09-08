@@ -303,21 +303,16 @@ fn the_reload_route_installs_an_edited_policy_without_a_restart() {
     );
 }
 
-/// A served deployment names tools canonically, because the wire carries the
-/// host's raw spelling and the adapter derives the identity a contract must
-/// match. A policy naming a tool the host's way refuses to serve at startup and
-/// refuses to install on reload, leaving the running deployment serving.
+/// Native policy names resolve internally at startup and reload. The authored
+/// file stays unchanged, while the canonical wire call selects the same contract.
 #[test]
-fn a_policy_naming_a_non_canonical_tool_refuses_to_serve_and_to_install() {
+fn a_policy_naming_native_tools_serves_and_reloads() {
     let _scenario = serialize_server_scenarios();
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let db = dir.path().join("appa.db");
     let raw = CONFIG.replace("host/claude-code/Bash", "Bash");
 
     let config = write_config(dir.path(), &raw);
-    expect_startup_refusal(&config, &db, "Bash");
-
-    let config = write_config(dir.path(), CONFIG);
     let server = serve_runtime(&config, &db);
     let reload = format!("{}/reload", server.url);
     post_hook(
@@ -326,16 +321,16 @@ fn a_policy_naming_a_non_canonical_tool_refuses_to_serve_and_to_install() {
     )
     .expect("SessionStart answers");
 
-    write_config(dir.path(), &raw);
+    write_config(dir.path(), CONFIG);
     assert!(
-        http(&reload, "POST", None).is_none(),
-        "a policy naming a raw tool must not install",
+        http(&reload, "POST", None).is_some(),
+        "canonical policy names also install",
     );
     let still_allows = post_hook(
         &server,
         r#"{"hook_event_name":"PreToolUse","session_id":"canon-1","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"t1"}"#,
     )
-    .expect("the gate still answers after the refused reload");
+    .expect("the gate answers under the opening native policy after reload");
     assert!(allowed(&still_allows), "{still_allows}");
 
     // A selector on a canonical name is canonical: the rule reads the tool it names.
@@ -350,9 +345,7 @@ fn a_policy_naming_a_non_canonical_tool_refuses_to_serve_and_to_install() {
     assert!(installed.contains("\"changed\":true"), "{installed}");
 }
 
-/// A wildcard contract covers every name, so a `[deployment]` field naming a tool the
-/// host's way passes coverage: only the served rule refuses it. Every field here names a
-/// tool the served adapter derives.
+/// Deployment tool references normalize through the same resolver as tool rules.
 const DEPLOYMENT_CONFIG: &str = r#"
 [policy]
 version = 2
@@ -375,12 +368,8 @@ timeout_ms = 5000
 max_body_bytes = 65536
 "#;
 
-/// A `[deployment]` field names a tool the way a contract does: the identity the served
-/// adapter derives, matched exactly. A raw spelling there confines or excepts nothing, so
-/// each field refuses to serve at startup and to install on reload, naming the field it
-/// refused.
 #[test]
-fn a_deployment_field_naming_a_non_canonical_tool_refuses_to_serve_and_to_install() {
+fn deployment_fields_accept_native_names_at_startup_and_reload() {
     let _scenario = serialize_server_scenarios();
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let db = dir.path().join("appa.db");
@@ -396,10 +385,11 @@ fn a_deployment_field_naming_a_non_canonical_tool_refuses_to_serve_and_to_instal
         let raw = DEPLOYMENT_CONFIG.replace(canonical, raw_name);
         write_config(dir.path(), &raw);
         assert!(
-            http(&reload, "POST", None).is_none(),
-            "a raw name in {field} must not install",
+            http(&reload, "POST", None).is_some(),
+            "a native name in {field} installs",
         );
-        expect_startup_refusal(&config, &dir.path().join("refused.db"), field);
+        let fresh = serve_runtime(&config, &dir.path().join(format!("{field}.db")));
+        drop(fresh);
     }
 
     write_config(dir.path(), DEPLOYMENT_CONFIG);
