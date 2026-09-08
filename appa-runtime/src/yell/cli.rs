@@ -73,7 +73,7 @@ async fn yell(
     match yes {
         true => println!("Sending it to {destination}."),
         false => {
-            if !confirm(&format!("Share it with {destination}?"), false) {
+            if !confirm(&format!("Share it with {destination}?"), true) {
                 println!();
                 println!("Not sent. The report stays at {path}.");
                 return ExitCode::SUCCESS;
@@ -248,8 +248,8 @@ fn ask_pseudonymization() -> Mode {
     }
 }
 
-/// A yes/no question. Anything but an explicit answer takes the default, including a closed
-/// stdin: a pipe that ran out of input has not said yes to sending anything.
+/// A yes/no question. Anything but an explicit answer takes the caller-supplied default,
+/// including a closed stdin or empty input.
 fn confirm(question: &str, default: bool) -> bool {
     let suffix = match default {
         true => "[Y/n]",
