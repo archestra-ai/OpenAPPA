@@ -861,6 +861,7 @@ fn classify_transport(error: reqwest::Error) -> NoAnswerReason {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    #[cfg(unix)]
     use std::sync::OnceLock;
     use std::time::Duration;
 
@@ -868,6 +869,7 @@ mod tests {
     use axum::routing::post;
 
     use super::*;
+    #[cfg(unix)]
     use crate::builtins::run_claude_code;
     use crate::config::Token;
     use crate::consult::{
@@ -877,6 +879,7 @@ mod tests {
     };
     use appa_engine::audience::MemberClaims;
 
+    #[cfg(unix)]
     fn process_environment() -> &'static tokio::sync::Mutex<()> {
         static ENVIRONMENT: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
         ENVIRONMENT.get_or_init(|| tokio::sync::Mutex::new(()))
@@ -1529,6 +1532,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
     }
 
     /// Split the fake claude's NUL-separated argument capture.
+    #[cfg(unix)]
     fn captured_args(path: &std::path::Path) -> Vec<String> {
         let raw = std::fs::read(path).expect("the fake captured arguments");
         let raw = raw.strip_suffix(&[0u8]).expect("every argument ends in NUL");
@@ -1537,6 +1541,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             .collect()
     }
 
+    #[cfg(unix)]
     fn arg_after<'a>(args: &'a [String], flag: &str) -> &'a str {
         let position = args
             .iter()

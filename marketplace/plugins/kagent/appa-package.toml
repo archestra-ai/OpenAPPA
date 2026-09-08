@@ -1,0 +1,11 @@
+schema = 1
+name = "kagent"
+description = "Gates a kagent agent pod through the Google ADK plugin API: every tool call and agent-to-agent delegation is checked before it runs."
+
+[plugin]
+host = "kagent"
+protocol = 1
+default_policy = "default.appa.toml"
+# The generation descriptor locks registry and platform digests for these
+# release images. The Go image also publishes the alias kagent derives.
+images = { adk = "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk:v0.16.0", adk-go = "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk-go:v0.16.0" } # x-release-please-version
