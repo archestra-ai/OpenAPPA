@@ -9,6 +9,9 @@ The CI job builds four images, pushes them to an isolated local registry, record
 actual OCI digests, and packages a test-only offline deployment. The test drives
 the real plugin/battery CLI and deploys its resulting chart and settings into a
 uniquely named amd64 kind cluster, using a dedicated kubeconfig throughout.
+The pinned node explicitly enables its registry configuration directory. A CRI
+image pull verifies mirror access before Helm deployment. Failure diagnostics
+include pod events and descriptions even when container logs are unavailable.
 
 It checks registry and running-image digests, rejects missing running evidence,
 and exercises three cases for each language:

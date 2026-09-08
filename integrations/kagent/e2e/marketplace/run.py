@@ -183,12 +183,20 @@ class Acceptance:
         (mismatch / "images.json").write_text(json.dumps(wrong))
         self.command([sys.executable, mismatch / "verify-images.py", "--registry", mirror], expect_success=False)
         self.cluster_created = True
-        self.command(["kind", "create", "cluster", "--name", self.name, "--kubeconfig", self.env["KUBECONFIG"], "--wait", "180s"], timeout=300)
+        cluster_config = {
+            "kind": "Cluster", "apiVersion": "kind.x-k8s.io/v1alpha4",
+            "containerdConfigPatches": ['[plugins."io.containerd.grpc.v1.cri".registry]\n  config_path = "/etc/containerd/certs.d"\n'],
+        }
+        # This pinned node does not enable the CRI registry directory by default.
+        node_image = "kindest/node:v1.32.2@sha256:f226345927d7e348497136874b6d207e0b32cc52154ad8323129352923a3142f"
+        self.command(["kind", "create", "cluster", "--name", self.name, "--kubeconfig", self.env["KUBECONFIG"],
+                      "--image", node_image, "--config", "-", "--wait", "180s"], data=json.dumps(cluster_config), timeout=300)
         self.command(["docker", "network", "connect", "kind", self.registry])
         for node in self.command(["kind", "get", "nodes", "--name", self.name]).splitlines():
             directory = f"/etc/containerd/certs.d/{mirror}"
             self.command(["docker", "exec", node, "mkdir", "-p", directory])
             self.command(["docker", "exec", "-i", node, "cp", "/dev/stdin", directory + "/hosts.toml"], data=f'[host."http://{self.registry}:5000"]\n')
+            self.command(["docker", "exec", node, "crictl", "pull", f"{mirror}/appa-runtime@{images['runtime']['digest']}"], timeout=180)
         version = "0.9.12"
         self.helm("upgrade", "--install", "kagent-crds", "oci://ghcr.io/kagent-dev/kagent/helm/kagent-crds", "--version", version, "-n", "kagent", "--create-namespace", "--wait")
         extras = ("k8s-agent", "kgateway-agent", "istio-agent", "promql-agent", "observability-agent", "argo-rollouts-agent", "helm-agent", "cilium-policy-agent", "cilium-manager-agent", "cilium-debug-agent", "grafana-mcp", "querydoc", "kagent-tools")
@@ -295,12 +303,19 @@ class Acceptance:
             finally:
                 output.close()
         if self.cluster_created:
-            try:
-                self.kubectl("get", "pods", "-A", "-o", "wide")
-                for namespace in ("appa", "kagent"):
-                    self.kubectl("-n", namespace, "logs", "--all-containers", "--prefix", "--tail=200", "--selector=app.kubernetes.io/instance=appa-runtime" if namespace == "appa" else "--selector=appa.dev/managed=kagent")
-            except Exception as error:
-                print("Diagnostics incomplete:", error, file=sys.stderr)
+            diagnostics = [("get", "pods", "-A", "-o", "wide"),
+                           ("get", "events", "-A", "--sort-by=.metadata.creationTimestamp")]
+            for namespace, selector in (("appa", "app.kubernetes.io/instance=appa-runtime"),
+                                        ("kagent", "appa.dev/managed=kagent")):
+                diagnostics.extend([
+                    ("-n", namespace, "describe", "pods", "--selector=" + selector),
+                    ("-n", namespace, "logs", "--all-containers", "--prefix", "--tail=200", "--selector=" + selector),
+                ])
+            for args in diagnostics:
+                try:
+                    self.kubectl(*args, timeout=30)
+                except Exception as error:
+                    print("Diagnostics incomplete:", error, file=sys.stderr)
             cleanup(["kind", "delete", "cluster", "--name", self.name])
         if self.registry_created:
             cleanup(["docker", "rm", "-f", self.registry])
