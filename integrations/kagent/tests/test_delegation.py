@@ -300,13 +300,21 @@ def test_nothing_a_child_says_after_returning_nothing_reaches_its_parent(stack):
 @pytest.mark.parametrize("stack", [True], indirect=True)
 def test_a_known_uncovered_agent_is_rejected_before_model_execution(stack):
     """An advertised agent without a contract is a known activation error."""
-    body = json.dumps({
-        "jsonrpc": "2.0", "id": str(uuid.uuid4()), "method": "message/send",
-        "params": {"message": {
-            "role": "user", "kind": "message", "messageId": str(uuid.uuid4()),
-            "parts": [{"kind": "text", "text": DELEGATE_UNDECLARED}],
-        }},
-    }).encode()
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": str(uuid.uuid4()),
+            "method": "message/send",
+            "params": {
+                "message": {
+                    "role": "user",
+                    "kind": "message",
+                    "messageId": str(uuid.uuid4()),
+                    "parts": [{"kind": "text", "text": DELEGATE_UNDECLARED}],
+                }
+            },
+        }
+    ).encode()
     request = urllib.request.Request(stack.agent.url, data=body, headers={"content-type": "application/json"})
     with urllib.request.urlopen(request, timeout=30) as response:
         answer = json.load(response)

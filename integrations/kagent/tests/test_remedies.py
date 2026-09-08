@@ -31,6 +31,7 @@ ROLLBACK_APPROVED = "roll back the checkout-api deployment for an approving boar
 ROLLBACK_DENIED = "roll back the checkout-api deployment for a denying board"
 ROLLBACK_SILENT = "roll back the checkout-api deployment for a silent board"
 
+
 # The change board waits on the canonical tool id, the name the policy
 # carries — a consult names the call the runtime derived, not the bare
 # name kagent dispatches.
@@ -38,6 +39,7 @@ def rollback_consult(endpoint):
     from appa_kagent_adk.inventory import mcp_source_id
 
     return f"mcp/{mcp_source_id(endpoint)}/rollback_deployment"
+
 
 # The offer actions the runtime renders (`appa-runtime/src/engine.rs`,
 # `remedy_instruction`). A `{"remedy": ...}` turn names one of them.

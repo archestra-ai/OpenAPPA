@@ -70,7 +70,9 @@ func discoveryRuntime(t *testing.T) string {
 	}
 	t.Cleanup(func() { command.Process.Kill(); command.Wait(); log.Close() })
 	client := http.Client{Timeout: time.Second}
-	deadline := time.Now().Add(10 * time.Second)
+	// Debug runtimes fingerprint their executable before binding. Allow
+	// that startup work on CI; this does not change discovery's deadline.
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		response, err := client.Get("http://" + address + "/health")
 		if err == nil {
