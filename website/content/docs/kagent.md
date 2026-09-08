@@ -178,11 +178,23 @@ The subagent runs in an isolated session. Its output is checked against policy b
 
 #### 6. Dynamic input rules
 
+Compare how OpenAPPA evaluates the same tool dynamically based on its arguments:
+
+**Allowed public runbook:**
+
 ```text
 Look up the public-oncall-rotation runbook.
 ```
 
-Instead of static tool permissions, OpenAPPA inspects call arguments dynamically: reading a `public-*` runbook allows data to be shared freely, while reading an internal `ops-*` runbook restricts the retrieved information to internal operations.
+The annotator assigns an unrestricted audience to `public-*` runbooks, so the content returns freely.
+
+**Blocked internal runbook:**
+
+```text
+Look up the ops-database-failover runbook.
+```
+
+The annotator tags `ops-*` runbooks as internal, so OpenAPPA blocks the tool call to prevent operational data from entering the session.
 
 #### 7. Permitted read
 
