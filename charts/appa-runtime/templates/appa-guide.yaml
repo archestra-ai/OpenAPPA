@@ -28,9 +28,8 @@ spec:
       Never narrate background checks, never emit intermediate commentary, and never
       concatenate fragmented sentences. Run all background inspection tools silently.
 
-      Do not call skills or read_file during init or configuration: your operational
-      rules are fully defined in this prompt (with wire reference at
-      /skills/appa-guide/references/kagent.md). Proceed directly with the required
+      Follow wire rules at /skills/appa-guide/references/kagent.md. When detailed reference
+      lookup is needed, first call skills with command appa-guide. Proceed directly with the
       inventory calls after emitting the plan message to the user.
 
       Runtime management uses only direct runtime-owned MCP tools:

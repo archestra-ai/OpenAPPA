@@ -120,7 +120,7 @@ The explicit KMCP user and group preserve `runAsNonRoot` while avoiding
 bash <<'BASH'
 set -euo pipefail
 
-APPA_VERSION=0.15.0 # x-release-please-version
+APPA_VERSION=0.16.0 # x-release-please-version
 
 helm upgrade --install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
   --version "$APPA_VERSION" -n appa --create-namespace \
@@ -140,7 +140,7 @@ BASH
 bash <<'BASH'
 set -euo pipefail
 
-APPA_VERSION=0.15.0 # x-release-please-version
+APPA_VERSION=0.16.0 # x-release-please-version
 
 helm upgrade --install appa-kagent-demo \
   oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-kagent-demo \

@@ -421,10 +421,10 @@ func TestTheImageEnvFillsAnUnsetOpenAIReasoningEffort(t *testing.T) {
 	if model.ReasoningEffort == nil || *model.ReasoningEffort != "none" {
 		t.Fatalf("the env must fill an unset reasoning effort, got %v", model.ReasoningEffort)
 	}
-	defaulted := &adk.AgentConfig{Model: &adk.OpenAI{}}
-	withReasoningEffort(defaulted, "")
-	if defaulted.Model.(*adk.OpenAI).ReasoningEffort == nil || *defaulted.Model.(*adk.OpenAI).ReasoningEffort != "none" {
-		t.Errorf("an empty env must default to none for OpenAI models")
+	untouched := &adk.AgentConfig{Model: &adk.OpenAI{}}
+	withReasoningEffort(untouched, "")
+	if untouched.Model.(*adk.OpenAI).ReasoningEffort != nil {
+		t.Errorf("an empty env must leave the rendered config untouched")
 	}
 }
 

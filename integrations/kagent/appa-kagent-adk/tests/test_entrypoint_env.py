@@ -25,6 +25,12 @@ def test_no_env_defaults_openai_models_to_none():
     assert config["model"]["reasoning_effort"] == "none"
 
 
+def test_non_reasoning_model_with_no_env_is_untouched():
+    config = _config({"type": "openai", "model": "gpt-5.2"})
+    fill_reasoning_effort(config, {})
+    assert "reasoning_effort" not in config["model"]
+
+
 def test_a_model_of_another_type_is_untouched():
     config = _config({"type": "anthropic", "model": "claude-sonnet-5"})
     fill_reasoning_effort(config, {REASONING_EFFORT_ENV: "none"})
