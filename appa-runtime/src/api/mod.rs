@@ -1104,9 +1104,6 @@ impl Runtime {
             .lock()
             .expect("the retired-engine mutex is never poisoned: no panic runs while it is held")
             .clear();
-        // Every reload retires at most one more policy, so clearing here bounds the
-        // cache by the reloads since the last one instead of by the life of the
-        // process. A trajectory still replaying under a dropped entry recompiles it.
 
         let key = crate::engine::policy_file_key(deployment.config.policy_file().bytes());
         let changed = crate::engine::policy_file_key(previous.config.policy_file().bytes()) != key;
