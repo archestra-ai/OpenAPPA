@@ -74,6 +74,19 @@ def test_denied_code_never_reaches_the_subprocess():
     assert result.stdout == ""
 
 
+def test_code_gate_keeps_the_invocation_identity_when_headers_change():
+    hook = Hook(ALLOW, ACK)
+    gate = gate_over(hook)
+    context = FakeInvocationContext(FakeSession("s1"))
+    gate._identity.open_invocation(context)
+    context.session.state["headers"] = {"x-kagent-root-context-id": "another-root"}
+    GatedCodeExecutor(FakeExecutor(), gate).execute_code(context, FakeCodeInput("print(42)"))
+    assert [(event["root_id"], event.get("child_id")) for event in hook.events] == [
+        ("s1", None),
+        ("s1", None),
+    ]
+
+
 def test_a_denied_code_run_names_the_tool_the_model_dispatches():
     """The stderr of a refused run is what the model reads, so the
     redispatch line of the block names the tool ADK dispatches, not the
@@ -149,6 +162,25 @@ async def test_a_denied_persist_writes_nothing_to_the_memory_backend():
     await agent.after_agent_callback[0](MemoryCallbackContext(FakeSession("s1")))
     assert ran == [], "a denied persist skips add_session_to_memory"
     assert [event["event"] for event in hook.events] == ["tool_call"]
+
+
+async def test_memory_gate_keeps_the_invocation_identity_across_the_persist():
+    hook = Hook(ALLOW, ACK)
+    plugin = plugin_over(hook)
+    context = MemoryCallbackContext(FakeSession("child", {"headers": {"x-kagent-root-context-id": "root"}}))
+    plugin._identity.open_invocation(context._invocation_context)
+    context._invocation_context.session.state["headers"] = {"x-kagent-root-context-id": "another-root"}
+
+    async def auto_save_session_to_memory_callback(callback_context):
+        callback_context._invocation_context.session.state["headers"] = {"x-kagent-root-context-id": "third-root"}
+
+    agent = FakeAgent([auto_save_session_to_memory_callback])
+    assert gate_memory_persist(agent, plugin)
+    await agent.after_agent_callback[0](context)
+    assert [(event["root_id"], event.get("child_id")) for event in hook.events] == [
+        ("root", "child"),
+        ("root", "child"),
+    ]
 
 
 def test_an_agent_without_the_stock_callback_is_left_alone():
