@@ -45,6 +45,41 @@ For interruption coverage, cause native startup to fail after config publication
 a successful registration receipt. Restore the prerequisite and rerun the same
 install; success must clear the journal and verify native activation.
 
+## Retained generation update and restore
+
+Use two clean-commit fixture bundles with different generation identities. Import
+each once into the isolated deployment to retain its artifacts, and select GitHub.
+Import restores the bundle's complete selection; it does not merge batteries
+from a different local selection.
+
+With external network access disabled, run:
+
+```sh
+appa plugin install claude-code --revision <older-full-commit> --json
+appa plugin install claude-code --revision <newer-full-commit> --json
+```
+
+After each command, check the active commit and GitHub include in
+`.appa/<config-filename>/active.json`. Compare `/binary-fingerprint` with the
+SHA256 of the corresponding fixture binary, and run the installed-hook GitHub
+check. The unrelated Claude plugin and recorded trajectories must survive both
+switches. Restoring the older generation must restore its owned include paths
+without changing authored policy.
+
+## Native removal failure and retry
+
+With APPA registered, put a test `claude` wrapper first on PATH. Make it refuse
+only `plugin uninstall`, after checking that `clappa` contains the incomplete
+removal message; delegate all other calls to the real Claude executable.
+Run `appa plugin remove claude-code --json`. Expect exit 3, a recovery journal,
+the disabled launcher, and the still-registered plugin. Policy and trajectory
+data must remain unchanged.
+
+Restore normal PATH and rerun removal. Expect exit 0 with state `recovered`,
+no journal or APPA registration, and the unrelated plugin still present. A third
+run must report `unchanged`. This tests a native-command failure after launcher
+disabling; it is not evidence of arbitrary kernel-crash or power-loss recovery.
+
 ## Artifact fixtures
 
 `examples/installation_fixture.rs` creates a local, current-platform bundle from

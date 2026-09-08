@@ -59,6 +59,46 @@ fn removing_an_unselected_plugin_is_read_only_and_idempotent() {
 }
 
 #[test]
+fn plugin_removal_reports_completed_recovery_before_an_idle_result() {
+    for published_config in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let config = deployment(root.path());
+        let state = root.path().join("config/.appa/appa.toml");
+        let active = state.join("active.json");
+        let selection: serde_json::Value = serde_json::from_slice(&std::fs::read(&active).unwrap()).unwrap();
+        let after = std::fs::read(&config).unwrap();
+        if !published_config {
+            std::fs::remove_file(&config).unwrap();
+            std::fs::remove_file(&active).unwrap();
+        }
+        let journal = state.join("transaction.json");
+        std::fs::write(
+            &journal,
+            serde_json::to_vec(&serde_json::json!({
+                "before":null,"after":after,"selection":selection,
+                "activation":"none","previous":null
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let output = run(root.path(), &["plugin", "remove", "claude-code", "--json"]);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["result"]["state"], "recovered");
+        assert!(!journal.exists());
+        assert_eq!(config.exists(), published_config);
+        assert_eq!(active.exists(), published_config);
+        if published_config {
+            assert_eq!(std::fs::read(&config).unwrap(), after);
+        }
+        let repeated = run(root.path(), &["plugin", "remove", "claude-code", "--json"]);
+        assert!(repeated.status.success());
+        let result: serde_json::Value = serde_json::from_slice(&repeated.stdout).unwrap();
+        assert_eq!(result["result"]["state"], "unchanged");
+    }
+}
+
+#[test]
 fn plugin_removal_requires_the_selected_native_artifact_before_changing_state() {
     let root = tempfile::tempdir().unwrap();
     let config = deployment(root.path());

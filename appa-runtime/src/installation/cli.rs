@@ -104,33 +104,30 @@ pub struct PluginRemove {
 pub fn remove_plugin(args: PluginRemove) -> ExitCode {
     let result = (|| {
         let path = args.target.path();
-        let Some(current) = Installation::inspect(&path).or_else(|error| {
-            if matches!(error, InstallError::Recovery { .. }) {
-                let installation = Installation::open(&path)?;
-                installation.recover_config()?;
-                installation.selection()
-            } else {
-                Err(error)
+        match Installation::inspect(&path) {
+            Ok(None) => {
+                return Ok((None, serde_json::json!({"plugin":args.name,"state":"unchanged"})));
             }
-        })?
-        else {
-            return Ok((None, serde_json::json!({"plugin":args.name,"state":"unchanged"})));
-        };
-        if !current.plugins.contains(&args.name) {
-            return Ok((
-                Some(current.commit().to_string()),
-                serde_json::json!({"plugin":args.name,"state":"unchanged"}),
-            ));
+            Ok(Some(current)) if !current.plugins.contains(&args.name) => {
+                return Ok((
+                    Some(current.commit().to_string()),
+                    serde_json::json!({"plugin":args.name,"state":"unchanged"}),
+                ));
+            }
+            Ok(Some(_)) | Err(InstallError::Recovery { .. }) => {}
+            Err(error) => return Err(error),
         }
         let installation = Installation::open(&path)?;
+        let recovering = super::optional_bytes(&installation.state.join("transaction.json"))?.is_some();
         installation.recover_config()?;
-        let mut selection = installation
-            .selection()?
-            .ok_or_else(|| InstallError::Invalid("selection disappeared before removal".into()))?;
+        let state = if recovering { "recovered" } else { "unchanged" };
+        let Some(mut selection) = installation.selection()? else {
+            return Ok((None, serde_json::json!({"plugin":args.name,"state":state})));
+        };
         if !selection.plugins.contains(&args.name) {
             return Ok((
                 Some(selection.commit().to_string()),
-                serde_json::json!({"plugin":args.name,"state":"unchanged"}),
+                serde_json::json!({"plugin":args.name,"state":state}),
             ));
         }
         let before = super::required_bytes(installation.config_path())?;
