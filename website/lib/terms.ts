@@ -5,9 +5,11 @@
    with no entry renders as plain code. */
 
 const TERMS = {
+  context_control:
+    "Declares that the integration can keep a child agent's data hidden from the parent and withhold its answer until OpenAPPA allows it. Setting this to true does not implement that behavior; the integration must already support it.",
   version: "The policy configuration dialect version.",
   include:
-    "Policy fragments composed by the root configuration. Root declarations run first, followed by included declarations in list order. Included files cannot include more files or replace root-wide settings. A root [[annotator]] replaces one included Annotator with the same name.",
+    "Policy fragments composed by the root configuration. Root declarations run first, followed by included declarations in list order. Included files cannot include more files or replace root-wide settings. A root [[policy.annotator]] replaces one included Annotator with the same name.",
   trust_chain:
     "The ordered list of trust ranks, least-trusted first. Omitted, it defaults to suspicious < trusted.",
 
@@ -17,23 +19,21 @@ const TERMS = {
   log:
     "The append-only execution history recording tool dispatches, narrowing acceptances, authority approvals, and denials.",
   authority:
-    "A policy component empowered to approve specific out-of-bounds actions. A deployment binding provides its judgment; without one, it returns no answer and cannot release a call.",
+    "Reviews a blocked tool call and can approve an exception within its permits. Approval applies to that call only.",
   authorities:
-    "Policy components empowered to approve specific out-of-bounds actions, each within what its permits table declares. An unbound authority returns no answer.",
+    "Components that review blocked tool calls. Each can approve only the requirements listed in its permits section.",
   sanitizer:
-    "A registered component (such as a PII scrubber or schema validator) that derives cleaner outputs to restore lost reach or raise trust.",
+    "Cleans or validates data before an agent or tool receives it. Its permits specify the audience or trust rank allowed for the result.",
   sanitizers:
-    "Registered components that derive cleaner outputs to restore lost reach or raise trust.",
+    "Components that clean or validate data before an agent or tool receives it, within the changes allowed by their permits.",
   annotator:
-    "A registered component that produces a tool call's complete contract — delta, requires, and effects — per call, inside its declared mandate. A tool routes through it with annotator = \"<name>\"; the wildcard tool routes the long tail through one.",
+    "Determines a tool call's delta, requires (including attention), and effects. The tool selects it with annotator = \"<name>\". Its permits limit the values it can return.",
   annotators:
-    "Registered components that produce complete per-call tool contracts inside their declared mandates.",
+    "Components that determine each tool call's restrictions, requirements, and effects within their configured permits.",
   annotation:
-    "The complete concrete contract one released tool call carries: its delta, its requires, and the effects it emits. Written statically in the [[tool]] entry, or answered per call by an annotator; pinned to the exact call, so a rewrite is annotated afresh and replay never consults again.",
-  "[[annotator]]":
-    "A named producer of per-call tool contracts. It declares an optional policy-authored hint, an input mapping, and a mandate that bounds every answer. It may name builtin = \"claude-code\" or \"llm\"; otherwise the deployment binds it under [externals.annotators.<name>].",
-  mandate:
-    "The closed vocabulary an annotator's answers may use: ranks, audiences, marks, and effects. An omitted bound admits the whole policy vocabulary; public is always an admissible audience. Every transport's answer passes the same mandate validation.",
+    "The restrictions, requirements, and effects for one tool call. These come from a static tool contract or an annotator. Changing an annotated call requires a new annotation; replaying it uses the recorded answer.",
+  "[[policy.annotator]]":
+    "Declares an annotator, the call data it receives, and the values it may return. Select a built-in implementation here or configure its service under [externals.annotators.<name>].",
   remedy:
     "An actionable path returned on a policy refusal explaining how to unblock execution safely.",
   remedies:
@@ -61,48 +61,48 @@ const TERMS = {
   audience:
     "Who is allowed to see data. In a delta, it restricts who can receive the tool's result; in requires, it checks who the agent can send data to.",
   trust:
-    "Whether data comes from a vetted source. In a delta, it marks tool output as trusted or suspicious; in requires, it sets the minimum trust level a tool demands.",
+    "A rank that describes how much the data can be trusted. delta.trust can lower the trajectory's rank; requires.trust sets the minimum rank for a call. Allowed ranks come from trust_chain.",
   trusted:
-    "Data from a vetted source, or vouched to the rank by a sanitizer that permits the transition — a claim about the instruction channel, never about a value's honesty.",
+    "The higher default trust rank. A tool can declare this rank for its result or require it before a call. A trusted rank does not guarantee that the data is factually correct.",
   suspicious:
-    "Data from an unvetted source, like external web content. Once ingested, the run stays suspicious.",
+    "Data from an unverified source, such as a web page. Reading it lowers the trajectory's trust and can block tools that require trusted input.",
   public:
     "The reserved unrestricted audience state, not a reader ID: no audience restriction applies. An agent with public reach can send data to any outbound destination. As a placeholder argument it names the Public audience, which only a Public trajectory includes. Never a group member.",
   "@name":
-    "A mention of a symbolic audience: @finance names a configured [[audience.group]], and @provider:selector reads a source collection directly. The mention stays symbolic in labels and the log; membership is read from the configured sources per act and pinned.",
+    "A mention of a symbolic audience: @finance names a configured [[policy.audience.group]], and @provider:selector reads a source collection directly. The mention stays symbolic in labels and the log; membership is read from the configured sources per act and pinned.",
   "@finance":
     "A mention of a configured named audience. It stays symbolic in labels and the log; its membership is read from the audience sources per act and pinned.",
-  "[[audience.group]]":
+  "[[policy.audience.group]]":
     "One configured named audience: its bare name (mentioned as @name), an optional within assertion into a built-in audience, and the from selectors that supply its members. Multiple sources are unioned.",
-  "[audience.self]":
-    "The mapping of the built-in self audience: the viewer selectors of the configured sources. self is the deployment's configured operating principal — whoever the credentials represent.",
-  "[audience.internal]":
+  "[policy.audience.self]":
+    "Configures the self audience: the identity OpenAPPA acts for. Uses viewer selectors to read that identity from the configured sources. Results from multiple sources are combined.",
+  "[policy.audience.internal]":
     "The mapping of the built-in internal audience: full-membership collections, and for GitHub only explicitly selected organizations. Multiple sources are unioned.",
-  self: "The innermost built-in audience: the deployment's configured operating principal — whoever the credentials represent, which need not be a person — extensionally the union of the configured viewer sources.",
-  "[identity]":
-    "The deployment's one identity implementation, canonicalizing each provider-reported member to one principal before exact reader comparison. The shipped verified-email is deterministic and network-free; a custom name binds under [externals.identity.<name>].",
+  self: "The identity OpenAPPA acts for. This can be a person or a service. The configured viewer sources supply its reader IDs, which are combined into the self audience.",
+  "[policy.identity]":
+    "Selects how OpenAPPA converts member details into reader IDs. If omitted, OpenAPPA uses verified-email. To use your own service, set implementation to its name and configure it under [externals.identity.<name>].",
   "verified-email":
-    "The shipped identity implementation: a member with a verified email becomes that address under conservative normalization (domain case only); a member without one keeps its provider-qualified ID. The address is the principal, so a reader written as an address is the same reader the verified claim resolves to. Deterministic and network-free.",
+    "Uses the membership service's verified_email field as the reader ID. The service must verify who owns the email; OpenAPPA only checks its format. A value such as finance causes an error. If the field is absent, OpenAPPA keeps the provider ID. This is the default identity implementation.",
   inputs:
     "The values an annotator reads, each mapped from $tool_call on its declaration. Without an explicit mapping, the annotator reads the complete tool call: name, description when declared, and arguments.",
   ranks:
-    "In an annotator's mandate: the trust ranks its answers may write in delta.trust and requires.trust. Omitted, every rank in the trust chain.",
+    "Trust ranks an annotator may use in delta.trust and requires.trust. If omitted, it may use every rank in trust_chain.",
   audiences:
-    "In an annotator's mandate: the audiences a restricted answer may name — self, internal, @ mentions, and literal readers, each spelled as a declaration spells it. public is always admissible and is never listed. Omitted, every audience the policy writes.",
+    "Audiences an annotator may use in its answer. public is always allowed and must not be listed here. An empty list allows only public; omitting the field allows audiences declared in the policy.",
   marks:
-    "In an annotator's mandate: the attention marks its answers may require. Omitted, every mark an authority names under permits.attention.",
+    "Attention marks an annotator may require. An empty list allows none. If omitted, it may use every mark declared in an authority's permits.attention.",
   "$tool_call":
     "The only source an annotator input reads. Its five forms are the complete call (name, description when declared, arguments), its name, its description, its arguments, and one top-level argument. Only $tool_call.description requires a declared description.",
   "[externals.annotators.<name>]":
-    "The deployment binding for one annotator that does not carry a builtin on its declaration: an HTTP endpoint or a local command. Every implementation receives the same consult and answers under the same mandate validation. Unsupported platforms reject command bindings when loading the configuration.",
+    "Configures an annotator's HTTP service or local program. Local programs require Unix. Every implementation receives a consult request and must return values within the annotator's permits.",
   "[externals.<kind>.<name>]":
-    "One deployment binding: a registered authority or sanitizer bound to exactly one of url, command, or builtin; an annotator without a declared builtin, an audience source, or a custom identity implementation, bound to url or command. A binding without a registration refuses the deployment, and so does an unbound sanitizer, annotator, referenced audience source, or custom identity implementation; an unbound authority returns no answer.",
+    "Configures how OpenAPPA calls a component. The kind identifies its role, such as sanitizers, and the name matches its policy declaration. Use url for a service or command for a local program. Authorities and sanitizers also accept builtin here.",
   declaration:
-    "The registered half of a consult: the component's hint and permits, an annotator's hint, input names, and mandate vocabulary, or an audience source's selector templates. The agent never writes it.",
+    "Instructions and limits that OpenAPPA includes in a consult request. These come from the policy, not from the agent. Their fields depend on the component receiving the request.",
   artifact:
-    "The judged half of a consult: the call and its unmet requirements, the body to rewrite, an annotator's args, a selector or member to read, or the member claims to canonicalize. Never the trajectory.",
+    "The request data sent to a component: for example, a tool call to review, text to clean, or a member's identity details.",
   internal:
-    "The built-in organization audience, between self and public in the shipped chain. Symbolic in labels and the log; extensionally the union of the configured internal sources, the members of self, and every group declared within either. Reading internal data closes off public destinations.",
+    "Data for members of the organization, as defined by the policy. After reading it, the agent needs a permitted remedy to share data outside that audience.",
   "{public, trusted}":
     "The neutral starting label before reading any data: unrestricted outbound reach and the trust chain's top rank — trusted under the default chain.",
   egress:
@@ -112,56 +112,56 @@ const TERMS = {
   effects:
     "What a successful tool call appends to the execution log, declared as effects = [...] in the contract.",
   emits:
-    "What a successful tool call appends to the log, declared as effects = [...] in the contract.",
+    "The effects listed in an annotator's JSON answer. OpenAPPA records them when the tool succeeds. Policy TOML uses the field name effects.",
   contains:
     "Under requires.audience: the current audience must include these readers; a $arg placeholder is allowed only here. Under requires.effects: the trajectory already recorded this effect.",
   within:
-    "Under requires.audience: the current audience must sit within this audience; a tool_input rewrite cannot clear it. On an [[audience.group]]: the trusted policy assertion that the group sits within a built-in audience (self or internal).",
+    "Under requires.audience: the current audience must sit within this audience; a tool_input rewrite cannot clear it. On an [[policy.audience.group]]: the trusted policy assertion that the group sits within a built-in audience (self or internal).",
   excludes:
-    "Under requires.effects: the effect is neither recorded in the trajectory nor reserved by an unsettled dispatch.",
-  tags: "Routing names with no algebraic life. On a tool, the names that select it. On an authority or sanitizer, the tools it answers or the values it acts on; omitted, every tool. Attention routing ignores tags.",
+    "Blocks a call if a listed effect is already recorded or declared by another call that has been allowed but has not finished.",
+  tags: "Names that connect tools to authorities and sanitizers. One matching tag is enough. Without tags, an authority or sanitizer is not limited to particular tools. Attention approvals use permits.attention instead.",
 
   /* Authorities */
   permits:
-    "What a registered component may do, declared in its own table. For an authority: which unmet requirements its rulings can clear, and how far. For a sanitizer: the one transition, on one dimension, its derivation can claim.",
-  hint: "The deployer's trusted instruction for an authority, sanitizer, or annotator. It explains what the component covers, removes, or classifies. It enters the component's consult, and authority or sanitizer hints also enter remedy plans. Advisory: it grants nothing.",
+    "Limits what a component may do. An authority can approve only the listed requirements. A sanitizer can make only the declared audience or trust change. An annotator can return only the permitted values.",
+  hint: "Instructions from the policy for an authority, sanitizer, or annotator. Explains what to review, clean, or classify. It does not grant permission beyond permits.",
   trust_below:
-    "In an authority's permits: it can rule for a call whose trust requirement is unmet, for requirements up to this rank.",
+    "Allows an authority to approve a call whose trust requirement is not met, up to the rank specified here.",
   audience_missing:
-    "In an authority's permits: it can rule for a call whose audience is missing required readers, up to these readers.",
+    "Allows an authority to approve sharing with readers outside the current audience, limited to the audience specified here.",
   effects_containing:
-    "In an authority's permits: it can rule for a call although the trajectory already contains one of these effects, so a failed excludes check is waived for that one dispatch.",
+    "Allows an authority to approve a call blocked by excludes because one of these effects has already occurred.",
   attention:
-    "In a tool's requires: named marks that demand a fresh ruling on every call; history never satisfies them. In an authority's permits: the marks its rulings satisfy. A mark routes to every authority that names it, whatever its tags.",
+    "Named approvals required for each tool call. An earlier approval does not satisfy a later call. Authorities can give the approvals listed in their permits.attention, regardless of their tags.",
   "permits.attention":
-    "In an authority's permits: the marks its rulings satisfy. The marks every authority lists form the set an annotation's attention answer selects from.",
+    "The named approvals an authority can give for a call. Annotators can require only marks declared by authorities in the policy.",
   'builtin = "hitl"':
-    "The built-in human-in-the-loop authority: elicitation hosted by the harness rather than a remote resolver.",
+    "Asks a person to approve or deny the call through the agent integration.",
   'builtin = "approve"':
-    "The stock in-process authority that approves every consult within what it permits. An open gate the deployer chose deliberately — legitimate and visible in review.",
+    "Automatically approves every request within the authority's permits.",
   'builtin = "claude-code"':
-    "The stock model transport on a Claude subscription: one isolated claude -p process per consult, given the component's declaration and the judged value, never the trajectory. An authority or sanitizer binds it under [externals]; an annotator names it on its declaration. The same caps apply as to any implementation.",
+    "Runs Claude Code locally to answer a component's request. Each request starts a new claude -p process with the policy instructions and request data. Requires Claude Code on the Unix machine running OpenAPPA.",
   'builtin = "llm"':
-    "The stock model transport on an API key, through the deployment's [externals.llm] profile. Same consult rendering, same placement, and same per-kind caps as claude-code.",
+    "Uses the model configured under [externals.llm] to answer a component's request. The model receives the policy instructions and request data and must stay within the component's permits.",
   "[externals.llm]":
-    "The deployment's one API-key model profile — provider (anthropic, openai, gemini, or ollama), model, optional url, token_env (required except for ollama), timeout, and concurrency — that every builtin = \"llm\" binding or declaration consults. A deployment without it refuses to open a policy that declares one.",
+    "Selects the provider, model, authentication, and request limits shared by all builtin = \"llm\" components. This section is required when any component uses that implementation.",
 
   /* Sanitizers */
-  on: "Where a sanitizer may apply: tool_output at an admission the host can withhold — a child return, or a tool result at a confined application point; tool_input as whole-argument substitution at dispatch.",
+  on: "Selects the data a sanitizer can transform: tool_output for a tool result or child agent's answer, or tool_input for a tool call's arguments.",
   tool_input:
-    "A sanitizer application point: the sanitizer derives a replacement for one call's arguments, and the harness dispatches exactly those bytes. The rewrite is judged by the ordered contract its arguments select; an annotation binds the exact call, so a rewrite of an annotator-backed tool is annotated afresh, whichever contract it selects.",
+    "Lets a sanitizer replace a tool call's arguments. OpenAPPA checks the changed call before allowing it. The integration must use exactly the replacement arguments.",
   tool_output:
-    "A sanitizer application point: an admission the host can withhold — the child-return crossing, or a tool result at an application point the deployment confines. The derivation is admitted; the raw value is withheld.",
+    "Lets a sanitizer transform a tool result or child agent's answer before the receiving agent reads it. The integration must keep the original data hidden.",
   from: "In a sanitizer's permits: for audience, the readers the source audience must contain; for trust, the rank the source must meet or exceed.",
-  to: "In a sanitizer's permits: the exact audience, or the exact trust rank, the derivation carries.",
+  to: "The audience or trust rank assigned to a sanitizer's result.",
   resolver:
     "The implementation answering for one registered external: the endpoint, command, builtin, or model behind an authority, sanitizer, annotator, audience source, or identity binding.",
   return_schema:
-    "Argument of the attest-schema plan in a spawn's return declaration: the shape-bounded JSON schema the child's return must match. The child is told the shape when it starts.",
+    "The JSON Schema a parent supplies when selecting an attest-schema plan. It specifies the fields and values the child may return. The child receives these requirements when it starts.",
   "attest-schema":
-    "The reserved builtin sanitizer of the quarantine exit: raises trust on a child return whose structure is shape-bounded (values the schema declares and bounds — no free text) and was declared by the parent at the spawn, up to the parent's rank at that spawn. Claims instruction-cleanliness only.",
+    "Checks a child agent's structured answer against a schema chosen before the child reads untrusted data. It can raise trust up to the parent's rank when the child started. The schema must restrict every field and exclude free text. It does not verify factual accuracy.",
   'builtin = "redact-email"':
-    "The stock in-process sanitizer that replaces every email-like token in a value with a fixed placeholder, deriving the label its permits table declares.",
+    "Replaces email addresses with a fixed placeholder. It does not remove other private information. The result receives the audience or trust rank declared in permits.",
 
   /* Refusals & Model Terms */
   requirement_gaps: "Returned on a refusal: the unmet entries of requires.",
@@ -170,7 +170,7 @@ const TERMS = {
   remedy_plans:
     "Returned on a refusal: exact valid paths forward to unblock execution.",
   confined_results:
-    "The deployment's list of result points the host withholds from the model. Output sanitization at a tool result needs the tool listed here; a provider-run tool cannot be listed, because its result reaches the model inside the inference call.",
+    "Tools whose results the integration can keep hidden until OpenAPPA allows delivery. A tool must be listed here for its results to use an output sanitizer. Tools that run inside the model provider's service cannot be listed.",
   trajectory: "One agent run: its security label plus its append-only event log.",
 } as const satisfies Record<string, string>;
 

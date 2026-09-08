@@ -123,7 +123,7 @@ External services behave differently depending on their type:
 
 - **Authorities and sanitizers:** Handled by built-in test stand-ins. Replay grants approval and accepts sanitization without sending HTTP requests or asking users.
 - **Annotators:** Called live. [Annotators](/contracts#annotators) generate dynamic contracts for proposed tool calls, so replay needs their responses to make policy decisions.
-- **Audience and identity services:** Called live. Replay queries configured providers to check dynamic group membership ([audience sources](/contracts#audience-sources)) and canonicalize user identities ([identity services](/contracts#identity)).
+- **Audience and identity services:** Called live. Replay queries configured providers to check dynamic group membership ([audience sources](/contracts#configure-audience-membership)) and canonicalize user identities ([identity services](/contracts#identity-resolution)).
 
 If a live external service fails or times out, replay reports that the step could not run instead of a policy failure.
 

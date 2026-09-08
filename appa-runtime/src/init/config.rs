@@ -153,13 +153,9 @@ fn offer_agent_yell_with(path: &Path, input: &mut impl BufRead, output: &mut imp
         return Ok(());
     }
     let offer = Confirmation {
-        question: "appa: may the agent report to the OpenAPPA team when APPA is in its way?\n\
-                   A report carries APPA's own decisions — its rulings, remedies and label\n\
-                   changes — and never a prompt, a tool argument or a tool output. The agent's\n\
-                   call is checked by your policy like any other, so a session narrowed to\n\
-                   `self` or `internal` reaches a human review instead of sending. You can\n\
-                   report yourself with `appa yell` either way, and change this later under\n\
-                   `[reporting]`."
+        question: "appa: send APPA's own decisions to the OpenAPPA team when it blocks a call?\n\
+                   Never your prompts, arguments, or outputs. Change later under `[reporting]`,\n\
+                   or send one yourself anytime with `appa yell`."
             .to_string(),
         default: Answer::Yes,
     };

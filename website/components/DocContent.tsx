@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, type AnchorHTMLAttributes, type HTMLAttributes, type ReactNode } from "react";
+import { createContext, Fragment, useContext, type AnchorHTMLAttributes, type HTMLAttributes, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import rehypeSlug from "rehype-slug";
@@ -142,7 +142,7 @@ function AnchoredHeading({
   id,
   children,
   ...props
-}: HTMLAttributes<HTMLHeadingElement> & { level: 2 | 3 | 4; children?: ReactNode }) {
+}: HTMLAttributes<HTMLHeadingElement> & { level: 2 | 3 | 4 | 5; children?: ReactNode }) {
   const Tag = `h${level}` as const;
   return (
     <Tag id={id} {...props}>
@@ -156,10 +156,13 @@ function AnchoredHeading({
   );
 }
 
-/* Inline code whose text names a glossary term gets a definition popover;
+const InDocTable = createContext(false);
+
+/* Inline code outside tables whose text names a glossary term gets a definition popover;
    block code (array children after highlighting) falls through untouched. */
 function MarkdownCode({ children, ...props }: HTMLAttributes<HTMLElement> & { children?: ReactNode }) {
-  if (typeof children === "string") {
+  const inTable = useContext(InDocTable);
+  if (!inTable && typeof children === "string") {
     const definition = termDefinition(children);
     if (definition !== undefined) return <Term chip={children} definition={definition} />;
   }
@@ -207,13 +210,16 @@ function Markdown({ content, terms = true }: { content: string; terms?: boolean 
         // A table's min-content width can exceed a phone viewport; without a
         // scroll container of its own it widens the whole page instead.
         table: (props) => (
-          <div className="table-scroll">
-            <table {...props} />
-          </div>
+          <InDocTable.Provider value={true}>
+            <div className="table-scroll">
+              <table {...props} />
+            </div>
+          </InDocTable.Provider>
         ),
         h2: (props) => <AnchoredHeading level={2} {...props} />,
         h3: (props) => <AnchoredHeading level={3} {...props} />,
         h4: (props) => <AnchoredHeading level={4} {...props} />,
+        h5: (props) => <AnchoredHeading level={5} {...props} />,
       }}
     >
       {content}

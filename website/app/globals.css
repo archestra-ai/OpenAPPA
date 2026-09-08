@@ -723,7 +723,7 @@ samp {
 }
 
 /* Anchor targets stop below the sticky header instead of underneath it. */
-.prose :is(h1, h2, h3, h4)[id] {
+.prose :is(h1, h2, h3, h4, h5)[id] {
   scroll-margin-top: calc(var(--header-h) + 1.5rem);
 }
 
@@ -754,7 +754,8 @@ samp {
   margin: 2rem 0 0.5rem;
 }
 
-.prose h4 {
+.prose h4,
+.prose h5 {
   font-family: var(--font-mono);
   font-size: 15px;
   font-weight: 600;
@@ -1173,7 +1174,8 @@ samp {
 
 .prose h2:hover .heading-anchor,
 .prose h3:hover .heading-anchor,
-.prose h4:hover .heading-anchor {
+.prose h4:hover .heading-anchor,
+.prose h5:hover .heading-anchor {
   opacity: 1;
 }
 
