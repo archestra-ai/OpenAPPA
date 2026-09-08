@@ -233,44 +233,6 @@ impl NativeChild {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn windows_binary_archive_accepts_one_executable_and_refuses_other_paths() {
-        for name in ["appa.exe", "../appa.exe", "nested/appa.exe", "other.exe"] {
-            let root = tempfile::tempdir().unwrap();
-            let archive = root.path().join("binary.zip");
-            let mut zip = zip::ZipWriter::new(File::create(&archive).unwrap());
-            zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
-            zip.write_all(b"verified executable bytes").unwrap();
-            zip.finish().unwrap();
-            let target = root.path().join("appa.exe");
-            let result = extract_windows_binary(&archive, &target);
-            assert_eq!(result.is_ok(), name == "appa.exe");
-            if result.is_ok() {
-                assert_eq!(fs::read(target).unwrap(), b"verified executable bytes");
-            } else {
-                assert!(!target.exists());
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn native_subprocess_timeout_and_output_limit_are_bounded() {
-        let start = Instant::now();
-        let timeout = invoke(Path::new("/bin/sleep"), &["30".as_ref()], Duration::from_millis(50));
-        assert!(matches!(timeout, Err(InstallError::Recovery { .. })));
-        assert!(start.elapsed() < Duration::from_secs(2));
-        let start = Instant::now();
-        let noisy = invoke(Path::new("/usr/bin/yes"), &[], Duration::from_secs(5));
-        assert!(matches!(noisy, Err(InstallError::Recovery { .. })));
-        assert!(start.elapsed() < Duration::from_secs(2));
-    }
-}
-
 #[cfg(not(windows))]
 impl Drop for NativeChild {
     fn drop(&mut self) {
@@ -421,4 +383,42 @@ fn invoke(binary: &Path, arguments: &[&std::ffi::OsStr], timeout: Duration) -> R
         })?;
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_binary_archive_accepts_one_executable_and_refuses_other_paths() {
+        for name in ["appa.exe", "../appa.exe", "nested/appa.exe", "other.exe"] {
+            let root = tempfile::tempdir().unwrap();
+            let archive = root.path().join("binary.zip");
+            let mut zip = zip::ZipWriter::new(File::create(&archive).unwrap());
+            zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(b"verified executable bytes").unwrap();
+            zip.finish().unwrap();
+            let target = root.path().join("appa.exe");
+            let result = extract_windows_binary(&archive, &target);
+            assert_eq!(result.is_ok(), name == "appa.exe");
+            if result.is_ok() {
+                assert_eq!(fs::read(target).unwrap(), b"verified executable bytes");
+            } else {
+                assert!(!target.exists());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_subprocess_timeout_and_output_limit_are_bounded() {
+        let start = Instant::now();
+        let timeout = invoke(Path::new("/bin/sleep"), &["30".as_ref()], Duration::from_millis(50));
+        assert!(matches!(timeout, Err(InstallError::Recovery { .. })));
+        assert!(start.elapsed() < Duration::from_secs(2));
+        let start = Instant::now();
+        let noisy = invoke(Path::new("/usr/bin/yes"), &[], Duration::from_secs(5));
+        assert!(matches!(noisy, Err(InstallError::Recovery { .. })));
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
 }

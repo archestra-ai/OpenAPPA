@@ -2,7 +2,9 @@
 
 Rules for the GitHub MCP server (`https://api.githubcopilot.com/mcp/`)
 with its default tool sets: your profile, repositories, issues, pull
-requests, and user search. Written for public repositories. Add it to your root config with `include`.
+requests, and user search. Written for public repositories, shared by the
+Claude Code and kagent plugins. Installing the battery adds its policy include;
+it does not create the MCP connection or enable tools in either host.
 
 ## Files
 

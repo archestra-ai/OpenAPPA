@@ -1305,6 +1305,18 @@ mod tests {
     }
 
     #[test]
+    fn shipped_github_battery_supports_both_plugins_together() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace");
+        let catalog = fs::read(source.join("marketplace.toml")).unwrap();
+        let mut selected = Selection::empty(generation(&catalog), Platform::MacArm64);
+        for plugin in ["claude-code", "kagent"] {
+            selected.select(PackageKind::Plugin, &PackageName::parse(plugin).unwrap());
+        }
+        selected.select(PackageKind::Battery, &PackageName::parse("github").unwrap());
+        selected.validate_packages(&source).unwrap();
+    }
+
+    #[test]
     fn package_publication_rechecks_catalog_and_retained_trees() {
         let root = tempfile::tempdir().unwrap();
         let source = tempfile::tempdir().unwrap();

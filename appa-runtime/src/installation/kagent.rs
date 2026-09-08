@@ -46,7 +46,17 @@ fn inventory(root: &Path) -> Result<BTreeMap<String, Member>, InstallError> {
                 .replace(std::path::MAIN_SEPARATOR, "/");
             appa_package::RelativePath::parse(&relative).map_err(invalid)?;
             let metadata = fs::symlink_metadata(&path).map_err(|error| io("inspect prepared entry", &path, error))?;
-            let mut executable = false;
+            let executable = {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                }
+                #[cfg(not(unix))]
+                {
+                    false
+                }
+            };
             let digest = if metadata.is_dir() {
                 pending.push(path.clone());
                 None
@@ -54,11 +64,6 @@ fn inventory(root: &Path) -> Result<BTreeMap<String, Member>, InstallError> {
                 remaining = remaining
                     .checked_sub(metadata.len())
                     .ok_or_else(|| invalid("prepared deployment exceeds 1 GiB"))?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    executable = metadata.permissions().mode() & 0o111 != 0;
-                }
                 Some(
                     ArtifactDigest::of_reader(open_regular(&path)?, metadata.len())
                         .map_err(|error| io("hash prepared file", &path, error))?,

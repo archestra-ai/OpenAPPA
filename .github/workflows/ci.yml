@@ -1006,6 +1006,83 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  marketplace-kagent-acceptance:
+    name: Marketplace kagent acceptance
+    needs: changes
+    if: needs.changes.outputs.marketplace == 'true' || needs.changes.outputs.e2e == 'true' || needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: integrations/kagent/appa-kagent-adk-go/go.mod
+          cache-dependency-path: integrations/kagent/appa-kagent-adk-go/go.sum
+      - name: Setup acceptance tools
+        run: |
+          rustup show
+          go install sigs.k8s.io/kind@v0.27.0
+          go install github.com/google/go-containerregistry/cmd/crane@v0.20.3
+          helm version
+          kubectl version --client
+      - name: Cache installer builds
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: marketplace-kagent
+      - name: Setup fixture test environment
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - name: Check fixture and evidence contracts
+        run: uv run --isolated --no-project --with 'mcp>=1.25,<2' --with pytest python -m pytest integrations/kagent/e2e/marketplace -q
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Build runtime
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: appa-runtime/Dockerfile
+          tags: appa-acceptance-runtime:ci
+          load: true
+          cache-from: type=gha,scope=appa-runtime
+      - name: Build Python plugin
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/appa-kagent-adk
+          tags: appa-acceptance-python:ci
+          load: true
+          cache-from: type=gha,scope=appa-kagent-adk
+      - name: Build Go plugin
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/appa-kagent-adk-go
+          tags: appa-acceptance-go:ci
+          load: true
+          cache-from: type=gha,scope=appa-kagent-adk-go
+      - name: Build deterministic model and GitHub fixtures
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/e2e/marketplace
+          tags: appa-acceptance-fixtures:ci
+          load: true
+      - name: Exercise prepared deployment and offline restore
+        env:
+          ACCEPTANCE_LOGS: ${{ runner.temp }}/appa-marketplace-acceptance
+        run: python3 integrations/kagent/e2e/marketplace/run.py "$ACCEPTANCE_LOGS"
+      - name: Upload acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: marketplace-kagent-acceptance
+          path: |
+            ${{ runner.temp }}/appa-marketplace-acceptance
+            !${{ runner.temp }}/appa-marketplace-acceptance/kubeconfig
+          if-no-files-found: ignore
+          retention-days: 7
+
   # All published images get an amd64 build here on every change
   # that can break them. Publishing itself happens in release.yml.
   kagent-images-build:
