@@ -94,6 +94,8 @@ class MCPDiscovery(BaseToolset):
             not isinstance(report.get(key), list) for key in ("tools", "errors", "accepted_tools")
         ):
             raise ConfigRefused("MCP inventory validation response is incomplete")
+        if not isinstance(report.get("actor_opened", False), bool):
+            raise ConfigRefused("MCP inventory validation contains an invalid actor state")
         checked = {}
         for check in report["tools"]:
             if (
@@ -137,7 +139,7 @@ class MCPDiscovery(BaseToolset):
                 if not allow_new or child is not None:
                     raise ConfigRefused("the requested APPA family has not opened")
                 previous = await self._validate(root, child, empty, pinned=False)
-            elif child is None or previous["accepted_tools"]:
+            elif previous.get("actor_opened", False):
                 state.opened = True
             accepted = {}
             for observed in previous["accepted_tools"]:

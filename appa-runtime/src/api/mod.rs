@@ -634,6 +634,17 @@ fn inventory_at(
             .map_err(|_| EventError::PolicyUnavailable("stored inventory does not decode".into()))?;
         previous = opening.appa_inventory;
     }
+    previous.validate(adapter).map_err(inventory_refused)?;
+    let mut tools: std::collections::BTreeMap<_, _> = previous
+        .tools
+        .into_iter()
+        .map(|tool| (tool.name.clone(), tool))
+        .collect();
+    let mut sources: std::collections::BTreeMap<_, _> = previous
+        .sources
+        .into_iter()
+        .map(|source| (source.server.clone(), source))
+        .collect();
     let scope = crate::engine::engine_id(acting_trajectory(actor));
     for observation in log
         .inventories()
@@ -645,10 +656,26 @@ fn inventory_at(
                 "an actor cannot change its plugin adapter".into(),
             ));
         }
-        previous = previous
-            .extending(&observation.inventory, adapter)
-            .map_err(inventory_refused)?;
+        observation.inventory.validate(adapter).map_err(inventory_refused)?;
+        for tool in &observation.inventory.tools {
+            if let Some(old) = tools.get(&tool.name)
+                && old.tool != tool.tool
+            {
+                return Err(EventError::InventoryRefused(
+                    "a recorded tool changed identity within this actor".into(),
+                ));
+            }
+            tools.insert(tool.name.clone(), tool.clone());
+        }
+        for source in &observation.inventory.sources {
+            sources.insert(source.server.clone(), source.clone());
+        }
     }
+    let previous = ToolInventory {
+        tools: tools.into_values().collect(),
+        sources: sources.into_values().collect(),
+    };
+    previous.validate(adapter).map_err(inventory_refused)?;
     Ok(previous)
 }
 
@@ -1028,8 +1055,17 @@ impl Runtime {
     ) -> Result<crate::tool_validation::ValidationReport, EventError> {
         match actor {
             Some(actor) => {
-                let mut report = self.check_inventory(&actor.root, adapter, inventory)?;
-                let previous = inventory_at(&self.inner.log(&actor.root)?, actor, adapter)?;
+                let log = self.inner.log(&actor.root)?;
+                let mut report = self.check_inventory_at(&log, adapter, inventory)?;
+                let scope = crate::engine::engine_id(acting_trajectory(actor));
+                report.actor_opened = log.facts().iter().any(|fact| {
+                    matches!(
+                        fact,
+                        appa_engine::fact::Fact::TrajectoryOpened { trajectory, .. }
+                        | appa_engine::fact::Fact::ForkOpened { trajectory, .. } if trajectory == &scope
+                    )
+                });
+                let previous = inventory_at(&log, actor, adapter)?;
                 let accepted = previous.identities(adapter).map_err(inventory_refused)?;
                 let names: std::collections::BTreeMap<_, _> =
                     accepted.iter().map(|(name, id, _)| (name.as_str(), id)).collect();
@@ -1079,7 +1115,16 @@ impl Runtime {
         inventory: &appa_runtime_api::inventory::ToolInventory,
     ) -> Result<crate::tool_validation::ValidationReport, EventError> {
         let log = self.inner.log(root)?;
-        self.inner.resolve_policy(&self.inner.deployment(), &log)?;
+        self.check_inventory_at(&log, adapter, inventory)
+    }
+
+    fn check_inventory_at(
+        &self,
+        log: &Log,
+        adapter: Adapter,
+        inventory: &appa_runtime_api::inventory::ToolInventory,
+    ) -> Result<crate::tool_validation::ValidationReport, EventError> {
+        self.inner.resolve_policy(&self.inner.deployment(), log)?;
         #[derive(serde::Deserialize)]
         struct Rules {
             policy: toml::Value,
@@ -2953,7 +2998,21 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         ));
         let released = send(&runtime, spawn).await;
         assert_eq!(released["decision"], "allow_call");
-        send(&runtime, serde_json::json!({"event":"child_start","child_id":"child","spawn_binding":released["spawn_binding"],"inventory":inventory("child-server")})).await;
+        let child_actor = Actor {
+            root: root.clone(),
+            child: Some(TrajectoryId("kagent:family:child".into())),
+        };
+        let empty = appa_runtime_api::inventory::ToolInventory::default();
+        let check = runtime
+            .preflight_inventory(Some(&child_actor), appa_adapter_kagent::adapter(), &empty)
+            .unwrap();
+        assert!(!check.actor_opened);
+        send(&runtime, serde_json::json!({"event":"child_start","child_id":"child","spawn_binding":released["spawn_binding"],"inventory":{"tools":[],"sources":[]}})).await;
+        let check = runtime
+            .preflight_inventory(Some(&child_actor), appa_adapter_kagent::adapter(), &empty)
+            .unwrap();
+        assert!(check.actor_opened, "opening is independent of the tool count");
+        assert!(check.accepted_tools.is_empty());
         let allowed = send(&runtime, serde_json::json!({"event":"tool_call","child_id":"child","tool":"mcp:child-server/read","arguments":{},"inventory":inventory("child-server")})).await;
         assert_eq!(allowed["decision"], "allow_call");
         let after = runtime.inner.log(&root).unwrap();

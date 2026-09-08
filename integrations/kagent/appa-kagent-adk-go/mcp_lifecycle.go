@@ -44,9 +44,10 @@ type toolCheck struct {
 	Reason string `json:"reason"`
 }
 type validationReport struct {
-	Tools    []toolCheck    `json:"tools"`
-	Errors   []string       `json:"errors"`
-	Accepted []observedTool `json:"accepted_tools"`
+	Tools       []toolCheck    `json:"tools"`
+	Errors      []string       `json:"errors"`
+	Accepted    []observedTool `json:"accepted_tools"`
+	ActorOpened bool           `json:"actor_opened"`
 }
 
 type mcpConnection struct {
@@ -231,7 +232,7 @@ func (d *MCPDiscovery) prepare(ctx agent.ReadonlyContext, ids trajectoryIDs, pin
 		previous, err = d.validate(ctx, ids, observedInventory{Tools: []observedTool{}, Sources: []inventorySource{}}, false)
 	} else if err == nil {
 		pinned = true
-		if ids.childID == "" || len(previous.Accepted) > 0 {
+		if previous.ActorOpened {
 			run.opened = true
 		}
 	}

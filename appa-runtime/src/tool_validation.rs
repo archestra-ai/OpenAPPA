@@ -37,6 +37,9 @@ pub struct ValidationReport {
     /// omitted from later listings. Hosts use these to isolate invalid additions.
     #[serde(default)]
     pub accepted_tools: Vec<appa_runtime_api::inventory::ObservedTool>,
+    /// Whether this actor has opened, independently of an empty tool catalogue.
+    #[serde(default)]
+    pub actor_opened: bool,
 }
 
 impl ValidationReport {

@@ -10,6 +10,24 @@ use crate::{Adapter, CanonicalTool, ParseRefusal};
 pub const MAX_INVENTORY_TOOLS: usize = 10_000;
 pub const MAX_INVENTORY_BYTES: usize = 10 * 1024 * 1024;
 
+// Count the exact JSON encoding without allocating another inventory-sized
+// buffer. Stop once the same wire-size limit has been exceeded.
+struct InventorySize(usize);
+
+impl std::io::Write for InventorySize {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(bytes.len());
+        if self.0 > MAX_INVENTORY_BYTES {
+            return Err(std::io::Error::other("tool inventory exceeds its size limit"));
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// A read-only preflight. Omit root_id before opening a family to check the
 /// serving policy; supply it afterwards to check that family's pinned policy.
 /// This neither reserves names nor authorizes calls.
@@ -102,12 +120,7 @@ impl ToolInventory {
     /// ambiguous dispatch name. An identical repeated observation is harmless.
     pub fn validate(&self, adapter: Adapter) -> Result<(), ParseRefusal> {
         let refuse = |detail| ParseRefusal::Malformed { detail };
-        if self.tools.len() > MAX_INVENTORY_TOOLS
-            || serde_json::to_vec(self)
-                .map_err(|error| refuse(error.to_string()))?
-                .len()
-                > MAX_INVENTORY_BYTES
-        {
+        if self.tools.len() > MAX_INVENTORY_TOOLS || serde_json::to_writer(InventorySize(0), self).is_err() {
             return Err(refuse("tool inventory exceeds its size limit".into()));
         }
         let mut names = BTreeMap::new();
@@ -159,5 +172,20 @@ impl ToolInventory {
                 Ok((observed.name.clone(), derived.canonical, derived.spawn))
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::*;
+
+    #[test]
+    fn counts_encoded_bytes_and_stops_at_the_wire_limit() {
+        let value = serde_json::json!({"detail": "quotes \" and backslash \\ and Unicode λ"});
+        let mut count = InventorySize(0);
+        serde_json::to_writer(&mut count, &value).unwrap();
+        assert_eq!(count.0, serde_json::to_vec(&value).unwrap().len());
+        let mut nearly_full = InventorySize(MAX_INVENTORY_BYTES - 1);
+        assert!(serde_json::to_writer(&mut nearly_full, &value).is_err());
     }
 }
