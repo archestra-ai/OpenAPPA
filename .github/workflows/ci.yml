@@ -1023,7 +1023,7 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: integrations/kagent/appa-kagent-adk-go/go.mod
-          cache-dependency-path: integrations/kagent/appa-kagent-adk-go/go.sum
+          cache: false
       - name: Setup acceptance tools
         run: |
           rustup show
@@ -1031,12 +1031,10 @@ jobs:
           go install github.com/google/go-containerregistry/cmd/crane@v0.20.3
           helm version
           kubectl version --client
-      - name: Cache installer builds
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: marketplace-kagent
       - name: Setup fixture test environment
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: false
       - name: Check fixture and evidence contracts
         run: uv run --isolated --no-project --with 'mcp>=1.25,<2' --with pytest python -m pytest integrations/kagent/e2e/marketplace -q
       - name: Setup Docker Buildx
