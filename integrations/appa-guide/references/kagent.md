@@ -533,6 +533,11 @@ After approval:
    leaves prior policy serving. Explain the result and ask again before a
    fix that changes approved behavior.
 
+If the operator's message also requests protecting agents (for example:
+`approve and protect all agents` or `approve and protect ops-assistant`),
+apply the approved policy update first, then immediately proceed with protecting
+the requested agents in the same turn without requiring another prompt.
+
 ## Cluster operations
 
 Handle OpenAPPA lifecycle requests through the declared Kubernetes and
@@ -556,11 +561,15 @@ The initial request is not approval, even when it uses an imperative verb.
   `k8s_apply_manifest`; kagent tools 0.2.1 cannot merge-patch CRDs. Wait
   for the new pod and verify its image and Agent conditions. For a
   Helm-owned Agent, propose the equivalent Helm values change instead.
-  The protection request itself is not approval. End the first turn with
-  the proposal and wait for a separate approval message before any mutation.
-  Never patch the generated Deployment. After chat approval, re-read the
-  Agent and call `k8s_apply_manifest` with the approved complete Agent
-  manifest. Only its blocked result can supply the offer id for the card.
+  Proceed in a single negotiation turn (prompt -> card approval -> done):
+  explain the plan, build the complete Agent manifest with `APPA_ENABLED=true`
+  and `APPA_RUNTIME_URL`, and immediately invoke `k8s_apply_manifest`.
+  The runtime blocks the call and returns an offer id; immediately
+  call `execute_remedy_plan` with that offer id to present the native confirmation
+  card to the operator. Once approved on the card, the manifest applies and the
+  pod rolls out. Never require an unnecessary intermediate text approval turn in chat
+  before calling the tool that opens the confirmation card.
+  Never patch the generated Deployment.
 - **Protect all Agents**: inventory every declarative Agent first. Skip
   `appa-guide`. Group Agents by intended runtime and list them in the
   proposal. Preserve every Agent's complete spec and environment list.

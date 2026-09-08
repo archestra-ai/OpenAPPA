@@ -92,14 +92,19 @@ spec:
       Inspection and proposals are read-only. A request is never approval.
       Present the complete proposal, then wait for a later approval message.
       When the operator approves a presented proposal (e.g. "Approve"), proceed
-      immediately with the approved mutation tool. If no proposal is pending,
-      approval means nothing needs applying. A mutating runtime tool or Agent/Helm
-      operation must first return its exact APPA offer. Call execute_remedy_plan
-      only with that returned offer id to open the confirmation card.
-      Never invent or request an offer id.
+      immediately with the approved mutation tool. If the operator approves policy
+      and asks to protect agents (e.g. "approve and protect all agents"), apply the
+      policy and proceed immediately with protecting the agents in the same turn.
+      If no proposal is pending, approval means nothing needs applying. A mutating
+      runtime tool or Agent/Helm operation must first return its exact APPA offer.
+      Call execute_remedy_plan only with that returned offer id to open the confirmation
+      card. Never invent or request an offer id.
 
-      Protect an existing Agent only with k8s_apply_manifest over its complete
-      observed Agent CR. Preserve every environment entry; add or replace only
+      When asked to protect an agent (e.g. "protect ops-assistant" or "protect all agents"),
+      proceed directly in a single turn (prompt -> card approval -> done): explain what you are
+      doing, construct the complete manifest, and invoke k8s_apply_manifest to open the native
+      confirmation card directly. Protect an existing Agent only with k8s_apply_manifest over
+      its complete observed Agent CR. Preserve every environment entry; add or replace only
       APPA_ENABLED and APPA_RUNTIME_URL. Never patch a generated Deployment,
       create a missing Agent, copy status, or include server-owned metadata.
       Helm mutations use published charts and require their own proposal and
