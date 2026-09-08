@@ -10,15 +10,15 @@
 version = 2
 
 [[policy.tool]]
-name = "Read(path:/hr/*)"
+name = "mcp/files/read(path:/hr/*)"
 delta = { audience = ["hr@corp.example"] }
 
 [[policy.tool]]
-name = "Read"
+name = "mcp/files/read"
 delta = {}
 
 [[policy.tool]]
-name = "Email"
+name = "mcp/mail/send"
 requires = { audience = { contains = ["public"] } }
 delta = {}
 

@@ -4,16 +4,21 @@
 # demo toolset of a cluster-ops Agent: in-cluster reads, two suspicious
 # ingress tools, one outward
 # sink with a requirement, one effectful action behind human approval,
-# and the two synthetic tools the entrypoint gates route out-of-band
-# flows through. A tool the policy does not name is refused at the
-# `ToolCall` hook — add a wildcard annotator before pointing a long
-# tail of CRD toolsets at this file.
-# Every protected Agent sets `APPA_ENABLED=true` and `APPA_RUNTIME_URL`.
+# and the two gates the entrypoint routes out-of-band flows through. A
+# tool the policy does not name is refused at the `ToolCall` hook — add
+# a wildcard annotator before pointing a long tail of CRD toolsets at
+# this file. Every protected Agent sets `APPA_ENABLED=true` and
+# `APPA_RUNTIME_URL`.
+#
+# MCP contracts use the agent's native tool names. The plugin discovers
+# their configured sources before activation; it does not infer a provider
+# from a hostname. A rule can add `server` to constrain one connection.
+# kagent builtins and entrypoint gates below use their canonical names.
 #
 # It names no agent: on kagent an agent called as a tool runs as a child
 # only under a contract that names it, wildcard or not, so delegation to
-# another Agent is off until a `[[policy.tool]]` entry names that agent by
-# its wire spelling (`<namespace>__NS__<name>`, hyphens as underscores).
+# another Agent is off until a `[[policy.tool]]` entry names that agent
+# as `agent/<namespace>/<name>`.
 #
 # The policy runs without model keys: it declares no sanitizer and no
 # model-builtin annotator, so every decision is structural.
@@ -77,19 +82,19 @@ attention = ["human-approval"]
 # surfaces a question to the human caller and returns the answer. The
 # question flows to the operator the reply already reaches.
 [[policy.tool]]
-name = "ask_user"
+name = "host/kagent/ask_user"
 delta = {}
 
-# --- the entrypoint's synthetic tools ---
+# --- the entrypoint's gates ---
 
 # Code execution and the memory write-back cross the tool gate under
 # these names (the appa-kagent-adk entrypoint wraps both).
 [[policy.tool]]
-name = "appa_code_execution"
+name = "host/kagent-gate/code_execution"
 delta = {}
 
 [[policy.tool]]
-name = "appa_memory_persist"
+name = "host/kagent-gate/memory_persist"
 delta = {}
 
 # The A2A call to a delegated agent carries exactly the request the

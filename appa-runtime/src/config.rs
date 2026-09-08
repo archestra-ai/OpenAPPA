@@ -13,6 +13,8 @@ use serde::Deserialize;
 #[derive(Debug, Clone)]
 pub struct Config {
     policy: PolicyFile,
+    pub(crate) server_aliases: BTreeMap<String, String>,
+    pub(crate) inventory: appa_runtime_api::inventory::ToolInventory,
     pub externals: Externals,
     /// Deployment knobs that describe this machine's reporting posture, not its policy.
     /// Deliberately outside [`PolicyFile`]: changing one must not move the policy file key
@@ -573,6 +575,10 @@ struct RawConfig {
     /// reaches [`PolicyFile::bytes`]. See [`Config::load`].
     #[serde(default)]
     reporting: RawReporting,
+    #[serde(default)]
+    server_aliases: BTreeMap<String, String>,
+    #[serde(default)]
+    appa_inventory: appa_runtime_api::inventory::ToolInventory,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -808,6 +814,27 @@ impl Config {
         &self.policy
     }
 
+    /// Pin host observations beside the authored policy in the same stored snapshot.
+    /// No process-local alias map is needed to reopen or replay this session.
+    pub(crate) fn with_inventory(&self, inventory: appa_runtime_api::inventory::ToolInventory) -> Result<Self, String> {
+        let mut document: toml::Value =
+            toml::from_str(std::str::from_utf8(self.policy.bytes()).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+        document.as_table_mut().ok_or("policy document is not a table")?.insert(
+            "appa_inventory".into(),
+            toml::Value::try_from(&inventory).map_err(|error| error.to_string())?,
+        );
+        let mut config = self.clone();
+        config.policy = PolicyFile::new(
+            toml::to_string(&document)
+                .map_err(|error| error.to_string())?
+                .into_bytes(),
+            self.policy.value.clone(),
+        );
+        config.inventory = inventory;
+        Ok(config)
+    }
+
     pub fn included_batteries(&self) -> &[String] {
         &self.included_batteries
     }
@@ -876,6 +903,8 @@ impl Config {
         };
         Ok(Config {
             policy: PolicyFile::new(text.into_bytes(), raw.policy),
+            server_aliases: raw.server_aliases,
+            inventory: raw.appa_inventory,
             reporting,
             included_batteries,
             externals: Externals {

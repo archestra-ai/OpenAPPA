@@ -277,7 +277,7 @@ fn audience_description(compiled: &appa_policy::Config, bindings: Bindings<'_>) 
     }
 }
 
-fn inspect(path: &Path, battery_dirs: &[PathBuf]) -> (ConfigDescription, PolicyDescription) {
+fn inspect(path: &Path, battery_dirs: &[PathBuf]) -> (ConfigDescription, PolicyDescription, Option<Config>) {
     let mut config = ConfigDescription {
         path: path.to_path_buf(),
         state: ConfigState::Missing,
@@ -285,6 +285,7 @@ fn inspect(path: &Path, battery_dirs: &[PathBuf]) -> (ConfigDescription, PolicyD
         batteries: Vec::new(),
     };
     let mut policy = PolicyDescription::default();
+    let mut loaded_config = None;
 
     match std::fs::read_to_string(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -329,12 +330,13 @@ fn inspect(path: &Path, battery_dirs: &[PathBuf]) -> (ConfigDescription, PolicyD
                         Bindings::Loaded(&loaded.externals),
                         &mut policy,
                     );
+                    loaded_config = Some(loaded);
                 }
             }
         },
     }
 
-    (config, policy)
+    (config, policy, loaded_config)
 }
 
 fn describe_policy_value(policy_value: &toml::Value, bindings: Bindings<'_>, out: &mut PolicyDescription) {
@@ -366,8 +368,42 @@ fn battery_name(path: &Path) -> Option<String> {
     crate::batteries::name_from_include(path)
 }
 
-pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: &'static str) -> String {
-    let (config, policy) = inspect(path, battery_dirs);
+pub struct Description {
+    pub text: String,
+    pub valid: bool,
+}
+
+pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: &'static str) -> Description {
+    let (mut config, mut policy, loaded) = inspect(path, battery_dirs);
+    let served = match adapter {
+        "claude-code" => Some(appa_adapter_claude_code::adapter()),
+        "kagent" => Some(appa_adapter_kagent::adapter()),
+        _ => None,
+    };
+    if let Some(loaded) = &loaded
+        && let Some(served) = served
+    {
+        let resolved = crate::tool_validation::resolve(
+            loaded.policy_file().value(),
+            served,
+            &loaded.inventory,
+            &loaded.server_aliases,
+        );
+        let authored_tools = policy.tools.clone();
+        describe_policy_value(&resolved.policy, Bindings::Loaded(&loaded.externals), &mut policy);
+        policy.tools = authored_tools;
+    }
+    let validation = match (loaded, served) {
+        (Some(loaded), Some(served)) => {
+            crate::api::Runtime::validate_served(loaded, served).map_err(|error| error.to_string())
+        }
+        (_, None) => Err(format!("unsupported adapter {adapter:?}")),
+        (None, _) => Err("configuration cannot be loaded; check the configuration diagnostics above".to_string()),
+    };
+    let valid = validation.is_ok();
+    if !valid && config.state == ConfigState::Loadable {
+        config.state = ConfigState::Invalid;
+    }
     let mut output = String::new();
     let _ = writeln!(output, "OpenAPPA world");
     let _ = writeln!(output, "Adapter: {adapter}");
@@ -459,11 +495,46 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: &'static str) -> S
         output,
         "Session integrations/tools/accounts: unavailable to this command"
     );
-    output
+    match validation {
+        Ok(report) => {
+            let _ = writeln!(output, "Validation: {}", report.summary());
+            for check in &report.tools {
+                match &check.status {
+                    crate::tool_validation::ToolStatus::Valid => {}
+                    crate::tool_validation::ToolStatus::Invalid { reason } => {
+                        let _ = writeln!(output, "  invalid {}: {reason}", check.tool);
+                    }
+                    crate::tool_validation::ToolStatus::Unknown { reason } => {
+                        let _ = writeln!(output, "  unknown {}: {reason}", check.tool);
+                    }
+                }
+            }
+            for diagnostic in report.diagnostics {
+                let _ = writeln!(output, "  {diagnostic}");
+            }
+        }
+        Err(error) => {
+            let _ = writeln!(output, "Validation failed: {error}");
+        }
+    }
+    Description { text: output, valid }
 }
 
-pub fn is_loadable(path: &Path, battery_dirs: &[PathBuf]) -> bool {
-    matches!(inspect(path, battery_dirs).0.state, ConfigState::Loadable)
+#[cfg(test)]
+fn validation(
+    path: &Path,
+    battery_dirs: &[PathBuf],
+    adapter: &str,
+) -> Result<crate::tool_validation::ValidationReport, String> {
+    let adapter = match adapter {
+        "claude-code" => appa_adapter_claude_code::adapter(),
+        "kagent" => appa_adapter_kagent::adapter(),
+        _ => return Err(format!("unsupported adapter {adapter:?}")),
+    };
+    // Config parse errors may quote credentials from the source document.
+    let config = Config::load_from(path, battery_dirs)
+        .map_err(|_| "configuration cannot be loaded; check the configuration diagnostics above".to_string())?;
+    crate::api::Runtime::validate_served(config, adapter).map_err(|error| error.to_string())
 }
 
 fn list_or_none(items: &[String]) -> String {
@@ -479,14 +550,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn preflight_allows_unknown_tools_but_rejects_known_coverage_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("appa.toml");
+        let policy = "[policy]\nversion = 2\n[[policy.tool]]\nname = \"read_secret\"\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n";
+        std::fs::write(&path, policy).unwrap();
+        let report = validation(&path, &[], "kagent").unwrap();
+        assert!(!report.inventory_complete);
+        assert!(report.tools_may_change);
+        assert!(matches!(
+            report.tools[0].status,
+            crate::tool_validation::ToolStatus::Unknown { .. }
+        ));
+        let description = render(&path, &[], "kagent");
+        assert!(description.valid);
+        assert!(description.text.contains("unknown read_secret:"));
+
+        std::fs::write(
+            &path,
+            format!("{policy}\n[[appa_inventory.tools]]\nname = \"write_secret\"\ntool = \"mcp:demo/write_secret\"\n"),
+        )
+        .unwrap();
+        assert!(!render(&path, &[], "kagent").valid);
+    }
+
+    #[test]
+    fn preflight_compiles_the_policy_not_only_the_configuration_envelope() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("appa.toml");
+        std::fs::write(&path, "[policy]\nversion = 2\n[[policy.tool]]\nname = \"read\"\nannotator = \"missing\"\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n").unwrap();
+        assert!(Config::load_from(&path, &[]).is_ok());
+        assert!(!render(&path, &[], "kagent").valid);
+    }
+
+    #[test]
     fn missing_config_is_described_without_creating_it() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("missing.toml");
 
-        let (config, policy) = inspect(&path, &[]);
+        let (config, policy, loaded) = inspect(&path, &[]);
 
         assert_eq!(config.state, ConfigState::Missing);
-        assert!(!is_loadable(&path, &[]));
+        assert!(loaded.is_none());
         assert!(!path.exists());
         assert!(policy.tools.is_empty());
     }
@@ -512,10 +617,10 @@ mod tests {
         Config::load_from(&root, std::slice::from_ref(&batteries))
             .unwrap_or_else(|error| panic!("fixture must load: {error}"));
 
-        let (config, policy) = inspect(&root, std::slice::from_ref(&batteries));
+        let (config, policy, loaded) = inspect(&root, std::slice::from_ref(&batteries));
 
         assert_eq!(config.state, ConfigState::Loadable);
-        assert!(is_loadable(&root, std::slice::from_ref(&batteries)));
+        assert!(loaded.is_some());
         assert_eq!(config.batteries, ["mail"]);
         assert_eq!(policy.tools, ["mail_read"]);
         assert_eq!(
@@ -555,7 +660,7 @@ mod tests {
                 from: vec!["slack:user-group/finance".to_string()],
             }]
         );
-        let rendered = render(&root, &[batteries], "claude-code");
+        let rendered = render(&root, &[batteries], "claude-code").text;
         assert!(rendered.contains(
             "operator: builtin hitl; permits trust_below=trusted, audience_missing=public, effects_containing=[mail.sent], attention=[hitl]"
         ));
@@ -573,8 +678,8 @@ mod tests {
         let secret = "super-secret-token";
         std::fs::write(&path, format!("token = \\\"{secret}")).expect("malformed config");
 
-        let (config, _) = inspect(&path, &[]);
-        let output = render(&path, &[], "claude-code");
+        let (config, _, _) = inspect(&path, &[]);
+        let output = render(&path, &[], "claude-code").text;
 
         assert_eq!(config.state, ConfigState::Unparsable);
         assert!(!output.contains(secret));
@@ -583,7 +688,7 @@ mod tests {
     #[test]
     fn human_output_is_small_and_explicit_about_unknown_session_facts() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let output = render(&directory.path().join("appa.toml"), &[], "claude-code");
+        let output = render(&directory.path().join("appa.toml"), &[], "claude-code").text;
 
         assert!(output.contains("Config:"));
         assert!(output.contains("Batteries: none"));

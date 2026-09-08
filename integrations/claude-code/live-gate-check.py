@@ -44,11 +44,11 @@ POLICY = """[policy]
 version = 2
 
 [[policy.tool]]
-name = "Read"
+name = "host/claude-code/Read"
 delta = { audience = ["session"] }
 
 [[policy.tool]]
-name = "Write"
+name = "host/claude-code/Write"
 requires = { audience = { contains = ["public"] } }
 delta = {}
 

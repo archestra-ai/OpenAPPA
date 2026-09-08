@@ -45,11 +45,12 @@ pub enum SurfaceMode {
 
 /// One capability the deployment leaves uncovered, derived canonically from the normalized
 /// declaration and the registered tool set — never a caller-supplied acknowledgement list.
-/// Exactly three kinds exist.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum OpenVector {
     AssumedExecutor { tool: ToolName },
     ProviderRunDispatch { tool: ToolName },
+    AssumedExecutorRule { rule: ToolName },
+    ProviderRunRule { rule: ToolName },
     OpenProviderSurface { surface: SurfaceName },
 }
 
@@ -143,6 +144,16 @@ impl DeploymentProfile {
             provider_surfaces,
             binding,
         } = declaration;
+        for (first, class) in &executor_exceptions {
+            for (second, other) in &executor_exceptions {
+                if class != other && (first.matches_name(second) || second.matches_name(first)) {
+                    return Err(LoadError::ConflictingToolExecutors {
+                        first: first.as_str().into(),
+                        second: second.as_str().into(),
+                    });
+                }
+            }
+        }
         executor_exceptions.retain(|_, class| *class != dispatch);
         Ok(DeploymentProfile {
             starting_label,
@@ -168,7 +179,15 @@ impl DeploymentProfile {
     }
 
     pub fn executor_class(&self, tool: &ToolName) -> ExecutorClass {
-        self.executor_exceptions.get(tool).copied().unwrap_or(self.dispatch)
+        self.executor_exceptions
+            .iter()
+            .find(|(rule, _)| rule.matches_name(tool))
+            .map(|(_, class)| *class)
+            .unwrap_or(self.dispatch)
+    }
+
+    pub(crate) fn executor_exceptions(&self) -> impl Iterator<Item = (&ToolName, &ExecutorClass)> {
+        self.executor_exceptions.iter()
     }
 
     /// The one shared provider-run predicate: the registry split, the plan families, and the
@@ -178,7 +197,7 @@ impl DeploymentProfile {
     }
 
     pub fn confines_result(&self, tool: &ToolName) -> bool {
-        self.confined_results.contains(tool)
+        self.confined_results.iter().any(|rule| rule.matches_name(tool))
     }
 
     pub fn provider_surfaces(&self) -> impl Iterator<Item = (&SurfaceName, SurfaceMode)> {
@@ -435,13 +454,20 @@ fn identity_document(registry: &RegistryConfig, profile: &DeploymentProfile) -> 
 /// one per assumed executor, one per allowed provider-run dispatch, one per `open` provider
 /// surface, in canonical order.
 pub(crate) fn derive_open_vectors<'a>(
-    profile: &DeploymentProfile,
+    profile: &'a DeploymentProfile,
     tools: impl Iterator<Item = &'a ToolName>,
 ) -> Vec<OpenVector> {
     let mut vectors = Vec::new();
+    let tools: BTreeSet<_> = tools.chain(profile.executor_exceptions.keys()).collect();
     for tool in tools {
         match profile.executor_class(tool) {
             ExecutorClass::Enforced => {}
+            ExecutorClass::Assumed if tool.is_name_selector() => {
+                vectors.push(OpenVector::AssumedExecutorRule { rule: tool.clone() })
+            }
+            ExecutorClass::ProviderRun if tool.is_name_selector() => {
+                vectors.push(OpenVector::ProviderRunRule { rule: tool.clone() })
+            }
             ExecutorClass::Assumed => vectors.push(OpenVector::AssumedExecutor { tool: tool.clone() }),
             ExecutorClass::ProviderRun => vectors.push(OpenVector::ProviderRunDispatch { tool: tool.clone() }),
         }
@@ -477,7 +503,14 @@ pub(crate) fn validate_coverage(registry: &Registry, declaration: &ProfileDeclar
 
     // Without a wildcard, a deployment declaration naming an unwritten tool is a typo.
     // With one, every name is a runnable annotated call, so coverage accepts it.
-    let registered = |tool: &ToolName| registry.classify(tool).is_some();
+    let registered = |tool: &ToolName| {
+        registry.classify(tool).is_some()
+            || (tool.is_name_selector()
+                && (registry.tools().any(|declaration| declaration.name() == tool)
+                    || registry
+                        .provider_run_annotations()
+                        .any(|annotation| &annotation.name == tool)))
+    };
     for tool in declaration.executor_exceptions.keys() {
         if !registered(tool) {
             return Err(LoadError::UnknownDeploymentTool {
@@ -495,7 +528,11 @@ pub(crate) fn validate_coverage(registry: &Registry, declaration: &ProfileDeclar
         }
         // A provider-run result reaches the model inside the inference call, before any host
         // could withhold it: declaring it confined would be a false declaration.
-        if profile.is_provider_run(tool) {
+        if profile.is_provider_run(tool)
+            || declaration.executor_exceptions.iter().any(|(exception, class)| {
+                *class == ExecutorClass::ProviderRun && (tool.matches_name(exception) || exception.matches_name(tool))
+            })
+        {
             return Err(LoadError::ConfinedProviderRun {
                 tool: tool.as_str().to_string(),
             });
@@ -582,10 +619,12 @@ pub(crate) fn covering_declaration(config: &RegistryConfig) -> ProfileDeclaratio
         confined_results: config
             .tools
             .iter()
-            // Coverage names written tools only: the wildcard is not a name a deployment confines.
-            .filter(|declaration| declaration.name().as_str() != crate::registry::WILDCARD_TOOL_NAME)
-            .map(|declaration| {
-                crate::registry::base_tool_name(declaration.name()).expect("test contracts have valid names")
+            .filter_map(|declaration| {
+                match crate::registry::contract_name(declaration.name()).expect("test contracts have valid names") {
+                    crate::registry::ContractName::Named(name) => Some(name),
+                    // Coverage names written tools only: the wildcard is not a name a deployment confines.
+                    crate::registry::ContractName::Wildcard => None,
+                }
             })
             .collect(),
         provider_surfaces: BTreeMap::new(),
@@ -835,6 +874,82 @@ mod tests {
             open(cfg, declaration),
             Err(LoadError::ConfinedProviderRun { tool }) if tool == "search"
         ));
+    }
+
+    #[test]
+    fn server_independent_coverage_keeps_confinement_and_reports_rule_scope() {
+        let rule = ToolName::new("mcp/*/read");
+        let actual = ToolName::new("mcp/demo/read");
+        let cfg = config(vec![tool(rule.as_str())]);
+        let mut profile = covering_declaration(&cfg);
+        profile.executor_exceptions.insert(rule.clone(), ExecutorClass::Assumed);
+        let engine = open(cfg.clone(), profile).unwrap();
+        assert!(engine.profile().confines_result(&actual));
+        assert_eq!(engine.profile().executor_class(&actual), ExecutorClass::Assumed);
+        assert_eq!(
+            engine.open_vectors(),
+            vec![OpenVector::AssumedExecutorRule { rule: rule.clone() }]
+        );
+
+        let mut profile = covering_declaration(&cfg);
+        profile
+            .executor_exceptions
+            .insert(actual.clone(), ExecutorClass::Assumed);
+        let engine = open(cfg, profile).unwrap();
+        assert_eq!(
+            engine.open_vectors(),
+            vec![OpenVector::AssumedExecutor { tool: actual }]
+        );
+    }
+
+    #[test]
+    fn provider_run_name_rules_cannot_hide_conflicting_precise_executors() {
+        let cfg = config(vec![tool("mcp/*/read")]);
+        let mut profile = covering_declaration(&cfg);
+        provider_run(&mut profile, "mcp/demo/read");
+        assert!(matches!(
+            open(cfg.clone(), profile),
+            Err(LoadError::ConflictingToolExecutors { .. })
+        ));
+
+        let mut profile = covering_declaration(&cfg);
+        provider_run(&mut profile, "mcp/*/read");
+        let engine = open(cfg, profile).unwrap();
+        let actual = ToolName::new("mcp/demo/read");
+        assert_eq!(
+            engine.registry().classify(&actual),
+            Some(crate::registry::ToolKind::ProviderRun)
+        );
+        assert!(engine.registry().provider_run_annotation(&actual).is_some());
+        assert_eq!(
+            engine.open_vectors(),
+            vec![OpenVector::ProviderRunRule {
+                rule: ToolName::new("mcp/*/read")
+            }]
+        );
+    }
+
+    #[test]
+    fn overlapping_declaration_order_is_part_of_the_policy_identity() {
+        let mut broad = tool("mcp/*/read");
+        broad.description = Some("broad metadata".into());
+        let precise = tool("mcp/demo/read");
+        let first = config(vec![broad.clone(), precise.clone()]);
+        let second = config(vec![precise, broad]);
+        let first = open(first.clone(), covering_declaration(&first)).unwrap();
+        let second = open(second.clone(), covering_declaration(&second)).unwrap();
+        assert_ne!(first.identity(), second.identity());
+    }
+
+    #[test]
+    fn overlapping_provider_run_contracts_reject_in_either_authored_order() {
+        for names in [["mcp/*/read", "mcp/demo/read"], ["mcp/demo/read", "mcp/*/read"]] {
+            let cfg = config(names.into_iter().map(tool).collect());
+            let mut profile = covering_declaration(&cfg);
+            provider_run(&mut profile, "mcp/*/read");
+            provider_run(&mut profile, "mcp/demo/read");
+            assert!(matches!(open(cfg, profile), Err(LoadError::DuplicateTool { .. })));
+        }
     }
 
     #[test]

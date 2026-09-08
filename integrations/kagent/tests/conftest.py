@@ -71,9 +71,6 @@ os.environ.setdefault("KAGENT_URL", "http://kagent-controller:8083")
 os.environ.setdefault("KAGENT_NAME", "cluster-ops")
 os.environ.setdefault("KAGENT_NAMESPACE", "kagent")
 
-pytest.importorskip("kagent.adk", reason="the kagent/ADK lane is not installed")
-pytest.importorskip("mcp", reason="mcp is not installed")
-
 import kagent.core._config as kagent_identity
 import uvicorn
 from appa_kagent_adk import entrypoint
@@ -458,8 +455,37 @@ class Agent:
         return self._send({"message": message})
 
 
+class Ruling:
+    """One background ruling, joined by the case that started it.
+
+    The board is one session-wide member, so a case must not read a
+    cumulative list: an earlier case's ruling would answer for it, and a
+    thread that timed out without ruling would look the same as a real
+    one. `entry` is this invocation's own consult, or None when this
+    thread ruled on nothing.
+    """
+
+    def __init__(self, board: Board, tool: str, ruling: str):
+        self._entry: dict | None = None
+        self._thread = threading.Thread(target=self._run, args=(board, tool, ruling), daemon=True)
+        self._thread.start()
+
+    def _run(self, board: Board, tool: str, ruling: str) -> None:
+        self._entry = board.rule(tool, ruling)
+
+    def entry(self, timeout_s: float = 5.0) -> dict | None:
+        """The consult this ruling answered; None if it ruled on none."""
+        self._thread.join(timeout_s)
+        return self._entry
+
+
 class Board:
-    """A member of the remote change board: rules on the mock's side channel."""
+    """A member of the remote change board: rules on the mock's side channel.
+
+    A consult names its tool by the canonical id the policy carries, so
+    a caller waits on `mcp/localhost/rollback_deployment`, never on the
+    bare name kagent dispatches.
+    """
 
     def __init__(self, url: str):
         self.url = url.rstrip("/")
@@ -482,10 +508,8 @@ class Board:
             time.sleep(0.2)
         return None
 
-    def rule_in_background(self, tool: str, ruling: str) -> threading.Thread:
-        thread = threading.Thread(target=self.rule, args=(tool, ruling), daemon=True)
-        thread.start()
-        return thread
+    def rule_in_background(self, tool: str, ruling: str) -> Ruling:
+        return Ruling(self, tool, ruling)
 
 
 # -------------------------------------------------------- the processes
@@ -632,7 +656,23 @@ def demo_tools_url(workdir) -> Iterator[str]:
     command = [sys.executable, str(DEMO_TOOLS), "--host", "127.0.0.1", "--port", str(port)]
     with _process(command, workdir / "demo-tools.log"):
         _wait_tcp("127.0.0.1", port)
-        yield f"http://127.0.0.1:{port}/mcp"
+        # Native policy rules do not depend on this fixture's endpoint.
+        yield f"http://localhost:{port}/mcp"
+
+
+def _stage_github_battery(destination: Path) -> None:
+    """Copy the shipped GitHub battery under the toolset this stack serves.
+
+    A battery names its tools by canonical id, and the toolset half of
+    that id is the host label of the MCP server that carries them. The
+    fleet here reaches one server at ``localhost``, which also carries
+    the two canned GitHub tools under the names kagent renders. Only the
+    identity is restated: the contracts, sanitizers and trust rules the
+    tests exercise are the shipped battery's own.
+    """
+    shutil.copytree(REPO_ROOT / "batteries" / "github", destination)
+    policy = destination / "appa.toml"
+    policy.write_text(policy.read_text().replace("mcp/github/", "mcp__github__"))
 
 
 @pytest.fixture(scope="session")
@@ -641,7 +681,7 @@ def runtime_url(workdir, mock_port) -> Iterator[str]:
     binary = _appa_binary()
     port = _free_port()
     policy = workdir / "policy.appa.toml"
-    shutil.copytree(REPO_ROOT / "batteries" / "github", workdir / "batteries" / "github")
+    _stage_github_battery(workdir / "batteries" / "github")
     policy.write_text(POLICY.read_text().replace("@@MOCK_PORT@@", str(mock_port)).replace("@@PYTHON@@", sys.executable))
     command = [
         binary,
@@ -705,7 +745,7 @@ class Stack:
 
 
 @pytest.fixture(scope="session")
-def stack(workdir, runtime_url, demo_tools_url) -> Iterator[Stack]:
+def stack(workdir, runtime_url, demo_tools_url, request) -> Iterator[Stack]:
     """The parent and the child, built and served exactly as a pod builds them."""
     patcher = pytest.MonkeyPatch()
     stock_build = KAgentApp.build
@@ -728,9 +768,11 @@ def stack(workdir, runtime_url, demo_tools_url) -> Iterator[Stack]:
         },
         f"{child_base}/",
     )
-    # Both remote agents resolve to the child's card. The undeclared one
-    # is denied at the spawn, before any card is fetched, so the URL it
-    # carries is never reached — it exists to make the tool listable.
+    # The invalid-startup regression adds a known uncovered remote agent.
+    # Ordinary lifecycle cases advertise only policy-covered tools.
+    remotes = [{"name": CHILD_TOOL, "url": child_base, "description": CHILD_DESCRIPTION}]
+    if getattr(request, "param", False):
+        remotes.append({"name": UNDECLARED_TOOL, "url": child_base, "description": UNDECLARED_DESCRIPTION})
     parent_dir = _write_config(
         workdir / "parent",
         PARENT,
@@ -739,10 +781,7 @@ def stack(workdir, runtime_url, demo_tools_url) -> Iterator[Stack]:
             "description": PARENT_DESCRIPTION,
             "instruction": PARENT_INSTRUCTION,
             "http_tools": [{"params": {"url": demo_tools_url}, "tools": PARENT_TOOLS}],
-            "remote_agents": [
-                {"name": CHILD_TOOL, "url": child_base, "description": CHILD_DESCRIPTION},
-                {"name": UNDECLARED_TOOL, "url": child_base, "description": UNDECLARED_DESCRIPTION},
-            ],
+            "remote_agents": remotes,
         },
         f"{parent_base}/",
     )

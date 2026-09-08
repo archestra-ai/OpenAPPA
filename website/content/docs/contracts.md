@@ -73,6 +73,50 @@ Only one source of contract rules is allowed: static `delta`, `requires`, and `e
 
 OpenAPPA checks both `delta` and `requires` before allowing the tool call.
 
+### Tool names
+
+A policy can use a host-native name or a canonical tool id. Canonical ids have three segments: `<family>/<namespace>/<tool>`. The family is `mcp`, `host`, or `agent`. Each segment matches `[A-Za-z0-9_.-]+`. A namespace segment never contains `__`.
+
+| Family | Names | Example |
+|---|---|---|
+| `mcp` | One tool of one MCP server. The namespace is the server. | `mcp/github/create_issue` |
+| `host` | A tool the host itself provides. The namespace is the host. | `host/claude-code/Bash` |
+| `agent` | An agent called as a tool. The namespace is where the agent lives. | `agent/kagent/log-analyst` |
+
+`appa/execute_remedy_plan` is the runtime's own control tool, the one member of the `appa` family. A policy cannot declare it: the runtime recognizes it before any contract, and a `[[policy.tool]]` entry that names it refuses the policy at load. The wildcard entry `name = "*"` is not a canonical id; it covers every tool the policy does not name (see [the wildcard](#handling-undeclared-tools)).
+
+The agent keeps using its host's tool names. A plugin implements the host lifecycle; the runtime's adapter translates tool identities and events. The runtime records canonical ids, even when the policy uses native names. Where it tells the model to run a tool, it uses the host's dispatch spelling. Claude Code and kagent have these mappings:
+
+| Adapter | Raw tool spelling | Canonical tool id |
+|---|---|---|
+| Claude Code | `mcp__<server>__<tool>` — split at the first `__` after `mcp__` | `mcp/<server>/<tool>` |
+| Claude Code | A built-in tool: `Bash`, `Read`, `Edit`, `Agent`, … | `host/claude-code/<name>` |
+| Claude Code | The remedy tool of the APPA plugin | `appa/execute_remedy_plan` |
+| kagent | A tool discovered from a configured MCP endpoint | `mcp/<source-id>/<tool>` |
+| kagent | An agent called as a tool | `agent/<namespace>/<agent>` |
+| kagent | A kagent built-in, such as `ask_user`, `load_memory`, `save_memory`, `prefetch_memory`, or a skill tool | `host/kagent/<name>` |
+| kagent | The entrypoint gates | `host/kagent-gate/code_execution`, `host/kagent-gate/memory_persist` |
+| kagent | The remedy tool | `appa/execute_remedy_plan` |
+
+Claude Code names such as `Bash` and `mcp__github__create_issue` identify precise tools. An unqualified kagent rule such as `read_secret` applies to that native name across MCP servers and kagent's own tools. It does not cover remote-agent delegation. A newly discovered tool can use an existing rule without restarting the trajectory or changing its opening policy.
+
+Use `server` when a rule should apply to one MCP connection:
+
+```toml
+[[policy.tool]]
+name = "read_secret"
+server = "demo-tools"
+delta = { trust = "suspicious" }
+```
+
+This rule identifies `mcp/demo-tools/read_secret`. Deployment-level `[server_aliases]` can map a policy's server name to a configured connection identity. APPA does not infer a provider from a hostname or server metadata. A server qualifier cannot repair duplicate host dispatch names; the host must distinguish those tools.
+
+kagent derives a default source ID from the exact configured endpoint URL. Native rules do not require that ID. Discovery supplies evidence, not permission: known tools need policy coverage, unavailable sources remain unknown, and later calls still pass runtime enforcement. A trajectory retains its opening policy and accepted identities.
+
+Native names also work in `confined_results`, `assumed_tools`, and `provider_run_tools`. Coverage reports distinguish a rule spanning servers from an observed concrete tool. Overlapping declarations with incompatible provider-run execution settings are rejected.
+
+Which calls start a child trajectory is the runtime's derivation from the adapter (Claude Code's `Agent`, a kagent agent called as a tool); a policy does not declare it.
+
 ### Tags
 
 Tags connect tools to the authorities that can review their calls and the sanitizers that can transform their data. For example, this contract gives a ticket tool the `support` tag:
@@ -90,7 +134,7 @@ Attention approvals use a different rule: OpenAPPA selects authorities by `permi
 
 ### Pattern matching
 
-A policy can declare several contracts for one tool. OpenAPPA checks them in declaration order and selects the first matching contract.
+A policy can declare several contracts for one tool. OpenAPPA checks them in declaration order and selects the first matching contract. This includes overlapping native and canonical names; canonical spelling does not give a rule priority.
 
 In the example below, the first contract matches a `path` string that starts with `/docs/` and declares its result as `public`. The second contract covers all other calls to `read_file` and declares their results as `internal`.
 

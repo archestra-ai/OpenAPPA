@@ -25,6 +25,7 @@ use crate::engine::{EngineRefusal, Liveness, PolicyEngine, RuntimeEngine};
 use crate::external::{ConsultGates, ExternalServices};
 use crate::yell;
 use appa_eventlog::{Backend, Log, LogStore};
+use appa_runtime_api::{Adapter, AdapterName};
 
 /// One remedy offer as it is quoted and carried.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -125,6 +126,9 @@ pub(crate) fn call_key(call: &ProposedCall) -> Option<PermitKey> {
 fn bare_runtime_tool(tool: &str) -> &str {
     tool.strip_prefix("mcp__appa__")
         .or_else(|| tool.strip_prefix("mcp__plugin_appa-runtime_appa__"))
+        .or_else(|| tool.strip_prefix("mcp/appa/"))
+        .or_else(|| tool.strip_prefix("mcp/plugin_appa-runtime_appa/"))
+        .or_else(|| tool.strip_prefix("mcp/appa-guide/"))
         .unwrap_or(tool)
 }
 
@@ -154,11 +158,14 @@ pub(crate) enum ToolCallDecision {
 }
 
 /// What the adapter gives the harness as the tool output. `Keep`: use
-/// the output as it is. `Replace`: use this text instead — a cleaned
-/// version, or a short note saying the real output was not accepted.
+/// the output as it is. `Deliver`: use this admitted value — a confined
+/// result the check let through, or a sanitizer's derivation — as it
+/// crossed. `Replace`: use the runtime's own words instead, a short note
+/// saying the real output was not accepted or the narrowing it causes.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ToolResultDecision {
     Keep,
+    Deliver { value: String },
     Replace { placeholder: String },
 }
 
@@ -236,6 +243,12 @@ pub enum OpenError {
     UnsupportedPolicy(String),
     #[error("policy declares reserved tool name {0}")]
     ReservedTool(String),
+    #[error("the policy names tool {name} in {field}, which a served deployment cannot name: {detail}")]
+    NonCanonicalTool {
+        field: &'static str,
+        name: String,
+        detail: String,
+    },
     #[error("policy names {kind} {name}, which has no [externals] binding")]
     UnboundExternal { kind: &'static str, name: String },
     #[error("[externals] binds {kind} {name}, which the policy does not declare")]
@@ -317,6 +330,8 @@ pub(crate) enum EventError {
     UntrustedLog(String),
     #[error("the opening policy is unavailable: {0}")]
     PolicyUnavailable(String),
+    #[error("host tool inventory is invalid: {0}")]
+    InventoryRefused(String),
     #[error("engine invariant breach: {0}")]
     EngineInvariant(String),
     #[error("annotator={annotator} error={reason}{next_action}")]
@@ -364,6 +379,7 @@ impl EventError {
             EventError::Storage(_)
             | EventError::UntrustedLog(_)
             | EventError::PolicyUnavailable(_)
+            | EventError::InventoryRefused(_)
             | EventError::EngineInvariant(_)
             | EventError::Contended { .. }
             | EventError::ResolutionDiverged { .. }
@@ -416,13 +432,60 @@ pub(crate) struct Deployment {
     externals: ExternalServices,
 }
 
+/// Which deployment this is, and with it every rule the harness fixes rather than the
+/// policy: how the policy names tools, how a recorded name is spelled back when the runtime
+/// addresses the model, and which contracts may release a spawn.
+///
+/// A served deployment answers exactly one host, and carries that host's adapter: the
+/// adapter derives a canonical identity for every call, so the policy names tools that way,
+/// and its inverse gives the host spelling the model can dispatch. A host that embeds the
+/// runtime, and `appa replay`, name tools their own way: what the runtime records is already
+/// the name their model calls.
+#[derive(Clone, Copy)]
+pub(crate) enum ToolNaming {
+    Canonical { adapter: Adapter },
+    AsAuthored,
+}
+
+impl ToolNaming {
+    /// The spelling of one recorded or authored tool name the model can act on. A
+    /// contract's `(selector)` is the policy's own discriminator and no part of what the
+    /// model calls, so the host spells the bare name. A canonical id outside the served
+    /// adapter's range — one no call under this host can name — stays as recorded.
+    pub(crate) fn model_spelling(self, recorded: &str) -> String {
+        match self {
+            ToolNaming::AsAuthored => recorded.to_string(),
+            ToolNaming::Canonical { adapter } => appa_runtime_api::CanonicalTool::parse(bare_tool_name(recorded))
+                .ok()
+                .and_then(|tool| (adapter.spell)(&tool))
+                .unwrap_or_else(|| recorded.to_string()),
+        }
+    }
+
+    /// Which contracts may release a spawn here. The served adapter settles it, so a
+    /// deployment cannot serve one host under another's rule: kagent's spawns are other
+    /// agents called as tools, and a child trajectory is not something a per-call
+    /// annotation can stand for. Claude Code's `Task` keeps the wildcard's cover, and so
+    /// does a host that embeds the runtime and delegates under contracts it writes itself.
+    pub(crate) fn spawn_coverage(self) -> SpawnCoverage {
+        match self {
+            ToolNaming::Canonical { adapter } => match adapter.name {
+                AdapterName::ClaudeCode => SpawnCoverage::Wildcard,
+                AdapterName::Kagent => SpawnCoverage::Declared,
+            },
+            ToolNaming::AsAuthored => SpawnCoverage::Wildcard,
+        }
+    }
+}
+
 impl Deployment {
     fn load(
         config: Config,
         modules: &crate::builtins::ModuleRegistry,
         gates: ConsultGates,
+        naming: ToolNaming,
     ) -> Result<Deployment, OpenError> {
-        let policy = compile_policy(&config)?;
+        let policy = compile_policy(&config, naming)?;
         validate_deployment(&policy, &config.externals)?;
         let annotator_builtins = policy
             .annotators()
@@ -432,7 +495,7 @@ impl Deployment {
             .map_err(|error| OpenError::Modules(error.to_string()))?;
         Ok(Deployment {
             config,
-            resident: RuntimeEngine::from_policy(&policy),
+            resident: RuntimeEngine::from_policy(&policy, naming),
             externals,
         })
     }
@@ -612,11 +675,10 @@ pub struct Runtime {
 /// `Declared`: only a contract written for the tool's name; the wildcard, which covers
 /// every ordinary call the policy does not write, covers no spawn. An agent the policy never
 /// names is denied before it runs, with the reason as the model's feedback. `Wildcard`: the
-/// wildcard covers a spawn as it covers any call. The harness adapter picks: kagent's spawns
-/// are other agents called as tools, and a child trajectory is not something a per-call
-/// annotation can stand for.
+/// wildcard covers a spawn as it covers any call. No caller chooses: the deployment reads it
+/// off [`ToolNaming`], which carries the adapter a served runtime answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SpawnCoverage {
+pub(crate) enum SpawnCoverage {
     Declared,
     Wildcard,
 }
@@ -627,19 +689,21 @@ struct Prepared {
     modules: crate::builtins::ModuleRegistry,
     gates: ConsultGates,
     deployment: Deployment,
+    naming: ToolNaming,
 }
 
 impl Prepared {
-    fn new(config: Config, modules: Option<PathBuf>) -> Result<Prepared, OpenError> {
+    fn new(config: Config, modules: Option<PathBuf>, naming: ToolNaming) -> Result<Prepared, OpenError> {
         let modules =
             crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
         let gates = ConsultGates::per_runtime();
-        let deployment = Deployment::load(config, &modules, gates.clone())?;
+        let deployment = Deployment::load(config, &modules, gates.clone(), naming)?;
         gates.serve_llm(deployment.config.externals.llm_bound());
         Ok(Prepared {
             modules,
             gates,
             deployment,
+            naming,
         })
     }
 
@@ -660,7 +724,7 @@ impl Prepared {
                 prompted: std::sync::Mutex::new(std::collections::BTreeSet::new()),
                 events: std::sync::Mutex::new(crate::events::EventLog::default()),
                 gates: self.gates,
-                named_spawns: std::sync::atomic::AtomicBool::new(false),
+                naming: self.naming,
             }),
         })
     }
@@ -683,8 +747,10 @@ struct Inner {
     /// The gates every process-costing consult of this runtime passes; deployment reloads
     /// clone them, so old and new snapshots contend on the same permits.
     gates: ConsultGates,
-    /// `true` under [`SpawnCoverage::Declared`]: set once, before the runtime is shared.
-    named_spawns: std::sync::atomic::AtomicBool,
+    /// Which deployment this is: how its policy names tools, the spelling the model can
+    /// dispatch, and which contracts release a spawn. Settled at open and unchanged by a
+    /// reload — it is the deployment kind, not the policy.
+    naming: ToolNaming,
 }
 
 /// The trajectory an actor's events belong to: the child when the harness names one.
@@ -692,7 +758,94 @@ pub(crate) fn acting_trajectory(actor: &Actor) -> &TrajectoryId {
     actor.child.as_ref().unwrap_or(&actor.root)
 }
 
+fn inventory_refused(error: appa_runtime_api::ParseRefusal) -> EventError {
+    let (appa_runtime_api::ParseRefusal::Malformed { detail } | appa_runtime_api::ParseRefusal::Unreadable { detail }) =
+        error;
+    EventError::InventoryRefused(detail)
+}
+
+fn inventory_at(
+    log: &Log,
+    actor: &Actor,
+    adapter: Adapter,
+) -> Result<appa_runtime_api::inventory::ToolInventory, EventError> {
+    use appa_runtime_api::inventory::ToolInventory;
+    let mut previous = ToolInventory::default();
+    if actor.child.is_none() {
+        #[derive(serde::Deserialize)]
+        struct OpeningInventory {
+            #[serde(default)]
+            appa_inventory: ToolInventory,
+        }
+        let source = std::str::from_utf8(log.policy_file())
+            .map_err(|_| EventError::PolicyUnavailable("stored policy is not UTF-8".into()))?;
+        let opening: OpeningInventory = toml::from_str(source)
+            .map_err(|_| EventError::PolicyUnavailable("stored inventory does not decode".into()))?;
+        previous = opening.appa_inventory;
+    }
+    previous.validate(adapter).map_err(inventory_refused)?;
+    let mut tools: std::collections::BTreeMap<_, _> = previous
+        .tools
+        .into_iter()
+        .map(|tool| (tool.name.clone(), tool))
+        .collect();
+    let mut sources: std::collections::BTreeMap<_, _> = previous
+        .sources
+        .into_iter()
+        .map(|source| (source.server.clone(), source))
+        .collect();
+    let scope = crate::engine::engine_id(acting_trajectory(actor));
+    for observation in log
+        .inventories()
+        .iter()
+        .filter(|observation| observation.actor == scope)
+    {
+        if observation.adapter != adapter.name {
+            return Err(EventError::InventoryRefused(
+                "an actor cannot change its plugin adapter".into(),
+            ));
+        }
+        observation.inventory.validate(adapter).map_err(inventory_refused)?;
+        for tool in &observation.inventory.tools {
+            if let Some(old) = tools.get(&tool.name)
+                && old.tool != tool.tool
+            {
+                return Err(EventError::InventoryRefused(
+                    "a recorded tool changed identity within this actor".into(),
+                ));
+            }
+            tools.insert(tool.name.clone(), tool.clone());
+        }
+        for source in &observation.inventory.sources {
+            sources.insert(source.server.clone(), source.clone());
+        }
+    }
+    let previous = ToolInventory {
+        tools: tools.into_values().collect(),
+        sources: sources.into_values().collect(),
+    };
+    previous.validate(adapter).map_err(inventory_refused)?;
+    Ok(previous)
+}
+
 impl Runtime {
+    /// Run the serving load checks without opening a store, making network requests,
+    /// or activating a deployment. Unknown inventory is reported, not rejected.
+    pub(crate) fn validate_served(
+        config: Config,
+        adapter: Adapter,
+    ) -> Result<crate::tool_validation::ValidationReport, OpenError> {
+        let report = crate::tool_validation::resolve(
+            config.policy_file().value(),
+            adapter,
+            &config.inventory,
+            &config.server_aliases,
+        )
+        .report;
+        Prepared::new(config, None, ToolNaming::Canonical { adapter })?;
+        Ok(report)
+    }
+
     /// Note one thing this runtime did. Infallible and best-effort by construction: a
     /// diagnostic must never fail a decision the engine has already made, and the lock is
     /// held only for the insert.
@@ -705,27 +858,9 @@ impl Runtime {
     pub(crate) fn record(&self, root: Option<&TrajectoryId>, event: crate::events::RuntimeEvent) {
         self.inner.record(root, event);
     }
-
-    /// Settle which contracts may release a spawn. Called once by the binary, for the
-    /// adapter it serves, before the runtime is shared; the default is `Wildcard`.
-    pub fn with_spawn_coverage(self, coverage: SpawnCoverage) -> Runtime {
-        self.inner.named_spawns.store(
-            coverage == SpawnCoverage::Declared,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        self
-    }
 }
 
 impl Inner {
-    pub(super) fn spawn_coverage(&self) -> SpawnCoverage {
-        if self.named_spawns.load(std::sync::atomic::Ordering::Relaxed) {
-            SpawnCoverage::Declared
-        } else {
-            SpawnCoverage::Wildcard
-        }
-    }
-
     /// Note a failed store operation as a closed class.
     ///
     /// Takes the *typed* error, deliberately. Every one of these errors carries free text —
@@ -817,6 +952,11 @@ impl Inner {
     /// compile stays outside the lock — it is the expensive step, and the mutex's
     /// "no panic runs while it is held" reading must keep holding — so a race can
     /// still compile twice, but only one result is ever cached and handed out.
+    ///
+    /// A retired policy decides under the identities this deployment derives now, so it
+    /// meets the naming rule this deployment serves under or the trajectory does not
+    /// reopen: a stored policy naming a tool the served host's raw way confines and
+    /// excepts nothing, while a wildcard contract still permits the call.
     fn retired_engine(&self, key: &str, bytes: &[u8]) -> Result<Arc<RuntimeEngine>, EventError> {
         if let Some(engine) = self
             .retired
@@ -826,8 +966,8 @@ impl Inner {
         {
             return Ok(Arc::clone(engine));
         }
-        let compiled = compile_stored_policy(bytes).map_err(EventError::PolicyUnavailable)?;
-        let engine = Arc::new(RuntimeEngine::from_policy(&compiled));
+        let compiled = compile_stored_for_host(bytes, self.naming).map_err(EventError::PolicyUnavailable)?;
+        let engine = Arc::new(RuntimeEngine::from_policy(&compiled, self.naming));
         Ok(Arc::clone(
             self.retired
                 .lock()
@@ -859,8 +999,31 @@ impl Runtime {
     /// a policy this deployment cannot honor is refused before
     /// anything opens.
     pub fn open(config: Config, db: PathBuf, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
-        let prepared = Prepared::new(config, modules)?;
+        let prepared = Prepared::new(config, modules, ToolNaming::AsAuthored)?;
         prepared.assemble(Backend::Sqlite { path: db })
+    }
+
+    /// The deployment `appa runtime` serves: [`Runtime::open`], plus the served-deployment
+    /// normalization of native policy names to internal identities. One compile answers both. The
+    /// served adapter comes in because a served deployment answers exactly one host: its
+    /// spelling of a tool is what the runtime says where it addresses that host's model,
+    /// and its rule is which contracts release a spawn.
+    pub(crate) fn open_served(
+        config: Config,
+        db: PathBuf,
+        modules: Option<PathBuf>,
+        adapter: Adapter,
+    ) -> Result<Runtime, OpenError> {
+        let prepared = Prepared::new(config, modules, ToolNaming::Canonical { adapter })?;
+        prepared.assemble(Backend::Sqlite { path: db })
+    }
+
+    /// The spelling of a recorded tool name this deployment's model can dispatch: the
+    /// served host's own, or — where the host embeds the runtime and names its own tools —
+    /// the recorded name itself. Every text the runtime addresses to the model names a
+    /// tool this way.
+    pub(crate) fn model_spelling(&self, recorded: &str) -> String {
+        self.inner.naming.model_spelling(recorded)
     }
 
     /// The deployment `appa replay` runs: the same session and engine over a log that lives
@@ -868,7 +1031,7 @@ impl Runtime {
     /// approve, and the body unchanged — as if the bound party had. Annotators, audience
     /// sources, and lookups stay bound as configured. Nothing of the run survives the process.
     pub fn open_in_memory(config: Config, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
-        let mut prepared = Prepared::new(config, modules)?;
+        let mut prepared = Prepared::new(config, modules, ToolNaming::AsAuthored)?;
         prepared.deployment.stand_in_for_remedies();
         prepared.assemble(Backend::Memory)
     }
@@ -899,6 +1062,11 @@ impl Runtime {
     /// learns where a configuration came from, so an embedding host
     /// reloads a composed policy the same way. A host that probes the new
     /// sources first prepares, probes, then installs.
+    ///
+    /// How this deployment names tools is its own state and no caller's choice, so the
+    /// reload holds the naming it opened with: a served deployment's rule that the policy
+    /// names every tool canonically survives the reload, and a refused candidate changes
+    /// nothing — the deployment that was serving keeps serving.
     pub fn reload(&self, config: Config) -> Result<Reloaded, OpenError> {
         Ok(self.install(self.prepare_reload(config)?))
     }
@@ -906,7 +1074,7 @@ impl Runtime {
     /// Load the deployment a configuration declares without installing it: every open-time
     /// gate runs, and the result is held for a probe before [`Runtime::install`] swaps it in.
     pub fn prepare_reload(&self, config: Config) -> Result<PreparedReload, OpenError> {
-        let deployment = Deployment::load(config, &self.inner.modules, self.inner.gates.clone())?;
+        let deployment = Deployment::load(config, &self.inner.modules, self.inner.gates.clone(), self.inner.naming)?;
         Ok(PreparedReload {
             deployment: Arc::new(deployment),
         })
@@ -971,6 +1139,176 @@ impl Runtime {
     /// to that file durably or is not opened at all.
     pub(crate) fn create_session(&self, id: TrajectoryId) -> Result<Session, EventError> {
         let deployment = self.inner.deployment();
+        self.create_session_under(id, deployment)
+    }
+
+    pub(crate) fn create_session_with_inventory(
+        &self,
+        id: TrajectoryId,
+        inventory: appa_runtime_api::inventory::ToolInventory,
+    ) -> Result<Session, EventError> {
+        let config = self
+            .inner
+            .deployment()
+            .config
+            .with_inventory(inventory)
+            .map_err(EventError::PolicyUnavailable)?;
+        let deployment = Deployment::load(config, &self.inner.modules, self.inner.gates.clone(), self.inner.naming)
+            .map_err(|error| EventError::PolicyUnavailable(error.to_string()))?;
+        self.create_session_under(id, Arc::new(deployment))
+    }
+
+    /// Reserve identities in the actor's own scope, independently of the immutable
+    /// policy registry. The same log CAS as tool admission makes a concurrent
+    /// discovery retry before it can authorize a call under stale evidence.
+    pub(crate) fn observe_inventory(
+        &self,
+        actor: &appa_runtime_api::Actor,
+        adapter: appa_runtime_api::Adapter,
+        candidate: &appa_runtime_api::inventory::ToolInventory,
+    ) -> Result<(), EventError> {
+        use appa_runtime_api::inventory::ToolInventory;
+        candidate.validate(adapter).map_err(inventory_refused)?;
+        let scope = crate::engine::engine_id(actor.child.as_ref().unwrap_or(&actor.root));
+        const ATTEMPTS: u32 = 8;
+        for _ in 0..ATTEMPTS {
+            let log = self.inner.log(&actor.root)?;
+            let previous = inventory_at(&log, actor, adapter)?;
+            let combined = previous.extending(candidate, adapter).map_err(inventory_refused)?;
+            let previous_tools: std::collections::BTreeMap<_, _> =
+                previous.tools.iter().map(|tool| (&tool.name, &tool.tool)).collect();
+            let previous_sources: std::collections::BTreeMap<_, _> =
+                previous.sources.iter().map(|source| (&source.server, source)).collect();
+            let delta = ToolInventory {
+                tools: combined
+                    .tools
+                    .iter()
+                    .filter(|tool| previous_tools.get(&tool.name).copied() != Some(&tool.tool))
+                    .cloned()
+                    .collect(),
+                sources: combined
+                    .sources
+                    .iter()
+                    .filter(|source| previous_sources.get(&source.server).copied() != Some(*source))
+                    .cloned()
+                    .collect(),
+            };
+            if delta.tools.is_empty() && delta.sources.is_empty() {
+                return Ok(());
+            }
+            let observation = appa_eventlog::InventoryObservation {
+                actor: scope.clone(),
+                adapter: adapter.name,
+                // Persist only the new evidence, not another full copy of history.
+                inventory: delta,
+            };
+            match self.inner.store.append_inventory(&log, &observation) {
+                Ok(()) => return Ok(()),
+                Err(appa_eventlog::AppendError::Conflict { .. }) => continue,
+                Err(error) => {
+                    self.inner
+                        .note_store_error(Some(&actor.root), crate::events::StoreOperation::Append, &error);
+                    return Err(EventError::Storage(error.to_string()));
+                }
+            }
+        }
+        Err(EventError::Contended { attempts: ATTEMPTS })
+    }
+
+    /// Read-only preflight against the policy this family opened under. Another
+    /// actor's complete inventory does not make absent policy tools invalid.
+    pub(crate) fn preflight_inventory(
+        &self,
+        actor: Option<&Actor>,
+        adapter: Adapter,
+        inventory: &appa_runtime_api::inventory::ToolInventory,
+    ) -> Result<crate::tool_validation::ValidationReport, EventError> {
+        match actor {
+            Some(actor) => {
+                let log = self.inner.log(&actor.root)?;
+                let mut report = self.check_inventory_at(&log, adapter, inventory)?;
+                let scope = crate::engine::engine_id(acting_trajectory(actor));
+                report.actor_opened = log.facts().iter().any(|fact| {
+                    matches!(
+                        fact,
+                        appa_engine::fact::Fact::TrajectoryOpened { trajectory, .. }
+                        | appa_engine::fact::Fact::ForkOpened { trajectory, .. } if trajectory == &scope
+                    )
+                });
+                let previous = inventory_at(&log, actor, adapter)?;
+                let accepted = previous.identities(adapter).map_err(inventory_refused)?;
+                let names: std::collections::BTreeMap<_, _> =
+                    accepted.iter().map(|(name, id, _)| (name.as_str(), id)).collect();
+                let identities: std::collections::BTreeMap<_, _> =
+                    accepted.iter().map(|(name, id, _)| (id, name.as_str())).collect();
+                let mut conflicts = std::collections::BTreeSet::new();
+                for observed in &inventory.tools {
+                    if let Ok(id) = (adapter.derive)(&observed.tool)
+                        && (names
+                            .get(observed.name.as_str())
+                            .is_some_and(|previous| **previous != id.canonical)
+                            || identities
+                                .get(&id.canonical)
+                                .is_some_and(|previous| *previous != observed.name))
+                    {
+                        conflicts.insert(observed.name.as_str());
+                    }
+                }
+                for check in &mut report.tools {
+                    if conflicts.contains(check.tool.as_str()) {
+                        check.status = crate::tool_validation::ToolStatus::Invalid {
+                            reason: "tool identity conflicts with an earlier observation in this actor".into(),
+                        };
+                    }
+                }
+                report.accepted_tools = previous.tools;
+                Ok(report)
+            }
+            None => {
+                let serving = self.inner.deployment();
+                Ok(crate::tool_validation::resolve(
+                    serving.config.policy_file().value(),
+                    adapter,
+                    inventory,
+                    &serving.config.server_aliases,
+                )
+                .report)
+            }
+        }
+    }
+
+    /// Read-only preflight under a pinned family policy, including child startup.
+    pub(crate) fn check_inventory(
+        &self,
+        root: &TrajectoryId,
+        adapter: Adapter,
+        inventory: &appa_runtime_api::inventory::ToolInventory,
+    ) -> Result<crate::tool_validation::ValidationReport, EventError> {
+        let log = self.inner.log(root)?;
+        self.check_inventory_at(&log, adapter, inventory)
+    }
+
+    fn check_inventory_at(
+        &self,
+        log: &Log,
+        adapter: Adapter,
+        inventory: &appa_runtime_api::inventory::ToolInventory,
+    ) -> Result<crate::tool_validation::ValidationReport, EventError> {
+        self.inner.resolve_policy(&self.inner.deployment(), log)?;
+        #[derive(serde::Deserialize)]
+        struct Rules {
+            policy: toml::Value,
+            #[serde(default)]
+            server_aliases: std::collections::BTreeMap<String, String>,
+        }
+        let source = std::str::from_utf8(log.policy_file())
+            .map_err(|_| EventError::PolicyUnavailable("stored policy is not UTF-8".into()))?;
+        let rules: Rules = toml::from_str(source)
+            .map_err(|_| EventError::PolicyUnavailable("stored validation rules do not decode".into()))?;
+        Ok(crate::tool_validation::resolve(&rules.policy, adapter, inventory, &rules.server_aliases).report)
+    }
+
+    fn create_session_under(&self, id: TrajectoryId, deployment: Arc<Deployment>) -> Result<Session, EventError> {
         let opening = deployment.root_opening(&id);
         let root = self
             .inner
@@ -1330,6 +1668,12 @@ impl Runtime {
     pub(crate) fn vouch(&self, key: &PermitKey, acting: &Actor, ruling: Option<appa_runtime_api::Ruling>) {
         let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
         let holders = permits.entry(key.clone()).or_default();
+        // An offer has one current pursuer: its new vouch replaces the former
+        // pursuer's. A yell ticket may be quoted by independent sessions, so
+        // retain those holders and refuse ambiguity when it is consumed.
+        if matches!(key, PermitKey::Offer(_)) {
+            holders.clear();
+        }
         match holders.iter_mut().find(|holder| holder.actor == *acting) {
             Some(holder) => holder.ruling = ruling,
             None => holders.push(Vouch {
@@ -1580,10 +1924,18 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
         ));
     }
 
+    // The control tool is the runtime's own: the hooks answer that identity before the
+    // executor classifies a call or confines its result, so a policy naming it declares
+    // something the deployment can never apply. A contract naming it and a `[deployment]`
+    // field naming it are the same claim, and both are refused rather than accepted as a
+    // silent no-op. Both of its spellings make that claim: a harness translates the
+    // advertised alias into the canonical id before the hooks see it, so an authored
+    // deployment naming the alias reaches remedy handling the same way. A served
+    // deployment refuses the alias earlier, for not being canonical at all.
     let rc = policy.registry_config();
-    for tool in &rc.tools {
-        let name = tool.name().as_str();
-        if is_control_tool(name) {
+    let contracts = rc.tools.iter().map(|tool| tool.name().as_str());
+    for name in contracts.chain(policy.deployment_tool_names().map(|(_, name)| name)) {
+        if appa_runtime_api::is_reserved_tool_name(bare_tool_name(name)) {
             return Err(OpenError::ReservedTool(name.to_string()));
         }
     }
@@ -1702,8 +2054,20 @@ fn no_undeclared<'a, Implementation>(
     Ok(())
 }
 
-fn compile_policy(config: &Config) -> Result<appa_policy::Config, OpenError> {
-    let text = toml::to_string(config.policy_file().value())
+/// The tool an authored `[[policy.tool]]` name names, before any `(selector)`.
+fn bare_tool_name(authored: &str) -> &str {
+    authored.split('(').next().unwrap_or(authored)
+}
+
+fn compile_policy(config: &Config, naming: ToolNaming) -> Result<appa_policy::Config, OpenError> {
+    let policy = resolve_served_policy(
+        config.policy_file().value(),
+        naming,
+        &config.inventory,
+        &config.server_aliases,
+    )
+    .map_err(OpenError::UnsupportedPolicy)?;
+    let text = toml::to_string(&policy)
         .map_err(|error| OpenError::UnsupportedPolicy(format!("the policy table does not serialize: {error}")))?;
     let lookup_providers = config
         .externals
@@ -1748,15 +2112,58 @@ fn policy_section(bytes: &[u8]) -> Option<(toml::Value, String)> {
     Some((document, crate::engine::policy_file_key(bytes)))
 }
 
+#[cfg(test)]
 fn compile_stored_policy(bytes: &[u8]) -> Result<appa_policy::Config, String> {
+    compile_stored_for_host(bytes, ToolNaming::AsAuthored)
+}
+
+fn resolve_served_policy(
+    policy: &toml::Value,
+    naming: ToolNaming,
+    inventory: &appa_runtime_api::inventory::ToolInventory,
+    aliases: &std::collections::BTreeMap<String, String>,
+) -> Result<toml::Value, String> {
+    match naming {
+        ToolNaming::AsAuthored => Ok(policy.clone()),
+        ToolNaming::Canonical { adapter } => {
+            let resolved = crate::tool_validation::resolve(policy, adapter, inventory, aliases);
+            if !resolved.report.is_valid() {
+                let mut errors = resolved.report.errors;
+                errors.extend(resolved.report.tools.into_iter().filter_map(|tool| match tool.status {
+                    crate::tool_validation::ToolStatus::Invalid { reason } => Some(format!("{}: {reason}", tool.tool)),
+                    _ => None,
+                }));
+                return Err(errors.join("; "));
+            }
+            Ok(resolved.policy)
+        }
+    }
+}
+
+fn compile_stored_for_host(bytes: &[u8], naming: ToolNaming) -> Result<appa_policy::Config, String> {
     let text = std::str::from_utf8(bytes).map_err(|error| format!("the stored policy file is not UTF-8: {error}"))?;
     let value: toml::Value =
         toml::from_str(text).map_err(|error| format!("the stored policy file does not parse: {error}"))?;
     let policy = value
         .get("policy")
         .ok_or("the stored policy file has no [policy] table")?;
+    let inventory = value
+        .get("appa_inventory")
+        .cloned()
+        .map(toml::Value::try_into)
+        .transpose()
+        .map_err(|error| format!("invalid stored inventory: {error}"))?
+        .unwrap_or_default();
+    let aliases = value
+        .get("server_aliases")
+        .cloned()
+        .map(toml::Value::try_into)
+        .transpose()
+        .map_err(|error| format!("invalid stored aliases: {error}"))?
+        .unwrap_or_default();
+    let policy = resolve_served_policy(policy, naming, &inventory, &aliases)?;
     let text =
-        toml::to_string(policy).map_err(|error| format!("the stored policy table does not serialize: {error}"))?;
+        toml::to_string(&policy).map_err(|error| format!("the stored policy table does not serialize: {error}"))?;
     appa_policy::Config::from_toml_str_routed(&text, lookup_providers_of(&value))
         .map_err(|error| format!("the stored policy does not load: {error}"))
 }
@@ -1812,6 +2219,39 @@ mod deployment_tests {
         assert!(!exact.contains("/appa-guide init"), "{exact}");
     }
 
+    /// The served adapter's inverse is what the runtime says where it addresses that
+    /// host's model. A contract's `(selector)` is the policy's own discriminator and no
+    /// part of the name the model calls; a canonical id the served host cannot name — and
+    /// the wildcard, which is no tool — stays as it is.
+    #[test]
+    fn a_served_deployment_spells_a_recorded_name_the_way_its_host_dispatches_it() {
+        let claude_code = ToolNaming::Canonical {
+            adapter: appa_adapter_claude_code::adapter(),
+        };
+        let kagent = ToolNaming::Canonical {
+            adapter: appa_adapter_kagent::adapter(),
+        };
+        for (naming, recorded, expected) in [
+            (claude_code, "host/claude-code/Read", "Read"),
+            (claude_code, "host/claude-code/Bash(command:git)", "Bash"),
+            (claude_code, "mcp/github/create_issue", "mcp__github__create_issue"),
+            (
+                claude_code,
+                appa_runtime_api::CONTROL_TOOL,
+                "mcp__plugin_appa-runtime_appa__execute_remedy_plan",
+            ),
+            (claude_code, "agent/kagent/log-analyst", "agent/kagent/log-analyst"),
+            (claude_code, "*", "*"),
+            (kagent, "mcp/k8s/get_pods", "mcp:k8s/get_pods"),
+            (kagent, "agent/kagent/log-analyst", "agent:kagent/log-analyst"),
+            (kagent, "host/kagent-gate/outer", "gate:outer"),
+            (kagent, appa_runtime_api::CONTROL_TOOL, "appa:execute_remedy_plan"),
+            (kagent, "host/claude-code/Read", "host/claude-code/Read"),
+        ] {
+            assert_eq!(naming.model_spelling(recorded), expected, "{recorded}");
+        }
+    }
+
     /// A deployment with no `[externals.annotators]` bindings: the policy under test names
     /// `builtin = "claude-code"` on the declarations it wants answered by Claude Code.
     fn claude_config(policy: &str) -> Config {
@@ -1824,7 +2264,57 @@ mod deployment_tests {
     }
 
     fn load(config: Config) -> Result<Deployment, OpenError> {
-        Deployment::load(config, &crate::builtins::ModuleRegistry::empty(), test_permits())
+        Deployment::load(
+            config,
+            &crate::builtins::ModuleRegistry::empty(),
+            test_permits(),
+            ToolNaming::AsAuthored,
+        )
+    }
+
+    /// The hooks answer the control tool's identity before a call is classified or a result
+    /// confined, so a `[deployment]` field naming it claims a treatment the runtime can never
+    /// apply. A wildcard contract makes the name pass coverage, so only this refusal stops the
+    /// claim from opening as a silent no-op — the same refusal a contract naming it gets.
+    ///
+    /// Under either spelling. This deployment is authored, so nothing else reads its tool
+    /// names: a harness translates the advertised alias into the canonical id on its way to
+    /// the hooks, and the field naming the alias would open and never apply.
+    #[test]
+    fn no_deployment_field_may_name_the_control_tool() {
+        let policy = |field: &str, tool: &str| {
+            format!(
+                r#"
+                version = 2
+                [[annotator]]
+                name = "any"
+                builtin = "claude-code"
+                [[tool]]
+                name = "*"
+                annotator = "any"
+                [deployment]
+                {field} = ["{tool}"]
+            "#
+            )
+        };
+        for tool in [
+            appa_runtime_api::CONTROL_TOOL,
+            appa_runtime_api::ADVERTISED_CONTROL_TOOL,
+        ] {
+            for field in ["assumed_tools", "provider_run_tools", "confined_results"] {
+                assert!(
+                    matches!(
+                        load(claude_config(&policy(field, tool))),
+                        Err(OpenError::ReservedTool(_))
+                    ),
+                    "[deployment] {field} naming {tool} must refuse to open"
+                );
+            }
+        }
+        assert!(
+            load(claude_config(&policy("assumed_tools", "host/claude-code/Read"))).is_ok(),
+            "every other name in the same field still opens"
+        );
     }
 
     #[test]
@@ -1841,7 +2331,15 @@ mod deployment_tests {
                 annotator = "classifier"
             "#,
         );
-        assert!(Deployment::load(tool_level, &crate::builtins::ModuleRegistry::empty(), test_permits()).is_ok());
+        assert!(
+            Deployment::load(
+                tool_level,
+                &crate::builtins::ModuleRegistry::empty(),
+                test_permits(),
+                ToolNaming::AsAuthored
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -2156,6 +2654,593 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         );
     }
 
+    /// Two stored policies that differ only in how their `[deployment]` field spells the
+    /// tool it confines. The wildcard contract covers every name, so either spelling passes
+    /// coverage at load; the contract permits the call, and only the confinement reads the
+    /// name exactly.
+    fn confining_policy(confined: &str) -> Config {
+        claude_config(&format!(
+            r#"
+            version = 2
+            [[annotator]]
+            name = "any"
+            builtin = "claude-code"
+            [[tool]]
+            name = "host/claude-code/Bash"
+            [[tool]]
+            name = "*"
+            annotator = "any"
+            [deployment]
+            confined_results = ["{confined}"]
+            "#
+        ))
+    }
+
+    /// The canonical policy the served deployment serves now: different bytes from either
+    /// stored one, so a trajectory recorded under those reopens through the retired branch.
+    fn served_policy() -> Config {
+        claude_config(
+            r#"
+            version = 2
+            [[tool]]
+            name = "host/claude-code/Bash"
+            [[tool]]
+            name = "host/claude-code/Read"
+            [deployment]
+            confined_results = ["host/claude-code/Bash"]
+            "#,
+        )
+    }
+
+    /// A trajectory recorded before the upgrade carries its own policy bytes, and reopening
+    /// it compiles them. A served deployment derives a canonical identity for every call, so
+    /// a stored policy naming a tool the host's raw way in a `[deployment]` field confines
+    /// nothing while its contract still permits the call: the served runtime refuses that
+    /// trajectory rather than deciding under it, and reopens a stored canonical policy.
+    #[tokio::test]
+    async fn a_served_deployment_refuses_a_stored_policy_its_naming_rule_rejects() {
+        for (confined, refuses) in [("Bash", true), ("host/claude-code/Bash", false)] {
+            let dir = tempfile::tempdir().expect("a temp dir is creatable");
+            let db = dir.path().join("appa.db");
+            let root = TrajectoryId("upgraded".to_string());
+
+            // Recorded under a deployment that embeds the runtime and names tools its own way.
+            let recorded = Runtime::open(confining_policy(confined), db.clone(), None).expect("the deployment opens");
+            assert_eq!(
+                crate::hooks::handle(
+                    &recorded,
+                    appa_runtime_api::HookEvent::SessionStart { root: root.clone() }
+                )
+                .await,
+                appa_runtime_api::HookDecision::Ack
+            );
+            drop(recorded);
+
+            // The upgrade: the same log, served under the canonical naming rule.
+            let served = Runtime::open_served(served_policy(), db, None, appa_adapter_claude_code::adapter())
+                .expect("the served deployment opens");
+            let decision = crate::hooks::handle(
+                &served,
+                appa_runtime_api::HookEvent::ToolCall {
+                    actor: Actor {
+                        root: root.clone(),
+                        child: None,
+                    },
+                    call: ProposedCall {
+                        tool: "host/claude-code/Bash".to_string(),
+                        arguments: raw(serde_json::json!({"command": "ls"})),
+                    },
+                    spawn: false,
+                    ruling: None,
+                },
+            )
+            .await;
+            assert_eq!(
+                matches!(decision, appa_runtime_api::HookDecision::Refuse { .. }),
+                refuses,
+                "the stored policy confines {confined}: {decision:?}"
+            );
+        }
+    }
+
+    /// Native policy names remain usable; normalization is internal and applies equally
+    /// to startup and candidate reloads.
+    #[test]
+    fn a_served_deployment_accepts_native_policy_at_startup_and_on_reload() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let db = dir.path().join("appa.db");
+        let raw = || {
+            claude_config(
+                r#"
+                version = 2
+                [[tool]]
+                name = "Bash"
+                "#,
+            )
+        };
+        let initial = Runtime::open_served(raw(), db.clone(), None, appa_adapter_claude_code::adapter())
+            .expect("native names load");
+        drop(initial);
+
+        let served = Runtime::open_served(served_policy(), db, None, appa_adapter_claude_code::adapter())
+            .expect("the served deployment opens");
+        served.reload(raw()).expect("native names reload");
+        served.reload(served_policy()).expect("a canonical policy reloads");
+    }
+
+    #[test]
+    fn a_known_uncovered_candidate_inventory_cannot_replace_the_serving_policy() {
+        use appa_runtime_api::inventory::{ObservedTool, ToolInventory};
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::open_served(
+            served_policy(),
+            dir.path().join("appa.db"),
+            None,
+            appa_adapter_claude_code::adapter(),
+        )
+        .unwrap();
+        let before = runtime
+            .preflight_inventory(None, appa_adapter_claude_code::adapter(), &ToolInventory::default())
+            .unwrap();
+        let mut candidate = claude_config("version = 2\n[[tool]]\nname = 'Read'\n");
+        candidate.inventory = ToolInventory {
+            tools: vec![ObservedTool {
+                name: "Bash".into(),
+                tool: "builtin:Bash".into(),
+            }],
+            sources: vec![],
+        };
+        assert!(runtime.reload(candidate).is_err());
+        let after = runtime
+            .preflight_inventory(None, appa_adapter_claude_code::adapter(), &ToolInventory::default())
+            .unwrap();
+        assert_eq!(before.tools, after.tools);
+    }
+
+    #[test]
+    fn observed_native_bindings_survive_reload_and_process_reopen() {
+        use appa_runtime_api::inventory::{ObservedTool, ToolInventory};
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("appa.db");
+        let config = || claude_config("version = 2\n[[tool]]\nname = \"read_secret\"\n");
+        let adapter = appa_adapter_kagent::adapter();
+        let runtime = Runtime::open_served(config(), db.clone(), None, adapter).unwrap();
+        let id = TrajectoryId("inventory-root".into());
+        let inventory = ToolInventory {
+            tools: vec![ObservedTool {
+                name: "read_secret".into(),
+                tool: "mcp:demo/read_secret".into(),
+            }],
+            ..ToolInventory::default()
+        };
+        runtime.create_session_with_inventory(id.clone(), inventory).unwrap();
+        runtime
+            .reload(claude_config("version = 2\n[[tool]]\nname = \"other\"\n"))
+            .unwrap();
+        runtime.live(&id, &id).unwrap();
+        let log = runtime.inner.log(&id).unwrap();
+        let compiled = compile_stored_for_host(log.policy_file(), ToolNaming::Canonical { adapter }).unwrap();
+        let engine = RuntimeEngine::from_policy(&compiled, ToolNaming::Canonical { adapter });
+        assert!(engine.names_tool("mcp/demo/read_secret"));
+        assert!(!engine.names_tool("read_secret"));
+        drop(runtime);
+        let reopened = Runtime::open_served(config(), db, None, adapter).unwrap();
+        reopened.live(&id, &id).unwrap();
+    }
+
+    #[test]
+    fn late_inventory_is_scoped_idempotent_and_cannot_rebind_after_reopen() {
+        use appa_runtime_api::inventory::{ObservedTool, ToolInventory};
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("appa.db");
+        let config =
+            || claude_config("version = 2\n[[tool]]\nname = 'mcp/demo/read'\n[[tool]]\nname = 'mcp/other/read'\n");
+        let adapter = appa_adapter_kagent::adapter();
+        let runtime = Runtime::open_served(config(), db.clone(), None, adapter).unwrap();
+        let actor = Actor {
+            root: TrajectoryId("inventory-root".into()),
+            child: None,
+        };
+        runtime.create_session(actor.root.clone()).unwrap();
+        let before = runtime.inner.log(&actor.root).unwrap();
+        let inventory = |server: &str| ToolInventory {
+            tools: vec![ObservedTool {
+                name: "read".into(),
+                tool: format!("mcp:{server}/read"),
+            }],
+            ..ToolInventory::default()
+        };
+        runtime.observe_inventory(&actor, adapter, &inventory("demo")).unwrap();
+        let accepted = runtime.inner.log(&actor.root).unwrap();
+        runtime.observe_inventory(&actor, adapter, &inventory("demo")).unwrap();
+        runtime
+            .observe_inventory(&actor, adapter, &ToolInventory::default())
+            .unwrap();
+        assert_eq!(runtime.inner.log(&actor.root).unwrap().basis(), accepted.basis());
+        assert!(matches!(
+            runtime.observe_inventory(&actor, adapter, &inventory("other")),
+            Err(EventError::InventoryRefused(_))
+        ));
+        assert_eq!(runtime.inner.log(&actor.root).unwrap().basis(), accepted.basis());
+        let child = Actor {
+            root: actor.root.clone(),
+            child: Some(TrajectoryId("child".into())),
+        };
+        runtime.observe_inventory(&child, adapter, &inventory("other")).unwrap();
+        let after = runtime.inner.log(&actor.root).unwrap();
+        assert_eq!(after.facts(), before.facts());
+        assert_eq!(after.policy_file(), before.policy_file());
+        assert_eq!(after.inventories().len(), 2);
+        drop(runtime);
+
+        let runtime = Runtime::open_served(config(), db, None, adapter).unwrap();
+        assert!(matches!(
+            runtime.observe_inventory(&actor, adapter, &inventory("other")),
+            Err(EventError::InventoryRefused(_))
+        ));
+        runtime.observe_inventory(&actor, adapter, &inventory("demo")).unwrap();
+        runtime.observe_inventory(&child, adapter, &inventory("other")).unwrap();
+        runtime.live(&actor.root, &actor.root).unwrap();
+    }
+
+    #[test]
+    fn inventory_retries_contention_and_only_one_racing_identity_wins() {
+        use appa_runtime_api::inventory::{ObservedTool, ToolInventory};
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = appa_adapter_kagent::adapter();
+        let runtime = Runtime::open_served(
+            claude_config("version = 2\n[[tool]]\nname = 'read'\n"),
+            dir.path().join("appa.db"),
+            None,
+            adapter,
+        )
+        .unwrap();
+        let actor = Actor {
+            root: TrajectoryId("racing-inventory".into()),
+            child: None,
+        };
+        runtime.create_session(actor.root.clone()).unwrap();
+        let inventory = |server: &str| ToolInventory {
+            tools: vec![ObservedTool {
+                name: "read".into(),
+                tool: format!("mcp:{server}/read"),
+            }],
+            ..ToolInventory::default()
+        };
+        runtime.inner.store.contend_next_appends(1);
+        let barrier = std::sync::Barrier::new(2);
+        let results = std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                barrier.wait();
+                runtime.observe_inventory(&actor, adapter, &inventory("first"))
+            });
+            let second = scope.spawn(|| {
+                barrier.wait();
+                runtime.observe_inventory(&actor, adapter, &inventory("second"))
+            });
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(EventError::InventoryRefused(_))))
+                .count(),
+            1
+        );
+        let log = runtime.inner.log(&actor.root).unwrap();
+        assert_eq!(log.inventories().len(), 1);
+        assert_eq!(log.basis(), 3, "opening, injected competing batch, accepted inventory");
+    }
+
+    #[test]
+    fn remote_preflight_is_read_only_and_uses_the_requested_policy() {
+        use crate::tool_validation::{ToolStatus, ValidationReport};
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = appa_adapter_kagent::adapter();
+        let runtime = Runtime::open_served(
+            claude_config("version = 2\n[[tool]]\nname = 'read'\n"),
+            dir.path().join("appa.db"),
+            None,
+            adapter,
+        )
+        .unwrap();
+        let request = |root: Option<&str>, name: &str| {
+            serde_json::to_vec(&serde_json::json!({
+                "protocol": appa_runtime_api::PROTOCOL, "adapter": "kagent", "root_id": root,
+                "inventory": {"tools": [{"name": name, "tool": format!("mcp:demo/{name}")}]}
+            }))
+            .unwrap()
+        };
+        let report = |root, name| {
+            let (status, report) = crate::tool_validation::answer(&runtime, adapter, &request(root, name));
+            assert_eq!(status, 200);
+            serde_json::from_value::<ValidationReport>(report).unwrap()
+        };
+        assert!(report(None, "read").is_valid());
+        assert!(!report(None, "write").is_valid());
+        assert_eq!(
+            crate::tool_validation::answer(&runtime, adapter, &request(Some("preflight"), "read")).0,
+            404
+        );
+        let root = adapter.name.root("preflight");
+        assert!(matches!(runtime.inner.log(&root), Err(EventError::UnknownTrajectory)));
+        runtime.create_session(root.clone()).unwrap();
+        let before = runtime.inner.log(&root).unwrap();
+        runtime
+            .reload(claude_config("version = 2\n[[tool]]\nname = 'write'\n"))
+            .unwrap();
+        assert!(report(None, "write").is_valid());
+        assert!(!report(None, "read").is_valid());
+        assert!(report(Some("preflight"), "read").is_valid());
+        assert!(!report(Some("preflight"), "write").is_valid());
+        let after = runtime.inner.log(&root).unwrap();
+        assert_eq!(before.basis(), after.basis());
+        assert_eq!(before.policy_file(), after.policy_file());
+        assert!(after.inventories().is_empty());
+        let unknown = crate::tool_validation::answer(
+            &runtime,
+            adapter,
+            br#"{"protocol":1,"adapter":"kagent","inventory":{}}"#,
+        );
+        let unknown: ValidationReport = serde_json::from_value(unknown.1).unwrap();
+        assert!(unknown.is_valid());
+        assert!(
+            unknown
+                .tools
+                .iter()
+                .any(|tool| matches!(tool.status, ToolStatus::Unknown { .. }))
+        );
+    }
+
+    #[test]
+    fn remote_preflight_returns_only_this_actors_durable_reservations() {
+        use appa_runtime_api::inventory::{ObservedTool, ToolInventory};
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = appa_adapter_kagent::adapter();
+        let db = dir.path().join("appa.db");
+        let config = || claude_config("version = 2\n[[tool]]\nname = 'read'\n");
+        let runtime = Runtime::open_served(config(), db.clone(), None, adapter).unwrap();
+        let root = adapter.name.root("family");
+        let inventory = |server| ToolInventory {
+            tools: vec![ObservedTool {
+                name: "read".into(),
+                tool: format!("mcp:{server}/read"),
+            }],
+            sources: Vec::new(),
+        };
+        runtime
+            .create_session_with_inventory(root.clone(), inventory("parent"))
+            .unwrap();
+        let child = Actor {
+            root: root.clone(),
+            child: Some(TrajectoryId(format!("{}:child", root.0))),
+        };
+        runtime.observe_inventory(&child, adapter, &inventory("child")).unwrap();
+        drop(runtime);
+        let runtime = Runtime::open_served(config(), db, None, adapter).unwrap();
+        let before = runtime.inner.log(&root).unwrap().basis();
+        for (child_id, expected) in [(None, "parent"), (Some("child"), "child")] {
+            for source in [expected, "replacement"] {
+                let request = serde_json::to_vec(&serde_json::json!({
+                    "protocol":1, "adapter":"kagent", "root_id":"family", "child_id":child_id,
+                    "inventory": inventory(source)
+                }))
+                .unwrap();
+                let (status, report) = crate::tool_validation::answer(&runtime, adapter, &request);
+                assert_eq!(status, 200);
+                let report: crate::tool_validation::ValidationReport = serde_json::from_value(report).unwrap();
+                assert_eq!(report.accepted_tools, inventory(expected).tools);
+                assert_eq!(report.is_valid(), source == expected);
+            }
+        }
+        assert_eq!(runtime.inner.log(&root).unwrap().basis(), before);
+    }
+
+    #[test]
+    fn remote_preflight_rejects_bad_envelopes_and_host_name_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = appa_adapter_kagent::adapter();
+        let runtime = Runtime::open_served(
+            claude_config("version = 2\n[[tool]]\nname = 'read'\n"),
+            dir.path().join("appa.db"),
+            None,
+            adapter,
+        )
+        .unwrap();
+        for body in [
+            serde_json::json!({"protocol": 99, "adapter": "kagent", "inventory": {}}),
+            serde_json::json!({"protocol": 1, "adapter": "claude-code", "inventory": {}}),
+            serde_json::json!({"protocol": 1, "adapter": "kagent", "inventory": {}, "root_id": ""}),
+            serde_json::json!({"protocol": 1, "adapter": "kagent", "inventory": {}, "extra": true}),
+            serde_json::json!({"protocol": 1, "adapter": "kagent", "inventory": {}, "child_id": "child"}),
+        ] {
+            assert!(crate::tool_validation::answer(&runtime, adapter, &serde_json::to_vec(&body).unwrap()).0 >= 400);
+        }
+        let (status, report) = crate::tool_validation::answer(&runtime, adapter, br#"{"protocol":1,"adapter":"kagent","inventory":{"tools":[{"name":"first_read","tool":"mcp:demo/read"}]}}"#);
+        assert_eq!(status, 200);
+        let report: crate::tool_validation::ValidationReport = serde_json::from_value(report).unwrap();
+        assert!(!report.is_valid());
+        assert!(!report.errors.is_empty());
+    }
+
+    #[test]
+    fn known_uncovered_inventory_does_not_open_a_trajectory() {
+        use appa_runtime_api::inventory::{ObservedTool, ToolInventory};
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::open_served(
+            claude_config("version = 2\n[[tool]]\nname = \"read\"\n"),
+            dir.path().join("appa.db"),
+            None,
+            appa_adapter_kagent::adapter(),
+        )
+        .unwrap();
+        let id = TrajectoryId("invalid-inventory".into());
+        let inventory = ToolInventory {
+            tools: vec![ObservedTool {
+                name: "write".into(),
+                tool: "mcp:demo/write".into(),
+            }],
+            ..ToolInventory::default()
+        };
+        assert!(runtime.create_session_with_inventory(id.clone(), inventory).is_err());
+        assert!(matches!(runtime.session(&id, &id), Err(EventError::UnknownTrajectory)));
+    }
+
+    #[tokio::test]
+    async fn a_late_discovered_tool_uses_its_existing_native_rule_without_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = appa_adapter_kagent::adapter();
+        let db = dir.path().join("appa.db");
+        let runtime = Runtime::open_served(
+            claude_config(
+                "version = 2\n[[tool]]\nname = \"read_secret\"\n[deployment]\nconfined_results = ['read_secret']\n",
+            ),
+            db.clone(),
+            None,
+            adapter,
+        )
+        .unwrap();
+        let opening = serde_json::json!({
+            "protocol": 1, "adapter": "kagent", "event": "session_start", "root_id": "late",
+            "inventory": { "tools": [], "sources": [{"server": "demo", "status": "unavailable", "dynamic": true}] }
+        });
+        let (status, response) = crate::hooks::answer(&runtime, &adapter, &serde_json::to_vec(&opening).unwrap()).await;
+        assert_eq!(status, 200, "{response}");
+        let call = serde_json::json!({
+            "protocol": 1, "adapter": "kagent", "event": "tool_call", "root_id": "late",
+            "tool": "mcp:demo/read_secret", "arguments": {},
+            "inventory": {
+                "tools": [{"name": "read_secret", "tool": "mcp:demo/read_secret"}],
+                "sources": [{"server": "demo", "status": "complete", "dynamic": true}]
+            }
+        });
+        let (status, response) = crate::hooks::answer(&runtime, &adapter, &serde_json::to_vec(&call).unwrap()).await;
+        assert_eq!(status, 200, "{response}");
+        let decision = serde_json::from_value::<appa_runtime_api::WireDecision>(response)
+            .unwrap()
+            .into_decision()
+            .unwrap();
+        assert!(matches!(decision, appa_runtime_api::HookDecision::AllowCall { .. }));
+        let result = br#"{"protocol":1,"adapter":"kagent","event":"tool_result","root_id":"late","tool":"mcp:demo/read_secret","arguments":{},"outcome":{"status":"success","body":{ "literal" : "mcp:demo/read_secret" }}}"#;
+        let (status, response) = crate::hooks::answer(&runtime, &adapter, result).await;
+        assert_eq!(status, 200, "{response}");
+        assert_eq!(response["decision"], "ack", "unchanged output stays with the host");
+        let root = TrajectoryId("kagent:late".into());
+        let before = runtime.inner.log(&root).unwrap();
+        assert!(before.facts().iter().any(|fact| matches!(fact,
+            appa_engine::fact::Fact::ValueAdmitted { value, .. }
+                if value.body.as_str() == r#"{ "literal" : "mcp:demo/read_secret" }"#
+        )));
+        runtime
+            .live(&TrajectoryId("kagent:late".into()), &TrajectoryId("kagent:late".into()))
+            .unwrap();
+        drop(runtime);
+        let reopened = Runtime::open_served(
+            claude_config("version = 2\n[[tool]]\nname = 'different'\n"),
+            db,
+            None,
+            adapter,
+        )
+        .unwrap();
+        reopened.live(&root, &root).unwrap();
+        let after = reopened.inner.log(&root).unwrap();
+        assert_eq!(after.facts(), before.facts());
+        assert_eq!(after.policy_file(), before.policy_file());
+        assert_eq!(after.inventories(), before.inventories());
+    }
+
+    #[tokio::test]
+    async fn a_remote_child_discovers_its_own_server_under_the_same_opening_registry() {
+        async fn send(runtime: &Runtime, mut event: serde_json::Value) -> serde_json::Value {
+            event["protocol"] = 1.into();
+            event["adapter"] = "kagent".into();
+            event["root_id"] = "family".into();
+            let (status, response) = crate::hooks::answer(
+                runtime,
+                &appa_adapter_kagent::adapter(),
+                &serde_json::to_vec(&event).unwrap(),
+            )
+            .await;
+            assert_eq!(status, 200, "{response}");
+            response
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let config = || {
+            claude_config(
+                "version = 2\n[[tool]]\nname = 'read'\n[[tool]]\nname = 'team__NS__child'\n[deployment]\ncontext_control = true\n",
+            )
+        };
+        let db = dir.path().join("appa.db");
+        let runtime = Runtime::open_served(config(), db.clone(), None, appa_adapter_kagent::adapter()).unwrap();
+        let inventory = |server: &str| serde_json::json!({"tools":[{"name":"read", "tool":format!("mcp:{server}/read")}],"sources":[{"server":server,"status":"complete","dynamic":true}]});
+        send(
+            &runtime,
+            serde_json::json!({"event":"session_start","inventory":inventory("parent-server")}),
+        )
+        .await;
+        let root = TrajectoryId("kagent:family".into());
+        let before = runtime.inner.log(&root).unwrap();
+        let spawn = serde_json::json!({"event":"tool_call","tool":"agent:team/child","arguments":{}});
+        let held = send(&runtime, spawn.clone()).await;
+        let offer = held["offers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|offer| offer["returns"] == "as_spoken")
+            .unwrap()["offer_id"]
+            .as_str()
+            .unwrap();
+        let args = serde_json::json!({"offer_id":offer,"label":{}});
+        let passed = send(
+            &runtime,
+            serde_json::json!({"event":"tool_call","tool":"appa:execute_remedy_plan","arguments":args}),
+        )
+        .await;
+        assert_eq!(passed["decision"], "pass_control");
+        let (offer, args) = parse_control_arguments(&args.to_string()).unwrap();
+        let actor = Actor {
+            root: root.clone(),
+            child: None,
+        };
+        assert!(matches!(
+            runtime.execute_remedy_with(&actor, offer, args).await,
+            RemedyOutcome::Authorized { .. }
+        ));
+        let released = send(&runtime, spawn).await;
+        assert_eq!(released["decision"], "allow_call");
+        let child_actor = Actor {
+            root: root.clone(),
+            child: Some(TrajectoryId("kagent:family:child".into())),
+        };
+        let empty = appa_runtime_api::inventory::ToolInventory::default();
+        let check = runtime
+            .preflight_inventory(Some(&child_actor), appa_adapter_kagent::adapter(), &empty)
+            .unwrap();
+        assert!(!check.actor_opened);
+        send(&runtime, serde_json::json!({"event":"child_start","child_id":"child","spawn_binding":released["spawn_binding"],"inventory":{"tools":[],"sources":[]}})).await;
+        let check = runtime
+            .preflight_inventory(Some(&child_actor), appa_adapter_kagent::adapter(), &empty)
+            .unwrap();
+        assert!(check.actor_opened, "opening is independent of the tool count");
+        assert!(check.accepted_tools.is_empty());
+        let allowed = send(&runtime, serde_json::json!({"event":"tool_call","child_id":"child","tool":"mcp:child-server/read","arguments":{},"inventory":inventory("child-server")})).await;
+        assert_eq!(allowed["decision"], "allow_call");
+        let after = runtime.inner.log(&root).unwrap();
+        assert_eq!(before.policy_file(), after.policy_file());
+        assert_eq!(
+            after.inventories().len(),
+            1,
+            "only the child adds observations beyond the root snapshot"
+        );
+        drop(runtime);
+        let reopened = Runtime::open_served(config(), db, None, appa_adapter_kagent::adapter()).unwrap();
+        reopened
+            .live(&root, &TrajectoryId("kagent:family:child".into()))
+            .unwrap();
+        assert_eq!(reopened.inner.log(&root).unwrap().facts(), after.facts());
+    }
+
     #[test]
     fn the_serving_policy_key_names_the_deployment_answering_now() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -2185,6 +3270,63 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             .lock()
             .expect("the retired-engine mutex is never poisoned")
             .len()
+    }
+
+    /// The offer a subagent pursued falls to its parent when the subagent
+    /// ends, and the parent quotes the same id. Nothing releases what the
+    /// subagent left standing — a turn end releases the actor's own vouches,
+    /// and a subagent's end is not the parent's turn end — so the two quotes
+    /// meet on one id. The parent is the offer's pursuer now, so its quote
+    /// supersedes the stale one: the take is the parent's, carrying the
+    /// ruling the parent's harness attached and not the child's.
+    #[tokio::test]
+    async fn a_parents_quote_supersedes_the_vouch_its_ended_child_left_standing() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = std::sync::Arc::new(
+            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens"),
+        );
+        let root = TrajectoryId("vouch-supersede".to_string());
+        assert_eq!(
+            crate::hooks::handle(
+                &runtime,
+                appa_runtime_api::HookEvent::SessionStart { root: root.clone() }
+            )
+            .await,
+            appa_runtime_api::HookDecision::Ack
+        );
+        let parent = Actor {
+            root: root.clone(),
+            child: None,
+        };
+        let child = Actor {
+            root: root.clone(),
+            child: Some(TrajectoryId(format!("{}:c1", root.0))),
+        };
+        let quoted = PermitKey::offer(&OfferId("offer-1".to_string()));
+
+        runtime.vouch(&quoted, &child, Some(appa_runtime_api::Ruling::Approve));
+        crate::hooks::handle(&runtime, appa_runtime_api::HookEvent::TurnEnd { actor: parent.clone() }).await;
+        assert_eq!(
+            runtime.take_vouched(&quoted),
+            Ok((child.clone(), Some(appa_runtime_api::Ruling::Approve))),
+            "a turn end releases the actor's own vouches, and a child's is not one of them"
+        );
+
+        runtime.vouch(&quoted, &child, Some(appa_runtime_api::Ruling::Approve));
+        runtime.vouch(&quoted, &parent, None);
+        assert_eq!(
+            runtime.take_vouched(&quoted),
+            Ok((parent.clone(), None)),
+            "the offer's pursuer takes its own vouch, and no one else's ruling rides it"
+        );
+
+        runtime.vouch(&quoted, &parent, None);
+        runtime.release_vouches(&child);
+        assert_eq!(
+            runtime.take_vouched(&quoted),
+            Ok((parent, None)),
+            "releasing the child's vouches takes away no vouch of the parent's"
+        );
     }
 
     #[tokio::test]
@@ -2324,5 +3466,186 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             matches!(runtime.live(&root, &root), Err(EventError::PolicyUnavailable(_))),
             "the root's policy file is gone, which is not a storage failure"
         );
+    }
+}
+
+/// Spawn coverage is the deployment's, not a caller's: a served runtime reads it off the
+/// adapter it answers, so it cannot serve one host under another host's rule.
+#[cfg(test)]
+mod spawn_coverage_tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::config::Config;
+    use appa_runtime_api::{HookDecision, HookEvent};
+    use axum::Router;
+    use axum::extract::State;
+    use axum::routing::post;
+
+    /// The agent no contract in the fixture policy names.
+    const UNNAMED: &str = "agent/NS/release_manager";
+
+    fn root() -> TrajectoryId {
+        TrajectoryId("coverage-root".to_string())
+    }
+
+    fn acting() -> Actor {
+        Actor {
+            root: root(),
+            child: None,
+        }
+    }
+
+    /// An annotator that lets everything through unchanged, counting its consults.
+    async fn permissive_annotator() -> (String, Arc<Mutex<usize>>) {
+        let consults = Arc::new(Mutex::new(0usize));
+        let router = Router::new()
+            .route(
+                "/annotate",
+                post(|State(consults): State<Arc<Mutex<usize>>>, _body: String| async move {
+                    *consults.lock().expect("the consult counter is never poisoned") += 1;
+                    axum::Json(serde_json::json!({
+                        "version": 1,
+                        "answer": {
+                            "delta": {},
+                            "requires": { "history": [], "attention": [] },
+                            "emits": [],
+                        }
+                    }))
+                }),
+            )
+            .with_state(Arc::clone(&consults));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("an ephemeral loopback port binds");
+        let addr = listener.local_addr().expect("the bound address is readable");
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("the stub serves");
+        });
+        (format!("http://{addr}/annotate"), consults)
+    }
+
+    /// One agent this deployment delegates to, by the canonical name both adapters derive,
+    /// and a wildcard over everything else. Every name is canonical, so a served deployment
+    /// of either host loads it.
+    fn config(dir: &tempfile::TempDir, url: &str) -> Config {
+        let text = format!(
+            r#"
+[policy]
+version = 2
+
+[[policy.annotator]]
+name = "gatekeeper"
+
+[[policy.tool]]
+name = "agent/NS/log_analyst"
+delta = {{}}
+
+[[policy.tool]]
+name = "*"
+annotator = "gatekeeper"
+
+[policy.deployment]
+context_control = true
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+
+[externals.annotators.gatekeeper]
+url = "{url}"
+"#
+        );
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, text).expect("the fixture writes");
+        Config::load(&path).expect("the fixture validates")
+    }
+
+    /// The deployment under `adapter`, or — `None` — the one an embedding host opens.
+    async fn opened(dir: &tempfile::TempDir, url: &str, adapter: Option<Adapter>) -> Runtime {
+        let config = config(dir, url);
+        let db = dir.path().join("appa.db");
+        let runtime = match adapter {
+            Some(adapter) => Runtime::open_served(config, db, None, adapter).expect("the served deployment opens"),
+            None => Runtime::open(config, db, None).expect("the embedded deployment opens"),
+        };
+        assert_eq!(
+            crate::hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
+            HookDecision::Ack
+        );
+        runtime
+    }
+
+    async fn call(runtime: &Runtime, tool: &str, spawn: bool) -> HookDecision {
+        crate::hooks::handle(
+            runtime,
+            HookEvent::ToolCall {
+                actor: acting(),
+                call: ProposedCall {
+                    tool: tool.to_string(),
+                    arguments: raw(serde_json::json!({ "request": "summarize the crash logs" })),
+                },
+                spawn,
+                ruling: None,
+            },
+        )
+        .await
+    }
+
+    /// Served under kagent: an agent no contract names cannot run as a child, and the
+    /// refusal stands before any evidence is gathered. The same name proposed as an
+    /// ordinary call is the wildcard's to cover, as any other call is.
+    #[tokio::test]
+    async fn a_kagent_deployment_covers_no_spawn_the_policy_does_not_name() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let (url, consults) = permissive_annotator().await;
+        let runtime = opened(&dir, &url, Some(appa_adapter_kagent::adapter())).await;
+
+        let denied = call(&runtime, UNNAMED, true).await;
+        let HookDecision::DenyCall { offers, review, .. } = &denied else {
+            panic!("an unnamed agent spawns nothing, got {denied:?}");
+        };
+        assert!(offers.is_empty(), "no contract, no offer: {denied:?}");
+        assert!(review.is_empty(), "nothing to review: {denied:?}");
+        assert_eq!(
+            *consults.lock().expect("the counter reads"),
+            0,
+            "no consult stands in for a missing declaration"
+        );
+
+        assert_eq!(
+            call(&runtime, UNNAMED, false).await,
+            HookDecision::AllowCall { spawn: None },
+            "the wildcard covers the ordinary call under the same name"
+        );
+        assert_eq!(
+            *consults.lock().expect("the counter reads"),
+            1,
+            "the wildcard annotated the ordinary call"
+        );
+    }
+
+    /// Every other deployment keeps the wildcard's cover over a spawn: the served Claude
+    /// Code runtime, whose `Task` is an ordinary call the policy need not name, and a host
+    /// that embeds the runtime. The spawn is judged like any call and held on the return
+    /// menu, which is a decision no unnamed agent reaches under kagent.
+    #[tokio::test]
+    async fn every_other_deployment_lets_the_wildcard_cover_a_spawn() {
+        for adapter in [Some(appa_adapter_claude_code::adapter()), None] {
+            let dir = tempfile::tempdir().expect("a temp dir is creatable");
+            let (url, consults) = permissive_annotator().await;
+            let runtime = opened(&dir, &url, adapter).await;
+
+            let held = call(&runtime, UNNAMED, true).await;
+            let HookDecision::DenyCall { offers, .. } = &held else {
+                panic!("a covered spawn is held on the return menu, got {held:?}");
+            };
+            assert!(!offers.is_empty(), "the wildcard covered the spawn: {held:?}");
+            assert_eq!(
+                *consults.lock().expect("the counter reads"),
+                1,
+                "the wildcard annotated the spawn as it annotates any call"
+            );
+        }
     }
 }

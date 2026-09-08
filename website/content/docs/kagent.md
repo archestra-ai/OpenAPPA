@@ -43,7 +43,7 @@ Deploy the kagent controller, `appa-runtime`, and the demonstration fleet in one
 
 ```sh
 : "${OPENAI_API_KEY:?Set OPENAI_API_KEY before installing kagent}"
-APPA_VERSION=0.15.0 # x-release-please-version
+APPA_VERSION=0.16.0 # x-release-please-version
 
 # 1. Install kagent CRDs and OpenAI secret
 helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-crds \
@@ -246,7 +246,7 @@ To protect existing kagent workloads without downtime, follow these steps:
 Update the kagent controller to use the OpenAPPA plugin image, and deploy `appa-runtime` with `appa-guide`:
 
 ```sh
-APPA_VERSION=0.15.0 # x-release-please-version
+APPA_VERSION=0.16.0 # x-release-please-version
 
 # 1. Update the kagent controller to use the OpenAPPA plugin image
 helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
@@ -344,6 +344,30 @@ show me the active policy rules for cluster-ops
 ```
 
 For the formal policy grammar and syntax specification, see [Policy configuration](/contracts).
+
+## Tool names and startup requirements
+
+Both the Python and Go plugins post the shared hook protocol (`protocol: 1`) to `/hook`. Run the runtime with `--adapter kagent`; trajectory ids receive the `kagent:` prefix.
+
+Policies can use the names the agent already calls, such as `read_secret` or `ask_user`. The plugin supplies source identities internally. Canonical names remain available when a rule must target one source:
+
+| kagent dispatches | Policy name |
+|---|---|
+| MCP tool | `mcp/<toolset>/<tool>` |
+| Agent called as a tool | `agent/<namespace>/<agent>` |
+| Built-in tool | `host/kagent/<name>` |
+| Code-execution or memory-persist gate | `host/kagent-gate/code_execution`, `host/kagent-gate/memory_persist` |
+| Remedy tool | `appa/execute_remedy_plan` (not declared in policy) |
+
+For example, the demo declares `name = "read_secret"`. Agent delegation needs an explicit contract, such as `agent/<namespace>/<agent>`; wildcards do not cover delegation spawns.
+
+MCP `tools` filters are optional. Before opening a trajectory, the plugin enumerates metadata from configured servers using kagent's authentication and transport. Discovery never executes tools. APPA checks observed names against policy before exposing them to the model.
+
+Validation distinguishes covered tools, known errors, and unknowns. Known uncovered tools or ambiguous names prevent initial activation. An unreachable server remains unknown and does not prevent activation. During a trajectory, covered late tools become available; invalid additions stay unavailable without removing working tools.
+
+Configured HTTP(S) endpoints are accepted inside or outside Kubernetes. A source ID is `server-` followed by the SHA-256 of the exact configured URL, not its first DNS label. This separates namespaces, ports and paths without guessing a provider. Duplicate endpoints are rejected. Use the optional rule `server` and deployment `server_aliases` when a rule needs a source constraint. A trajectory retains its opening policy and accepted tool identities across plugin restarts. Native approvals and per-call APPA enforcement still apply.
+
+Offline `appa describe --check` validates configuration and reports what it cannot observe. It cannot establish a live host catalogue. Claude Code likewise supplies tools as host events arrive; missing catalogue evidence must not be reported as complete coverage. See [Tool names](/contracts#tool-names) for the canonical grammar.
 
 ## Where next
 

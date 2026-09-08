@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::{env, ffi::OsString, iter};
 
+use appa_runtime_api::AdapterName;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -26,8 +27,8 @@ enum Command {
         )]
         batteries_dir: Vec<PathBuf>,
 
-        #[arg(long, value_enum, default_value_t = Adapter::ClaudeCode)]
-        adapter: Adapter,
+        #[arg(long, default_value_t = AdapterName::ClaudeCode)]
+        adapter: AdapterName,
 
         /// Exit unsuccessfully unless the complete configuration loads.
         #[arg(long)]
@@ -92,21 +93,6 @@ enum Command {
     },
 }
 
-#[derive(Clone, Copy, clap::ValueEnum)]
-enum Adapter {
-    ClaudeCode,
-    Kagent,
-}
-
-impl Adapter {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::ClaudeCode => "claude-code",
-            Self::Kagent => "kagent",
-        }
-    }
-}
-
 #[derive(Subcommand)]
 enum Harness {
     /// Install this build's Claude Code plugin and initialize its local deployment.
@@ -143,8 +129,8 @@ fn main() -> ExitCode {
         } => {
             let config = config.unwrap_or_else(appa_runtime::init::installed_config_path);
             let description = appa_runtime::describe::render(&config, &batteries_dir, adapter.as_str());
-            print!("{description}");
-            if check && !appa_runtime::describe::is_loadable(&config, &batteries_dir) {
+            print!("{}", description.text);
+            if check && !description.valid {
                 ExitCode::FAILURE
             } else {
                 ExitCode::SUCCESS

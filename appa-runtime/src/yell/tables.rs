@@ -468,11 +468,18 @@ static OPEN_VECTOR_SURFACE: Table = Table {
     entries: &[("surface", Rule::Token(Class::Surface))],
 };
 
+static OPEN_VECTOR_RULE: Table = Table {
+    name: "OpenVector::rule",
+    entries: &[("rule", Rule::Token(Class::Tool))],
+};
+
 static OPEN_VECTOR: Table = Table {
     name: "OpenVector",
     entries: &[
         ("AssumedExecutor", Rule::Table(&OPEN_VECTOR_TOOL)),
         ("ProviderRunDispatch", Rule::Table(&OPEN_VECTOR_TOOL)),
+        ("AssumedExecutorRule", Rule::Table(&OPEN_VECTOR_RULE)),
+        ("ProviderRunRule", Rule::Table(&OPEN_VECTOR_RULE)),
         ("OpenProviderSurface", Rule::Table(&OPEN_VECTOR_SURFACE)),
     ],
 };

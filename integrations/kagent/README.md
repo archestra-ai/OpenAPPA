@@ -35,8 +35,8 @@ Wraps kagent's published Python runtime container image. It ships `AppaPluginKag
 ### 2. Go Runtime (`appa-kagent-adk-go/`)
 Implements `AppaPluginKagent` for Google Go ADK v2. It provides a replacement runtime main that registers the plugin, manages session lineage headers across delegations, and coordinates human-in-the-loop approvals.
 
-### 3. Codec Crate (`appa-adapter-kagent`)
-The Rust codec crate lives at [`appa-adapter-kagent/`](../../appa-adapter-kagent) in the workspace root. It compiles directly into `appa-runtime` and parses wire events sent by `AppaPluginKagent`.
+### 3. Adapter Crate (`appa-adapter-kagent`)
+The Rust adapter crate lives at [`appa-adapter-kagent/`](../../appa-adapter-kagent) in the workspace root. It is compiled directly into `appa-runtime`. Both plugins post the canonical hook envelope ([`appa-runtime-api/src/wire.rs`](../../appa-runtime-api/src/wire.rs)) to `POST /hook`; the crate derives the canonical tool id and whether a call is a spawn from the structured tool spelling they send (`mcp:<toolset>/<tool>`, `agent:<namespace>/<agent>`, `builtin:<name>`, `gate:<name>`, `appa:execute_remedy_plan`).
 
 ### 4. Guide Skill (`../appa-guide/`)
 The `appa-guide` agent runs in kagent using Kubernetes tools and `appa_match_batteries`. It drafts policy in chat and updates the runtime ConfigMap under kagent confirmation cards.
@@ -63,7 +63,7 @@ helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-c
   --version 0.9.12 -n kagent --create-namespace --force-conflicts
 
 # 2. Install kagent with the appa plugin image
-APPA_VERSION=0.15.0 # x-release-please-version
+APPA_VERSION=0.16.0 # x-release-please-version
 OPENAI_API_KEY_B64="$(printf %s "$OPENAI_API_KEY" | base64 | tr -d '\n')"
 kubectl apply -f - <<EOF
 apiVersion: v1

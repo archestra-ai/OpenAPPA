@@ -8,8 +8,8 @@ use appa_runtime::api::{LabelSpelling, OfferId, OfferedRemedy, RemedyArguments, 
 use appa_runtime::config::{Binding, Config, ExternalBindings};
 use appa_runtime::hooks;
 use appa_runtime_api::{
-    Actor, HookDecision, HookEvent, OfferedReturn, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome,
-    TrajectoryId,
+    ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OfferedReturn, OutcomeBody, ProposedCall, SpawnBinding,
+    SpawnRef, ToolOutcome, TrajectoryId, canonical_tool_name, is_reserved_tool_name,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
@@ -24,7 +24,6 @@ const MAX_BODY_BYTES: usize = 256 * 1024;
 const BRIDGE_TIMEOUT: Duration = Duration::from_secs(30);
 const CONSULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-const CONTROL_TOOL: &str = "execute_remedy_plan";
 const OFFER_ARGUMENT: &str = "offer_id";
 
 create_exception!(appa_agent_python, AppaError, PyRuntimeError);
@@ -106,6 +105,13 @@ enum ReturnDisposition {
     Substituted,
 }
 
+/// Whether the model received the tool's own bytes or something APPA put in
+/// their place. The same line [`ReturnDisposition`] draws for a child's value,
+/// on the result of a tool call: `Admitted` is the produced result crossing
+/// unchanged, and everything else is `Sealed` — a runtime notice, a narrowing's
+/// text, a refusal, and a value the engine admitted in place of the raw result,
+/// which is a confined result or a sanitizer's derivation and not what the tool
+/// produced. Diagnostic only: nothing branches on it.
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 enum DeliveryDisposition {
@@ -178,6 +184,15 @@ impl SessionInner {
         let bridge_url = bridge_url.map(validate_bridge_url).transpose()?;
         let tools: Vec<ToolInput> =
             serde_json::from_str(tools_json).map_err(|error| format!("invalid tools JSON: {error}"))?;
+        // Both of the control tool's names belong to the runtime, so a host tool spelled
+        // either way would be indistinguishable from it at check time: every call to that
+        // name reaches remedy handling. The session refuses the inventory rather than
+        // rerouting the host's tool.
+        for name in tools.iter().map(ToolInput::name).chain(spawn_tool) {
+            if is_reserved_tool_name(name) {
+                return Err(format!("{name} is a reserved control tool name; rename the host tool"));
+            }
+        }
         let policy = toml::to_string(&compose_policy(policy_toml, &tools, bridge_url.is_some(), spawn_tool)?)
             .map_err(|error| format!("the composed policy does not render: {error}"))?;
 
@@ -334,7 +349,7 @@ impl SessionInner {
             return Err("tool arguments must be a JSON object".to_string());
         }
         let call = ProposedCall {
-            tool: tool.to_string(),
+            tool: canonical_tool_name(tool).to_string(),
             arguments,
         };
 
@@ -358,7 +373,9 @@ impl SessionInner {
 
     fn execute_remedy(&self, child: Option<&TrajectoryId>, call: &ProposedCall) -> String {
         let Ok((offer, arguments)) = appa_runtime::api::parse_control_arguments(call.arguments.get()) else {
-            return format!("{CONTROL_TOOL} needs an {OFFER_ARGUMENT}, quoted exactly as the feedback surfaced it.");
+            return format!(
+                "{ADVERTISED_CONTROL_TOOL} needs an {OFFER_ARGUMENT}, quoted exactly as the feedback surfaced it."
+            );
         };
         match self
             .tokio
@@ -459,7 +476,12 @@ impl SessionInner {
         let (content, disposition) = match decision {
             HookDecision::Ack if as_produced => (produced, DeliveryDisposition::Admitted),
             HookDecision::Ack => (produced, DeliveryDisposition::Sealed),
-            HookDecision::ReplaceOutput { output } => (output, DeliveryDisposition::Sealed),
+            // `DeliverValue` carries what the engine admitted in place of the
+            // raw result, so it is sealed for the reason `ChildReturn` is
+            // substituted: the model reads it, and the tool did not write it.
+            HookDecision::ReplaceOutput { output } | HookDecision::DeliverValue { value: output } => {
+                (output, DeliveryDisposition::Sealed)
+            }
             HookDecision::Block { reason } => (reason, DeliveryDisposition::Sealed),
             other => return Err(format!("the runtime answered a tool outcome with {other:?}")),
         };
@@ -683,10 +705,12 @@ impl SessionInner {
             },
             // A void return closes the spawn with nothing carried; the placeholder
             // is the parent's tool result, not a value.
-            HookDecision::ReplaceOutput { .. } if crossing.is_none() => ReturnResponse::Returned {
-                value: None,
-                disposition,
-            },
+            HookDecision::ReplaceOutput { .. } | HookDecision::DeliverValue { .. } if crossing.is_none() => {
+                ReturnResponse::Returned {
+                    value: None,
+                    disposition,
+                }
+            }
             HookDecision::Block { reason } => ReturnResponse::Blocked { feedback: reason },
             other => return Err(format!("the runtime answered a spawn result with {other:?}")),
         })
@@ -1218,7 +1242,7 @@ delta    = {}
 
         let taken = session
             .root_check(
-                CONTROL_TOOL,
+                ADVERTISED_CONTROL_TOOL,
                 &format!(r#"{{"{OFFER_ARGUMENT}":"{}"}}"#, offer_id(&blocked)),
             )
             .unwrap();
@@ -1239,7 +1263,7 @@ delta    = {}
     fn an_unsurfaced_offer_authorizes_nothing() {
         let mut session = session(None);
         let answered = session
-            .root_check(CONTROL_TOOL, r#"{"offer_id":"offer-nobody-surfaced-0"}"#)
+            .root_check(ADVERTISED_CONTROL_TOOL, r#"{"offer_id":"offer-nobody-surfaced-0"}"#)
             .unwrap();
         assert_eq!(kind(&answered), "blocked");
         assert_eq!(
@@ -1253,12 +1277,47 @@ delta    = {}
     fn the_control_tool_answers_without_opening_a_dispatch() {
         let mut session = session(None);
         let refused = session
-            .root_check(CONTROL_TOOL, r#"{"offer_id":"offer-nobody-surfaced"}"#)
+            .root_check(ADVERTISED_CONTROL_TOOL, r#"{"offer_id":"offer-nobody-surfaced"}"#)
             .unwrap();
         assert_eq!(kind(&refused), "blocked");
         assert!(session.pending.is_none(), "no outcome is owed");
-        assert_eq!(kind(&session.root_check(CONTROL_TOOL, "{}").unwrap()), "control");
+        assert_eq!(
+            kind(&session.root_check(ADVERTISED_CONTROL_TOOL, "{}").unwrap()),
+            "control"
+        );
         assert!(session.pending.is_none(), "no outcome is owed");
+    }
+
+    /// Both control tool names reach remedy handling — the advertised alias is translated
+    /// into the canonical id, and the canonical id passes through — so a host tool or a
+    /// spawn tool under either one opens no session.
+    #[test]
+    fn a_host_tool_spelled_like_the_control_tool_opens_no_session() {
+        for reserved in [ADVERTISED_CONTROL_TOOL, appa_runtime_api::CONTROL_TOOL] {
+            let opened = SessionInner::open(
+                POLICY,
+                &format!(r#"["publish","{reserved}"]"#),
+                "do the thing",
+                None,
+                None,
+                None,
+            );
+            assert!(opened.is_err(), "a host tool cannot claim {reserved}");
+
+            let spawn = SessionInner::open(POLICY, r#"["publish"]"#, "do the thing", None, None, Some(reserved));
+            assert!(spawn.is_err(), "a spawn tool cannot claim {reserved} either");
+        }
+
+        // The refusal is the collision, not the name: the control tool still answers.
+        let mut session = session(None);
+        assert_eq!(
+            kind(&session.root_check(ADVERTISED_CONTROL_TOOL, "{}").unwrap()),
+            "control"
+        );
+        assert_eq!(
+            kind(&session.root_check(appa_runtime_api::CONTROL_TOOL, "{}").unwrap()),
+            "control"
+        );
     }
 
     #[test]
@@ -1380,7 +1439,7 @@ trust = { from = "suspicious", to = "trusted" }
         let taken = session
             .check(
                 Some(&child()),
-                CONTROL_TOOL,
+                ADVERTISED_CONTROL_TOOL,
                 &format!(r#"{{"{OFFER_ARGUMENT}":"{}"}}"#, offer_id(&blocked)),
                 false,
             )
@@ -1547,7 +1606,7 @@ trust = { from = "suspicious", to = "trusted" }
         let blocked = session.root_check("read_external", "{}").unwrap();
         session
             .root_check(
-                CONTROL_TOOL,
+                ADVERTISED_CONTROL_TOOL,
                 &format!(r#"{{"{OFFER_ARGUMENT}":"{}"}}"#, offer_id(&blocked)),
             )
             .unwrap();
