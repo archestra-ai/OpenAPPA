@@ -97,8 +97,6 @@ kubectl rollout status deployment/appa-runtime -n "$KAGENT_NAMESPACE" --timeout=
 kubectl rollout status deployment/cluster-ops -n "$KAGENT_NAMESPACE" --timeout=5m
 kubectl wait remotemcpserver/demo-tools -n "$KAGENT_NAMESPACE" \
   --for=jsonpath='{.status.discoveredTools[0].name}' --timeout=2m
-kubectl get remotemcpserver/demo-tools -n "$KAGENT_NAMESPACE" \
-  -o jsonpath='{range .status.discoveredTools[*]}{.name}{"\n"}{end}'
 ```
 
 To clean up the demo later, see [Uninstall](#uninstall).
