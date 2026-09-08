@@ -77,8 +77,8 @@ class SyncHookGate:
         except wire.WireError as error:
             raise AppaFailClosed(str(error)) from error
 
-    def ids(self, session: Any) -> tuple[str, str | None]:
-        return self._identity.ids(session)
+    def ids(self, invocation_context: Any) -> tuple[str, str | None]:
+        return self._identity.ids_for(invocation_context)
 
     def for_model(self, text: str | None) -> str:
         """Runtime text as the model must read it, as the plugin spells it."""
@@ -103,8 +103,7 @@ class GatedCodeExecutor:
     def execute_code(self, invocation_context: Any, code_execution_input: Any) -> Any:
         from google.adk.code_executors.code_execution_utils import CodeExecutionResult
 
-        session = invocation_context.session
-        root_id, child_id = self._gate.ids(session)
+        root_id, child_id = self._gate.ids(invocation_context)
         arguments = {"code": code_execution_input.code}
         decision = self._gate.post(wire.tool_call(root_id, CODE_EXECUTION_TOOL, arguments, child_id))
         if decision.kind == "deny_call":
@@ -149,16 +148,17 @@ def gate_memory_persist(agent: Any, plugin: AppaPluginKagent) -> bool:
 
 def _gated_persist(stock: Any, plugin: AppaPluginKagent):
     async def appa_gated_memory_persist(callback_context: Any):
-        session = callback_context._invocation_context.session
+        invocation_context = callback_context._invocation_context
+        session = invocation_context.session
         arguments = {"session_id": session.id}
-        decision = await plugin.gate_synthetic_call(session, MEMORY_PERSIST_TOOL, arguments)
+        decision = await plugin.gate_synthetic_call(invocation_context, MEMORY_PERSIST_TOOL, arguments)
         if decision.kind == "deny_call":
             logger.info("appa denied the memory persist for session %s: %s", session.id, decision.feedback)
             return None
         if decision.kind not in ("allow_call", "pass_control"):
             raise AppaFailClosed(f"appa answered the memory persist with {decision.detail or decision.kind}")
         returned = await stock(callback_context)
-        await plugin.report_synthetic_result(session, MEMORY_PERSIST_TOOL, arguments, {"persisted": True})
+        await plugin.report_synthetic_result(invocation_context, MEMORY_PERSIST_TOOL, arguments, {"persisted": True})
         return returned
 
     return appa_gated_memory_persist

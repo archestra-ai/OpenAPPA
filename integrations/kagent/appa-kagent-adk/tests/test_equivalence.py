@@ -418,7 +418,7 @@ class PersistContext:
     """The CallbackContext shape the stock persist callback reads."""
 
     def __init__(self, session: Session, memory_service: RecordingMemoryService):
-        self._invocation_context = SimpleNamespace(session=session, memory_service=memory_service)
+        self._invocation_context = SimpleNamespace(session=session, memory_service=memory_service, invocation_id="i1")
 
 
 def session_after_user_turns(count: int) -> Session:

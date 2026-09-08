@@ -340,8 +340,8 @@ class AppaPluginKagent(BasePlugin):
 
     # -- synthetic gates for the entrypoint wrappers ------------------
 
-    async def gate_synthetic_call(self, session: Any, tool: str, arguments: dict[str, Any]) -> wire.Decision:
-        """Gate an out-of-band flow as a tool call in the session's trajectory.
+    async def gate_synthetic_call(self, invocation_context: Any, tool: str, arguments: dict[str, Any]) -> wire.Decision:
+        """Gate an out-of-band flow in the invocation's pinned trajectory.
 
         The entrypoint wraps ADK features that move a value without a
         FunctionTool call — code execution, the memory write-back — and
@@ -349,14 +349,14 @@ class AppaPluginKagent(BasePlugin):
         ``gate:`` spelling it hands over. The caller enforces the
         decision.
         """
-        root_id, child_id = self._identity.ids(session)
+        root_id, child_id = self._identity.ids_for(invocation_context)
         return await self._post(wire.tool_call(root_id, tool, arguments, child_id))
 
     async def report_synthetic_result(
-        self, session: Any, tool: str, arguments: dict[str, Any], body: Any
+        self, invocation_context: Any, tool: str, arguments: dict[str, Any], body: Any
     ) -> wire.Decision:
         """Report an out-of-band flow's output as its tool result."""
-        root_id, child_id = self._identity.ids(session)
+        root_id, child_id = self._identity.ids_for(invocation_context)
         return await self._post(wire.tool_result(root_id, tool, arguments, wire.success(body), child_id))
 
     # -- session and prompt -------------------------------------------
