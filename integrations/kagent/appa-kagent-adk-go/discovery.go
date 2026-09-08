@@ -29,6 +29,8 @@ type Discovery struct {
 	Tools  []*mcp.Tool
 	Status DiscoveryStatus
 	Detail string
+	// Kept private for the host's reconnect handling; never serialized or logged.
+	failure error
 }
 
 // Discover reuses the host's authenticated session. It never creates a transport
@@ -65,7 +67,9 @@ func Discover(ctx context.Context, session *mcp.ClientSession, filter []string) 
 				status = DiscoveryPartial
 			}
 			// Transport errors can quote credentials; retain no exception text.
-			return result(status, "MCP metadata discovery did not complete"), nil
+			observation := result(status, "MCP metadata discovery did not complete")
+			observation.failure = err
+			return observation, nil
 		}
 		if page == nil {
 			return Discovery{}, fmt.Errorf("MCP tool listing has no result")
