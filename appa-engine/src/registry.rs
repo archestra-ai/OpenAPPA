@@ -1193,10 +1193,10 @@ impl Registry {
             })
             .collect();
         for (name, ordinal) in &tool_order {
-            if let Some((_, leaf)) = name.as_str().strip_prefix("mcp/").and_then(|name| name.split_once('/')) {
-                if let Some(ordered) = mcp_order.get_mut(leaf) {
-                    ordered.push((name.clone(), *ordinal));
-                }
+            if let Some((_, leaf)) = name.as_str().strip_prefix("mcp/").and_then(|name| name.split_once('/'))
+                && let Some(ordered) = mcp_order.get_mut(leaf)
+            {
+                ordered.push((name.clone(), *ordinal));
             }
         }
         Ok(Registry {

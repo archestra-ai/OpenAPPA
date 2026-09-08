@@ -162,10 +162,10 @@ pub fn precise_name(name: &str, adapter: Adapter) -> Option<CanonicalTool> {
     if let Ok(derived) = (adapter.derive)(name) {
         return Some(derived.canonical);
     }
-    if adapter.name == AdapterName::Kagent {
-        if let Some((namespace, agent)) = name.split_once("__NS__") {
-            return CanonicalTool::of("agent", &namespace.replace('_', "-"), &agent.replace('_', "-")).ok();
-        }
+    if adapter.name == AdapterName::Kagent
+        && let Some((namespace, agent)) = name.split_once("__NS__")
+    {
+        return CanonicalTool::of("agent", &namespace.replace('_', "-"), &agent.replace('_', "-")).ok();
     }
     None
 }

@@ -1037,16 +1037,15 @@ impl Runtime {
                     accepted.iter().map(|(name, id, _)| (id, name.as_str())).collect();
                 let mut conflicts = std::collections::BTreeSet::new();
                 for observed in &inventory.tools {
-                    if let Ok(id) = (adapter.derive)(&observed.tool) {
-                        if names
+                    if let Ok(id) = (adapter.derive)(&observed.tool)
+                        && (names
                             .get(observed.name.as_str())
                             .is_some_and(|previous| **previous != id.canonical)
                             || identities
                                 .get(&id.canonical)
-                                .is_some_and(|previous| *previous != observed.name)
-                        {
-                            conflicts.insert(observed.name.as_str());
-                        }
+                                .is_some_and(|previous| *previous != observed.name))
+                    {
+                        conflicts.insert(observed.name.as_str());
                     }
                 }
                 for check in &mut report.tools {
