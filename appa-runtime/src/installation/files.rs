@@ -603,6 +603,7 @@ mod tests {
 
     const BASE: &str = "[policy]\nversion=2\n[externals]\ntimeout_ms=1000\nmax_body_bytes=65536\n";
 
+    #[cfg(unix)]
     fn installed(root: &Path, text: &str) -> Installation {
         let installation = Installation::open(&root.join("config/appa.toml")).unwrap();
         let selection = super::super::tests::selection();

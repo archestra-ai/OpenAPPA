@@ -1659,7 +1659,8 @@ mod tests {
     /// The transport one resolved entry selected, the same view over every section.
     enum Bound<'a> {
         Url,
-        Command(&'a ResolverCommand),
+        // Config rejects command bindings on non-Unix hosts.
+        Command(#[cfg_attr(not(unix), allow(dead_code))] &'a ResolverCommand),
         Builtin(&'a str),
     }
 
