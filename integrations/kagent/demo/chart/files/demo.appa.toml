@@ -10,9 +10,10 @@
 # `appa-runtime` that every agent pod reaches, so a parent and its
 # delegated child land in one trajectory.
 
+include = ["batteries/github/appa.toml"]
+
 [policy]
 version = 2
-include = ["batteries/github/appa.toml"]
 
 # --- in-cluster reads that stay inside the session ---
 

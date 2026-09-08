@@ -118,12 +118,19 @@ export function substituteKagentDevSnippets(content: string): string {
   // 5. Add local build commands before helm commands in quickstart
   result = result.replace(
     `kubectl config current-context\n`,
-    `# Build images and load into kind
+    `# Build images and load into cluster
 docker build -t appa-kagent-adk:dev integrations/kagent/appa-kagent-adk
 docker build -t appa-demo-tools:dev integrations/kagent/demo
 docker build -t appa-demo-mocks:dev integrations/kagent/demo/mocks
 docker build -f appa-runtime/Dockerfile -t appa-runtime:dev .
-kind load docker-image appa-kagent-adk:dev appa-demo-tools:dev appa-demo-mocks:dev appa-runtime:dev
+
+if command -v kind >/dev/null 2>&1; then
+  kind load docker-image appa-kagent-adk:dev appa-demo-tools:dev appa-demo-mocks:dev appa-runtime:dev
+else
+  NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
+  docker save appa-kagent-adk:dev appa-demo-tools:dev appa-demo-mocks:dev appa-runtime:dev \\
+    | docker exec -i "$NODE" ctr --namespace k8s.io images import -
+fi
 
 kubectl config current-context
 `
