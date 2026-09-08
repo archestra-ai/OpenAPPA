@@ -1,7 +1,7 @@
 //! The spec's policy-dialect compiler: the configuration dialect (TOML) → the engine's
 //! [`RegistryConfig`] for the runtime.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -287,14 +287,15 @@ impl Config {
     /// Parse the policy TOML. HTTP and command bindings remain deployment-owned; a stock
     /// annotator builtin is selected on the declaration that carries it.
     pub fn from_toml_str(s: &str) -> Result<Config, ConfigError> {
-        Config::from_toml_str_routed(s, BTreeSet::new())
+        Config::from_toml_str_routed(s, BTreeMap::new())
     }
 
-    /// [`Config::from_toml_str`] under the deployment's lookup routing: `lookup_providers`
-    /// are the audience providers whose member lookups the deployment redirects, so every
-    /// qualified member they report is looked up before it seats. Routing is the
-    /// deployment's, not the policy's, and stays out of the policy identity.
-    pub fn from_toml_str_routed(s: &str, lookup_providers: BTreeSet<String>) -> Result<Config, ConfigError> {
+    /// [`Config::from_toml_str`] under the deployment's lookup routing: `lookup_targets`
+    /// names, per audience provider whose member lookups the deployment redirects, the entry
+    /// that answers them, so every qualified member such a provider reports is looked up
+    /// there before it seats. Routing is the deployment's, not the policy's, and stays out
+    /// of the policy identity.
+    pub fn from_toml_str_routed(s: &str, lookup_targets: BTreeMap<String, String>) -> Result<Config, ConfigError> {
         let raw: RawConfig = toml::from_str(s)?;
         if raw.version != SUPPORTED_VERSION {
             return Err(ConfigError::UnsupportedVersion { found: raw.version });
@@ -385,7 +386,7 @@ impl Config {
             annotators.insert(name, AnnotatorBinding { hint, builtin, inputs });
         }
         let mut audience = convert_audience(raw.audience)?;
-        audience.lookup_providers = lookup_providers;
+        audience.lookup_targets = lookup_targets;
         let mut tools = Vec::new();
         let mut qualified: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
         for t in raw.tool {

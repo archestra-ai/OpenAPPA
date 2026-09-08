@@ -423,6 +423,51 @@ async fn a_refused_reload_probe_leaves_the_previous_deployment_serving() {
     );
 }
 
+/// A trajectory opened under one routing keeps it after a reload retargets the provider:
+/// its lookups still reach the entry its stored policy file names, while a trajectory opened
+/// under the reloaded deployment reaches the new one.
+#[tokio::test]
+async fn a_retired_trajectory_keeps_the_lookup_routing_it_opened_under() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, source) = serve_source().await;
+    let policy = POLICY.replace(SLACK_BINDING, LOOKUP_URL_BINDINGS);
+    let runtime = narrowed_under(&dir, &policy, &url).await;
+
+    // Slack's lookups move to `directory`; a new GitHub group keeps `people` bound.
+    let retargeted = format!(
+        "{}\n[externals.audience.directory]\nurl = \"{url}\"\n\n[externals.audience.github]\nurl = \"{url}\"\nlookup = \"people\"\n",
+        policy
+            .replace("AUDIENCE_URL", &url)
+            .replace("lookup = \"people\"", "lookup = \"directory\"")
+            .replace(
+                "[policy.audience.group.nobody]\n",
+                "[policy.audience.group.engineers]\nfrom = [\"github:org/acme/members\"]\n\n[policy.audience.group.nobody]\n"
+            )
+    );
+    let path = dir.path().join("appa.toml");
+    std::fs::write(&path, retargeted).expect("the revision writes");
+    let revised = Config::load(&path).expect("the revision validates");
+    source.members(Some(vec!["slack:U-bob"]));
+    source.principal(Some(Some("bob@corp.example")));
+    let reloaded = runtime.reload(revised).expect("the revision installs");
+    assert!(reloaded.changed);
+
+    assert_eq!(
+        propose(&runtime, send("@team")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    let lookups: Vec<serde_json::Value> = source
+        .requests()
+        .into_iter()
+        .filter(|request| request["artifact"]["member"].is_string())
+        .collect();
+    assert_eq!(lookups.len(), 1);
+    assert_eq!(
+        lookups[0]["name"], "people",
+        "the retired trajectory's lookup goes where its own policy file sends it"
+    );
+}
+
 #[test]
 fn a_referenced_audience_source_must_be_bound() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");

@@ -612,7 +612,7 @@ impl Deployment {
             member: spec.member.clone(),
             reason,
         };
-        let answering = self.config.externals.lookup_target(&spec.provider);
+        let answering = audience.lookup_target(&spec.provider);
         let consult = Consult::member_lookup(answering, &spec.member, self.templates_of(audience, &spec.provider));
         let principal = match self.externals.consult(&consult, None, None).await {
             ConsultOutcome::Answer(answer) => LookupAnswer::from_wire(&answer)
@@ -2069,22 +2069,20 @@ fn compile_policy(config: &Config, naming: ToolNaming) -> Result<appa_policy::Co
     .map_err(OpenError::UnsupportedPolicy)?;
     let text = toml::to_string(&policy)
         .map_err(|error| OpenError::UnsupportedPolicy(format!("the policy table does not serialize: {error}")))?;
-    let lookup_providers = config
+    let lookup_targets = config
         .externals
         .audience
         .iter()
-        .filter(|(_, binding)| binding.lookup.is_some())
-        .map(|(name, _)| name.clone())
+        .filter_map(|(name, binding)| Some((name.clone(), binding.lookup.clone()?)))
         .collect();
-    appa_policy::Config::from_toml_str_routed(&text, lookup_providers)
-        .map_err(|error| OpenError::Policy(Box::new(error)))
+    appa_policy::Config::from_toml_str_routed(&text, lookup_targets).map_err(|error| OpenError::Policy(Box::new(error)))
 }
 
 /// The providers whose member lookups a stored policy file redirects: the audience entries
 /// that carry a `lookup` — the same keys `compile_policy` reads off the loaded bindings, read
 /// here from the stored document so a retired file compiles under the routing it was written
 /// with.
-fn lookup_providers_of(document: &toml::Value) -> std::collections::BTreeSet<String> {
+fn lookup_targets_of(document: &toml::Value) -> std::collections::BTreeMap<String, String> {
     document
         .get("externals")
         .and_then(|externals| externals.get("audience"))
@@ -2092,8 +2090,7 @@ fn lookup_providers_of(document: &toml::Value) -> std::collections::BTreeSet<Str
         .map(|entries| {
             entries
                 .iter()
-                .filter(|(_, entry)| entry.get("lookup").is_some())
-                .map(|(name, _)| name.clone())
+                .filter_map(|(name, entry)| Some((name.clone(), entry.get("lookup")?.as_str()?.to_string())))
                 .collect()
         })
         .unwrap_or_default()
@@ -2164,7 +2161,7 @@ fn compile_stored_for_host(bytes: &[u8], naming: ToolNaming) -> Result<appa_poli
     let policy = resolve_served_policy(policy, naming, &inventory, &aliases)?;
     let text =
         toml::to_string(&policy).map_err(|error| format!("the stored policy table does not serialize: {error}"))?;
-    appa_policy::Config::from_toml_str_routed(&text, lookup_providers_of(&value))
+    appa_policy::Config::from_toml_str_routed(&text, lookup_targets_of(&value))
         .map_err(|error| format!("the stored policy does not load: {error}"))
 }
 

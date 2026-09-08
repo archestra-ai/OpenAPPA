@@ -195,15 +195,6 @@ pub struct Externals {
 }
 
 impl Externals {
-    /// The audience entry that answers a provider's member lookups: the one its `lookup`
-    /// names, else the provider's own.
-    pub(crate) fn lookup_target<'a>(&'a self, provider: &'a str) -> &'a str {
-        self.audience
-            .get(provider)
-            .and_then(|binding| binding.lookup.as_deref())
-            .unwrap_or(provider)
-    }
-
     /// How many `llm` consults this deployment lets run at once: `max_concurrent` of its
     /// profile, none without one.
     pub(crate) fn llm_bound(&self) -> usize {

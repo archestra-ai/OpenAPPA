@@ -246,12 +246,7 @@ fn audience_description(compiled: &appa_policy::Config, bindings: Bindings<'_>) 
             .iter()
             .map(|provider| SourceDescription {
                 provider: provider.clone(),
-                templates: audience
-                    .templates(provider)
-                    .into_iter()
-                    .flatten()
-                    .map(|template| template.as_str().to_string())
-                    .collect(),
+                templates: crate::engine::selector_templates(audience, provider).unwrap_or_default(),
                 binding_configured: bindings.bound(Section::Audience, provider),
                 lookup: bindings.lookup_target(provider),
             })

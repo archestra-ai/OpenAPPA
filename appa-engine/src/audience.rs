@@ -266,11 +266,11 @@ pub struct AudienceConfig {
     pub internal_from: Vec<SelectorSpec>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<NamedAudience>,
-    /// Providers whose member lookups the deployment redirects to another entry: every
-    /// qualified member they report is looked up before it seats. Routing, not policy
-    /// meaning — the deployment supplies it and it stays out of the policy identity.
+    /// The entry that answers each redirected provider's member lookups: every qualified
+    /// member such a provider reports is looked up there before it seats. Routing, not
+    /// policy meaning — the deployment supplies it and it stays out of the policy identity.
     #[serde(skip)]
-    pub lookup_providers: BTreeSet<String>,
+    pub lookup_targets: BTreeMap<String, String>,
 }
 
 /// The validated audience registry the engine reads: everything [`AudienceConfig`] declares,
@@ -282,7 +282,7 @@ pub struct AudienceRegistry {
     internal_from: BTreeSet<SelectorSpec>,
     groups: BTreeMap<GroupName, NamedAudience>,
     provider_names: BTreeSet<String>,
-    lookup_providers: BTreeSet<String>,
+    lookup_targets: BTreeMap<String, String>,
     within: crate::label::WithinAssertions,
     /// The `@provider:selector` atoms declarations write directly; the registry build
     /// gathers them while routing each one.
@@ -336,7 +336,7 @@ impl AudienceRegistry {
                 .map(|group| (group.name.clone(), group.clone()))
                 .collect(),
             provider_names: config.sources.iter().map(|source| source.provider.clone()).collect(),
-            lookup_providers: config.lookup_providers.clone(),
+            lookup_targets: config.lookup_targets.clone(),
             within: crate::label::WithinAssertions::new(
                 config
                     .groups
@@ -370,7 +370,13 @@ impl AudienceRegistry {
     /// Does the deployment redirect this provider's lookups, so its qualified members are
     /// looked up before they seat?
     pub fn looks_up(&self, provider: &str) -> bool {
-        self.lookup_providers.contains(provider)
+        self.lookup_targets.contains_key(provider)
+    }
+
+    /// The entry that answers this provider's member lookups: the one its routing names,
+    /// else the provider's own source.
+    pub fn lookup_target<'a>(&'a self, provider: &'a str) -> &'a str {
+        self.lookup_targets.get(provider).map_or(provider, String::as_str)
     }
 
     pub fn groups(&self) -> impl Iterator<Item = &NamedAudience> {
@@ -797,7 +803,7 @@ mod tests {
                 within: Some(ChainAudience::Internal),
                 from: vec![spec("google-workspace", "group/finance@corp.com")],
             }],
-            lookup_providers: BTreeSet::new(),
+            lookup_targets: BTreeMap::new(),
         }
     }
 
@@ -1160,7 +1166,7 @@ mod tests {
     #[test]
     fn a_redirected_provider_seats_its_qualified_members_through_pinned_lookups() {
         let mut config = corp_config();
-        config.lookup_providers.insert("slack".into());
+        config.lookup_targets.insert("slack".into(), "people".into());
         let redirected = registry(config);
         let viewer = SymbolicAtom::Group(GroupRef::Source {
             provider: "slack".into(),
