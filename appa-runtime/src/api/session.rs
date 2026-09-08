@@ -809,16 +809,14 @@ impl Session {
                         // Batch-terminal: every sibling settles first; any no-answer
                         // then aborts the invocation, discarding the siblings' answers,
                         // before another engine round or any append.
-                        let consults = requests
-                            .into_iter()
-                            .map(|request| self.consult(&policy, request, None, None));
+                        let consults = requests.into_iter().map(|request| self.consult(request, None, None));
                         for answered in crate::external::settle_batch(consults).await {
                             evidence.push(answered?);
                         }
                     }
                     Some(_) => {
                         for request in requests {
-                            let answered = self.consult(&policy, request, elicitation, ruling).await?;
+                            let answered = self.consult(request, elicitation, ruling).await?;
                             evidence.push(answered);
                         }
                     }
@@ -934,7 +932,6 @@ impl Session {
     /// — never a policy denial. Every other external keeps its no-answer evidence shape.
     async fn consult(
         &self,
-        policy: &crate::engine::PolicyEngine<'_>,
         request: ExternalRequest,
         elicitation: Option<&Elicitation>,
         ruling: Option<appa_runtime_api::Ruling>,
@@ -1051,12 +1048,11 @@ impl Session {
             ExternalRequest::MemberLookup {
                 provider,
                 member,
+                answering,
                 templates,
             } => {
-                // The entry the deciding policy's routing names answers — a retired
-                // trajectory keeps the routing it opened under; the evidence stays keyed by
-                // the member's own provider.
-                let answering = policy.engine().registry().audience().lookup_target(provider);
+                // The evidence stays keyed by the member's own provider, whichever entry
+                // answered.
                 let consult = Consult::member_lookup(answering, member, templates.clone());
                 let principal = match self.timed_consult(&consult, None, None).await {
                     ConsultOutcome::Answer(answer) => {

@@ -373,10 +373,9 @@ impl AudienceRegistry {
         self.lookup_targets.contains_key(provider)
     }
 
-    /// The entry that answers this provider's member lookups: the one its routing names,
-    /// else the provider's own source.
-    pub fn lookup_target<'a>(&'a self, provider: &'a str) -> &'a str {
-        self.lookup_targets.get(provider).map_or(provider, String::as_str)
+    /// The entry that answers this provider's member lookups, when its routing names one.
+    pub fn lookup_target(&self, provider: &str) -> Option<&str> {
+        self.lookup_targets.get(provider).map(String::as_str)
     }
 
     pub fn groups(&self) -> impl Iterator<Item = &NamedAudience> {

@@ -195,11 +195,37 @@ pub struct Externals {
 }
 
 impl Externals {
+    /// The lookup routing these bindings declare: each redirected audience provider and
+    /// the entry that answers its member lookups.
+    pub(crate) fn lookup_targets(&self) -> BTreeMap<String, String> {
+        self.audience
+            .iter()
+            .filter_map(|(name, binding)| Some((name.clone(), binding.lookup.clone()?)))
+            .collect()
+    }
+
     /// How many `llm` consults this deployment lets run at once: `max_concurrent` of its
     /// profile, none without one.
     pub(crate) fn llm_bound(&self) -> usize {
         self.llm.as_ref().map_or(0, |profile| profile.max_concurrent)
     }
+}
+
+/// The lookup routing a composed document declares, read from its `[externals.audience]`
+/// table: what a stored policy file compiles under at replay, and what a file that does not
+/// load is described with.
+pub(crate) fn lookup_targets_of(document: &toml::Value) -> BTreeMap<String, String> {
+    document
+        .get("externals")
+        .and_then(|externals| externals.get("audience"))
+        .and_then(toml::Value::as_table)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|(name, entry)| Some((name.clone(), entry.get("lookup")?.as_str()?.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// How this deployment runs the stock `claude-code` builtin. `command` overrides the

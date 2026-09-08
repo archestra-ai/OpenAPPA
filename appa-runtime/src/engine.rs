@@ -156,11 +156,13 @@ pub enum ExternalRequest {
         /// declaration.
         templates: Vec<String>,
     },
-    /// One member lookup: the principal for one qualified reader, asked of the entry the
-    /// deployment routes `provider`'s lookups to.
+    /// One member lookup: the principal for one qualified reader, asked of `answering` —
+    /// the entry the deciding policy's routing sends `provider`'s lookups to, which is the
+    /// provider's own source when nothing redirects them.
     MemberLookup {
         provider: String,
         member: String,
+        answering: String,
         templates: Vec<String>,
     },
 }
@@ -2258,9 +2260,14 @@ impl RuntimeEngine {
             }
             let templates = selector_templates(audience, &owed.provider)
                 .expect("an owed lookup names the registered provider of a pinned source");
+            let answering = audience
+                .lookup_target(&owed.provider)
+                .unwrap_or(&owed.provider)
+                .to_string();
             requests.push(ExternalRequest::MemberLookup {
                 provider: owed.provider,
                 member: owed.member,
+                answering,
                 templates,
             });
         }
@@ -2313,9 +2320,14 @@ impl RuntimeEngine {
                     spec.provider
                 )));
             }
+            let audience = self.engine.registry().audience();
             requests.push(ExternalRequest::MemberLookup {
                 provider: spec.provider.clone(),
                 member: spec.member.clone(),
+                answering: audience
+                    .lookup_target(&spec.provider)
+                    .unwrap_or(&spec.provider)
+                    .to_string(),
                 templates: self.templates_of(&spec.provider)?,
             });
         }

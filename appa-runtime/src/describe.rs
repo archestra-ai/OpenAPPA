@@ -4,7 +4,7 @@
 //! session tool catalogue or connector accounts. Those are session facts and must
 //! be merged by the configuring actor.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -221,17 +221,11 @@ fn authority_descriptions(compiled: &appa_policy::Config, bindings: Bindings<'_>
 }
 
 impl Bindings<'_> {
-    /// The `lookup` an audience entry names, from the loaded bindings or the raw table.
-    fn lookup_target(self, provider: &str) -> Option<String> {
+    /// The lookup routing the bindings declare, from the loaded configuration or the raw table.
+    fn lookup_targets(self) -> BTreeMap<String, String> {
         match self {
-            Bindings::Loaded(externals) => externals.audience.get(provider)?.lookup.clone(),
-            Bindings::Raw(root) => root
-                .get("externals")?
-                .get(Section::Audience.name())?
-                .get(provider)?
-                .get("lookup")?
-                .as_str()
-                .map(str::to_string),
+            Bindings::Loaded(externals) => externals.lookup_targets(),
+            Bindings::Raw(root) => crate::config::lookup_targets_of(root),
         }
     }
 }
@@ -248,7 +242,7 @@ fn audience_description(compiled: &appa_policy::Config, bindings: Bindings<'_>) 
                 provider: provider.clone(),
                 templates: crate::engine::selector_templates(audience, provider).unwrap_or_default(),
                 binding_configured: bindings.bound(Section::Audience, provider),
-                lookup: bindings.lookup_target(provider),
+                lookup: audience.lookup_target(provider).map(str::to_string),
             })
             .collect(),
         self_from: audience
@@ -349,7 +343,10 @@ fn describe_policy_value(policy_value: &toml::Value, bindings: Bindings<'_>, out
 
     let compiled = toml::to_string(policy_value)
         .map_err(|error| error.to_string())
-        .and_then(|source| appa_policy::Config::from_toml_str(&source).map_err(|error| error.to_string()));
+        .and_then(|source| {
+            appa_policy::Config::from_toml_str_routed(&source, bindings.lookup_targets())
+                .map_err(|error| error.to_string())
+        });
     out.audience = match compiled {
         Ok(compiled) => {
             out.authorities = authority_descriptions(&compiled, bindings);
