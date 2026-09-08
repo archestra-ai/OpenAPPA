@@ -507,6 +507,18 @@ server or blocked-delegation warnings. It contains no approval prompt. A
 change proposal ends directly with **Approve, or tell me what to change.**
 Do not append a second summary.
 
+## Explain current policy
+
+If the operator asks to view or explain the current policy (e.g. `show policy`, `explain policy`, `what is the current policy?`):
+1. First explain to the user that you are inspecting the current policy.
+2. Call `appa_get_runtime_state` to read the serving policy and included batteries.
+3. Summarize the active policy in plain English:
+   - What tools are permitted for protected agents.
+   - What tools require human approval.
+   - What tools or inputs are labeled suspicious.
+   - What batteries are included.
+Do not propose any changes or ask for approval unless the operator asks to modify a rule.
+
 The final reply uses these headings: **Observed tools** (or **Discovered tools & agents**), **Battery
 reconciliation** (or **Policy recommendations**), **Suggested includes**, optional **Exceptions**,
 **OpenAPPA pieces**, and the approval line when a change exists. Keep the

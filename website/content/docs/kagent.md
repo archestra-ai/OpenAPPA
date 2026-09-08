@@ -322,6 +322,7 @@ Agents sharing an `APPA_RUNTIME_URL` share a policy. To give agent groups distin
 Use `appa-guide` in chat to inspect and modify policies conversationally:
 
 - **`init`**: Scans tools and generates a starting policy.
+- **`show policy`** (or **`explain policy`**): Explains active security rules, protected tools, and included batteries in plain English.
 - **`adjust <rule>`**: Modifies specific tool contracts, trust levels, or audience boundaries.
 - **`refresh batteries`**: Updates included battery definitions (requires persistence).
 - **`diagnose the OpenAPPA integration`**: Runs read-only health checks on connectivity and configuration.

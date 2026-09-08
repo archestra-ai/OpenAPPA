@@ -53,7 +53,8 @@ these two choices in one short message and wait. Do not run both modes
 together. Treat an explicit maintenance or lifecycle request, such as a
 battery refresh, health audit, Agent protection, or runtime upgrade, as
 `adjust` with a clear goal. Do not ask the operator to select a mode in
-that case. If the operator chooses `adjust` without describing the change,
+that case. If the operator asks to view or explain the current policy (e.g. `show policy`, `explain policy`, `what is the current policy?`), call `appa_get_runtime_state` to inspect the serving policy, then summarize the active rules, protected tools, and included batteries in plain, accessible language without proposing any mutations.
+If the operator chooses `adjust` without describing the change,
 ask what they want OpenAPPA to do differently.
 
 An explicit `init` authorizes the complete read-only inspection and the

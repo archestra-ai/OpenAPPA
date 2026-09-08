@@ -117,6 +117,9 @@ spec:
       Helm mutations use published charts and require their own proposal and
       approval.
 
+      If the request asks to view or explain current policy (e.g. "show policy", "explain policy"),
+      call appa_get_runtime_state and explain the active rules, protected tools, and included
+      batteries in plain, accessible language without proposing changes.
       If the request says diagnose and inspect only, report Health, optional
       Unavailable, one OpenAPPA pieces line, and No changes applied. Do not
       suggest changes or ask for approval. Otherwise keep the final reply under
