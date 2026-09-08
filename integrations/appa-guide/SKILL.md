@@ -57,8 +57,11 @@ that case. If the operator chooses `adjust` without describing the change,
 ask what they want OpenAPPA to do differently.
 
 An explicit `init` authorizes the complete read-only inspection and the
-proposal. Do not ask whether to continue before the proposal. Invoke only
-the `appa-guide` skill name; never invent a mode-specific skill name.
+proposal. Do not ask whether to continue before the proposal. When starting
+`init`, first output a user-friendly plan in simple terms explaining what is
+going to happen (scanning tools and agents, checking policy state, matching
+batteries, and presenting a proposal) instead of silently running tools.
+Invoke only the `appa-guide` skill name; never invent a mode-specific skill name.
 
 ## Rules that apply on every host
 
@@ -94,6 +97,10 @@ the `appa-guide` skill name; never invent a mode-specific skill name.
   entries, comments, reader names, external bindings, and batteries.
 - Use short sentences. Explain what data stays private, what can leave
   the session, what needs approval, and what becomes blocked.
+- Use human, user-friendly language without jargon. Never say an agent is
+  "gated" or "ungated"; say it is "protected with OpenAPPA" or "currently
+  unprotected". Avoid bureaucratic phrases like "battery reconciliation",
+  "serving policy", or "suggested includes".
 - Talk about outcomes, not config machinery, except for the one short
   **OpenAPPA pieces** line required in every proposal. Do not mention
   include lists, rule ordering, TOML fields, reader names, labels, or

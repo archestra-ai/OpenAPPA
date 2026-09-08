@@ -82,14 +82,20 @@ Inspect-only diagnosis uses the same Agent, Deployment, RemoteMCPServer,
 and runtime-state inventory, but does not match batteries or propose changes.
 It must report all four health categories before finishing.
 
+When starting `init`, first output a brief, user-friendly plan explaining what is going to happen in simple terms:
+1. Scan cluster agents, tool servers, and discovered MCP tools.
+2. Inspect the current OpenAPPA runtime policy and available batteries.
+3. Match discovered tools against security batteries.
+4. Present a tailored policy proposal for operator review and approval.
+
 Run inspection tool calls one at a time; do not issue parallel calls.
-Continue until this checklist is complete. Do not emit an
-intermediate response that promises the next inspection step. Never call
+Continue until this checklist is complete. Never call
 an Agent ungated when its observed `APPA_ENABLED` is `true`. Distinguish
 batteries available from `/batteries` from batteries included by the
 current config. Send one final response, not duplicate summaries.
 Never name an unmatched catalog battery in that response. If no observed
-tool matches a battery, say: "Battery matches: none." Never say
+tool matches a battery, say: "Battery matches: none." (stating in plain terms
+that no matching pre-packaged batteries were found for these tools). Never say
 "available batteries detected"; `/batteries` is the runtime's shipped
 catalog, not evidence that its tools exist in kagent.
 If a required inspection is refused or awaits approval, never claim the
@@ -328,6 +334,8 @@ already present. Propose only the matched GitHub battery include. If it
 lists any of the ten static demo tools above, the same proposal must
 copy those missing entries from the verified demo manifest. Do not
 suggest only a battery include while those ten tools stay undeclared.
+For any other server (like `kagent-tool-server`) with unconfigured tools,
+draft root contracts following ### Cover unconfigured tools in init below.
 
 For an approved complete policy proposal, call `appa_update_policy` with
 the exact full root policy and the proposal's serving policy key. The
@@ -425,6 +433,22 @@ root config nor a translated battery declaration covers.
   `requires`.
 - A delegation stays blocked until the operator names it.
 
+### Cover unconfigured tools in init
+
+When `init` inspects tools (whether from `kagent-tool-server`, `demo-tools`, or any other server) and `appa_match_batteries` returns `unconfigured_tools`:
+The initial bootstrap policy only contains `appa-guide`'s internal inspection actions. Other cluster tools remain undeclared and refused.
+`init` MUST draft a starting policy covering all discovered tools attached to agents or discovered on accepted servers:
+1. Generate tool contracts:
+   - Queries and reads (`k8s_get_*`, `k8s_describe_*`, `list_*`, `read_*`): permitted (`delta = {}`).
+   - Pod logs, cluster events, and diagnostic feeds (`k8s_get_pod_logs`, `k8s_get_events`): incoming cluster data (`delta = { trust = "suspicious" }`).
+   - Cluster changes and destructive actions (`k8s_apply_manifest`, `k8s_delete_resource`, `k8s_patch_*`): require human approval (`requires = { trust = "trusted", attention = ["human-approval"] }`, `delta = {}`).
+2. Construct the full starting policy: keep the guide's internal bootstrap declarations, append the new `[[policy.tool]]` contracts, and declare the `oncall` authority (`builtin = "hitl"`). Include any matched batteries.
+3. Present the proposal in human, user-friendly language:
+   - **Discovered tools & agents**: list the discovered tools and state which agents are protected with OpenAPPA and which are unprotected. Never use the words "gated" or "ungated".
+   - **Policy recommendations**: explain what rules will be created (what's allowed, what's tagged suspicious, what needs approval).
+   - **Next steps**: end with **Approve, or tell me what to change.**
+4. When the operator replies "Approve", call `appa_update_policy` with this complete root policy. Never conclude that no change is needed when discovered cluster tools remain undeclared in the bootstrap policy.
+
 ## Ask about ambiguity
 
 Use tool names and descriptions when their behavior is clear. If you
@@ -453,27 +477,26 @@ Show:
 - blocked delegations: every Agent delegation whose exact wire name is
   absent from policy is blocked, even when that omission is deliberate;
   never report it as covered or unblocked;
-- every ungated agent: "`<agent>` runs ungated, and nothing in this
-  policy applies to it.";
+- unprotected agents: state clearly which agents are protected with OpenAPPA and which are currently unprotected (e.g. "`<agent>` is not protected yet. Send `protect <agent>` to enable OpenAPPA policy on it."). Never use the words "gated" or "ungated";
 - every uninspected server: "`<server>` is configured, but the cluster
   has not discovered its tools.";
 - one short **OpenAPPA pieces** line;
 - **Needed for this to work** at the end, when support is missing —
   group every missing requirement there with the concrete fix. An
-   ungated agent belongs there: the fix adds `APPA_ENABLED=true` in that
-   Agent's `spec.declarative.deployment.env`. It also needs the correct
-   `APPA_RUNTIME_URL`. Propose
-   the change and apply it only after approval.
+  unprotected agent belongs there: the fix adds `APPA_ENABLED=true` in that
+  Agent's `spec.declarative.deployment.env`. It also needs the correct
+  `APPA_RUNTIME_URL`. Propose
+  the change and apply it only after approval.
 
 An unchanged result is one short outcome summary plus required unavailable
 server or blocked-delegation warnings. It contains no approval prompt. A
 change proposal ends directly with **Approve, or tell me what to change.**
 Do not append a second summary.
 
-The final reply uses only these headings: **Observed tools**, **Battery
-reconciliation**, **Suggested includes**, optional **Exceptions**,
+The final reply uses these headings: **Observed tools** (or **Discovered tools & agents**), **Battery
+reconciliation** (or **Policy recommendations**), **Suggested includes**, optional **Exceptions**,
 **OpenAPPA pieces**, and the approval line when a change exists. Keep the
-whole reply below 1,600 characters. Do not list Agents, releases, pods,
+whole reply below 1,600 characters. Use human, user-friendly language without jargon. Do not list Agents, releases, pods,
 Services, ConfigMaps, catalog-only batteries, or successful checks.
 
 When Agents use more than one runtime, make one explicitly named proposal

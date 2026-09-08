@@ -242,7 +242,7 @@ kubectl wait agent/appa-guide -n "$KAGENT_NAMESPACE" \
   --for=condition=Ready=True --timeout=5m
 ```
 
-To retain trajectory audit logs across pod restarts, deploy with persistent storage instead (requires a `ReadWriteOnce` [StorageClass](https://kubernetes.io/docs/concepts/storage/storage-classes/)):
+To retain trajectory audit logs and persist battery updates (`refresh batteries`) across pod restarts, deploy with persistent storage instead (requires a `ReadWriteOnce` [StorageClass](https://kubernetes.io/docs/concepts/storage/storage-classes/)):
 
 ```sh
 helm upgrade --install appa-runtime \
