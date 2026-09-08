@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.15.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.14.1...v0.15.0) (2026-09-08)
+
+
+### Features
+
+* **yell:** the agent's own report, vouched by the hook that saw the call ([#218](https://github.com/archestra-ai/OpenAPPA/issues/218)) ([c68704a](https://github.com/archestra-ai/OpenAPPA/commit/c68704a6e0134fe9f31250ae045e75b68d633bac))
+* **yell:** the diagnostic projection, the report envelope, and `appa yell` ([#214](https://github.com/archestra-ai/OpenAPPA/issues/214)) ([66bceac](https://github.com/archestra-ai/OpenAPPA/commit/66bceacbaf41aa4c9bed6b1e3c55dcdbd48b9343))
+* **yell:** the openappa.yell.v1 receiver ([#221](https://github.com/archestra-ai/OpenAPPA/issues/221)) ([d7311b3](https://github.com/archestra-ai/OpenAPPA/commit/d7311b3d2ee88b9623d4af1a10d8803ef4e92d73))
+
+
+### Bug Fixes
+
+* **appa-runtime:** shorten agent-reporting consent prompt ([#255](https://github.com/archestra-ai/OpenAPPA/issues/255)) ([f698115](https://github.com/archestra-ai/OpenAPPA/commit/f6981150f0ccc98ba8e540b7aa7fd7c32a9fab84))
+* **docs:** fix remedy diagram label placement and wording ([#252](https://github.com/archestra-ai/OpenAPPA/issues/252)) ([b809fb6](https://github.com/archestra-ai/OpenAPPA/commit/b809fb6cce217554647b6ed1e7d0ce817183ea5e))
+* **docs:** keep remedy diagram labels inside cards ([b809fb6](https://github.com/archestra-ai/OpenAPPA/commit/b809fb6cce217554647b6ed1e7d0ce817183ea5e))
+* **runtime:** battery names under symlinks, one vouch record, and a readable appa yell ([#254](https://github.com/archestra-ai/OpenAPPA/issues/254)) ([5b496e8](https://github.com/archestra-ai/OpenAPPA/commit/5b496e8ac6cf86246d292f77427033a01f78ebd6))
+* **yell:** clarify agent tool description and confusion guidance ([#258](https://github.com/archestra-ai/OpenAPPA/issues/258)) ([12483e6](https://github.com/archestra-ai/OpenAPPA/commit/12483e646feafdecd32d77ed10cbd85a0d4c140b))
+
+
+### Documentation
+
+* **kagent:** streamline quickstart, expand showcase scenarios, and polish prose ([#251](https://github.com/archestra-ai/OpenAPPA/issues/251)) ([530af64](https://github.com/archestra-ai/OpenAPPA/commit/530af642d423eaf86e507cd6126c544d9596b2ee))
+* reorganize and clarify policy configuration reference ([#256](https://github.com/archestra-ai/OpenAPPA/issues/256)) ([5b679d1](https://github.com/archestra-ai/OpenAPPA/commit/5b679d1c76c42c75ba311cdb5bfc5e6fc018a121))
+* simplify How it works and reorganize reference sections ([#250](https://github.com/archestra-ai/OpenAPPA/issues/250)) ([8b8c20c](https://github.com/archestra-ai/OpenAPPA/commit/8b8c20cb76115f1ff59b2bde22693243d47cf1d0))
+
 ## [0.14.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.14.0...v0.14.1) (2026-09-06)
 
 

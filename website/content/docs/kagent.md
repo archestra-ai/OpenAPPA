@@ -43,7 +43,7 @@ Deploy the kagent controller, `appa-runtime`, and the demonstration fleet in one
 
 ```sh
 : "${OPENAI_API_KEY:?Set OPENAI_API_KEY before installing kagent}"
-APPA_VERSION=0.14.1 # x-release-please-version
+APPA_VERSION=0.15.0 # x-release-please-version
 
 # 1. Install kagent CRDs and OpenAI secret
 helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-crds \
@@ -241,7 +241,7 @@ To protect existing kagent workloads without downtime, follow these steps:
 Update the kagent controller to use the OpenAPPA plugin image, and deploy `appa-runtime` with `appa-guide`:
 
 ```sh
-APPA_VERSION=0.14.1 # x-release-please-version
+APPA_VERSION=0.15.0 # x-release-please-version
 
 # 1. Update the kagent controller to use the OpenAPPA plugin image
 helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
