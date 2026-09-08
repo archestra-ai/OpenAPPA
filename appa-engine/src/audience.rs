@@ -285,8 +285,8 @@ pub struct AudienceRegistry {
     lookup_targets: BTreeMap<String, String>,
     within: crate::label::WithinAssertions,
     /// The `@provider:selector` atoms declarations write directly; the registry build
-    /// gathers them while routing each one.
-    pub(crate) direct: BTreeSet<SelectorSpec>,
+    /// gathers them while routing each one and completes the registry with them.
+    direct: BTreeSet<SelectorSpec>,
 }
 
 /// Why an atom cannot be routed to any registered source: the operational-failure side of
@@ -345,6 +345,12 @@ impl AudienceRegistry {
             ),
             direct: BTreeSet::new(),
         }
+    }
+
+    /// The registry completed with the selectors the declarations route directly, once
+    /// the registry build has walked them.
+    pub(crate) fn with_direct(self, direct: BTreeSet<SelectorSpec>) -> Self {
+        Self { direct, ..self }
     }
 
     /// Every selector the policy can ask a source for: the chain mappings, every named

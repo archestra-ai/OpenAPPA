@@ -149,12 +149,12 @@ enum CollectionRole {
     Named,
 }
 
-fn collection_role(spec: &SelectorSpec) -> Option<CollectionRole> {
-    let template = stock_audience_sources()
-        .into_iter()
+fn collection_role(catalog: &[SourceRegistration], spec: &SelectorSpec) -> Option<CollectionRole> {
+    let template = catalog
+        .iter()
         .find(|source| source.provider == spec.provider)?
         .templates
-        .into_iter()
+        .iter()
         .find(|template| template.matches(&spec.selector))?;
     Some(match template.as_str() {
         "viewer" => CollectionRole::Viewer,
@@ -165,8 +165,7 @@ fn collection_role(spec: &SelectorSpec) -> Option<CollectionRole> {
 
 /// Why a selector names nothing: the provider is not stock, or the selector matches none of
 /// the provider's templates — each spelled out, so the writer need not guess the catalog.
-fn uncatalogued(spec: &SelectorSpec) -> String {
-    let catalog = stock_audience_sources();
+fn uncatalogued(catalog: &[SourceRegistration], spec: &SelectorSpec) -> String {
     match catalog.iter().find(|source| source.provider == spec.provider) {
         Some(source) => {
             let templates: Vec<&str> = source.templates.iter().map(SelectorTemplate::as_str).collect();
@@ -738,6 +737,7 @@ struct RawAudienceGroup {
 /// sources — and so the policy identity — exactly when some selector picks from it.
 fn convert_audience(audience: Option<RawAudience>) -> Result<AudienceConfig, ConfigError> {
     let mut config = AudienceConfig::default();
+    let catalog = stock_audience_sources();
     let mut providers: Vec<String> = Vec::new();
     let mut selectors = |list: &[String],
                          context: &str,
@@ -753,7 +753,7 @@ fn convert_audience(audience: Option<RawAudience>) -> Result<AudienceConfig, Con
         for entry in list {
             let spec = SelectorSpec::parse(entry)
                 .ok_or_else(|| refused(entry, "is not a `<provider>:<selector>` source".to_string()))?;
-            let role = collection_role(&spec).ok_or_else(|| refused(entry, uncatalogued(&spec)))?;
+            let role = collection_role(&catalog, &spec).ok_or_else(|| refused(entry, uncatalogued(&catalog, &spec)))?;
             if !admits(role) {
                 return Err(refused(entry, format!("cannot feed this audience — {expected}")));
             }
@@ -815,7 +815,7 @@ fn convert_audience(audience: Option<RawAudience>) -> Result<AudienceConfig, Con
             });
         }
     }
-    config.sources = stock_audience_sources()
+    config.sources = catalog
         .into_iter()
         .filter(|source| providers.contains(&source.provider))
         .collect();

@@ -45,7 +45,9 @@ A member is the email address GitHub verifies for the account, else
 `github:<login>`, which merges with no other provider's reader. For an
 organization or team member that is the email published on its
 profile, read with one `/users/<login>` call per member, eight at a
-time: GitHub lets an account publish only a verified address there. The member lookup
+time: GitHub lets an account publish only a verified address there. A
+collection answer costs one API call per member inside one consult, so a
+large organization needs `externals.timeout_ms` sized for it. The member lookup
 resolves a `github:<login>` member the same way and answers `null`
 for a login GitHub does not know.
 

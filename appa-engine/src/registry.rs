@@ -921,7 +921,7 @@ impl Registry {
             }
         }
         let audience_vocabulary = configured_audience_vocabulary(&config, &profile);
-        let mut audience = validated_audience_registry(&config.audience)?;
+        let audience = validated_audience_registry(&config.audience)?;
         let mut direct = BTreeSet::new();
         for clause in profile.starting_label().audience.clauses() {
             check_literal(clause.readers(), || "starting label".to_string())?;
@@ -1187,7 +1187,7 @@ impl Registry {
             })
             .collect();
 
-        audience.direct = direct;
+        let audience = audience.with_direct(direct);
         // Exact-only policies retain their existing canonical name order. With
         // overlapping names the authored order is part of the policy identity.
         if !tools.keys().any(ToolName::is_name_selector) {
