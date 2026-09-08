@@ -16,7 +16,7 @@ import (
 	"testing"
 )
 
-const fixturesPath = "../fixtures/wire-events.jsonl"
+const fixturesPath = "../../../marketplace/plugins/kagent/fixtures/wire-events.jsonl"
 
 const (
 	fixtureRoot  = "adk-4f6c2f1e"

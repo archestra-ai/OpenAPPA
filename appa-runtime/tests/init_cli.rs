@@ -15,7 +15,7 @@ use common::{repo_root, stage_bundle};
 /// The key of the policy a first install writes: the shipped default, which
 /// composes to the same bytes wherever it is loaded from.
 fn default_policy_key() -> String {
-    let example = repo_root().join("integrations/claude-code/examples/claude-code.appa.toml");
+    let example = repo_root().join("marketplace/plugins/claude-code/default.appa.toml");
     let config = Config::load(&example).expect("the shipped default loads");
     PolicyFileKey::of(config.policy_file().bytes()).as_str().to_owned()
 }
@@ -186,6 +186,16 @@ fn launcher_is_armed(fixture: &Fixture) -> bool {
 }
 
 #[test]
+fn launcher_uses_the_install_directory_not_the_source_binary_cache() {
+    let fixture = Fixture::new();
+    let launchers = fixture.root.join("launchers");
+    let output = fixture.init().env("APPA_INSTALL_DIR", &launchers).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(launchers.join("clappa").is_file());
+    assert!(!fixture.bin.join("clappa").exists());
+}
+
+#[test]
 fn a_failure_before_the_statusline_puts_the_previous_binary_back() {
     let fixture = Fixture::new();
     let before = previous_install(&fixture);
@@ -334,7 +344,7 @@ fn the_plugin_source_override_is_hidden_from_normal_help() {
 
 /// The shipped default config, byte for byte: what a first init seeds.
 fn shipped_default_config() -> String {
-    fs::read_to_string(repo_root().join("integrations/claude-code/examples/claude-code.appa.toml"))
+    fs::read_to_string(repo_root().join("marketplace/plugins/claude-code/default.appa.toml"))
         .expect("the shipped default is readable")
 }
 

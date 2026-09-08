@@ -224,7 +224,8 @@ fn only_the_runtime_chart_consumes_this_skill_package() {
         "the unused skill helpers stay undeclared"
     );
 
-    let github = fs::read_to_string(root.join("batteries/github/appa.toml")).expect("the GitHub battery exists");
+    let github =
+        fs::read_to_string(root.join("marketplace/batteries/github/appa.toml")).expect("the GitHub battery exists");
     assert!(github.contains("name = \"mcp/github/get_file_contents\""));
     assert!(github.contains("name = \"mcp/github/issue_write\""));
     assert!(!github.contains("name = \"get_file_contents\""));
@@ -293,7 +294,7 @@ fn kagent_runtime_management_is_typed_vouched_and_least_privilege() {
 fn the_claude_plugin_has_no_second_source_copy() {
     assert!(
         !repo_root()
-            .join("integrations/claude-code/plugin/skills/appa-guide")
+            .join("marketplace/plugins/claude-code/plugin/skills/appa-guide")
             .exists(),
         "the Claude plugin materializes the canonical skill at staging time; a source copy would drift"
     );
