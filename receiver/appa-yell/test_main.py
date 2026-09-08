@@ -233,3 +233,80 @@ def test_the_salt_is_the_one_the_client_compiles_in():
     assert included, "the client still compiles in a salt file"
     compiled = (Path(__file__).parents[2] / "appa-runtime/src/yell" / included.group(1)).resolve()
     assert compiled == (Path(__file__).parent / "salt.txt").resolve()
+
+
+def test_format_slack_message_with_empty_trajectory():
+    doc = one_report(message="something broke", trajectory={"omitted_reason": "no_recent_trajectory"})
+    msg = main.format_slack_message(doc, "abcd1234abcd", "release", "test-bucket")
+    assert msg.startswith("something broke\n\n")
+    assert "*Trajectory*: no" in msg
+    expected_url = (
+        "https://console.cloud.google.com/storage/browser/_details/test-bucket/reports/release/abcd1234abcd.json.gz"
+    )
+    assert f"*Gzip*: <{expected_url}|reports/release/abcd1234abcd.json.gz>" in msg
+
+
+def test_format_slack_message_with_non_empty_trajectory():
+    doc = one_report(
+        message="tool failed",
+        trajectory={"facts": [{"seq": 1}], "runtime_events": [{"event": "x"}]},
+    )
+    msg = main.format_slack_message(doc, "11223344", "commit", "test-bucket")
+    assert msg.startswith("tool failed\n\n")
+    assert "*Trajectory*: yes" in msg
+    expected_url = (
+        "https://console.cloud.google.com/storage/browser/_details/test-bucket/reports/commit/11223344.json.gz"
+    )
+    assert f"*Gzip*: <{expected_url}|reports/commit/11223344.json.gz>" in msg
+
+
+def test_notify_slack_sends_payload_when_configured(monkeypatch):
+    sent = []
+
+    class DummyResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    def dummy_urlopen(req, timeout=None):
+        sent.append((req, timeout))
+        return DummyResponse()
+
+    monkeypatch.setenv("APPA_YELL_SLACK_WEBHOOK", "https://hooks.slack.com/services/T/B/X")
+    monkeypatch.setenv("APPA_YELL_BUCKET", "my-reports")
+    monkeypatch.setattr(main.urllib.request, "urlopen", dummy_urlopen)
+
+    doc = one_report(message="alert test", trajectory={"omitted_reason": "none"})
+    main.notify_slack(doc, "deadbeef", "release")
+
+    assert len(sent) == 1
+    req, timeout = sent[0]
+    assert req.full_url == "https://hooks.slack.com/services/T/B/X"
+    assert timeout == 3
+    body = json.loads(req.data.decode("utf-8"))
+    assert "alert test" in body["text"]
+    assert "*Trajectory*: no" in body["text"]
+    expected_link = (
+        "https://console.cloud.google.com/storage/browser/_details/my-reports/reports/release/deadbeef.json.gz"
+    )
+    assert expected_link in body["text"]
+
+
+def test_notify_slack_silent_when_not_configured(monkeypatch):
+    called = []
+    monkeypatch.delenv("APPA_YELL_SLACK_WEBHOOK", raising=False)
+    monkeypatch.setattr(main.urllib.request, "urlopen", lambda *a, **kw: called.append(True))
+    main.notify_slack(one_report(), "deadbeef", "release")
+    assert not called
+
+
+def test_notify_slack_failure_does_not_raise(monkeypatch):
+    def failing_urlopen(*args, **kwargs):
+        raise OSError("connection error")
+
+    monkeypatch.setenv("APPA_YELL_SLACK_WEBHOOK", "https://hooks.slack.com/services/T/B/X")
+    monkeypatch.setattr(main.urllib.request, "urlopen", failing_urlopen)
+    # Must not raise
+    main.notify_slack(one_report(), "deadbeef", "release")

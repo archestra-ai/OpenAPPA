@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import urllib.request
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -233,6 +234,39 @@ def store(plain: bytes, compressed: bytes, kind: str) -> tuple[str, bool]:
     return digest, False
 
 
+def format_slack_message(document: dict[str, Any], digest: str, kind: str, bucket_name: str) -> str:
+    """The concise Slack alert: only the message, whether trajectory is present, and a link to the gzip."""
+    message = document.get("message", "").strip()
+    has_trajectory = "yes" if entries(document) > 0 else "no"
+    object_path = f"reports/{kind}/{digest}.json.gz"
+    gcs_link = f"https://console.cloud.google.com/storage/browser/_details/{bucket_name}/{object_path}"
+    return f"{message}\n\n*Trajectory*: {has_trajectory}\n*Gzip*: <{gcs_link}|{object_path}>"
+
+
+def notify_slack(document: dict[str, Any], digest: str, kind: str) -> None:
+    """Forward a new report to Slack if APPA_YELL_SLACK_WEBHOOK is set.
+
+    Any failure is logged and never bubbles up: a Slack outage must not refuse
+    a report that has already been stored safely in GCS.
+    """
+    webhook = os.environ.get("APPA_YELL_SLACK_WEBHOOK")
+    if not webhook:
+        return
+    bucket_name = os.environ.get("APPA_YELL_BUCKET", "archestra-appa-yell-reports")
+    text = format_slack_message(document, digest, kind, bucket_name)
+    payload = json.dumps({"text": text}).encode("utf-8")
+    req = urllib.request.Request(
+        webhook,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=3):
+            pass
+    except Exception:
+        logger.exception("could not notify slack of yell report")
+
+
 @functions_framework.http
 def receive(request: Any) -> tuple[Any, int, dict[str, str]]:
     """One report in, one receipt out."""
@@ -258,4 +292,7 @@ def receive(request: Any) -> tuple[Any, int, dict[str, str]]:
             "entries": entries(document),
         },
     )
+    if not duplicate:
+        notify_slack(document, digest, kind)
+
     return {"receipt_id": f"r-{digest[:32]}", "duplicate": duplicate}, 200, json_headers

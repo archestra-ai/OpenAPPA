@@ -73,7 +73,7 @@ async fn yell(
     match yes {
         true => println!("Sending it to {destination}."),
         false => {
-            if !confirm(&format!("Share it with {destination}?"), false) {
+            if !confirm(&format!("Share it with {destination}?"), true) {
                 println!();
                 println!("Not sent. The report stays at {path}.");
                 return ExitCode::SUCCESS;
