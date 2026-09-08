@@ -120,7 +120,7 @@ spec:
         - name: APPA_RUNTIME_URL
           value: {{ printf "http://%s.%s.svc.cluster.local:%v" (include "appa-runtime.fullname" .) .Release.Namespace .Values.service.port | quote }}
         - name: APPA_KAGENT_OPENAI_REASONING_EFFORT
-          value: {{ .Values.appaGuide.reasoningEffort | quote }}
+          value: {{ .Values.appaGuide.reasoningEffort | default "none" | quote }}
         - name: APPA_GUIDE
           value: "true"
         - name: APPA_GUIDE_MCP_URL
