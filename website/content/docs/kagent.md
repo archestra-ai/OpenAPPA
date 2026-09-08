@@ -210,7 +210,7 @@ If you already have kagent running with your own agents, use `appa-guide` to con
 
 #### 1. Deploy the adapter image and runtime
 
-Update the kagent controller to use the `appa-kagent-adk` adapter image, and deploy `appa-runtime` with persistence enabled for audit logs and battery updates (requires a `ReadWriteOnce` [StorageClass](https://kubernetes.io/docs/concepts/storage/storage-classes/)):
+Update the kagent controller to use the `appa-kagent-adk` adapter image and deploy `appa-runtime`. Persistent storage is optional—keep `persistence.enabled=false` for an ephemeral setup without StorageClass requirements, or set it to `true` to retain trajectory audit logs across pod restarts (requires a `ReadWriteOnce` [StorageClass](https://kubernetes.io/docs/concepts/storage/storage-classes/)):
 
 ```sh
 APPA_VERSION=0.15.0 # x-release-please-version
@@ -229,7 +229,7 @@ helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
 helm upgrade --install appa-runtime \
   oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
   --version "$APPA_VERSION" -n "$RUNTIME_NAMESPACE" --create-namespace \
-  --set persistence.enabled=true \
+  --set persistence.enabled=false \
   --set appaGuide.enabled=true \
   --set appaGuide.namespace="$KAGENT_NAMESPACE" \
   --set-string appaGuide.modelConfig=default-model-config \
