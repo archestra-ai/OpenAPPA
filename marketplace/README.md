@@ -29,6 +29,42 @@ CI runs `bash scripts/appa-marketplace.sh --check` and fails when the catalog
 needs regeneration. Regeneration is a developer operation; it does not update
 installed deployments or contact a remote marketplace.
 
+## Install and manage a deployment
+
+Start with an APPA release binary and Claude Code installed:
+
+```sh
+appa plugin install claude-code
+appa battery install github
+appa plugin list
+appa battery list --available
+```
+
+The first install uses that binary's published generation. A generation binds
+the catalog, packages, runtime, native plugin and image descriptors to one commit.
+Source commits without published artifacts cannot be installed online. Subsequent
+installs retain the selected generation; nothing updates automatically.
+
+Claude installation registers its native plugin and verifies the running APPA
+runtime. Battery installation adds and activates its policy in the same operation.
+It does not register an MCP server or obtain credentials. A connection with a
+different identity can be associated using `--server <connection-id>`; use the
+identity reported by the host's discovery/validation, not a guessed provider URL.
+
+Use `--config <path>` to select another deployment. An explicit
+`appa plugin install claude-code --revision <full-commit>` updates the whole
+selected generation. A previously retained commit can be restored the same way.
+`appa battery remove github` removes unchanged installer-owned configuration;
+`appa plugin remove claude-code` unregisters owned Claude support. Removal keeps
+authored configuration, retained artifacts, trajectory data and the runtime.
+Changed owned files are preserved and reported for recovery, not overwritten.
+
+Commands never prompt. `--json` emits one result or error on stdout, while
+progress goes to stderr. Exit codes are 0 for success, 1 for failure, 2 for
+invalid command syntax and 3 when recovery is required. Offline transfer uses
+the shared `appa bundle` command described below; import restores the bundle's
+selection rather than merging it with the destination's selection.
+
 ## Prepare kagent
 
 ```sh
