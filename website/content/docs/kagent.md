@@ -145,31 +145,51 @@ Restarting a deployment is a sensitive action. The `oncall` authority requires e
 Rollback the checkout-api deployment.
 ```
 
-The asynchronous `change-board` authority parks the request and notifies an external service. In another terminal, forward port `8081` (`kubectl port-forward -n kagent svc/appa-demo-mocks 8081:8081`) and use `GET /pending` and `POST /decide` to inspect and approve the change.
+The policy routes this request to an external change board service.
 
-#### 5. Child delegation
+Forward the change board port in another terminal:
+
+```sh
+kubectl port-forward -n kagent svc/appa-demo-mocks 8081:8081
+```
+
+Inspect pending requests:
+
+```sh
+curl http://localhost:8081/pending
+```
+
+Approve the change:
+
+```sh
+curl -X POST http://localhost:8081/decide \
+  -H "Content-Type: application/json" \
+  -d '{"ruling": "approve"}'
+```
+
+#### 5. Subagents
 
 ```text
 Ask the log analyst to analyze the crash logs of checkout-api-b2k1 and give me its summary.
 ```
 
-The child agent runs on an isolated trajectory. Its output is validated at `ChildEnd` before being admitted into the parent trajectory. Delegating to unconfigured agents (such as `release-manager`) is refused upfront.
+The subagent runs in an isolated session. Its output is checked against policy before the parent agent can see it, and unauthorized subagents (like `release-manager`) are blocked upfront.
 
-#### 6. Annotator
+#### 6. Dynamic input rules
 
 ```text
 Look up the public-oncall-rotation runbook.
 ```
 
-The annotator inspects call arguments dynamically at runtime to select the appropriate contract.
+Instead of static tool permissions, OpenAPPA inspects call arguments dynamically: reading a `public-*` runbook allows data to be shared freely, while reading an internal `ops-*` runbook restricts the retrieved information to internal operations.
 
-#### 7. Baseline read
+#### 7. Permitted read
 
 ```text
 List the pods in the shop namespace.
 ```
 
-A standard read operation that satisfies all audience and trust requirements flows through without human interruption.
+A standard read operation with no sensitive data or external risks flows through without interruption.
 
 ## Protect existing agents
 

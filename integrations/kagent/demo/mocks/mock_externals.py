@@ -244,6 +244,8 @@ class ChangeBoard:
         if ruling not in ("approve", "deny"):
             return False
         with self._cond:
+            if not request_id and len(self._parked) == 1:
+                request_id = next(iter(self._parked))
             entry = self._parked.get(request_id) if isinstance(request_id, str) else None
             if entry is None or entry["ruling"] is not None:
                 return False
