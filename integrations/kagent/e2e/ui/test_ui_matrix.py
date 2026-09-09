@@ -119,9 +119,9 @@ def test_the_hitl_authority_asks_the_person_and_an_approval_runs_the_restart(cha
     confirmation; the person's Approve is the authority's ruling."""
     chat.send("restart the checkout-api deployment; if it is blocked, execute the offered remedy plan")
     assert chat.decide("Approve"), "the confirmation reaches the person"
-    body = chat.wait_reply()
+    chat.wait_reply()
     chat.shot(shots_dir, "m07-hitl-approve")
-    assert "restarted" in body.lower(), "an approval authorizes, and the restart runs"
+    assert chat.has_result("restart_deployment", restarted="checkout-api"), "the restart tool actually ran"
 
 
 def test_the_hitl_authority_asks_the_person_and_a_rejection_leaves_it_blocked(chat, shots_dir):
@@ -132,6 +132,7 @@ def test_the_hitl_authority_asks_the_person_and_a_rejection_leaves_it_blocked(ch
     lowered = body.lower()
     assert "restarted successfully" not in lowered
     assert "has been restarted" not in lowered, "a rejection grants nothing"
+    assert not chat.has_result("restart_deployment", restarted="checkout-api")
 
 
 def test_the_annotator_rules_per_call(chat, shots_dir):
@@ -160,7 +161,7 @@ def test_the_release_window_authority_approves_in_window(chat, shots_dir):
     chat.shot(shots_dir, "m09-window-approve")
     assert not chat.confirmation_shown(), "a human-less authority needs no card"
     assert "catalog-cache" in body
-    assert "scaled" in body.lower() or "2 replicas" in body, "the in-window change is authorized and runs"
+    assert chat.has_result("scale_deployment", scaled="catalog-cache"), "the scale tool actually ran"
 
 
 def test_the_release_window_authority_denies_out_of_window(chat, shots_dir):
@@ -170,6 +171,8 @@ def test_the_release_window_authority_denies_out_of_window(chat, shots_dir):
     lowered = body.lower()
     assert "scaled checkout-api to 5" not in lowered
     assert "has been scaled" not in lowered, "an out-of-window change stays denied"
+    assert chat.has_result("scale_deployment", appa="denied")
+    assert not chat.has_result("scale_deployment", scaled="checkout-api")
 
 
 def test_the_delegated_child_is_gated_in_its_own_branch(chat, second_chat, shots_dir):
@@ -273,10 +276,10 @@ def test_the_remote_change_board_approves_and_the_rollback_runs(chat, board, sho
     the person is on the remote side."""
     with board.ruling("rollback_deployment", "approve"):
         chat.send(ROLLBACK)
-        body = chat.wait_reply()
+        chat.wait_reply()
     chat.shot(shots_dir, "m14-board-approve")
     assert not chat.confirmation_shown(), "the person rules remotely, not through a kagent card"
-    assert "rolled back" in body.lower() or "rollback" in body.lower(), "the board's approval authorizes the rollback"
+    assert chat.has_result("rollback_deployment", rolled_back="checkout-api"), "the rollback tool actually ran"
 
 
 def test_the_remote_change_board_denies_and_the_rollback_stays_blocked(chat, board, shots_dir):
@@ -286,6 +289,7 @@ def test_the_remote_change_board_denies_and_the_rollback_stays_blocked(chat, boa
     chat.shot(shots_dir, "m15-board-deny")
     lowered = body.lower()
     assert "rolled back the" not in lowered and "rollback undone" not in lowered, "a denial authorizes nothing"
+    assert not chat.has_result("rollback_deployment", rolled_back="checkout-api")
 
 
 def test_an_unanswered_change_board_grants_nothing(chat, shots_dir):
@@ -299,3 +303,5 @@ def test_an_unanswered_change_board_grants_nothing(chat, shots_dir):
     chat.shot(shots_dir, "m16-board-silent")
     lowered = body.lower()
     assert "rolled back the" not in lowered and "rollback undone" not in lowered, "no answer grants nothing"
+    assert chat.has_result("rollback_deployment", appa="denied")
+    assert not chat.has_result("rollback_deployment", rolled_back="checkout-api")

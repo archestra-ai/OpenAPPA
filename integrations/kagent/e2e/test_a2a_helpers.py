@@ -12,6 +12,62 @@ from types import SimpleNamespace
 import pytest
 
 
+def test_ui_results_are_scoped_and_reading_twice_does_not_collapse_them():
+    source = Path(__file__).parent / "ui/conftest.py"
+    tree = ast.parse(source.read_text())
+    chat_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Chat")
+    namespace = {"REPLY_TIMEOUT_S": 300, "json": json}
+    exec(compile(ast.Module(body=[chat_class], type_ignores=[]), str(source), "exec"), namespace)  # noqa: S102 -- repository test code only
+
+    class Output:
+        def __init__(self):
+            self.expanded = False
+            self.first = self
+
+        def count(self):
+            return int(self.expanded)
+
+        def wait_for(self, **kwargs):
+            assert self.expanded
+
+        def all_inner_texts(self):
+            return ['{"rolled_back": "checkout-api"}']
+
+    class Button:
+        def __init__(self):
+            self.output = Output()
+            self.clicks = 0
+
+        def is_visible(self):
+            return True
+
+        def click(self):
+            self.clicks += 1
+            self.output.expanded = not self.output.expanded
+
+        def locator(self, selector):
+            if selector == "xpath=..":
+                return SimpleNamespace(locator=lambda name: self.output if name == "pre" else None)
+            assert "ancestor::div" in selector and "min-w-full" in selector
+            return SimpleNamespace(locator=lambda name: SimpleNamespace(
+                first=SimpleNamespace(inner_text=lambda: "rollback_deployment"),
+            ))
+
+    button = Button()
+
+    def get_by_role(role, *, name, exact):
+        assert role == "button" and exact
+        return SimpleNamespace(all=lambda: [button] if name == "Results" else [])
+
+    # Deliberately no page.inner_text: whole-page prose/arguments cannot enter.
+    chat = namespace["Chat"](SimpleNamespace(get_by_role=get_by_role))
+    assert chat.has_result("rollback_deployment", rolled_back="checkout-api")
+    assert chat.has_result("rollback_deployment", rolled_back="checkout-api")
+    assert not chat.has_result("restart_deployment", rolled_back="checkout-api")
+    assert chat.tool_results() == '{"rolled_back": "checkout-api"}'
+    assert button.clicks == 1
+
+
 def test_scripted_parent_instructions_match_the_shipped_demo():
     kagent = Path(__file__).resolve().parents[1]
     tree = ast.parse((kagent / "tests/conftest.py").read_text())

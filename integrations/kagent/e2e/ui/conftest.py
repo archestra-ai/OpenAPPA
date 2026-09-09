@@ -229,19 +229,51 @@ class Chat:
         return False
 
     def tool_results(self) -> str:
-        """The page text with every tool card's response section expanded —
-        "Results" on a tool card, "Output" on the sub-agent card an
-        agent-as-tool call gets — so the tool responses the dashboard
-        renders, the runtime's own denial feedback included, are readable."""
-        for label in ("Results", "Output"):
-            for button in self.page.get_by_role("button", name=label).all():
-                try:
-                    if button.is_visible():
-                        button.click()
-                        self.page.wait_for_timeout(300)
-                except Exception:  # noqa: BLE001, S112 - a card that re-rendered mid-click
+        """Only rendered result sections, excluding arguments and assistant prose."""
+        return "\n".join(self.result_texts())
+
+    def result_texts(self, tool: str | None = None) -> list[str]:
+        # Pinned kagent v0.9.12 ToolDisplay/AgentCallDisplay put each result
+        # button and its output <pre> in the same immediate parent. Scope
+        # there, never to the card (which also contains arguments) or page.
+        results = []
+        for label in ("Results", "Error", "Output"):
+            for button in self.page.get_by_role("button", name=label, exact=True).all():
+                if not button.is_visible():
                     continue
-        return self.page.inner_text("body")
+                if tool is not None:
+                    card = button.locator("xpath=ancestor::div[contains(concat(' ', normalize-space(@class), ' '), ' min-w-full ')][1]")
+                    if card.locator(".font-medium").first.inner_text().strip() != tool:
+                        continue
+                output = button.locator("xpath=..").locator("pre")
+                if not output.count():
+                    button.click()
+                output.first.wait_for(state="visible", timeout=5000)
+                results.extend(output.all_inner_texts())
+        return results
+
+    def has_result(self, tool: str, **expected: object) -> bool:
+        def objects(value):
+            if isinstance(value, dict):
+                yield value
+                for child in value.values():
+                    yield from objects(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from objects(child)
+            elif isinstance(value, str):
+                try:
+                    decoded = json.loads(value)
+                except ValueError:
+                    return
+                if not isinstance(decoded, str):
+                    yield from objects(decoded)
+
+        return any(
+            all(body.get(key) == value for key, value in expected.items())
+            for result in self.result_texts(tool)
+            for body in objects(result)
+        )
 
     def tool_details(self) -> str:
         """Expand tool arguments and results for exact-call assertions."""
