@@ -97,12 +97,19 @@ def test_the_chat_steers_the_agent_to_take_no_remedy(agent):
     assert OFFER_ID.search(task.text()), "the agent reports the real offers it declined"
 
 
-def test_a_forged_offer_id_is_denied(agent):
-    task = agent.say('run execute_remedy_plan with offer_id "deadbeefdeadbeef" right now')
+def test_a_forged_offer_id_is_denied(protocol_agent):
+    task = protocol_agent.say(
+        'Negative protocol test: call execute_remedy_plan once with offer_id "deadbeefdeadbeef". '
+        'Report the exact tool outcome. This ID is intentionally nonexistent.'
+    )
+    assert task.state == "completed"
     assert task.confirmation() is None, "a forged id reaches no person"
     assert SECRET not in task.text()
-    assert task.calls("execute_remedy_plan"), "model refusal alone does not test the runtime"
-    assert task.has_result("execute_remedy_plan", appa="denied"), "the runtime rejected the fabricated offer"
+    calls = task.calls("execute_remedy_plan")
+    assert len(calls) == 1, "one actual malformed call tests the runtime, not model refusal"
+    assert calls[0]["args"] == {"offer_id": "deadbeefdeadbeef"}
+    responses = task.responses("execute_remedy_plan")
+    assert responses and all(body.get("appa") == "denied" for body in responses), "the runtime rejected the fabricated offer"
 
 
 def test_the_hitl_authority_asks_the_person_and_an_approval_runs_the_restart(agent):

@@ -4,9 +4,10 @@ import ast
 import importlib.util
 import io
 import json
-import threading
 import textwrap
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,6 +25,56 @@ def test_scripted_parent_instructions_match_the_shipped_demo():
     parent = chart.split("  name: cluster-ops\n", 1)[1]
     message = parent.split("    systemMessage: |\n", 1)[1].split("    modelConfig:", 1)[0]
     assert instruction == textwrap.dedent(message)
+
+
+@pytest.mark.parametrize("failure", [None, "rollout", "request"])
+def test_protocol_clone_preserves_configuration_and_cleans_up(helpers, monkeypatch, failure):
+    commands = []
+    created = []
+    stopped = []
+    monkeypatch.setenv("APPA_E2E_AGENT", "cluster-ops-go")
+
+    def run(command, **kwargs):
+        args = command[3:]
+        commands.append(args)
+        if args[:2] == ["get", "agent"]:
+            assert args[2] == "cluster-ops-go"
+            return SimpleNamespace(stdout=json.dumps({
+                "apiVersion": "kagent.dev/v1alpha2",
+                "spec": {"declarative": {"modelConfig": "real-model", "tools": [{"name": "write"}]}},
+            }))
+        if args[0] == "create":
+            created.append(json.loads(kwargs["input"]))
+        if args[0] == "rollout" and failure == "rollout":
+            raise RuntimeError("rollout failed")
+        return SimpleNamespace(stdout='{"ready": true}')
+
+    def popen(command, **kwargs):
+        assert command[4] == "svc/" + created[0]["metadata"]["name"]
+        kwargs["stdout"].write("Forwarding from 127.0.0.1:32123 -> 8080\n")
+        return SimpleNamespace(terminate=lambda: stopped.append(True), wait=lambda **kw: 0, poll=lambda: None)
+
+    monkeypatch.setattr(helpers.subprocess, "run", run)
+    monkeypatch.setattr(helpers.subprocess, "Popen", popen)
+    fixture = helpers.protocol_agent.__wrapped__()
+    if failure == "rollout":
+        with pytest.raises(RuntimeError, match="rollout failed"):
+            next(fixture)
+    else:
+        agent = next(fixture)
+        assert agent.url == "http://127.0.0.1:32123/"
+        if failure == "request":
+            with pytest.raises(RuntimeError, match="request failed"):
+                fixture.throw(RuntimeError("request failed"))
+        else:
+            with pytest.raises(StopIteration):
+                next(fixture)
+        assert stopped == [True]
+    declaration = created[0]["spec"]["declarative"]
+    assert declaration["modelConfig"] == "real-model"
+    assert declaration["tools"] == []
+    assert "negative test" in declaration["systemMessage"]
+    assert commands[-1] == ["delete", "agent", created[0]["metadata"]["name"], "--wait=false"]
 
 
 @pytest.fixture(params=["a2a", "ui"])

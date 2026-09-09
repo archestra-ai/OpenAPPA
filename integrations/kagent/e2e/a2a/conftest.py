@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
+import tempfile
 import threading
 import time
 import urllib.request
@@ -261,6 +263,70 @@ def agent() -> Agent:
     return Agent(A2A_URL)
 
 
+@pytest.fixture()
+def protocol_agent():
+    """Exercise malformed calls on a disposable clone, never alter the demo agent."""
+    source = os.environ.get("APPA_E2E_AGENT", "cluster-ops")
+    name = "appa-protocol-" + uuid.uuid4().hex[:12]
+
+    def kubectl(*args, **kwargs):
+        return subprocess.run(
+            ["kubectl", "-n", NAMESPACE, *args],
+            check=True, capture_output=True, text=True, timeout=360, **kwargs,
+        ).stdout
+
+    original = json.loads(kubectl("get", "agent", source, "-o", "json"))
+    resource = {
+        "apiVersion": original["apiVersion"], "kind": "Agent",
+        "metadata": {"name": name, "namespace": NAMESPACE}, "spec": original["spec"],
+    }
+    declaration = resource["spec"]["declarative"]
+    declaration["tools"] = []
+    declaration["systemMessage"] = (
+        "You are a protocol-test agent in a disposable demo. When the operator supplies "
+        "an offer ID for a negative test, call execute_remedy_plan exactly once with that ID "
+        "to observe the actual runtime rejection. Do not invent a different ID, retry, "
+        "or claim a result without calling the tool. No real external actions are available."
+    )
+    kubectl("create", "-f", "-", input=json.dumps(resource))
+    try:
+        deadline = time.monotonic() + 300
+        while True:
+            deployments = json.loads(kubectl("get", "deployment", name, "--ignore-not-found", "-o", "json") or "null")
+            if deployments:
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"controller did not create deployment {name}")
+            time.sleep(1)
+        kubectl("rollout", "status", "deployment/" + name, "--timeout=300s")
+        with tempfile.TemporaryFile(mode="w+") as log:
+            forward = subprocess.Popen(
+                ["kubectl", "-n", NAMESPACE, "port-forward", "svc/" + name, ":8080", "--address=127.0.0.1"],
+                stdout=log, stderr=subprocess.STDOUT,
+            )
+            try:
+                deadline = time.monotonic() + 30
+                while True:
+                    log.seek(0)
+                    output = log.read()
+                    match = re.search(r"Forwarding from 127\.0\.0\.1:(\d+)", output)
+                    if match:
+                        yield Agent(f"http://127.0.0.1:{match[1]}/")
+                        break
+                    if forward.poll() is not None or time.monotonic() >= deadline:
+                        raise RuntimeError(f"protocol-agent port-forward failed: {output}")
+                    time.sleep(0.1)
+            finally:
+                forward.terminate()
+                try:
+                    forward.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    forward.kill()
+                    forward.wait(timeout=10)
+    finally:
+        kubectl("delete", "agent", name, "--wait=false")
+
+
 class Board:
     """A member of the remote change board: rules on the mock's side channel.
 
@@ -324,7 +390,7 @@ class Board:
         def run():
             try:
                 outcome["entry"] = self.rule(tool, ruling, stop=stop)
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 -- re-raised on the owning test thread
                 outcome["error"] = error
 
         thread = threading.Thread(target=run, daemon=True)
