@@ -866,6 +866,8 @@ async def test_a_tool_failure_crosses_as_a_failure_outcome(tool_name, event):
     )
     assert returned is None, "an acknowledged failure propagates the original error"
     assert hook.events[0]["event"] == event
+    assert "spawned_id" not in hook.events[0]
+    assert "value" not in hook.events[0]
     assert hook.events[0]["outcome"] == {"status": "failure", "message": "connection refused"}
 
 
