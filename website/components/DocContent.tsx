@@ -17,7 +17,6 @@ import {
   ClaudeSessionChoice,
 } from "@/components/ClaudeCodeStory";
 import { CodeBlock } from "@/components/CodeBlock";
-import { CedarComparisonFigure } from "@/components/figures/CedarComparisonFigure";
 import { BatteryRuleOrderFigure } from "@/components/figures/BatteriesFigures";
 import { ClaudeCodeHooksFigure } from "@/components/figures/ClaudeCodeHooksFigure";
 import { ConnectedAgentFigure } from "@/components/figures/ConnectedAgentFigure";
@@ -70,7 +69,6 @@ const appaTraceLanguage: LanguageFn = (hljs) => ({
 /* Block directives: a line of the form :::name::: in the markdown renders
    the mapped component in place. */
 const DIRECTIVES: Record<string, () => ReactNode> = {
-  "fig-comparison-cedar": () => <CedarComparisonFigure />,
   "advisory-signup": () => <AdvisorySignup />,
   "battery-catalog": () => <BatteryCatalog />,
   "battery-review-checklist": () => (
