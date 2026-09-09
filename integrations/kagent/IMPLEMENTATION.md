@@ -492,6 +492,29 @@ parent receives the crossed value · its label unchanged
 
 On the Go cells, the runtime's session-service decorator lands lineage headers on every `Get` and `Create`. Both plugins open each delegated child under its parent's root. Every new remote delegation gets a fresh child context: Go enables the pinned SDK's `IsolateSessions` during APPA runner assembly; Python wraps the stock remote tool per call. Approval resumes keep the original paused child's identity. Neither change alters the runtime's one-fork-per-child rule or the APPA-disabled construction.
 
+### Native child approval pauses
+
+The callback tables above describe completed calls. A native remote result with
+`status: pending` and `waiting_for: subagent_approval` is a pause, not a completed
+spawn. Both plugins check runtime liveness but send neither `spawn_result` nor
+the invocation's final `turn_end`. Local invocation bookkeeping is still released.
+An unrelated invocation ends normally; further tool work clears the pause marker.
+
+When kagent resumes that call after approval or rejection, the before-tool callback
+sends `spawn_resume` instead of proposing a new `tool_call`. The event carries
+`root_id`, optional acting-parent `child_id`, `tool`, `arguments`, and `spawned_id`
+from the native confirmation payload's `context_id`. It carries no human ruling:
+the native child receives that decision through kagent's existing confirmation flow.
+
+The runtime requires the same tool and canonical arguments as the parent's open
+dispatch, whose fork must already bind that exact live child. It resumes the existing
+binding, including inheritance of the parent's current label, and returns `ack`.
+A missing identity, mismatched call, wrong child, or closed dispatch fails closed;
+the plugins never fall back to a fresh proposal. A terminal `spawn_result` then
+closes the original dispatch and checks the child's returned value normally.
+An error or abandoned call still uses ordinary recovery. Only the recognized native
+approval pause is exempt from turn-end cleanup.
+
 The A2A matrix checks delegation from separate parents, repeated delegation across messages in one chat, and two sequential delegations in one turn. It requires actual calls, distinct child IDs for new delegations, and checked return values. A model refusal is not evidence that a second child worked.
 
 ## Trajectory identity
