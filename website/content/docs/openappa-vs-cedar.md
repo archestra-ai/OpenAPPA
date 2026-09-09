@@ -1,7 +1,7 @@
 ---
 title: OpenAPPA vs Cedar
 category: Comparison
-order: 100
+order: 10.5
 description: Cedar provides a policy language and engine. OpenAPPA adds persistent context tracking and remediation for AI agents.
 ---
 
