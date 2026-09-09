@@ -1,7 +1,9 @@
 # Claude Code battery
 
-Use this battery for Claude Code sessions that need policy-aware shell commands
-and `self` labels on the requester's own secrets.
+This battery gives Claude Code sessions policy-aware shell commands and `self`
+labels on the requester's own secrets. `appa plugin install claude-code`
+includes it on a first install; `appa battery remove claude-code` takes it out,
+and a later plugin install does not bring it back.
 
 It covers two built-in tools, which the policy names `host/claude-code/Bash`
 and `host/claude-code/Read`:
@@ -23,7 +25,7 @@ and `host/claude-code/Read`:
   match the path as written, absolute or relative. Other paths keep the
   session's label. No rule blocks a read or lowers its trust.
 
-The default config `appa plugin install claude-code` writes separately provides the
+The default config `appa plugin install claude-code` writes provides the
 wildcard fallback for tools it does not name and the deployment-specific Bash
 Annotator hint. The root Annotator replaces this battery's default declaration.
 

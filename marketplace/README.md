@@ -9,7 +9,9 @@ The marketplace distributes two package kinds:
 The smaller protocol-translation components remain **adapters** in the runtime
 API. They are implementation components of the host plugins, not package kinds.
 
-Each directory under `plugins/` or `batteries/` has an `appa-package.toml`.
+Each directory under `plugins/` or `batteries/` has an `appa-package.toml`. A
+plugin's `batteries` list names the batteries a first install includes with it;
+each must be a battery of this catalog written for the plugin's host.
 The directory name must match the manifest's package name. The package manifest
 is the authored source; `marketplace.toml` is generated from these manifests and
 the package contents.
@@ -47,8 +49,10 @@ descriptors to one commit. Commits without a published release cannot be
 installed from the network. Subsequent installs retain the installed version;
 nothing updates automatically.
 
-Claude installation registers its native plugin and verifies the running APPA
-runtime. Battery installation adds and activates its policy in the same operation.
+Claude installation registers its native plugin, includes the batteries the
+plugin's manifest names (`claude-code`) on a first install, and verifies the
+running APPA runtime. Battery installation adds and activates its policy in the
+same operation.
 It does not register an MCP server or obtain credentials. A connection with a
 different identity can be associated using `--server <connection-id>`; use the
 identity reported by the host's discovery/validation, not a guessed provider URL.

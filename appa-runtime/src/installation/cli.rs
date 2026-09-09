@@ -227,17 +227,7 @@ pub fn install_battery(args: BatteryInstall) -> ExitCode {
             installation.config_path(),
             acquired.marketplace(),
         )?;
-        let filename = installation
-            .config_path()
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("installation requires UTF-8 config name");
-        let include = format!(
-            ".appa/{filename}/generations/{}/marketplace/{}/{}",
-            selection.commit(),
-            entry.path,
-            battery.policy
-        );
+        let include = battery_include(&installation, &selection, acquired.marketplace(), &name)?;
         text = selection.include_battery(&text, &name, &include)?;
         if let Some(server) = &args.server {
             if battery.namespaces.len() != 1 {
@@ -505,6 +495,10 @@ pub fn install(args: Install) -> ExitCode {
         let acquired = args.source.acquire(&installation, current.as_ref(), requirements)?;
         installation.retain(&acquired)?;
         let package = PackageName::parse(&name).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        // A bundle restores its own selection and a reinstall keeps the
+        // person's battery choices; only the plugin's first install brings its
+        // batteries along.
+        let mut included = Vec::new();
         let (mut selection, text) = if let Some(imported) = acquired.imported() {
             if !imported.selection().plugins.contains(&name) {
                 return Err(InstallError::Invalid(
@@ -513,25 +507,31 @@ pub fn install(args: Install) -> ExitCode {
             }
             imported.configuration(&installation)?
         } else {
+            let catalog = Marketplace::read(&acquired.marketplace().join("marketplace.toml"))
+                .map_err(|error| InstallError::Invalid(error.to_string()))?;
+            let entry = catalog
+                .packages
+                .iter()
+                .find(|entry| entry.kind == PackageKind::Plugin && entry.name == package)
+                .ok_or_else(|| InstallError::Invalid("plugin is absent from this version".into()))?;
+            let root = acquired.marketplace().join(entry.path.as_str());
+            let manifest = appa_package::Package::read(&root.join(appa_package::MANIFEST_FILE))
+                .map_err(|error| InstallError::Invalid(error.to_string()))?;
+            let Role::Plugin(plugin) = manifest.role else {
+                return Err(InstallError::Invalid("selected package is not a plugin".into()));
+            };
+            let first_install = !current
+                .as_ref()
+                .is_some_and(|selection| selection.plugins.contains(&name));
+            if first_install {
+                included = plugin.batteries().to_vec();
+            }
             let selected = current.unwrap_or_else(|| Selection::empty(acquired.generation().clone(), platform));
             let text = match before.as_deref() {
                 Some(bytes) => {
                     String::from_utf8(bytes.to_vec()).map_err(|error| InstallError::Invalid(error.to_string()))?
                 }
                 None => {
-                    let catalog = Marketplace::read(&acquired.marketplace().join("marketplace.toml"))
-                        .map_err(|error| InstallError::Invalid(error.to_string()))?;
-                    let entry = catalog
-                        .packages
-                        .iter()
-                        .find(|entry| entry.kind == PackageKind::Plugin && entry.name == package)
-                        .ok_or_else(|| InstallError::Invalid("plugin is absent from this version".into()))?;
-                    let root = acquired.marketplace().join(entry.path.as_str());
-                    let package = appa_package::Package::read(&root.join(appa_package::MANIFEST_FILE))
-                        .map_err(|error| InstallError::Invalid(error.to_string()))?;
-                    let Role::Plugin(plugin) = package.role else {
-                        return Err(InstallError::Invalid("selected package is not a plugin".into()));
-                    };
                     let text = String::from_utf8(super::required_bytes(&root.join(plugin.default_policy().as_str()))?)
                         .map_err(|error| InstallError::Invalid(error.to_string()))?;
                     match agent_yell {
@@ -546,14 +546,21 @@ pub fn install(args: Install) -> ExitCode {
         if let Some(runtime) = args.runtime {
             selection.kagent_runtime = Some(runtime);
         }
-        let text = selection.relocate(
+        let mut text = selection.relocate(
             &text,
             acquired.generation().clone(),
             installation.config_path(),
             acquired.marketplace(),
         )?;
+        included.retain(|battery| !selection.batteries.contains(battery.as_str()));
+        for battery in &included {
+            selection.select(PackageKind::Battery, battery);
+            let include = battery_include(&installation, &selection, acquired.marketplace(), battery)?;
+            text = selection.include_battery(&text, battery, &include)?;
+        }
         eprintln!("appa: verifying artifacts and preparing selected plugins...");
         installation.commit_installation(before.as_deref(), text.as_bytes(), &selection)?;
+        let batteries: Vec<&str> = included.iter().map(PackageName::as_str).collect();
         let result = if name == "kagent" {
             let installed = installation
                 .selection()?
@@ -561,13 +568,46 @@ pub fn install(args: Install) -> ExitCode {
             let digest = installed
                 .kagent_assets
                 .ok_or_else(|| InstallError::Invalid("kagent preparation is missing".into()))?;
-            serde_json::json!({"plugin":name,"state":"prepared","directory":installation.state.join("kagent").join(digest.hex()),"cluster":"unchanged"})
+            serde_json::json!({"plugin":name,"state":"prepared","batteries":batteries,"directory":installation.state.join("kagent").join(digest.hex()),"cluster":"unchanged"})
         } else {
-            serde_json::json!({"plugin": name, "state": "registered", "runtime": "verified"})
+            serde_json::json!({"plugin": name, "state": "registered", "batteries": batteries, "runtime": "verified"})
         };
         Ok((Some(Version::of(selection.generation())), result))
     })();
     finish(&args.target, "plugin.install".into(), result)
+}
+
+/// The config-relative include path of a selected battery's policy, as the
+/// selection retains it.
+fn battery_include(
+    installation: &Installation,
+    selection: &Selection,
+    marketplace: &Path,
+    name: &PackageName,
+) -> Result<String, InstallError> {
+    let catalog = Marketplace::read(&marketplace.join("marketplace.toml"))
+        .map_err(|error| InstallError::Invalid(error.to_string()))?;
+    let entry = catalog
+        .packages
+        .iter()
+        .find(|entry| entry.kind == PackageKind::Battery && entry.name == *name)
+        .ok_or_else(|| InstallError::Invalid(format!("battery {name} is absent from the installed version")))?;
+    let package = appa_package::Package::read(&marketplace.join(entry.path.as_str()).join(appa_package::MANIFEST_FILE))
+        .map_err(|error| InstallError::Invalid(error.to_string()))?;
+    let Role::Battery(battery) = package.role else {
+        return Err(InstallError::Invalid(format!("{name} is not a battery")));
+    };
+    let filename = installation
+        .config_path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("installation requires UTF-8 config name");
+    Ok(format!(
+        ".appa/{filename}/generations/{}/marketplace/{}/{}",
+        selection.commit(),
+        entry.path,
+        battery.policy
+    ))
 }
 
 /// A release build carries the tag whose generation the marketplace can fetch.
@@ -743,6 +783,20 @@ fn orient(kind: PackageKind, target: &Target) -> ExitCode {
 
 /// The catalog as a table, then the deployment's state when nothing is installed
 /// yet, so the next command is on the screen.
+/// " with battery x" / " with batteries x and y" for a plugin receipt, empty when
+/// the install included none.
+fn with_batteries(result: &serde_json::Value) -> String {
+    let names: Vec<&str> = result["batteries"]
+        .as_array()
+        .map(|batteries| batteries.iter().filter_map(serde_json::Value::as_str).collect())
+        .unwrap_or_default();
+    match names.as_slice() {
+        [] => String::new(),
+        [one] => format!(" with battery {one}"),
+        [head @ .., last] => format!(" with batteries {} and {last}", head.join(", ")),
+    }
+}
+
 fn render_listing(output: &mut impl Write, kind: &str, result: &serde_json::Value, path: &Path) -> io::Result<()> {
     let packages = result["packages"].as_array().map(Vec::as_slice).unwrap_or_default();
     let name = |package: &serde_json::Value| package["name"].as_str().unwrap_or_default().to_owned();
@@ -907,9 +961,11 @@ fn finish(
                 result["directory"].as_str().unwrap_or_default()
             )
         } else {
+            let result = receipt.result.as_ref().expect("plugin result is present");
             writeln!(
                 output,
-                "Installed {plugin} for {} ({}); runtime verified.",
+                "Installed {plugin}{} for {} ({}); runtime verified.",
+                with_batteries(result),
                 receipt.deployment.display(),
                 receipt
                     .version

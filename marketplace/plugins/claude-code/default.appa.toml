@@ -1,8 +1,9 @@
 # Example deployment for protecting a Claude Code session.
 #
-# The stable built-in tools of the harness are named. Bash and Read deliberately
-# reach the bounded Claude fallback at the end of this file unless the optional
-# Claude Code battery supplies their exact annotators. Any other tool the policy
+# The stable built-in tools of the harness are named. Bash and Read are left to
+# the Claude Code battery, which `appa plugin install claude-code` includes with
+# this file; a deployment that removed the battery sends them to the bounded
+# Claude fallback at the end of this file instead. Any other tool the policy
 # does not name gets the same per-call fallback until `/appa-guide init` gives it
 # an exact contract. A named tool without a `delta` key restricts nothing, the
 # same statement as `delta = {}`: the result's label is the combination of its
@@ -249,10 +250,10 @@ delta = {}
 # annotation may narrow a result to `self` or `internal`, or require a reader
 # this policy names, exactly as a static rule above would.
 # APPA-UNIX-FALLBACK-BEGIN
-# Bash classification prompt for the optional Claude Code battery. Edit `hint`
-# to describe how this deployment classifies shell commands. When the battery
-# is included, this root declaration replaces the battery's Annotator, while
-# the battery continues to provide the Bash contract and credential-path rules.
+# Bash classification prompt for the Claude Code battery. Edit `hint` to
+# describe how this deployment classifies shell commands. This root declaration
+# replaces the battery's Annotator, while the battery continues to provide the
+# Bash contract and credential-path rules.
 [[policy.annotator]]
 name = "claude-code.bash-requirements"
 builtin = "claude-code"
