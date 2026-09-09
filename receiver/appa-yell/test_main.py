@@ -258,7 +258,7 @@ def test_format_slack_payload_structure(trajectory, expected_status):
     expected_url = (
         "https://console.cloud.google.com/storage/browser/_details/test-bucket/reports/release/abcd1234abcd.json.gz"
     )
-    assert f"<{expected_url}|reports/release/abcd1234abcd.json.gz>" in context
+    assert f"<{expected_url}|gzip>" in context
 
 
 def test_sanitize_message_for_slack_breaks_mentions_and_truncates():

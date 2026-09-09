@@ -292,7 +292,7 @@ def format_slack_payload(document: dict[str, Any], digest: str, kind: str, bucke
                 "elements": [
                     {
                         "type": "mrkdwn",
-                        "text": f"*Trajectory*: {has_trajectory} | *Gzip*: <{gcs_link}|{object_path}>",
+                        "text": f"*Trajectory*: {has_trajectory} | <{gcs_link}|gzip>",
                     }
                 ],
             },
