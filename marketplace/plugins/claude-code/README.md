@@ -52,11 +52,14 @@ that binary. Release builds carry an immutable tag and artifact digest; clean
 checkout builds carry an immutable commit and plugin-tree digest. The result
 does not depend on the working directory.
 
-From a release binary, that digest is baked in. The installer verifies the
-checksum of the binary for Linux or macOS and places it in `~/.local/bin`
-(Windows: unpack the zip from the releases page). Init then downloads the
-artifact once, verifies it against the digest before anything outside a
-temporary file changes, and caches it, so a later init needs no network:
+From a release binary, `appa init claude-code` is `appa plugin install
+claude-code`: it fetches the generation published for the binary's tag,
+verifies every artifact against the generation descriptor before anything
+outside a temporary file changes, retains them under the deployment's `.appa/`
+state so a later install needs no network, and activates the plugin with the
+generation's own binary. The installer verifies the checksum of the binary for
+Linux or macOS and places it in `~/.local/bin` (Windows: unpack the zip from
+the releases page):
 
 ```sh
 curl -fsSL https://openappa.com/install.sh | sh
@@ -74,8 +77,9 @@ appa init claude-code
 ```
 
 Init reports each slow phase on stderr. If another installed APPA build owns
-the runtime endpoint, init identifies its process and asks `Stop it and
-continue? [Y/n]` before sending any signal. It never offers to stop an
+the runtime endpoint, a checkout build identifies its process and asks `Stop it
+and continue? [Y/n]` before sending any signal; a release binary never prompts
+and instead refuses, naming the process to stop. Neither offers to stop an
 unidentified listener or another user's process.
 
 Init installs `clappa` beside `appa` so the short command works in later examples.

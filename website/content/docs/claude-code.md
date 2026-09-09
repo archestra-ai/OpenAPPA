@@ -25,9 +25,11 @@ and run `appa init claude-code` from it. From a checkout, `cargo install --path
 appa-runtime --force` builds the binary instead of downloading one.
 
 Initialization prints progress while it resolves the matching plugin, updates
-Claude Code, and starts the runtime. If a different APPA build already owns the
-runtime endpoint, it asks before stopping that process; an unidentified
-listener is never stopped automatically.
+Claude Code, and starts the runtime. A release binary installs the generation
+published for its tag through the marketplace and never prompts; if a different
+APPA build already owns the runtime endpoint, it refuses and names the process
+to stop. A checkout build deploys the plugin from its own commit and asks before
+stopping that process. An unidentified listener is never stopped automatically.
 
 Initialization installs `clappa` beside `appa` so the short command works below.
 

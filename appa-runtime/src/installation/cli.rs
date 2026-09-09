@@ -548,6 +548,11 @@ pub fn list(kind: PackageKind, args: List) -> ExitCode {
             .map(|selection| selection.names(kind).clone())
             .unwrap_or_default();
         let mut revision = selection.as_ref().map(|selection| selection.commit().to_string());
+        let deployment = match (&selection, path.exists()) {
+            (Some(_), _) => "installed",
+            (None, true) => "unmanaged",
+            (None, false) => "absent",
+        };
         let names = if args.available {
             // A malformed selected config must not be hidden by a successful
             // catalog fetch. Ordinary local listing only reads selection state.
@@ -567,7 +572,7 @@ pub fn list(kind: PackageKind, args: List) -> ExitCode {
                 .map(|name| serde_json::json!({"name": name, "installed": true}))
                 .collect()
         };
-        Ok((revision, serde_json::json!({"packages": names})))
+        Ok((revision, serde_json::json!({"packages": names, "deployment": deployment})))
     })();
     finish(&args.target, format!("{kind}.list"), result)
 }
@@ -662,7 +667,20 @@ fn finish(
         .and_then(serde_json::Value::as_array)
     {
         if packages.is_empty() {
-            writeln!(output, "No packages selected for {}.", receipt.deployment.display())
+            let path = receipt.deployment.display();
+            let kind = receipt.operation.strip_suffix(".list").unwrap_or("package");
+            match receipt.result.as_ref().and_then(|result| result["deployment"].as_str()) {
+                Some("absent") => writeln!(output, "No deployment at {path}. Run: appa init claude-code"),
+                Some("unmanaged") if is_published_build() => writeln!(
+                    output,
+                    "{path} was not installed through the marketplace; nothing is selected. Run: appa plugin install claude-code"
+                ),
+                Some("unmanaged") => writeln!(
+                    output,
+                    "{path} was not installed through the marketplace; a development build selects no packages. Include a battery's policy in the config instead."
+                ),
+                _ => writeln!(output, "No {kind} packages selected for {path}."),
+            }
         } else {
             packages.iter().try_for_each(|package| {
                 writeln!(

@@ -46,6 +46,19 @@ fn local_list_is_structured_and_does_not_initialize_an_installation() {
 }
 
 #[test]
+fn list_names_the_deployment_state() {
+    let root = tempfile::tempdir().unwrap();
+    let document = |output: Output| -> serde_json::Value { serde_json::from_slice(&output.stdout).unwrap() };
+    let absent = document(run(root.path(), &["battery", "list", "--json"]));
+    assert_eq!(absent["result"]["deployment"], "absent");
+    std::fs::create_dir_all(root.path().join("config")).unwrap();
+    std::fs::write(root.path().join("config/appa.toml"), b"").unwrap();
+    let unmanaged = document(run(root.path(), &["battery", "list", "--json"]));
+    assert_eq!(unmanaged["result"]["deployment"], "unmanaged");
+    assert_eq!(unmanaged["result"]["packages"], serde_json::json!([]));
+}
+
+#[test]
 fn removing_an_unselected_plugin_is_read_only_and_idempotent() {
     let root = tempfile::tempdir().unwrap();
     for _ in 0..2 {

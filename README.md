@@ -109,8 +109,8 @@ names your policy chose with tokens such as `tool-1`, and whether to send the
 finished file, which is named before you answer and kept either way.
 
 The agent can report on its own through the `yell` tool, on a deployment that
-turns it on. `appa init` asks; `[reporting] agent_yell` in the config is the
-answer. That call is checked by your policy like any other, so a session
+turns it on. `appa init` from a checkout build asks; a release binary does not,
+and `[reporting] agent_yell` in the config is the answer either way. That call is checked by your policy like any other, so a session
 narrowed to `self` or `internal` reaches a human review instead of sending.
 
 ## Status
