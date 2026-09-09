@@ -2221,6 +2221,20 @@ func (m *scriptedModel) read() []*model.LLMRequest {
 	return append([]*model.LLMRequest{}, m.seen...)
 }
 
+func TestSyntheticCallsHaveUniqueIDsThatADKWillNotStrip(t *testing.T) {
+	seen := map[string]bool{}
+	for _, response := range []*model.LLMResponse{
+		returnCallResponse("first"), returnCallResponse("second"),
+		reviewCallResponse("offer-1"), reviewCallResponse("offer-1"),
+	} {
+		id := response.Content.Parts[0].FunctionCall.ID
+		if id == "" || strings.HasPrefix(id, "adk-") || seen[id] {
+			t.Fatalf("synthetic calls need distinct provider-visible IDs, got %q", id)
+		}
+		seen[id] = true
+	}
+}
+
 func TestAChildScopeStopsThroughTheReturnGateInARealRunner(t *testing.T) {
 	// The gate, end to end, in the adk/v2 loop of the locked major. The
 	// child speaks its answer, the plugin turns that stop into one gate
@@ -2288,8 +2302,22 @@ func TestAChildScopeStopsThroughTheReturnGateInARealRunner(t *testing.T) {
 		t.Errorf("the value of the child crosses at child_end: got %v, want %v", got, wantEnd)
 	}
 	read := scripted.read()
-	if len(read) == 0 {
-		t.Fatal("the model must have read at least one request")
+	if len(read) < 2 {
+		t.Fatal("the model must read the return gate's result on its next request")
+	}
+	var callID, responseID string
+	for _, content := range read[1].Contents {
+		for _, part := range content.Parts {
+			if call := part.FunctionCall; call != nil && call.Name == ReturnTool {
+				callID = call.ID
+			}
+			if response := part.FunctionResponse; response != nil && response.Name == ReturnTool {
+				responseID = response.ID
+			}
+		}
+	}
+	if callID == "" || responseID != callID {
+		t.Fatalf("the next model request needs a nonempty matching return call/result ID, got %q and %q", callID, responseID)
 	}
 	if _, registered := read[0].Tools[ReturnTool]; !registered {
 		t.Errorf("the child reads the gate on every request, got %v", read[0].Tools)

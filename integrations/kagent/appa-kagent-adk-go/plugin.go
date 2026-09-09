@@ -69,6 +69,7 @@ package appakagentadk
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1167,9 +1168,10 @@ func (p *AppaPluginKagent) holdTheStop(invocationID string, resp *model.LLMRespo
 }
 
 // returnCallResponse is the stop of a child, as one call to the return
-// gate.
+// gate. ADK removes its reserved adk-* IDs while rebuilding model history.
+// Own the ID so OpenAI-compatible providers can match the replayed result.
 func returnCallResponse(text string) *model.LLMResponse {
-	call := &genai.FunctionCall{Name: ReturnTool, Args: map[string]any{"text": text}}
+	call := &genai.FunctionCall{ID: "appa-" + rand.Text(), Name: ReturnTool, Args: map[string]any{"text": text}}
 	return modelResponse(&genai.Part{FunctionCall: call})
 }
 
@@ -1184,7 +1186,7 @@ func modelResponse(part *genai.Part) *model.LLMResponse {
 }
 
 func reviewCallResponse(offer string) *model.LLMResponse {
-	call := &genai.FunctionCall{Name: ReservedTool, Args: map[string]any{"offer_id": offer}}
+	call := &genai.FunctionCall{ID: "appa-" + rand.Text(), Name: ReservedTool, Args: map[string]any{"offer_id": offer}}
 	return modelResponse(&genai.Part{FunctionCall: call})
 }
 
