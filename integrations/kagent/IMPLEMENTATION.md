@@ -515,6 +515,14 @@ closes the original dispatch and checks the child's returned value normally.
 An error or abandoned call still uses ordinary recovery. Only the recognized native
 approval pause is exempt from turn-end cleanup.
 
+The Go runner wraps remote tools because the pinned ADK function-tool wrapper
+rejects `Confirmed=false` before kagent can forward the ruling. APPA's wrapper
+forwards that native decision to the original child task through A2A, preserving
+caller, authentication, and lineage headers. Initial and approved calls still use
+the stock tool. The rejection response must identify the original task and child;
+its returned value still passes the normal `spawn_result` gate. Transport errors
+report a failed spawn, never an ordinary tool result or an invented child return.
+
 The A2A matrix checks delegation from separate parents, repeated delegation across messages in one chat, and two sequential delegations in one turn. It requires actual calls, distinct child IDs for new delegations, and checked return values. A model refusal is not evidence that a second child worked.
 
 ## Trajectory identity
