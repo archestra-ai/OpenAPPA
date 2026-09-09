@@ -200,28 +200,39 @@ session performing this setup runs the first two and prints the third.
 running session cannot be pointed at a different runtime. To move
 between the installed and the dev runtime, start a new session.
 
-## Live check
+## Harness conformance check
 
 `live-gate-check.py` runs two real headless `claude` sessions against a
 runtime process it starts itself, under a policy that states one flow:
 reading a file narrows its content to the session, and writing a file
-releases content to the outside world.
+releases content to the outside world. By default, Claude Code talks to a
+deterministic local model fixture, so the check needs no Claude account and
+consumes no model usage.
 
 ```sh
 uv run marketplace/plugins/claude-code/live-gate-check.py
 ```
 
-It judges the gate the way a user does, on what reached the disk. One
-session writes words of the model's own and the file lands. The other
-reads a private file, proposes the write, and that line then appears in no
-file under any name. The allowed write is what stops a runtime that is
-down from passing as a refusal: the hooks fail closed, so a gate that is
-not answering blocks both sessions rather than one.
+It judges the gate on what reached the disk and the runtime's supported
+trajectory-status projection. One session writes words of the model's own and
+the file lands. The other reads a private file, narrows the trajectory to
+`session`, proposes the write, and that line then appears in no file under any
+name. The allowed write is what stops a runtime that is down from passing as a
+refusal: the hooks fail closed, so a gate that is not answering blocks both
+sessions rather than one.
 
-The check reads nothing of APPA's own log or database. It needs the
-`claude` CLI on PATH and logged in, and an appa binary — a local build,
-an installed one, or `APPA_BIN`. It spends the machine's
-Claude usage, so nothing runs it automatically.
+The check does not depend on APPA's internal event-log encoding. It needs the
+`claude` CLI on `PATH` and an appa binary: a local build, an installed one, or
+`APPA_BIN`. Set `CLAUDE_BIN` to use a specific Claude Code binary.
+
+Use the same scenarios as a small compatibility canary against the configured
+Claude account:
+
+```sh
+uv run marketplace/plugins/claude-code/live-gate-check.py --model live
+```
+
+Only this explicit live mode consumes Claude usage.
 
 ## Upgrade
 

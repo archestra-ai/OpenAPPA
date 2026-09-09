@@ -10,7 +10,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
-pub const REPOSITORY_MAPPINGS: [(&str, &str); 9] = [
+pub const REPOSITORY_MAPPINGS: [(&str, &str); 10] = [
     ("marketplace/plugins/claude-code/.claude-plugin", ".claude-plugin"),
     ("marketplace/plugins/claude-code/plugin", "plugin"),
     ("integrations/appa-guide", "plugin/skills/appa-guide"),
@@ -27,6 +27,10 @@ pub const REPOSITORY_MAPPINGS: [(&str, &str); 9] = [
     (
         "marketplace/plugins/claude-code/live-gate-check.py",
         "live-gate-check.py",
+    ),
+    (
+        "marketplace/plugins/claude-code/claude_model_fixture.py",
+        "claude_model_fixture.py",
     ),
     ("website/content/docs/contracts.md", "website/content/docs/contracts.md"),
 ];
