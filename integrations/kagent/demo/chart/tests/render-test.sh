@@ -99,6 +99,8 @@ expect 5 'http://appa-demo-mocks\.kagent\.svc\.cluster\.local:8081/'
 expect 1 '^    name = "host/kagent/skills"$'
 expect 1 '^    name = "agent/kagent/log-analyst"$'
 expect 1 '^    name = "agent/kagent/log-analyst-go"$'
+expect 1 'The release manager approves or refuses version bumps for the shop namespace\.$'
+expect 0 'agent the policy never names, so no delegation reaches it'
 expect 1 '^            - get_file_contents$'
 expect 1 '^            - issue_write$'
 expect 1 '^    github = "server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7"$'
@@ -123,6 +125,7 @@ must_render kagent --set agents.go.enabled=true
 expect 6 '^kind: Agent$'
 expect_env 6 APPA_RUNTIME_URL http://appa-runtime.appa.svc.cluster.local:18787
 expect 2 'never call ask_user'
+expect 2 'The release manager approves or refuses version bumps for the shop namespace\.$'
 
 must_render kagent --set agents.go.enabled=false --set agents.childName=release-manager-go
 must_refuse 'agent names collide' kagent --set agents.go.enabled=false --set agents.childName=log-analyst-go

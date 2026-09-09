@@ -8,4 +8,7 @@ protocol = 1
 default_policy = "default.appa.toml"
 # The generation descriptor locks registry and platform digests for these
 # release images. The Go image also publishes the alias kagent derives.
-images = { adk = "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk:v0.17.0", adk-go = "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk-go:v0.16.0" } # x-release-please-version
+
+[plugin.images]
+adk = "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk:v0.17.0" # x-release-please-version
+adk-go = "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk-go:v0.17.0" # x-release-please-version
