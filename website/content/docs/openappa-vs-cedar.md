@@ -12,11 +12,14 @@ OpenAPPA is a security framework built for AI agents. It includes persistent tra
 | Built in | Cedar | OpenAPPA |
 |---|:---:|:---:|
 | Policy language and evaluation engine | ✓ | ✓ |
+| Express custom business rules directly in policy | ✓ | ✕ |
 | Tracks the agent's action history | ✕ | ✓ |
 | Uses earlier reads to limit later actions | ✕ | ✓ |
 | Suggests ways to unblock an action | ✕ | ✓ |
 
-The main difference is how much of the agent's security behavior you need to build yourself. Cedar can check whether an agent may send information to a destination. Your application must track what the agent has read, decide how restrictions combine, and supply that state to Cedar. OpenAPPA supplies that behavior out of the box.
+Cedar gives you flexibility to define authorization rules. For example, a policy can allow a refund only up to the requesting employee's approval limit. Cedar can compare those values directly. OpenAPPA needs a separate component to evaluate that condition.
+
+OpenAPPA gives you built-in security behavior for agents. Cedar can check whether an agent may send information to a destination, but your application must track what the agent has read, decide how restrictions combine, and supply that state to Cedar. OpenAPPA supplies that behavior out of the box.
 
 OpenAPPA suits teams enforcing agent security at scale. The tracking, persistence, and recovery behavior are already part of the framework. See [How it works](/how-it-works) for the model and [Add to your agent](/writing-an-integration) for integration options.
 
