@@ -80,8 +80,7 @@ func CreateDiscoveryRunnerConfig(
 	}
 	extraTools = append(extraTools, discovery)
 	extraTools = append(extraTools, discovery.resumeTools()...)
-	plain := *agentConfig
-	plain.HttpTools, plain.SseTools = nil, nil
+	plain := discoveryAgentConfig(agentConfig)
 	adkAgent, err := agent.CreateGoogleADKAgent(ctx, &plain, agentNameFromAppName(appName), stsPlugin, extraTools...)
 	if err != nil {
 		return runner.Config{}, nil, fmt.Errorf("failed to create agent: %w", err)
@@ -123,6 +122,20 @@ func CreateDiscoveryRunnerConfig(
 	}
 
 	return cfg, discovery, nil
+}
+
+// discoveryAgentConfig leaves MCP wiring to discovery and gives every remote
+// delegation a fresh child session. A completed child trajectory cannot bind
+// another fork, and reusing its model history would cross parent boundaries.
+// The SDK supports this even when the cluster CRD cannot expose the setting.
+func discoveryAgentConfig(config *adk.AgentConfig) adk.AgentConfig {
+	plain := *config
+	plain.HttpTools, plain.SseTools = nil, nil
+	plain.RemoteAgents = append([]adk.RemoteAgentConfig(nil), config.RemoteAgents...)
+	for i := range plain.RemoteAgents {
+		plain.RemoteAgents[i].IsolateSessions = true
+	}
+	return plain
 }
 
 func buildTokenPropagationPlugin(ctx context.Context, log logr.Logger) (*sts.TokenPropagationPlugin, error) {

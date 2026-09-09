@@ -185,10 +185,9 @@ def test_the_delegated_child_is_gated_in_its_own_branch(agent):
     runtime shaped it. The parent's own gate declares nothing new here,
     and the replay carries the child's own answer.
 
-    Each parent delegates once. A second delegation from one parent
-    session sends a new fork at a child identity the family already
-    opened, which the runtime refuses — one errand is one child
-    trajectory. The injection in the logs never reaches the caller."""
+    Each parent delegates once here; the repeated-delegation case below
+    checks two errands in one parent chat. The injection in the logs
+    never reaches the caller."""
     for parent in ("the first parent session", "the second parent session"):
         task = agent.say(DELEGATE)
         assert task.state == "completed", parent
@@ -217,6 +216,32 @@ def test_the_delegated_child_is_gated_in_its_own_branch(agent):
             f"the injected instruction never reaches the caller through the child ({parent})"
         )
         assert task.confirmation() is None, f"nobody is asked ({parent})"
+
+
+def test_repeated_delegation_uses_fresh_children_in_the_same_parent_chat(agent):
+    context_id = None
+    children = set()
+    for attempt in range(2):
+        task = agent.say(
+            DELEGATE + "; make a fresh delegation now, do not reuse an earlier summary",
+            context_id=context_id,
+        )
+        assert task.state == "completed", f"delegation {attempt + 1} completed"
+        assert task.context_id, "the parent chat has an identity"
+        if context_id is not None:
+            assert task.context_id == context_id, "the second delegation stayed in the same parent chat"
+        context_id = task.context_id
+        assert task.calls(CHILD_TOOL), "the parent actually delegated again"
+        responses = task.responses(CHILD_TOOL)
+        assert responses, "the child returned a result"
+        for body in responses:
+            assert child_return_shape(body) == "returned", f"expected a checked child result: {body}"
+            child_id = body["subagent_session_id"]
+            assert child_id and child_id not in children, "each new delegation gets a fresh child session"
+            children.add(child_id)
+            assert str(body.get("result") or "").strip(), "the child returned a nonempty checked value"
+        assert INJECTION not in task.text()
+        assert task.confirmation() is None
 
 
 def test_a_delegation_the_policy_never_names_is_denied(agent):
