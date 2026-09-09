@@ -12,8 +12,10 @@ on the wire; the client answers with the same `data` part the kagent UI
 sends (`{"decision_type": "approve" | "reject"}`), and the runtime spends
 that answer as the authority's ruling.
 
-The matrix also checks both suspicious ingress sources and verifies that
-an audience-narrowed session cannot use the public status sink.
+The matrix also checks both suspicious ingress sources, the GitHub battery's
+operator-authored issue and repository-read remedy, and the denial of public
+writes after audience or trust narrowing. GitHub calls use the demo's canned
+repository and issue tools; these tests do not contact GitHub or create real issues.
 
 ## Requirements
 
@@ -42,7 +44,17 @@ The allowed delegation asserts that the call carries arguments, that its respons
 - kagent's own result with the child's `subagent_session_id` — what crossed at the child's stop, replayed;
 - a `result` alone — the same crossing where kagent answered with a message instead of a task, so no child session id came back.
 
-A denial fails the case. So does `{"appa": "withheld"}`: the parent's gate refused the message the harness delivered, because the child never returned it at a stop, and nothing crossed into the parent. A withhold whose text carries the runtime's reason `the spawn did not take` (the shape `spawn-not-taken`) fails it for a named cause. The runtime answers the parent's return with it when the child's session opened under another parent's root, or under none, so this parent's prepared fork was never bound. The case delegates from two fresh parent sessions in turn and asserts both returns: on the go cell one child session serves every parent, so a child opened per session instead of per (root, child) pair fails on the second parent. It delegates once per parent session, because a second delegation from one parent session sends a new fork at a child identity the family already opened, which the runtime refuses — one errand is one child trajectory. So does kagent's own failure text under `result`, which the python agent tool answers with when the child never answered (`Remote agent '…' request failed: …`, `… returned no result.`, `… failed.`), and so does the go agent tool's `{"error": …}`. The injected instruction in the logs never reaches the caller. The undeclared delegation asserts the opposite. Its response is the runtime's denial, `{"appa": "denied"}` with the reason `not declared by the policy`, and no `subagent_session_id` comes back.
+A denial or withheld return fails an allowed-delegation case. The reason
+`the spawn did not take` identifies a child that was not bound to this parent's
+prepared fork. Transport failures also fail the case. Both plugins allocate a
+fresh child context for every new delegation; an approval resume retains the
+paused child's context. Tests cover different parent conversations, repeated
+messages in one conversation, and two delegations within one turn. They require
+distinct child IDs and useful returned data, not merely a completed tool card.
+The injected log instruction must not reach the caller.
+
+The undeclared-delegation case requires the opposite result: the runtime's
+`{"appa": "denied"}` response with `not declared by the policy`, and no child ID.
 `APPA_A2A_DECISION_SETTLE` (seconds, default 2) is the pause before a
 decision is sent: kagent persists the confirmation-request event it
 later matches the decision against concurrently with answering the
