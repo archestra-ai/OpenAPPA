@@ -1471,7 +1471,11 @@ func (p *AppaPluginKagent) onToolError(ctx agent.Context, t tool.Tool, args map[
 	if !known {
 		return nil, failClosed("the tool %s is outside the gated inventory, and its failure cannot cross", t.Name())
 	}
-	decision, err := p.post(ctx, toolResultEvent(ids.rootID, spelled, plainJSON(orEmpty(args)), failureOutcome(toolErr.Error()), ids.childID))
+	failure := toolResultEvent(ids.rootID, spelled, plainJSON(orEmpty(args)), failureOutcome(toolErr.Error()), ids.childID)
+	if IsSpawn(spelled) {
+		failure = spawnResultEvent(ids.rootID, spelled, plainJSON(orEmpty(args)), failureOutcome(toolErr.Error()), "", "", ids.childID)
+	}
+	decision, err := p.post(ctx, failure)
 	if err != nil {
 		return nil, err
 	}

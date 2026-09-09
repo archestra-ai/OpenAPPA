@@ -957,6 +957,31 @@ func TestAToolFailureCrossesAsAFailureOutcome(t *testing.T) {
 	}
 }
 
+func TestRemoteFailureClosesASpawnNotAnOrdinaryToolCall(t *testing.T) {
+	h := newHook(t, ack)
+	p := pluginOver(t, h)
+	ctx := newFakeContext(newFakeSession("s1"))
+	remote := &fakeTool{"kagent__NS__billing_agent"}
+	args := map[string]any{"request": "total the invoices"}
+	failure := errors.New("remote transport failed")
+	if returned, err := p.onToolError(ctx, remote, args, failure); err != nil || returned != nil {
+		t.Fatalf("acknowledged failure must propagate: %v, %v", returned, err)
+	}
+	if _, err := p.afterTool(ctx, remote, args, nil, failure); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.kinds(); !reflect.DeepEqual(got, []string{"spawn_result"}) {
+		t.Fatalf("remote error used the wrong event or reported twice: %v", got)
+	}
+	event := h.recorded()[0]
+	if !reflect.DeepEqual(event["outcome"], failureOutcome(failure.Error())) {
+		t.Fatalf("failure outcome changed: %v", event)
+	}
+	if _, exists := event["spawned_id"]; exists {
+		t.Fatal("a transport failure must not invent a child result identity")
+	}
+}
+
 func TestNativeRejectionReportsTheHumanDecisionNotAnApprovalServiceFailure(t *testing.T) {
 	for _, confirmation := range []*toolconfirmation.ToolConfirmation{nil, {Confirmed: true}, {Confirmed: false}} {
 		h := newHook(t, ack)

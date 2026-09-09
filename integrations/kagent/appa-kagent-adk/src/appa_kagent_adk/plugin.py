@@ -809,9 +809,12 @@ class AppaPluginKagent(BasePlugin):
             raise AppaFailClosed(f"the tool {tool.name} is outside the gated inventory, and its failure cannot cross")
         root_id, child_id = self._ids(tool_context)
         try:
-            decision = await self._post(
-                wire.tool_result(root_id, spelled, _plain_json(tool_args), wire.failure(str(error)), child_id)
-            )
+            failure = wire.tool_result(root_id, spelled, _plain_json(tool_args), wire.failure(str(error)), child_id)
+            if is_spawn(spelled):
+                failure = wire.spawn_result(
+                    root_id, spelled, _plain_json(tool_args), wire.failure(str(error)), child_id=child_id
+                )
+            decision = await self._post(failure)
             if decision.kind == "ack":
                 return None  # the original error propagates
             if decision.kind == "deliver_value":

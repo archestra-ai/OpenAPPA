@@ -852,16 +852,20 @@ async def test_a_child_return_substitutes_what_the_parent_receives():
     assert returned == {"result": "the redacted summary"}
 
 
-async def test_a_tool_failure_crosses_as_a_failure_outcome():
+@pytest.mark.parametrize(
+    "tool_name,event", [("k8s_scale", "tool_result"), ("kagent__NS__billing_agent", "spawn_result")]
+)
+async def test_a_tool_failure_crosses_as_a_failure_outcome(tool_name, event):
     hook = Hook(ACK)
     plugin = plugin_over(hook)
     returned = await plugin.on_tool_error_callback(
-        tool=FakeTool("k8s_scale"),
+        tool=FakeTool(tool_name),
         tool_args={"replicas": 3},
         tool_context=FakeContext(FakeSession("s1")),
         error=RuntimeError("connection refused"),
     )
     assert returned is None, "an acknowledged failure propagates the original error"
+    assert hook.events[0]["event"] == event
     assert hook.events[0]["outcome"] == {"status": "failure", "message": "connection refused"}
 
 
