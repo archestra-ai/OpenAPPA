@@ -667,6 +667,8 @@ def demo_tools_url(workdir) -> Iterator[str]:
 def runtime_url(workdir, mock_port, demo_tools_url) -> Iterator[str]:
     """The one appa-runtime every agent in the fleet gates against."""
     binary = _appa_binary()
+    curl = shutil.which("curl")
+    assert curl is not None, "curl is required for the demo's HTTP command adapters"
     port = _free_port()
     policy = workdir / "policy.appa.toml"
     shutil.copytree(REPO_ROOT / "marketplace" / "batteries" / "github", workdir / "batteries" / "github")
@@ -674,7 +676,7 @@ def runtime_url(workdir, mock_port, demo_tools_url) -> Iterator[str]:
     policy.write_text(
         POLICY.read_text()
         .replace("@@MOCK_PORT@@", str(mock_port))
-        .replace("@@PYTHON@@", sys.executable)
+        .replace('"@@CURL@@"', json.dumps(curl))
         .replace("@@GITHUB_SERVER@@", server)
     )
     command = [
