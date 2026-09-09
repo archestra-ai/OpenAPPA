@@ -3,7 +3,7 @@ title: kAgent
 nav_title: kAgent
 category: Integrations
 order: 6
-description: Protect kagent declarative Python Agents with OpenAPPA policy.
+description: Protect kagent declarative Python and Go Agents with OpenAPPA policy.
 ---
 
 [kagent](https://kagent.dev/docs/kagent/introduction/what-is-kagent/) runs AI agents natively on [Kubernetes](https://kubernetes.io/docs/home/). OpenAPPA adds flow control to these [Agents](https://kagent.dev/docs/kagent/concepts/agents/), checking tool calls, subagents, and data flows against deterministic policy before any action runs.
@@ -12,11 +12,13 @@ description: Protect kagent declarative Python Agents with OpenAPPA policy.
 
 :::fig-kagent:::
 
-The OpenAPPA plugin intercepts tool calls, subagents, and return values before they execute:
+The OpenAPPA plugin checks tool calls before dispatch and checks returned values before they enter the agent's context:
 
 - **Enforce policy:** Denied actions stop immediately. When human review is required, kagent requests approval in chat or via A2A.
 - **Isolate subagents:** Subagent outputs are validated against policy before the parent agent can see them.
 - **Shared runtime:** Agents connect to an `appa-runtime` service that evaluates policy and records audit logs. New policies apply automatically to new chats.
+
+The plugin runs inside the Python or Go agent image. The separate `appa-runtime` chart owns policy evaluation and storage. The `appa-kagent-demo` chart supplies demo agents, fixture tools, and an inert policy template; it does not own the shared runtime. Batteries supply policy defaults, not agent runtimes or MCP servers.
 
 ## Quickstart
 
@@ -280,7 +282,9 @@ init
 
 `appa-guide` scans your cluster tools, matches relevant [batteries](/batteries) (like GitHub or Slack), and drafts starting policy rules.
 
-Click **Approve** on the confirmation card to activate the policy.
+Review the proposed behavior and approve that proposal in a later chat message. The guide then submits the change through the runtime-owned policy tool and opens a native **Approve / Reject** card. Approve that card to authorize publication. Neither `init` alone nor approval text alone publishes policy.
+
+If the active policy already provides the proposed behavior, the guide should report that no change is needed, without writing or requesting approval.
 
 #### 3. Protect your agents with appa-guide
 
@@ -329,7 +333,7 @@ Use `appa-guide` in chat to inspect and modify policies conversationally:
 - **`refresh batteries`**: Updates included battery definitions (requires persistence).
 - **`diagnose the OpenAPPA integration`**: Runs read-only health checks on connectivity and configuration.
 
-Changes take effect immediately once approved on the native confirmation card.
+The guide publishes and reloads the approved policy through the runtime's management tools. New chats use the reloaded policy; existing chats keep the policy they started with. The guide must report successful publication, not merely that a card was approved.
 
 ## Troubleshooting
 
