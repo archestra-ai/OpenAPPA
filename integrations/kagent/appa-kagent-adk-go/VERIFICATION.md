@@ -95,25 +95,19 @@ The decorator is per request because the kagent session service does
 not fold `state_delta` on `Get`; landing the headers once at `Create`
 would leave every later `Get` without them.
 
-**Finding: the go remote-agent tool sends every delegation from a pod
-into one child context.** `NewKAgentRemoteA2ATool` mints
-`sharedContextID` once, at construction
-(`kagent go/adk/pkg/tools/remote_a2a_tool.go:199, 211`).
-`contextIDForCall` returns it for every call while `isolateSessions`
-is false (`remote_a2a_tool.go:152-164, 227-234`). Each call sends that
-id as the message context id, with the parent session id in the call
-context (`remote_a2a_tool.go:306-316`). The flag comes from
-`RemoteAgentConfig.IsolateSessions` (`kagent go/api/adk/types.go:437-442`,
-`kagent go/adk/pkg/agent/agent.go:59`), false by default. The v0.9.12
-tree has no such field, so the v1alpha2 CRD cannot set it on cell
-A-go. The child pod therefore sees one ADK session id for every parent
-that delegates into it.
+**Every new delegation uses a fresh child context.** APPA's
+`discoveryAgentConfig` copies the remote-agent declarations and sets
+`IsolateSessions` before passing them to the pinned SDK. Its
+`contextIDForCall` then creates an ID per call. The v0.9.12 CRD does not
+need to expose this SDK setting. The source config remains unchanged,
+and the APPA-disabled path keeps stock construction.
 
-The python twin never shares one. The kagent python executor builds a
-fresh runner per A2A request from the root agent factory, and the
-remote tool it builds mints its child context id at construction
-(kagent-adk 0.3.0 `_agent_executor.py:128-137`, `_a2a.py:111-112`,
-`_remote_a2a_tool.py:177, 324`).
+The Python plugin wraps remote toolsets in `remote_agents.py`. Each
+call owns a copy of the stock tool with a fresh context ID. The wrapper
+preserves the original context ID on an approval resume and leaves HTTP
+client cleanup with the original toolset. Both plugins return the actual
+child ID with the tool result. Python omits the stale, per-turn ID from
+call metadata, so the pinned UI resolves activity from the result.
 
 Each parent opens the child under its own root id, so no parent takes
 the fork of another. The child trajectory id carries the root id
@@ -127,28 +121,17 @@ The plugin keeps the pairs it opened (`opened`), exactly as the python
 twin does (`plugin.py`, `_opened`). A re-entry of an opened pair sends
 no second `child_start`: the runtime ended the child trajectory when
 its first return crossed the parent's gate, and the child context id
-can bind no second fork (the limit below). The re-entry then runs in
+can bind no second fork. The re-entry then runs in
 the ended trajectory, and the log line names that case. A pair joins
 the set only after the runtime acked, so a refused start opens nothing
 and the next entry sends `child_start` again. A root session keeps the
 `isFresh` rule for `session_start`.
 
-**Limit: on kagent v0.9.12 one go parent delegates into a given child
-once per parent session.** The go tool sends a second delegation from
-the same parent session into the same child context id, and no header
-carries a per-delegation discriminator. That second delegation prepares
-a second fork, and a child bound to one fork binds no other
-(`appa-runtime/src/api/session.rs`, `bind_child`, and
-`EngineRefusal::Unbindable` mapped to `BindingMismatch` in
-`appa-runtime/src/api/mod.rs`). The child resumes under the first fork,
-and its stop crosses under the return policy of that fork. The second
-spawn result of the parent then comes back blocked with `the fork and
-the child are already bound elsewhere` (`on_spawn_result`, the
-`SpawnPlan::Bind` arm on a bound child). The rc4 `isolateSessions`
-field mints one context per call and removes the limit. The python cell
-mints a fresh child context per parent request and has no such limit.
-Both matrices delegate once per parent session, so no matrix row
-observes the limit.
+The A2A matrix checks two delegations across messages in one parent chat
+and two sequential delegations in one turn. Both require distinct child
+IDs and checked results. These tests also require actual model calls;
+a model that refuses the second request fails the scenario rather than
+counting as evidence of session isolation.
 
 `TestEachParentOpensTheSharedChildSessionUnderItsOwnRoot` and
 `TestARootSessionStillOpensOnceAtItsFirstContent` (`plugin_test.go`)
