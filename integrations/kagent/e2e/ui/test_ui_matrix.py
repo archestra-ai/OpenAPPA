@@ -271,20 +271,18 @@ def test_the_remote_change_board_approves_and_the_rollback_runs(chat, board, sho
     consult at the change board, a member rules on the board's own
     channel, and the ruling authorizes the exact call. No kagent card:
     the person is on the remote side."""
-    member = board.rule_in_background("rollback_deployment", "approve")
-    chat.send(ROLLBACK)
-    body = chat.wait_reply()
-    member.join(5)
+    with board.ruling("rollback_deployment", "approve"):
+        chat.send(ROLLBACK)
+        body = chat.wait_reply()
     chat.shot(shots_dir, "m14-board-approve")
     assert not chat.confirmation_shown(), "the person rules remotely, not through a kagent card"
     assert "rolled back" in body.lower() or "rollback" in body.lower(), "the board's approval authorizes the rollback"
 
 
 def test_the_remote_change_board_denies_and_the_rollback_stays_blocked(chat, board, shots_dir):
-    member = board.rule_in_background("rollback_deployment", "deny")
-    chat.send(ROLLBACK)
-    body = chat.wait_reply()
-    member.join(5)
+    with board.ruling("rollback_deployment", "deny"):
+        chat.send(ROLLBACK)
+        body = chat.wait_reply()
     chat.shot(shots_dir, "m15-board-deny")
     lowered = body.lower()
     assert "rolled back the" not in lowered and "rollback undone" not in lowered, "a denial authorizes nothing"

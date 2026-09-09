@@ -1,20 +1,27 @@
 """Offline regressions for the live matrix's evidence checks."""
 
+import ast
 import importlib.util
 import io
 import json
-from pathlib import Path
 import threading
+from pathlib import Path
 
 import pytest
 
 
-@pytest.fixture
-def helpers(monkeypatch):
+@pytest.fixture(params=["a2a", "ui"])
+def helpers(monkeypatch, request):
     monkeypatch.setenv("APPA_A2A_E2E", "1")
     spec = importlib.util.spec_from_file_location("appa_a2a_helpers", Path(__file__).parent / "a2a/conftest.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    if request.param == "ui":
+        # Exercise the UI board helper without importing or launching a browser.
+        source = Path(__file__).parent / "ui/conftest.py"
+        tree = ast.parse(source.read_text())
+        board = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Board")
+        exec(compile(ast.Module(body=[board], type_ignores=[]), str(source), "exec"), module.__dict__)  # noqa: S102 -- repository test code only
     return module
 
 
@@ -74,9 +81,8 @@ def test_board_requires_matching_ruling_acknowledgement(helpers, monkeypatch, ac
 def test_missing_ruling_fails_the_scenario(helpers, monkeypatch):
     board = helpers.Board("http://mock")
     monkeypatch.setattr(board, "rule", lambda *a, **k: None)
-    with pytest.raises(AssertionError, match="acknowledged an actual"):
-        with board.ruling("rollback_deployment", "approve"):
-            pass
+    with pytest.raises(AssertionError, match="acknowledged an actual"), board.ruling("rollback_deployment", "approve"):
+        pass
 
 
 def test_board_member_stops_when_the_agent_fails(helpers, monkeypatch):
@@ -88,7 +94,6 @@ def test_board_member_stops_when_the_agent_fails(helpers, monkeypatch):
         stopped.set()
 
     monkeypatch.setattr(board, "rule", rule)
-    with pytest.raises(ValueError, match="agent failed"):
-        with board.ruling("rollback_deployment", "approve"):
-            raise ValueError("agent failed")
+    with pytest.raises(ValueError, match="agent failed"), board.ruling("rollback_deployment", "approve"):
+        raise ValueError("agent failed")
     assert stopped.is_set()
