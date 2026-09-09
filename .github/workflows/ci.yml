@@ -301,9 +301,6 @@ jobs:
 
       # A package ships the externals its policy binds, and their tests sit
       # beside them.
-      - name: Generated Linear contracts
-        run: python3 marketplace/batteries/linear/build.py --check
-
       - name: Test package helpers
         run: |
           while IFS= read -r dir; do

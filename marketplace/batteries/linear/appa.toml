@@ -1,469 +1,367 @@
-# Generated from schema-lock.json and operations.json by build.py.
-# Override this annotator in the root config with explicit resource rules.
+# Linear MCP policy. Internal must name readers authorized for all resources
+# available through this connection. Override individual resources in the root policy.
+# Every mutation requires review; no provider credentials or helper processes.
+
 [policy]
 version = 2
 
-[[policy.annotator]]
-name = "linear.approved-writes"
-hint = '{"rules":{}}'
-ranks = ["suspicious", "trusted"]
-marks = ["linear-review"]
-effects = ["linear.changed", "linear.sensitive"]
+# Reads: outside content, restricted to internal readers.
 
-[externals.annotators."linear.approved-writes"]
-command = ["python3", "annotate.py"]
-
 [[policy.tool]]
-name = "create_attachment"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/extract_images"
+delta = { trust = "suspicious", audience = ["internal"] }
+# Fetches arbitrary image URLs: input must be public and reviewed.
+requires = { audience = { contains = ["public"] }, attention = ["linear-review"] }
 
 [[policy.tool]]
-name = "create_attachment_from_upload"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/get_agent_skill"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "create_issue_label"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/get_attachment"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "delete_attachment"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/get_diff"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "delete_comment"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/get_diff_threads"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "delete_diff_comment"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/get_document"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "delete_status_update"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/get_issue"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "extract_images"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/get_issue_status"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "get_agent_skill"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/get_milestone"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "get_attachment"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/get_notifications"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "get_diff"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/get_project"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "get_diff_threads"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/get_release"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "get_document"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/get_release_note"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "get_issue"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/get_status_updates"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "get_issue_status"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/get_team"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "get_milestone"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/get_template"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "get_notifications"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/get_user"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "get_project"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/get_workspace"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "get_release"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/list_agent_skills"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "get_release_note"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/list_comments"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "get_status_updates"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/list_cycles"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "get_team"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/list_diffs"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "get_template"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/list_documents"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "get_user"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/list_issue_labels"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "get_workspace"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/list_issue_statuses"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "list_agent_skills"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/list_issues"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "list_comments"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/list_milestones"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "list_cycles"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/list_project_labels"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "list_diffs"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/list_projects"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "list_documents"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/list_release_notes"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "list_issue_labels"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/list_release_pipelines"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "list_issue_statuses"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/list_releases"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "list_issues"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/list_teams"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "list_milestones"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/list_templates"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "list_project_labels"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/list_users"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "list_projects"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/search_documentation"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
+# Routine writes: trusted internal input and explicit review.
+
 [[policy.tool]]
-name = "list_release_notes"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/mark_notification"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.changed"]
 
 [[policy.tool]]
-name = "list_release_pipelines"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/save_comment"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.changed"]
 
 [[policy.tool]]
-name = "list_releases"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/save_document"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.changed"]
 
 [[policy.tool]]
-name = "list_teams"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/save_issue"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.changed"]
 
 [[policy.tool]]
-name = "list_templates"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/save_milestone"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.changed"]
+
+# Administrative, sharing and destructive writes: explicit review.
 
 [[policy.tool]]
-name = "list_users"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/create_attachment"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "mark_notification"
-server = "linear"
-tags = ["linear", "linear-write"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/create_attachment_from_upload"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "merge_diff"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/create_issue_label"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "prepare_attachment_upload"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/delete_attachment"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "resolve_diff_thread"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/delete_comment"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "restore_issue_label"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/delete_diff_comment"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "restore_project_label"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/delete_status_update"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "retire_issue_label"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/merge_diff"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "retire_project_label"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/prepare_attachment_upload"
+delta = { trust = "suspicious", audience = ["self"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "save_comment"
-server = "linear"
-tags = ["linear", "linear-write"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/resolve_diff_thread"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "save_diff_comment"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/restore_issue_label"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "save_document"
-server = "linear"
-tags = ["linear", "linear-write"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/restore_project_label"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "save_issue"
-server = "linear"
-tags = ["linear", "linear-write"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/retire_issue_label"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "save_issue_label"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/retire_project_label"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "save_milestone"
-server = "linear"
-tags = ["linear", "linear-write"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/save_diff_comment"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "save_project"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/save_issue_label"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "save_project_label"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/save_project"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "save_release"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/save_project_label"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "save_release_note"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/save_release"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "save_status_update"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/save_release_note"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "search_documentation"
-server = "linear"
-tags = ["linear", "linear-read"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/save_status_update"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "share_issue"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/share_issue"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "submit_diff_review"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/submit_diff_review"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
 
 [[policy.tool]]
-name = "unshare_issue"
-server = "linear"
-tags = ["linear", "linear-sensitive"]
-parameters = { type = "object", additionalProperties = true }
-annotator = "linear.approved-writes"
+name = "mcp/linear/unshare_issue"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]

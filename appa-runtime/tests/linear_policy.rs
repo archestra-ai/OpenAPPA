@@ -22,15 +22,10 @@ async fn runtime(dir: &tempfile::TempDir, extra: &str) -> Arc<Runtime> {
         let source = repo_root().join("marketplace/batteries").join(battery);
         let target = dir.path().join("marketplace/batteries").join(battery);
         std::fs::create_dir_all(&target).unwrap();
-        for entry in std::fs::read_dir(source).unwrap() {
-            let entry = entry.unwrap();
-            if entry.file_type().unwrap().is_file() {
-                std::fs::copy(entry.path(), target.join(entry.file_name())).unwrap();
-            }
-        }
+        std::fs::copy(source.join("appa.toml"), target.join("appa.toml")).unwrap();
     }
     // Use the documented configuration; substitute a deterministic review authority.
-    let text = std::fs::read_to_string(repo_root().join("examples/linear-battery/approved-writes.toml"))
+    let text = std::fs::read_to_string(repo_root().join("examples/linear-battery/appa.toml"))
         .unwrap()
         .replace("../../marketplace/", "marketplace/")
         .replace("builtin = \"hitl\"", "builtin = \"approve\"");
@@ -46,41 +41,40 @@ async fn runtime(dir: &tempfile::TempDir, extra: &str) -> Arc<Runtime> {
 
 #[tokio::test]
 async fn linear_write_requires_review_and_records_its_effect() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime(&dir, "").await;
-    let write = call(
-        "save_comment",
-        serde_json::json!({"issueId":"ENG-1","body":"reviewed text"}),
-    );
-    let decision = propose(&runtime, write.clone()).await;
-    assert!(!matches!(decision, HookDecision::AllowCall { .. }));
-    assert!(matches!(
-        runtime.execute_remedy(&actor(), offer_of(&decision)).await,
-        RemedyOutcome::Authorized { .. }
-    ));
-    assert_eq!(
-        propose(&runtime, write.clone()).await,
-        HookDecision::AllowCall { spawn: None }
-    );
-    ran(&runtime, write).await;
-    let effects: Vec<_> = runtime
-        .audit(&root())
-        .unwrap()
-        .into_iter()
-        .filter_map(|entry| match entry.event {
-            AuditEvent::Released { tool, effects, .. } if tool == "mcp/linear/save_comment" => Some(effects),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(effects, vec![vec!["linear.changed"]]);
-}
-
-#[test]
-fn shipped_root_examples_load_with_their_actual_helpers() {
-    for profile in ["read-only", "team-use", "approved-writes", "production-lockdown"] {
+    for (tool, args) in [
+        (
+            "save_comment",
+            serde_json::json!({"issueId":"ENG-1","body":"reviewed text"}),
+        ),
+        ("save_issue", serde_json::json!({"id":"ENG-2","title":"reviewed text"})),
+    ] {
         let dir = tempfile::tempdir().unwrap();
-        let path = repo_root().join(format!("examples/linear-battery/{profile}.toml"));
-        Runtime::open(Config::load(&path).unwrap(), dir.path().join("runtime.db"), None).unwrap();
+        let runtime = runtime(&dir, "").await;
+        let write = call(tool, args);
+        let decision = propose(&runtime, write.clone()).await;
+        assert!(!matches!(decision, HookDecision::AllowCall { .. }));
+        let outcome = runtime.execute_remedy(&actor(), offer_of(&decision)).await;
+        if tool == "save_issue" {
+            // The unscoped default requires internal sources, absent in this example.
+            assert!(matches!(outcome, RemedyOutcome::NoAnswer { .. }));
+            continue;
+        }
+        assert!(matches!(outcome, RemedyOutcome::Authorized { .. }), "{outcome:?}");
+        assert_eq!(
+            propose(&runtime, write.clone()).await,
+            HookDecision::AllowCall { spawn: None }
+        );
+        ran(&runtime, write).await;
+        let effects: Vec<_> = runtime
+            .audit(&root())
+            .unwrap()
+            .into_iter()
+            .filter_map(|entry| match entry.event {
+                AuditEvent::Released { tool, effects, .. } if tool.starts_with("mcp/linear/") => Some(effects),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(effects, vec![vec!["linear.changed"]]);
     }
 }
 

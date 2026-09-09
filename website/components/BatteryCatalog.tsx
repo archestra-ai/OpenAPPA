@@ -21,7 +21,7 @@ const BATTERIES = [
   },
   {
     name: "Linear",
-    description: "65 tools, explicit resource audiences, and four policy profiles.",
+    description: "TOML rules for 65 tools, internal audiences, and reviewed writes.",
     href: "/battery-linear",
     logo: "/images/batteries/linear.svg",
   },

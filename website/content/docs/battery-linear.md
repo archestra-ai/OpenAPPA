@@ -2,29 +2,29 @@
 title: Linear battery
 category: Batteries
 order: 6.65
-description: Contracts for 65 Linear MCP tools with resource audiences and four policy profiles.
+description: TOML rules for 65 Linear MCP tools, internal audiences, and reviewed writes.
 sidebar: false
 breadcrumb: Linear
 ---
 
-The Linear battery covers all 65 tools in its authenticated MCP snapshot, including the 36-tool read-only surface. It supplies a deterministic Python annotator, a membership source, and four policy profiles for the existing Claude Code and kagent integrations.
+The Linear battery is a TOML policy and package manifest. It covers 65 MCP tools
+using the existing runtime; no Python helper or provider credential is required.
 
-[Source and setup examples](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/linear).
+Reads and mutation responses enter as suspicious and restricted to `internal`.
+Writes require trusted internal input and a review mark, and record their effects.
+Image extraction requires public input and review because it can fetch external
+URLs. Upload preparation keeps signed URLs restricted to `self`.
 
-## Behavior
+Define `internal` as readers authorized for every resource the connection can
+return. Membership alone does not establish resource access. Use a conservative
+common audience and root TOML overrides for resources with different permissions.
+Overrides supply the complete annotation; closed argument declarations prevent
+unexpected scope fields from reusing a resource rule.
 
-Every tool needs an explicit resource-to-audience rule. Query filters, issue IDs, sharing recipients, related-content flags and other scope arguments must match the operator's configuration exactly. Missing or ambiguous mappings stop the call. Team membership alone is not an issue or project ACL.
+The [root example](https://github.com/archestra-ai/OpenAPPA/tree/main/examples/linear-battery)
+binds human review and demonstrates a resource audience. The review authority
+cannot widen that audience, so it cannot authorize publishing private Linear
+content to a public GitHub repository. For read-only use, connect Linear's
+read-only MCP endpoint.
 
-Reads and mutation responses enter as suspicious and carry the configured resource audience. Writes require trusted data and emit a classified effect. The default profile additionally requires a fresh human review mark; production lockdown also requires explicit permission on each resource rule. Team-use omits the extra mark on routine edits, but mutations still need a trust authority because their responses contain outside content. The read-only profile registers only the captured read tools.
-
-An approved Linear write does not make its result safe to publish to GitHub. The shipped GitHub battery accepts only trusted public data. Wider sharing requires a separate, explicitly bounded authority or sanitizer in the root policy.
-
-## Setup
-
-Install the battery with the host's server identifier, then configure resource audiences and bind the existing human review backend. Installing policy does not create the MCP connection or grant Linear access. Source examples cover each profile; the installer selects the approved-writes default.
-
-The audience helper supports the authenticated viewer, workspace members and team members. It preserves `linear:<user-uuid>` readers; it never infers cross-provider identity from profile email. A deployment can explicitly route these readers through its existing identity mappings.
-
-## Schema updates
-
-The battery stores per-tool definition hashes and a reviewed policy contract, rather than full provider schemas. Its capture utility compares both official endpoints without invoking tools; changed hashes require reviewing the affected definitions and argument classifications. This is a development drift check, not a runtime schema comparison. Run it for the account and endpoint you intend to use.
+[Source and setup](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/linear).
