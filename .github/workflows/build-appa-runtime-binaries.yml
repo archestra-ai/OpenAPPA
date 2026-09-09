@@ -172,30 +172,6 @@ jobs:
           test -x "./${EXECUTABLE}"
           "./${EXECUTABLE}" init claude-code --help >/dev/null
 
-          # Every debug-only seam is read through one gate that
-          # [profile.release] pins shut, so a released binary must ignore a
-          # malformed APPA_ENDPOINT and carry on; one that refuses the value
-          # read it, and could be pointed at another release's plugin.
-          #
-          # init exits non-zero on both outcomes, so its output is the
-          # assertion and the exit code is discarded. The progress line is
-          # printed immediately after the endpoint resolves, which makes its
-          # presence the proof that the seam was ignored. Every output is
-          # classified, including the unrecognised one: this probe used to pass
-          # on an empty answer, which is how it stayed inert for four releases.
-          hostile=$(APPA_ENDPOINT=http://127.0.0.1:0 "./${EXECUTABLE}" init claude-code 2>&1 || true)
-          case "$hostile" in
-            *"is not a usable runtime endpoint"*)
-              echo "::error::the released binary honoured APPA_ENDPOINT: ${hostile}"
-              exit 1
-              ;;
-            "appa init: "*) ;;
-            *)
-              echo "::error::init stopped before the probe could prove anything: ${hostile}"
-              exit 1
-              ;;
-          esac
-
           if command -v sha256sum >/dev/null 2>&1; then
             expected_digest=$(sha256sum "./${EXECUTABLE}" | cut -d' ' -f1)
           else
@@ -292,33 +268,40 @@ jobs:
             if ($LASTEXITCODE -ne 0) {
               throw "Extracted $env:EXECUTABLE does not expose init claude-code"
             }
-            # Every debug-only seam is read through one gate that
-            # [profile.release] pins shut, so a released binary must ignore a
-            # malformed APPA_ENDPOINT and carry on; one that refuses the value
-            # read it, and could be pointed at another release's plugin.
-            #
-            # The progress line is printed immediately after the endpoint
-            # resolves, which makes its presence the proof that the seam was
-            # ignored. All three outcomes are classified, the unrecognised one
-            # included: this probe used to pass on an empty answer, which is how
-            # it stayed inert for four releases.
-            $env:APPA_ENDPOINT = "http://127.0.0.1:0"
-            $hostile = (& $cli init claude-code 2>&1 | Out-String)
-            $env:APPA_ENDPOINT = $null
-            if ($hostile -match "is not a usable runtime endpoint") {
-              throw "the released binary honoured APPA_ENDPOINT: $hostile"
-            }
-            if ("$hostile" -notmatch "^appa init: ") {
-              throw "init stopped before the probe could prove anything: $hostile"
-            }
-            # init exits non-zero on the path just proven correct, so the
-            # expected native exit code is cleared here and only here, after the
-            # classification above has already thrown on every other outcome.
-            $global:LASTEXITCODE = 0
           } finally {
             $process.Refresh()
             if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
           }
+
+      - name: Verify release ignores debug overrides
+        shell: bash
+        env:
+          EXECUTABLE: ${{ matrix.executable }}
+        run: |
+          sh scripts/appa-stage-plugin-bundle.sh probe-plugin-source
+          # The explicit source reaches native init without fetching a generation
+          # that cannot be published until these binary jobs pass. Endpoint
+          # resolution precedes deployment paths; removing home/directory inputs
+          # stops init there, before any installation or Claude invocation.
+          status=0
+          hostile=$(env -u HOME -u USERPROFILE -u APPDATA -u LOCALAPPDATA \
+            -u XDG_CONFIG_HOME -u XDG_DATA_HOME -u APPA_INSTALL_DIR \
+            -u APPA_CONFIG_DIR -u APPA_DATA_DIR -u CLAUDE_CONFIG_DIR \
+            APPA_ENDPOINT=http://127.0.0.1:0 \
+            "./verify/${EXECUTABLE}" init claude-code \
+            --plugin-source "${PWD}/probe-plugin-source" 2>&1) || status=$?
+          test "$status" -ne 0
+          case "$hostile" in
+            *"is not a usable runtime endpoint"*)
+              echo "::error::the released binary honoured APPA_ENDPOINT: ${hostile}"
+              exit 1
+              ;;
+            *"cannot find a home directory; set HOME or the relevant APPA directory variables"*) ;;
+            *)
+              echo "::error::init stopped before the probe could prove anything: ${hostile}"
+              exit 1
+              ;;
+          esac
 
       - name: Upload package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

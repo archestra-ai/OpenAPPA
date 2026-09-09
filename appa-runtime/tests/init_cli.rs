@@ -148,6 +148,40 @@ impl Fixture {
     }
 }
 
+#[test]
+fn release_override_probe_reaches_endpoint_before_deployment_paths() {
+    let fixture = Fixture::new();
+    for endpoint in ["http://127.0.0.1:0", "http://127.0.0.1:8787"] {
+        let mut command = fixture.init();
+        for variable in [
+            "HOME",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "APPA_INSTALL_DIR",
+            "APPA_CONFIG_DIR",
+            "APPA_DATA_DIR",
+            "CLAUDE_CONFIG_DIR",
+        ] {
+            command.env_remove(variable);
+        }
+        let output = command.env("APPA_ENDPOINT", endpoint).output().expect("probe runs");
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let expected = if cfg!(debug_assertions) && endpoint.ends_with(":0") {
+            "is not a usable runtime endpoint"
+        } else {
+            "cannot find a home directory; set HOME or the relevant APPA directory variables"
+        };
+        assert!(stderr.contains(expected), "{stderr}");
+        assert!(!fixture.config.exists());
+        assert!(!fixture.data.exists());
+        assert!(!fixture.root.join("claude.log").exists());
+    }
+}
+
 /// Everything a failed upgrade must leave as it found it.
 #[derive(Debug, PartialEq, Eq)]
 struct Installed {
