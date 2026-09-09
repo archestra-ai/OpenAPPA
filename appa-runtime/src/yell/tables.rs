@@ -63,38 +63,23 @@ static NARROWING: Table = Table {
 
 // ---------------------------------------------------------------- audience evidence
 
-/// One member as an audience source described them. Both fields name the same person in two
-/// spellings, and both are that person's identity.
-static MEMBER_CLAIMS: Table = Table {
-    name: "MemberClaims",
-    entries: &[
-        ("id", Rule::Token(Class::Reader)),
-        ("verified_email", Rule::Token(Class::Reader)),
-    ],
-};
-
+/// One selector's members as its source reported them: each one a person.
 static SOURCE_CLAIMS: Table = Table {
     name: "SourceClaims",
     entries: &[
         ("provider", Rule::Token(Class::Source)),
         ("selector", Rule::Token(Class::Selector)),
-        ("members", Rule::Each(&Rule::Table(&MEMBER_CLAIMS))),
+        ("members", Rule::Elements(Class::Reader)),
     ],
 };
 
+/// One member's lookup: the member and the principal it maps to are the same person in
+/// two spellings.
 static MEMBER_LOOKUP: Table = Table {
     name: "MemberLookup",
     entries: &[
         ("provider", Rule::Token(Class::Source)),
         ("member", Rule::Token(Class::Reader)),
-        ("claims", Rule::Table(&MEMBER_CLAIMS)),
-    ],
-};
-
-static IDENTITY_MAPPING: Table = Table {
-    name: "IdentityMapping",
-    entries: &[
-        ("id", Rule::Token(Class::Reader)),
         ("principal", Rule::Token(Class::Reader)),
     ],
 };
@@ -104,7 +89,6 @@ static EVIDENCE: Table = Table {
     entries: &[
         ("sources", Rule::Each(&Rule::Table(&SOURCE_CLAIMS))),
         ("lookups", Rule::Each(&Rule::Table(&MEMBER_LOOKUP))),
-        ("identity", Rule::Each(&Rule::Table(&IDENTITY_MAPPING))),
     ],
 };
 
@@ -878,7 +862,6 @@ external_table!(
     "RuntimeEvent::External(audience_source)",
     Class::Source
 );
-external_table!(EXTERNAL_IDENTITY, "RuntimeEvent::External(identity)", Class::Identity);
 
 static CONTROL_CALL: Table = Table {
     name: "ControlCall",
@@ -924,7 +907,6 @@ pub(crate) fn event_table(event: &Value) -> Option<&'static Table> {
             "sanitizer" => Some(&EXTERNAL_SANITIZER),
             "annotator" => Some(&EXTERNAL_ANNOTATOR),
             "audience_source" => Some(&EXTERNAL_SOURCE),
-            "identity" => Some(&EXTERNAL_IDENTITY),
             _ => None,
         },
         "control" => Some(&CONTROL_EVENT),
@@ -995,7 +977,6 @@ mod tests {
                 ExternalRole::AudienceSource,
                 ExternalOutcome::NoAnswer(NoAnswerClass::ModulePanicked),
             ),
-            external(ExternalRole::Identity, ExternalOutcome::Answered),
             RuntimeEvent::Control {
                 call: ControlCall::Remedy {
                     offer: "f610dbd5610171965d4de357b2e0acbe".to_string(),

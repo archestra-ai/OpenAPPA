@@ -67,8 +67,6 @@ pub(crate) enum Class {
     Selector,
     /// A trust rank's policy-given name. Ranks are numeric in a fact; only the chain names them.
     Trust,
-    /// A custom identity implementation's name.
-    Identity,
     /// A property name in a return contract's schema. The schema arrives in a remedy plan's
     /// arguments, so it is the agent's text, not the policy's.
     Field,
@@ -101,13 +99,12 @@ impl Class {
             | Class::Group
             | Class::Surface
             | Class::Source
-            | Class::Trust
-            | Class::Identity => false,
+            | Class::Trust => false,
         }
     }
 
     /// Every class, so that one can be checked against all of them.
-    const ALL: [Class; 19] = [
+    const ALL: [Class; 18] = [
         Class::Trajectory,
         Class::Reader,
         Class::Argument,
@@ -124,7 +121,6 @@ impl Class {
         Class::Source,
         Class::Selector,
         Class::Trust,
-        Class::Identity,
         Class::Field,
         Class::Literal,
     ];
@@ -164,7 +160,6 @@ impl Class {
             Class::Source => "source",
             Class::Selector => "selector",
             Class::Trust => "trust",
-            Class::Identity => "identity",
             Class::Field => "field",
             Class::Literal => "literal",
         }

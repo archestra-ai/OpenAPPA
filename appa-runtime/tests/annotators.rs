@@ -924,8 +924,7 @@ fn symbolic_policy(annotator_url: &str, audience_url: &str) -> String {
 [policy]
 version = 2
 
-[[policy.audience.group]]
-name = "team"
+[policy.audience.group.team]
 from = ["slack:user-group/team"]
 
 [[policy.annotator]]
@@ -983,7 +982,7 @@ async fn serve_members() -> (String, Members) {
                     .lock()
                     .unwrap()
                     .iter()
-                    .map(|email| serde_json::json!({ "id": format!("slack:U-{email}"), "verified_email": email }))
+                    .map(|email| serde_json::Value::String(email.to_string()))
                     .collect();
                 (
                     axum::http::StatusCode::OK,

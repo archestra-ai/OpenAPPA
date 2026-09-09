@@ -444,8 +444,7 @@ fn identity_document(registry: &RegistryConfig, profile: &DeploymentProfile) -> 
         "trust_chain": registry.trust_chain,
         "authorities": authorities,
         "sanitizers": sanitizers,
-        // Which sources feed each audience and who resolves identity are part of what the
-        // policy means.
+        // Which sources feed each audience is part of what the policy means.
         "audience": registry.audience,
         "deployment": profile,
     })

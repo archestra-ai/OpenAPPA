@@ -16,12 +16,11 @@
 //! outside this schema. That makes drift here mean one thing — the schema grew and this
 //! inventory did not — rather than "a deployment wrote something unexpected".
 //!
-//! Two of the six free-form `toml::Value` fields the schema does hold — the inline
-//! `implementation` on a tool, authority, sanitizer or annotator, and `url`/`command` on
-//! `[identity]` — are refused during conversion (`ConfigError::ForbiddenInlineBinding`), so a
-//! loaded policy carries none. They are deliberately *not* named below: one appearing in a
-//! pinned document means the loader's contract changed, and drift is the only thing that
-//! would say so.
+//! The free-form `toml::Value` field the schema does hold — the inline `implementation` on a
+//! tool, authority, sanitizer or annotator — is refused during conversion
+//! (`ConfigError::ForbiddenInlineBinding`), so a loaded policy carries none. It is
+//! deliberately *not* named below: one appearing in a pinned document means the loader's
+//! contract changed, and drift is the only thing that would say so.
 //!
 //! # What the two modes differ on
 //!
@@ -161,24 +160,17 @@ static ANNOTATOR: Table = Table {
     ],
 };
 
-// ---------------------------------------------------------------- audiences and identity
+// ---------------------------------------------------------------- audiences
 
-/// Where a built-in audience level gets its members. Each entry is `provider:selector`, and
-/// the selector is never carried: the loader accepts an instantiated
-/// `google-workspace:group/finance@corp.example` wherever it accepts the template
-/// `group/<group-address>`, so an address is exactly as likely there as a word.
-static AUDIENCE_LEVEL: Table = Table {
-    name: "policy.audience.level",
-    entries: &[("from", Rule::Each(&SOURCE))],
-};
-
-/// One `provider:selector` audience source, wherever a policy writes one.
+/// One `provider:selector` audience source, wherever a policy writes one. The selector is
+/// never carried: the loader accepts an instantiated `google-workspace:group/finance@corp.example`
+/// wherever it accepts the template `group/<group-address>`, so an address is exactly as
+/// likely there as a word.
 static SOURCE: Rule = Rule::AudienceSource;
 
 static AUDIENCE_GROUP: Table = Table {
     name: "policy.audience.group",
     entries: &[
-        ("name", Rule::Token(Class::Group)),
         // `within` asserts containment in a built-in audience, so its only values are `self`
         // and `internal` — the engine's words, not a group the deployment named.
         ("within", Rule::Keep),
@@ -186,18 +178,15 @@ static AUDIENCE_GROUP: Table = Table {
     ],
 };
 
+/// `self` and `internal` list the sources that feed each built-in level; `group` is keyed
+/// by the names the deployment gave its audiences.
 static AUDIENCE: Table = Table {
     name: "policy.audience",
     entries: &[
-        ("self", Rule::Table(&AUDIENCE_LEVEL)),
-        ("internal", Rule::Table(&AUDIENCE_LEVEL)),
-        ("group", Rule::Each(&Rule::Table(&AUDIENCE_GROUP))),
+        ("self", Rule::Each(&SOURCE)),
+        ("internal", Rule::Each(&SOURCE)),
+        ("group", Rule::MapKeys(Class::Group, &Rule::Table(&AUDIENCE_GROUP))),
     ],
-};
-
-static IDENTITY: Table = Table {
-    name: "policy.identity",
-    entries: &[("implementation", Rule::Token(Class::Identity))],
 };
 
 // ---------------------------------------------------------------- deployment
@@ -243,7 +232,6 @@ static POLICY: Table = Table {
         ("sanitizer", Rule::Each(&Rule::Table(&SANITIZER))),
         ("annotator", Rule::Each(&Rule::Table(&ANNOTATOR))),
         ("audience", Rule::Table(&AUDIENCE)),
-        ("identity", Rule::Table(&IDENTITY)),
         ("limits", Rule::Table(&LIMITS)),
         ("deployment", Rule::Table(&DEPLOYMENT)),
     ],
@@ -348,15 +336,10 @@ mod tests {
         to = "trusted"
 
         [audience]
-        [audience.internal]
-        from = ["google-workspace:full-members"]
-        [[audience.group]]
-        name = "finance"
+        internal = ["google-workspace:full-members"]
+        [audience.group.finance]
         within = "internal"
         from = ["google-workspace:group/finance@corp.example"]
-
-        [identity]
-        implementation = "verified-email"
 
         [deployment]
         context_control = true
@@ -502,9 +485,9 @@ mod tests {
         let text = r#"
             version = 2
             trust_chain = ["trusted"]
-            [identity]
-            implementation = "corp-directory"
-            [identity.url]
+            [[authority]]
+            name = "directory"
+            [authority.implementation]
             url = "https://directory.corp.example/whoami"
             token_env = "APPA_PROVIDER_DIRECTORY"
         "#;
@@ -516,7 +499,7 @@ mod tests {
                     .iter()
                     .map(|drift| drift.path.as_str())
                     .collect::<Vec<_>>(),
-                vec!["identity.url"],
+                vec!["authority[0].implementation"],
                 "the walk says where it found something it does not know"
             );
             let rendered = serde_json::to_string(&stripped.value).expect("serializes");
@@ -535,9 +518,7 @@ mod tests {
         let text = r#"
             version = 2
             trust_chain = ["trusted"]
-            [audience]
-            [[audience.group]]
-            name = "finance"
+            [audience.group.finance]
             within = "internal"
             from = ["slack:user-group/<handle>"]
             [[tool]]

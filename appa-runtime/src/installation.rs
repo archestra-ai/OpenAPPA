@@ -430,12 +430,19 @@ impl Installation {
             .authorities
             .values()
             .chain(externals.sanitizers.values())
-            .chain(externals.audience.values())
-            .chain(externals.identity.values())
             .filter_map(|implementation| match implementation {
                 crate::config::Implementation::Command(command) => Some(command),
                 _ => None,
             })
+            .chain(
+                externals
+                    .audience
+                    .values()
+                    .filter_map(|binding| match &binding.implementation {
+                        crate::config::AudienceImplementation::Command(command) => Some(command),
+                        _ => None,
+                    }),
+            )
             .chain(
                 externals
                     .annotators

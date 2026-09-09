@@ -1,92 +1,47 @@
-//! Audience sources, identity, and the primitive evidence a decision pins.
+//! Audience sources and the primitive evidence a decision pins.
 //!
 //! A symbolic audience resolves through registered **audience sources** (one per provider,
-//! shipped by batteries) and the deployment's **identity implementation**, which
-//! canonicalizes each provider member to one principal. The record pins the PRIMITIVES —
-//! per-selector member claims, per-member lookups, and (for a custom identity
-//! implementation) id→principal mappings. Identity application, union, and the `within`
-//! closure are recomputed deterministically from those primitives at replay, so a live
-//! decision and its replay read the same answers, and cross-audience invariants
-//! (`@finance ⊆ internal`) hold by construction.
+//! shipped by batteries). A source reports each member as a reader: the address the
+//! provider verified for that account, or the provider-qualified id. The record pins the
+//! PRIMITIVES — per-selector member answers and per-member lookups. Union, principal
+//! substitution, and the `within` closure are recomputed deterministically from those
+//! primitives at replay, so a live decision and its replay read the same answers, and
+//! cross-audience invariants (`@finance ⊆ internal`) hold by construction.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::label::{ChainAudience, Expansions, GroupRef, ReaderId, SymbolicAtom};
-use crate::names::{GroupName, IdentityImplementationName};
+use crate::label::{ChainAudience, Expansions, GroupRef, ReaderId, SymbolicAtom, address_parts};
+use crate::names::GroupName;
 
-/// One provider member as its source reports it: the provider-qualified id and, when the
-/// provider explicitly verifies one, the member's preferred verified email. Nothing else —
-/// display names and usernames are never identity evidence.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MemberClaims {
-    /// Provider-qualified id, e.g. `slack:U012345`. Must carry the prefix of the source that
-    /// reported it; evidence validation refuses a cross-provider claim.
-    pub id: String,
-    /// The provider-verified preferred email, exactly as claimed. Absent is a definitive
-    /// state, not an error: the member keeps its qualified identity.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verified_email: Option<String>,
-}
-
-/// One selector's validated answer from its provider's source, as the record pins it.
+/// One selector's validated answer from its provider's source, as the record pins it. Each
+/// member is the reader the source reports: an address or a `<provider>:<id>` under the
+/// source's own provider — the one shape rule, applied by [`AudienceRegistry::expansions`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceClaims {
     pub provider: String,
     pub selector: String,
-    pub members: Vec<MemberClaims>,
+    pub members: Vec<ReaderId>,
 }
 
-/// One member lookup's pinned answer: the claims the provider reports for one qualified
-/// reader, or `None` when the provider does not know it — a definitive answer that leaves
-/// the reader its qualified identity.
+/// One member lookup's pinned answer: the principal the answering entry reports for one
+/// qualified reader, or `None` when it does not know the member — a definitive answer that
+/// leaves the reader as written.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemberLookup {
+    /// The member's own provider — the pin key, whichever entry answered.
     pub provider: String,
     /// The provider-qualified reader that was looked up, e.g. `slack:U012345`.
     pub member: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claims: Option<MemberClaims>,
-}
-
-/// One custom identity answer: the principal one provider-qualified id canonicalizes to.
-/// Pinned only when the deployment runs a custom identity implementation; the shipped
-/// `verified-email` implementation is deterministic and recomputed at replay instead.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct IdentityMapping {
-    pub id: String,
-    pub principal: ReaderId,
-}
-
-impl<'de> Deserialize<'de> for IdentityMapping {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            id: String,
-            principal: ReaderId,
-        }
-        let wire = Wire::deserialize(deserializer)?;
-        if !wire.principal.is_literal() {
-            return Err(serde::de::Error::custom(format!(
-                "identity mapping for {:?} names reserved output {:?}",
-                wire.id,
-                wire.principal.as_str()
-            )));
-        }
-        Ok(IdentityMapping {
-            id: wire.id,
-            principal: wire.principal,
-        })
-    }
+    pub principal: Option<ReaderId>,
 }
 
 /// The primitive audience evidence one operation pins: everything its expansions are
-/// recomputed from. Duplicate or conflicting entries never validate, and after the act's
+/// recomputed from. Duplicate or malformed entries never validate, and after the act's
 /// decision runs, every entry must be an inherited pin or answer an ask the operation
 /// actually made ([`AudienceRegistry::only_requested`]) — evidence cannot be pre-loaded for
 /// asks nobody made, live or at replay.
@@ -97,13 +52,11 @@ pub struct AudienceEvidence {
     pub sources: Vec<SourceClaims>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lookups: Vec<MemberLookup>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub identity: Vec<IdentityMapping>,
 }
 
 impl AudienceEvidence {
     pub fn is_empty(&self) -> bool {
-        self.sources.is_empty() && self.lookups.is_empty() && self.identity.is_empty()
+        self.sources.is_empty() && self.lookups.is_empty()
     }
 
     /// Does this evidence carry every entry of `other`? An operation may extend what an
@@ -111,7 +64,6 @@ impl AudienceEvidence {
     pub(crate) fn contains(&self, other: &AudienceEvidence) -> bool {
         other.sources.iter().all(|claims| self.sources.contains(claims))
             && other.lookups.iter().all(|lookup| self.lookups.contains(lookup))
-            && other.identity.iter().all(|mapping| self.identity.contains(mapping))
     }
 
     /// This act's evidence read under an earlier record's pins: the pinned entries come
@@ -143,13 +95,6 @@ impl AudienceEvidence {
                 Some(_) => return Err(EvidenceRefusal::ContradictedPin { entry: lookup.entry() }),
             }
         }
-        for mapping in &self.identity {
-            match pinned.identity.iter().find(|entry| entry.id == mapping.id) {
-                None => merged.identity.push(mapping.clone()),
-                Some(entry) if entry == mapping => {}
-                Some(_) => return Err(EvidenceRefusal::ContradictedPin { entry: mapping.entry() }),
-            }
-        }
         Ok(merged)
     }
 }
@@ -168,13 +113,6 @@ impl MemberLookup {
     }
 }
 
-impl IdentityMapping {
-    /// The entry as a refusal names it.
-    fn entry(&self) -> String {
-        format!("identity mapping for {}", self.id)
-    }
-}
-
 /// Why pinned audience evidence is not admissible.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum EvidenceRefusal {
@@ -182,32 +120,30 @@ pub enum EvidenceRefusal {
     DuplicateSelector { provider: String, selector: String },
     #[error("two lookups for member {member} in one operation")]
     DuplicateLookup { member: String },
-    #[error("two identity mappings for {id} in one operation")]
-    DuplicateIdentity { id: String },
-    #[error("selector {provider}:{selector} reports member {id:?} outside its own provider namespace")]
-    ForeignMember {
+    #[error(
+        "selector {provider}:{selector} reports member {id:?}, which is neither an address nor a {provider}-qualified id"
+    )]
+    MalformedMember {
         provider: String,
         selector: String,
         id: String,
     },
     #[error("lookup under provider {provider} answers for member {member:?} outside that namespace")]
     ForeignLookup { provider: String, member: String },
-    #[error("the lookup of member {member:?} under provider {provider} carries claims for a different id")]
-    ForeignLookupClaims { provider: String, member: String },
+    #[error(
+        "the lookup of member {member:?} names principal {principal:?}, which is neither an address nor a {provider}-qualified id"
+    )]
+    MalformedPrincipal {
+        provider: String,
+        member: String,
+        principal: String,
+    },
     #[error("selector {provider}:{selector} reports member {id:?} twice in one answer")]
     DuplicateMember {
         provider: String,
         selector: String,
         id: String,
     },
-    #[error("member {id:?} carries conflicting verified-email claims in one operation")]
-    ConflictingClaims { id: String },
-    #[error("identity mapping for {id:?} names a reserved principal")]
-    ReservedPrincipal { id: String },
-    #[error("member {id:?} claims verified email {email:?}, which does not parse as one address")]
-    MalformedEmail { id: String, email: String },
-    #[error("identity implementation returned no mapping for {id:?}")]
-    UnmappedIdentity { id: String },
     #[error("no registered audience source serves selector {provider}:{selector}")]
     UnroutableSelector { provider: String, selector: String },
     #[error("no registered audience provider {provider} serves the lookup of {member:?}")]
@@ -218,85 +154,27 @@ pub enum EvidenceRefusal {
     ContradictedPin { entry: String },
 }
 
-/// One operation-wide claim per provider id, folded across every occurrence the evidence
-/// carries. A collection that reports a member and a viewer that reports the same member
-/// with its verified address describe one reader, not a contradiction: a silent occurrence
-/// makes no counter-claim and defers to the verified one. Two verified addresses conflict
-/// when they name different principals, not when they are spelled differently: the same
-/// address under two domain cases is one claim, because that is the reader both resolve to.
-/// Addresses that do differ have no resolution and refuse. Every consumer resolves an
-/// occurrence through
-/// this table, so one id seats exactly one principal in an operation — the engine when it
-/// canonicalizes, and the runtime when it asks a custom implementation.
-pub fn folded_claims(evidence: &AudienceEvidence) -> Result<BTreeMap<String, MemberClaims>, EvidenceRefusal> {
-    let mut folded: BTreeMap<String, MemberClaims> = BTreeMap::new();
-    let occurrences = evidence
-        .sources
-        .iter()
-        .flat_map(|claims| claims.members.iter())
-        .chain(evidence.lookups.iter().filter_map(|lookup| lookup.claims.as_ref()));
-    for claims in occurrences {
-        match folded.entry(claims.id.clone()) {
-            std::collections::btree_map::Entry::Vacant(slot) => {
-                slot.insert(claims.clone());
-            }
-            std::collections::btree_map::Entry::Occupied(mut held) => {
-                match (&held.get().verified_email, &claims.verified_email) {
-                    (Some(_), Some(_))
-                        if verified_email_principal(held.get())? != verified_email_principal(claims)? =>
-                    {
-                        return Err(EvidenceRefusal::ConflictingClaims { id: claims.id.clone() });
-                    }
-                    (None, Some(_)) => {
-                        held.insert(claims.clone());
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-    Ok(folded)
+/// The one shape rule on a reader a source reports under `provider`: a literal spelling
+/// that is an address — the principal itself, the same reader a policy or a tool argument
+/// names by writing it — or a `<provider>:<id>` in the reporting source's own namespace.
+/// Deliberately shape-only: the source is trusted for what it says, and the rule only
+/// keeps a source from seating a member on a reserved spelling, a bare name, or another
+/// provider's namespace. Address normalization is [`ReaderId::new`]'s: the domain folds,
+/// the local part does not.
+pub fn well_formed_reader(provider: &str, reader: &ReaderId) -> bool {
+    reader.is_literal() && (is_address(reader) || reader.provider_prefix() == Some(provider))
 }
 
-/// The conservative `verified-email` normalization, shipped and deterministic: a member with
-/// a well-formed verified email becomes that address, which is the principal itself — the
-/// same reader a policy or a tool argument names by writing the address. A member without
-/// one keeps its provider-qualified id. Nothing merges identities beyond exact address
-/// equality: no dot folding, no `+suffix` stripping, no alias folding, and the local part
-/// keeps its case ([`ReaderId::new`] lowercases only the domain). A malformed claimed email
-/// is an invalid answer, never a silent fallback.
-pub(crate) fn verified_email_principal(claims: &MemberClaims) -> Result<ReaderId, EvidenceRefusal> {
-    match &claims.verified_email {
-        None => Ok(ReaderId::new(claims.id.clone())),
-        Some(email) => match crate::label::address_parts(email) {
-            Some(_) => Ok(ReaderId::new(email.clone())),
-            None => Err(EvidenceRefusal::MalformedEmail {
-                id: claims.id.clone(),
-                email: email.clone(),
-            }),
-        },
-    }
+/// A reader written as one address in no provider's namespace: the principal itself. A
+/// `<provider>:<id>` stays qualified whatever its id part spells.
+fn is_address(reader: &ReaderId) -> bool {
+    reader.provider_prefix().is_none() && address_parts(reader.as_str()).is_some()
 }
 
-/// The deployment's identity implementation, as the registry holds it. `VerifiedEmail` is
-/// the shipped default — deterministic and network-free, recomputed at replay. A custom
-/// implementation answers through the external-binding pattern and its mappings are pinned.
-#[derive(Default, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum IdentityImplementation {
-    #[default]
-    VerifiedEmail,
-    Custom(IdentityImplementationName),
-}
-
-impl IdentityImplementation {
-    pub const VERIFIED_EMAIL: &'static str = "verified-email";
-
-    pub fn name(&self) -> &str {
-        match self {
-            IdentityImplementation::VerifiedEmail => Self::VERIFIED_EMAIL,
-            IdentityImplementation::Custom(name) => name.as_str(),
-        }
-    }
+/// Is this reader one a redirected provider must look up before it can seat it: a member
+/// reported as a qualified id rather than an address.
+fn needs_lookup(reader: &ReaderId) -> bool {
+    !is_address(reader)
 }
 
 /// One selector as configuration spells it: `<provider>:<selector>`.
@@ -364,7 +242,7 @@ pub struct SourceRegistration {
     pub templates: Vec<SelectorTemplate>,
 }
 
-/// One configured named audience: `[[audience.group]] name / within / from`.
+/// One configured named audience: `[audience.group.<name>] within / from`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamedAudience {
     pub name: GroupName,
@@ -376,7 +254,8 @@ pub struct NamedAudience {
 
 /// The audience side of the registry: the registered sources, the chain mappings, and the
 /// configured named audiences. All of it is policy meaning and enters the policy identity;
-/// how a deployment *reaches* a source (URL, command, credentials) never does.
+/// how a deployment *reaches* a source (URL, command, credentials) and where it sends a
+/// provider's lookups never do.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudienceConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -387,8 +266,11 @@ pub struct AudienceConfig {
     pub internal_from: Vec<SelectorSpec>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<NamedAudience>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub identity: Option<IdentityImplementation>,
+    /// The entry that answers each redirected provider's member lookups: every qualified
+    /// member such a provider reports is looked up there before it seats. Routing, not
+    /// policy meaning — the deployment supplies it and it stays out of the policy identity.
+    #[serde(skip)]
+    pub lookup_targets: BTreeMap<String, String>,
 }
 
 /// The validated audience registry the engine reads: everything [`AudienceConfig`] declares,
@@ -400,8 +282,11 @@ pub struct AudienceRegistry {
     internal_from: BTreeSet<SelectorSpec>,
     groups: BTreeMap<GroupName, NamedAudience>,
     provider_names: BTreeSet<String>,
-    identity: IdentityImplementation,
+    lookup_targets: BTreeMap<String, String>,
     within: crate::label::WithinAssertions,
+    /// The `@provider:selector` atoms declarations write directly; the registry build
+    /// gathers them while routing each one and completes the registry with them.
+    direct: BTreeSet<SelectorSpec>,
 }
 
 /// Why an atom cannot be routed to any registered source: the operational-failure side of
@@ -427,7 +312,8 @@ pub struct LookupSpec {
 }
 
 /// The primitive requests one round must answer: which selectors to consult and which member
-/// lookups to perform. Identity inputs are derived from the claims those answers carry.
+/// lookups to perform. The lookups a redirected provider's members owe are derived from the
+/// pinned answers instead ([`AudienceRegistry::member_lookups_owed`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NeededPrimitives {
     pub selectors: BTreeSet<SelectorSpec>,
@@ -450,14 +336,32 @@ impl AudienceRegistry {
                 .map(|group| (group.name.clone(), group.clone()))
                 .collect(),
             provider_names: config.sources.iter().map(|source| source.provider.clone()).collect(),
-            identity: config.identity.clone().unwrap_or_default(),
+            lookup_targets: config.lookup_targets.clone(),
             within: crate::label::WithinAssertions::new(
                 config
                     .groups
                     .iter()
                     .filter_map(|group| group.within.map(|target| (group.name.clone(), target))),
             ),
+            direct: BTreeSet::new(),
         }
+    }
+
+    /// The registry completed with the selectors the declarations route directly, once
+    /// the registry build has walked them.
+    pub(crate) fn with_direct(self, direct: BTreeSet<SelectorSpec>) -> Self {
+        Self { direct, ..self }
+    }
+
+    /// Every selector the policy can ask a source for: the chain mappings, every named
+    /// audience's `from`, and the atoms declarations route directly.
+    pub fn referenced_selectors(&self) -> BTreeSet<&SelectorSpec> {
+        self.self_from
+            .iter()
+            .chain(self.internal_from.iter())
+            .chain(self.groups.values().flat_map(|group| group.from.iter()))
+            .chain(self.direct.iter())
+            .collect()
     }
 
     /// The registered provider names — what decides which qualified readers canonicalize.
@@ -469,8 +373,15 @@ impl AudienceRegistry {
         self.providers.get(provider).map(Vec::as_slice)
     }
 
-    pub fn identity(&self) -> &IdentityImplementation {
-        &self.identity
+    /// Does the deployment redirect this provider's lookups, so its qualified members are
+    /// looked up before they seat?
+    pub fn looks_up(&self, provider: &str) -> bool {
+        self.lookup_targets.contains_key(provider)
+    }
+
+    /// The entry that answers this provider's member lookups, when its routing names one.
+    pub fn lookup_target(&self, provider: &str) -> Option<&str> {
+        self.lookup_targets.get(provider).map(String::as_str)
     }
 
     pub fn groups(&self) -> impl Iterator<Item = &NamedAudience> {
@@ -572,12 +483,13 @@ impl AudienceRegistry {
         Ok(needed)
     }
 
-    /// Build the operation's expansions from its pinned primitives: validate, canonicalize
-    /// every member to its principal, union per selector, and close the chain levels
-    /// symmetrically. Answers exist only for atoms whose primitives are all present — a
-    /// check that still misses one re-raises its ask. Duplicates, cross-provider claims,
-    /// unroutable entries, malformed emails, and (under a custom identity) unmapped members
-    /// refuse the evidence — the live act and its replay hold it to the same test.
+    /// Build the operation's expansions from its pinned primitives: validate, seat every
+    /// member as its reader (or, under a redirected provider, its pinned principal), union
+    /// per selector, and close the chain levels symmetrically. Answers exist only for atoms
+    /// whose primitives are all present — a selector one of whose qualified members still
+    /// owes a lookup stays unanswered, so a check that reads it re-raises its ask. Duplicate,
+    /// malformed, and unroutable entries refuse the evidence — the live act and its replay
+    /// hold it to the same test.
     pub fn expansions(&self, evidence: &AudienceEvidence) -> Result<Expansions, EvidenceRefusal> {
         for claims in &evidence.sources {
             self.route_selector(&claims.provider, &claims.selector).map_err(|_| {
@@ -595,44 +507,73 @@ impl AudienceRegistry {
                 });
             }
         }
-        let identity = IdentityTable::new(&self.identity, &evidence.identity)?;
 
-        let folded = folded_claims(evidence)?;
-        // The folded claim of one occurrence: the id is in the table by construction.
-        let resolved = |claims: &MemberClaims| -> MemberClaims {
-            folded
-                .get(claims.id.as_str())
-                .expect("every occurring id is folded before principals are resolved")
-                .clone()
-        };
+        // Reader canonicalizations from lookups, validated: one answer per member, in the
+        // member's own namespace, naming a well-formed principal. Not found is definitive:
+        // the reader keeps its spelling.
+        let mut principals: BTreeMap<ReaderId, ReaderId> = BTreeMap::new();
+        for lookup in &evidence.lookups {
+            let member = ReaderId::new(lookup.member.clone());
+            if member.provider_prefix() != Some(lookup.provider.as_str()) {
+                return Err(EvidenceRefusal::ForeignLookup {
+                    provider: lookup.provider.clone(),
+                    member: lookup.member.clone(),
+                });
+            }
+            let principal = match &lookup.principal {
+                None => member.clone(),
+                Some(principal) if well_formed_reader(&lookup.provider, principal) => principal.clone(),
+                Some(principal) => {
+                    return Err(EvidenceRefusal::MalformedPrincipal {
+                        provider: lookup.provider.clone(),
+                        member: lookup.member.clone(),
+                        principal: principal.as_str().to_string(),
+                    });
+                }
+            };
+            if principals.insert(member, principal).is_some() {
+                return Err(EvidenceRefusal::DuplicateLookup {
+                    member: lookup.member.clone(),
+                });
+            }
+        }
 
-        // Per-selector principal sets, validated.
-        let mut selector_members: BTreeMap<SelectorSpec, BTreeSet<ReaderId>> = BTreeMap::new();
+        // Per-selector reader sets, validated. `None` marks a selector whose redirected
+        // provider still owes a lookup for one of its qualified members.
+        let mut selector_members: BTreeMap<SelectorSpec, Option<BTreeSet<ReaderId>>> = BTreeMap::new();
         for claims in &evidence.sources {
             let spec = SelectorSpec {
                 provider: claims.provider.clone(),
                 selector: claims.selector.clone(),
             };
-            let mut members = BTreeSet::new();
-            let mut ids = BTreeSet::new();
+            let mut members = Some(BTreeSet::new());
+            let mut seen = BTreeSet::new();
             for member in &claims.members {
-                if ReaderId::new(member.id.clone()).provider_prefix() != Some(claims.provider.as_str()) {
-                    return Err(EvidenceRefusal::ForeignMember {
+                if !well_formed_reader(&claims.provider, member) {
+                    return Err(EvidenceRefusal::MalformedMember {
                         provider: claims.provider.clone(),
                         selector: claims.selector.clone(),
-                        id: member.id.clone(),
+                        id: member.as_str().to_string(),
                     });
                 }
-                // One id may not appear twice under one selector: the second entry could
-                // carry a conflicting verified email and seat a second principal.
-                if !ids.insert(member.id.as_str()) {
+                if !seen.insert(member.as_str()) {
                     return Err(EvidenceRefusal::DuplicateMember {
                         provider: claims.provider.clone(),
                         selector: claims.selector.clone(),
-                        id: member.id.clone(),
+                        id: member.as_str().to_string(),
                     });
                 }
-                members.insert(identity.principal(&resolved(member))?);
+                let seated = if self.looks_up(&claims.provider) && needs_lookup(member) {
+                    principals.get(member).cloned()
+                } else {
+                    Some(member.clone())
+                };
+                match (&mut members, seated) {
+                    (Some(set), Some(reader)) => {
+                        set.insert(reader);
+                    }
+                    _ => members = None,
+                }
             }
             if selector_members.insert(spec.clone(), members).is_some() {
                 return Err(EvidenceRefusal::DuplicateSelector {
@@ -643,54 +584,25 @@ impl AudienceRegistry {
         }
 
         let mut answers: Vec<(SymbolicAtom, BTreeSet<ReaderId>)> = Vec::new();
-        let mut principals: Vec<(ReaderId, ReaderId)> = Vec::new();
-
-        // Reader canonicalizations from lookups.
-        let mut seen_lookups = BTreeSet::new();
-        for lookup in &evidence.lookups {
-            if !seen_lookups.insert(lookup.member.clone()) {
-                return Err(EvidenceRefusal::DuplicateLookup {
-                    member: lookup.member.clone(),
-                });
-            }
-            if ReaderId::new(lookup.member.clone()).provider_prefix() != Some(lookup.provider.as_str()) {
-                return Err(EvidenceRefusal::ForeignLookup {
-                    provider: lookup.provider.clone(),
-                    member: lookup.member.clone(),
-                });
-            }
-            let principal = match &lookup.claims {
-                // Not found is definitive: the reader keeps its qualified identity.
-                None => ReaderId::new(lookup.member.clone()),
-                // Claims for another id would let a source canonicalize a member it does
-                // not own, or pre-seat an identity mapping for it.
-                Some(claims) if claims.id != lookup.member => {
-                    return Err(EvidenceRefusal::ForeignLookupClaims {
-                        provider: lookup.provider.clone(),
-                        member: lookup.member.clone(),
-                    });
-                }
-                Some(claims) => identity.principal(&resolved(claims))?,
-            };
-            principals.push((ReaderId::new(lookup.member.clone()), principal));
-        }
 
         // Source-qualified selector atoms answer directly.
         for (spec, members) in &selector_members {
-            answers.push((
-                SymbolicAtom::Group(GroupRef::Source {
-                    provider: spec.provider.clone(),
-                    selector: spec.selector.clone(),
-                }),
-                members.clone(),
-            ));
+            if let Some(members) = members {
+                answers.push((
+                    SymbolicAtom::Group(GroupRef::Source {
+                        provider: spec.provider.clone(),
+                        selector: spec.selector.clone(),
+                    }),
+                    members.clone(),
+                ));
+            }
         }
 
         // Named audiences: the union of their selectors, when every one is answered.
         let union_of = |specs: &BTreeSet<SelectorSpec>| -> Option<BTreeSet<ReaderId>> {
             let mut union = BTreeSet::new();
             for spec in specs {
-                union.extend(selector_members.get(spec)?.iter().cloned());
+                union.extend(selector_members.get(spec)?.as_ref()?.iter().cloned());
             }
             Some(union)
         };
@@ -712,6 +624,44 @@ impl AudienceRegistry {
         }
 
         Ok(Expansions::new(answers, principals))
+    }
+
+    /// The lookups a redirected provider's pinned answers owe: every qualified member it
+    /// reports, under the member's own provider. Evidence-derived, not atom-derived — the
+    /// members are known only once the source has answered — and deterministic in the
+    /// pinned answers, so live and replay derive the same set.
+    fn owed_lookups(&self, evidence: &AudienceEvidence) -> BTreeSet<LookupSpec> {
+        evidence
+            .sources
+            .iter()
+            .filter(|claims| self.looks_up(&claims.provider))
+            .flat_map(|claims| {
+                claims
+                    .members
+                    .iter()
+                    .filter(|member| needs_lookup(member))
+                    .map(|member| LookupSpec {
+                        provider: claims.provider.clone(),
+                        member: member.as_str().to_string(),
+                    })
+            })
+            .collect()
+    }
+
+    /// The owed lookups this evidence does not yet pin: what the next round must ask before
+    /// the selectors that report those members can answer.
+    pub fn member_lookups_owed(&self, evidence: &AudienceEvidence) -> BTreeSet<LookupSpec> {
+        let pinned: BTreeSet<LookupSpec> = evidence
+            .lookups
+            .iter()
+            .map(|lookup| LookupSpec {
+                provider: lookup.provider.clone(),
+                member: lookup.member.clone(),
+            })
+            .collect();
+        let mut owed = self.owed_lookups(evidence);
+        owed.retain(|spec| !pinned.contains(spec));
+        owed
     }
 
     /// The operation-scope test on one act's pinned evidence: every entry is an inherited
@@ -743,37 +693,16 @@ impl AudienceRegistry {
                 return Err(EvidenceRefusal::UnrequestedEvidence { entry: claims.entry() });
             }
         }
+        // A redirected provider's pinned answers justify the lookups their qualified members
+        // owe, exactly as an atom justifies its selectors.
+        let owed = self.owed_lookups(evidence);
         for lookup in &evidence.lookups {
             let spec = LookupSpec {
                 provider: lookup.provider.clone(),
                 member: lookup.member.clone(),
             };
-            if !requested.lookups.contains(&spec) && !inherited.lookups.contains(lookup) {
+            if !requested.lookups.contains(&spec) && !owed.contains(&spec) && !inherited.lookups.contains(lookup) {
                 return Err(EvidenceRefusal::UnrequestedEvidence { entry: lookup.entry() });
-            }
-        }
-        // An identity mapping is requested only through a member the admitted evidence
-        // reports, and only under a custom implementation — the shipped normalization
-        // recomputes and pins nothing.
-        let occurring = |id: &str| {
-            evidence
-                .sources
-                .iter()
-                .flat_map(|claims| claims.members.iter())
-                .any(|member| member.id == id)
-                || evidence
-                    .lookups
-                    .iter()
-                    .filter_map(|lookup| lookup.claims.as_ref())
-                    .any(|claims| claims.id == id)
-        };
-        for mapping in &evidence.identity {
-            let requested = match &self.identity {
-                IdentityImplementation::Custom(_) => occurring(&mapping.id),
-                IdentityImplementation::VerifiedEmail => false,
-            };
-            if !requested && !inherited.identity.contains(mapping) {
-                return Err(EvidenceRefusal::UnrequestedEvidence { entry: mapping.entry() });
             }
         }
         Ok(())
@@ -833,57 +762,12 @@ impl ActLedger {
     }
 }
 
-/// The identity implementation applied to one operation's claims: the shipped normalization
-/// recomputed, or a custom implementation's pinned mappings looked up.
-struct IdentityTable<'a> {
-    implementation: &'a IdentityImplementation,
-    mappings: BTreeMap<&'a str, &'a ReaderId>,
-}
-
-impl<'a> IdentityTable<'a> {
-    fn new(
-        implementation: &'a IdentityImplementation,
-        pinned: &'a [IdentityMapping],
-    ) -> Result<IdentityTable<'a>, EvidenceRefusal> {
-        let mut mappings: BTreeMap<&str, &ReaderId> = BTreeMap::new();
-        for mapping in pinned {
-            // Deserialization refuses reserved principals, but a mapping built in process
-            // (a buggy custom implementation) must fail here, not when the record it was
-            // pinned into refuses to decode: the live act and its replay hold one test.
-            if !mapping.principal.is_literal() {
-                return Err(EvidenceRefusal::ReservedPrincipal { id: mapping.id.clone() });
-            }
-            if mappings.insert(mapping.id.as_str(), &mapping.principal).is_some() {
-                return Err(EvidenceRefusal::DuplicateIdentity { id: mapping.id.clone() });
-            }
-        }
-        Ok(IdentityTable {
-            implementation,
-            mappings,
-        })
-    }
-
-    fn principal(&self, claims: &MemberClaims) -> Result<ReaderId, EvidenceRefusal> {
-        match self.implementation {
-            IdentityImplementation::VerifiedEmail => verified_email_principal(claims),
-            IdentityImplementation::Custom(_) => self
-                .mappings
-                .get(claims.id.as_str())
-                .map(|principal| (*principal).clone())
-                .ok_or_else(|| EvidenceRefusal::UnmappedIdentity { id: claims.id.clone() }),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn member(id: &str, email: Option<&str>) -> MemberClaims {
-        MemberClaims {
-            id: id.to_string(),
-            verified_email: email.map(str::to_string),
-        }
+    fn reader(id: &str) -> ReaderId {
+        ReaderId::new(id)
     }
 
     fn spec(provider: &str, selector: &str) -> SelectorSpec {
@@ -924,7 +808,30 @@ mod tests {
                 within: Some(ChainAudience::Internal),
                 from: vec![spec("google-workspace", "group/finance@corp.com")],
             }],
-            identity: None,
+            lookup_targets: BTreeMap::new(),
+        }
+    }
+
+    fn slack(selector: &str, members: &[&str]) -> SourceClaims {
+        SourceClaims {
+            provider: "slack".into(),
+            selector: selector.into(),
+            members: members.iter().map(|member| reader(member)).collect(),
+        }
+    }
+
+    fn sources(sources: Vec<SourceClaims>) -> AudienceEvidence {
+        AudienceEvidence {
+            sources,
+            ..AudienceEvidence::default()
+        }
+    }
+
+    fn lookup(provider: &str, member: &str, principal: Option<&str>) -> MemberLookup {
+        MemberLookup {
+            provider: provider.into(),
+            member: member.into(),
+            principal: principal.map(reader),
         }
     }
 
@@ -951,7 +858,7 @@ mod tests {
             SourceClaims {
                 provider: provider.to_string(),
                 selector: selector.to_string(),
-                members: vec![member(&format!("{provider}:u1"), None)],
+                members: vec![reader(&format!("{provider}:u1"))],
             }
         }
 
@@ -999,14 +906,11 @@ mod tests {
                 for read in reads.iter().rev() {
                     replay.read([atom(*read).0]);
                 }
-                // The verdict is order-free; which unjustified entry a refusal names follows
-                // the pin order, so the two sides may name different ones.
-                let (live, replay) = (live.settle(&registry), replay.settle(&registry));
+                // The verdict is the invariant; which unrequested entry a refusal names
+                // first follows pin order, which record-by-record replay reverses.
+                let live = live.settle(&registry);
+                let replay = replay.settle(&registry);
                 prop_assert_eq!(live.is_ok(), replay.is_ok());
-                for verdict in [&live, &replay] {
-                    let unrequested = matches!(verdict, Ok(()) | Err(EvidenceRefusal::UnrequestedEvidence { .. }));
-                    prop_assert!(unrequested, "{verdict:?}");
-                }
 
                 let requested: BTreeSet<usize> = reads.iter().flat_map(|index| atom(*index).1.iter().copied()).collect();
                 let justified = pins.iter().all(|pin| inherited.contains(pin) || requested.contains(pin));
@@ -1016,46 +920,47 @@ mod tests {
     }
 
     #[test]
-    fn verified_email_is_conservative() {
-        // One verified corporate address is one principal whichever provider reports it; a
-        // personal address, a missing one, and any local-part variation each stay distinct.
-        // Only the domain case folds: no dots, no +suffixes, and never the local part.
-        for (id, email, principal) in [
-            (
-                "google-workspace:alice@corp.com",
-                Some("alice@corp.com"),
-                "alice@corp.com",
-            ),
-            ("slack:U012345", Some("alice@corp.com"), "alice@corp.com"),
-            ("github:alice", Some("alice@gmail.com"), "alice@gmail.com"),
-            ("github:alice", None, "github:alice"),
-            ("x:1", Some("Alice@CORP.com"), "Alice@corp.com"),
-            ("x:1", Some("a.lice@corp.com"), "a.lice@corp.com"),
-            ("x:1", Some("alice+x@corp.com"), "alice+x@corp.com"),
-        ] {
-            assert_eq!(
-                verified_email_principal(&member(id, email)).unwrap(),
-                ReaderId::new(principal),
-                "{id} with {email:?}"
-            );
-        }
-
-        // A malformed claimed email is an invalid answer, not a fallback.
-        for bad in ["nodomain", "two@at@signs", "@corp.com", "alice@", "a b@corp.com"] {
-            assert!(verified_email_principal(&member("x:1", Some(bad))).is_err(), "{bad}");
-        }
-
+    fn a_reported_reader_is_an_address_or_the_sources_own_qualified_id() {
         // An address is the principal itself: a reader written as one — by a policy, by a
-        // tool argument, by an annotation — is the reader the verified claim resolves to,
-        // so an ordinary email recipient meets the directory member who holds that address.
-        // The reader ingress folds domain case the same way, so one identity has one
-        // spelling wherever it is written; a qualified id and an opaque reader stay as written.
-        assert_eq!(
-            ReaderId::new("Alice@CORP.com"),
-            verified_email_principal(&member("x:1", Some("Alice@corp.com"))).unwrap()
+        // tool argument, by a source — is one reader, with only the domain case folded.
+        for good in [
+            "alice@corp.com",
+            "Alice@CORP.com",
+            "a.lice@corp.com",
+            "alice+x@corp.com",
+            "slack:U012345",
+            "slack:alice@corp.com",
+        ] {
+            assert!(well_formed_reader("slack", &reader(good)), "{good}");
+        }
+        assert_eq!(reader("Alice@CORP.com"), reader("Alice@corp.com"));
+        assert_ne!(
+            reader("alice@corp.com"),
+            reader("Alice@corp.com"),
+            "the local part keeps its case"
         );
-        assert_eq!(ReaderId::new("slack:U1").as_str(), "slack:U1");
-        assert_eq!(ReaderId::new("Insider").as_str(), "Insider");
+        assert_eq!(reader("slack:U1").as_str(), "slack:U1");
+
+        // Everything else: a bare name, a reserved spelling, a group mark, a malformed
+        // address, another provider's namespace, a bare prefix.
+        for bad in [
+            "finance",
+            "id63234",
+            "public",
+            "self",
+            "internal",
+            "@finance",
+            "",
+            "two@at@signs",
+            "@corp.com",
+            "alice@",
+            "a b@corp.com",
+            "github:alice",
+            "github:alice@corp.com",
+            "slack:",
+        ] {
+            assert!(!well_formed_reader("slack", &reader(bad)), "{bad:?}");
+        }
     }
 
     #[test]
@@ -1131,62 +1036,36 @@ mod tests {
     #[test]
     fn expansions_recompute_the_closure_from_primitives() {
         let registry = registry(corp_config());
-        let evidence = AudienceEvidence {
-            sources: vec![
-                SourceClaims {
-                    provider: "google-workspace".into(),
-                    selector: "viewer".into(),
-                    members: vec![member("google-workspace:me@corp.com", Some("me@corp.com"))],
-                },
-                SourceClaims {
-                    provider: "slack".into(),
-                    selector: "viewer".into(),
-                    members: vec![member("slack:U0ME", Some("me@corp.com"))],
-                },
-                SourceClaims {
-                    provider: "google-workspace".into(),
-                    selector: "full-members".into(),
-                    members: vec![
-                        member("google-workspace:me@corp.com", Some("me@corp.com")),
-                        member("google-workspace:bob@corp.com", Some("bob@corp.com")),
-                    ],
-                },
-                SourceClaims {
-                    provider: "slack".into(),
-                    selector: "full-members".into(),
-                    members: vec![member("slack:U0BOB", Some("bob@corp.com"))],
-                },
-                SourceClaims {
-                    provider: "google-workspace".into(),
-                    selector: "group/finance@corp.com".into(),
-                    members: vec![
-                        // An external auditor the finance source reports: within is a trusted
-                        // assertion, so this member is internal — no domain second-guessing.
-                        member(
-                            "google-workspace:auditor@consulting.com",
-                            Some("auditor@consulting.com"),
-                        ),
-                    ],
-                },
-            ],
-            lookups: vec![],
-            identity: vec![],
+        let google = |selector: &str, members: &[&str]| SourceClaims {
+            provider: "google-workspace".into(),
+            selector: selector.into(),
+            members: members.iter().map(|member| reader(member)).collect(),
         };
+        let evidence = sources(vec![
+            google("viewer", &["me@corp.com"]),
+            slack("viewer", &["me@corp.com"]),
+            google("full-members", &["me@corp.com", "bob@corp.com"]),
+            slack("full-members", &["bob@corp.com", "slack:UBOT"]),
+            // An external auditor the finance source reports: within is a trusted
+            // assertion, so this member is internal — no domain second-guessing.
+            google("group/finance@corp.com", &["auditor@consulting.com"]),
+        ]);
         let expansions = registry.expansions(&evidence).unwrap();
-        let reader = |s: &str| ReaderId::new(s);
 
-        // The two viewer accounts collapse to one principal: union dedups.
+        // The two viewer accounts collapse to one reader: union dedups.
         assert_eq!(
             expansions.members(&SymbolicAtom::Chain(ChainAudience::Self_)),
             Some(&BTreeSet::from([reader("me@corp.com")]))
         );
-        // internal ⊇ self ∪ own sources ∪ finance (within): the auditor is internal.
+        // internal ⊇ self ∪ own sources ∪ finance (within): the auditor is internal, and a
+        // member without an address is its qualified id.
         assert_eq!(
             expansions.members(&SymbolicAtom::Chain(ChainAudience::Internal)),
             Some(&BTreeSet::from([
                 reader("auditor@consulting.com"),
                 reader("bob@corp.com"),
                 reader("me@corp.com"),
+                reader("slack:UBOT"),
             ]))
         );
         assert_eq!(
@@ -1198,83 +1077,50 @@ mod tests {
     /// Which refusal a case expects.
     type Refuses = fn(&EvidenceRefusal) -> bool;
 
-    fn slack(selector: &str, members: Vec<MemberClaims>) -> SourceClaims {
-        SourceClaims {
-            provider: "slack".into(),
-            selector: selector.into(),
-            members,
-        }
-    }
-
-    fn sources(sources: Vec<SourceClaims>) -> AudienceEvidence {
-        AudienceEvidence {
-            sources,
-            ..AudienceEvidence::default()
-        }
-    }
-
     #[test]
-    fn evidence_validation_refuses_duplicates_and_foreign_claims() {
+    fn evidence_validation_refuses_duplicates_and_malformed_readers() {
         let registry = registry(corp_config());
         let refused: [(&str, AudienceEvidence, Refuses); 7] = [
             (
                 "one selector answered twice",
-                sources(vec![
-                    slack("viewer", vec![]),
-                    slack("viewer", vec![member("slack:U1", None)]),
-                ]),
+                sources(vec![slack("viewer", &[]), slack("viewer", &["slack:U1"])]),
                 |refusal| matches!(refusal, EvidenceRefusal::DuplicateSelector { .. }),
             ),
             (
                 "a member outside the provider's namespace",
-                sources(vec![slack("viewer", vec![member("github:alice", None)])]),
-                |refusal| matches!(refusal, EvidenceRefusal::ForeignMember { .. }),
+                sources(vec![slack("viewer", &["github:alice"])]),
+                |refusal| matches!(refusal, EvidenceRefusal::MalformedMember { .. }),
             ),
             (
-                // A bare provider prefix names no member: it is not inside the namespace.
-                "a bare provider prefix as a member",
-                sources(vec![slack("viewer", vec![member("slack:", None)])]),
-                |refusal| matches!(refusal, EvidenceRefusal::ForeignMember { .. }),
+                "a bare name as a member",
+                sources(vec![slack("viewer", &["finance"])]),
+                |refusal| matches!(refusal, EvidenceRefusal::MalformedMember { .. }),
             ),
             (
-                "a malformed verified email",
-                sources(vec![slack("viewer", vec![member("slack:U1", Some("not-an-email"))])]),
-                |refusal| matches!(refusal, EvidenceRefusal::MalformedEmail { .. }),
+                "a reserved spelling as a member",
+                sources(vec![slack("viewer", &["internal"])]),
+                |refusal| matches!(refusal, EvidenceRefusal::MalformedMember { .. }),
             ),
             (
-                // One member twice under one selector could seat two principals for one id.
                 "one member twice under one selector",
-                sources(vec![slack(
-                    "viewer",
-                    vec![
-                        member("slack:U1", Some("a@corp.com")),
-                        member("slack:U1", Some("a@corp.com")),
-                    ],
-                )]),
+                sources(vec![slack("viewer", &["a@corp.com", "a@corp.com"])]),
                 |refusal| matches!(refusal, EvidenceRefusal::DuplicateMember { .. }),
             ),
             (
-                // One id, one operation-wide claim set: two verified emails across two
-                // selectors would resolve to two principals.
-                "one member with two verified emails across selectors",
-                sources(vec![
-                    slack("viewer", vec![member("slack:U1", Some("a@corp.com"))]),
-                    slack("full-members", vec![member("slack:U1", Some("b@corp.com"))]),
-                ]),
-                |refusal| matches!(refusal, EvidenceRefusal::ConflictingClaims { .. }),
-            ),
-            (
-                // A source may not canonicalize a member it does not own.
-                "a lookup answering for another member",
+                "a lookup under a provider that does not own the member",
                 AudienceEvidence {
-                    lookups: vec![MemberLookup {
-                        provider: "slack".into(),
-                        member: "slack:U1".into(),
-                        claims: Some(member("google-workspace:alice", Some("alice@corp.com"))),
-                    }],
+                    lookups: vec![lookup("slack", "google-workspace:alice", Some("alice@corp.com"))],
                     ..AudienceEvidence::default()
                 },
-                |refusal| matches!(refusal, EvidenceRefusal::ForeignLookupClaims { .. }),
+                |refusal| matches!(refusal, EvidenceRefusal::ForeignLookup { .. }),
+            ),
+            (
+                "a lookup naming a principal outside both shapes",
+                AudienceEvidence {
+                    lookups: vec![lookup("slack", "slack:U1", Some("github:alice"))],
+                    ..AudienceEvidence::default()
+                },
+                |refusal| matches!(refusal, EvidenceRefusal::MalformedPrincipal { .. }),
             ),
         ];
         for (case, evidence, expected) in refused {
@@ -1284,71 +1130,20 @@ mod tests {
             }
         }
 
-        // The same claims twice are consistent, not conflicting; nor are two domain-case
-        // spellings of one address, which resolve to one principal.
-        for (case, evidence) in [
-            (
-                "one claim repeated",
-                sources(vec![
-                    slack("viewer", vec![member("slack:U1", Some("a@corp.com"))]),
-                    slack("full-members", vec![member("slack:U1", Some("a@corp.com"))]),
-                ]),
-            ),
-            (
-                "one address under two domain cases",
-                sources(vec![
-                    slack("viewer", vec![member("slack:U1", Some("Alice@CORP.com"))]),
-                    slack("full-members", vec![member("slack:U1", Some("Alice@corp.com"))]),
-                ]),
-            ),
-        ] {
-            assert!(registry.expansions(&evidence).is_ok(), "{case}");
-        }
-
-        // A silent occurrence is no counter-claim: the viewer reports its own verified
-        // address, the membership collection reports the same id and knows no address, and
-        // the one verified claim seats the principal for both — the common shape of a token
-        // owner who belongs to the organization the policy selected.
-        let silent_elsewhere = sources(vec![
-            slack("viewer", vec![member("slack:U1", Some("a@corp.com"))]),
-            slack("full-members", vec![member("slack:U1", None), member("slack:U2", None)]),
+        // One address under two domain cases is one reader.
+        let two_cases = sources(vec![
+            slack("viewer", &["Alice@CORP.com"]),
+            slack("full-members", &["Alice@corp.com"]),
         ]);
-        let expansions = registry
-            .expansions(&silent_elsewhere)
-            .expect("a silent occurrence defers to the verified claim");
-        let members = |selector: &str| {
-            expansions
-                .members(&SymbolicAtom::Group(GroupRef::Source {
-                    provider: "slack".to_string(),
-                    selector: selector.to_string(),
-                }))
-                .expect("the selector is answered")
-                .clone()
-        };
-        assert_eq!(members("viewer"), BTreeSet::from([ReaderId::new("a@corp.com")]));
+        let expansions = registry.expansions(&two_cases).unwrap();
+        let slack_viewer = SymbolicAtom::Group(GroupRef::Source {
+            provider: "slack".into(),
+            selector: "viewer".into(),
+        });
         assert_eq!(
-            members("full-members"),
-            BTreeSet::from([ReaderId::new("a@corp.com"), ReaderId::new("slack:U2")]),
-            "the folded claim seats one principal for the id everywhere it occurs"
+            expansions.members(&slack_viewer),
+            Some(&BTreeSet::from([reader("Alice@corp.com")]))
         );
-
-        // A Rust-constructed identity mapping with a reserved principal fails validation,
-        // not the eventual decode of the record it was pinned into.
-        let mut custom = corp_config();
-        custom.identity = Some(IdentityImplementation::Custom(IdentityImplementationName::new(
-            "corp-identity",
-        )));
-        let reserved = AudienceEvidence {
-            identity: vec![IdentityMapping {
-                id: "slack:U1".into(),
-                principal: ReaderId::new("internal"),
-            }],
-            ..AudienceEvidence::default()
-        };
-        assert!(matches!(
-            AudienceRegistry::build(&custom).expansions(&reserved),
-            Err(EvidenceRefusal::ReservedPrincipal { .. })
-        ));
     }
 
     #[test]
@@ -1356,73 +1151,84 @@ mod tests {
         let registry = registry(corp_config());
         let evidence = AudienceEvidence {
             lookups: vec![
-                MemberLookup {
-                    provider: "slack".into(),
-                    member: "slack:U012345".into(),
-                    claims: Some(member("slack:U012345", Some("alice@corp.com"))),
-                },
-                MemberLookup {
-                    provider: "slack".into(),
-                    member: "slack:UGONE".into(),
-                    claims: None,
-                },
+                lookup("slack", "slack:U012345", Some("alice@corp.com")),
+                lookup("slack", "slack:UGONE", None),
             ],
             ..AudienceEvidence::default()
         };
         let expansions = registry.expansions(&evidence).unwrap();
         assert_eq!(
-            expansions.principal(&ReaderId::new("slack:U012345")),
-            Some(&ReaderId::new("alice@corp.com"))
+            expansions.principal(&reader("slack:U012345")),
+            Some(&reader("alice@corp.com"))
         );
         assert_eq!(
-            expansions.principal(&ReaderId::new("slack:UGONE")),
-            Some(&ReaderId::new("slack:UGONE")),
-            "not found keeps the qualified identity"
+            expansions.principal(&reader("slack:UGONE")),
+            Some(&reader("slack:UGONE")),
+            "not found keeps the reader as written"
         );
     }
 
     #[test]
-    fn a_custom_identity_reads_pinned_mappings_only() {
+    fn a_redirected_provider_seats_its_qualified_members_through_pinned_lookups() {
         let mut config = corp_config();
-        config.identity = Some(IdentityImplementation::Custom(IdentityImplementationName::new(
-            "corp-identity",
-        )));
-        let registry = registry(config);
-        let claims = SourceClaims {
+        config.lookup_targets.insert("slack".into(), "people".into());
+        let redirected = registry(config);
+        let viewer = SymbolicAtom::Group(GroupRef::Source {
             provider: "slack".into(),
             selector: "viewer".into(),
-            members: vec![member("slack:U1", Some("who@corp.com"))],
-        };
-        let unmapped = AudienceEvidence {
-            sources: vec![claims.clone()],
-            ..AudienceEvidence::default()
-        };
-        assert!(matches!(
-            registry.expansions(&unmapped),
-            Err(EvidenceRefusal::UnmappedIdentity { .. })
-        ));
+        });
 
-        let mapped = AudienceEvidence {
-            sources: vec![claims],
-            identity: vec![IdentityMapping {
-                id: "slack:U1".into(),
-                principal: ReaderId::new("corp:alice"),
-            }],
-            ..AudienceEvidence::default()
-        };
-        let expansions = registry.expansions(&mapped).unwrap();
+        // Until every qualified member is looked up, the selector is unanswered and the
+        // owed lookups are exactly the qualified members without a pin.
+        let unmapped = sources(vec![slack("viewer", &["slack:U1", "bob@corp.com"])]);
         assert_eq!(
-            expansions.members(&SymbolicAtom::Group(GroupRef::Source {
+            redirected.member_lookups_owed(&unmapped),
+            BTreeSet::from([LookupSpec {
                 provider: "slack".into(),
-                selector: "viewer".into()
-            })),
-            Some(&BTreeSet::from([ReaderId::new("corp:alice")]))
+                member: "slack:U1".into()
+            }])
+        );
+        let expansions = redirected.expansions(&unmapped).unwrap();
+        assert_eq!(expansions.members(&viewer), None);
+        assert_eq!(expansions.members(&SymbolicAtom::Chain(ChainAudience::Self_)), None);
+
+        // A pinned principal seats the member; a pinned not-found leaves it as written.
+        let mapped = AudienceEvidence {
+            lookups: vec![lookup("slack", "slack:U1", Some("alice@corp.com"))],
+            ..unmapped.clone()
+        };
+        assert!(redirected.member_lookups_owed(&mapped).is_empty());
+        assert_eq!(
+            redirected.expansions(&mapped).unwrap().members(&viewer),
+            Some(&BTreeSet::from([reader("alice@corp.com"), reader("bob@corp.com")]))
+        );
+        let unknown = AudienceEvidence {
+            lookups: vec![lookup("slack", "slack:U1", None)],
+            ..unmapped.clone()
+        };
+        assert_eq!(
+            redirected.expansions(&unknown).unwrap().members(&viewer),
+            Some(&BTreeSet::from([reader("slack:U1"), reader("bob@corp.com")]))
         );
 
-        // A reserved principal never deserializes.
-        for reserved in ["public", "self", "internal", "@finance"] {
-            let wire = serde_json::json!({ "id": "slack:U1", "principal": reserved });
-            assert!(serde_json::from_value::<IdentityMapping>(wire).is_err(), "{reserved}");
-        }
+        // The owed lookup is justified by the pinned answer that reports the member, with
+        // no atom naming it — and only under a redirected provider.
+        redirected
+            .only_requested(&mapped, &AudienceEvidence::default(), std::slice::from_ref(&viewer))
+            .expect("an owed lookup answers the answer that owes it");
+        assert!(
+            matches!(
+                redirected.only_requested(&mapped, &AudienceEvidence::default(), &[]),
+                Err(EvidenceRefusal::UnrequestedEvidence { .. })
+            ),
+            "without the selector read, neither the answer nor its lookup is requested"
+        );
+        assert!(
+            matches!(
+                registry(corp_config()).only_requested(&mapped, &AudienceEvidence::default(), &[viewer]),
+                Err(EvidenceRefusal::UnrequestedEvidence { .. })
+            ),
+            "an unredirected provider's members owe nothing"
+        );
     }
 }
