@@ -302,9 +302,11 @@ def main():
             require(len(statuses) == 1 and statuses[0].get('ready') is True
                     and 'running' in statuses[0].get('state', {}), 'container is not running and ready: ' + name)
             image_id = statuses[0].get('imageID', '')
-            # Accept manifest digests only. Config IDs and unknown CRI forms fail.
+            # CRI implementations report either the selected platform manifest
+            # or its index. Both must be pinned by this generation; the node's
+            # platform was checked above. Config IDs and unknown CRI forms fail.
             match = re.fullmatch(r'(?:(?:docker-pullable|containerd)://)?(?:[^\s@]+@)?(sha256:[0-9a-f]{64})', image_id)
-            require(match and match.group(1) == entry['platforms'][platform], 'running manifest digest is unknown or mismatched: ' + name)
+            require(match and match.group(1) in (entry['digest'], entry['platforms'][platform]), 'running manifest digest is unknown or mismatched: ' + name)
             seen.add(kind)
         require(seen == set(images), 'no verified ready pods for: ' + ', '.join(sorted(set(images) - seen)))
     print('Verified ' + ('running image evidence only' if args.pods_only else 'registry image digests')
@@ -558,6 +560,36 @@ assert child.returncode != 0
             let mut fixture = Fixture::new();
             fixture.evidence["agents"]["items"][0]["status"]["containerStatuses"] = json!([]);
             fixture.fails(PODS, "container is not running and ready");
+        }
+
+        #[test]
+        fn emitted_helper_accepts_a_pinned_index_only_on_a_supported_node_platform() {
+            let mut fixture = Fixture::new();
+            // The fixture pods report the index. Give each platform a distinct
+            // digest so accepting the index is exercised rather than incidental.
+            for image in fixture.evidence["lock"]["images"].as_object_mut().unwrap().values_mut() {
+                image["platforms"]["linux/amd64"] = json!(format!("sha256:{}", "f".repeat(64)));
+            }
+            fs::write(
+                fixture.root.path().join("images.json"),
+                serde_json::to_vec(&fixture.evidence["lock"]).unwrap(),
+            )
+            .unwrap();
+            let output = fixture.run(PODS);
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            fixture.evidence["nodes"]["items"][0]["status"]["nodeInfo"]["architecture"] = json!("arm64");
+            fixture.fails(PODS, "unsupported or unknown platform");
+            fixture.evidence["nodes"]["items"][0]["status"]["nodeInfo"]["architecture"] = json!("amd64");
+            fixture.evidence["lock"]["images"]["python"]["platforms"]["linux/arm64"] =
+                json!(format!("sha256:{}", "e".repeat(64)));
+            fs::write(
+                fixture.root.path().join("images.json"),
+                serde_json::to_vec(&fixture.evidence["lock"]).unwrap(),
+            )
+            .unwrap();
+            fixture.evidence["agents"]["items"][0]["status"]["containerStatuses"][0]["imageID"] =
+                json!(format!("sha256:{}", "e".repeat(64)));
+            fixture.fails(PODS, "running manifest digest is unknown or mismatched");
         }
 
         #[test]
