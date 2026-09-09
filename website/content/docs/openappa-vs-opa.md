@@ -6,7 +6,7 @@ order: 10.7
 
 [Open Policy Agent (OPA)](https://www.openpolicyagent.org/docs) is a general-purpose policy engine used across applications and infrastructure. For AI agents, OPA can check [which tools an agent may call and which arguments are allowed](https://www.openpolicyagent.org/). Your application supplies the context and enforces the decision.
 
-OpenAPPA is an agentic security framework. It supplies action-history tracking, persistent security state, and recovery plans. Reading internal data limits later sharing. Reading an untrusted source can prevent later use of tools that require trusted input. With OPA, your application must track those reads and define how they affect later actions. See [How it works](/how-it-works).
+OpenAPPA is an agentic security framework. It supplies action-history tracking, persistent security state, and recovery plans. Reading internal data limits later sharing. Reading an untrusted source can prevent later use of tools that require trusted input. With OPA, your application must track those reads and define how they affect later actions.
 
 | | OPA | OpenAPPA |
 |---|:---:|:---:|
