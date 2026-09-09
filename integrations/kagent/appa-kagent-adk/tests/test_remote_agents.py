@@ -44,6 +44,17 @@ async def test_approval_resume_keeps_the_paused_child():
         await tool.run_async(args={}, tool_context=context)
 
 
+@pytest.mark.parametrize("result", ["Remote agent 'analyst' request failed: unavailable", "Direct message", None])
+async def test_non_task_results_never_claim_a_child_identity(result):
+    class MessageRemote(Remote):
+        async def run_async(self, *, args, tool_context):
+            return result
+
+    tool = IsolatedRemoteTool(MessageRemote())
+    actual = await tool.run_async(args={}, tool_context=SimpleNamespace(tool_confirmation=None))
+    assert actual == result
+
+
 async def test_toolset_keeps_client_ownership_without_advertising_a_stale_id():
     class Toolset:
         closed = False

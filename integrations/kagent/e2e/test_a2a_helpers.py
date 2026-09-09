@@ -97,6 +97,27 @@ def test_success_prose_is_not_a_tool_result(helpers):
     assert not task.has_result("rollback_deployment", rolled_back="checkout-api")
 
 
+def test_tool_evidence_rejects_prefix_collisions(helpers):
+    names = ["rollback_deployment_extra", "rollback_deployment_go", "agent/demo/rollback_deployment"]
+    task = helpers.Task({"history": [{"parts": [
+        {"kind": "data", "data": {"name": name, "args": {}, "response": {"rolled_back": "checkout-api"}}}
+        for name in names
+    ]}]})
+    assert not task.calls("rollback_deployment")
+    assert not task.responses("rollback_deployment")
+    assert not task.has_result("rollback_deployment", rolled_back="checkout-api")
+
+
+def test_agent_evidence_accepts_only_exact_name_or_go_variant(helpers):
+    tool = "kagent__NS__log_analyst"
+    task = helpers.Task({"history": [{"parts": [
+        {"kind": "data", "data": {"name": name, "args": {}, "response": {"result": name}}}
+        for name in [tool, tool + "_go", tool + "_extra", tool + "_go_extra"]
+    ]}]})
+    assert [call["name"] for call in task.calls(tool)] == [tool, tool + "_go"]
+    assert [body["result"] for body in task.responses(tool)] == [tool, tool + "_go"]
+
+
 def test_nested_mcp_result_is_observed_but_call_arguments_are_not(helpers):
     data = {"name": "rollback_deployment", "args": {"rolled_back": "checkout-api"}}
     task = helpers.Task({"history": [{"role": "agent", "parts": [{"kind": "data", "data": data}]}]})

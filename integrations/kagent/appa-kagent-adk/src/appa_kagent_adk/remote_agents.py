@@ -27,10 +27,9 @@ class IsolatedRemoteTool(BaseTool):
             if not isinstance(payload, dict) or not payload.get("context_id"):
                 raise ValueError("remote approval resume requires the original child context_id")
             call._last_context_id = payload["context_id"]
-        result = await call.run_async(args=args, tool_context=tool_context)
-        if isinstance(result, str):
-            return {"result": result, "subagent_session_id": call._last_context_id}
-        return result
+        # Only the transport's Task response establishes a child identity.
+        # Bare messages and transport errors must not acquire a fabricated ID.
+        return await call.run_async(args=args, tool_context=tool_context)
 
 
 class IsolatedRemoteToolset(BaseToolset):

@@ -56,7 +56,7 @@ def wire_name(namespace: str, agent: str) -> str:
 
 
 # The agent-tool names as the wire carries them. The go row's names end
-# in `_go`, so a test matches these as a prefix, never by equality.
+# in `_go`, which is the only suffix a test may accept.
 CHILD_TOOL = wire_name(NAMESPACE, CHILD)
 UNDECLARED_TOOL = wire_name(NAMESPACE, UNDECLARED)
 
@@ -96,15 +96,16 @@ class Task:
         return [part["data"] for part in parts if part.get("kind") == "data" and isinstance(part.get("data"), dict)]
 
     def calls(self, tool: str) -> list[dict]:
-        """The function calls to a tool whose wire name starts with `tool`.
+        """Calls to this tool (or the Go variant of a delegated agent)."""
+        return [entry for entry in self.data() if self._matches_tool(entry.get("name"), tool) and "args" in entry]
 
-        A prefix, not an equality: the go row's agent-tool names end in
-        `_go`. Each entry carries the call's `args`."""
-        return [entry for entry in self.data() if str(entry.get("name", "")).startswith(tool) and "args" in entry]
+    @staticmethod
+    def _matches_tool(name: object, tool: str) -> bool:
+        return name == tool or ("__NS__" in tool and name == tool + "_go")
 
     def responses(self, tool: str) -> list:
         """The function responses of those calls, as the model read them."""
-        called = [entry for entry in self.data() if str(entry.get("name", "")).startswith(tool)]
+        called = [entry for entry in self.data() if self._matches_tool(entry.get("name"), tool)]
         return [entry["response"] for entry in called if "response" in entry]
 
     def has_result(self, tool: str, **expected: object) -> bool:
