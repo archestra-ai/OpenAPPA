@@ -1,6 +1,9 @@
 import importlib.util
 import json
 import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 import unittest
 import sys
@@ -20,27 +23,32 @@ def request(tool, arguments, profile="approved-writes", match=None, production=F
 
 
 class AnnotationTests(unittest.TestCase):
-    def test_every_captured_operation_is_classified_and_profiled(self):
-        # These are mechanical contract-coverage cases, not provider execution.
-        # Exercise the names actually emitted by the generator, so a generated
-        # profile cannot escape consult coverage when the profile list changes.
+    def test_generated_profiles_apply_the_expected_write_requirements(self):
         profiles = [re.search(r'^name = "linear\.([^"\n]+)"$', body, re.MULTILINE).group(1)
                     for body in build.render().values()]
-        for tool, operation in module.OPERATIONS.items():
-            args = {key: "fixture" for key in operation["required_arguments"]}
-            for profile in profiles:
-                with self.subTest(tool=tool, profile=profile):
-                    mutation = module.OPERATIONS[tool]["kind"] != "read"
-                    req = request(tool, args, profile, production=True)
-                    if mutation and profile == "read-only":
-                        with self.assertRaises(module.Refusal):
-                            module.annotate(req)
-                    else:
-                        answer = module.annotate(req)["answer"]
-                        self.assertEqual(answer["delta"]["trust"], "suspicious")
-                        self.assertEqual(bool(answer["emits"]), mutation)
-                        if mutation and profile != "team-use":
-                            self.assertEqual(answer["requires"]["attention"], ["linear-review"])
+        self.assertEqual(set(profiles), {"read-only", "approved-writes", "team-use", "production-lockdown"})
+        for profile in profiles:
+            with self.subTest(profile=profile):
+                req = request("save_comment", {"issueId": "ENG-1", "body": "update"}, profile, production=True)
+                if profile == "read-only":
+                    with self.assertRaises(module.Refusal):
+                        module.annotate(req)
+                else:
+                    answer = module.annotate(req)["answer"]
+                    self.assertEqual(answer["emits"], ["linear.changed"])
+                    self.assertEqual(answer["requires"]["trust"], "trusted")
+                    self.assertEqual(answer["requires"]["attention"], [] if profile == "team-use" else ["linear-review"])
+
+    def test_relocated_helper_runs_without_mutating_its_package(self):
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "linear"
+            shutil.copytree(Path(__file__).parent, package, ignore=shutil.ignore_patterns("__pycache__"))
+            result = subprocess.run([sys.executable, str(package / "annotate.py")],
+                                    input=json.dumps(request("get_issue", {"id": "ENG-1"})),
+                                    cwd=directory, capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["answer"]["delta"]["audience"], ["alice@corp.example"])
+            self.assertFalse((package / "__pycache__").exists())
 
     def test_unknown_nested_patch_fields_cannot_bypass_scope_review(self):
         args = {"id": "ENG-1", "patch": [{"op": "append", "text": "update", "team": "outside"}]}

@@ -36,12 +36,14 @@ def config_from(declaration):
         if tool not in OPERATIONS or not isinstance(rules, list):
             raise Refusal("configuration names an unknown tool or invalid rules")
         for rule in rules:
-            if (not isinstance(rule, dict) or set(rule) - {"match", "audience", "production"}
-                    or not {"match", "audience"}.issubset(rule)
-                    or not isinstance(rule["match"], dict)
-                    or set(rule["match"]) - argument_names(OPERATIONS[tool])
-                    or type(rule.get("production", False)) is not bool):
-                raise Refusal("invalid resource rule")
+            if not isinstance(rule, dict) or set(rule) - {"match", "audience", "production"}:
+                raise Refusal("unknown resource rule fields")
+            if not {"match", "audience"}.issubset(rule):
+                raise Refusal("resource rule needs match and audience")
+            if not isinstance(rule["match"], dict) or set(rule["match"]) - argument_names(OPERATIONS[tool]):
+                raise Refusal("resource rule names unknown arguments")
+            if type(rule.get("production", False)) is not bool:
+                raise Refusal("production must be a boolean")
             audience = rule["audience"]
             if audience != "public" and (not isinstance(audience, list) or not audience
                     or not all(isinstance(a, str) and a and a != "public" for a in audience)):
@@ -49,35 +51,9 @@ def config_from(declaration):
     return config
 
 
-def annotate(request):
-    if (not isinstance(request, dict) or type(request.get("version")) is not int
-            or request["version"] != 1 or request.get("kind") != "annotation"):
-        raise Refusal("unsupported annotation envelope")
-    name = request.get("name", "")
-    if name not in {"linear." + profile for profile in PROFILES}:
-        raise Refusal("unknown Linear annotator")
-    profile = name.removeprefix("linear.")
-    declaration = request.get("declaration")
-    if not isinstance(declaration, dict):
-        raise Refusal("missing declaration")
-    config = config_from(declaration)
-    artifact = request.get("artifact", {})
-    call = artifact.get("args") if isinstance(artifact, dict) else None
-    if not isinstance(call, dict) or not isinstance(call.get("arguments"), dict):
-        raise Refusal("missing tool call")
-    canonical = call.get("name", "")
-    parts = canonical.split("/") if isinstance(canonical, str) else []
-    if len(parts) != 3 or parts[0] != "mcp" or not parts[1]:
-        raise Refusal("call is not a canonical MCP tool")
-    # The runtime binds the exact tool to its configured server alias. The
-    # consult carries that physical identity, which can be any host namespace.
-    tool = parts[2]
-    if tool not in OPERATIONS:
-        raise Refusal("operation was not reviewed")
+def resource_rule(config, tool, arguments):
+    """Choose exactly one audience rule, binding every supplied scope argument."""
     operation = OPERATIONS[tool]
-    arguments = call["arguments"]
-    if not valid_arguments(operation, arguments):
-        raise Refusal("arguments do not satisfy the reviewed policy contract")
     candidates = []
     supplied_scope = set(operation["scope_arguments"]) & arguments.keys()
     for rule in config["rules"].get(tool, []):
@@ -86,7 +62,12 @@ def annotate(request):
             candidates.append(rule)
     if len(candidates) != 1:
         raise Refusal("resource audience is unresolved or ambiguous")
-    rule = candidates[0]
+    return candidates[0]
+
+
+def decision(tool, arguments, profile, rule):
+    """Linear policy: mapped audience, low-trust results and reviewed mutations."""
+    operation = OPERATIONS[tool]
     mutation = operation["kind"] != "read"
     if mutation and profile == "read-only":
         raise Refusal("read-only profile refuses mutations")
@@ -110,6 +91,26 @@ def annotate(request):
                                      "emits": [operation["effect"]] if mutation else []}}
 
 
+def annotate(request):
+    # The runtime constructs the consult envelope and binds the physical server.
+    # Reject incompatible protocol/name values; missing fields fail at the command boundary.
+    if request["version"] != 1 or request["kind"] != "annotation":
+        raise Refusal("unsupported annotation envelope")
+    name = request["name"]
+    if name not in {"linear." + profile for profile in PROFILES}:
+        raise Refusal("unknown Linear annotator")
+    call = request["artifact"]["args"]
+    namespace, server, tool = call["name"].split("/")
+    if namespace != "mcp" or not server or tool not in OPERATIONS:
+        raise Refusal("unknown Linear tool")
+    arguments = call["arguments"]
+    if not isinstance(arguments, dict) or not valid_arguments(OPERATIONS[tool], arguments):
+        raise Refusal("arguments do not satisfy the reviewed policy contract")
+    config = config_from(request["declaration"])
+    rule = resource_rule(config, tool, arguments)
+    return decision(tool, arguments, name.removeprefix("linear."), rule)
+
+
 def main():
     try:
         raw = sys.stdin.buffer.read(MAX_BYTES + 1)
@@ -119,7 +120,7 @@ def main():
         json.dump(result, sys.stdout)
         sys.stdout.write("\n")
         return 0
-    except (ValueError, TypeError, KeyError):
+    except (ValueError, TypeError, KeyError, AttributeError):
         print("Linear annotation refused: check the policy contract, profile, and resource audience rules", file=sys.stderr)
         return 1
 

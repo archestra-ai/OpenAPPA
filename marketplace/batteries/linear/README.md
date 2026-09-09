@@ -192,7 +192,7 @@ at runtime, but semantic changes to existing fields require the drift check.
 ```sh
 python3 marketplace/batteries/linear/build.py --check
 python3 -m unittest discover -s marketplace/batteries/linear -p 'test_*.py'
-cargo test --locked -p appa --test linear_policy --test linear_audience --test marketplace_cli
+cargo test --locked -p appa --test linear_policy --test marketplace
 bash scripts/appa-marketplace.sh --check
 ```
 
