@@ -81,6 +81,8 @@ expect 2 '^kind: Deployment$'
 expect 2 '^kind: Service$'
 expect 1 '^kind: RemoteMCPServer$'
 expect 3 '^kind: Agent$'
+expect 1 '^kind: Job$'
+expect 1 'name: SEED_AGENT_REF, value: "kagent/cluster-ops"'
 expect 0 '^kind: PersistentVolumeClaim$'
 expect 0 '^kind: ModelConfig$'
 expect 0 '^kind: Secret$'
@@ -124,6 +126,8 @@ must_refuse 'agent names collide' kagent --set agents.go.enabled=true --set agen
 # Enabling the Go cell adds its three optional agents.
 must_render kagent --set agents.go.enabled=true
 expect 6 '^kind: Agent$'
+expect 1 '^kind: Job$'
+expect 1 'name: SEED_AGENT_REF, value: "kagent/cluster-ops"'
 expect_env 6 APPA_RUNTIME_URL http://appa-runtime.appa.svc.cluster.local:18787
 expect 2 'never call ask_user'
 expect 2 'The release manager approves or refuses version bumps for the shop namespace\.$'
@@ -164,5 +168,9 @@ must_refuse 'schema' kagent --set-string modelConfig.name=Default
 must_refuse "additional properties 'guide' not allowed" kagent --set guide.enabled=false
 must_refuse "additional properties 'openai' not allowed" kagent --set-string openai.apiKey=placeholder
 must_refuse "additional properties 'image' not allowed" kagent --set runtime.image.repository=example.invalid/runtime
+
+must_render kagent --set seed.enabled=false
+expect 0 '^kind: Job$'
+expect 0 '^  name: appa-demo-seed$'
 
 echo "render-test: every case passed"
