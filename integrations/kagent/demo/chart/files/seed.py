@@ -28,22 +28,27 @@ RELEASE = os.environ.get("SEED_RELEASE", "appa-kagent-demo")
 FIXTURE = os.environ.get("SEED_FIXTURE", "/seed/showcase-sessions.json")
 WAIT_S = float(os.environ.get("SEED_WAIT_SECONDS", "600"))
 
-# The order the dashboard shows them in (newest first): seed the reverse.
+# Website scenario order (newest first): seed the reverse.
 ORDER = [
-    "pods",
     "exfil",
+    "ingress",
+    "hitl",
+    "delegation",
+    "annotator",
+]
+
+# Exact IDs owned by the shipped seed Job, never user-created chats.
+REPLACED_KEYS = [
+    *ORDER,
+    "change-board-approve",
+    "pods",
     "sanitized-default",
     "steer-accept",
     "steer-decline",
     "forged",
-    "hitl",
-    "annotator",
     "release-window",
     "release-window-deny",
-    "delegation",
     "delegation-denied",
-    "ingress",
-    "change-board-approve",
     "change-board-deny",
     "change-board-silent",
 ]
@@ -57,7 +62,7 @@ def api(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            return response.status, json.load(response)
+            return response.status, json.loads(response.read() or b"{}")
     except urllib.error.HTTPError as error:
         try:
             return error.code, json.loads(error.read() or b"{}")
@@ -112,25 +117,55 @@ def wait_for_agent() -> None:
 
 
 def main() -> None:
-    showcases = json.load(open(FIXTURE))
+    with open(FIXTURE) as fixture:
+        showcases = json.load(fixture)
+    if set(showcases) != set(ORDER):
+        sys.exit("[seed] fixtures must contain exactly the five website scenarios")
     wait_for_agent()
     seeded = 0
-    for key in reversed([k for k in ORDER if k in showcases] + [k for k in showcases if k not in ORDER]):
+    for key in reversed(ORDER):
         case = showcases[key]
-        session_id = stable(f"session/{key}")
+        # kagent soft-deletes sessions. Fresh IDs let the new recordings
+        # replace the shipped chats without reusing their deleted rows/tasks.
+        session_id = stable(f"website/session/{key}")
         status, body = api("POST", "/sessions", {"agent_ref": AGENT_REF, "id": session_id, "name": case["name"]})
         if status not in (200, 201):
             sys.exit(f"[seed] session {key}: {status} {body}")
         status, existing = api("GET", f"/sessions/{session_id}/tasks")
-        if status == 200 and existing.get("data"):
+        if status != 200:
+            sys.exit(f"[seed] list tasks {key}: {status} {existing}")
+        tasks = [remap_task(f"website/{key}", index, task, session_id) for index, task in enumerate(case["tasks"])]
+        existing_ids = {task["id"] for task in existing.get("data") or []}
+        if all(task["id"] in existing_ids for task in tasks):
             print(f"[seed] {key}: already seeded ({len(existing['data'])} tasks)", flush=True)
             continue
-        for index, task in enumerate(case["tasks"]):
-            status, body = api("POST", "/tasks", remap_task(key, index, task, session_id))
+        for index, task in enumerate(tasks):
+            if task["id"] in existing_ids:
+                continue
+            status, body = api("POST", "/tasks", task)
             if status not in (200, 201):
                 sys.exit(f"[seed] task {key}/{index}: {status} {body}")
         seeded += 1
         print(f"[seed] {key}: {len(case['tasks'])} task(s) under session {session_id}", flush=True)
+    status, sessions = api("GET", "/sessions")
+    if status != 200:
+        sys.exit(f"[seed] list sessions: {status} {sessions}")
+    replaced_ids = {stable(f"session/{key}") for key in REPLACED_KEYS}
+    replaced_ids.update(stable(f"website/session/{key}") for key in ("change-board-approve", "pods"))
+    for session in sessions.get("data") or []:
+        if session["id"] not in replaced_ids:
+            continue
+        # Deleting a kagent session does not remove its retrievable tasks.
+        status, tasks = api("GET", f"/sessions/{session['id']}/tasks")
+        if status != 200:
+            sys.exit(f"[seed] list replaced tasks {session['id']}: {status} {tasks}")
+        for task in tasks.get("data") or []:
+            status, body = api("DELETE", f"/tasks/{task['id']}")
+            if status not in (200, 204, 404):
+                sys.exit(f"[seed] remove replaced task {task['id']}: {status} {body}")
+        status, body = api("DELETE", f"/sessions/{session['id']}")
+        if status not in (200, 204, 404):
+            sys.exit(f"[seed] remove replaced session {session['id']}: {status} {body}")
     print(f"[seed] done: {seeded} showcase chat(s) seeded for {USER} on {AGENT_REF}", flush=True)
 
 
