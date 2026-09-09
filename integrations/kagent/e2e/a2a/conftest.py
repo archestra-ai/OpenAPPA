@@ -20,11 +20,15 @@ import threading
 import time
 import urllib.request
 import uuid
+from contextlib import contextmanager
 
 import pytest
 
 if os.environ.get("APPA_A2A_E2E") != "1":
-    pytest.skip("set APPA_A2A_E2E=1 (and stand up the demo stack) to run the A2A matrix", allow_module_level=True)
+    pytest.skip(
+        "set APPA_A2A_E2E=1 (and stand up the demo stack) to run the A2A matrix",
+        allow_module_level=True,
+    )
 
 A2A_URL = os.environ.get("APPA_A2A_URL", "http://127.0.0.1:18089/")
 MOCK_URL = os.environ.get("APPA_MOCK_URL", "http://127.0.0.1:8081")
@@ -80,7 +84,9 @@ class Task:
 
     def text(self) -> str:
         """Everything the agent said, in order — tool data included."""
-        return "\n".join(part.get("text", "") for part in self.parts() if part.get("_role") == "agent" and part.get("kind") == "text")
+        return "\n".join(
+            part.get("text", "") for part in self.parts() if part.get("_role") == "agent" and part.get("kind") == "text"
+        )
 
     def data(self) -> list[dict]:
         """Every data part's payload, in order: the function calls and their responses."""
@@ -98,6 +104,31 @@ class Task:
         """The function responses of those calls, as the model read them."""
         called = [entry for entry in self.data() if str(entry.get("name", "")).startswith(tool)]
         return [entry["response"] for entry in called if "response" in entry]
+
+    def has_result(self, tool: str, **expected: object) -> bool:
+        """Match actual tool-result fields, including JSON-wrapped MCP results."""
+
+        def objects(value):
+            if isinstance(value, dict):
+                yield value
+                for child in value.values():
+                    yield from objects(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from objects(child)
+            elif isinstance(value, str):
+                try:
+                    decoded = json.loads(value)
+                except ValueError:
+                    return
+                if not isinstance(decoded, str):
+                    yield from objects(decoded)
+
+        return any(
+            all(body.get(key) == value for key, value in expected.items())
+            for response in self.responses(tool)
+            for body in objects(response)
+        )
 
     def confirmation(self) -> dict | None:
         """The pending confirmation request, if the task is waiting on a person."""
@@ -185,7 +216,14 @@ class Agent:
         self.url = url
 
     def _send(self, params: dict) -> Task:
-        body = json.dumps({"jsonrpc": "2.0", "id": str(uuid.uuid4()), "method": "message/send", "params": params}).encode()
+        body = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": str(uuid.uuid4()),
+                "method": "message/send",
+                "params": params,
+            }
+        ).encode()
         request = urllib.request.Request(self.url, data=body, headers={"content-type": "application/json"})
         with urllib.request.urlopen(request, timeout=TIMEOUT_S) as response:
             answer = json.load(response)
@@ -193,7 +231,12 @@ class Agent:
         return Task(answer["result"])
 
     def say(self, text: str, context_id: str | None = None) -> Task:
-        message = {"role": "user", "kind": "message", "messageId": str(uuid.uuid4()), "parts": [{"kind": "text", "text": text}]}
+        message = {
+            "role": "user",
+            "kind": "message",
+            "messageId": str(uuid.uuid4()),
+            "parts": [{"kind": "text", "text": text}],
+        }
         if context_id:
             message["contextId"] = context_id
         return self._send({"message": message})
@@ -232,29 +275,68 @@ class Board:
 
     def pending(self, tool: str) -> list[dict]:
         with urllib.request.urlopen(self.url + "/pending", timeout=5) as response:
-            return [entry for entry in json.load(response)["pending"] if entry.get("tool") == tool]
+            return [
+                entry
+                for entry in json.load(response)["pending"]
+                if entry.get("tool") == tool
+                or (str(entry.get("tool", "")).startswith("mcp/") and str(entry["tool"]).rsplit("/", 1)[-1] == tool)
+            ]
 
-    def rule(self, tool: str, ruling: str, timeout_s: float = 120.0) -> dict | None:
+    def rule(
+        self,
+        tool: str,
+        ruling: str,
+        timeout_s: float = 120.0,
+        stop: threading.Event | None = None,
+    ) -> dict | None:
         """Wait for the consult on `tool` to be parked, then rule on it; None if none came."""
-        deadline = time.time() + timeout_s
-        while time.time() < deadline:
+        stop = stop or threading.Event()
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline and not stop.is_set():
             try:
                 for entry in self.pending(tool):
-                    body = json.dumps({"id": entry["id"], "ruling": ruling, "reason": "ruled by the matrix"}).encode()
+                    body = json.dumps(
+                        {
+                            "id": entry["id"],
+                            "ruling": ruling,
+                            "reason": "ruled by the matrix",
+                        }
+                    ).encode()
                     request = urllib.request.Request(
-                        self.url + "/decide", data=body, headers={"content-type": "application/json"}
+                        self.url + "/decide",
+                        data=body,
+                        headers={"content-type": "application/json"},
                     )
-                    with urllib.request.urlopen(request, timeout=5):
-                        return entry
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        if json.load(response).get("decided") == entry["id"]:
+                            return entry
             except OSError:
                 pass
-            time.sleep(0.5)
+            stop.wait(0.5)
         return None
 
-    def rule_in_background(self, tool: str, ruling: str) -> threading.Thread:
-        thread = threading.Thread(target=self.rule, args=(tool, ruling), daemon=True)
+    @contextmanager
+    def ruling(self, tool: str, ruling: str):
+        """A scoped board member; require an acknowledged ruling, even on denial."""
+        stop = threading.Event()
+        outcome = {}
+
+        def run():
+            try:
+                outcome["entry"] = self.rule(tool, ruling, stop=stop)
+            except Exception as error:
+                outcome["error"] = error
+
+        thread = threading.Thread(target=run, daemon=True)
         thread.start()
-        return thread
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join(11)
+        assert not thread.is_alive(), "the board member stopped before the next scenario"
+        assert "error" not in outcome, f"board request failed: {outcome.get('error')}"
+        assert outcome.get("entry"), f"the board acknowledged an actual {ruling} ruling for {tool}"
 
 
 @pytest.fixture()
