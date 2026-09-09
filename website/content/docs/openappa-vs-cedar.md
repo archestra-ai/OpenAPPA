@@ -11,13 +11,15 @@ OpenAPPA is a security framework built for AI agents. It includes persistent tra
 
 The main difference is how much of the agent's security behavior you need to build yourself. Cedar can check whether an agent may send information to a destination. Your application must track what the agent has read, decide how restrictions combine, and supply that state to Cedar. OpenAPPA supplies that behavior out of the box.
 
-| With Cedar | With OpenAPPA |
-|---|---|
-| **Policy checks:** Write access rules; Cedar evaluates them using the facts you supply. | **Policy checks:** Configure tool rules; OpenAPPA checks them using the agent's tracked context. |
-| **Context tracking:** Build the logic to remember what the agent reads and does. | **Context tracking:** Included for the agent activity routed through OpenAPPA. |
-| **Persistence:** Store and restore the agent's security context in your application. | **Persistence:** Stores the agent's history and restores its security context when a session resumes. |
-| **Data restrictions:** Work out how earlier reads limit later actions, then send those facts to Cedar. | **Data restrictions:** Combines restrictions as the agent reads and applies them to later actions. |
-| **Recovery:** Build the workflow for cleaning data, requesting approval, and retrying blocked actions. | **Recovery:** Provides remedy plans and coordinates the cleaning or approval allowed by policy. |
+| Built in | Cedar | OpenAPPA |
+|---|:---:|:---:|
+| Policy language and engine | ✓ | ✓ |
+| Tracks what the agent reads and does | ✕ | ✓ |
+| Saves and restores the agent's security context | ✕ | ✓ |
+| Carries data restrictions into later actions | ✕ | ✓ |
+| Plans recovery when an action is blocked | ✕ | ✓ |
+
+✓ Included. ✕ Requires additional application code or a service around Cedar.
 
 Cedar supplies the policy language and evaluation engine. A service built around Cedar may provide more of this surrounding functionality. OpenAPPA includes the agent-specific tracking and recovery model; you still connect the agent, configure its tool rules, and provide any cleaning or approval services your policy needs.
 
