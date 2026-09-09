@@ -237,6 +237,8 @@ class Acceptance:
         self.command([sys.executable, replica / "verify-images.py", "--registry", mirror, "--context", self.context, "--namespace", "kagent", "--pods-only"])
         for language in ("python", "go"):
             self.scenarios(self.forward("marketplace-" + language, 8080), fixture_url, "offline-" + language)
+        for language in ("python", "go"):
+            self.approval_scenarios("marketplace-" + language, fixture_url)
         (self.work / "result.json").write_text(json.dumps({"status": "passed", "generation": commit, "languages": ["python", "go"], "offline_registry_stopped": True}))
 
     def deploy_runtime(self, prepared, chart, mirror):
@@ -282,6 +284,51 @@ class Acceptance:
             state = http(fixture_url + "/state")
             (self.work / f"{label}-{case}.json").write_text(json.dumps({"task": result, "fixture": state}, indent=2))
             assert_evidence(state, len(script), expected_reads, expected_writes, denials)
+
+    def approval_scenarios(self, agent_name, fixture_url):
+        # Native kagent confirmation resumes before Go ADK request processors.
+        # A successful ordinary call does not prove that this dispatch works.
+        self.kubectl("-n", "kagent", "patch", "agent", agent_name, "--type=json", "-p", json.dumps([
+            {"op": "add", "path": "/spec/declarative/tools/0/mcpServer/requireApproval", "value": ["issue_write"]},
+        ]))
+        # Wait for the controller to publish the new configuration, not just for
+        # the old Deployment's already-ready replica.
+        deadline = time.monotonic() + 180
+        while time.monotonic() < deadline:
+            agent = json.loads(self.kubectl("-n", "kagent", "get", "agent", agent_name, "-o", "json"))
+            conditions = agent.get("status", {}).get("conditions", [])
+            if any(c.get("type") == "Ready" and c.get("status") == "True" and
+                   c.get("observedGeneration") == agent["metadata"]["generation"] for c in conditions):
+                break
+            time.sleep(1)
+        else:
+            raise RuntimeError("approval configuration was not reconciled")
+        self.kubectl("-n", "kagent", "rollout", "status", "deployment/" + agent_name, "--timeout=180s", timeout=210)
+        agent_url = self.forward(agent_name, 8080)
+
+        def send(message):
+            result = http(agent_url, {"jsonrpc": "2.0", "id": uuid.uuid4().hex, "method": "message/send", "params": {"message": message}})
+            deadline = time.monotonic() + 180
+            while result.get("result", {}).get("status", {}).get("state") in ("submitted", "working") and time.monotonic() < deadline:
+                time.sleep(1)
+                result = http(agent_url, {"jsonrpc": "2.0", "id": uuid.uuid4().hex, "method": "tasks/get", "params": {"id": result["result"]["id"]}})
+            return result
+
+        for decision in ("reject", "approve"):
+            http(fixture_url + "/state", {})
+            script = [{"tool": "issue_write", "args": {"owner": "acme", "repo": "public", "title": "approval test", "body": "operator text"}}, {"text": "done"}]
+            pending = send({"role": "user", "kind": "message", "messageId": uuid.uuid4().hex,
+                            "parts": [{"kind": "text", "text": json.dumps({"appa_script": script})}]})
+            require(pending.get("result", {}).get("status", {}).get("state") == "input-required", f"missing confirmation: {pending}")
+            require(not http(fixture_url + "/state")["invocations"], "write executed before approval")
+            task = pending["result"]
+            result = send({"role": "user", "kind": "message", "messageId": uuid.uuid4().hex,
+                           "taskId": task["id"], "contextId": task["contextId"],
+                           "parts": [{"kind": "data", "data": {"decision_type": decision}}]})
+            state = http(fixture_url + "/state")
+            (self.work / f"{agent_name}-approval-{decision}.json").write_text(json.dumps({"pending": pending, "task": result, "fixture": state}, indent=2))
+            require(result.get("result", {}).get("status", {}).get("state") == "completed", f"confirmation did not complete: {result}")
+            require(state["counts"] == {"get_file_contents": 0, "issue_write": int(decision == "approve")}, "wrong actual execution count after confirmation")
 
     def close(self):
         errors = []

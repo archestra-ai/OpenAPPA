@@ -26,6 +26,10 @@ stops its registry, redeploys the runtime, restarts both Agents from cached imag
 and repeats the checks. This demonstrates offline marketplace restore and cached
 image reuse, not isolation from every possible network destination.
 
+Finally, both Agents enable native approval for the fixture write tool. Rejection
+must execute nothing; approval must execute exactly once. These checks exercise
+the A2A confirmation/resume path, not just ordinary model tool calls.
+
 Run on an amd64 Docker host with cargo, helm, kubectl, kind and crane available:
 
 ```sh
