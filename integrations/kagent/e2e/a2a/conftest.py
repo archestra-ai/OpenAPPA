@@ -325,7 +325,7 @@ def protocol_agent():
                     forward.kill()
                     forward.wait(timeout=10)
     finally:
-        kubectl("delete", "agent", name, "--wait=false")
+        kubectl("delete", "agent", name, "--wait=false", "--ignore-not-found")
 
 
 class Board:

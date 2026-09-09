@@ -130,7 +130,7 @@ def test_protocol_clone_preserves_configuration_and_cleans_up(helpers, monkeypat
     assert declaration["modelConfig"] == "real-model"
     assert declaration["tools"] == []
     assert "negative test" in declaration["systemMessage"]
-    assert commands[-1] == ["delete", "agent", created[0]["metadata"]["name"], "--wait=false"]
+    assert commands[-1] == ["delete", "agent", created[0]["metadata"]["name"], "--wait=false", "--ignore-not-found"]
 
 
 @pytest.fixture(params=["a2a", "ui"])

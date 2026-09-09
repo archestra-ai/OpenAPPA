@@ -25,6 +25,8 @@ delegations, and the board's approval. Human attention is the policy's
 to require, through an authority, never the harness's default. The
 [A2A suite](../a2a/) covers these policy paths plus repeated delegation,
 GitHub battery flows, and a dedicated malformed-offer protocol probe.
+The UI forged-offer case checks only that no secret or approval card appears;
+it does not prove the model called the runtime with the malformed offer.
 [../README.md](../README.md)
 is the matrix index across kagent versions, runtime plugins and drivers.
 
