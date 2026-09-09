@@ -878,6 +878,33 @@ func TestAToolFailureCrossesAsAFailureOutcome(t *testing.T) {
 	}
 }
 
+func TestNativeRejectionReportsTheHumanDecisionNotAnApprovalServiceFailure(t *testing.T) {
+	for _, confirmation := range []*toolconfirmation.ToolConfirmation{nil, {Confirmed: true}, {Confirmed: false}} {
+		h := newHook(t, ack)
+		p := pluginOver(t, h)
+		ctx := newFakeContext(newFakeSession("s1"))
+		ctx.confirmation = confirmation
+		returned, err := p.onToolError(ctx, &fakeTool{"k8s_scale"}, map[string]any{}, fmt.Errorf("native rejection: %w", tool.ErrConfirmationRejected))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if confirmation != nil && !confirmation.Confirmed {
+			if returned[denyKey] != denied || !strings.Contains(returned["result"].(string), "operator rejected") {
+				t.Fatalf("missing human rejection: %v", returned)
+			}
+			// ADK clears the error once onToolError provides a replacement.
+			if replacement, err := p.afterTool(ctx, &fakeTool{"k8s_scale"}, map[string]any{}, returned, nil); replacement != nil || err != nil {
+				t.Fatalf("afterTool changed the handled rejection: %v, %v", replacement, err)
+			}
+		} else if returned != nil {
+			t.Fatalf("invented a human decision: %v", returned)
+		}
+		if len(h.recorded()) != 1 || h.recorded()[0]["event"] != "tool_result" {
+			t.Fatal("rejection did not cross the runtime")
+		}
+	}
+}
+
 // -- the tool the model reads, in the name it dispatches -------------
 //
 // A tool crosses under its wire spelling, and the runtime names it back

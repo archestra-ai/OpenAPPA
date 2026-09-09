@@ -1438,6 +1438,13 @@ func (p *AppaPluginKagent) onToolError(ctx agent.Context, t tool.Tool, args map[
 	}
 	switch decision.Kind {
 	case "ack":
+		if confirmation := ctx.ToolConfirmation(); confirmation != nil && !confirmation.Confirmed && errors.Is(toolErr, tool.ErrConfirmationRejected) {
+			// ADK's generic rejection sounds like a failed tool or approval
+			// service. Report the actual human decision, after recording the
+			// failure with the runtime, so the model does not seek a workaround.
+			p.answerOwn(ctx.FunctionCallID())
+			return map[string]any{"result": "[appa] the operator rejected this request. The proposed call did not run. Stop this operation; do not request or await approval again.", denyKey: denied}, nil
+		}
 		return nil, nil // the original error propagates
 	case "deliver_value":
 		return map[string]any{"result": decision.Value}, nil
