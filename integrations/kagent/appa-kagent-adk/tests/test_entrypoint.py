@@ -117,6 +117,23 @@ def test_an_unknown_field_refuses_the_start(config_dir):
         entrypoint.build_server(config_dir({**CONFIG, "surprise": True}), RUNTIME_URL)
 
 
+def test_only_the_gated_factory_isolates_remote_agents(config_dir, built_apps):
+    from kagent.adk._remote_a2a_tool import KAgentRemoteA2AToolset
+
+    from appa_kagent_adk.remote_agents import IsolatedRemoteToolset
+
+    config = {**CONFIG, "remote_agents": [{"name": "kagent__NS__analyst", "url": "http://analyst:8080"}]}
+    path = config_dir(config)
+    entrypoint.build_server(path, RUNTIME_URL)
+    gated = built_apps[-1].root_agent_factory()
+    assert any(isinstance(tool, IsolatedRemoteToolset) for tool in gated.tools)
+    assert not any(isinstance(tool, KAgentRemoteA2AToolset) for tool in gated.tools)
+    entrypoint.build_stock_server(path)
+    stock = built_apps[-1].root_agent_factory()
+    assert any(isinstance(tool, KAgentRemoteA2AToolset) for tool in stock.tools)
+    assert not any(isinstance(tool, IsolatedRemoteToolset) for tool in stock.tools)
+
+
 def test_compiled_sub_agents_refuse_with_the_runtime_mismatch(config_dir):
     with pytest.raises(ConfigRefused, match="Go-compiled"):
         entrypoint.build_server(config_dir({**CONFIG, "sub_agents": []}), RUNTIME_URL)
