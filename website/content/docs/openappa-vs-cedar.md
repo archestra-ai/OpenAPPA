@@ -12,8 +12,7 @@ OpenAPPA is a security framework built for AI agents. It includes persistent tra
 | Built in | Cedar | OpenAPPA |
 |---|:---:|:---:|
 | Checks actions against your rules | ✓ | ✓ |
-| Remembers earlier tool calls | ✕ | ✓ |
-| Keeps that history after a restart | ✕ | ✓ |
+| Tracks the agent's action history | ✕ | ✓ |
 | Uses earlier reads to limit later actions | ✕ | ✓ |
 | Suggests ways to unblock an action | ✕ | ✓ |
 
