@@ -704,6 +704,13 @@ func isFresh(sess session.Session) bool {
 // spelling is the wire spelling of a dispatched tool; false outside the
 // inventory.
 func (p *AppaPluginKagent) spelling(ctx agent.Context, t tool.Tool) (string, bool) {
+	if resumed, ok := t.(*mcpResumeTool); ok {
+		selected, available := resumed.selected(ctx)
+		if !available {
+			return "", false
+		}
+		return selected.spelling, true
+	}
 	if discovered, ok := t.(*discoveredMCPTool); ok {
 		return discovered.spelling, true
 	}
