@@ -20,8 +20,8 @@ mocks:
     tag: ""
     pullPolicy: IfNotPresent
   # Seconds a change-board consult waits for a member's ruling before it
-  # answers nothing. Inside the policy's externals.timeout_ms (30 s in
-  # the demo policy).
+  # answers nothing. The chart adds five seconds for the HTTP client and
+  # five more for the runtime consult, with a 30-second runtime minimum.
   approvalWindowSeconds: 120
 
 tools:

@@ -32,7 +32,13 @@
       "required": ["url"],
       "additionalProperties": false
     },
-    "mocks": { "type": "object" },
+    "mocks": {
+      "type": "object",
+      "properties": {
+        "approvalWindowSeconds": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["approvalWindowSeconds"]
+    },
     "tools": { "type": "object" },
     "seed": { "type": "object" },
     "agents": {

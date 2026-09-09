@@ -155,15 +155,8 @@ delta = {}
 name = "agent/kagent/log-analyst"
 delta = {}
 
-# --- the entrypoint's gates ---
-
-[[policy.tool]]
-name = "host/kagent-gate/code_execution"
-delta = {}
-
-[[policy.tool]]
-name = "host/kagent-gate/memory_persist"
-delta = {}
+# As in the demo, unused code-execution and memory-persistence gates stay
+# undeclared. Enabling either feature must not grant it permission.
 
 # --- the configuring actor: the appa-guide agent ---
 # The guide agent runs the routing skill against these tools. Reads are

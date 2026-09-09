@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from mock_externals import derive, drop_instructions, sanitize
+from mock_externals import authorize, derive, drop_instructions, sanitize
 
 CRASH_LOGS = (
     "2026-09-01T21:58:12Z ERROR payment provider handshake failed: timeout after 4500ms\n"
@@ -68,9 +68,46 @@ def test_a_json_envelope_keeps_the_status_facts_and_drops_the_system_line():
 def test_secret_values_in_a_json_object_are_redacted_and_the_keys_remain():
     derived = derive(SECRET_BODY)
     assert "PAYMENTS_API_KEY" in derived
-    assert "[redacted]" in derived
     assert "pk_live_" not in derived
     assert "whsec_" not in derived
+    parsed = json.loads(derived)
+    for key, secret in json.loads(SECRET_BODY).items():
+        assert parsed[key] == f"[redacted] ({len(secret)} characters)"
+
+
+def test_secret_values_in_an_mcp_envelope_keep_their_original_lengths():
+    body = mcp_envelope(SECRET_BODY)
+    derived = json.loads(derive(body))
+    text = derived["content"][0]["text"]
+    assert "pk_live_" not in text
+    assert "whsec_" not in text
+    for secret in json.loads(SECRET_BODY).values():
+        assert f"[redacted] ({len(secret)} characters)" in text
+
+
+def test_release_window_authorizes_native_and_canonical_scale_calls():
+    canonical = "mcp/server-" + "a" * 64 + "/scale_deployment"
+    for tool in ("scale_deployment", canonical):
+        answer, _ = authorize({"tool": tool, "arguments": {"name": "catalog-cache", "replicas": 2}})
+        assert answer["ruling"] == "approve"
+
+
+def test_release_window_denies_a_different_name_even_when_a_note_mentions_catalog_cache():
+    answer, _ = authorize(
+        {"tool": "scale_deployment", "arguments": {"name": "checkout-api", "note": "catalog-cache"}}
+    )
+    assert answer["ruling"] == "deny"
+
+
+def test_release_window_denies_a_different_tool_for_catalog_cache():
+    answer, _ = authorize({"tool": "restart_deployment", "arguments": {"name": "catalog-cache"}})
+    assert answer["ruling"] == "deny"
+
+
+def test_release_window_denies_malformed_arguments():
+    for arguments in (None, "catalog-cache", ["catalog-cache"], {"name": ["catalog-cache"]}):
+        answer, _ = authorize({"tool": "scale_deployment", "arguments": arguments})
+        assert answer["ruling"] == "deny"
 
 
 def test_sanitize_reports_the_byte_counts_of_the_json_envelope():

@@ -9,6 +9,7 @@
 set -eu
 
 chart=$(cd "$(dirname "$0")/.." && pwd)
+python3 -m unittest discover -s "$chart/tests" -p 'test_*.py'
 app_version=$(sed -n 's/^appVersion: *"\([^"]*\)".*/\1/p' "$chart/Chart.yaml")
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT

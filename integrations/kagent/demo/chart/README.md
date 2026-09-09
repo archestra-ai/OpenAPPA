@@ -68,7 +68,7 @@ upgrading this chart cannot change runtime policy.
 | `modelConfig.name` | `default-model-config` | Existing kagent ModelConfig used by every demo Agent. |
 | `tools.image.*` | `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-demo-tools:v<appVersion>` | Demo MCP server image. |
 | `mocks.image.*` | `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-demo-mocks:v<appVersion>` | Demo policy-service image. |
-| `mocks.approvalWindowSeconds` | `25` | Change-board ruling window, below the policy's 30-second consult timeout. |
+| `mocks.approvalWindowSeconds` | `120` | Change-board ruling window. The HTTP timeout adds 5 seconds; the runtime adds 5 more, with a 30-second minimum. |
 | `seed.enabled` | `true` | Replay the sixteen showcase chats after install. |
 | `seed.controllerUrl` | controller in the release namespace | kagent controller receiving seeded sessions. |
 | `agents.childName` | `log-analyst` | Python child named by the rendered delegation contract. |
