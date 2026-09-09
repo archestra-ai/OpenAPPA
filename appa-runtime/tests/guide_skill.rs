@@ -73,7 +73,7 @@ fn the_claude_code_reference_carries_the_full_flow() {
         "known_marketplaces.json",
         "claude mcp list",
         "mcp__<server>__<tool>",
-        "batteries/<name>/",
+        "appa battery install <name> --config <live-path>",
         "website/content/docs/contracts.md",
         "http://127.0.0.1:8787",
         "clappa",
