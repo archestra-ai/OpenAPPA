@@ -8,6 +8,8 @@ import math
 import re
 from datetime import datetime
 
+PROFILES = ("approved-writes", "read-only", "team-use", "production-lockdown")
+
 KEYWORDS = {"$schema", "type", "description", "default", "properties", "required", "additionalProperties",
             "items", "minItems", "maxItems", "minLength", "maxLength", "enum", "const", "minimum", "maximum",
             "exclusiveMinimum", "exclusiveMaximum", "pattern", "format", "oneOf", "anyOf", "propertyNames"}

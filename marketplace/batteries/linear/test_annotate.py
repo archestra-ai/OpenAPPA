@@ -1,9 +1,11 @@
 import importlib.util
 import json
+import re
 from pathlib import Path
 import unittest
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import build
 
 SPEC = importlib.util.spec_from_file_location("linear_annotate", Path(__file__).with_name("annotate.py"))
 module = importlib.util.module_from_spec(SPEC)
@@ -20,6 +22,10 @@ def request(tool, arguments, profile="approved-writes", match=None, production=F
 class AnnotationTests(unittest.TestCase):
     def test_every_captured_operation_is_classified_and_profiled(self):
         # These are mechanical contract-coverage cases, not provider execution.
+        # Exercise the names actually emitted by the generator, so a generated
+        # profile cannot escape consult coverage when the profile list changes.
+        profiles = [re.search(r'^name = "linear\.([^"\n]+)"$', body, re.MULTILINE).group(1)
+                    for body in build.render().values()]
         for tool, schema in module.SCHEMAS.items():
             def sample(s):
                 if "const" in s: return s["const"]
@@ -38,7 +44,7 @@ class AnnotationTests(unittest.TestCase):
                 if s.get("format") == "date-time": return "2026-09-09T12:00:00Z"
                 return "fixture"
             args = sample(schema)
-            for profile in module.PROFILES:
+            for profile in profiles:
                 with self.subTest(tool=tool, profile=profile):
                     mutation = module.OPERATIONS[tool]["kind"] != "read"
                     req = request(tool, args, profile, production=True)

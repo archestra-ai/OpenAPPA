@@ -55,8 +55,20 @@ class SourceTests(unittest.TestCase):
         with self.assertRaises(source.Refusal):
             source.answer(lambda *_: page([user()], scope=BOB), {"selector": f"workspace/{SCOPE}/members"})
 
-    def test_lookup_null_preserves_qualified_reader_without_network(self):
-        self.assertEqual(source.answer(None, {"member": "linear:" + ALICE}), {"principal": None})
+    def test_lookup_preserves_qualified_reader_without_network(self):
+        self.assertEqual(source.answer(None, {"member": "linear:" + ALICE}), {"principal": "linear:" + ALICE})
+
+    def test_member_lookup_matches_collection_readers_for_every_uuid_case(self):
+        canonical = "00000000-0000-0000-0000-00000000abcd"
+        for spelling in (canonical, canonical.upper(), canonical[:-4] + "aBcD"):
+            with self.subTest(spelling=spelling):
+                lookup = source.answer(None, {"member": "linear:" + spelling})
+                viewer = source.answer(lambda *_: {"viewer": user(spelling)}, {"selector": "viewer"})
+                workspace = source.answer(lambda *_: page([user(spelling)]),
+                                          {"selector": f"workspace/{SCOPE}/members"})
+                self.assertEqual(lookup, {"principal": "linear:" + canonical})
+                self.assertEqual(viewer["members"], [lookup["principal"]])
+                self.assertEqual(workspace["members"], [lookup["principal"]])
 
     def test_bad_inputs_refuse(self):
         for artifact in [{"member": "github:alice"}, {"member": "linear:public"},
@@ -115,7 +127,7 @@ class SourceTests(unittest.TestCase):
                                   input=json.dumps(payload), text=True, capture_output=True, env=env, timeout=5)
         result = run(request)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout), {"version": 1, "answer": {"principal": None}})
+        self.assertEqual(json.loads(result.stdout), {"version": 1, "answer": {"principal": "linear:" + ALICE}})
         for invalid in [request | {"version": True}, request | {"name": "github"},
                         request | {"artifact": {"selector": "viewer"}}]:
             result = run(invalid)

@@ -120,8 +120,9 @@ does not necessarily enumerate everyone who can read its issues. Tool
 contracts therefore require deployment-owned resource audience rules.
 
 All returned members are `linear:<user-uuid>`. The helper does not treat profile
-email as an identity attestation. Member lookups return `principal: null`,
-preserving the qualified reader. A deployment can explicitly map those readers
+email as an identity attestation. Member lookups return the Linear-qualified
+principal with a lowercase UUID, matching collection results even when the lookup
+uses uppercase or mixed-case hex. A deployment can explicitly map those readers
 to shared email principals through #262's lookup routing:
 
 ```toml

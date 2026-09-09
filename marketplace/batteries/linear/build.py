@@ -5,10 +5,9 @@ import argparse
 import json
 from pathlib import Path
 import sys
-from linear_schema import check_schema
+from linear_schema import PROFILES, check_schema
 
 ROOT = Path(__file__).resolve().parent
-PROFILES = ("approved-writes", "read-only", "team-use", "production-lockdown")
 
 
 def toml(value):

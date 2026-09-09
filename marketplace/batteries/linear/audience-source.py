@@ -123,10 +123,10 @@ def answer(call, artifact):
         member = artifact["member"]
         if not isinstance(member, str) or not member.startswith("linear:"):
             raise Refusal("member must belong to Linear")
-        identifier(member.removeprefix("linear:"))
-        # This source supplies no cross-provider identity attestation. Operators
-        # can redirect lookups to a roster; null retains the original reader.
-        return {"principal": None}
+        principal = "linear:" + identifier(member.removeprefix("linear:"))
+        # Normalize UUID spelling within Linear without asserting cross-provider
+        # identity. Operators can still redirect lookups to an explicit roster.
+        return {"principal": principal}
     if set(artifact) != {"selector"} or not isinstance(artifact["selector"], str):
         raise Refusal("artifact must name exactly one selector or member")
     selector = artifact["selector"]

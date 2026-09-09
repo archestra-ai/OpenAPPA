@@ -9,14 +9,13 @@ from pathlib import Path
 import sys
 # Installed generations are immutable: importing support code must not create caches.
 sys.dont_write_bytecode = True
-from linear_schema import check_schema, valid
+from linear_schema import PROFILES, check_schema, valid
 
 ROOT = Path(__file__).resolve().parent
 OPERATIONS = json.loads((ROOT / "operations.json").read_text())["operations"]
 SCHEMAS = {t["name"]: t["inputSchema"] for t in json.loads((ROOT / "schemas.json").read_text())["surfaces"]["read-write"]["tools"]}
 for _schema in SCHEMAS.values():
     check_schema(_schema)
-PROFILES = {"read-only", "team-use", "approved-writes", "production-lockdown"}
 MAX_BYTES = 8 * 1024 * 1024
 # These edits can expand access, cause secondary actions, or apply inherited content.
 SENSITIVE_ARGUMENTS = {"team", "teamId", "addTeams", "setTeams", "removeTeams", "delegate", "template",
