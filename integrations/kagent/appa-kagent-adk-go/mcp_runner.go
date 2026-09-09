@@ -81,6 +81,19 @@ func CreateDiscoveryRunnerConfig(
 	extraTools = append(extraTools, discovery)
 	extraTools = append(extraTools, discovery.resumeTools()...)
 	plain := discoveryAgentConfig(agentConfig)
+	for _, remote := range plain.RemoteAgents {
+		if remote.Url == "" {
+			continue
+		}
+		wrapped, err := newRemoteApprovalTool(remote, strings.EqualFold(os.Getenv("KAGENT_PROPAGATE_TOKEN"), "true"))
+		if err != nil {
+			return runner.Config{}, nil, fmt.Errorf("failed to create remote approval tool: %w", err)
+		}
+		extraTools = append(extraTools, wrapped)
+	}
+	// The wrapped tools keep the stock declarations and ordinary execution.
+	// Do not also construct the unwrapped copies under the same names.
+	plain.RemoteAgents = nil
 	adkAgent, err := agent.CreateGoogleADKAgent(ctx, &plain, agentNameFromAppName(appName), stsPlugin, extraTools...)
 	if err != nil {
 		return runner.Config{}, nil, fmt.Errorf("failed to create agent: %w", err)
