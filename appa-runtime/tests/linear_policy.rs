@@ -204,7 +204,7 @@ builtin = "hitl"
                 actor: actor(),
                 call: control,
                 spawn: false,
-                ruling: Some(ruling.clone()),
+                ruling: Some(ruling),
             },
         )
         .await;
