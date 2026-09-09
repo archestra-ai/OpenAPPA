@@ -5,7 +5,7 @@ order: 100
 description: Cedar provides a policy language and engine. OpenAPPA adds persistent context tracking and remediation for AI agents.
 ---
 
-[Cedar](https://docs.cedarpolicy.com/) is a language for writing authorization policies and an engine for evaluating them. It checks each request against your policies, using the application data and context you provide, and returns an allow or deny decision. It supports application authorization broadly, including requests from AI agents.
+[Cedar](https://docs.cedarpolicy.com/) is a language for writing authorization policies and an engine for evaluating them. It checks each request against your policies, using the context you provide, and returns an allow or deny decision. It supports application authorization broadly, including requests from AI agents.
 
 OpenAPPA is a security framework built for AI agents. It includes persistent tracking of what an agent reads and does, rules for how that history affects later actions, and remedy plans for blocked actions.
 
