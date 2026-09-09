@@ -278,6 +278,15 @@ impl Published {
     fn version(&self) -> &str {
         &self.release[1..]
     }
+    fn plugin_archive(&self) -> String {
+        format!("appa-plugin-{}.tar.gz", self.version())
+    }
+    fn marketplace_archive(&self) -> String {
+        format!("appa-marketplace-{}.tar.gz", self.version())
+    }
+    fn runtime_chart_archive(&self) -> String {
+        format!("appa-runtime-{}.tgz", self.version())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -539,21 +548,19 @@ impl Generation {
     /// The archive that carries the Claude Code plugin tree.
     pub fn plugin_archive(&self) -> String {
         match &self.artifacts {
-            Artifacts::Published(published) => format!("appa-plugin-{}.tar.gz", published.version()),
+            Artifacts::Published(published) => published.plugin_archive(),
             Artifacts::Build(_) => BUILD_PLUGIN_ARCHIVE.to_owned(),
         }
     }
 
     /// The archive that carries the marketplace tree; a build stages its own.
     pub fn marketplace_archive(&self) -> Option<String> {
-        self.published()
-            .map(|published| format!("appa-marketplace-{}.tar.gz", published.version()))
+        self.published().map(Published::marketplace_archive)
     }
 
     /// The kagent runtime chart; a build publishes none.
     pub fn runtime_chart_archive(&self) -> Option<String> {
-        self.published()
-            .map(|published| format!("appa-runtime-{}.tgz", published.version()))
+        self.published().map(Published::runtime_chart_archive)
     }
 
     /// Official asset names, never a URL/path supplied by a package manifest.
@@ -565,18 +572,9 @@ impl Generation {
                     .iter()
                     .map(|(platform, digest)| (platform.archive().to_owned(), digest.clone()))
                     .collect();
-                files.insert(
-                    format!("appa-marketplace-{}.tar.gz", published.version()),
-                    published.marketplace.clone(),
-                );
-                files.insert(
-                    format!("appa-plugin-{}.tar.gz", published.version()),
-                    published.claude_plugin.clone(),
-                );
-                files.insert(
-                    format!("appa-runtime-{}.tgz", published.version()),
-                    published.runtime_chart.clone(),
-                );
+                files.insert(published.marketplace_archive(), published.marketplace.clone());
+                files.insert(published.plugin_archive(), published.claude_plugin.clone());
+                files.insert(published.runtime_chart_archive(), published.runtime_chart.clone());
                 files
             }
             Artifacts::Build(build) => BTreeMap::from([

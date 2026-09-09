@@ -80,7 +80,7 @@ pub enum InitError {
     Starter(String),
     #[error("the runtime endpoint {endpoint} is taken: {message}")]
     RuntimeIdentity { endpoint: String, message: String },
-    #[error("the appa runtime (pid {pid}) still answers {endpoint} after being stopped; stop it and rerun init")]
+    #[error("the appa runtime (pid {pid}) still answers {endpoint} after being stopped. Stop it, then rerun appa plugin install claude-code.")]
     RuntimeSurvived { pid: i32, endpoint: String },
     #[error("the runtime at {endpoint} does not answer for its policy: {message}")]
     PolicyKey { endpoint: String, message: String },

@@ -261,8 +261,8 @@ impl VerifiedArchive {
     }
 }
 
-/// Structural validation, applied identically to a `--plugin-source` tree, a
-/// freshly extracted archive, and an existing deployment considered for reuse.
+/// Structural validation, applied identically to a freshly extracted archive
+/// and to an existing deployment considered for reuse.
 ///
 /// This checks shape, not content. Reuse also compares the complete rendered
 /// tree with the freshly verified source.
@@ -369,9 +369,8 @@ impl Endpoint {
 
 /// The identity of a plugin source that has no release digest of its own:
 /// the canonical tree digest `build.rs` bakes in, over the staged tree and
-/// before rendering. Without this, editing a file in a `--plugin-source` tree
-/// and re-running init would reuse the existing deployment and never reach
-/// Claude.
+/// before rendering. It is what tells a rebuilt development plugin from the
+/// deployment already installed, so a changed tree is never reused as-is.
 fn canonical_source_digest(root: &Path) -> Result<PluginDigest, PluginBundleError> {
     Ok(PluginDigest(canonical_tree_digest(root)?))
 }

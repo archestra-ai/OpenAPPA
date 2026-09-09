@@ -189,23 +189,7 @@ pub fn install_battery(args: BatteryInstall) -> ExitCode {
             .source
             .acquire(&installation, Some(&current), current.requirements())?;
         installation.retain(&acquired)?;
-        let catalog = Marketplace::read(&acquired.marketplace().join("marketplace.toml"))
-            .map_err(|error| InstallError::Invalid(error.to_string()))?;
-        let entry = catalog
-            .packages
-            .iter()
-            .find(|entry| entry.kind == PackageKind::Battery && entry.name == name)
-            .ok_or_else(|| InstallError::Invalid(format!("battery {} is absent from the installed version", name)))?;
-        let package = appa_package::Package::read(
-            &acquired
-                .marketplace()
-                .join(entry.path.as_str())
-                .join(appa_package::MANIFEST_FILE),
-        )
-        .map_err(|error| InstallError::Invalid(error.to_string()))?;
-        let Role::Battery(battery) = package.role else {
-            return Err(InstallError::Invalid("selected package is not a battery".into()));
-        };
+        let (_, battery) = super::battery_package(acquired.marketplace(), name.as_str())?;
         let (mut selection, text) = match acquired.imported() {
             Some(imported) => {
                 if !imported.selection().batteries.contains(name.as_str()) {
@@ -227,7 +211,7 @@ pub fn install_battery(args: BatteryInstall) -> ExitCode {
             installation.config_path(),
             acquired.marketplace(),
         )?;
-        let include = battery_include(&installation, &selection, acquired.marketplace(), &name)?;
+        let include = selection.owned_include(installation.config_path(), acquired.marketplace(), &name)?;
         text = selection.include_battery(&text, &name, &include)?;
         if let Some(server) = &args.server {
             if battery.namespaces.len() != 1 {
@@ -555,7 +539,7 @@ pub fn install(args: Install) -> ExitCode {
         included.retain(|battery| !selection.batteries.contains(battery.as_str()));
         for battery in &included {
             selection.select(PackageKind::Battery, battery);
-            let include = battery_include(&installation, &selection, acquired.marketplace(), battery)?;
+            let include = selection.owned_include(installation.config_path(), acquired.marketplace(), battery)?;
             text = selection.include_battery(&text, battery, &include)?;
         }
         eprintln!("appa: verifying artifacts and preparing selected plugins...");
@@ -575,39 +559,6 @@ pub fn install(args: Install) -> ExitCode {
         Ok((Some(Version::of(selection.generation())), result))
     })();
     finish(&args.target, "plugin.install".into(), result)
-}
-
-/// The config-relative include path of a selected battery's policy, as the
-/// selection retains it.
-fn battery_include(
-    installation: &Installation,
-    selection: &Selection,
-    marketplace: &Path,
-    name: &PackageName,
-) -> Result<String, InstallError> {
-    let catalog = Marketplace::read(&marketplace.join("marketplace.toml"))
-        .map_err(|error| InstallError::Invalid(error.to_string()))?;
-    let entry = catalog
-        .packages
-        .iter()
-        .find(|entry| entry.kind == PackageKind::Battery && entry.name == *name)
-        .ok_or_else(|| InstallError::Invalid(format!("battery {name} is absent from the installed version")))?;
-    let package = appa_package::Package::read(&marketplace.join(entry.path.as_str()).join(appa_package::MANIFEST_FILE))
-        .map_err(|error| InstallError::Invalid(error.to_string()))?;
-    let Role::Battery(battery) = package.role else {
-        return Err(InstallError::Invalid(format!("{name} is not a battery")));
-    };
-    let filename = installation
-        .config_path()
-        .file_name()
-        .and_then(|name| name.to_str())
-        .expect("installation requires UTF-8 config name");
-    Ok(format!(
-        ".appa/{filename}/generations/{}/marketplace/{}/{}",
-        selection.commit(),
-        entry.path,
-        battery.policy
-    ))
 }
 
 /// A release build carries the tag whose generation the marketplace can fetch.

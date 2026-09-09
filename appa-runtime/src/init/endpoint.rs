@@ -342,7 +342,7 @@ fn classify_endpoint_owner(
         .and_then(positive_pid)
         .ok_or_else(|| InitError::RuntimeIdentity {
             endpoint: endpoint.url().to_owned(),
-            message: "the answering runtime does not identify its pid; stop it and rerun init".to_owned(),
+            message: "the answering runtime does not identify its pid. Stop it, then rerun the install.".to_owned(),
         })?;
     // Everything after the first newline is the path, less the one the transport appends:
     // a config path may itself hold a newline, and splitting again would truncate it.

@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use appa_package::generation::{ArtifactDigest, Commit, DESCRIPTOR_FILE, Generation, Platform};
-use appa_package::{Marketplace, Package, PackageKind, PackageName, Role, TreeDigest};
+use appa_package::{Battery, Marketplace, Package, PackageEntry, PackageKind, PackageName, Role, TreeDigest};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -91,32 +91,14 @@ impl Selection {
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| InstallError::Invalid("config filename must be UTF-8".into()))?;
-        let catalog = Marketplace::read(&marketplace.join("marketplace.toml"))
-            .map_err(|error| InstallError::Invalid(error.to_string()))?;
         let mut document: toml_edit::DocumentMut = text
             .parse()
             .map_err(|error: toml_edit::TomlError| InstallError::Invalid(error.to_string()))?;
         let mut proposed = self.clone();
         proposed.generation = generation;
         for owned in &mut proposed.includes {
-            let entry = catalog
-                .packages
-                .iter()
-                .find(|entry| entry.kind == PackageKind::Battery && entry.name.as_str() == owned.battery)
-                .ok_or_else(|| {
-                    InstallError::Invalid(format!("battery {} is absent from the new version", owned.battery))
-                })?;
-            let package = Package::read(&marketplace.join(entry.path.as_str()).join(appa_package::MANIFEST_FILE))
-                .map_err(|error| InstallError::Invalid(error.to_string()))?;
-            let Role::Battery(battery) = package.role else {
-                return Err(InstallError::Invalid("catalog battery has another role".into()));
-            };
-            let replacement = format!(
-                ".appa/{filename}/generations/{}/marketplace/{}/{}",
-                proposed.generation.commit(),
-                entry.path,
-                battery.policy
-            );
+            let (entry, battery) = battery_package(marketplace, &owned.battery)?;
+            let replacement = owned_include_path(filename, proposed.generation.commit(), &entry, &battery);
             let includes = document
                 .get_mut("include")
                 .and_then(toml_edit::Item::as_array_mut)
@@ -131,6 +113,17 @@ impl Selection {
         proposed.validate_packages(marketplace)?;
         *self = proposed;
         Ok(document.to_string())
+    }
+
+    /// The include path of a selected battery's policy as this selection retains
+    /// it, relative to the config `config` names.
+    pub fn owned_include(&self, config: &Path, marketplace: &Path, name: &PackageName) -> Result<String, InstallError> {
+        let filename = config
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| InstallError::Invalid("config filename must be UTF-8".into()))?;
+        let (entry, battery) = battery_package(marketplace, name.as_str())?;
+        Ok(owned_include_path(filename, self.commit(), &entry, &battery))
     }
 
     pub fn empty(generation: Generation, platform: Platform) -> Self {
@@ -1236,6 +1229,32 @@ fn verify_packages(root: &Path, generation: &Generation) -> Result<Vec<Package>,
     }
     appa_package::check_ownership(&packages).map_err(|error| InstallError::Invalid(error.to_string()))?;
     Ok(packages)
+}
+
+/// A battery of the catalog under `marketplace`, with its catalog entry.
+pub(crate) fn battery_package(marketplace: &Path, name: &str) -> Result<(PackageEntry, Battery), InstallError> {
+    let catalog = Marketplace::read(&marketplace.join("marketplace.toml"))
+        .map_err(|error| InstallError::Invalid(error.to_string()))?;
+    let entry = catalog
+        .packages
+        .into_iter()
+        .find(|entry| entry.kind == PackageKind::Battery && entry.name.as_str() == name)
+        .ok_or_else(|| InstallError::Invalid(format!("battery {name} is absent from this version")))?;
+    let package = Package::read(&marketplace.join(entry.path.as_str()).join(appa_package::MANIFEST_FILE))
+        .map_err(|error| InstallError::Invalid(error.to_string()))?;
+    match package.role {
+        Role::Battery(battery) => Ok((entry, battery)),
+        Role::Plugin(_) => Err(InstallError::Invalid(format!("{name} is not a battery"))),
+    }
+}
+
+/// The one spelling of an installer-owned include: the battery policy inside the
+/// retained marketplace of `commit`, relative to the config file's directory.
+fn owned_include_path(filename: &str, commit: &Commit, entry: &PackageEntry, battery: &Battery) -> String {
+    format!(
+        ".appa/{filename}/generations/{commit}/marketplace/{}/{}",
+        entry.path, battery.policy
+    )
 }
 
 #[cfg(test)]
