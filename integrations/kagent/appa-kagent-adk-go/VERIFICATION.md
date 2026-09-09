@@ -11,9 +11,8 @@ against the locked sources on disk:
 That baseline is the one `go.mod` locks. The plan names the image
 built from it for every go cell, and only cell A-go runs. On cell A-go
 (kagent v0.9.12) the image runs under the `golang-adk` name the
-controller derives from `controller.agentImage`. Both demo matrix rows
-for that cell pass 18/18 after the per-parent child-return work
-([../e2e/README.md](../e2e/README.md)). No
+controller derives from `controller.agentImage`. The Python and Go demo
+matrix rows target that cell ([../e2e/README.md](../e2e/README.md)). No
 matrix row runs cell B1-go (v0.10.0-rc4) or cell B2-go (kagent main,
 adk/v2 v2.2.0). This file does not verify the B2 baseline or its
 configuration semantics.
@@ -64,8 +63,11 @@ These are go-ADK mechanics, not gaps; `plugin.go` handles each one, and
 3. **A deferred result reaches the after-tool point.** A long-running
    or response-deferring tool yields `(nil, nil)` from `tool.Run`, and
    go still runs `AfterToolCallback` with a nil result. The python
-   ADK has no such call. The plugin reports it as an `indeterminate`
-   outcome — the dispatch is genuinely unresolved at that moment.
+   ADK has no such call. The plugin reports an ordinary deferred result
+   as an `indeterminate` outcome. A remote-agent `input_required` result
+   is different: it preserves the open spawn for a checked `spawn_resume`
+   and suppresses `turn_end` for that paused invocation. It does not
+   report a terminal spawn result while the child awaits a ruling.
 
 ## Trajectory identity on the go runtime
 
@@ -545,9 +547,8 @@ as planned; go tooling accepted it unchanged. The root package is
 3. The lineage headers land in session state through the runtime
    main's session-service decorator, not through the go executor
    (above). Classification reads the same headers. Both plugins open a
-   (root, child) pair once and suppress the repeat, and each parent
-   opens the child under its own root id, because the go remote-agent
-   tool shares one child context across every parent of a pod (above).
+   (root, child) pair once. New delegations allocate fresh child contexts;
+   approval resumes retain the paused child and its existing binding.
 4. `beforeAgent`/`afterAgent` distinguish the invocation's own scope
    by first-seen agent name per invocation id, where python compares
    against `callback_context.agent_name`. The go `agent.Context` has
@@ -556,9 +557,9 @@ as planned; go tooling accepted it unchanged. The root package is
    records the first scope each invocation opens and clears the entry
    at `afterRun`. Same observable behavior: own scope pings, later
    differently-named scopes open `child_start`.
-5. A deferred (long-running) result crosses as an `indeterminate`
-   outcome — a callback moment the python ADK never delivers (caveat 3
-   above). The wire already carries the status; the runtime reads it.
+5. An ordinary deferred result crosses as an `indeterminate` outcome —
+   a callback moment the python ADK never delivers. Native remote-agent
+   approval pauses instead preserve the spawn (caveat 3 above).
 6. The `/mcp` leg of the return declaration imports
    `github.com/modelcontextprotocol/go-sdk/mcp` directly, where the
    python cell imports the python MCP client inside the function.
