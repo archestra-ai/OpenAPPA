@@ -386,21 +386,29 @@ func (d *MCPDiscovery) prepare(ctx agent.ReadonlyContext, ids trajectoryIDs, pin
 	if len(report.Errors) > 0 {
 		return nil, failClosed("MCP inventory is invalid: %s", strings.Join(report.Errors, "; "))
 	}
-	invalid := make(map[string]bool)
+	invalidDynamic := make(map[string]bool)
+	uncovered := make(map[string]bool)
 	for _, check := range report.Tools {
 		if check.Status == "invalid" {
-			// Missing coverage disables this tool, not the conversation.
-			invalid[check.Tool] = true
-			delete(selected, check.Tool)
+			uncovered[check.Tool] = true
+			if selected[check.Tool] != nil {
+				// Only dynamic MCP tools can be removed from model exposure.
+				// Static builtins and remote agents remain callable so the runtime,
+				// not a local fallback, denies their uncovered calls.
+				invalidDynamic[check.Tool] = true
+				delete(selected, check.Tool)
+			}
 		}
 	}
 	filtered := inventory.Tools[:0]
 	run.names = Inventory{spellings: make(map[string]string), names: make(map[string]string)}
 	for _, tool := range inventory.Tools {
-		if !invalid[tool.Name] {
-			filtered = append(filtered, tool)
+		if !invalidDynamic[tool.Name] {
 			run.names.spellings[tool.Name] = tool.Tool
 			run.names.names[tool.Tool] = tool.Name
+		}
+		if !uncovered[tool.Name] {
+			filtered = append(filtered, tool)
 		}
 	}
 	inventory.Tools = filtered

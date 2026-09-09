@@ -117,7 +117,9 @@ async def test_authenticated_discovery_late_tools_and_restart_against_runtime(tm
     opened = []
 
     def host(root):
-        plugin = AppaPluginKagent(runtime_url, inventory=ToolInventory({"bash": "builtin:bash"}))
+        plugin = AppaPluginKagent(
+            runtime_url, inventory=ToolInventory({"kagent__NS__release_manager": "agent:kagent/release-manager"})
+        )
         source = kagent.KAgentMcpToolset(
             connection_params=StreamableHTTPConnectionParams(url=endpoint, headers={"Authorization": "fixture-token"})
         )
@@ -156,10 +158,18 @@ async def test_authenticated_discovery_late_tools_and_restart_against_runtime(tm
         tools = await discovery.get_tools(ReadonlyContext(context))
         assert [tool.name for tool in tools] == ["late", "read"]
         assert "uncovered" not in discovery.runs[context.invocation_id].names.spellings
+        release_manager = "kagent__NS__release_manager"
+        assert discovery.runs[context.invocation_id].names.spelling(release_manager) == "agent:kagent/release-manager"
+        assert not any(
+            entry["name"] == release_manager for entry in discovery.runs[context.invocation_id].evidence["tools"]
+        )
         denied = await plugin.before_tool_callback(
-            tool=FakeTool("bash"), tool_args={}, tool_context=ToolContext(context, function_call_id="bash-call")
+            tool=FakeTool(release_manager),
+            tool_args={},
+            tool_context=ToolContext(context, function_call_id="release-manager-call"),
         )
         assert denied["appa"] == "denied"
+        assert "not declared by the policy" in denied["result"]
         assert calls.read_text() == "late\n"
     finally:
         for plugin, discovery in opened:
