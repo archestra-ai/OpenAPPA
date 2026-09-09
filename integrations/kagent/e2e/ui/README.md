@@ -22,8 +22,10 @@ authority's ruling. Nine of the other sixteen cases assert that no
 card appears. Those are the exfiltration ask, the three steered
 remedies, the forged offer, the in-window release change, both
 delegations, and the board's approval. Human attention is the policy's
-to require, through an authority, never the harness's default. The same eighteen cases run
-over the A2A protocol alone in [../a2a/](../a2a/); [../README.md](../README.md)
+to require, through an authority, never the harness's default. The
+[A2A suite](../a2a/) covers these policy paths plus repeated delegation,
+GitHub battery flows, and a dedicated malformed-offer protocol probe.
+[../README.md](../README.md)
 is the matrix index across kagent versions, runtime plugins and drivers.
 
 ## Requirements
@@ -55,7 +57,19 @@ python runtime) by default, or `cluster-ops-go`, its twin on kagent's go
 runtime — the same eighteen cases run against either cell.
 Set `APPA_EXPECT_RUNTIME_DOWN=1` to run the separate fail-closed outage
 case while the runtime Deployment is stopped.
-`APPA_NAMESPACE` (default `kagent`), `APPA_CHILD` (default `log-analyst`) and `APPA_UNDECLARED` (default `release-manager`) set the release namespace and the two delegated agents. The two delegation cases ask for each agent by that name. They wait for the run to end before they read the page, because the child works out of sight for longer than the quiet period. The dashboard renders a call to an agent as a sub-agent card. Its header carries `<namespace>/<agent>`, the call id, and a status. The allowed delegation asserts the child's card with the status `Completed` and no confirmation card. With the card's output expanded, it asserts no denial, no injected instruction, none of kagent's own failure texts, and not the runtime's reason `the spawn did not take`. The dashboard shows `Completed` on those too, so the output is what pins that the child answered. A child's value is checked where the child stops, so the card's output carries what already crossed: the child's own words, or the derivation the runtime shaped them into. A withheld return fails the case whatever its reason, because it means the harness delivered the parent a message the child never returned, and nothing crossed. The case asserts the runtime's reason for the other withhold, `ended outside the return check`, is absent too. The runtime's `the spawn did not take` reason means the child's session opened under another parent's root, or under none, so this parent's prepared fork was never bound. The case delegates from two chat sessions in turn, each a fresh page, and asserts both cards: on the go cell one child session serves every parent, so a child opened per session instead of per (root, child) pair fails on the second. Each session delegates once, because a second delegation from one parent session sends a new fork at a child identity the family already opened, which the runtime refuses — one errand is one child trajectory. The undeclared delegation asserts that agent's card. In the expanded output, it asserts the runtime's denial, which quotes the canonical id `agent/<namespace>/<agent>` — the name a policy contract carries, not the `__NS__` name kagent dispatches the tool under.
+`APPA_NAMESPACE` (default `kagent`), `APPA_CHILD` (default `log-analyst`), and
+`APPA_UNDECLARED` (default `release-manager`) select the namespace and delegated
+agents. Delegation checks wait for the parent run to end before reading the
+child card. A completed card alone is insufficient: its output must contain
+neither a runtime denial/withhold nor a transport failure. The undeclared child
+must instead return the runtime's denial naming its canonical agent ID.
+
+Both plugins use a fresh child context for each new delegation and retain the
+paused context when resuming approval. The UI cases use separate conversations;
+the A2A suite additionally exercises repeated calls in one conversation and turn.
+Tool-result checks read only the card's Results, Error, or Output section, not
+arguments or assistant prose. Restart, scale, and rollback assertions require
+the corresponding structured result fields.
 The change-board cases rule on the mock's side channel at
 `APPA_MOCK_URL` (default `http://127.0.0.1:8081`). Assertions are on substance, never on the model's phrasing —
 a failure means the gate, the remedy loop, or the data flow misbehaved,
