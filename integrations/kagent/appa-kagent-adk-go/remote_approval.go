@@ -40,7 +40,9 @@ type remoteApprovalTool struct {
 
 func newRemoteApprovalTool(config adk.RemoteAgentConfig, propagateToken bool) (*remoteApprovalTool, error) {
 	client := &http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport)}
-	stock, err := tools.NewKAgentRemoteA2ATool(config.Name, config.Description, config.Url, client, config.Headers, propagateToken, true)
+	// The stock constructor adds its own tracing transport. Keep the rejection
+	// client separate so ordinary calls do not get instrumented twice.
+	stock, err := tools.NewKAgentRemoteA2ATool(config.Name, config.Description, config.Url, nil, config.Headers, propagateToken, true)
 	if err != nil {
 		return nil, err
 	}
