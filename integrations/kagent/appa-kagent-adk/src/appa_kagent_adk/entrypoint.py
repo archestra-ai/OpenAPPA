@@ -283,6 +283,9 @@ def build_server(filepath: str, runtime_url: str):
 
     def root_agent_factory():
         root_agent = agent_config.to_agent(app_cfg.name, sts_integration, stock_cli.propagate_token)
+        from .remote_agents import isolate_remote_agents
+
+        isolate_remote_agents(root_agent)
         stock_cli.maybe_add_skills_with_config(root_agent, agent_config)
         if root_agent.code_executor is not None:
             root_agent.code_executor = gates.GatedCodeExecutor(

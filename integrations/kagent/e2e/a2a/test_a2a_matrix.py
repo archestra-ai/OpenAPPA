@@ -246,6 +246,29 @@ def test_repeated_delegation_uses_fresh_children_in_the_same_parent_chat(agent):
         assert task.confirmation() is None
 
 
+def test_two_delegations_in_one_turn_use_distinct_children(agent):
+    task = agent.say(
+        f"Ask the {CHILD.replace('-', ' ')} to analyze the crash logs of checkout-api-b2k1. "
+        "After it returns, delegate to that same agent a second time to independently verify "
+        "the timeout duration from the logs. Make two separate, sequential tool calls in this turn."
+    )
+    assert task.state == "completed"
+    assert len(task.calls(CHILD_TOOL)) >= 2, "the model actually made both delegations"
+    responses = task.responses(CHILD_TOOL)
+    assert len(responses) >= 2, "both children returned"
+    children = set()
+    for body in responses:
+        assert child_return_shape(body) == "returned", f"the child result crossed its return gate: {body}"
+        child_id = body["subagent_session_id"]
+        assert child_id and child_id not in children, "each delegation has its own child trajectory"
+        children.add(child_id)
+        assert str(body.get("result") or "").strip()
+    result = json.dumps(responses).lower().replace(",", "")
+    assert "4500" in result or "4.5" in result, "the returned analysis contains observed log data"
+    assert INJECTION not in task.text()
+    assert task.confirmation() is None
+
+
 def test_a_delegation_the_policy_never_names_is_denied(agent):
     """The release manager is listed as a tool and named by no policy
     contract: the spawn is denied with the runtime's reason, and no child
