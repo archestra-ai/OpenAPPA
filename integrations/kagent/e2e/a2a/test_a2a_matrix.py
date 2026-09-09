@@ -212,10 +212,9 @@ def test_the_delegated_child_is_gated_in_its_own_branch(agent):
     withhold means nothing crossed into the parent. The one that carries
     the runtime's ``SPAWN_NOT_TAKEN`` reason says why: the child's
     session opened under another parent's root, and this parent's
-    prepared fork was never bound. On the go cell one child session
-    serves every parent, so the second parent is what tells a child
-    opened per (root, child) pair from one opened per session, on a
-    fresh child pod too.
+    prepared fork was never bound. Both plugins allocate a fresh child
+    context for each new delegation. A second parent verifies that
+    the shared child service preserves the correct lineage for each call.
 
     The child's value is checked where the child stops, so what reaches
     the parent has crossed already: as the child spoke it, or as the

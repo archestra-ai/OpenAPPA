@@ -35,7 +35,7 @@ preserves its runtime/model configuration, removes ordinary tools, and gives it
 explicit negative-test instructions. It asserts the actual malformed call and
 runtime denial, then deletes the clone. Refusal by the ordinary operations model
 does not establish runtime rejection. The original agent is never changed.
-`APPA_NAMESPACE` (default `kagent`), `APPA_CHILD` (default `log-analyst`) and `APPA_UNDECLARED` (default `release-manager`) set the release namespace and the two delegated agents. The two delegation cases ask for each agent by that name. They read the parent's call to it off the task history under its wire name, `<namespace>__NS__<agent>` with hyphens as underscores. The name is matched as a prefix, because the go cell's names end in `_go`.
+`APPA_NAMESPACE` (default `kagent`), `APPA_CHILD` (default `log-analyst`) and `APPA_UNDECLARED` (default `release-manager`) set the release namespace and the two delegated agents. The delegation cases ask for each agent by that name. They read the parent's call from task history under its wire name, `<namespace>__NS__<agent>` with hyphens as underscores. Matching accepts that exact name or its `_go` variant, not arbitrary prefixes.
 
 A child's value is checked where the child stops, and the parent's spawn result replays what crossed there. So a return the runtime shaped — a sanitizer's derivation, an attested body in canonical form — reaches the parent already substituted and reads exactly like one that crossed as spoken. The shapes below tell apart where the value was checked, not what it says.
 

@@ -20,6 +20,7 @@ from conftest import (
     CHILD,
     CHILD_FAILURE,
     INJECTION,
+    NAMESPACE,
     SECRET,
     SPAWN_NOT_TAKEN,
     UNCHECKED_RETURN,
@@ -184,17 +185,14 @@ def test_the_delegated_child_is_gated_in_its_own_branch(chat, second_chat, shots
     withhold means nothing crossed into the parent. The
     ``SPAWN_NOT_TAKEN`` one means the child's session opened under
     another parent's root, and this parent's prepared fork was never
-    bound. On the go cell one child session serves every parent, so the
-    second session is what tells a child opened per (root, child) pair
-    from one opened per session, on a fresh child pod too.
+    bound. Both plugins allocate a fresh child context for every new
+    delegation; the shared child service must preserve each parent's lineage.
 
     The child's value is checked where the child stops, so the card's
     output carries what already crossed: the child's own words, or the
     derivation the runtime shaped them into. Each session delegates
-    once, because a second delegation from one parent session sends a
-    new fork at a child identity the family already opened, which the
-    runtime refuses. The injection in the logs never reaches the
-    operator."""
+    once here. Separate A2A cases cover repeated delegation within one
+    parent chat. The injection in the logs never reaches the operator."""
     for parent, session, shot in (
         ("the first parent session", chat, "m11-delegation"),
         ("the second parent session", second_chat, "m11-delegation-second-parent"),
@@ -204,7 +202,8 @@ def test_the_delegated_child_is_gated_in_its_own_branch(chat, second_chat, shots
         session.shot(shots_dir, shot)
         assert session.agent_card(CHILD) == "Completed", f"the dashboard renders the child's sub-agent card for {parent}, completed"
         assert not session.confirmation_shown(), f"no confirmation card ({parent})"
-        results = session.tool_results()
+        results = "\n".join(session.result_texts(f"{NAMESPACE}/{CHILD}"))
+        assert results, f"the child's own card has a rendered result ({parent})"
         assert "not declared by the policy" not in results, f"the policy names the child: the spawn of {parent} is released, not denied"
         # `Completed` alone does not pin that the child answered: the dashboard
         # shows it on kagent's own failure text too, which sets no error flag.
