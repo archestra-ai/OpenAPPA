@@ -8,7 +8,7 @@ Three dimensions, every combination a row:
 - **driver** — the kagent dashboard in headless Chromium ([ui/](ui/)), or
   the A2A protocol alone ([a2a/](a2a/)).
 
-Every row runs the same eighteen conversations with a real model against
+The suites run real-model conversations against
 the dedicated `appa-runtime` release on the demo policy: the allowed read, the
 exfiltration ask, the agent's own remedies under configured and chat
 steering, a forged offer, the human-review authority both ways, the
@@ -18,12 +18,18 @@ delegation from two parent sessions in turn, a delegation the policy
 never names, both untrusted ingress sources, and a public-sink attempt
 after audience narrowing.
 
-| kagent | Cell | Runtime plugin | Driver | Status |
+The A2A suite additionally checks repeated delegation in one conversation and
+turn, shipped GitHub battery flows, and actual malformed-offer rejection through
+a disposable protocol-test Agent. It requires `kubectl` access to the demo
+cluster; the runner passes the selected Python or Go agent to that fixture.
+UI coverage is separate and must be verified in the dashboard.
+
+| kagent | Cell | Runtime plugin | Driver | Coverage |
 |---|---|---|---|---|
-| v0.9.12 | A-py | python (`cluster-ops`, google-adk 1.31.1) | dashboard | runs, 18/18 |
-| v0.9.12 | A-py | python (`cluster-ops`, google-adk 1.31.1) | A2A | runs, 18/18 |
-| v0.9.12 | A-go | go (`cluster-ops-go`, adk/v2 v2.1.0) | dashboard | runs, 18/18 |
-| v0.9.12 | A-go | go (`cluster-ops-go`, adk/v2 v2.1.0) | A2A | runs, 18/18 |
+| v0.9.12 | A-py | python (`cluster-ops`, google-adk 1.31.1) | dashboard | UI suite |
+| v0.9.12 | A-py | python (`cluster-ops`, google-adk 1.31.1) | A2A | A2A suite |
+| v0.9.12 | A-go | go (`cluster-ops-go`, adk/v2 v2.1.0) | dashboard | UI suite |
+| v0.9.12 | A-go | go (`cluster-ops-go`, adk/v2 v2.1.0) | A2A | A2A suite |
 | v0.10.0-rc4 | B1-py | python (google-adk 2.8.0) | dashboard, A2A | not run |
 | v0.10.0-rc4 | B1-go | go (adk/v2 v2.1.0) | dashboard, A2A | not run |
 | main `52cc4de2` | B2-py, B2-go | python (google-adk 2.8.0), go (adk/v2 v2.1.0 binary, kagent main locks v2.2.0) | dashboard, A2A | not run |
@@ -31,7 +37,7 @@ after audience narrowing.
 The cell ids are the plan's ([../IMPLEMENTATION.md](../IMPLEMENTATION.md)).
 Only the kagent v0.9.12 rows run: the runtime and fixture charts install
 into a v0.9.12 cluster and run both runtime cells on it. The v0.10 rows name
-the same eighteen cases on that release line's stack, and no run of
+the same suites on that release line's stack, and no run of
 them exists. Local matrix runs assume a running stack. The scripts under
 `e2e/ci` provision the A-py A2A row.
 

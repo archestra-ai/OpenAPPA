@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs the complete live A2A matrix against the installed demo stack: all
-# eighteen cases, on the real model, through the parent agent. It
+# cases, on the real model, through the parent agent. It
 # port-forwards the parent Service and the mocks, runs the matrix, and
 # appends the model and the timings to
 # $GITHUB_STEP_SUMMARY when a runner sets it. It exits with pytest's
@@ -63,14 +63,14 @@ forward appa-demo-mocks "$mock_port" 8081
 wait_for_url "$mock_url/healthz" "the mocks"
 wait_for_url "$agent_url" "$agent"
 
-echo "== all eighteen A2A cases on $model at $base_url"
+echo "== complete A2A suite on $model at $base_url"
 started=$(date +%s)
 status=0
 (
   cd "$a2a"
   # Every case gets three total attempts. Per-test flaky markers use the
   # same floor when the matrix runs outside CI.
-  APPA_A2A_E2E=1 APPA_A2A_URL="$agent_url" APPA_MOCK_URL="$mock_url" \
+  APPA_A2A_E2E=1 APPA_E2E_AGENT="$agent" APPA_NAMESPACE="$namespace" APPA_A2A_URL="$agent_url" APPA_MOCK_URL="$mock_url" \
     uv run --with "pytest>=8" --with pytest-rerunfailures \
     pytest -v -rA --durations=0 --reruns 2 .
 ) 2>&1 | tee "$log" || status=$?
@@ -86,7 +86,7 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     echo "| agent | \`$agent\` in namespace \`$namespace\` |"
     echo "| model | \`$model\` |"
     echo "| endpoint | \`$base_url\` |"
-    echo "| cases | all 18 A2A conversations |"
+    echo "| cases | complete A2A suite (counts below) |"
     echo "| pytest exit | \`$status\` |"
     echo "| seconds | \`$seconds\` |"
     echo
