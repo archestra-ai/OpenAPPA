@@ -408,6 +408,9 @@ pub enum HookEvent {
     ToolCall {
         actor: Actor,
         call: ProposedCall,
+        /// The host's opaque identity for this call occurrence. A host
+        /// that supplies one can have several ordinary calls open at once.
+        call_id: Option<String>,
         spawn: bool,
         /// A ruling the harness already obtained for the offer this
         /// control call quotes; `None` on every ordinary call.
@@ -416,6 +419,7 @@ pub enum HookEvent {
     ToolResult {
         actor: Actor,
         call: ProposedCall,
+        call_id: Option<String>,
         outcome: ToolOutcome,
     },
     ChildStart {
@@ -434,6 +438,7 @@ pub enum HookEvent {
     SpawnResult {
         actor: Actor,
         call: ProposedCall,
+        call_id: Option<String>,
         outcome: ToolOutcome,
         child: Option<TrajectoryId>,
         value: Option<String>,

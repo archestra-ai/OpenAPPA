@@ -1356,6 +1356,7 @@ mod tests {
                 tool: appa_runtime_api::CONTROL_TOOL.to_string(),
                 arguments: raw(serde_json::json!({ "offer_id": quoted.0 })),
             },
+            call_id: None,
             spawn: false,
             ruling: None,
         }

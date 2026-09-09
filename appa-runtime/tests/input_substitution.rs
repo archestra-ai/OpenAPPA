@@ -58,6 +58,7 @@ async fn report(runtime: &Arc<Runtime>, call: ProposedCall, body: &str) -> HookD
         HookEvent::ToolResult {
             actor: actor(),
             call,
+            call_id: None,
             outcome: ToolOutcome::Success {
                 body: OutcomeBody::Available(body.to_string()),
             },

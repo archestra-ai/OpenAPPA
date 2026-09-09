@@ -75,22 +75,57 @@ fn is_open_call(call: &ProposedCall, canonical: impl FnOnce() -> Option<Vec<u8>>
 /// no open dispatch — the duplicate every crash recovery produces —
 /// settles without canonicalizing anything.
 ///
-/// More than one open dispatch is not a state this deployment reaches:
-/// one call in flight is refused at the decision that would open the
-/// second. It is still refused here rather than resolved, because a
-/// byte match that named one of several occurrences would be a guess.
-fn classify_report(
+/// A host call id selects one occurrence among parallel dispatches. A
+/// legacy event without an id can report only when exactly one dispatch
+/// is open; a byte match among several occurrences would be a guess.
+fn classify_report_identified(
     call: &ProposedCall,
+    call_id: Option<&str>,
     canonical: impl FnOnce() -> Option<Vec<u8>>,
     open: &[OpenDispatch],
+    bindings: &[appa_eventlog::CallBinding],
+    trajectory: &appa_engine::value::TrajectoryId,
 ) -> Result<appa_engine::value::DispatchId, UnreportableOutcome> {
-    let [open] = open else {
-        return Err(UnreportableOutcome::NoOpenDispatch);
+    let open = match call_id {
+        Some(call_id) => {
+            let Some(binding) = bindings
+                .iter()
+                .find(|binding| binding.trajectory == *trajectory && binding.call_id == call_id)
+            else {
+                return Err(UnreportableOutcome::NoOpenDispatch);
+            };
+            let Some(open) = open.iter().find(|open| open.id == binding.dispatch) else {
+                return Err(UnreportableOutcome::NoOpenDispatch);
+            };
+            open
+        }
+        None => {
+            let [open] = open else {
+                return Err(UnreportableOutcome::NoOpenDispatch);
+            };
+            open
+        }
     };
     if !is_open_call(call, canonical, open) {
         return Err(UnreportableOutcome::ByteMismatch);
     }
     Ok(open.id.clone())
+}
+
+#[cfg(test)]
+fn classify_report(
+    call: &ProposedCall,
+    canonical: impl FnOnce() -> Option<Vec<u8>>,
+    open: &[OpenDispatch],
+) -> Result<appa_engine::value::DispatchId, UnreportableOutcome> {
+    classify_report_identified(
+        call,
+        None,
+        canonical,
+        open,
+        &[],
+        &appa_engine::value::TrajectoryId::new("test"),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -207,11 +242,11 @@ impl Session {
         &self.trajectory
     }
 
-    /// The actor's turn is over. A call still open here got no outcome
+    /// The actor's turn is over. Calls still open here got no outcome
     /// hook and will never get one: Claude Code reports none for a call
     /// refused at its permission prompt, and none for a turn the user
-    /// interrupted. Left open it refuses every later proposal as a
-    /// second call in flight, for the life of the trajectory. Two
+    /// interrupted. Left open they keep effect reservations and remain
+    /// reportable for the life of the trajectory. Two
     /// hooks reach here: the turn end, and the first tool call after a
     /// prompt that no turn end preceded.
     ///
@@ -226,22 +261,33 @@ impl Session {
     /// Not an engine event when nothing is carried, which is every
     /// ordinary turn: the view is read, no fact is appended.
     pub async fn on_turn_end(&self) -> Result<(), EventError> {
-        let Some(open) = self.carried_call()? else {
+        let open = self.carried_calls()?;
+        if open.is_empty() {
             tracing::debug!(trajectory = %self.trajectory.0, "no call outstanding");
             return Ok(());
-        };
-        self.abandon_open(&ToolOutcome::Indeterminate).await?;
-        tracing::debug!(
-            trajectory = %self.trajectory.0,
-            dispatch = ?open.id,
-            tool = %open.tool,
-            "call closed as unreported",
-        );
+        }
+        for dispatch in open {
+            match self
+                .abandon_dispatch(dispatch.id.clone(), &ToolOutcome::Indeterminate)
+                .await
+            {
+                Ok(_) => {
+                    tracing::debug!(
+                        trajectory = %self.trajectory.0,
+                        dispatch = ?dispatch.id,
+                        tool = %dispatch.tool,
+                        "call closed as unreported",
+                    );
+                }
+                Err(EventError::UnknownDispatch) => continue,
+                Err(error) => return Err(error),
+            }
+        }
         Ok(())
     }
 
-    /// The call a turn end closes. A trajectory that has ended or never
-    /// opened carries nothing, so a turn end that names one is a no-op
+    /// The calls a turn end closes. A trajectory that has ended or never
+    /// opened carries none, so a turn end that names one is a no-op
     /// rather than a refusal — a turn ends for reasons the engine does
     /// not model.
     ///
@@ -250,20 +296,30 @@ impl Session {
     /// for it, and it ends only when the harness runs it or proposes
     /// past it (`claim_or_abandon`). Closing it here would discard the
     /// remedy that minted it.
-    fn carried_call(&self) -> Result<Option<OpenDispatch>, EventError> {
+    fn carried_calls(&self) -> Result<Vec<OpenDispatch>, EventError> {
         let log = self.inner.log(&self.root)?;
         let policy = self.inner.resolve_policy(&self.deployment, &log)?;
         let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
         match policy.engine().liveness(&view, &self.trajectory) {
-            Liveness::Ended | Liveness::Unopened => Ok(None),
-            Liveness::Live if policy.engine().substituted_release(&view, &self.trajectory).is_some() => Ok(None),
-            Liveness::Live => Ok(policy.engine().open_dispatches(&view, &self.trajectory).pop()),
+            Liveness::Ended | Liveness::Unopened => Ok(Vec::new()),
+            Liveness::Live if policy.engine().substituted_release(&view, &self.trajectory).is_some() => Ok(Vec::new()),
+            Liveness::Live => Ok(policy.engine().open_dispatches(&view, &self.trajectory)),
         }
     }
 
+    #[cfg(test)]
     pub async fn on_tool_call(&self, call: ProposedCall, spawn: bool) -> Result<ToolCallDecision, EventError> {
+        self.on_tool_call_identified(call, None, spawn).await
+    }
+
+    pub async fn on_tool_call_identified(
+        &self,
+        call: ProposedCall,
+        call_id: Option<String>,
+        spawn: bool,
+    ) -> Result<ToolCallDecision, EventError> {
         if let Some(open) = self.substituted_release(&call)? {
-            return self.claim_or_abandon(call, open).await;
+            return self.claim_or_abandon(call, call_id, open).await;
         }
         if spawn
             && self.inner.naming.spawn_coverage() == super::SpawnCoverage::Declared
@@ -286,6 +342,7 @@ impl Session {
                 },
                 None,
                 None,
+                call_id.as_deref(),
             )
             .await?;
 
@@ -345,9 +402,17 @@ impl Session {
         }))
     }
 
-    async fn claim_or_abandon(&self, call: ProposedCall, standing: Standing) -> Result<ToolCallDecision, EventError> {
+    async fn claim_or_abandon(
+        &self,
+        call: ProposedCall,
+        call_id: Option<String>,
+        standing: Standing,
+    ) -> Result<ToolCallDecision, EventError> {
         let open = match standing {
             Standing::Runs(open) => {
+                if let Some(call_id) = call_id {
+                    self.bind_existing_call(call_id, open.id.clone())?;
+                }
                 tracing::debug!(
                     trajectory = %self.trajectory.0,
                     dispatch = ?open.id,
@@ -361,7 +426,7 @@ impl Session {
             }
             Standing::Abandoned(open) => open,
         };
-        self.abandon_open(&unrun_substitution()).await?;
+        self.abandon_dispatch(open.id.clone(), &unrun_substitution()).await?;
         tracing::debug!(
             trajectory = %self.trajectory.0,
             dispatch = ?open.id,
@@ -372,21 +437,59 @@ impl Session {
         Err(EventError::SubstitutionAbandoned { tool: open.tool })
     }
 
+    /// Bind a host call identity to a dispatch that a remedy opened before
+    /// the harness received the substituted call. The empty fact batch makes
+    /// only the integration binding durable at the log's CAS position.
+    fn bind_existing_call(&self, call_id: String, dispatch: appa_engine::value::DispatchId) -> Result<(), EventError> {
+        if call_id.is_empty() {
+            return Err(EventError::CallIdReused);
+        }
+        for _ in 0..REPLAY_LIMIT {
+            let log = self.inner.log(&self.root)?;
+            let trajectory = crate::engine::engine_id(&self.trajectory);
+            if log
+                .call_bindings()
+                .iter()
+                .any(|binding| binding.trajectory == trajectory && binding.call_id == call_id)
+            {
+                return Err(EventError::CallIdReused);
+            }
+            let binding = appa_eventlog::CallBinding {
+                trajectory: trajectory.clone(),
+                call_id: call_id.clone(),
+                dispatch: dispatch.clone(),
+            };
+            match self.inner.store.append_bound(&log, &[], binding) {
+                Ok(()) => return Ok(()),
+                Err(appa_eventlog::AppendError::Conflict { .. }) => continue,
+                Err(error) => {
+                    self.inner
+                        .note_store_error(Some(&self.root), crate::events::StoreOperation::Append, &error);
+                    return Err(EventError::Storage(error.to_string()));
+                }
+            }
+        }
+        Err(EventError::Contended { attempts: REPLAY_LIMIT })
+    }
+
     /// Close the call this trajectory has open as one that did not run.
     /// The dispatch is re-read from the view on every replay, so a
     /// contended append never closes an occurrence the winning writer
     /// already closed. Both callers reach here with one dispatch open:
     /// a substituted release the harness declined to run, and a
     /// released call whose turn ended without an outcome.
-    async fn abandon_open(&self, outcome: &ToolOutcome) -> Result<EngineDecision, EventError> {
+    async fn abandon_dispatch(
+        &self,
+        dispatch: appa_engine::value::DispatchId,
+        outcome: &ToolOutcome,
+    ) -> Result<EngineDecision, EventError> {
         self.drive_with_evidence(
-            |context, evidence| {
-                let open = context.open_dispatches();
-                let [open] = open.as_slice() else {
+            move |context, evidence| {
+                if !context.open_dispatches().iter().any(|open| open.id == dispatch) {
                     return Err(EventError::UnknownDispatch);
-                };
+                }
                 Ok(EngineEvent::ToolOutcome {
-                    dispatch: open.id.clone(),
+                    dispatch: dispatch.clone(),
                     outcome: outcome.clone(),
                     evidence,
                     entropy: fresh_entropy(),
@@ -394,20 +497,36 @@ impl Session {
             },
             None,
             None,
+            None,
         )
         .await
     }
 
+    #[cfg(test)]
     pub async fn on_tool_result(&self, call: ProposedCall, o: ToolOutcome) -> Result<ToolResultDecision, EventError> {
-        let o = self.cap_outcome(o);
-        outcome_decision(self.report_outcome(&call, &o).await?)
+        self.on_tool_result_identified(call, None, o).await
     }
 
-    async fn report_outcome(&self, call: &ProposedCall, o: &ToolOutcome) -> Result<EngineDecision, EventError> {
+    pub async fn on_tool_result_identified(
+        &self,
+        call: ProposedCall,
+        call_id: Option<String>,
+        o: ToolOutcome,
+    ) -> Result<ToolResultDecision, EventError> {
+        let o = self.cap_outcome(o);
+        outcome_decision(self.report_outcome(&call, call_id.as_deref(), &o).await?)
+    }
+
+    async fn report_outcome(
+        &self,
+        call: &ProposedCall,
+        call_id: Option<&str>,
+        o: &ToolOutcome,
+    ) -> Result<EngineDecision, EventError> {
         self.drive_with_evidence(
             |context, evidence| {
                 let open = context.open_dispatches();
-                let dispatch = match classify_report(call, || context.canonical_bytes(call), &open) {
+                let dispatch = match context.classify_report(call, call_id, &open) {
                     Ok(dispatch) => dispatch,
                     Err(case) => return Err(self.refuse_report(case, call, &open)),
                 };
@@ -418,6 +537,7 @@ impl Session {
                     entropy: fresh_entropy(),
                 })
             },
+            None,
             None,
             None,
         )
@@ -433,9 +553,21 @@ impl Session {
     /// never checked at a stop — the harness delivered content the child
     /// never returned — and is withheld from the parent with nothing
     /// admitted.
+    #[cfg(test)]
     pub async fn on_spawn_result(
         &self,
         call: ProposedCall,
+        outcome: ToolOutcome,
+        child: Option<TrajectoryId>,
+        value: Option<String>,
+    ) -> Result<SpawnResultDecision, EventError> {
+        self.on_spawn_result_identified(call, None, outcome, child, value).await
+    }
+
+    pub async fn on_spawn_result_identified(
+        &self,
+        call: ProposedCall,
+        call_id: Option<String>,
         outcome: ToolOutcome,
         child: Option<TrajectoryId>,
         value: Option<String>,
@@ -450,7 +582,7 @@ impl Session {
                 .drive_with_evidence(
                     |context, evidence| {
                         let open = context.open_dispatches();
-                        let dispatch = match classify_report(&call, || context.canonical_bytes(&call), &open) {
+                        let dispatch = match context.classify_report(&call, call_id.as_deref(), &open) {
                             Ok(dispatch) => dispatch,
                             Err(case) => return Err(self.refuse_report(case, &call, &open)),
                         };
@@ -505,6 +637,7 @@ impl Session {
                         plan = Some(next);
                         Ok(event)
                     },
+                    None,
                     None,
                     None,
                 )
@@ -564,6 +697,7 @@ impl Session {
                 },
                 elicitation,
                 ruling,
+                None,
             )
             .await?;
 
@@ -635,7 +769,7 @@ impl Session {
         let opened = self.inner.log(&self.root)?;
         let policy = self.inner.resolve_policy(&self.deployment, &opened)?;
         let mut contract = None;
-        let decision = self.drive(&policy, Some(opened), true, |context| {
+        let decision = self.drive(&policy, Some(opened), true, None, |context| {
             let fork = fork(context)?;
             match context.fork_status(&fork) {
                 ForkStatus::Unprepared | ForkStatus::Failed | ForkStatus::ParentEnded => Err(EventError::SpawnNotTaken),
@@ -708,13 +842,14 @@ impl Session {
                 },
                 None,
                 None,
+                None,
             )
             .await?;
 
         return_decision(decision)
     }
 
-    /// Close whatever call this child still has open before it returns.
+    /// Close whatever calls this child still has open before it returns.
     /// A substituted release stands until the harness runs it or the
     /// model proposes past it; a child that ends has done neither and
     /// abandons it. Any other open release got no outcome hook and closes
@@ -725,7 +860,7 @@ impl Session {
         view: &EngineView,
     ) -> Result<(), EventError> {
         if let Some(open) = policy.engine().substituted_release(view, &self.trajectory) {
-            self.abandon_open(&unrun_substitution()).await?;
+            self.abandon_dispatch(open.id.clone(), &unrun_substitution()).await?;
             tracing::debug!(
                 trajectory = %self.trajectory.0,
                 dispatch = ?open.id,
@@ -734,14 +869,22 @@ impl Session {
             );
             return Ok(());
         }
-        if let Some(open) = policy.engine().open_dispatches(view, &self.trajectory).pop() {
-            self.abandon_open(&ToolOutcome::Indeterminate).await?;
-            tracing::debug!(
-                trajectory = %self.trajectory.0,
-                dispatch = ?open.id,
-                tool = %open.tool,
-                "call closed as unreported at the child's end"
-            );
+        for open in policy.engine().open_dispatches(view, &self.trajectory) {
+            match self
+                .abandon_dispatch(open.id.clone(), &ToolOutcome::Indeterminate)
+                .await
+            {
+                Ok(_) => {
+                    tracing::debug!(
+                        trajectory = %self.trajectory.0,
+                        dispatch = ?open.id,
+                        tool = %open.tool,
+                        "call closed as unreported at the child's end"
+                    );
+                }
+                Err(EventError::UnknownDispatch) => continue,
+                Err(error) => return Err(error),
+            }
         }
         Ok(())
     }
@@ -781,6 +924,7 @@ impl Session {
         mut event: impl FnMut(&Decided<'_>, Vec<ExternalEvidence>) -> Result<EngineEvent, EventError>,
         elicitation: Option<&Elicitation>,
         ruling: Option<appa_runtime_api::Ruling>,
+        opening_call_id: Option<&str>,
     ) -> Result<EngineDecision, EventError> {
         let opened = self.inner.log(&self.root)?;
         let policy = self.inner.resolve_policy(&self.deployment, &opened)?;
@@ -795,7 +939,7 @@ impl Session {
         for _ in 0..RESOLUTION_ROUNDS {
             let carried = evidence.clone();
             let entering = carried.is_empty();
-            let decision = self.drive(&policy, opened.take(), entering, |context| {
+            let decision = self.drive(&policy, opened.take(), entering, opening_call_id, |context| {
                 event(context, carried.clone())
             })?;
             match decision.then {
@@ -840,6 +984,7 @@ impl Session {
         policy: &crate::engine::PolicyEngine<'_>,
         mut opened: Option<appa_eventlog::Log>,
         entering: bool,
+        opening_call_id: Option<&str>,
         mut event: impl FnMut(&Decided<'_>) -> Result<EngineEvent, EventError>,
     ) -> Result<EngineDecision, EventError> {
         for attempt in 1..=REPLAY_LIMIT {
@@ -852,6 +997,7 @@ impl Session {
                 session: self,
                 policy,
                 view: &view,
+                log: &log,
             };
             if entering {
                 match policy.engine().liveness(&view, &self.trajectory) {
@@ -861,6 +1007,7 @@ impl Session {
                 }
             }
             let event = event(&context)?;
+            let remedy_opens_unbound = matches!(&event, EngineEvent::ExecuteOffer { .. });
             if let EngineEvent::ChildReturn { child, .. } = &event
                 && !policy.engine().open_dispatches(&view, child).is_empty()
             {
@@ -874,10 +1021,50 @@ impl Session {
             let Some(facts) = decision.append.as_ref() else {
                 return Ok(decision);
             };
-            if policy.engine().opens_a_second_dispatch(&view, &self.trajectory, facts) {
+            let opens_dispatch = facts.iter().find_map(|fact| match fact {
+                appa_engine::fact::Fact::DispatchOpened { dispatch, .. }
+                    if dispatch.trajectory() == &crate::engine::engine_id(&self.trajectory) =>
+                {
+                    Some(dispatch.clone())
+                }
+                _ => None,
+            });
+            if policy.engine().opens_a_second_dispatch(&view, &self.trajectory, facts)
+                && ((opening_call_id.is_none() && !remedy_opens_unbound) || context.has_unbound_open_dispatch())
+            {
                 return Err(EventError::CallOutstanding);
             }
-            match self.inner.store.append(&log, facts) {
+            if opens_dispatch.is_some()
+                && facts
+                    .iter()
+                    .any(|fact| matches!(fact, appa_engine::fact::Fact::ForkPrepared { .. }))
+                && !policy.engine().forks_in_flight(&view).is_empty()
+            {
+                return Err(EventError::SpawnOutstanding);
+            }
+            let appended = match (opening_call_id, opens_dispatch) {
+                (Some(call_id), Some(dispatch)) => {
+                    if call_id.is_empty()
+                        || log.call_bindings().iter().any(|binding| {
+                            binding.trajectory == crate::engine::engine_id(&self.trajectory)
+                                && binding.call_id == call_id
+                        })
+                    {
+                        return Err(EventError::CallIdReused);
+                    }
+                    self.inner.store.append_bound(
+                        &log,
+                        facts,
+                        appa_eventlog::CallBinding {
+                            trajectory: crate::engine::engine_id(&self.trajectory),
+                            call_id: call_id.to_string(),
+                            dispatch,
+                        },
+                    )
+                }
+                _ => self.inner.store.append(&log, facts),
+            };
+            match appended {
                 Ok(()) => return Ok(decision),
                 Err(appa_eventlog::AppendError::Conflict { .. }) => {
                     tracing::debug!(
@@ -1079,6 +1266,7 @@ pub(crate) struct Decided<'a> {
     session: &'a Session,
     policy: &'a crate::engine::PolicyEngine<'a>,
     view: &'a EngineView,
+    log: &'a appa_eventlog::Log,
 }
 
 impl Decided<'_> {
@@ -1092,6 +1280,33 @@ impl Decided<'_> {
 
     fn canonical_bytes(&self, call: &ProposedCall) -> Option<Vec<u8>> {
         self.engine().canonical_bytes(call)
+    }
+
+    fn classify_report(
+        &self,
+        call: &ProposedCall,
+        call_id: Option<&str>,
+        open: &[OpenDispatch],
+    ) -> Result<appa_engine::value::DispatchId, UnreportableOutcome> {
+        classify_report_identified(
+            call,
+            call_id,
+            || self.canonical_bytes(call),
+            open,
+            self.log.call_bindings(),
+            &crate::engine::engine_id(&self.session.trajectory),
+        )
+    }
+
+    fn has_unbound_open_dispatch(&self) -> bool {
+        let trajectory = crate::engine::engine_id(&self.session.trajectory);
+        self.open_dispatches().iter().any(|open| {
+            !self
+                .log
+                .call_bindings()
+                .iter()
+                .any(|binding| binding.trajectory == trajectory && binding.dispatch == open.id)
+        })
     }
 
     fn parent_of(&self, child: &TrajectoryId) -> Option<TrajectoryId> {
@@ -1249,6 +1464,25 @@ context_control = true
         sanitizer: Option<&str>,
         label: crate::engine::LabelSpelling,
     ) -> SpawnBinding {
+        let call = authorize_spawn(session, spawn, sanitizer, label).await;
+        let ToolCallDecision::Allow {
+            spawn: Some(binding), ..
+        } = session
+            .on_tool_call(call.proposed(), true)
+            .await
+            .expect("the approved spawn releases")
+        else {
+            panic!("a context-controlled spawn releases a fork binding");
+        };
+        binding
+    }
+
+    async fn authorize_spawn(
+        session: &Session,
+        spawn: ProposedCall,
+        sanitizer: Option<&str>,
+        label: crate::engine::LabelSpelling,
+    ) -> ExactCall {
         let ToolCallDecision::Deny { offers, .. } =
             session.on_tool_call(spawn, true).await.expect("the spawn is judged")
         else {
@@ -1281,16 +1515,7 @@ context_control = true
         else {
             panic!("a return declaration approves the spawn");
         };
-        let ToolCallDecision::Allow {
-            spawn: Some(binding), ..
-        } = session
-            .on_tool_call(call.proposed(), true)
-            .await
-            .expect("the approved spawn releases")
-        else {
-            panic!("a context-controlled spawn releases a fork binding");
-        };
-        binding
+        call
     }
 
     /// The bare declaration: the return crosses as spoken, floored at the parent's
@@ -1485,6 +1710,129 @@ name = "appa/execute_remedy_plan"
             facts.last(),
             Some(appa_engine::fact::Fact::DispatchOpened { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn identified_calls_run_in_parallel_and_report_after_restart_in_any_order() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let db = dir.path().join("appa.db");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), db.clone(), None).expect("the deployment opens");
+        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let call = fetch(serde_json::json!({"a": 1}));
+
+        for call_id in ["toolu-1", "toolu-2"] {
+            assert!(matches!(
+                session
+                    .on_tool_call_identified(call.clone(), Some(call_id.to_string()), false)
+                    .await
+                    .expect("the identified call releases"),
+                ToolCallDecision::Allow { spawn: None, .. }
+            ));
+        }
+        assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 2);
+        drop(session);
+        drop(runtime);
+
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), db, None).expect("the deployment reopens");
+        let session = runtime.session(&root(), &root()).expect("the session reattaches");
+        for (call_id, body) in [("toolu-2", "second"), ("toolu-1", "first")] {
+            assert_eq!(
+                session
+                    .on_tool_result_identified(
+                        call.clone(),
+                        Some(call_id.to_string()),
+                        ToolOutcome::Success {
+                            body: OutcomeBody::Available(body.to_string()),
+                        },
+                    )
+                    .await
+                    .expect("the identified result is correlated"),
+                ToolResultDecision::Keep,
+            );
+        }
+        assert!(runtime.open_dispatches(&root(), &root()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_host_call_id_cannot_be_reused() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let session = runtime.create_session(root()).expect("a fresh id opens");
+        session
+            .on_tool_call_identified(fetch(serde_json::json!({"a": 1})), Some("toolu-1".to_string()), false)
+            .await
+            .expect("the first call releases");
+
+        let reused = session
+            .on_tool_call_identified(fetch(serde_json::json!({"a": 2})), Some("toolu-1".to_string()), false)
+            .await;
+        assert!(matches!(reused, Err(EventError::CallIdReused)), "got {reused:?}");
+        assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ordinary_calls_overlap_an_unbound_spawn_but_a_second_spawn_does_not() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let session = runtime.create_session(root()).expect("a fresh id opens");
+
+        let first = authorize_spawn(
+            &session,
+            fetch(serde_json::json!({"a": 1})),
+            None,
+            crate::engine::LabelSpelling::default(),
+        )
+        .await;
+        assert!(matches!(
+            session
+                .on_tool_call_identified(first.proposed(), Some("spawn-1".to_string()), true)
+                .await
+                .expect("the first spawn releases"),
+            ToolCallDecision::Allow { spawn: Some(_), .. }
+        ));
+        assert!(matches!(
+            session
+                .on_tool_call_identified(
+                    fetch(serde_json::json!({"a": 2})),
+                    Some("ordinary-1".to_string()),
+                    false,
+                )
+                .await
+                .expect("an ordinary call overlaps the spawn"),
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
+
+        let second_proposal = session
+            .on_tool_call_identified(fetch(serde_json::json!({"a": 3})), Some("spawn-2".to_string()), true)
+            .await
+            .expect("the second spawn is checked");
+        let ToolCallDecision::Deny { offers, .. } = second_proposal else {
+            panic!("the second spawn first declares its return");
+        };
+        let quoted = OfferId(offers[0].id.clone());
+        let log = session.inner.log(&session.root).expect("the log reads");
+        let offer = crate::engine::resolve_rendered(&log, &quoted).expect("the quoted id resolves");
+        let RemedyDecision::Authorized { call: second } = session
+            .on_remedy(
+                offer,
+                RemedyArguments {
+                    label: Some(crate::engine::LabelSpelling::default()),
+                    return_schema: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("the second return declaration executes")
+        else {
+            panic!("the return declaration authorizes the second spawn");
+        };
+        let second = session
+            .on_tool_call_identified(second.proposed(), Some("spawn-2".to_string()), true)
+            .await;
+        assert!(matches!(second, Err(EventError::SpawnOutstanding)), "got {second:?}");
     }
 
     #[tokio::test]
@@ -3910,7 +4258,7 @@ context_control = true
     }
 
     #[tokio::test]
-    async fn two_forks_in_flight_bind_nothing() {
+    async fn a_second_unbound_spawn_is_refused_across_the_family() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
@@ -3930,15 +4278,24 @@ context_control = true
             .expect("the spawn dispatch closes");
 
         release_spawn(&mut first, fetch(serde_json::json!({"a": 2}))).await;
-        release_spawn(&mut session, fetch(serde_json::json!({"a": 3}))).await;
+        let second = authorize_spawn(
+            &session,
+            fetch(serde_json::json!({"a": 3})),
+            None,
+            crate::engine::LabelSpelling::default(),
+        )
+        .await;
         let error = session
+            .on_tool_call_identified(second.proposed(), Some("spawn-2".to_string()), true)
+            .await
+            .expect_err("another unbound spawn would make SubagentStart ambiguous");
+        assert!(matches!(error, EventError::SpawnOutstanding), "got {error:?}");
+
+        session
             .on_child_start(child("c2"), SpawnRef::InFlight)
-            .err()
-            .expect("two forks in flight: none is picked");
-        assert!(matches!(error, EventError::SpawnAmbiguous), "got {error:?}");
-        assert!(!error.is_operational());
-        assert!(!opened(&runtime, &child("c2")), "no child opened");
-        assert_eq!(fork_opened_count(&runtime), 1);
+            .expect("the one remaining spawn binds unambiguously");
+        assert!(opened(&runtime, &child("c2")));
+        assert_eq!(fork_opened_count(&runtime), 2);
     }
 
     #[tokio::test]
@@ -4441,6 +4798,43 @@ context_control = true
                 .expect("the next turn proposes freely"),
             ToolCallDecision::Allow { spawn: None, .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn a_turn_end_closes_all_parallel_calls_the_harness_never_ran() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let session = runtime.create_session(root()).expect("a fresh id opens");
+        for (call_id, argument) in [("toolu-1", 1), ("toolu-2", 2)] {
+            session
+                .on_tool_call_identified(
+                    fetch(serde_json::json!({"a": argument})),
+                    Some(call_id.to_string()),
+                    false,
+                )
+                .await
+                .expect("the identified call releases");
+        }
+        assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 2);
+
+        session.on_turn_end().await.expect("the turn end closes every call");
+
+        assert!(runtime.open_dispatches(&root(), &root()).is_empty());
+        let unknown_closes = runtime
+            .audit(&root())
+            .expect("the audit reads")
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.event,
+                    crate::engine::AuditEvent::Closed {
+                        outcome: crate::engine::DispatchOutcome::Unknown
+                    }
+                )
+            })
+            .count();
+        assert_eq!(unknown_closes, 2);
     }
 
     /// The outcome the close ruled out cannot be reported afterwards:

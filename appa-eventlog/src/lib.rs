@@ -1,7 +1,7 @@
 //! # appa-eventlog — the trajectory log, and where it is kept
 //!
 //! A root trajectory and its branches append to one shared log. That log holds
-//! every lasting fact and host inventory observation; the stored policy files are the only other durable state, and
+//! every lasting fact, host inventory observation, and host-call binding; the stored policy files are the only other durable state, and
 //! everything else — a branch's parent, whether it has ended, which dispatch is open, whether an
 //! offer still stands — is read back from the log by the engine's projection.
 //!
@@ -43,7 +43,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 pub use appa_engine::fact::Fact;
 use appa_engine::profile::PolicyFileKey;
-use appa_engine::value::TrajectoryId;
+use appa_engine::value::{DispatchId, TrajectoryId};
 use appa_runtime_api::{AdapterName, inventory::ToolInventory};
 
 const SCHEMA_VERSION: i64 = 1;
@@ -74,6 +74,7 @@ pub struct Log {
     basis: u64,
     policy_file: Vec<u8>,
     inventories: Vec<InventoryObservation>,
+    call_bindings: Vec<CallBinding>,
 }
 
 /// Identity evidence from one actor's host. This is not an engine fact or a
@@ -87,11 +88,31 @@ pub struct InventoryObservation {
     pub inventory: ToolInventory,
 }
 
+/// The host's opaque identity for one call, bound to the dispatch the Engine
+/// opened for it. This is integration state, not an Engine fact. It is stored
+/// in the same batch as the opening facts so a restart cannot leave an open
+/// dispatch whose result can no longer name it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallBinding {
+    pub trajectory: TrajectoryId,
+    pub call_id: String,
+    pub dispatch: DispatchId,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BoundFacts {
+    facts: Vec<Fact>,
+    call_binding: CallBinding,
+}
+
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum Batch {
     Facts(Vec<Fact>),
     Inventory(InventoryObservation),
+    BoundFacts(BoundFacts),
 }
 
 impl Log {
@@ -117,6 +138,12 @@ impl Log {
     /// opening configuration; no later observation changes earlier engine facts.
     pub fn inventories(&self) -> &[InventoryObservation] {
         &self.inventories
+    }
+
+    /// Host call identities in append order. A binding remains after its
+    /// dispatch closes so reuse of one host id can be refused after restart.
+    pub fn call_bindings(&self) -> &[CallBinding] {
+        &self.call_bindings
     }
 }
 
@@ -375,6 +402,17 @@ impl LogStore {
         self.append_bytes(based_on, encode(facts))
     }
 
+    /// Append Engine facts and the host identity of the dispatch they open in
+    /// one transaction. The binding is durable exactly when the opening is.
+    pub fn append_bound(&self, based_on: &Log, facts: &[Fact], call_binding: CallBinding) -> Result<(), AppendError> {
+        let bytes = serde_json::to_vec(&BoundFacts {
+            facts: facts.to_vec(),
+            call_binding,
+        })
+        .expect("bound facts contain only serializable fields");
+        self.append_bytes(based_on, bytes)
+    }
+
     /// Reserve host identity evidence without modifying the opening policy or
     /// fabricating an engine fact. A stale read writes nothing, just as append.
     pub fn append_inventory(&self, based_on: &Log, observation: &InventoryObservation) -> Result<(), AppendError> {
@@ -549,7 +587,7 @@ fn stored(connection: &Connection, root: &TrajectoryId) -> Result<(Vec<Vec<u8>>,
     };
     let opening = match decode(first)? {
         Batch::Facts(facts) => facts,
-        Batch::Inventory(_) => Vec::new(),
+        Batch::Inventory(_) | Batch::BoundFacts(_) => Vec::new(),
     };
     let Some(Fact::TrajectoryOpened {
         policy_file_key: key, ..
@@ -578,10 +616,15 @@ fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: Vec<u8>) -> 
     let basis = batches.len() as u64;
     let mut facts = Vec::new();
     let mut inventories = Vec::new();
+    let mut call_bindings = Vec::new();
     for batch in &batches {
         match decode(batch)? {
             Batch::Facts(batch) => facts.extend(batch),
             Batch::Inventory(observation) => inventories.push(observation),
+            Batch::BoundFacts(bound) => {
+                facts.extend(bound.facts);
+                call_bindings.push(bound.call_binding);
+            }
         }
     }
     Ok(Log {
@@ -590,6 +633,7 @@ fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: Vec<u8>) -> 
         basis,
         policy_file,
         inventories,
+        call_bindings,
     })
 }
 

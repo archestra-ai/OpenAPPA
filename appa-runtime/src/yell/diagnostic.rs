@@ -656,6 +656,7 @@ mod tests {
                     tool: invented.to_string(),
                     arguments: serde_json::value::RawValue::from_string("{}".to_string()).expect("valid JSON"),
                 },
+                call_id: None,
                 spawn: false,
                 ruling: None,
             },

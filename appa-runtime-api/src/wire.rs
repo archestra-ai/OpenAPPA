@@ -14,6 +14,9 @@
 //! whether a proposed call's arguments name a
 //! child's transcript is the same adapter's separate answer
 //! ([`Adapter::names_children`]), asked at the call, where it is used.
+//! A host's opaque `call_id` binds a call and its result to one internal
+//! dispatch without becoming that dispatch's identity. This permits
+//! ordinary calls to overlap and report in any order.
 //! Ids cross unprefixed and the server applies the configured adapter's
 //! prefix, so no caller can speak for another adapter's trajectories.
 //! A person's
@@ -125,6 +128,7 @@ enum Field {
     Text,
     Tool,
     Arguments,
+    CallId,
     Ruling,
     Outcome,
     SpawnedId,
@@ -133,12 +137,13 @@ enum Field {
 }
 
 impl Field {
-    const ALL: [Field; 10] = [
+    const ALL: [Field; 11] = [
         Field::RootId,
         Field::ChildId,
         Field::Text,
         Field::Tool,
         Field::Arguments,
+        Field::CallId,
         Field::Ruling,
         Field::Outcome,
         Field::SpawnedId,
@@ -153,6 +158,7 @@ impl Field {
             Field::Text => "text",
             Field::Tool => "tool",
             Field::Arguments => "arguments",
+            Field::CallId => "call_id",
             Field::Ruling => "ruling",
             Field::Outcome => "outcome",
             Field::SpawnedId => "spawned_id",
@@ -183,6 +189,7 @@ fn fields_read(name: EventName) -> &'static [Field] {
             Field::ChildId,
             Field::Tool,
             Field::Arguments,
+            Field::CallId,
             Field::Ruling,
         ],
         EventName::ToolResult | EventName::SpawnResult => &[
@@ -190,6 +197,7 @@ fn fields_read(name: EventName) -> &'static [Field] {
             Field::ChildId,
             Field::Tool,
             Field::Arguments,
+            Field::CallId,
             Field::Outcome,
             Field::SpawnedId,
             Field::Value,
@@ -375,6 +383,9 @@ pub struct WireEvent {
     pub tool: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arguments: Option<Box<RawValue>>,
+    /// The host's opaque identity for this call occurrence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ruling: Option<Ruling>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -414,6 +425,7 @@ impl WireEvent {
             text: None,
             tool: None,
             arguments: None,
+            call_id: None,
             ruling: None,
             outcome: None,
             spawned_id: None,
@@ -432,6 +444,7 @@ impl WireEvent {
             Field::Text => self.text.is_some(),
             Field::Tool => self.tool.is_some(),
             Field::Arguments => self.arguments.is_some(),
+            Field::CallId => self.call_id.is_some(),
             Field::Ruling => self.ruling.is_some(),
             Field::Outcome => self.outcome.is_some(),
             Field::SpawnedId => self.spawned_id.is_some(),
@@ -489,7 +502,11 @@ impl WireEvent {
                 }
             }
             HookEvent::ToolCall {
-                actor, call, ruling, ..
+                actor,
+                call,
+                call_id,
+                ruling,
+                ..
             } => {
                 let (root_id, child_id) = ids(actor)?;
                 Self {
@@ -497,17 +514,24 @@ impl WireEvent {
                     child_id,
                     tool: Some(call.tool.clone()),
                     arguments: Some(call.arguments.clone()),
+                    call_id: call_id.clone(),
                     ruling: checked_ruling(adapter, *ruling)?,
                     ..Self::bare(adapter, EventName::ToolCall)
                 }
             }
-            HookEvent::ToolResult { actor, call, outcome } => {
+            HookEvent::ToolResult {
+                actor,
+                call,
+                call_id,
+                outcome,
+            } => {
                 let (root_id, child_id) = ids(actor)?;
                 Self {
                     root_id: Some(root_id),
                     child_id,
                     tool: Some(call.tool.clone()),
                     arguments: Some(call.arguments.clone()),
+                    call_id: call_id.clone(),
                     outcome: Some(WireOutcome::of(outcome)?),
                     ..Self::bare(adapter, EventName::ToolResult)
                 }
@@ -515,6 +539,7 @@ impl WireEvent {
             HookEvent::SpawnResult {
                 actor,
                 call,
+                call_id,
                 outcome,
                 child,
                 value,
@@ -529,6 +554,7 @@ impl WireEvent {
                     child_id,
                     tool: Some(call.tool.clone()),
                     arguments: Some(call.arguments.clone()),
+                    call_id: call_id.clone(),
                     outcome: Some(WireOutcome::of(outcome)?),
                     spawned_id,
                     value: value.clone(),
@@ -619,6 +645,7 @@ impl WireEvent {
             text,
             tool,
             arguments,
+            call_id,
             outcome,
             spawned_id,
             value,
@@ -707,6 +734,7 @@ impl WireEvent {
                             tool: derived.canonical.into_string(),
                             arguments: raw.arguments,
                         },
+                        call_id,
                         spawn,
                         ruling,
                     },
@@ -740,6 +768,7 @@ impl WireEvent {
                     true => accepted(HookEvent::SpawnResult {
                         actor,
                         call,
+                        call_id,
                         outcome,
                         child,
                         value,
@@ -753,7 +782,12 @@ impl WireEvent {
                             "a result carrying value for {}, which this adapter derives as an ordinary call",
                             call.tool
                         ))),
-                        (None, None) => accepted(HookEvent::ToolResult { actor, call, outcome }),
+                        (None, None) => accepted(HookEvent::ToolResult {
+                            actor,
+                            call,
+                            call_id,
+                            outcome,
+                        }),
                     },
                 }
             }
@@ -1183,6 +1217,7 @@ mod tests {
             HookEvent::ToolCall {
                 actor,
                 call,
+                call_id,
                 spawn,
                 ruling,
             } => {
@@ -1191,6 +1226,7 @@ mod tests {
                 assert_eq!(call.arguments.get(), r#"{"a":1,"a":2}"#, "arguments cross unparsed");
                 assert!(spawn, "spawn is derived, never read from the wire");
                 assert_eq!(ruling, None);
+                assert_eq!(call_id, None);
             }
             other => panic!("{other:?}"),
         }
@@ -1270,6 +1306,7 @@ mod tests {
                 tool: "Agent".to_string(),
                 arguments: raw(r#"{"prompt":"go"}"#),
             },
+            call_id: Some("toolu-1".to_string()),
             outcome: ToolOutcome::Success {
                 body: OutcomeBody::Available(r#"{"content":"done"}"#.to_string()),
             },
@@ -1280,6 +1317,7 @@ mod tests {
         assert_eq!(wire.root_id.as_deref(), Some("s1"));
         assert_eq!(wire.child_id.as_deref(), Some("a1"));
         assert_eq!(wire.spawned_id.as_deref(), Some("a2"));
+        assert_eq!(wire.call_id.as_deref(), Some("toolu-1"));
         let bytes = serde_json::to_vec(&wire).expect("serializes");
         let text = std::str::from_utf8(&bytes).expect("utf8");
         assert!(!text.contains("spawn\""), "the wire carries no spawn claim: {text}");
@@ -1501,6 +1539,7 @@ mod tests {
                 tool: "appa:execute_remedy_plan".to_string(),
                 arguments: raw(r#"{"offer_id":"o1"}"#),
             },
+            call_id: None,
             spawn: false,
             ruling,
         };
@@ -1549,11 +1588,13 @@ mod tests {
                 HookEvent::ToolResult {
                     actor: actor(),
                     call: call("read"),
+                    call_id: None,
                     outcome: outcome.clone(),
                 },
                 HookEvent::SpawnResult {
                     actor: actor(),
                     call: call("spawn"),
+                    call_id: None,
                     outcome: outcome.clone(),
                     child: Some(TrajectoryId("kagent:r1:c1".to_string())),
                     value: Some("done".to_string()),

@@ -54,6 +54,14 @@
 //! | `SubagentStop` | `ChildEnd` carrying `last_assistant_message` as the return; `TurnEnd` for a helper with an empty `agent_type` |
 //! | `Stop`, `StopFailure` | `TurnEnd` for the actor that finished |
 //!
+//! Every call and result carries Claude Code's opaque `tool_use_id` as
+//! its host call identity. The runtime persists that identity beside the
+//! opened dispatch, so ordinary calls can run in parallel and report in
+//! any order, including after a runtime restart. One exception remains:
+//! only one `Agent` (`Task`) spawn may wait for binding at a time. Claude
+//! Code's `SubagentStart` names the child but not the `Agent` call that
+//! launched it, so two unbound spawns would make that start ambiguous.
+//!
 //! Subagents. Claude Code spawns a subagent through its `Agent` tool
 //! (`Task` is its older name), so the codec marks that call as the
 //! deployment's context-controlled spawn; the runtime holds the spawn
@@ -374,6 +382,8 @@ struct WireEvent {
     #[serde(default)]
     tool_input: Option<Box<serde_json::value::RawValue>>,
     #[serde(default)]
+    tool_use_id: Option<String>,
+    #[serde(default)]
     tool_response: Option<serde_json::Value>,
     #[serde(default)]
     agent_type: Option<String>,
@@ -497,6 +507,7 @@ fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
                 Ok(Some(HookEvent::ToolCall {
                     actor: event.actor(),
                     call,
+                    call_id: event.tool_use_id.clone(),
                     spawn,
                     ruling: None,
                 }))
@@ -509,6 +520,7 @@ fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
                 Ok(Some(HookEvent::SpawnResult {
                     actor: event.actor(),
                     call,
+                    call_id: event.tool_use_id.clone(),
                     outcome: map_outcome(event.tool_response.as_ref()),
                     child,
                     value,
@@ -517,6 +529,7 @@ fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
             Some(call) => Ok(Some(HookEvent::ToolResult {
                 actor: event.actor(),
                 call,
+                call_id: event.tool_use_id.clone(),
                 outcome: map_outcome(event.tool_response.as_ref()),
             })),
             None => Err(malformed("a tool outcome without its tool call")),
@@ -525,6 +538,7 @@ fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
             Some(call) => Ok(Some(HookEvent::ToolResult {
                 actor: event.actor(),
                 call,
+                call_id: event.tool_use_id.clone(),
                 outcome: ToolOutcome::Failure {
                     message: "the tool run failed".to_string(),
                 },
@@ -1333,6 +1347,7 @@ mod tests {
         let event = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "session_id": "s1",
+            "tool_use_id": "toolu-1",
             "tool_name": "Bash",
             "tool_input": {"command": "ls"},
         });
@@ -1347,10 +1362,40 @@ mod tests {
                     tool: "Bash".to_string(),
                     arguments: raw(serde_json::json!({"command": "ls"})),
                 },
+                call_id: Some("toolu-1".to_string()),
                 spawn: false,
                 ruling: None,
             })),
         );
+    }
+
+    #[test]
+    fn result_hooks_preserve_the_tool_use_id() {
+        for hook in ["PostToolUse", "PostToolUseFailure"] {
+            let event = serde_json::json!({
+                "hook_event_name": hook,
+                "session_id": "s1",
+                "tool_use_id": "toolu-1",
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls"},
+                "tool_response": {"stdout": "readme.txt"},
+            });
+            match parse_value(&event) {
+                Ok(Some(HookEvent::ToolResult { call_id, .. })) => {
+                    assert_eq!(call_id.as_deref(), Some("toolu-1"));
+                }
+                other => panic!("expected a ToolResult event for {hook}, got {other:?}"),
+            }
+        }
+
+        let mut event = agent_post_tool_use(agent_response());
+        event["tool_use_id"] = serde_json::json!("toolu-agent");
+        match parse_value(&event) {
+            Ok(Some(HookEvent::SpawnResult { call_id, .. })) => {
+                assert_eq!(call_id.as_deref(), Some("toolu-agent"));
+            }
+            other => panic!("expected a SpawnResult event, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1434,6 +1479,7 @@ mod tests {
                     tool: "Agent".to_string(),
                     arguments: raw(serde_json::json!({"prompt": "List the files.", "subagent_type": "Explore"})),
                 },
+                call_id: None,
                 outcome: ToolOutcome::Success {
                     body: OutcomeBody::Available(response.to_string()),
                 },
@@ -1497,6 +1543,7 @@ mod tests {
                         tool: tool.to_string(),
                         arguments: raw(serde_json::json!({"prompt": "List the files.", "subagent_type": "Explore"})),
                     },
+                    call_id: None,
                     outcome: ToolOutcome::Success {
                         body: OutcomeBody::Available(response.to_string()),
                     },
@@ -1684,6 +1731,7 @@ mod tests {
                 tool: "Bash".to_string(),
                 arguments: raw(serde_json::json!({"command": "cat notes.txt"})),
             },
+            call_id: None,
             outcome: ToolOutcome::Success {
                 body: OutcomeBody::Available(response.to_string()),
             },
@@ -1700,6 +1748,7 @@ mod tests {
                 tool: "Agent".to_string(),
                 arguments: raw(serde_json::json!({"prompt": "List the files."})),
             },
+            call_id: None,
             outcome: ToolOutcome::Success {
                 body: OutcomeBody::Available(response.to_string()),
             },
@@ -1718,6 +1767,7 @@ mod tests {
                 tool: "Bash".to_string(),
                 arguments: raw(serde_json::json!({"command": "ls"})),
             },
+            call_id: None,
             spawn: false,
             ruling: None,
         }
@@ -1941,6 +1991,7 @@ mod tests {
                 tool: "mcp__vault__lookup".to_string(),
                 arguments: raw(serde_json::json!({"key": "prod"})),
             },
+            call_id: None,
             outcome: ToolOutcome::Success {
                 body: OutcomeBody::Available(
                     serde_json::json!([{"type": "text", "text": "sk_live_secret"}, {"sk_live_secret": false}])
@@ -2018,6 +2069,7 @@ mod tests {
                 tool: "Bash".to_string(),
                 arguments: raw(serde_json::json!({"command": "ls"})),
             },
+            call_id: None,
             outcome: ToolOutcome::Indeterminate,
         };
         assert_eq!(

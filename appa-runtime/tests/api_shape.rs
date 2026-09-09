@@ -58,19 +58,26 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
             let _: Option<TrajectoryId> = child;
         }
         HookEvent::ToolCall {
-            actor: _, call, spawn, ..
+            actor: _,
+            call,
+            call_id,
+            spawn,
+            ..
         } => {
             let ProposedCall { tool, arguments } = call;
             let _: String = tool;
             let _: Box<serde_json::value::RawValue> = arguments;
             let _: bool = spawn;
+            let _: Option<String> = call_id;
         }
         HookEvent::ToolResult {
             actor: _,
             call: _,
+            call_id,
             outcome,
         } => {
             let _: ToolOutcome = outcome;
+            let _: Option<String> = call_id;
         }
         HookEvent::ChildStart { root, child, spawn } => {
             let _: TrajectoryId = root;
@@ -92,11 +99,13 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
         HookEvent::SpawnResult {
             actor: _,
             call: _,
+            call_id,
             outcome,
             child,
             value,
         } => {
             let _: ToolOutcome = outcome;
+            let _: Option<String> = call_id;
             let _: Option<TrajectoryId> = child;
             let _: Option<String> = value;
         }

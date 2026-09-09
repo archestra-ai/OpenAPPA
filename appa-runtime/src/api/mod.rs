@@ -292,8 +292,12 @@ pub enum ProbeError {
 /// as a deny.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum EventError {
-    #[error("a call is already outstanding; propose one call at a time")]
+    #[error("a call without a host id is already outstanding; this host must propose one unidentified call at a time")]
     CallOutstanding,
+    #[error("a subagent spawn is already waiting to be bound; start one subagent at a time")]
+    SpawnOutstanding,
+    #[error("the host reused a call id")]
+    CallIdReused,
     #[error(
         "the substituted {tool} call did not run and is now closed; propose your call again (a substituted call needs a fresh offer)"
     )]
@@ -387,6 +391,8 @@ impl EventError {
             | EventError::UndeclaredTool { .. }
             | EventError::UnexpectedDecision => true,
             EventError::CallOutstanding
+            | EventError::SpawnOutstanding
+            | EventError::CallIdReused
             | EventError::SubstitutionAbandoned { .. }
             | EventError::TrajectoryEnded
             | EventError::ChildDispatchOpen
@@ -2701,6 +2707,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                         tool: "host/claude-code/Bash".to_string(),
                         arguments: raw(serde_json::json!({"command": "ls"})),
                     },
+                    call_id: None,
                     spawn: false,
                     ruling: None,
                 },
@@ -3556,6 +3563,7 @@ url = "{url}"
                     tool: tool.to_string(),
                     arguments: raw(serde_json::json!({ "request": "summarize the crash logs" })),
                 },
+                call_id: None,
                 spawn,
                 ruling: None,
             },
