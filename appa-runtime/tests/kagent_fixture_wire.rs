@@ -159,6 +159,7 @@ fn the_runtime_prefixes_the_trajectory_ids_the_plugin_leaves_bare() {
             HookEvent::Prompt { actor, .. }
             | HookEvent::TurnEnd { actor }
             | HookEvent::ToolCall { actor, .. }
+            | HookEvent::SpawnResume { actor, .. }
             | HookEvent::ToolResult { actor, .. }
             | HookEvent::SpawnResult { actor, .. } => actor.root.0.clone(),
         };

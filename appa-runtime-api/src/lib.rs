@@ -413,6 +413,12 @@ pub enum HookEvent {
         /// control call quotes; `None` on every ordinary call.
         ruling: Option<Ruling>,
     },
+    /// Continue an already released spawn after native approval, without a new proposal.
+    SpawnResume {
+        actor: Actor,
+        call: ProposedCall,
+        child: TrajectoryId,
+    },
     ToolResult {
         actor: Actor,
         call: ProposedCall,

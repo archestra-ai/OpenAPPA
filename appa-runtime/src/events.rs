@@ -105,6 +105,7 @@ pub(crate) enum HookKind {
     Prompt,
     TurnEnd,
     ToolCall,
+    SpawnResume,
     ToolResult,
     ChildStart,
     ChildEnd,
