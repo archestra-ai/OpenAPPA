@@ -574,6 +574,7 @@ async fn concurrent_claude_consults_are_gated_by_the_runtime_permit_pool() {
                 HookEvent::ToolCall {
                     actor: Actor { root, child: None },
                     call: fetch("https://a.example"),
+                    call_id: None,
                     spawn: false,
                     ruling: None,
                 },

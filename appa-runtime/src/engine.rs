@@ -19,8 +19,9 @@
 //! Beside `handle` the boundary makes projection reads — which branch has ended,
 //! which dispatches it has open, what its label renders as. They gate nothing
 //! and append nothing. One of them is not a read at all:
-//! [`RuntimeEngine::opens_a_second_dispatch`] is this deployment's own host
-//! policy, which the engine deliberately does not enforce.
+//! [`RuntimeEngine::opens_a_second_dispatch`] supports the runtime's legacy
+//! host policy for events without call identities. The engine deliberately
+//! does not impose that policy.
 //!
 //! External evidence is typed before it reaches an engine input:
 //! an authority verdict, a sanitizer derivation, an annotation answer, or a
@@ -815,7 +816,8 @@ impl RuntimeEngine {
     }
 
     /// Would applying this batch leave the trajectory with more than one
-    /// dispatch open?
+    /// dispatch open? The runtime asks only when a host supplied no identity
+    /// for the new call or an older open call has no identity.
     pub(crate) fn opens_a_second_dispatch(&self, view: &EngineView, trajectory: &TrajectoryId, facts: &[Fact]) -> bool {
         let owner = engine_id(trajectory);
         let mut open: std::collections::BTreeSet<_> = view
