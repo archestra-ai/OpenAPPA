@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.17.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.17.0...v0.17.1) (2026-09-09)
+
+
+### Bug Fixes
+
+* **kagent:** repair delegation gating and release image annotations ([#274](https://github.com/archestra-ai/OpenAPPA/issues/274)) ([6ad5b4d](https://github.com/archestra-ai/OpenAPPA/commit/6ad5b4d71aa95be6cb97dd9b3f1ac3c25f184498))
+
+
+### Documentation
+
+* add OpenAPPA vs Dogwood comparison ([#277](https://github.com/archestra-ai/OpenAPPA/issues/277)) ([99022c9](https://github.com/archestra-ai/OpenAPPA/commit/99022c9bb07020982e77ad3aae2e7670789defb8))
+
 ## [0.17.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.16.0...v0.17.0) (2026-09-09)
 
 

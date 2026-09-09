@@ -68,7 +68,7 @@ helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-c
   --version 0.9.12 -n kagent --create-namespace --force-conflicts
 
 # 2. Install kagent with the appa plugin image
-APPA_VERSION=0.17.0 # x-release-please-version
+APPA_VERSION=0.17.1 # x-release-please-version
 OPENAI_API_KEY_B64="$(printf %s "$OPENAI_API_KEY" | base64 | tr -d '\n')"
 kubectl apply -f - <<EOF
 apiVersion: v1
@@ -120,7 +120,7 @@ The explicit KMCP user and group preserve `runAsNonRoot` while avoiding
 bash <<'BASH'
 set -euo pipefail
 
-APPA_VERSION=0.17.0 # x-release-please-version
+APPA_VERSION=0.17.1 # x-release-please-version
 
 helm upgrade --install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
   --version "$APPA_VERSION" -n appa --create-namespace \
@@ -140,7 +140,7 @@ BASH
 bash <<'BASH'
 set -euo pipefail
 
-APPA_VERSION=0.17.0 # x-release-please-version
+APPA_VERSION=0.17.1 # x-release-please-version
 
 helm upgrade --install appa-kagent-demo \
   oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-kagent-demo \
