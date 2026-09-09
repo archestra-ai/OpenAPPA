@@ -29,20 +29,56 @@ fn run(root: &Path, args: &[&str]) -> Output {
     child.wait_with_output().unwrap()
 }
 
+/// Before any install, a listing shows what this build can install: the whole
+/// catalog of its own tree, offline, none of it installed. It reads state only.
 #[test]
-fn local_list_is_structured_and_does_not_initialize_an_installation() {
+fn local_list_shows_this_builds_catalog_and_does_not_initialize_an_installation() {
     let root = tempfile::tempdir().unwrap();
-    for kind in ["plugin", "battery"] {
+    for (kind, expected) in [("plugin", "claude-code"), ("battery", "github")] {
         let output = run(root.path(), &[kind, "list", "--json"]);
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(document["status"], "ok");
         assert_eq!(document["operation"], format!("{kind}.list"));
-        assert_eq!(document["result"]["packages"], serde_json::json!([]));
+        assert_eq!(document["result"]["deployment"], "absent");
+        assert!(
+            matches!(document["result"]["catalog"]["source"].as_str(), Some("build" | "checkout")),
+            "{document}"
+        );
+        let packages = document["result"]["packages"].as_array().unwrap();
+        assert!(packages.iter().any(|package| package["name"] == expected), "{document}");
+        for package in packages {
+            assert_eq!(package["installed"], false);
+            assert!(package["description"].as_str().is_some_and(|text| !text.is_empty()));
+        }
         assert!(document.get("error").is_none());
         assert!(output.stderr.is_empty());
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
+    let text = run(root.path(), &["plugin", "list"]);
+    assert!(text.status.success());
+    assert!(text.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&text.stdout).lines().count() > 1);
+}
+
+/// An install with no name orients instead of mutating: the exit is the parser's,
+/// stdout stays empty in text mode and carries the usage envelope in JSON mode,
+/// and no state is created.
+#[test]
+fn install_without_a_name_orients_and_changes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    for kind in ["plugin", "battery"] {
+        let output = run(root.path(), &[kind, "install"]);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(!output.stderr.is_empty());
+        let output = run(root.path(), &[kind, "install", "--json"]);
+        assert_eq!(output.status.code(), Some(2));
+        let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(document["error"]["code"], "usage");
+        assert!(output.stderr.is_empty());
+    }
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
 }
 
 #[test]
@@ -55,7 +91,11 @@ fn list_names_the_deployment_state() {
     std::fs::write(root.path().join("config/appa.toml"), b"").unwrap();
     let unmanaged = document(run(root.path(), &["battery", "list", "--json"]));
     assert_eq!(unmanaged["result"]["deployment"], "unmanaged");
-    assert_eq!(unmanaged["result"]["packages"], serde_json::json!([]));
+    assert!(
+        unmanaged["result"]["packages"]
+            .as_array()
+            .is_some_and(|packages| packages.iter().all(|package| package["installed"] == false))
+    );
 }
 
 #[test]

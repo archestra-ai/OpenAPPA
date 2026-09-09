@@ -37,7 +37,7 @@ Start with an APPA release binary and Claude Code installed:
 appa plugin install claude-code
 appa battery install github
 appa plugin list
-appa battery list --available
+appa battery list
 ```
 
 The first install uses that binary's published generation. A generation binds

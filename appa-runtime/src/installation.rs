@@ -471,7 +471,8 @@ impl Installation {
 
     /// Read-only inspection does not create directories or acquire a mutation
     /// lock. Atomic selection publication gives readers a complete record.
-    pub fn inspect(config: &Path) -> Result<Option<Selection>, InstallError> {
+    /// Where this config's installation keeps its state, whether or not it exists yet.
+    fn state_directory(config: &Path) -> Result<PathBuf, InstallError> {
         let path = std::path::absolute(config).map_err(|error| io("resolve config", config, error))?;
         let parent = path
             .parent()
@@ -483,6 +484,28 @@ impl Installation {
         for directory in [parent.join(".appa"), state.clone()] {
             require_directory_or_absent(&directory)?;
         }
+        Ok(state)
+    }
+
+    /// The marketplace tree retained for the selected generation: what a listing
+    /// reads offline, and what an install of this generation reads again.
+    pub fn retained_marketplace(config: &Path, selection: &Selection) -> Result<PathBuf, InstallError> {
+        let marketplace = Self::state_directory(config)?
+            .join("generations")
+            .join(selection.commit().as_str())
+            .join("marketplace");
+        if !marketplace.is_dir() {
+            return Err(InstallError::Invalid(format!(
+                "the selected generation {} is not retained at {}; rerun: appa plugin install claude-code",
+                selection.commit(),
+                marketplace.display()
+            )));
+        }
+        Ok(marketplace)
+    }
+
+    pub fn inspect(config: &Path) -> Result<Option<Selection>, InstallError> {
+        let state = Self::state_directory(config)?;
         if optional_bytes(&state.join("transaction.json"))?.is_some() {
             return Err(InstallError::Recovery {
                 path: state.join("transaction.json"),

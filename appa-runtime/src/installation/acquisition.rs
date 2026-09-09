@@ -196,6 +196,30 @@ impl Acquired {
         })
     }
 
+    /// The catalog a development build lists from, without the network: the
+    /// marketplace tree at its commit, exported from the checkout that built
+    /// it, or that checkout's working tree when the build's commit is unknown
+    /// (uncommitted changes) or no longer at HEAD. Answers the commit only for
+    /// an export. A listing needs no artifacts; an install builds the whole
+    /// generation.
+    pub fn build_catalog(stage: &Path) -> Result<(Option<Commit>, PathBuf), InstallError> {
+        let root = option_env!("APPA_BUILD_REPOSITORY")
+            .map(Path::new)
+            .ok_or_else(|| InstallError::Invalid("this build names no checkout to list from".into()))?;
+        let commit = option_env!("APPA_BUILD_COMMIT")
+            .map(Commit::parse)
+            .transpose()
+            .map_err(|error| InstallError::Invalid(error.to_string()))?;
+        match commit {
+            Some(commit) if git_head(root).as_deref() == Some(commit.as_str()) => {
+                let repository = stage.join("repository");
+                export_commit(root, &repository)?;
+                Ok((Some(commit), repository.join("marketplace")))
+            }
+            _ => Ok((None, root.join("marketplace"))),
+        }
+    }
+
     /// A development build installs itself: the plugin tree staged from its
     /// commit, which must digest to what the build stamped, the marketplace
     /// tree at that commit, and this process's own executable. Kagent needs
