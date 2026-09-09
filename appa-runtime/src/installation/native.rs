@@ -292,6 +292,19 @@ fn spawn(
     })
 }
 
+/// The one line of a failed activation's stderr that says why: its last
+/// diagnostic, with the `appa: ` prefix and the progress lines (which end in
+/// `...`) left out. A child that said nothing is reported by its exit status.
+fn failure_cause(stderr: &str, status: std::process::ExitStatus) -> String {
+    stderr
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty() && !line.ends_with("..."))
+        .map(|line| line.strip_prefix("appa: ").unwrap_or(line).to_owned())
+        .map(|line| if line.ends_with('.') { line } else { format!("{line}.") })
+        .unwrap_or_else(|| format!("the selected binary exited with {status}."))
+}
+
 fn invoke(binary: &Path, arguments: &[&std::ffi::OsStr], timeout: Duration) -> Result<Vec<u8>, InstallError> {
     let mut stdout = tempfile::tempfile().map_err(|error| io("capture native result", binary, error))?;
     let mut stderr = tempfile::tempfile().map_err(|error| io("capture native diagnostics", binary, error))?;
@@ -373,7 +386,7 @@ fn invoke(binary: &Path, arguments: &[&std::ffi::OsStr], timeout: Duration) -> R
             .map_err(|error| io("read native diagnostics", binary, error))?;
         return Err(InstallError::Recovery {
             path: binary.to_owned(),
-            reason: format!("native command exited with {status}: {}", message.trim()),
+            reason: format!("activation failed: {}", failure_cause(&message, status)),
         });
     }
     #[cfg(windows)]

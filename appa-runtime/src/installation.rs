@@ -36,7 +36,7 @@ pub enum InstallError {
     Invalid(String),
     #[error("{} changed during installation; no replacement was made", .0.display())]
     Changed(PathBuf),
-    #[error("installation recovery is required at {}: {reason}", path.display())]
+    #[error("the install did not finish: {reason} Its record is {}; rerunning the install completes it.", path.display())]
     Recovery { path: PathBuf, reason: String },
 }
 
@@ -509,7 +509,7 @@ impl Installation {
         if optional_bytes(&state.join("transaction.json"))?.is_some() {
             return Err(InstallError::Recovery {
                 path: state.join("transaction.json"),
-                reason: "an installation transaction is pending; rerun the interrupted install".into(),
+                reason: "an earlier install was interrupted.".into(),
             });
         }
         read_selection(&state.join("active.json"))
@@ -889,7 +889,7 @@ impl Installation {
         let transaction: ConfigTransaction =
             serde_json::from_slice(&bytes).map_err(|error| InstallError::Recovery {
                 path: path.clone(),
-                reason: error.to_string(),
+                reason: format!("its record does not parse: {error}."),
             })?;
         transaction.selection.validate()?;
         let selected_claude = transaction.selection.plugins.contains("claude-code");
@@ -907,7 +907,7 @@ impl Installation {
         if !activation_matches {
             return Err(InstallError::Recovery {
                 path: path.clone(),
-                reason: "journal activation does not match its selected host".into(),
+                reason: "its record names an activation that does not match its selected host.".into(),
             });
         }
         let current = optional_bytes(&self.config)?;
@@ -937,7 +937,7 @@ impl Installation {
             };
             validate().map_err(|error| InstallError::Recovery {
                 path: path.clone(),
-                reason: error.to_string(),
+                reason: format!("{error}."),
             })?;
             if transaction.activation != Activation::None {
                 let activate = || {
@@ -966,7 +966,10 @@ impl Installation {
                 };
                 activate().map_err(|error| InstallError::Recovery {
                     path: path.clone(),
-                    reason: error.to_string(),
+                    reason: match error {
+                        InstallError::Recovery { reason, .. } => reason,
+                        other => format!("{other}."),
+                    },
                 })?;
             }
             let selected =
@@ -983,14 +986,14 @@ impl Installation {
                 kagent::remove_previous(self, previous, &transaction.selection).map_err(|error| {
                     InstallError::Recovery {
                         path: path.clone(),
-                        reason: error.to_string(),
+                        reason: format!("{error}."),
                     }
                 })?;
             }
         } else if current != transaction.before {
             return Err(InstallError::Recovery {
                 path,
-                reason: "config differs from both recorded states; resolve the manual edit before retrying".into(),
+                reason: "the config differs from both recorded states; resolve the manual edit before retrying.".into(),
             });
         }
         fs::remove_file(&path).map_err(|error| io("finish config transaction", &path, error))?;

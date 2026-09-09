@@ -10,6 +10,7 @@ use std::process::{Command, Output};
 
 use super::InitError;
 use super::config::ComposedPolicy;
+use super::paths::same_file;
 #[cfg(windows)]
 use super::powershell;
 
@@ -346,7 +347,8 @@ fn classify_endpoint_owner(
     // Everything after the first newline is the path, less the one the transport appends:
     // a config path may itself hold a newline, and splitting again would truncate it.
     let serves = rest.strip_suffix('\n').unwrap_or(rest);
-    if actual == expected && !serves.is_empty() && Path::new(serves) == config {
+    let serves = Path::new(serves);
+    if actual == expected && !serves.as_os_str().is_empty() && (serves == config || same_file(serves, config)) {
         Ok(EndpointOwner::Deployment { pid })
     } else {
         Ok(EndpointOwner::Foreign { pid })

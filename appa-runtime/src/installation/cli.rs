@@ -161,12 +161,21 @@ pub fn install_battery(args: BatteryInstall) -> ExitCode {
     };
     let result = (|| {
         let path = args.target.path();
+        if !path.exists() {
+            return Err(InstallError::Invalid(format!(
+                "no deployment at {}; run: appa plugin install claude-code",
+                path.display()
+            )));
+        }
         crate::config::Config::load(&path).map_err(|error| InstallError::Invalid(error.to_string()))?;
         let installation = Installation::open(&path)?;
         installation.recover_config()?;
         let before = super::required_bytes(installation.config_path())?;
         let current = installation.selection()?.ok_or_else(|| {
-            InstallError::Invalid("no selected generation; install a host plugin for this config first".into())
+            InstallError::Invalid(format!(
+                "{} was set up without the marketplace, so no generation is selected; run: appa plugin install claude-code",
+                path.display()
+            ))
         })?;
         let acquired = args
             .source
@@ -753,13 +762,17 @@ fn finish(
         .and_then(serde_json::Value::as_str)
     {
         if receipt.operation == "plugin.remove" {
+            let result = receipt.result.as_ref().expect("plugin result is present");
             writeln!(
                 output,
-                "Plugin {plugin}: {} for {}; configuration and data preserved.",
-                receipt.result.as_ref().expect("plugin result is present")["state"]
-                    .as_str()
-                    .unwrap_or_default(),
-                receipt.deployment.display()
+                "Plugin {plugin}: {} for {}; configuration and data preserved{}.",
+                result["state"].as_str().unwrap_or_default(),
+                receipt.deployment.display(),
+                if result["runtime"] == "kept" {
+                    ", and the runtime keeps running"
+                } else {
+                    ""
+                }
             )
         } else if plugin == "kagent" {
             let result = receipt.result.as_ref().expect("plugin result is present");

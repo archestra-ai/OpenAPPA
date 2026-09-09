@@ -78,7 +78,7 @@ pub enum InitError {
     MissingPluginFile(PathBuf),
     #[error("the installed Claude plugin could not start `appa runtime`: {0}")]
     Starter(String),
-    #[error("a different Appa runtime is already running at {endpoint}; {message}")]
+    #[error("the runtime endpoint {endpoint} is taken: {message}")]
     RuntimeIdentity { endpoint: String, message: String },
     #[error("the appa runtime (pid {pid}) still answers {endpoint} after being stopped; stop it and rerun init")]
     RuntimeSurvived { pid: i32, endpoint: String },
