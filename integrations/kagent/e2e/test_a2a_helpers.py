@@ -5,9 +5,25 @@ import importlib.util
 import io
 import json
 import threading
+import textwrap
 from pathlib import Path
 
 import pytest
+
+
+def test_scripted_parent_instructions_match_the_shipped_demo():
+    kagent = Path(__file__).resolve().parents[1]
+    tree = ast.parse((kagent / "tests/conftest.py").read_text())
+    instruction = next(
+        ast.literal_eval(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "PARENT_INSTRUCTION" for target in node.targets)
+    )
+    chart = (kagent / "demo/chart/templates/agents.yaml").read_text()
+    parent = chart.split("  name: cluster-ops\n", 1)[1]
+    message = parent.split("    systemMessage: |\n", 1)[1].split("    modelConfig:", 1)[0]
+    assert instruction == textwrap.dedent(message)
 
 
 @pytest.fixture(params=["a2a", "ui"])

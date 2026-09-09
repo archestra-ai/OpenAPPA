@@ -152,9 +152,9 @@ CHILD_FAILURE = re.compile(
 # runtime never tied to this parent's prepared fork: the child's session
 # opened under another parent's root, or under none. The runtime closes
 # the spawn, and the parent's gate withholds the return with this reason
-# in the withheld text. On the go cell one child session serves every
-# parent, so a child opened per session instead of per (root, child)
-# pair produces it for every parent after the first. The matrix keeps
+# in the withheld text. Both plugins allocate a fresh child context for
+# every new delegation; a resumed approval retains its paused context.
+# Reusing a child across new delegations violates that binding. The matrix keeps
 # this withhold apart from every other, because the other withhold — the
 # unchecked message — means only that the harness delivered something
 # the child never returned at a stop.
