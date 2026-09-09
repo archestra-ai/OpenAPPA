@@ -132,15 +132,3 @@ this boundary.
 These native checks do not replace the kagent Python/Go deployment lanes, custom
 dependency portability, explicit generation update/restore,
 platform tests, or the complete feature's independent review gate.
-
-## Linear slice
-
-Repeat the native Claude lifecycle above with both `linear` and `github`
-installed. Use the annotator and authority declarations from
-`examples/linear-battery/approved-writes.toml` in the root config, without its
-source includes (the installer owns those). Run
-`tests/fixtures/installed-linear-check.py` instead of the GitHub hook check.
-It exercises the installed helper, restricted Linear read, explicit trust and
-audience narrowing, and public GitHub leakage refusal. It supplies fixture tool
-results and does not claim a real Claude model conversation or provider writes.
-The kagent counterpart is `integrations/kagent/e2e/marketplace/linear_run.py`.

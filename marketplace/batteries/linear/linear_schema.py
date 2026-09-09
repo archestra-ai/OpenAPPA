@@ -1,6 +1,7 @@
 """Validate the deliberately bounded JSON Schema vocabulary in the pinned capture.
 
-Unknown keywords fail closed. This is not a general JSON Schema implementation;
+Unknown keywords fail closed. Objects are closed unless the snapshot explicitly
+allows additional properties (a deliberate tightening of JSON Schema defaults). This is not a general JSON Schema implementation;
 schema drift must be reviewed before broadening its supported vocabulary.
 """
 import math
@@ -59,10 +60,11 @@ def valid(schema, value):
         if not set(schema.get("required", [])).issubset(value):
             return False
         properties = schema.get("properties", {})
+        additional = schema.get("additionalProperties", not ("object" in kinds or "properties" in schema))
         for key, item in value.items():
             if not isinstance(key, str) or not valid(schema.get("propertyNames", True), key):
                 return False
-            if not valid(properties.get(key, schema.get("additionalProperties", True)), item):
+            if not valid(properties.get(key, additional), item):
                 return False
     if isinstance(value, list):
         if not schema.get("minItems", 0) <= len(value) <= schema.get("maxItems", math.inf):

@@ -45,24 +45,3 @@ cluster and registry container, keeps logs and evidence, and never switches the
 user's current context. Do not publish its kubeconfig. All generated generations
 are fixtures; unused native Claude/binary descriptor entries are placeholders,
 not release artifacts. Successful fixture unit tests alone are not cluster proof.
-
-## Linear vertical slice
-
-`linear_run.py` reuses the same isolated lifecycle with the installed Linear and
-GitHub batteries. It reads a restricted fixture issue, verifies refusal before
-accepting the trust/audience change, refuses a subsequent public GitHub write,
-and permits fresh public GitHub text. Both languages repeat after offline
-bundle restoration. Native confirmation rejects/accepts the GitHub write, then
-APPA's dynamic Linear trust and attention review rejects/accepts exactly one
-fixture comment. Assertions inspect actual MCP invocations and complete model
-scripts. No Linear credential is used in this lane.
-
-Build the same four images with tag `linear` instead of `ci`, then run:
-
-```sh
-python3 integrations/kagent/e2e/marketplace/linear_run.py /tmp/new-linear-acceptance
-```
-
-The fixture MCP exposes only the operations exercised by these scenarios. Full
-65-tool schema and profile coverage belongs to the battery's deterministic
-unit tests; this lane verifies real host dispatch for representative operations.

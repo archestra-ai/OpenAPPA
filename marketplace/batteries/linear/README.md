@@ -97,7 +97,9 @@ external PUT is outside Linear MCP and needs the host's shell/HTTP policy.
 The runtime parameter declaration admits an object because APPA supports a
 smaller schema vocabulary than Linear. Before classification, `linear_schema.py`
 validates arguments against the **full pinned input schema**, including nullable
-values, unions, nested patches, bounds and formats. This is a bounded validator,
+values, unions, nested patches, bounds and formats. Objects also reject unknown
+nested fields unless the snapshot explicitly permits additional properties.
+This is a bounded validator,
 not a general JSON Schema library. New keywords and unclassified arguments fail
 the generation check and require review. Capture annotations never grant access.
 

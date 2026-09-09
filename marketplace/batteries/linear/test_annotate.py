@@ -52,6 +52,11 @@ class AnnotationTests(unittest.TestCase):
                         if mutation and profile != "team-use":
                             self.assertEqual(answer["requires"]["attention"], ["linear-review"])
 
+    def test_unknown_nested_patch_fields_cannot_bypass_scope_review(self):
+        args = {"id": "ENG-1", "patch": [{"op": "append", "text": "update", "team": "outside"}]}
+        with self.assertRaises(module.Refusal):
+            module.annotate(request("save_issue", args, match={"id": "ENG-1"}))
+
     def test_reparent_cannot_reuse_old_issue_mapping(self):
         with self.assertRaises(module.Refusal):
             module.annotate(request("save_issue", {"id": "ENG-1", "team": "outside", "title": "x"}, match={"id": "ENG-1"}))

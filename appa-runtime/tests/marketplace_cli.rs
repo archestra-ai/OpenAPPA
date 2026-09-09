@@ -216,6 +216,10 @@ fn deployment_for(root: &Path, kagent: bool) -> std::path::PathBuf {
 }
 
 fn deployment_with_battery(root: &Path, kagent: bool, linear: bool) -> std::path::PathBuf {
+    deployment_with_revision(root, kagent, linear, "a")
+}
+
+fn deployment_with_revision(root: &Path, kagent: bool, linear: bool, revision: &str) -> std::path::PathBuf {
     use appa_package::generation::{ArtifactDigest, Generation, Image, Platform, REPOSITORY};
     use appa_runtime::installation::{Installation, Selection};
     use std::collections::BTreeMap;
@@ -247,6 +251,11 @@ fn deployment_with_battery(root: &Path, kagent: bool, linear: bool) -> std::path
                 std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
             }
         }
+        if revision != "a" {
+            let policy = to.join("appa.toml");
+            let text = std::fs::read_to_string(&policy).unwrap();
+            std::fs::write(policy, format!("# Updated fixture generation\n{text}")).unwrap();
+        }
         appa_package::validate_package(&to).unwrap();
         catalog.push_str(&format!(
             "[packages.battery.linear]\npath='batteries/linear'\ndigest='{}'\n",
@@ -276,7 +285,7 @@ fn deployment_with_battery(root: &Path, kagent: bool, linear: bool) -> std::path
     archive.append_dir_all(".", &source).unwrap();
     let archive = archive.into_inner().unwrap().finish().unwrap();
     let digest = ArtifactDigest::of_bytes(&archive);
-    let descriptor = serde_json::json!({"schema":1,"repository":REPOSITORY,"commit":"a".repeat(40),"release":"v1.0.0","protocol":appa_package::PROTOCOL,
+    let descriptor = serde_json::json!({"schema":1,"repository":REPOSITORY,"commit":revision.repeat(40),"release":"v1.0.0","protocol":appa_package::PROTOCOL,
         "catalog":ArtifactDigest::of_bytes(catalog.as_bytes()),"marketplace":digest,"claude_plugin":digest,"runtime_chart":digest,
         "binaries":Platform::ALL.into_iter().map(|platform|(platform,digest.clone())).collect::<BTreeMap<_,_>>(),
         "images":Image::ALL.into_iter().map(|image|(image,serde_json::json!({"digest":digest,"platforms":{"linux/amd64":digest}}))).collect::<BTreeMap<_,_>>()});
@@ -293,7 +302,7 @@ fn deployment_with_battery(root: &Path, kagent: bool, linear: bool) -> std::path
 }
 
 #[test]
-fn actual_linear_package_installs_repeats_bundles_relocates_and_removes() {
+fn actual_linear_package_installs_repeats_relocates_updates_and_removes() {
     use std::io::Write;
     let root = tempfile::tempdir().unwrap();
     let config = deployment_with_battery(root.path(), false, true);
@@ -392,6 +401,53 @@ fn actual_linear_package_installs_repeats_bundles_relocates_and_removes() {
         annotation["answer"]["delta"]["audience"],
         serde_json::json!(["alice@corp.example"])
     );
+    let next = tempfile::tempdir().unwrap();
+    deployment_with_revision(next.path(), false, true, "b");
+    invoke(next.path(), &["battery", "install", "linear", "--json"]);
+    let next_archive = next.path().join("next.tar.gz");
+    let next_receipt = invoke(
+        next.path(),
+        &["bundle", "--output", next_archive.to_str().unwrap(), "--json"],
+    );
+    invoke(
+        root.path(),
+        &[
+            "battery",
+            "install",
+            "linear",
+            "--from",
+            next_archive.to_str().unwrap(),
+            "--sha256",
+            next_receipt["result"]["sha256"].as_str().unwrap(),
+            "--json",
+        ],
+    );
+    let updated = std::fs::read_to_string(&config).unwrap();
+    assert!(
+        updated.contains(&"b".repeat(40)),
+        "update must select the new immutable generation"
+    );
+    assert!(!updated.contains(&"a".repeat(40)), "old include must be replaced");
+    let invalid = run(
+        root.path(),
+        &[
+            "battery",
+            "install",
+            "linear",
+            "--from",
+            archive.to_str().unwrap(),
+            "--sha256",
+            &"0".repeat(64),
+            "--json",
+        ],
+    );
+    assert!(!invalid.status.success());
+    assert_eq!(
+        std::fs::read_to_string(&config).unwrap(),
+        updated,
+        "failed import must preserve the active policy"
+    );
+    assert!(appa_runtime::config::Config::load(&config).is_ok());
     invoke(root.path(), &["battery", "remove", "linear", "--json"]);
     assert!(std::fs::read_to_string(config).unwrap().contains(&original));
 }

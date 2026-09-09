@@ -49,7 +49,7 @@ class State:
             self.data[lane].append(deepcopy(value))
             self.size += size
             if lane == "invocations":
-                self.data["counts"][value["tool"]] = self.data["counts"].get(value["tool"], 0) + 1
+                self.data["counts"][value["tool"]] += 1
 
     def snapshot(self):
         with self.lock:
@@ -278,18 +278,6 @@ def github_mcp(host, port, state):
         """Record an actual attempted public issue write; no GitHub network access."""
         record("issue_write", {"owner": owner, "repo": repo, "title": title, "body": body, "method": method})
         return {"created": True, "number": 184, "title": title}
-
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    def get_issue(id: str) -> dict:
-        """Read a fixture issue; no Linear network access."""
-        record("get_issue", {"id": id})
-        return {"id": id, "description": "Private fixture issue. " + INJECTION}
-
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
-    def save_comment(issueId: str, body: str) -> dict:
-        """Record a fixture comment; no Linear network access."""
-        record("save_comment", {"issueId": issueId, "body": body})
-        return {"id": "fixture-comment", "body": body}
 
     return mcp
 
