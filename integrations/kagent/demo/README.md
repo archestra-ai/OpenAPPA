@@ -70,11 +70,10 @@ The fixture chart owns no runtime Deployment, runtime Service, serving
 policy, PersistentVolumeClaim, provider Secret, ModelConfig, or
 `appa-guide` Agent.
 
-`demo-tools` also exposes canned `mcp__github__get_file_contents` and
-`mcp__github__issue_write`
-calls for a public repository. They have no rules in the demo template.
-`appa-guide` discovers their exact GitHub battery match and proposes the
-include. Repository text then enters as suspicious, while trusted issue
+`demo-tools` also exposes canned `get_file_contents` and `issue_write`
+calls for a public repository. The demo template includes the GitHub battery
+and binds it to the demo MCP endpoint. `appa-guide` proposes that configuration
+when it is missing from the serving policy. Repository text then enters as suspicious, while trusted issue
 text supplied by the operator can still publish.
 
 ## Tests

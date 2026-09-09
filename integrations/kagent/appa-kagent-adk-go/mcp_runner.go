@@ -79,6 +79,7 @@ func CreateDiscoveryRunnerConfig(
 		return runner.Config{}, nil, err
 	}
 	extraTools = append(extraTools, discovery)
+	extraTools = append(extraTools, discovery.resumeTools()...)
 	plain := *agentConfig
 	plain.HttpTools, plain.SseTools = nil, nil
 	adkAgent, err := agent.CreateGoogleADKAgent(ctx, &plain, agentNameFromAppName(appName), stsPlugin, extraTools...)

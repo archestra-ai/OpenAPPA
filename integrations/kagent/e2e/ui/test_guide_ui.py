@@ -77,8 +77,8 @@ def test_init_completes_the_full_read_only_inventory(chat: Chat, shots_dir: str)
         "kagent-tool-server",
         "batter",
         "release-manager",
-        "mcp__github__get_file_contents",
-        "mcp__github__issue_write",
+        "get_file_contents",
+        "issue_write",
         "appa_match_batteries",
         "appa_get_runtime_state",
     ]:
@@ -232,9 +232,9 @@ def test_the_guide_includes_the_matched_github_battery_after_approval(
         agent_chat.wait_idle(timeout_s=360)
         agent_chat.shot(shots_dir, "github-battery-block")
         details = agent_chat.tool_details()
-        assert "mcp__github__get_file_contents" in details
+        assert "get_file_contents" in details
         assert "appa" in details.lower() and "trust" in details.lower()
-        assert "mcp__github__issue_write" in details
+        assert "issue_write" in details
         assert "suspicious" in details.lower()
         assert '"created": true' not in details.lower()
         assert not agent_chat.confirmation_shown()
@@ -249,7 +249,7 @@ def test_the_guide_includes_the_matched_github_battery_after_approval(
         agent_chat.wait_idle(timeout_s=360)
         agent_chat.shot(shots_dir, "github-battery-allow")
         details = agent_chat.tool_details()
-        assert "mcp__github__issue_write" in details
+        assert "issue_write" in details
         assert '"created": true' in details.lower()
         assert "184" in details
         assert "Error in plugin" not in details

@@ -156,6 +156,7 @@ func (d *MCPDiscovery) close(id string) {
 	}
 	run.mu.Lock()
 	defer run.mu.Unlock()
+	run.opened = false
 	for _, observation := range run.observations {
 		if observation.session != nil {
 			observation.session.Close()
@@ -388,9 +389,7 @@ func (d *MCPDiscovery) prepare(ctx agent.ReadonlyContext, ids trajectoryIDs, pin
 	invalid := make(map[string]bool)
 	for _, check := range report.Tools {
 		if check.Status == "invalid" {
-			if !run.opened {
-				return nil, failClosed("%s: %s", check.Tool, check.Reason)
-			}
+			// Missing coverage disables this tool, not the conversation.
 			invalid[check.Tool] = true
 			delete(selected, check.Tool)
 		}

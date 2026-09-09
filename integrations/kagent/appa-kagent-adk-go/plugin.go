@@ -703,9 +703,22 @@ func isFresh(sess session.Session) bool {
 
 // spelling is the wire spelling of a dispatched tool; false outside the
 // inventory.
-func (p *AppaPluginKagent) spelling(t tool.Tool) (string, bool) {
+func (p *AppaPluginKagent) spelling(ctx agent.Context, t tool.Tool) (string, bool) {
+	if resumed, ok := t.(*mcpResumeTool); ok {
+		selected, available := resumed.selected(ctx)
+		if !available {
+			return "", false
+		}
+		return selected.spelling, true
+	}
 	if discovered, ok := t.(*discoveredMCPTool); ok {
 		return discovered.spelling, true
+	}
+	if p.discovery != nil {
+		run := p.discovery.run(ctx.InvocationID())
+		run.mu.Lock()
+		defer run.mu.Unlock()
+		return run.names.Spelling(t.Name())
 	}
 	return p.inventory.Spelling(t.Name())
 }
@@ -1247,7 +1260,7 @@ func (p *AppaPluginKagent) beforeTool(ctx agent.Context, t tool.Tool, args map[s
 	if !ok {
 		return nil, failClosed("no trajectory is pinned for invocation %s", ctx.InvocationID())
 	}
-	spelled, known := p.spelling(t)
+	spelled, known := p.spelling(ctx, t)
 	if !known {
 		// A name the inventory never saw has no spelling on the wire,
 		// so nothing crosses: the gate refuses it here and the model
@@ -1343,7 +1356,7 @@ func (p *AppaPluginKagent) afterTool(ctx agent.Context, t tool.Tool, args, resul
 	if !ok {
 		return nil, failClosed("no trajectory is pinned for invocation %s", ctx.InvocationID())
 	}
-	spelled, known := p.spelling(t)
+	spelled, known := p.spelling(ctx, t)
 	if !known {
 		return nil, failClosed("the tool %s is outside the gated inventory, and its result cannot cross", t.Name())
 	}
@@ -1415,7 +1428,7 @@ func (p *AppaPluginKagent) onToolError(ctx agent.Context, t tool.Tool, args map[
 	if !ok {
 		return nil, failClosed("no trajectory is pinned for invocation %s", ctx.InvocationID())
 	}
-	spelled, known := p.spelling(t)
+	spelled, known := p.spelling(ctx, t)
 	if !known {
 		return nil, failClosed("the tool %s is outside the gated inventory, and its failure cannot cross", t.Name())
 	}
@@ -1425,6 +1438,13 @@ func (p *AppaPluginKagent) onToolError(ctx agent.Context, t tool.Tool, args map[
 	}
 	switch decision.Kind {
 	case "ack":
+		if confirmation := ctx.ToolConfirmation(); confirmation != nil && !confirmation.Confirmed && errors.Is(toolErr, tool.ErrConfirmationRejected) {
+			// ADK's generic rejection sounds like a failed tool or approval
+			// service. Report the actual human decision, after recording the
+			// failure with the runtime, so the model does not seek a workaround.
+			p.answerOwn(ctx.FunctionCallID())
+			return map[string]any{"result": "[appa] the operator rejected this request. The proposed call did not run. Stop this operation; do not request or await approval again.", denyKey: denied}, nil
+		}
 		return nil, nil // the original error propagates
 	case "deliver_value":
 		return map[string]any{"result": decision.Value}, nil

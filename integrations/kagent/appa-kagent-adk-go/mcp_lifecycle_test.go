@@ -223,19 +223,33 @@ func TestMCPDiscoveryLifecycleAgainstRuntime(t *testing.T) {
 	if restarted.run(ctx.InvocationID()).observations[0].discovery.Status != DiscoveryComplete {
 		t.Fatal("metadata discovery did not reconnect the host session")
 	}
-	// The same uncovered tool is a known configuration error for a NEW
-	// trajectory. No MCP execution occurs and failed startup closes its sessions.
+	// A new trajectory also isolates uncovered tools without disabling covered ones.
 	initial := &MCPDiscovery{connections: discovery.connections, runs: make(map[string]*mcpRun)}
-	plugin, err = New(Config{RuntimeURL: runtimeURL, Discovery: initial})
+	plugin, err = New(Config{RuntimeURL: runtimeURL, Discovery: initial, Inventory: Inventory{
+		spellings: map[string]string{"bash": "builtin:bash"},
+		names:     map[string]string{"builtin:bash": "bash"},
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	fresh := newFakeContext(newFakeSession("initial-invalid"))
-	if _, err := plugin.onUserMessage(fresh, message); err == nil {
-		t.Fatal("activated a known uncovered tool")
+	defer initial.close(fresh.InvocationID())
+	if _, err := plugin.onUserMessage(fresh, message); err != nil {
+		t.Fatal(err)
 	}
-	if len(initial.runs) != 0 || calls.Load() != 1 {
-		t.Fatalf("failed activation leaked a session or executed a tool: runs=%d calls=%d", len(initial.runs), calls.Load())
+	request = &model.LLMRequest{}
+	if err := initial.ProcessRequest(fresh, request); err != nil {
+		t.Fatal(err)
+	}
+	if request.Tools["read"] == nil || request.Tools["late"] == nil || request.Tools["uncovered"] != nil {
+		t.Fatalf("initial discovery did not isolate uncovered tools: %v", request.Tools)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("discovery executed a tool: calls=%d", calls.Load())
+	}
+	refused, err := plugin.beforeTool(fresh, &fakeTool{"bash"}, map[string]any{})
+	if err != nil || refused[denyKey] != denied {
+		t.Fatalf("uncovered builtin was not individually refused: result=%v err=%v", refused, err)
 	}
 }
 

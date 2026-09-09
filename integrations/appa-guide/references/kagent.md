@@ -221,9 +221,8 @@ the same Kubernetes read with different capitalization or pluralization.
 3. List every `RemoteMCPServer` with
    `resource_type: remotemcpserver` across all namespaces with `output: json`
    in one call. Each `status.discoveredTools`
-   entry is one tool: its exact wire name and description. The policy names
-   it `mcp/<server name>/<tool>`. A server with no discovered tools is
-   uninspected — never invent its tool list.
+   entry is one tool: its native name and description. A server with no
+   discovered tools is uninspected — never invent its tool list.
 4. Cross-check. A `toolNames` entry no server discovered has a name but
    no description; if its boundary is unclear, it belongs in the one
    ambiguity question below.
@@ -259,7 +258,10 @@ Always use this order:
    unavailable server tools distinct.
 2. Call `appa_match_batteries` once per accepted `RemoteMCPServer`. Set
    `source` to its `<namespace>/<name>` and `tools` to only that resource's
-   sorted, deduplicated `status.discoveredTools` names. Never combine two
+   sorted, deduplicated `status.discoveredTools` names. Pass `endpoint` as
+   the exact configured MCP URL used by the Agent connection. If that URL
+   is unavailable, coverage is unknown; report it rather than claiming the
+   tools are covered. Never combine two
    servers in one call. This runtime-owned tool deterministically intersects
    each source with batteries currently available in the runtime's search-path layers.
    Process accepted servers in ascending discovered-tool count. A broad
@@ -280,7 +282,10 @@ Always use this order:
    match's `included` boolean is the only source of inclusion state. Never
    infer, add, or remove a match or inclusion in prose. Its
    `unconfigured_tools` array is the only source of uncovered tool names
-   for that server.
+   for that server. Read `coverage.tools` for valid, invalid, and unknown
+   results. An empty `unconfigured_tools` list does not prove coverage
+   when observations are unknown. `server` is the connection identity to
+   use in an approved deployment binding; a catalog match grants nothing.
 3. Combine only those authoritative match results, then reconcile them with the runtime layers and
    serving policy. Distinguish image-shipped batteries,
    persisted release batteries, operator-overlay batteries, and batteries
@@ -288,18 +293,24 @@ Always use this order:
    and a persisted release layer before the image layer, the latest
    release can become another candidate only through the approval-gated
    refresh flow below.
-4. Suggest only matches whose authoritative `included` value is `false`.
-   Say that the proposal will **include** the battery. Name the
+4. Suggest including a match when `included` is `false`. If it is already
+   included but observed tools are uncovered, inspect the deployment binding
+   instead of including it again. Name the
    exact observed tool source and summarize the behavior it adds. A
    catalog entry with no observed match is not a suggestion.
 
 When the operator approves a battery include and the ten demo cluster
-tools are already in serving policy, call `appa_include_battery`
+tools are already in serving policy and the battery's namespace already
+maps to the returned `server` in `server_aliases`, call `appa_include_battery`
 with that exact battery name and the policy key from the proposal's
 `appa_get_runtime_state`. The tool preserves the complete root policy,
 updates only the runtime-owned ConfigMap, waits for kubelet sync, reloads,
 and rolls back on failure. Never synthesize a ConfigMap or invoke a separate
-reload. A blocked delegation under **Exceptions** is not part of a battery
+reload. If the binding is absent, propose the include and
+`server_aliases.<battery-namespace> = "<returned server>"` together in one
+complete `appa_update_policy`. Never overwrite a binding to a different
+server without explicit approval for that change. A blocked delegation
+under **Exceptions** is not part of a battery
 include and remains unchanged unless separately requested.
 
 When `demo-tools` lists any of the ten static demo tools as
@@ -317,7 +328,7 @@ Match a battery only to installed tool names from the inventory above,
 including a server not yet attached to an Agent when that server has
 discovered tools. Also match Agent tools and delegations. Use the
 battery `tools` list from `GET /batteries`, not its directory name. A
-match is an exact listed tool name, or the last `__` segment before any
+match is an exact listed tool name, or the last `/` or `__` segment before any
 `(` argument suffix, equal to an installed name. Propose the
 intersection only. For every match, name the observed source as
 `<server>/<tool>` or `<Agent>/<tool>`. If no observed source supplies the
@@ -329,14 +340,13 @@ Do not compute that match yourself. The rules below explain how to apply
 the authoritative `appa_match_batteries` result, including exact aliases
 and suffix-only translations.
 
-For example, the demo exposes `mcp__github__get_file_contents` and
-`mcp__github__issue_write`, which exactly match qualified declarations in
-the GitHub battery. Propose including it; the include supplies those
-contracts directly. Do not copy an exactly
-matched declaration into the root. Copy and rename a declaration only
-when the match came from its final `__` segment and no exact alias exists.
-Either match is policy compatibility, not evidence that a GitHub connector
-exists beyond the observed MCP server.
+For example, the demo exposes `get_file_contents` and `issue_write`.
+The GitHub battery declares `mcp/github/get_file_contents` and
+`mcp/github/issue_write`. Its deployment binding associates `github`
+with the demo endpoint; the verified demo template includes that binding.
+Propose the include and binding together when either is missing. Do not
+rewrite the battery's contracts or infer a trusted provider from a tool name.
+Matching names establishes a candidate, not policy coverage.
 
 Determine demo coverage from serving policy, not prose. The demo contracts
 are present only when `appa_get_runtime_state` lists all ten cluster tools
@@ -350,9 +360,10 @@ whose delegation remains blocked. Never propose adding it unless the
 operator explicitly requests that behavior.
 
 When the `demo-tools` matcher result lists only
-`mcp__github__get_file_contents` and `mcp__github__issue_write` under
+`get_file_contents` and `issue_write` under
 `unconfigured_tools`, the static demo contracts are
-already present. Propose only the matched GitHub battery include. If it
+already present. Propose the matched GitHub battery include and any missing
+deployment binding. If it
 lists any of the ten static demo tools above, the same proposal must
 copy those missing entries from the verified demo manifest. Do not
 suggest only a battery include while those ten tools stay undeclared.
@@ -408,25 +419,14 @@ because persistence is disabled.
 
 ## Tool names
 
-A rule names a tool by its canonical tool id:
-
-- A tool of the `RemoteMCPServer` or `ToolServer` served at
-  `<toolset>`, the first label of the server host in `params.url`:
-  `mcp/<toolset>/<tool>`. The same tool name on two servers is two
-  contracts. A gated agent reaches that toolset only at the Kubernetes
-  service forms of the same name (`<service>`,
-  `<service>.<namespace>`, `<service>.<namespace>.svc`,
-  `<service>.<namespace>.svc.cluster.local`) or at loopback, so the
-  endpoint is a cluster service address and not an arbitrary host. The
-  name is that first label alone: a service of the same name in another
-  namespace, or an `ExternalName` Service pointing outside the cluster,
-  carries the same contract.
-- An agent called as a tool: `agent/<namespace>/<name>`. The wildcard
-  covers no spawn: a delegation needs a contract that names the agent,
-  or it stays blocked.
-- A kagent built-in: `host/kagent/<name>`. The entrypoint gates:
-  `host/kagent-gate/code_execution` and `host/kagent-gate/memory_persist`.
-- The reserved `appa/execute_remedy_plan` takes no rule.
+- MCP rules can use native names. Add `server` to restrict a rule to one
+  configured connection. Batteries use canonical names such as
+  `mcp/github/get_file_contents`; deployment `server_aliases` binds their
+  namespace to the connection identity returned by the matcher.
+- Delegation rules use `agent/<namespace>/<name>`. A wildcard never covers
+  a delegation; the agent requires an explicit contract.
+- Builtins use `host/kagent/<name>`; entrypoint gates use
+  `host/kagent-gate/<name>`. The reserved `appa/execute_remedy_plan` needs no rule.
 
 ## Cover the remaining tools
 
@@ -550,7 +550,8 @@ After approval:
 
 1. Call `appa_get_runtime_state`. If its policy key changed since that
    runtime's proposal, revise and ask again.
-2. For one battery include, call `appa_include_battery`. For another
+2. For one battery include with its source binding already configured, call
+   `appa_include_battery`. For an include requiring a binding or another
    complete policy change, call `appa_update_policy`. For an explicit
    unchanged reload, call `appa_reload_policy`. Pass the observed policy key.
    Never refuse to call `appa_update_policy` because persistence is off;

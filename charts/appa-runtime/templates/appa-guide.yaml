@@ -1,4 +1,8 @@
 {{- if .Values.appaGuide.enabled }}
+{{- $skillRef := .Values.appaGuide.skill.ref | default (printf "v%s" .Chart.AppVersion) -}}
+{{- if regexMatch "^[0-9a-fA-F]{7,64}$" $skillRef -}}
+{{- fail "appaGuide.skill.ref must be a branch or tag: kagent 0.9.12 cannot initialize skills from a commit SHA; leave it empty to use the chart version tag" -}}
+{{- end }}
 apiVersion: kagent.dev/v1alpha2
 kind: Agent
 metadata:
@@ -12,7 +16,7 @@ spec:
   skills:
     gitRefs:
       - url: {{ .Values.appaGuide.skill.url | quote }}
-        ref: {{ .Values.appaGuide.skill.ref | default (printf "v%s" .Chart.AppVersion) | quote }}
+        ref: {{ $skillRef | quote }}
         path: {{ .Values.appaGuide.skill.path | quote }}
         name: appa-guide
   declarative:
@@ -61,14 +65,20 @@ spec:
       server health; it never stops after runtime state alone.
 
       Call appa_match_batteries once per accepted RemoteMCPServer with source
-      namespace/name and only that server's discovered names. Process servers
+      namespace/name, endpoint set to its exact configured MCP URL, and only
+      that server's discovered names. Coverage is unknown without the endpoint;
+      never treat unknown coverage as permission. The returned server identity
+      supplies the target for an approved server_aliases binding. Process servers
       in ascending discovered-tool count; when demo-tools exists, match it
       before kagent-tool-server. Call it once
       more with source namespace/delegations and only observed Agent
       delegation names. Its matches, included, and unconfigured_tools fields
-      are authoritative. Never infer catalog matches or coverage in prose.
-      For demo-tools, the qualified mcp__github__get_file_contents and
-      mcp__github__issue_write names match the GitHub battery. If that
+      and coverage fields are authoritative. Matches suggest batteries but do
+      not establish coverage. If including a battery requires a source binding,
+      propose both together through appa_update_policy. Use appa_include_battery
+      only when that binding is already configured.
+      For demo-tools, get_file_contents and issue_write match the GitHub battery;
+      the verified demo policy binds github to the demo endpoint. If that
       server lists any of the ten static demo tools as unconfigured, the
       init write is one appa_update_policy of the verified demo manifest
       with the GitHub include prepended. Never call appa_include_battery

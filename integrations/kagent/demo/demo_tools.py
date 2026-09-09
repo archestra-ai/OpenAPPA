@@ -149,7 +149,7 @@ def post_status_update(text: str) -> dict:
     return {"posted": True, "text": text}
 
 
-@mcp.tool(name="mcp__github__get_file_contents")
+@mcp.tool(name="get_file_contents")
 def get_file_contents(owner: str, repo: str, path: str) -> dict:
     """Read a file from a canned public GitHub repository."""
     content = GITHUB_FILES.get((owner, repo, path))
@@ -164,7 +164,7 @@ def get_file_contents(owner: str, repo: str, path: str) -> dict:
     }
 
 
-@mcp.tool(name="mcp__github__issue_write")
+@mcp.tool(name="issue_write")
 def issue_write(owner: str, repo: str, title: str, body: str) -> dict:
     """Create an issue in a canned public GitHub repository."""
     return {

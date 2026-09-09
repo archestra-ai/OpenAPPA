@@ -16,6 +16,10 @@
 
 include = ["batteries/github/appa.toml"]
 
+# This deployment serves the canned GitHub tools through demo-tools.
+[server_aliases]
+github = "server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7"
+
 [policy]
 version = 2
 
