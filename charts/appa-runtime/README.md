@@ -41,6 +41,9 @@ The option is off by default because the runtime chart also supports
 clusters without kagent. The target namespace, kagent model config, and
 tool-server name are configurable under `appaGuide`. An empty
 `appaGuide.skill.ref` pins the skill to the chart's `v<appVersion>` tag.
+An override must name a branch or tag. kagent 0.9.12 cannot initialize
+Git skills from commit SHAs; the chart rejects SHA-shaped overrides before
+deployment. This limitation does not affect marketplace package commit pins.
 
 Enabling `appaGuide` opens a separate guide MCP listener on Service port
 `18788`. Only the `appa-guide` Agent receives that URL and management

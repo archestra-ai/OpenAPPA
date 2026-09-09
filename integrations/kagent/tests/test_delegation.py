@@ -31,7 +31,7 @@ import uuid
 
 import pytest
 
-from conftest import CHILD_FAILURE, CHILD_TOOL, INJECTION
+from conftest import CHILD_FAILURE, CHILD_TOOL, INJECTION, UNDECLARED_TOOL
 
 # The parent's prompts, and the `request` each delegation carries. The
 # child's script is keyed by that request, so the two must agree.
@@ -297,31 +297,21 @@ def test_nothing_a_child_says_after_returning_nothing_reaches_its_parent(stack):
     assert task.confirmation() is None, "no person is asked about a delegation"
 
 
-@pytest.mark.parametrize("stack", [True], indirect=True)
-def test_a_known_uncovered_agent_is_rejected_before_model_execution(stack):
-    """An advertised agent without a contract is a known activation error."""
-    body = json.dumps(
-        {
-            "jsonrpc": "2.0",
-            "id": str(uuid.uuid4()),
-            "method": "message/send",
-            "params": {
-                "message": {
-                    "role": "user",
-                    "kind": "message",
-                    "messageId": str(uuid.uuid4()),
-                    "parts": [{"kind": "text", "text": DELEGATE_UNDECLARED}],
-                }
-            },
-        }
-    ).encode()
-    request = urllib.request.Request(stack.agent.url, data=body, headers={"content-type": "application/json"})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        answer = json.load(response)
-    result = answer.get("result", {})
-    assert answer.get("error") or result.get("status", {}).get("state") == "failed", answer
+def test_an_uncovered_agent_is_refused_without_disabling_covered_tools(stack):
+    """An uncovered delegation has no side effect; the conversation continues."""
+    task = stack.say(
+        DELEGATE_UNDECLARED,
+        [
+            {"tool": UNDECLARED_TOOL, "args": {"request": BUMP}},
+            {"tool": "list_pods", "args": {}},
+            {"text": "The release manager is unavailable; I listed pods instead."},
+        ],
+    )
+    assert task.state == "completed"
+    assert task.responses(UNDECLARED_TOOL)[0]["appa"] == "denied"
+    assert task.responses("list_pods")
+    assert task.responses("list_pods")[0].get("appa") != "denied"
     assert stack.child_turns() == [], "no uncovered delegation reaches a child"
-    assert "not covered by policy" in json.dumps(answer), answer
 
 
 def test_two_parents_delegate_in_turn_into_one_child_session(stack, one_child_session):

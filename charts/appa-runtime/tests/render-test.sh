@@ -173,6 +173,13 @@ must_contain 'ref: "main"'
 must_contain 'modelConfig: "platform-model"'
 must_contain 'value: "none"'
 
+must_refuse 'appaGuide.skill.ref must be a branch or tag' --set appaGuide.enabled=true \
+  --set-string appaGuide.skill.ref=9b46eeffedee4b0a1f00dd967fc3eba9c856db8d
+must_refuse 'appaGuide.skill.ref must be a branch or tag' --set appaGuide.enabled=true \
+  --set-string appaGuide.skill.ref=9b46eef
+must_render --set appaGuide.enabled=true --set-string appaGuide.skill.ref=v0.16.0
+must_contain 'ref: "v0.16.0"'
+
 must_render --set persistence.enabled=true --set persistence.size=10Gi
 must_contain 'kind: PersistentVolumeClaim'
 must_contain '/var/lib/appa/batteries'

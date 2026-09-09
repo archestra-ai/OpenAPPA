@@ -175,16 +175,16 @@ def test_the_github_battery_blocks_repository_text_at_a_public_write(stack):
         GITHUB_READ,
         [
             {
-                "tool": "mcp__github__get_file_contents",
+                "tool": "get_file_contents",
                 "args": {"owner": "acme", "repo": "status-page", "path": "RELEASE.md"},
             },
             {"remedy": "accept this change"},
             {
-                "tool": "mcp__github__get_file_contents",
+                "tool": "get_file_contents",
                 "args": {"owner": "acme", "repo": "status-page", "path": "RELEASE.md"},
             },
             {
-                "tool": "mcp__github__issue_write",
+                "tool": "issue_write",
                 "args": {
                     "owner": "acme",
                     "repo": "status-page",
@@ -195,11 +195,11 @@ def test_the_github_battery_blocks_repository_text_at_a_public_write(stack):
             {"text": "The public issue write was blocked because repository text is suspicious."},
         ],
     )
-    responses = task.responses("mcp__github__get_file_contents")
+    responses = task.responses("get_file_contents")
     assert len(responses) == 2 and responses[0].get("appa") == "denied"
     assert "trust" in str(responses[0].get("result", "")).lower()
     assert GITHUB_INJECTION in task.everything()
-    writes = task.responses("mcp__github__issue_write")
+    writes = task.responses("issue_write")
     assert writes and writes[0].get("appa") == "denied"
     assert "suspicious" in str(writes[0].get("result", "")).lower()
     assert '"created": true' not in task.everything().lower()
@@ -212,7 +212,7 @@ def test_the_github_battery_allows_operator_authored_public_issue_text(stack):
         GITHUB_WRITE,
         [
             {
-                "tool": "mcp__github__issue_write",
+                "tool": "issue_write",
                 "args": {
                     "owner": "acme",
                     "repo": "status-page",
@@ -223,7 +223,7 @@ def test_the_github_battery_allows_operator_authored_public_issue_text(stack):
             {"text": "Created issue 184."},
         ],
     )
-    responses = task.responses("mcp__github__issue_write")
+    responses = task.responses("issue_write")
     assert responses
     result = json.loads(responses[0]["content"][0]["text"])
     assert result.get("created") is True
