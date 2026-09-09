@@ -848,6 +848,85 @@ func TestASpawnReturnCrossesAsTheSpawnResultInBothReplyShapes(t *testing.T) {
 	}
 }
 
+func TestRemoteApprovalKeepsTheOriginalSpawnOpen(t *testing.T) {
+	for _, approved := range []bool{true, false} {
+		t.Run(fmt.Sprint(approved), func(t *testing.T) {
+			h := newHook(t, allow, ack, ack, ack, ack)
+			p := pluginOver(t, h)
+			sess := newFakeSession("s1")
+			ctx := newFakeContext(sess)
+			remote := &fakeTool{"kagent__NS__billing_agent"}
+			args := map[string]any{"request": "total the invoices"}
+			if _, err := p.beforeTool(ctx, remote, args); err != nil {
+				t.Fatal(err)
+			}
+			pending := map[string]any{"status": "pending", "waiting_for": "subagent_approval", "subagent_session_id": "child-ctx"}
+			if _, err := p.afterTool(ctx, remote, args, pending, nil); err != nil {
+				t.Fatal(err)
+			}
+			p.afterRun(ctx)
+			if got := h.kinds(); !reflect.DeepEqual(got, []string{"tool_call", "ping"}) {
+				t.Fatalf("pause closed the original dispatch: %v", got)
+			}
+			resumed := newFakeContext(sess).forInvocation("i2")
+			resumed.confirmation = &toolconfirmation.ToolConfirmation{Confirmed: approved, Payload: map[string]any{"context_id": "child-ctx", "task_id": "child-task"}}
+			if _, err := p.beforeTool(resumed, remote, args); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := p.afterTool(resumed, remote, args, map[string]any{"result": "done", "subagent_session_id": "child-ctx"}, nil); err != nil {
+				t.Fatal(err)
+			}
+			p.afterRun(resumed)
+			want := []string{"tool_call", "ping", "spawn_resume", "spawn_result", "turn_end"}
+			if got := h.kinds(); !reflect.DeepEqual(got, want) {
+				t.Fatalf("resume lifecycle: %v, want %v", got, want)
+			}
+			resume := h.recorded()[2]
+			if resume["spawned_id"] != "child-ctx" || !reflect.DeepEqual(resume["arguments"], args) {
+				t.Fatalf("resume lost the original child/call: %v", resume)
+			}
+		})
+	}
+}
+
+func TestRemotePauseDoesNotHideOtherTurnEnds(t *testing.T) {
+	h := newHook(t)
+	p := pluginOver(t, h)
+	ctx := newFakeContext(newFakeSession("s1"))
+	pending := map[string]any{"status": "pending", "waiting_for": "subagent_approval"}
+	if _, err := p.afterTool(ctx, &fakeTool{"kagent__NS__billing_agent"}, nil, pending, nil); err != nil {
+		t.Fatal(err)
+	}
+	p.afterRun(newFakeContext(newFakeSession("other")).forInvocation("i2"))
+	// Further work in the paused invocation must restore ordinary cleanup,
+	// including when that new proposal is refused.
+	if _, err := p.beforeTool(ctx, &fakeTool{"k8s_scale"}, map[string]any{}); err == nil {
+		t.Fatal("the scripted ack must not allow an ordinary tool call")
+	}
+	p.afterRun(ctx)
+	want := []string{"ping", "turn_end", "tool_call", "turn_end"}
+	if got := h.kinds(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("pause escaped its invocation/lifecycle: %v", got)
+	}
+}
+
+func TestRemoteResumeRefusalNeverFallsBackToANewCall(t *testing.T) {
+	for _, payload := range []any{nil, map[string]any{"context_id": ""}, map[string]any{"context_id": "wrong-child"}} {
+		h := newHook(t, map[string]any{"protocol": 1, "decision": "block", "reason": "wrong child"})
+		p := pluginOver(t, h)
+		ctx := newFakeContext(newFakeSession("s1"))
+		ctx.confirmation = &toolconfirmation.ToolConfirmation{Confirmed: true, Payload: payload}
+		if _, err := p.beforeTool(ctx, &fakeTool{"kagent__NS__billing_agent"}, map[string]any{}); err == nil {
+			t.Fatal("an invalid resume was allowed")
+		}
+		for _, event := range h.recorded() {
+			if event["event"] != "spawn_resume" {
+				t.Fatalf("invalid resume fell back to another event: %v", event)
+			}
+		}
+	}
+}
+
 func TestAChildReturnSubstitutesWhatTheParentReceives(t *testing.T) {
 	h := newHook(t, map[string]any{"protocol": 1, "decision": "child_return", "value": "the redacted summary"})
 	p := pluginOver(t, h)

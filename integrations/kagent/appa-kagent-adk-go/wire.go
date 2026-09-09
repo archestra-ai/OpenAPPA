@@ -91,6 +91,14 @@ func toolResultEvent(rootID, tool string, arguments, outcome any, childID string
 	return wire
 }
 
+func spawnResumeEvent(rootID, tool string, arguments any, spawnedID, childID string) map[string]any {
+	wire := event("spawn_resume", rootID, childID)
+	wire["tool"] = tool
+	wire["arguments"] = arguments
+	wire["spawned_id"] = spawnedID
+	return wire
+}
+
 func spawnResultEvent(rootID, tool string, arguments, outcome any, spawnedID, value, childID string) map[string]any {
 	wire := event("spawn_result", rootID, childID)
 	wire["tool"] = tool
