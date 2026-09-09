@@ -108,8 +108,11 @@ jobs:
             plugin:
               - 'marketplace/plugins/claude-code/plugin/**'
               - 'marketplace/plugins/claude-code/.claude-plugin/**'
+              - 'marketplace/plugins/claude-code/*.py'
+              - 'marketplace/plugins/claude-code/README.md'
               - 'marketplace/batteries/**'
               - 'scripts/appa-stage-plugin-bundle.sh'
+              - 'scripts/appa-eval.sh'
               - 'scripts/appa-install.sh'
               - 'scripts/appa-install-test.sh'
               - 'scripts/appa-refresh-batteries.py'
@@ -218,6 +221,7 @@ jobs:
             marketplace/plugins/claude-code/plugin/hooks/appa-paths.sh \
             marketplace/plugins/claude-code/plugin/statusline.sh \
             scripts/appa-stage-plugin-bundle.sh \
+            scripts/appa-eval.sh \
             scripts/appa-install.sh \
             scripts/appa-install-test.sh
 
@@ -227,6 +231,7 @@ jobs:
             marketplace/plugins/claude-code/plugin/hooks/hook.sh \
             marketplace/plugins/claude-code/plugin/hooks/appa-paths.sh \
             scripts/appa-stage-plugin-bundle.sh \
+            scripts/appa-eval.sh \
             scripts/appa-install.sh \
             scripts/appa-install-test.sh
 
@@ -261,9 +266,44 @@ jobs:
         run: |
           python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --break-system-packages 'pyyaml==6.0.2'
           python3 -m unittest scripts/test_appa_refresh_batteries.py scripts/test_appa_guide_runtime.py scripts/test_appa_oci_tags.py scripts/test_appa_image_descriptor.py
+          python3 -m unittest discover -s marketplace/plugins/claude-code -p 'test_*.py'
 
       - name: Check release versions
         uses: ./.github/actions/check-release-versions
+
+  claude-harness:
+    name: Claude Harness Conformance
+    needs: changes
+    if: needs.changes.outputs.plugin == 'true' || needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Rust
+        run: rustup show
+
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: claude-harness
+          env-vars: CARGO_PROFILE_DEV_DEBUG
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build the runtime binary
+        run: cargo build --package appa --locked
+
+      - name: Install Claude Code harness
+        run: npm install --global @anthropic-ai/claude-code@2.1.266
+
+      - name: Exercise the real harness with deterministic inference
+        run: python3 marketplace/plugins/claude-code/live-gate-check.py
 
   marketplace-checks:
     name: Marketplace Checks
@@ -821,7 +861,7 @@ jobs:
           --with "kagent-adk @ git+https://github.com/kagent-dev/kagent@v0.9.12#subdirectory=python/packages/kagent-adk"
           --with "a2a-sdk>=0.3.23,<0.4" --with "google-adk==1.31.1" --with "mcp>=1.25,<2"
           --with "pytest>=8" --with "pytest-asyncio"
-          pytest integrations/kagent/tests -q --basetemp "$APPA_INTEGRATION_BASETEMP"
+          pytest integrations/kagent/tests integrations/kagent/demo/mocks/test_mock_externals.py -q --basetemp "$APPA_INTEGRATION_BASETEMP"
 
       - name: Authenticated MCP discovery lifecycle, Python
         env:

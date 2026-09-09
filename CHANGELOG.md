@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.17.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.17.0...v0.17.1) (2026-09-09)
+
+
+### Bug Fixes
+
+* **kagent:** repair delegation gating and release image annotations ([#274](https://github.com/archestra-ai/OpenAPPA/issues/274)) ([6ad5b4d](https://github.com/archestra-ai/OpenAPPA/commit/6ad5b4d71aa95be6cb97dd9b3f1ac3c25f184498))
+
+
+### Documentation
+
+* add OpenAPPA vs Dogwood comparison ([#277](https://github.com/archestra-ai/OpenAPPA/issues/277)) ([99022c9](https://github.com/archestra-ai/OpenAPPA/commit/99022c9bb07020982e77ad3aae2e7670789defb8))
+
+## [0.17.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.16.0...v0.17.0) (2026-09-09)
+
+
+### Features
+
+* **runtime:** shared plugin protocol with native-name tool validation ([#228](https://github.com/archestra-ai/OpenAPPA/issues/228)) ([242e412](https://github.com/archestra-ai/OpenAPPA/commit/242e4126dbf5ccf4c68c9f072ee7538db5d9715e))
+
+
+### Bug Fixes
+
+* **appa-yell:** label the Slack object link "gzip" instead of the full path ([#276](https://github.com/archestra-ai/OpenAPPA/issues/276)) ([fb5b88c](https://github.com/archestra-ai/OpenAPPA/commit/fb5b88c01b4bb92a962a2e173a322eb302407bcd))
+* **kagent:** keep covered tools usable and repair demo battery wiring ([#267](https://github.com/archestra-ai/OpenAPPA/issues/267)) ([16f43d2](https://github.com/archestra-ai/OpenAPPA/commit/16f43d2713a458312dd17dfbbef0a6aa964ebd1f))
+* land marketplace installation changes from PR229 on main ([#264](https://github.com/archestra-ai/OpenAPPA/issues/264)) ([0b0ec35](https://github.com/archestra-ai/OpenAPPA/commit/0b0ec350bdb0fb9602c2c62a1a003bd60cf3d091))
+
+
+### Documentation
+
+* compare OpenAPPA with Cedar ([#268](https://github.com/archestra-ai/OpenAPPA/issues/268)) ([ada3de7](https://github.com/archestra-ai/OpenAPPA/commit/ada3de7a7e02e47941484083f66fc8c225a4b224))
+* explain Cedar business-rule flexibility ([#273](https://github.com/archestra-ai/OpenAPPA/issues/273)) ([54666e2](https://github.com/archestra-ai/OpenAPPA/commit/54666e22fc98dcc0935010a93971fa47dfd5be4a))
+* **kagent:** remove bloated tool names and startup requirements section ([#266](https://github.com/archestra-ai/OpenAPPA/issues/266)) ([a9de424](https://github.com/archestra-ai/OpenAPPA/commit/a9de4243f61a9d4584765eed818b196bf0074701))
+* **kagent:** streamline quickstart, humanize appa-guide, and harden agent protections ([#265](https://github.com/archestra-ai/OpenAPPA/issues/265)) ([9b46eef](https://github.com/archestra-ai/OpenAPPA/commit/9b46eeffedee4b0a1f00dd967fc3eba9c856db8d))
+* replace Cedar comparison and update sidebar ([#270](https://github.com/archestra-ai/OpenAPPA/issues/270)) ([6ab8cae](https://github.com/archestra-ai/OpenAPPA/commit/6ab8caeb3f4cca7353a58b88d91b20f8c62b2763))
+
+
+### Code Refactoring
+
+* **audience:** the member id a source reports is the reader ([#262](https://github.com/archestra-ai/OpenAPPA/issues/262)) ([9174de9](https://github.com/archestra-ai/OpenAPPA/commit/9174de9c43750e72467af98a34f5323b875d8d1d))
+
 ## [0.16.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.15.0...v0.16.0) (2026-09-08)
 
 

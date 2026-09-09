@@ -219,7 +219,13 @@ def run(argv):
         require(code == 0, 'external read failed: ' + argv[0])
         return buffers[0].decode('utf-8')
     finally:
-        stop(process)
+        primary = sys.exc_info()[1]
+        try:
+            stop(process)
+        except (OSError, subprocess.TimeoutExpired) as cleanup:
+            if primary is not None:
+                raise RuntimeError(f'{primary}; process cleanup failed') from cleanup
+            raise
 
 def reference(entry, registry):
     repository = entry['repository']
@@ -494,6 +500,122 @@ child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
                          start_new_session=True)
 stop(child)
 assert child.returncode != 0
+"#,
+                )
+                .arg(fixture.root.path().join("verify-images.py"))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        }
+
+        #[test]
+        fn emitted_helper_handles_only_disappeared_darwin_zombie_groups() {
+            let fixture = Fixture::new();
+            let output = Command::new("python3")
+                .arg("-c")
+                .arg(
+                    r#"
+import runpy
+import signal
+import sys
+
+helper = runpy.run_path(sys.argv[1])
+stop = helper['stop']
+os_module = helper['os']
+old_killpg = os_module.killpg
+old_platform = sys.platform
+
+class ExitedProcess:
+    pid = 12345
+    def __init__(self):
+        self.waits = 0
+    def poll(self):
+        return 0
+    def kill(self):
+        raise AssertionError('exited leader must not be killed')
+    def wait(self, timeout):
+        assert timeout == 2
+        self.waits += 1
+
+try:
+    sys.platform = 'darwin'
+    calls = []
+    def disappeared_group(pid, sig):
+        assert pid == 12345
+        calls.append(sig)
+        if sig == signal.SIGKILL:
+            raise PermissionError
+        assert sig == 0
+        raise ProcessLookupError
+    os_module.killpg = disappeared_group
+    process = ExitedProcess()
+    stop(process)
+    assert calls == [signal.SIGKILL, 0]
+    assert process.waits == 1
+
+    calls = []
+    def live_group(pid, sig):
+        assert pid == 12345
+        calls.append(sig)
+        if sig == signal.SIGKILL:
+            raise PermissionError
+        assert sig == 0
+    os_module.killpg = live_group
+    process = ExitedProcess()
+    try:
+        stop(process)
+    except PermissionError:
+        pass
+    else:
+        raise AssertionError('a live unsignalable process group must fail')
+    assert calls == [signal.SIGKILL, 0]
+    assert process.waits == 1
+finally:
+    os_module.killpg = old_killpg
+    sys.platform = old_platform
+"#,
+                )
+                .arg(fixture.root.path().join("verify-images.py"))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        }
+
+        #[test]
+        fn emitted_helper_reports_primary_failures_when_cleanup_fails() {
+            let fixture = Fixture::new();
+            let output = Command::new("python3")
+                .arg("-c")
+                .arg(
+                    r#"
+import runpy
+import sys
+import time
+
+helper = runpy.run_path(sys.argv[1])
+run = helper['run']
+stop = helper['stop']
+run.__globals__['DEADLINE'] = time.monotonic() + 30
+
+def cleanup_fails(process):
+    stop(process)
+    raise PermissionError('cleanup EPERM')
+
+run.__globals__['stop'] = cleanup_fails
+try:
+    run([sys.executable, '-c', 'pass'])
+except PermissionError as error:
+    assert str(error) == 'cleanup EPERM'
+else:
+    raise AssertionError('successful command with failed cleanup must fail')
+
+try:
+    run([sys.executable, '-c', "import sys; sys.stdout.write('x' * (4 * 1024 * 1024 + 8192))"])
+except RuntimeError as error:
+    assert str(error) == 'external output exceeds limit: ' + sys.executable + '; process cleanup failed'
+    assert isinstance(error.__cause__, PermissionError)
+else:
+    raise AssertionError('cleanup failure must preserve the excessive-output failure')
 "#,
                 )
                 .arg(fixture.root.path().join("verify-images.py"))

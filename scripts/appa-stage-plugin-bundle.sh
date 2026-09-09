@@ -55,6 +55,7 @@ cp -- "$adapter/hitl.appa.toml" ./examples/claude-code-hitl.appa.toml
 cp -R -- "$repo/marketplace/batteries" ./batteries
 cp -- "$adapter/README.md" ./README.md
 cp -- "$adapter/live-gate-check.py" ./live-gate-check.py
+cp -- "$adapter/claude_model_fixture.py" ./claude_model_fixture.py
 
 mkdir -p -- ./website/content/docs
 cp -- "$repo/website/content/docs/contracts.md" ./website/content/docs/contracts.md

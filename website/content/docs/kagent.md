@@ -42,7 +42,7 @@ export OPENAI_API_KEY="your-api-key"
 Deploy the demo:
 
 ```sh
-APPA_VERSION=0.16.0 # x-release-please-version
+APPA_VERSION=0.17.1 # x-release-please-version
 KAGENT_VERSION=0.9.12
 KAGENT_NAMESPACE=kagent
 
@@ -129,7 +129,7 @@ Open [http://localhost:8080](http://localhost:8080), select **Agents** &rarr; **
 
 ## Demonstration scenarios
 
-In the dashboard ([http://localhost:8080](http://localhost:8080)), open **Agents** &rarr; **`cluster-ops`** &rarr; **Chat**. Inspect pre-recorded runs in chat history, or start a new chat to test the prompts live:
+In the dashboard ([http://localhost:8080](http://localhost:8080)), open **Agents** &rarr; **`cluster-ops`** &rarr; **Chat**. Chat history contains five pre-recorded runs, one for each scenario below. The dynamic input rules chat includes both runbook prompts. Other demo agents have no pre-seeded chats. Inspect these runs, or start a new chat to test the prompts live:
 
 #### 1. Confidential read
 
@@ -155,36 +155,7 @@ Restart the checkout-api deployment.
 
 Restarting a deployment requires approval. OpenAPPA pops up an interactive **Approve / Reject** card in chat before the restart proceeds.
 
-#### 4. Remote change board
-
-```text
-Rollback the checkout-api deployment.
-```
-
-The policy routes this request to an external change board service.
-
-Forward the change board port in another terminal:
-
-```sh
-kubectl port-forward -n kagent svc/appa-demo-mocks 8081:8081
-```
-
-Inspect pending requests:
-
-```sh
-curl http://localhost:8081/pending
-```
-
-Approve the change:
-
-```sh
-ID=$(curl -s http://localhost:8081/pending | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4)
-curl -X POST http://localhost:8081/decide \
-  -H "Content-Type: application/json" \
-  -d "{\"id\": \"$ID\", \"ruling\": \"approve\"}"
-```
-
-#### 5. Subagents
+#### 4. Subagents
 
 ```text
 Ask the log analyst to analyze the crash logs of checkout-api-b2k1 and give me its summary.
@@ -192,7 +163,7 @@ Ask the log analyst to analyze the crash logs of checkout-api-b2k1 and give me i
 
 The subagent runs in an isolated session. Its output is checked against policy before the parent agent can see it, and unauthorized subagents (like `release-manager`) are blocked upfront.
 
-#### 6. Dynamic input rules
+#### 5. Dynamic input rules
 
 Compare how OpenAPPA evaluates the same tool dynamically based on its arguments:
 
@@ -212,14 +183,6 @@ Look up the ops-database-failover runbook.
 
 The annotator tags `ops-*` runbooks as internal. OpenAPPA blocks the unconstrained read and requires the agent to accept a restricted-reader remedy before retrieving the operational runbook.
 
-#### 7. Permitted read
-
-```text
-List the pods in the shop namespace.
-```
-
-A standard read operation with no sensitive data or external risks flows through without interruption.
-
 ## Protect existing agents
 
 If you already run kagent with your own agents, use `appa-guide` to configure policy and protect them conversationally.
@@ -229,7 +192,7 @@ If you already run kagent with your own agents, use `appa-guide` to configure po
 Update the controller with the `appa-kagent-adk` plugin image and deploy `appa-runtime`:
 
 ```sh
-APPA_VERSION=0.16.0 # x-release-please-version
+APPA_VERSION=0.17.1 # x-release-please-version
 KAGENT_VERSION=0.9.12
 KAGENT_NAMESPACE=kagent
 RUNTIME_NAMESPACE=appa

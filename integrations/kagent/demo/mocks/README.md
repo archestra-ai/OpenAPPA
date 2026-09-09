@@ -61,8 +61,8 @@ Request (the consult for `scale_deployment(catalog-cache, 2)`):
 ```
 
 The ruling is `{"ruling": "approve"|"deny", "reason": "..."}` inside
-the answer envelope: approve iff any top-level string argument equals
-`catalog-cache`, deny otherwise. So `scale_deployment(catalog-cache, 2)`
+the answer envelope: approve only `scale_deployment` when `arguments.name`
+equals `catalog-cache`, deny otherwise. So `scale_deployment(catalog-cache, 2)`
 is authorized machine-side while `scale_deployment(checkout-api, 5)`
 stays denied.
 
@@ -82,9 +82,11 @@ the consult and answers it in one of two ways:
 - The approval window closes first (`--approval-window`, default 25 s):
   HTTP 504, a clean no-answer, and the offer stands.
 
-The window must sit inside the policy's `externals.timeout_ms` (30 s in
-the demo policy). Then an unanswered consult is a clean no-answer and
-never a transport error.
+The chart sets a 120-second window by default. It gives the HTTP client
+five more seconds and the runtime another five seconds. The runtime
+timeout has a 30-second minimum. The chart limits the window to 280
+seconds, below the plugins' 300-second remedy-call limit. These margins
+let the mock return its HTTP 504 before a client timeout.
 
 ### `POST /sanitize` — sanitizers `strip-secret-values`, `strip-instructions`
 
@@ -115,7 +117,7 @@ A non-JSON body is rewritten as one text.
 
 | rule | effect |
 |---|---|
-| a value matching `pk_live_*` or `whsec_*` | replaced by `[redacted]` |
+| a value matching `pk_live_*` or `whsec_*` | replaced by `[redacted] (N characters)`, with its original length |
 | a line carrying `ignore your previous instructions` or `SYSTEM:`, and the indented lines continuing it | dropped |
 
 Both rules together cover the demo's hazards: the secret material
@@ -147,9 +149,7 @@ annotator = "runbook-readers"
 [[policy.tool]]
 name = "scale_deployment"
 delta = {}
-[policy.tool.requires]
-trust = "trusted"
-attention = ["release-window"]
+requires = { trust = "trusted", attention = ["release-window"] }
 
 [[policy.authority]]
 name = "release-window"
@@ -160,9 +160,7 @@ attention = ["release-window"]
 [[policy.tool]]
 name = "rollback_deployment"
 delta = {}
-[policy.tool.requires]
-trust = "trusted"
-attention = ["change-approval"]
+requires = { trust = "trusted", attention = ["change-approval"] }
 
 [[policy.authority]]
 name = "change-board"
@@ -171,18 +169,21 @@ hint = "Ask the change board through its approval channel; it answers when a mem
 attention = ["change-approval"]
 
 [externals]
-timeout_ms = 30000
+timeout_ms = 130000
 
 [externals.annotators.runbook-readers]
-command = ["/usr/local/bin/python3", "-c", "<fixed HTTP forwarding adapter>",
+command = ["/usr/bin/curl", "--silent", "--show-error", "--max-time", "29",
+           "--header", "Content-Type: application/json", "--data-binary", "@-",
            "http://appa-demo-mocks.kagent.svc.cluster.local:8081/annotate"]
 
 [externals.authorities.release-window]
-command = ["/usr/local/bin/python3", "-c", "<fixed HTTP forwarding adapter>",
+command = ["/usr/bin/curl", "--silent", "--show-error", "--max-time", "29",
+           "--header", "Content-Type: application/json", "--data-binary", "@-",
            "http://appa-demo-mocks.kagent.svc.cluster.local:8081/authorize"]
 
 [externals.authorities.change-board]
-command = ["/usr/local/bin/python3", "-c", "<fixed HTTP forwarding adapter>",
+command = ["/usr/bin/curl", "--silent", "--show-error", "--max-time", "125",
+           "--header", "Content-Type: application/json", "--data-binary", "@-",
            "http://appa-demo-mocks.kagent.svc.cluster.local:8081/approve"]
 ```
 
@@ -191,18 +192,21 @@ deterministic derivation instead of a model:
 
 ```toml
 [externals.sanitizers.strip-secret-values]
-command = ["/usr/local/bin/python3", "-c", "<fixed HTTP forwarding adapter>",
+command = ["/usr/bin/curl", "--silent", "--show-error", "--max-time", "29",
+           "--header", "Content-Type: application/json", "--data-binary", "@-",
            "http://appa-demo-mocks.kagent.svc.cluster.local:8081/sanitize"]
 
 [externals.sanitizers.strip-instructions]
-command = ["/usr/local/bin/python3", "-c", "<fixed HTTP forwarding adapter>",
+command = ["/usr/bin/curl", "--silent", "--show-error", "--max-time", "29",
+           "--header", "Content-Type: application/json", "--data-binary", "@-",
            "http://appa-demo-mocks.kagent.svc.cluster.local:8081/sanitize"]
 ```
 
 The complete command is in
 [`../chart/files/demo.appa.toml`](../chart/files/demo.appa.toml). It
 forwards the consult envelope on stdin and writes the answer envelope to
-stdout. No provider token or runtime environment enters the subprocess.
+stdout. Do not add `--fail`: the mock's HTTP 404 and 504 error envelopes
+must reach the runtime as consult no-answers, not command-transport failures.
 
 A direct `url` binding still accepts cleartext `http` only to a loopback
 host (`appa-runtime/src/config.rs`, `validated_url`). The in-cluster mock
