@@ -388,9 +388,7 @@ func (d *MCPDiscovery) prepare(ctx agent.ReadonlyContext, ids trajectoryIDs, pin
 	invalid := make(map[string]bool)
 	for _, check := range report.Tools {
 		if check.Status == "invalid" {
-			if !run.opened {
-				return nil, failClosed("%s: %s", check.Tool, check.Reason)
-			}
+			// Missing coverage disables this tool, not the conversation.
 			invalid[check.Tool] = true
 			delete(selected, check.Tool)
 		}

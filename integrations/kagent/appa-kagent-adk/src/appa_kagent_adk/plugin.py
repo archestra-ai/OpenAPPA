@@ -291,6 +291,8 @@ class AppaPluginKagent(BasePlugin):
             found = discovery.state(context.invocation_id).identities.get(tool)
             if found is not None:
                 return found
+            if self._inventory.spelling(tool.name) is not None:
+                return discovery.state(context.invocation_id).names.spelling(tool.name)
         return self._inventory.spelling(tool.name)
 
     def _for_model(self, text: str | None, context=None) -> str:
