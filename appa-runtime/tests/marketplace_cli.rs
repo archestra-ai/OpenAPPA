@@ -365,7 +365,7 @@ fn actual_linear_package_installs_repeats_bundles_relocates_and_removes() {
         "a".repeat(40)
     ));
     let mut child = Command::new("python3")
-        .arg(helper)
+        .arg(&helper)
         .current_dir(replica.path())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -383,6 +383,10 @@ fn actual_linear_package_installs_repeats_bundles_relocates_and_removes() {
         .unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        !helper.parent().unwrap().join("__pycache__").exists(),
+        "running the helper must not mutate an immutable package"
+    );
     let annotation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
         annotation["answer"]["delta"]["audience"],

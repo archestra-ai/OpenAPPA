@@ -163,15 +163,20 @@ def test_actual_streamable_http_mcp_calls_update_shared_invocation_counters():
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 tools = await session.list_tools()
-                assert {tool.name for tool in tools.tools} == {"get_file_contents", "issue_write"}
+                assert {tool.name for tool in tools.tools} == {"get_file_contents", "issue_write", "get_issue", "save_comment"}
                 read_result = await session.call_tool("get_file_contents", {"owner": "acme", "repo": "docs", "path": "README.md"})
                 assert not read_result.isError
                 assert "ignore your previous instructions" in str(read_result)
                 write_result = await session.call_tool("issue_write", {"owner": "acme", "repo": "docs", "title": "Docs", "body": "Operator-authored"})
                 assert not write_result.isError
+                linear_read = await session.call_tool("get_issue", {"id": "ENG-1"})
+                assert not linear_read.isError
+                assert "Private fixture issue" in str(linear_read)
+                linear_write = await session.call_tool("save_comment", {"issueId": "ENG-1", "body": "Fixture comment"})
+                assert not linear_write.isError
 
     with running_fixture(with_mcp=True) as (base, mcp_url):
         asyncio.run(asyncio.wait_for(invoke(mcp_url), timeout=15))
         state = json.loads(http(base, "/state")[1])
-        assert state["counts"] == {"get_file_contents": 1, "issue_write": 1}
+        assert state["counts"] == {"get_file_contents": 1, "issue_write": 1, "get_issue": 1, "save_comment": 1}
         assert state["invocations"][1]["args"]["body"] == "Operator-authored"

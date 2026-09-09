@@ -1074,6 +1074,14 @@ jobs:
         env:
           ACCEPTANCE_LOGS: ${{ runner.temp }}/appa-marketplace-acceptance
         run: python3 integrations/kagent/e2e/marketplace/run.py "$ACCEPTANCE_LOGS"
+      - name: Exercise the Linear vertical slice
+        env:
+          ACCEPTANCE_LOGS: ${{ runner.temp }}/appa-linear-acceptance
+        run: |
+          for image in runtime python go fixtures; do
+            docker tag "appa-acceptance-${image}:ci" "appa-acceptance-${image}:linear"
+          done
+          python3 integrations/kagent/e2e/marketplace/linear_run.py "$ACCEPTANCE_LOGS"
       - name: Upload acceptance evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -1082,6 +1090,8 @@ jobs:
           path: |
             ${{ runner.temp }}/appa-marketplace-acceptance
             !${{ runner.temp }}/appa-marketplace-acceptance/kubeconfig
+            ${{ runner.temp }}/appa-linear-acceptance
+            !${{ runner.temp }}/appa-linear-acceptance/kubeconfig
           if-no-files-found: ignore
           retention-days: 7
 

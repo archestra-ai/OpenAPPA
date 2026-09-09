@@ -7,6 +7,8 @@ Every supplied scope argument must be fixed by the matching operator rule.
 import json
 from pathlib import Path
 import sys
+# Installed generations are immutable: importing support code must not create caches.
+sys.dont_write_bytecode = True
 from linear_schema import check_schema, valid
 
 ROOT = Path(__file__).resolve().parent
