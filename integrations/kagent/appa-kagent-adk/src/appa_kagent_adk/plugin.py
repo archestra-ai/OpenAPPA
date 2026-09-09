@@ -185,6 +185,7 @@ class AppaPluginKagent(BasePlugin):
         # nothing. The result gate drops the entry it reads, and the
         # run's end drops what no result gate reached.
         self._settled: dict[str, set[str]] = {}
+        self._paused_spawns: set[str] = set()
         # ADK executes parallel function calls concurrently, while one
         # OpenAPPA branch admits one dispatch lifecycle at a time. A
         # function-call id holds its branch's lock from the call gate
@@ -322,6 +323,7 @@ class AppaPluginKagent(BasePlugin):
 
     def _close_run(self, invocation_id: str) -> None:
         """Drop everything this run pinned. The next run reads afresh."""
+        self._paused_spawns.discard(invocation_id)
         self._abandon_invocation(invocation_id)
         for task, invocations in list(self._runner_invocations.items()):
             invocations.discard(invocation_id)
@@ -611,6 +613,7 @@ class AppaPluginKagent(BasePlugin):
         return True
 
     async def before_tool_callback(self, *, tool, tool_args, tool_context):
+        self._paused_spawns.discard(tool_context.invocation_id)
         root_id, child_id = self._ids(tool_context)
         if tool is self._return_tool:
             # APPA owns the return gate — the object this plugin built,
@@ -657,6 +660,21 @@ class AppaPluginKagent(BasePlugin):
                     if call_id is not None:
                         self._rejected_controls.setdefault(tool_context.invocation_id, set()).add(call_id)
         await self._acquire_dispatch(root_id, child_id, tool_context)
+        if is_spawn(spelled) and tool_context.tool_confirmation is not None:
+            try:
+                payload = tool_context.tool_confirmation.payload
+                target = payload.get("context_id") if isinstance(payload, dict) else None
+                if not isinstance(target, str) or not target:
+                    raise AppaFailClosed("remote approval resume requires the original child context_id")
+                decision = await self._post(
+                    wire.spawn_resume(root_id, spelled, _plain_json(tool_args), target, child_id)
+                )
+                if decision.kind != "ack":
+                    raise AppaFailClosed(f"appa refused the spawn resume: {decision.reason or decision.kind}")
+                return None
+            except BaseException:
+                self._release_tool_dispatch(tool_context)
+                raise
         call = wire.tool_call(root_id, spelled, _plain_json(tool_args), child_id, ruling=ruling)
         if (discovery := self._discovery_runs.get(tool_context.invocation_id)) is not None:
             call["inventory"] = discovery.state(tool_context.invocation_id).evidence
@@ -703,6 +721,14 @@ class AppaPluginKagent(BasePlugin):
         spelled = self._spelling(tool, tool_context)
         if spelled is None:
             raise AppaFailClosed(f"the tool {tool.name} is outside the gated inventory, and its result cannot cross")
+        if (is_spawn(spelled) and isinstance(result, dict) and result.get("status") == "pending"
+                and result.get("waiting_for") == "subagent_approval"):
+            try:
+                await self._ping()
+                self._paused_spawns.add(tool_context.invocation_id)
+                return None
+            finally:
+                self._release_tool_dispatch(tool_context)
         if tool.name == wire.BATTERY_MATCH_TOOL:
             self._remember_battery_suggestions(tool_context.invocation_id, result)
         root_id, child_id = self._ids(tool_context)
@@ -967,7 +993,8 @@ class AppaPluginKagent(BasePlugin):
         # turn_end lands where the prompt and the tool calls of the run
         # landed. The pin then goes, and the next run classifies afresh.
         root_id, child_id = self._ids(invocation_context)
-        await self._post_quiet(wire.turn_end(root_id, child_id))
+        if invocation_context.invocation_id not in self._paused_spawns:
+            await self._post_quiet(wire.turn_end(root_id, child_id))
         self._close_run(invocation_context.invocation_id)
 
     # google-adk 2.8.0 only — the 1.31.1 manager never calls these two.
