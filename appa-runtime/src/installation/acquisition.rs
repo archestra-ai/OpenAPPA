@@ -78,7 +78,7 @@ impl Acquired {
             .map_err(|error| InstallError::Invalid(error.to_string()))?;
         if cached != generation {
             return Err(InstallError::Invalid(
-                "retained descriptor disagrees with the selected generation".into(),
+                "the retained descriptor disagrees with the installed version".into(),
             ));
         }
         let marketplace = root.join("marketplace");
@@ -138,7 +138,7 @@ impl Acquired {
             .map_err(|error| InstallError::Invalid(error.to_string()))?;
         selection.validate()?;
         if selection.generation() != &generation {
-            return Err(InstallError::Invalid("bundle mixes generation identities".into()));
+            return Err(InstallError::Invalid("the bundle mixes versions".into()));
         }
         let config = String::from_utf8(super::required_bytes(&unpacked.join("config.toml"))?)
             .map_err(|error| InstallError::Invalid(error.to_string()))?;
@@ -227,7 +227,7 @@ impl Acquired {
     pub fn build(requirements: Requirements) -> Result<Self, InstallError> {
         let commit = option_env!("APPA_BUILD_COMMIT").ok_or_else(|| {
             InstallError::Invalid(
-                "this development build has uncommitted plugin changes; commit them and rebuild, or install a published generation with --revision"
+                "this development build has uncommitted plugin changes; commit them and rebuild, or install a published version with --revision"
                     .into(),
             )
         })?;
@@ -238,8 +238,7 @@ impl Acquired {
             .ok_or_else(|| InstallError::Invalid("this platform has no published runtime binary".into()))?;
         if matches!(requirements, Requirements::Kagent | Requirements::Both(_)) {
             return Err(InstallError::Invalid(
-                "kagent needs a published generation with its images and chart; a development build has none"
-                    .into(),
+                "kagent needs a published version with its images and chart; a development build has none".into(),
             ));
         }
         let stage =
@@ -248,7 +247,8 @@ impl Acquired {
         let staged = stage.path().join("plugin");
         crate::plugin_bundle::stage_repository(&repository, &staged)
             .map_err(|error| InstallError::Invalid(format!("cannot stage the plugin tree: {error}")))?;
-        crate::plugin_bundle::validate_source_tree(&staged).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        crate::plugin_bundle::validate_source_tree(&staged)
+            .map_err(|error| InstallError::Invalid(error.to_string()))?;
         let actual = appa_package::canonical_tree_digest(&staged)
             .map_err(|error| InstallError::Invalid(error.to_string()))?
             .iter()
@@ -264,7 +264,8 @@ impl Acquired {
         let plugin_archive = stage.path().join(BUILD_PLUGIN_ARCHIVE);
         pack_tree(&staged, &plugin_archive)?;
         let binary_archive = stage.path().join(platform.archive());
-        let executable = std::env::current_exe().map_err(|error| io("locate this executable", Path::new("appa"), error))?;
+        let executable =
+            std::env::current_exe().map_err(|error| io("locate this executable", Path::new("appa"), error))?;
         pack_binary(&executable, platform, &binary_archive)?;
         let generation = Generation::build(
             commit.clone(),
@@ -299,7 +300,7 @@ impl Acquired {
         let requested = match revision {
             Some(revision) => revision,
             None => option_env!("APPA_RELEASE_REF").or(own_commit)
-                .ok_or_else(|| InstallError::Invalid("this development build has no published generation; specify --revision with a published tag or commit".into()))?,
+                .ok_or_else(|| InstallError::Invalid("this development build has no published version; specify --revision with a published tag or commit".into()))?,
         };
         let expected_commit = if revision.is_none() {
             own_commit
@@ -349,19 +350,19 @@ impl Acquired {
                 .is_some_and(|commit| generation.commit() != commit)
         {
             return Err(InstallError::Invalid(
-                "published descriptor does not belong to the requested generation".into(),
+                "the published descriptor does not belong to the requested version".into(),
             ));
         }
         let available = generation.archives();
         let marketplace_archive = generation
             .marketplace_archive()
-            .expect("a published generation names its marketplace archive");
+            .expect("a published version names its marketplace archive");
         let names = required_archives(&generation, requirements)?;
         let mut archives = BTreeMap::new();
         for name in names {
             let expected = available
                 .get(&name)
-                .ok_or_else(|| InstallError::Invalid(format!("generation does not publish {name}")))?;
+                .ok_or_else(|| InstallError::Invalid(format!("this version does not publish {name}")))?;
             let path = stage.path().join(&name);
             fetch(&asset_url(releases, &release, &name)?, &path, MAX_ARTIFACT_BYTES)?;
             verify_artifact(&path, expected)?;
@@ -404,7 +405,7 @@ pub(super) fn required_archives(
             .is_some_and(|build| build.platform() != platform)
         {
             return Err(InstallError::Invalid(
-                "the selected development generation was built for another platform".into(),
+                "the installed build was made for another platform".into(),
             ));
         }
         names.push(platform.archive().to_owned());
@@ -413,7 +414,7 @@ pub(super) fn required_archives(
     if matches!(requirements, Requirements::Kagent | Requirements::Both(_)) {
         names.push(generation.runtime_chart_archive().ok_or_else(|| {
             InstallError::Invalid(
-                "kagent needs a published generation with its images and chart; a development build has none".into(),
+                "kagent needs a published version with its images and chart; a development build has none".into(),
             )
         })?);
     }
@@ -428,12 +429,19 @@ fn source_at_commit(commit: &Commit, stage: &Path) -> Result<PathBuf, InstallErr
     if let Some(root) = option_env!("APPA_BUILD_REPOSITORY").map(Path::new)
         && git_head(root).as_deref() == Some(commit.as_str())
     {
-        eprintln!("appa: exporting commit {} from {}...", &commit.as_str()[..12], root.display());
+        eprintln!(
+            "appa: exporting commit {} from {}...",
+            &commit.as_str()[..12],
+            root.display()
+        );
         export_commit(root, &repository)?;
         return Ok(repository);
     }
     let url = format!("{}/{commit}.tar.gz", crate::plugin_bundle::source_archive_base_url());
-    eprintln!("appa: fetching the source archive for commit {}...", &commit.as_str()[..12]);
+    eprintln!(
+        "appa: fetching the source archive for commit {}...",
+        &commit.as_str()[..12]
+    );
     let archive = stage.join("source.tar.gz");
     crate::plugin_bundle::download_bounded(&url, &archive, MAX_ARTIFACT_BYTES)
         .map_err(|error| InstallError::Invalid(format!("cannot fetch this build's source: {error}")))?;
@@ -469,7 +477,9 @@ fn export_commit(root: &Path, destination: &Path) -> Result<(), InstallError> {
             command.arg(source);
         }
     }
-    let output = command.output().map_err(|error| io("export the build's commit", root, error))?;
+    let output = command
+        .output()
+        .map_err(|error| io("export the build's commit", root, error))?;
     if !output.status.success() {
         return Err(InstallError::Invalid(format!(
             "git archive failed at {}: {}",
@@ -478,7 +488,9 @@ fn export_commit(root: &Path, destination: &Path) -> Result<(), InstallError> {
         )));
     }
     if output.stdout.len() as u64 > appa_package::tree::MAX_UNCOMPRESSED_BYTES {
-        return Err(InstallError::Invalid("the exported source exceeds its byte limit".into()));
+        return Err(InstallError::Invalid(
+            "the exported source exceeds its byte limit".into(),
+        ));
     }
     fs::create_dir(destination).map_err(|error| io("stage exported source", destination, error))?;
     tar::Archive::new(std::io::Cursor::new(output.stdout))
@@ -508,7 +520,8 @@ fn pack_tree(root: &Path, destination: &Path) -> Result<(), InstallError> {
                     .map_err(|error| io("archive directory", destination, error))?;
             }
             appa_package::tree::EntryKind::File => {
-                let metadata = fs::metadata(&entry.absolute).map_err(|error| io("inspect file", &entry.absolute, error))?;
+                let metadata =
+                    fs::metadata(&entry.absolute).map_err(|error| io("inspect file", &entry.absolute, error))?;
                 header.set_entry_type(tar::EntryType::Regular);
                 header.set_size(metadata.len());
                 header.set_mode(if is_executable(&metadata) { 0o755 } else { 0o644 });
@@ -584,7 +597,8 @@ fn is_executable(metadata: &fs::Metadata) -> bool {
 }
 
 fn digest_of(path: &Path) -> Result<ArtifactDigest, InstallError> {
-    ArtifactDigest::of_reader(super::open_regular(path)?, MAX_ARTIFACT_BYTES).map_err(|error| io("hash archive", path, error))
+    ArtifactDigest::of_reader(super::open_regular(path)?, MAX_ARTIFACT_BYTES)
+        .map_err(|error| io("hash archive", path, error))
 }
 
 pub(super) fn verify_artifact(path: &Path, expected: &ArtifactDigest) -> Result<(), InstallError> {
@@ -633,7 +647,7 @@ fn asset_url(base: &str, release: &str, file: &str) -> Result<String, InstallErr
 fn fetch(url: &str, path: &Path, limit: u64) -> Result<(), InstallError> {
     crate::plugin_bundle::download_bounded(url, path, limit).map_err(|error| {
         InstallError::Invalid(format!(
-            "cannot acquire a published generation: {error}; source-only commits are not installable releases"
+            "cannot fetch a published version: {error}; a commit without a release is not installable"
         ))
     })
 }
@@ -670,7 +684,7 @@ fn release_for_commit(commit: &Commit, api: &str, directory: &Path) -> Result<St
             return match found.as_slice() {
                 [release] => Ok(release.clone()),
                 [] => Err(InstallError::Invalid(format!(
-                    "commit {commit} has no published version tag; choose a published generation"
+                    "commit {commit} has no published release; choose a published version"
                 ))),
                 _ => Err(InstallError::Invalid(
                     "several release tags name this commit; specify the intended version tag".into(),
@@ -702,7 +716,11 @@ mod tests {
             ArtifactDigest::of_bytes(b"plugin"),
         )
         .unwrap();
-        assert!(required_archives(&generation, Requirements::Packages).unwrap().is_empty());
+        assert!(
+            required_archives(&generation, Requirements::Packages)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             required_archives(&generation, Requirements::Claude(Platform::MacArm64)).unwrap(),
             vec![Platform::MacArm64.archive().to_owned(), BUILD_PLUGIN_ARCHIVE.to_owned()]

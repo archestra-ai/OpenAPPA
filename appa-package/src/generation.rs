@@ -18,11 +18,11 @@ pub const MAX_DESCRIPTOR_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Error)]
 pub enum GenerationError {
-    #[error("generation descriptor exceeds {MAX_DESCRIPTOR_BYTES} bytes")]
+    #[error("the version descriptor exceeds {MAX_DESCRIPTOR_BYTES} bytes")]
     TooLarge,
-    #[error("invalid generation descriptor: {0}")]
+    #[error("invalid version descriptor: {0}")]
     Syntax(#[from] serde_json::Error),
-    #[error("invalid generation field `{field}`: {reason}")]
+    #[error("invalid version descriptor field `{field}`: {reason}")]
     Invalid { field: &'static str, reason: String },
 }
 
@@ -642,15 +642,17 @@ mod tests {
         assert_eq!(parsed.plugin_archive(), BUILD_PLUGIN_ARCHIVE);
         assert!(parsed.marketplace_archive().is_none());
         assert!(parsed.runtime_chart_archive().is_none());
-        assert!(Generation::build(
-            Commit::parse(&"b".repeat(40)).unwrap(),
-            digest,
-            Platform::MacArm64,
-            "short",
-            ArtifactDigest::of_bytes(b"binary"),
-            ArtifactDigest::of_bytes(b"plugin"),
-        )
-        .is_err());
+        assert!(
+            Generation::build(
+                Commit::parse(&"b".repeat(40)).unwrap(),
+                digest,
+                Platform::MacArm64,
+                "short",
+                ArtifactDigest::of_bytes(b"binary"),
+                ArtifactDigest::of_bytes(b"plugin"),
+            )
+            .is_err()
+        );
     }
 
     #[test]

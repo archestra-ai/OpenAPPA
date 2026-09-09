@@ -18,7 +18,7 @@ The Claude Code adapter requires the `claude` command, `curl`, and Cargo when bu
 Every `appa` build knows the SHA-256 of the plugin artifact belonging to its own
 release and accepts no other bytes. On Linux and macOS the installer fetches
 the release archive, verifies its checksum, and places `appa` in
-`~/.local/bin`; the install then fetches the generation published for that
+`~/.local/bin`; the install then fetches the version published for that
 release, verifies it, and retains it:
 
 ```sh

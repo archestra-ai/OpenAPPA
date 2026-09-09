@@ -40,10 +40,12 @@ appa plugin list
 appa battery list
 ```
 
-The first install uses that binary's published generation. A generation binds
-the catalog, packages, runtime, native plugin and image descriptors to one commit.
-Source commits without published artifacts cannot be installed online. Subsequent
-installs retain the selected generation; nothing updates automatically.
+The first install uses that binary's own version: the release published for
+its tag, or, for a checkout build, the tree of the commit it was built from. A
+version binds the catalog, packages, runtime, native plugin and image
+descriptors to one commit. Commits without a published release cannot be
+installed from the network. Subsequent installs retain the installed version;
+nothing updates automatically.
 
 Claude installation registers its native plugin and verifies the running APPA
 runtime. Battery installation adds and activates its policy in the same operation.
@@ -52,8 +54,9 @@ different identity can be associated using `--server <connection-id>`; use the
 identity reported by the host's discovery/validation, not a guessed provider URL.
 
 Use `--config <path>` to select another deployment. An explicit
-`appa plugin install claude-code --revision <full-commit>` updates the whole
-selected generation. A previously retained commit can be restored the same way.
+`appa plugin install claude-code --revision <tag-or-full-commit>` moves the
+whole deployment to that version. A previously retained version can be restored
+the same way.
 `appa battery remove github` removes unchanged installer-owned configuration;
 `appa plugin remove claude-code` unregisters owned Claude support. Removal keeps
 authored configuration, retained artifacts, trajectory data and the runtime.
@@ -82,7 +85,7 @@ go` when only one is needed; subsequent installs retain that choice. Go requires
 Linux amd64 nodes. Settings target kagent 0.9.12's native declarative agents;
 the controller image setting affects all its ordinary declarative agents.
 
-The runtime image is digest-pinned. Agent images use generation-specific tags;
+The runtime image is digest-pinned. Agent images use version-specific tags;
 the verifier compares registry and running-image digests to the lock. This is
 verification, not Kubernetes enforcement: a mismatched agent image can start
 before a post-deployment check detects it.
@@ -100,7 +103,7 @@ bundle command as Claude; container images and cluster credentials are separate
 prerequisites. No automatic updates occur.
 
 The separately published `appa-kagent-demo` chart is a demonstration, not an
-installed generation artifact. Its release checksum is in `SHA256SUMS`; the
+artifact of an installed version. Its release checksum is in `SHA256SUMS`; the
 marketplace installs and bundles only the runtime chart.
 
 ## Custom files in offline bundles

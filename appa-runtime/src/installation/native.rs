@@ -73,9 +73,9 @@ impl ClaudeArtifacts {
             ));
         }
         let archives = generation.archives();
-        let binary_digest = archives.get(platform.archive()).ok_or_else(|| {
-            InstallError::Invalid("the selected generation has no executable for this platform".into())
-        })?;
+        let binary_digest = archives
+            .get(platform.archive())
+            .ok_or_else(|| InstallError::Invalid("the installed version has no executable for this platform".into()))?;
         let plugin_digest = &archives[&generation.plugin_archive()];
         let binary_archive = installation.state.join("artifacts").join(binary_digest.hex());
         let archive = installation.state.join("artifacts").join(plugin_digest.hex());
@@ -135,7 +135,7 @@ impl ClaudeArtifacts {
             || !same_artifacts
         {
             return Err(InstallError::Invalid(
-                "selected runtime and native plugin do not belong to the same generation".into(),
+                "the selected runtime and native plugin do not belong to the same version".into(),
             ));
         }
         let destination = directory.join(binary_digest.hex());

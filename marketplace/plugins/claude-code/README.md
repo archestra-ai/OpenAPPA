@@ -48,13 +48,13 @@ scanned; agents passed on the command line are not.
 This flow needs the `claude` command, `curl`, and Cargo when building from a checkout.
 
 `appa plugin install claude-code` installs one bundle: the plugin belonging to
-the running binary and that binary. It selects a generation, verifies every
-artifact against the generation descriptor before anything outside a temporary
+the running binary and that binary. It selects a version, verifies every
+artifact against that version's descriptor before anything outside a temporary
 file changes, retains them under the deployment's `.appa/` state so a later
-install needs no network, and activates the plugin with the generation's own
+install needs no network, and activates the plugin with that version's own
 binary. The result does not depend on the working directory.
 
-A release binary installs the generation published for its tag. The installer
+A release binary installs the version published for its tag. The installer
 verifies the checksum of the binary for Linux or macOS and places it in
 `~/.local/bin` (Windows: unpack the zip from the releases page):
 
@@ -63,10 +63,9 @@ curl -fsSL https://openappa.com/install.sh | sh
 ~/.local/bin/appa plugin install claude-code
 ```
 
-A checkout build has no published generation, so it installs itself: the
-generation is the plugin tree of the commit it was built from, exported from
-that checkout without the network, and its binary is the one running the
-command.
+A checkout build has no published version, so it installs itself: the version
+is the plugin tree of the commit it was built from, exported from that checkout
+without the network, and its binary is the one running the command.
 
 ```sh
 cargo install --path appa-runtime --force
@@ -89,7 +88,7 @@ through `PATH`. A first install writes the starting policy; a later one keeps
 the file it finds. Activation installs `clappa`, preserves a custom Claude
 statusline, registers the plugin, and starts the runtime through the same
 starter used at SessionStart. A successful command therefore proves that one
-runtime and one plugin from the selected generation are active.
+runtime and one plugin from the installed version are active.
 
 Deployments are content-addressed and immutable: Claude is pointed at a
 directory that cannot change under it, rather than at a checkout or a remote

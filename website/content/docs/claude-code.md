@@ -25,10 +25,10 @@ and run `appa plugin install claude-code` from it. From a checkout, `cargo
 install --path appa-runtime --force` builds the binary instead of downloading
 one.
 
-The install prints progress while it selects the generation, updates Claude
-Code, and starts the runtime, and it never prompts. A release binary installs
-the generation published for its tag; a checkout build installs its own plugin
-tree, exported from the commit it was built from. If a different APPA
+The install prints progress while it selects the version, updates Claude Code,
+and starts the runtime, and it never prompts. A release binary installs the
+version published for its tag; a checkout build installs its own plugin tree,
+exported from the commit it was built from. If a different APPA
 deployment already owns the runtime endpoint, the install refuses and names the
 process to stop. An unidentified listener is never stopped automatically.
 

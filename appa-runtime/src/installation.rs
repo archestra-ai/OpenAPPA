@@ -104,7 +104,7 @@ impl Selection {
                 .iter()
                 .find(|entry| entry.kind == PackageKind::Battery && entry.name.as_str() == owned.battery)
                 .ok_or_else(|| {
-                    InstallError::Invalid(format!("battery {} is absent from the new generation", owned.battery))
+                    InstallError::Invalid(format!("battery {} is absent from the new version", owned.battery))
                 })?;
             let package = Package::read(&marketplace.join(entry.path.as_str()).join(appa_package::MANIFEST_FILE))
                 .map_err(|error| InstallError::Invalid(error.to_string()))?;
@@ -211,7 +211,7 @@ impl Selection {
             .is_some_and(|build| build.platform() != self.platform)
         {
             return Err(InstallError::Invalid(
-                "the development generation was built for another platform".into(),
+                "the installed build was made for another platform".into(),
             ));
         }
         for name in self.plugins.iter().chain(&self.batteries) {
@@ -248,9 +248,7 @@ impl Selection {
                     Role::Plugin(plugin) if package.name.as_str() == name => Some(plugin),
                     _ => None,
                 })
-                .ok_or_else(|| {
-                    InstallError::Invalid(format!("plugin {name} is absent from the selected generation"))
-                })?;
+                .ok_or_else(|| InstallError::Invalid(format!("plugin {name} is absent from the installed version")))?;
             if hosts.contains(&plugin.host()) {
                 return Err(InstallError::Invalid(
                     "two selected plugins target the same host".into(),
@@ -265,9 +263,7 @@ impl Selection {
                     Role::Battery(battery) if package.name.as_str() == name => Some(battery),
                     _ => None,
                 })
-                .ok_or_else(|| {
-                    InstallError::Invalid(format!("battery {name} is absent from the selected generation"))
-                })?;
+                .ok_or_else(|| InstallError::Invalid(format!("battery {name} is absent from the installed version")))?;
             if hosts.iter().any(|host| !battery.hosts.contains(host)) {
                 return Err(InstallError::Invalid(format!(
                     "battery {name} does not support every selected host"
@@ -496,7 +492,7 @@ impl Installation {
             .join("marketplace");
         if !marketplace.is_dir() {
             return Err(InstallError::Invalid(format!(
-                "the selected generation {} is not retained at {}; rerun: appa plugin install claude-code",
+                "the installed version {} is not retained at {}; rerun: appa plugin install claude-code",
                 selection.commit(),
                 marketplace.display()
             )));
@@ -722,7 +718,7 @@ impl Installation {
             let cached = Generation::parse(&descriptor).map_err(|error| InstallError::Invalid(error.to_string()))?;
             if &cached != generation {
                 return Err(InstallError::Invalid(
-                    "one commit has conflicting generation descriptors".into(),
+                    "one commit has conflicting version descriptors".into(),
                 ));
             }
             verify_packages(&destination.join("marketplace"), generation)?;
