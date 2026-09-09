@@ -223,7 +223,7 @@ def test_repeated_delegation_uses_fresh_children_in_the_same_parent_chat(agent):
     children = set()
     for attempt in range(2):
         task = agent.say(
-            DELEGATE + "; make a fresh delegation now, do not reuse an earlier summary",
+            DELEGATE + "; include the timeout duration from the logs; make a fresh delegation now, do not reuse an earlier summary",
             context_id=context_id,
         )
         assert task.state == "completed", f"delegation {attempt + 1} completed"
@@ -240,6 +240,8 @@ def test_repeated_delegation_uses_fresh_children_in_the_same_parent_chat(agent):
             assert child_id and child_id not in children, "each new delegation gets a fresh child session"
             children.add(child_id)
             assert str(body.get("result") or "").strip(), "the child returned a nonempty checked value"
+            result = str(body["result"]).lower().replace(",", "")
+            assert "4500" in result or "4.5" in result, "the child analyzed the log data, not just a refusal"
         assert INJECTION not in task.text()
         assert task.confirmation() is None
 
