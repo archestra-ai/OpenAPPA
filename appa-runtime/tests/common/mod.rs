@@ -202,6 +202,7 @@ pub async fn propose(runtime: &Arc<Runtime>, call: ProposedCall) -> HookDecision
         HookEvent::ToolCall {
             actor: actor(),
             call,
+            call_id: None,
             spawn: false,
             ruling: None,
         },
@@ -218,6 +219,7 @@ pub async fn ran(runtime: &Arc<Runtime>, call: ProposedCall) {
             HookEvent::ToolResult {
                 actor: actor(),
                 call,
+                call_id: None,
                 outcome: ToolOutcome::Success {
                     body: OutcomeBody::Available("done".to_string()),
                 },

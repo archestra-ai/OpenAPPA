@@ -481,6 +481,7 @@ async fn propose(runtime: &Runtime, actor: &Actor, call: ProposedCall) -> Propos
     let event = HookEvent::ToolCall {
         actor: actor.clone(),
         call: call.clone(),
+        call_id: None,
         spawn: false,
         ruling: None,
     };
@@ -498,6 +499,7 @@ async fn report_empty_output(runtime: &Runtime, actor: &Actor, call: ProposedCal
     let event = HookEvent::ToolResult {
         actor: actor.clone(),
         call,
+        call_id: None,
         outcome: ToolOutcome::Success {
             body: OutcomeBody::Available(String::new()),
         },

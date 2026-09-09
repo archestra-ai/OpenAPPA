@@ -132,6 +132,7 @@ async fn a_token_bearing_loopback_annotator_is_reached_directly_when_a_proxy_is_
                 tool: "fetch".to_string(),
                 arguments: raw(serde_json::json!({ "url": "https://a.example" })),
             },
+            call_id: None,
             spawn: false,
             ruling: None,
         },
