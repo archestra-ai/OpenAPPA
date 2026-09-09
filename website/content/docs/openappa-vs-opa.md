@@ -4,13 +4,11 @@ category: Comparison
 order: 10.7
 ---
 
-[Open Policy Agent (OPA)](https://www.openpolicyagent.org/docs) is a general-purpose policy engine, while OpenAPPA is an agentic security framework. You write rules in OPA's language, Rego, to check application requests or infrastructure configurations. A policy can check whether a deployment uses an approved container registry and return a list of violations. OpenAPPA does not replace those configuration checks.
+[Open Policy Agent (OPA)](https://www.openpolicyagent.org/docs) is a general-purpose policy engine, while OpenAPPA is an agentic security framework. OPA can check [which tools an agent may call and which arguments are allowed](https://www.openpolicyagent.org/). Your application supplies the context and enforces the decision.
 
-OpenAPPA stores security history and carries data restrictions forward between actions. If an agent reads private incident notes while preparing a deployment, OpenAPPA can restrict where it publishes the release summary. OPA can check that sharing rule too, but your application must track the private read, decide how restrictions combine, and make that state available to the policy.
+OpenAPPA also supplies action-history tracking, persistent security state, and recovery plans. Reading internal data limits later sharing. Reading an untrusted source can prevent later use of tools that require trusted input. With OPA, your application must track those reads and define how they affect later actions.
 
-When an action is blocked, OpenAPPA builds remedy plans from the cleaning and approval options allowed by your policy. See [How it works](/how-it-works). OPA policies can [return structured data](https://www.openpolicyagent.org/docs), not just allow or deny. You could use that output to request approval, but you write the rule and the code that obtains approval and retries the action.
-
-OPA gives you one policy language across applications and infrastructure. OpenAPPA supplies the tracking and recovery behavior for agent workflows.
+OPA gives you flexibility to write rules across applications and infrastructure. OpenAPPA supplies the security behavior for carrying data restrictions through agent workflows. See [How it works](/how-it-works).
 
 | | OPA | OpenAPPA |
 |---|:---:|:---:|
