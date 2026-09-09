@@ -23,7 +23,7 @@ and `host/claude-code/Read`:
   match the path as written, absolute or relative. Other paths keep the
   session's label. No rule blocks a read or lowers its trust.
 
-The default config created by `appa init claude-code` separately provides the
+The default config `appa plugin install claude-code` writes separately provides the
 wildcard fallback for tools it does not name and the deployment-specific Bash
 Annotator hint. The root Annotator replaces this battery's default declaration.
 

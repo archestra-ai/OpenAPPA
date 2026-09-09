@@ -1,6 +1,6 @@
-# Development copy. `appa init claude-code` overwrites this file in the
-# deployment it materializes, with the absolute paths that init resolved and no
-# environment fallback at all.
+# Development copy. `appa plugin install claude-code` overwrites this file in
+# the deployment it materializes, with the absolute paths the install resolved
+# and no environment fallback at all.
 #
 # This copy exists so `claude --plugin-dir marketplace/plugins/claude-code/plugin` and
 # live-gate-check.py keep working against a checkout, where nothing has been

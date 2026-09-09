@@ -7,7 +7,7 @@
 # script resolves the latest release tag (or `APPA_VERSION`), downloads the
 # archive and the list from that one release, verifies the digest, and installs
 # `appa` into `APPA_INSTALL_DIR` (default `~/.local/bin`). It never runs
-# `appa init`: init can prompt, and under a pipe stdin is the script itself.
+# `appa plugin install`: changing the Claude Code profile is the person's call.
 #
 # Linux and macOS on x86_64 and aarch64 only. Windows users unpack the zip from
 # the releases page. `APPA_REPOSITORY_URL` exists for appa-install-test.sh,
@@ -148,9 +148,9 @@ mv -f "$staged" "$install_dir/appa" || fail "could not replace $install_dir/appa
 staged=
 printf 'Installed %s to %s\n' "$version" "$install_dir/appa"
 case :${PATH:-}: in
-  *":$install_dir:"*) printf 'Next: appa init claude-code\n' ;;
+  *":$install_dir:"*) printf 'Next: appa plugin install claude-code\n' ;;
   *)
     printf 'Add %s to PATH to run appa by name.\n' "$install_dir"
-    printf 'Next: "%s/appa" init claude-code\n' "$install_dir"
+    printf 'Next: "%s/appa" plugin install claude-code\n' "$install_dir"
     ;;
 esac

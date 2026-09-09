@@ -478,34 +478,6 @@ pub fn install(args: Install) -> ExitCode {
     finish(&args.target, "plugin.install".into(), result)
 }
 
-/// `init` is the short first-run spelling. A published build installs its
-/// generation through the marketplace. A development build has no published
-/// generation, so it deploys the plugin twin its own compilation stamped in,
-/// as an explicit `--plugin-source` always does.
-pub fn init_claude_code(plugin_source: Option<&str>) -> ExitCode {
-    if plugin_source.is_none() && is_published_build() {
-        return install(Install {
-            name: "claude-code".into(),
-            target: Target {
-                config: None,
-                json: false,
-            },
-            source: Source::default(),
-            runtime: None,
-        });
-    }
-    match crate::init::claude_code(plugin_source) {
-        Ok(description) => {
-            print!("{description}");
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprintln!("appa: {error}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
 /// A release build carries the tag whose generation the marketplace can fetch.
 pub(crate) fn is_published_build() -> bool {
     option_env!("APPA_RELEASE_REF").is_some()
@@ -700,14 +672,10 @@ fn finish(
             let path = receipt.deployment.display();
             let kind = receipt.operation.strip_suffix(".list").unwrap_or("package");
             match receipt.result.as_ref().and_then(|result| result["deployment"].as_str()) {
-                Some("absent") => writeln!(output, "No deployment at {path}. Run: appa init claude-code"),
-                Some("unmanaged") if is_published_build() => writeln!(
-                    output,
-                    "{path} was set up without the marketplace, so nothing is tracked here. Run: appa plugin install claude-code"
-                ),
+                Some("absent") => writeln!(output, "No deployment at {path}. Run: appa plugin install claude-code"),
                 Some("unmanaged") => writeln!(
                     output,
-                    "{path} was set up by `appa init` from a checkout build, which does not track plugins or batteries. To add a battery, add its policy file to `include` in this config."
+                    "{path} was set up without the marketplace, so nothing is tracked here. Run: appa plugin install claude-code"
                 ),
                 _ => writeln!(output, "No {kind} packages selected for {path}."),
             }

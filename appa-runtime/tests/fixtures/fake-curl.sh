@@ -30,12 +30,18 @@ case "$*" in
     ;;
   *"/policy-key"*)
     # FAKE_POLICY_KEY is the policy the endpoint serves. Unset, the route is
-    # missing, which curl --fail reports as a failure and init refuses.
+    # missing, which curl --fail reports as a failure and activation refuses.
     # FAKE_POLICY_KEY_TIMEOUT is a runtime that never answers the route inside
-    # curl's deadline.
+    # curl's deadline. FAKE_POLICY_KEY_AFTER_RELOAD, when set, is what the route
+    # answers once a reload has been recorded in FAKE_RELOADS: a runtime that
+    # loaded the file it was asked to.
     if [ -n "${FAKE_POLICY_KEY_TIMEOUT:-}" ]; then
       printf 'curl: (28) Operation timed out after 2000 milliseconds\n' >&2
       exit 28
+    fi
+    if [ -n "${FAKE_POLICY_KEY_AFTER_RELOAD:-}" ] && [ -s "${FAKE_RELOADS:-/nonexistent}" ]; then
+      printf '%s\n' "$FAKE_POLICY_KEY_AFTER_RELOAD"
+      exit 0
     fi
     if [ -z "${FAKE_POLICY_KEY:-}" ]; then
       printf 'curl: (22) The requested URL returned error: 404\n' >&2
@@ -45,9 +51,9 @@ case "$*" in
     exit 0
     ;;
   *"/reload"*)
-    # A successful reload, which is all init reads: the body is not consumed, so
-    # the fixture invents none. FAKE_RELOADS, when set, records that init got
-    # this far.
+    # A successful reload, which is all activation reads: the body is not
+    # consumed, so the fixture invents none. FAKE_RELOADS, when set, records that
+    # activation got this far.
     if [ -n "${FAKE_RELOADS:-}" ]; then
       printf 'reload\n' >>"$FAKE_RELOADS"
     fi

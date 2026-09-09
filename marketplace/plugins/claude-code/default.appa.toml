@@ -329,6 +329,6 @@ builtin = "hitl"
 
 # Whether the agent may report on its own through the `yell` tool. Off leaves it
 # unadvertised and unroutable; a person can always report with `appa yell`.
-# `appa init` asks, and writes the answer here.
+# Nothing asks: set it here.
 [reporting]
 agent_yell = false

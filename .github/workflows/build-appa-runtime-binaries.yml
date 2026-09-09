@@ -170,28 +170,30 @@ jobs:
           tar -xzf "dist/${ARCHIVE}" -C verify
           cd verify
           test -x "./${EXECUTABLE}"
-          "./${EXECUTABLE}" init claude-code --help >/dev/null
+          "./${EXECUTABLE}" plugin install claude-code --help >/dev/null
 
           # Every debug-only seam is read through one gate that
           # [profile.release] pins shut, so a released binary must ignore a
           # malformed APPA_ENDPOINT and carry on; one that refuses the value
           # read it, and could be pointed at another release's plugin.
           #
-          # init exits non-zero on both outcomes, so its output is the
-          # assertion and the exit code is discarded. The progress line is
-          # printed immediately after the endpoint resolves, which makes its
-          # presence the proof that the seam was ignored. Every output is
-          # classified, including the unrecognised one: this probe used to pass
-          # on an empty answer, which is how it stayed inert for four releases.
-          hostile=$(APPA_ENDPOINT=http://127.0.0.1:0 "./${EXECUTABLE}" init claude-code 2>&1 || true)
+          # Activation settles the endpoint before it reads anything, so the
+          # config it is pointed at is what fails next, and that failure is
+          # the proof that the seam was ignored. Activation exits non-zero on
+          # both outcomes, so its output is the assertion and the exit code is
+          # discarded. Every output is classified, including the unrecognised
+          # one: this probe used to pass on an empty answer, which is how it
+          # stayed inert for four releases.
+          hostile=$(APPA_ENDPOINT=http://127.0.0.1:0 "./${EXECUTABLE}" activate-claude \
+            --config ./no-such-dir/appa.toml --archive ./no-such-archive.tar.gz 2>&1 || true)
           case "$hostile" in
             *"is not a usable runtime endpoint"*)
               echo "::error::the released binary honoured APPA_ENDPOINT: ${hostile}"
               exit 1
               ;;
-            "appa init: "*) ;;
+            *"does not load"*) ;;
             *)
-              echo "::error::init stopped before the probe could prove anything: ${hostile}"
+              echo "::error::activation stopped before the probe could prove anything: ${hostile}"
               exit 1
               ;;
           esac
@@ -288,30 +290,30 @@ jobs:
             if ($Matches.digest -ne $expectedDigest) {
               throw "127.0.0.1:8787 is not this build: answered $($Matches.digest), expected $expectedDigest"
             }
-            & $cli init claude-code --help | Out-Null
+            & $cli plugin install claude-code --help | Out-Null
             if ($LASTEXITCODE -ne 0) {
-              throw "Extracted $env:EXECUTABLE does not expose init claude-code"
+              throw "Extracted $env:EXECUTABLE does not expose plugin install claude-code"
             }
             # Every debug-only seam is read through one gate that
             # [profile.release] pins shut, so a released binary must ignore a
             # malformed APPA_ENDPOINT and carry on; one that refuses the value
             # read it, and could be pointed at another release's plugin.
             #
-            # The progress line is printed immediately after the endpoint
-            # resolves, which makes its presence the proof that the seam was
-            # ignored. All three outcomes are classified, the unrecognised one
-            # included: this probe used to pass on an empty answer, which is how
-            # it stayed inert for four releases.
+            # Activation settles the endpoint before it reads anything, so the
+            # config it is pointed at is what fails next, and that failure is
+            # the proof that the seam was ignored. All three outcomes are
+            # classified, the unrecognised one included: this probe used to pass
+            # on an empty answer, which is how it stayed inert for four releases.
             $env:APPA_ENDPOINT = "http://127.0.0.1:0"
-            $hostile = (& $cli init claude-code 2>&1 | Out-String)
+            $hostile = (& $cli activate-claude --config .\no-such-dir\appa.toml --archive .\no-such-archive.tar.gz 2>&1 | Out-String)
             $env:APPA_ENDPOINT = $null
             if ($hostile -match "is not a usable runtime endpoint") {
               throw "the released binary honoured APPA_ENDPOINT: $hostile"
             }
-            if ("$hostile" -notmatch "^appa init: ") {
-              throw "init stopped before the probe could prove anything: $hostile"
+            if ("$hostile" -notmatch "does not load") {
+              throw "activation stopped before the probe could prove anything: $hostile"
             }
-            # init exits non-zero on the path just proven correct, so the
+            # activation exits non-zero on the path just proven correct, so the
             # expected native exit code is cleared here and only here, after the
             # classification above has already thrown on every other outcome.
             $global:LASTEXITCODE = 0
