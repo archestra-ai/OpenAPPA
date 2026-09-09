@@ -1508,6 +1508,7 @@ mod tests {
         )
         .unwrap();
         fs::write(&path, after).unwrap();
+        install._lock.unlock().unwrap();
         drop(install);
         let install = Installation::open(&path).unwrap();
         install.recover_config().unwrap();

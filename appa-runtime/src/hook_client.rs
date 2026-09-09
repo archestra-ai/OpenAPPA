@@ -171,11 +171,49 @@ fn post(endpoint: &Endpoint, event: &[u8], deadline: &Deadline) -> Result<Answer
             .map_err(|error| format!("cannot bound the read from {address}: {error}"))?;
         match socket.read(&mut chunk) {
             Ok(0) => break,
-            Ok(read) => answer.extend_from_slice(&chunk[..read]),
+            Ok(read) => {
+                answer.extend_from_slice(&chunk[..read]);
+                if declared_answer_len(&answer)?.is_some_and(|length| answer.len() >= length) {
+                    break;
+                }
+            }
             Err(error) => return Err(format!("cannot read the answer from {address}: {error}")),
         }
     }
     parse(&answer)
+}
+
+fn declared_answer_len(answer: &[u8]) -> Result<Option<usize>, String> {
+    let Some(end_of_head) = answer.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return Ok(None);
+    };
+    let head =
+        std::str::from_utf8(&answer[..end_of_head]).map_err(|_| "the answer's headers are not text".to_owned())?;
+    let mut declared = None;
+    for line in head.lines().skip(1) {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("content-length") {
+            if declared.is_some() {
+                return Err("the answer carries more than one content-length".to_owned());
+            }
+            declared = Some(
+                value
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| "the answer carries an invalid content-length".to_owned())?,
+            );
+        }
+    }
+    declared
+        .map(|length| {
+            end_of_head
+                .checked_add(4)
+                .and_then(|head_length| head_length.checked_add(length))
+                .ok_or_else(|| "the answer's content-length overflows this platform".to_owned())
+        })
+        .transpose()
 }
 
 fn parse(answer: &[u8]) -> Result<Answer, String> {
@@ -190,6 +228,11 @@ fn parse(answer: &[u8]) -> Result<Answer, String> {
         .nth(1)
         .and_then(|code| code.parse().ok())
         .ok_or_else(|| format!("the answer carries no status code: {head}"))?;
+    if let Some(length) = declared_answer_len(answer)?
+        && answer.len() != length
+    {
+        return Err("the answer body does not match its content-length".to_owned());
+    }
     Ok(Answer {
         status,
         body: answer[end_of_head + 4..].to_vec(),
@@ -498,7 +541,27 @@ mod tests {
         assert!(!refused.is_success());
 
         assert!(parse(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n").is_err());
+        assert!(parse(b"HTTP/1.1 200 OK\r\ncontent-length: 3\r\n\r\n{}").is_err());
+        assert!(parse(b"HTTP/1.1 200 OK\r\ncontent-length: 1\r\n\r\n{}").is_err());
         assert!(parse(b"garbage\r\n\r\n").is_err());
+    }
+
+    #[test]
+    fn a_complete_declared_body_does_not_wait_for_the_server_to_close() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port binds");
+        let address = listener.local_addr().expect("the listener has an address");
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("the client connects");
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}")
+                .expect("the server answers");
+            std::thread::sleep(Duration::from_secs(1));
+        });
+        let endpoint = Endpoint::parse(&format!("http://{address}")).expect("the endpoint parses");
+        let answer = post(&endpoint, b"{}", &Deadline::spanning(Duration::from_millis(250)))
+            .expect("the complete body answers before the connection closes");
+        assert_eq!(answer.body, b"{}");
+        server.join().expect("the server exits");
     }
 
     #[test]
