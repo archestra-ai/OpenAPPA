@@ -205,6 +205,15 @@ impl Selection {
         if self.schema != 1 {
             return Err(InstallError::Invalid("unsupported selection schema".into()));
         }
+        if self
+            .generation
+            .build_artifacts()
+            .is_some_and(|build| build.platform() != self.platform)
+        {
+            return Err(InstallError::Invalid(
+                "the development generation was built for another platform".into(),
+            ));
+        }
         for name in self.plugins.iter().chain(&self.batteries) {
             PackageName::parse(name).map_err(|error| InstallError::Invalid(error.to_string()))?;
         }
@@ -627,7 +636,7 @@ impl Installation {
             archive
                 .append_dir_all("marketplace", &marketplace)
                 .map_err(|error| io("archive packages", &marketplace, error))?;
-            for name in acquisition::required_archives(selection.generation(), selection.requirements()) {
+            for name in acquisition::required_archives(selection.generation(), selection.requirements())? {
                 let digest = selection.generation().archives()[&name].clone();
                 let path = self.state.join("artifacts").join(digest.hex());
                 acquisition::verify_artifact(&path, &digest)?;

@@ -329,8 +329,17 @@ impl Source {
         } else {
             current.cloned()
         };
+        // A development build replaces a development generation with itself,
+        // so a rebuilt checkout installs what it built. A published selection
+        // stays until an explicit revision changes it.
+        let retained = retained.filter(|selected| {
+            self.revision.is_some()
+                || is_published_build()
+                || selected.generation().published().is_some()
+                || Acquired::is_own_build(selected.generation())
+        });
         if let Some(selected) = retained {
-            let complete = super::acquisition::required_archives(selected.generation(), requirements)
+            let complete = super::acquisition::required_archives(selected.generation(), requirements)?
                 .iter()
                 .all(|name| {
                     installation
@@ -344,16 +353,26 @@ impl Source {
                 return Acquired::retained(installation, &selected, requirements);
             }
             eprintln!("appa: fetching missing artifacts for the selected generation...");
-            let acquired = Acquired::fetch(Some(selected.generation().release()), requirements)?;
+            let acquired = match selected.generation().published() {
+                Some(published) => Acquired::fetch(Some(published.release()), requirements)?,
+                None if Acquired::is_own_build(selected.generation()) => Acquired::build(requirements)?,
+                None => {
+                    return Err(InstallError::Invalid(
+                        "the retained development generation is incomplete and belongs to another build; reinstall with that build or a published generation".into(),
+                    ));
+                }
+            };
             if acquired.generation() != selected.generation() {
                 return Err(InstallError::Invalid(
-                    "published generation differs from the retained descriptor".into(),
+                    "the acquired generation differs from the retained descriptor".into(),
                 ));
             }
             return Ok(acquired);
         }
-        eprintln!("appa: resolving the published generation and fetching its artifacts...");
-        Acquired::fetch(self.revision.as_deref(), requirements)
+        if self.revision.is_some() || is_published_build() {
+            eprintln!("appa: resolving the published generation and fetching its artifacts...");
+        }
+        Acquired::own(self.revision.as_deref(), requirements)
     }
 }
 
@@ -559,7 +578,18 @@ pub fn list(kind: PackageKind, args: List) -> ExitCode {
             if path.exists() {
                 crate::config::Config::load(&path).map_err(|error| InstallError::Invalid(error.to_string()))?;
             }
-            let acquired = Acquired::fetch(revision.as_deref(), Requirements::Packages)?;
+            let acquired = match selection.as_ref().map(Selection::generation) {
+                Some(generation) if generation.published().is_none() && !Acquired::is_own_build(generation) => {
+                    return Err(InstallError::Invalid(
+                        "the selected development generation belongs to another build; its catalog is the retained one".into(),
+                    ));
+                }
+                Some(generation) => Acquired::own(
+                    generation.published().map(|published| published.release()),
+                    Requirements::Packages,
+                )?,
+                None => Acquired::own(None, Requirements::Packages)?,
+            };
             revision = Some(acquired.generation().commit().to_string());
             let catalog = Marketplace::read(&acquired.marketplace().join("marketplace.toml"))
                 .map_err(|error| InstallError::Invalid(error.to_string()))?;

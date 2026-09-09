@@ -237,8 +237,72 @@ impl ImageDigests {
 
 /// Validation happens once at acquisition. No fields can be changed after it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "RawGeneration")]
+#[serde(try_from = "RawGeneration", into = "RawGeneration")]
 pub struct Generation {
+    commit: Commit,
+    catalog: ArtifactDigest,
+    artifacts: Artifacts,
+}
+
+/// Where a generation's runtime and plugin bytes come from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Artifacts {
+    /// The release workflow's assets for one version tag: every platform's
+    /// executable, the plugin and marketplace archives, the chart, the images.
+    Published(Published),
+    /// One development build installing itself on the machine that built it:
+    /// its own executable and the plugin tree stamped into it at compilation.
+    Build(Build),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Published {
+    release: String,
+    marketplace: ArtifactDigest,
+    claude_plugin: ArtifactDigest,
+    runtime_chart: ArtifactDigest,
+    binaries: BTreeMap<Platform, ArtifactDigest>,
+    images: BTreeMap<Image, ImageDigests>,
+}
+
+impl Published {
+    pub fn release(&self) -> &str {
+        &self.release
+    }
+    pub fn binaries(&self) -> &BTreeMap<Platform, ArtifactDigest> {
+        &self.binaries
+    }
+    pub fn images(&self) -> &BTreeMap<Image, ImageDigests> {
+        &self.images
+    }
+    fn version(&self) -> &str {
+        &self.release[1..]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Build {
+    platform: Platform,
+    plugin_tree: String,
+    binary: ArtifactDigest,
+    claude_plugin: ArtifactDigest,
+}
+
+impl Build {
+    pub fn platform(&self) -> Platform {
+        self.platform
+    }
+    /// The canonical digest of the staged plugin tree, as the build stamps it.
+    pub fn plugin_tree(&self) -> &str {
+        &self.plugin_tree
+    }
+}
+
+pub const BUILD_PLUGIN_ARCHIVE: &str = "appa-plugin-build.tar.gz";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPublished {
     schema: u32,
     repository: String,
     commit: Commit,
@@ -252,69 +316,163 @@ pub struct Generation {
     images: BTreeMap<Image, ImageDigests>,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum BuildMarker {
+    Build,
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawGeneration {
+struct RawBuild {
     schema: u32,
     repository: String,
     commit: Commit,
-    release: String,
     protocol: u32,
     catalog: ArtifactDigest,
-    marketplace: ArtifactDigest,
+    source: BuildMarker,
+    platform: Platform,
+    plugin_tree: String,
+    binary: ArtifactDigest,
     claude_plugin: ArtifactDigest,
-    runtime_chart: ArtifactDigest,
-    binaries: BTreeMap<Platform, ArtifactDigest>,
-    images: BTreeMap<Image, ImageDigests>,
+}
+
+/// The published shape is the release workflow's, unchanged. A build
+/// descriptor is told apart by its `source` field before either shape is
+/// parsed, so a malformed published document still reports its own field.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum RawGeneration {
+    Published(RawPublished),
+    Build(RawBuild),
+}
+
+impl<'de> Deserialize<'de> for RawGeneration {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let document = serde_json::Value::deserialize(deserializer)?;
+        let build = document.get("source").is_some_and(|source| source == "build");
+        if build {
+            serde_json::from_value(document).map(Self::Build)
+        } else {
+            serde_json::from_value(document).map(Self::Published)
+        }
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+fn validate_identity(schema: u32, repository: &str, protocol: u32) -> Result<(), GenerationError> {
+    if schema != 1 {
+        return Err(invalid("schema", "only schema 1 is supported"));
+    }
+    if repository != REPOSITORY {
+        return Err(invalid("repository", "only the official marketplace is supported"));
+    }
+    if protocol != crate::PROTOCOL {
+        return Err(invalid("protocol", "this runtime does not support that protocol"));
+    }
+    Ok(())
+}
+
+fn validate_release(release: &str) -> Result<(), GenerationError> {
+    let version = release.strip_prefix('v').unwrap_or_default();
+    if version.is_empty()
+        || version.len() > 96
+        || !version.starts_with(|c: char| c.is_ascii_digit())
+        || !version
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b".-+".contains(&c))
+    {
+        return Err(invalid("release", "expected a version tag such as v0.14.1"));
+    }
+    Ok(())
+}
+
+fn validate_plugin_tree(digest: &str) -> Result<(), GenerationError> {
+    if digest.len() != 64 || !digest.bytes().all(lower_hex) {
+        return Err(invalid("plugin_tree", "expected 64 lowercase hexadecimal characters"));
+    }
+    Ok(())
 }
 
 impl TryFrom<RawGeneration> for Generation {
     type Error = GenerationError;
 
     fn try_from(raw: RawGeneration) -> Result<Self, Self::Error> {
-        if raw.schema != 1 {
-            return Err(invalid("schema", "only schema 1 is supported"));
+        match raw {
+            RawGeneration::Published(raw) => {
+                validate_identity(raw.schema, &raw.repository, raw.protocol)?;
+                validate_release(&raw.release)?;
+                if Platform::ALL.iter().any(|p| !raw.binaries.contains_key(p)) {
+                    return Err(invalid("binaries", "all six release platforms must be present"));
+                }
+                if Image::ALL.iter().any(|image| !raw.images.contains_key(image))
+                    || raw.images.values().any(|image| image.platforms.is_empty())
+                {
+                    return Err(invalid(
+                        "images",
+                        "runtime, Python and Go must each name at least one platform digest",
+                    ));
+                }
+                Ok(Self {
+                    commit: raw.commit,
+                    catalog: raw.catalog,
+                    artifacts: Artifacts::Published(Published {
+                        release: raw.release,
+                        marketplace: raw.marketplace,
+                        claude_plugin: raw.claude_plugin,
+                        runtime_chart: raw.runtime_chart,
+                        binaries: raw.binaries,
+                        images: raw.images,
+                    }),
+                })
+            }
+            RawGeneration::Build(raw) => {
+                validate_identity(raw.schema, &raw.repository, raw.protocol)?;
+                validate_plugin_tree(&raw.plugin_tree)?;
+                Ok(Self {
+                    commit: raw.commit,
+                    catalog: raw.catalog,
+                    artifacts: Artifacts::Build(Build {
+                        platform: raw.platform,
+                        plugin_tree: raw.plugin_tree,
+                        binary: raw.binary,
+                        claude_plugin: raw.claude_plugin,
+                    }),
+                })
+            }
         }
-        if raw.repository != REPOSITORY {
-            return Err(invalid("repository", "only the official marketplace is supported"));
+    }
+}
+
+impl From<Generation> for RawGeneration {
+    fn from(generation: Generation) -> Self {
+        match generation.artifacts {
+            Artifacts::Published(published) => Self::Published(RawPublished {
+                schema: 1,
+                repository: REPOSITORY.to_owned(),
+                commit: generation.commit,
+                release: published.release,
+                protocol: crate::PROTOCOL,
+                catalog: generation.catalog,
+                marketplace: published.marketplace,
+                claude_plugin: published.claude_plugin,
+                runtime_chart: published.runtime_chart,
+                binaries: published.binaries,
+                images: published.images,
+            }),
+            Artifacts::Build(build) => Self::Build(RawBuild {
+                schema: 1,
+                repository: REPOSITORY.to_owned(),
+                commit: generation.commit,
+                protocol: crate::PROTOCOL,
+                catalog: generation.catalog,
+                source: BuildMarker::Build,
+                platform: build.platform,
+                plugin_tree: build.plugin_tree,
+                binary: build.binary,
+                claude_plugin: build.claude_plugin,
+            }),
         }
-        if raw.protocol != crate::PROTOCOL {
-            return Err(invalid("protocol", "this runtime does not support that protocol"));
-        }
-        let version = raw.release.strip_prefix('v').unwrap_or_default();
-        if version.is_empty()
-            || version.len() > 96
-            || !version.starts_with(|c: char| c.is_ascii_digit())
-            || !version
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || b".-+".contains(&c))
-        {
-            return Err(invalid("release", "expected a version tag such as v0.14.1"));
-        }
-        if Platform::ALL.iter().any(|p| !raw.binaries.contains_key(p)) {
-            return Err(invalid("binaries", "all six release platforms must be present"));
-        }
-        if Image::ALL.iter().any(|image| !raw.images.contains_key(image))
-            || raw.images.values().any(|image| image.platforms.is_empty())
-        {
-            return Err(invalid(
-                "images",
-                "runtime, Python and Go must each name at least one platform digest",
-            ));
-        }
-        Ok(Self {
-            schema: raw.schema,
-            repository: raw.repository,
-            commit: raw.commit,
-            release: raw.release,
-            protocol: raw.protocol,
-            catalog: raw.catalog,
-            marketplace: raw.marketplace,
-            claude_plugin: raw.claude_plugin,
-            runtime_chart: raw.runtime_chart,
-            binaries: raw.binaries,
-            images: raw.images,
-        })
     }
 }
 
@@ -326,37 +484,106 @@ impl Generation {
         Ok(serde_json::from_slice(bytes)?)
     }
 
+    /// A development build's own generation, validated like a parsed one.
+    pub fn build(
+        commit: Commit,
+        catalog: ArtifactDigest,
+        platform: Platform,
+        plugin_tree: &str,
+        binary: ArtifactDigest,
+        claude_plugin: ArtifactDigest,
+    ) -> Result<Self, GenerationError> {
+        validate_plugin_tree(plugin_tree)?;
+        Ok(Self {
+            commit,
+            catalog,
+            artifacts: Artifacts::Build(Build {
+                platform,
+                plugin_tree: plugin_tree.to_owned(),
+                binary,
+                claude_plugin,
+            }),
+        })
+    }
+
     pub fn commit(&self) -> &Commit {
         &self.commit
-    }
-    pub fn release(&self) -> &str {
-        &self.release
     }
     pub fn catalog(&self) -> &ArtifactDigest {
         &self.catalog
     }
-    pub fn marketplace(&self) -> &ArtifactDigest {
-        &self.marketplace
+    pub fn artifacts(&self) -> &Artifacts {
+        &self.artifacts
     }
-    pub fn binaries(&self) -> &BTreeMap<Platform, ArtifactDigest> {
-        &self.binaries
+    pub fn published(&self) -> Option<&Published> {
+        match &self.artifacts {
+            Artifacts::Published(published) => Some(published),
+            Artifacts::Build(_) => None,
+        }
     }
-    pub fn images(&self) -> &BTreeMap<Image, ImageDigests> {
-        &self.images
+    pub fn build_artifacts(&self) -> Option<&Build> {
+        match &self.artifacts {
+            Artifacts::Build(build) => Some(build),
+            Artifacts::Published(_) => None,
+        }
+    }
+
+    /// How a person names this generation: its version tag, or the build's commit.
+    pub fn label(&self) -> String {
+        match &self.artifacts {
+            Artifacts::Published(published) => published.release.clone(),
+            Artifacts::Build(_) => format!("build {}", &self.commit.as_str()[..12]),
+        }
+    }
+
+    /// The archive that carries the Claude Code plugin tree.
+    pub fn plugin_archive(&self) -> String {
+        match &self.artifacts {
+            Artifacts::Published(published) => format!("appa-plugin-{}.tar.gz", published.version()),
+            Artifacts::Build(_) => BUILD_PLUGIN_ARCHIVE.to_owned(),
+        }
+    }
+
+    /// The archive that carries the marketplace tree; a build stages its own.
+    pub fn marketplace_archive(&self) -> Option<String> {
+        self.published()
+            .map(|published| format!("appa-marketplace-{}.tar.gz", published.version()))
+    }
+
+    /// The kagent runtime chart; a build publishes none.
+    pub fn runtime_chart_archive(&self) -> Option<String> {
+        self.published()
+            .map(|published| format!("appa-runtime-{}.tgz", published.version()))
     }
 
     /// Official asset names, never a URL/path supplied by a package manifest.
     pub fn archives(&self) -> BTreeMap<String, ArtifactDigest> {
-        let version = &self.release[1..];
-        let mut files: BTreeMap<_, _> = self
-            .binaries
-            .iter()
-            .map(|(platform, digest)| (platform.archive().to_owned(), digest.clone()))
-            .collect();
-        files.insert(format!("appa-marketplace-{version}.tar.gz"), self.marketplace.clone());
-        files.insert(format!("appa-plugin-{version}.tar.gz"), self.claude_plugin.clone());
-        files.insert(format!("appa-runtime-{version}.tgz"), self.runtime_chart.clone());
-        files
+        match &self.artifacts {
+            Artifacts::Published(published) => {
+                let mut files: BTreeMap<_, _> = published
+                    .binaries
+                    .iter()
+                    .map(|(platform, digest)| (platform.archive().to_owned(), digest.clone()))
+                    .collect();
+                files.insert(
+                    format!("appa-marketplace-{}.tar.gz", published.version()),
+                    published.marketplace.clone(),
+                );
+                files.insert(
+                    format!("appa-plugin-{}.tar.gz", published.version()),
+                    published.claude_plugin.clone(),
+                );
+                files.insert(
+                    format!("appa-runtime-{}.tgz", published.version()),
+                    published.runtime_chart.clone(),
+                );
+                files
+            }
+            Artifacts::Build(build) => BTreeMap::from([
+                (build.platform.archive().to_owned(), build.binary.clone()),
+                (BUILD_PLUGIN_ARCHIVE.to_owned(), build.claude_plugin.clone()),
+            ]),
+        }
     }
 }
 
@@ -386,6 +613,44 @@ mod tests {
         assert_eq!(generation.archives().len(), 9);
         assert!(generation.archives().contains_key("appa-plugin-0.14.1.tar.gz"));
         assert_eq!(generation.commit().as_str(), "a".repeat(40));
+        assert_eq!(generation.published().unwrap().release(), "v0.14.1");
+        assert!(generation.build_artifacts().is_none());
+        // Serialization keeps the release workflow's document shape.
+        let serialized: Value = serde_json::to_value(&generation).unwrap();
+        assert_eq!(serialized, fixture());
+    }
+
+    #[test]
+    fn build_generation_round_trips_and_names_its_two_archives() {
+        let digest = ArtifactDigest::of_bytes(b"fixture");
+        let generation = Generation::build(
+            Commit::parse(&"b".repeat(40)).unwrap(),
+            digest.clone(),
+            Platform::MacArm64,
+            &"c".repeat(64),
+            ArtifactDigest::of_bytes(b"binary"),
+            ArtifactDigest::of_bytes(b"plugin"),
+        )
+        .unwrap();
+        let bytes = serde_json::to_vec(&generation).unwrap();
+        let parsed = Generation::parse(&bytes).unwrap();
+        assert_eq!(parsed, generation);
+        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap()["source"], "build");
+        assert!(parsed.published().is_none());
+        assert_eq!(parsed.build_artifacts().unwrap().platform(), Platform::MacArm64);
+        assert_eq!(parsed.archives().len(), 2);
+        assert_eq!(parsed.plugin_archive(), BUILD_PLUGIN_ARCHIVE);
+        assert!(parsed.marketplace_archive().is_none());
+        assert!(parsed.runtime_chart_archive().is_none());
+        assert!(Generation::build(
+            Commit::parse(&"b".repeat(40)).unwrap(),
+            digest,
+            Platform::MacArm64,
+            "short",
+            ArtifactDigest::of_bytes(b"binary"),
+            ArtifactDigest::of_bytes(b"plugin"),
+        )
+        .is_err());
     }
 
     #[test]

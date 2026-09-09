@@ -2,10 +2,14 @@
 //! here; listing installed state and runtime startup do not enter this module.
 
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-use appa_package::generation::{ArtifactDigest, Commit, DESCRIPTOR_FILE, Generation, Platform, REPOSITORY};
+use appa_package::generation::{
+    ArtifactDigest, BUILD_PLUGIN_ARCHIVE, Commit, DESCRIPTOR_FILE, Generation, Platform, REPOSITORY,
+};
 use serde::Deserialize;
 
 use super::{InstallError, Selection, io, verify_packages};
@@ -80,7 +84,7 @@ impl Acquired {
         let marketplace = root.join("marketplace");
         selection.validate_packages(&marketplace)?;
         let mut archives = BTreeMap::new();
-        for name in required_archives(&generation, requirements) {
+        for name in required_archives(&generation, requirements)? {
             let digest = &generation.archives()[&name];
             let path = installation.state.join("artifacts").join(digest.hex());
             verify_artifact(&path, digest)?;
@@ -155,7 +159,7 @@ impl Acquired {
         let marketplace = unpacked.join("marketplace");
         selection.validate_packages(&marketplace)?;
         let mut archives = BTreeMap::new();
-        for name in required_archives(&generation, selection.requirements()) {
+        for name in required_archives(&generation, selection.requirements())? {
             let path = unpacked.join("artifacts").join(&name);
             verify_artifact(&path, &generation.archives()[&name])?;
             archives.insert(name, path);
@@ -170,6 +174,98 @@ impl Acquired {
                 config,
                 snapshot,
             }),
+        })
+    }
+
+    /// This binary's own generation: the published one for a release build,
+    /// itself for a development build. An explicit revision is always published.
+    pub fn own(revision: Option<&str>, requirements: Requirements) -> Result<Self, InstallError> {
+        let own_commit = revision.is_none_or(|revision| Some(revision) == option_env!("APPA_BUILD_COMMIT"));
+        if own_commit && !super::cli::is_published_build() {
+            Self::build(requirements)
+        } else {
+            Self::fetch(revision, requirements)
+        }
+    }
+
+    /// Whether a generation is the one this development build produces.
+    pub fn is_own_build(generation: &Generation) -> bool {
+        generation.build_artifacts().is_some_and(|build| {
+            Some(generation.commit().as_str()) == option_env!("APPA_BUILD_COMMIT")
+                && Some(build.plugin_tree()) == option_env!("APPA_PLUGIN_TREE_SHA256")
+        })
+    }
+
+    /// A development build installs itself: the plugin tree staged from its
+    /// commit, which must digest to what the build stamped, the marketplace
+    /// tree at that commit, and this process's own executable. Kagent needs
+    /// published images and a chart, which a build cannot supply.
+    pub fn build(requirements: Requirements) -> Result<Self, InstallError> {
+        let commit = option_env!("APPA_BUILD_COMMIT").ok_or_else(|| {
+            InstallError::Invalid(
+                "this development build has uncommitted plugin changes; commit them and rebuild, or install a published generation with --revision"
+                    .into(),
+            )
+        })?;
+        let commit = Commit::parse(commit).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let plugin_tree = option_env!("APPA_PLUGIN_TREE_SHA256")
+            .ok_or_else(|| InstallError::Invalid("this build carries no plugin identity".into()))?;
+        let platform = Platform::current()
+            .ok_or_else(|| InstallError::Invalid("this platform has no published runtime binary".into()))?;
+        if matches!(requirements, Requirements::Kagent | Requirements::Both(_)) {
+            return Err(InstallError::Invalid(
+                "kagent needs a published generation with its images and chart; a development build has none"
+                    .into(),
+            ));
+        }
+        let stage =
+            tempfile::tempdir().map_err(|error| io("stage acquisition", Path::new("temporary directory"), error))?;
+        let repository = source_at_commit(&commit, stage.path())?;
+        let staged = stage.path().join("plugin");
+        crate::plugin_bundle::stage_repository(&repository, &staged)
+            .map_err(|error| InstallError::Invalid(format!("cannot stage the plugin tree: {error}")))?;
+        crate::plugin_bundle::validate_source_tree(&staged).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let actual = appa_package::canonical_tree_digest(&staged)
+            .map_err(|error| InstallError::Invalid(error.to_string()))?
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        if actual != plugin_tree {
+            return Err(InstallError::Invalid(format!(
+                "the plugin tree at commit {commit} does not match this build; rebuild from that commit"
+            )));
+        }
+        let marketplace = repository.join("marketplace");
+        let catalog = ArtifactDigest::of_bytes(&super::required_bytes(&marketplace.join("marketplace.toml"))?);
+        let plugin_archive = stage.path().join(BUILD_PLUGIN_ARCHIVE);
+        pack_tree(&staged, &plugin_archive)?;
+        let binary_archive = stage.path().join(platform.archive());
+        let executable = std::env::current_exe().map_err(|error| io("locate this executable", Path::new("appa"), error))?;
+        pack_binary(&executable, platform, &binary_archive)?;
+        let generation = Generation::build(
+            commit.clone(),
+            catalog,
+            platform,
+            plugin_tree,
+            digest_of(&binary_archive)?,
+            digest_of(&plugin_archive)?,
+        )
+        .map_err(|error| InstallError::Invalid(error.to_string()))?;
+        verify_packages(&marketplace, &generation).map_err(|error| {
+            InstallError::Invalid(format!(
+                "{error}; if packages changed at commit {commit}, regenerate the catalog with scripts/appa-marketplace.sh and commit it"
+            ))
+        })?;
+        let mut archives = BTreeMap::new();
+        for name in required_archives(&generation, requirements)? {
+            archives.insert(name.clone(), stage.path().join(&name));
+        }
+        Ok(Self {
+            _stage: Some(stage),
+            generation,
+            marketplace,
+            archives,
+            imported: None,
         })
     }
 
@@ -192,17 +288,7 @@ impl Acquired {
         let api = crate::plugin_bundle::debug_override("APPA_MARKETPLACE_API_URL")
             .unwrap_or_else(|| format!("https://api.github.com/repos/{REPOSITORY}"));
         let releases = crate::plugin_bundle::release_base_url();
-        let acquired = Self::fetch_from(requested, expected_commit.as_ref(), requirements, &api, &releases);
-        // A development build's own commit is rarely a published generation;
-        // its plugin twin is installable through `init` without one.
-        match acquired {
-            Err(InstallError::Invalid(message)) if revision.is_none() && !super::cli::is_published_build() => {
-                Err(InstallError::Invalid(format!(
-                    "{message}; this is a development build: `appa init claude-code` installs its own plugin"
-                )))
-            }
-            other => other,
-        }
+        Self::fetch_from(requested, expected_commit.as_ref(), requirements, &api, &releases)
     }
 
     fn fetch_from(
@@ -232,7 +318,7 @@ impl Acquired {
         )?;
         let bytes = fs::read(&descriptor).map_err(|error| io("read generation descriptor", &descriptor, error))?;
         let generation = Generation::parse(&bytes).map_err(|error| InstallError::Invalid(error.to_string()))?;
-        if generation.release() != release
+        if generation.published().map(|published| published.release()) != Some(release.as_str())
             || commit
                 .as_ref()
                 .or(expected)
@@ -243,8 +329,10 @@ impl Acquired {
             ));
         }
         let available = generation.archives();
-        let marketplace_archive = format!("appa-marketplace-{}.tar.gz", &generation.release()[1..]);
-        let names = required_archives(&generation, requirements);
+        let marketplace_archive = generation
+            .marketplace_archive()
+            .expect("a published generation names its marketplace archive");
+        let names = required_archives(&generation, requirements)?;
         let mut archives = BTreeMap::new();
         for name in names {
             let expected = available
@@ -281,17 +369,198 @@ impl Selection {
     }
 }
 
-pub(super) fn required_archives(generation: &Generation, requirements: Requirements) -> Vec<String> {
-    let version = &generation.release()[1..];
-    let mut names = vec![format!("appa-marketplace-{version}.tar.gz")];
+pub(super) fn required_archives(
+    generation: &Generation,
+    requirements: Requirements,
+) -> Result<Vec<String>, InstallError> {
+    let mut names: Vec<String> = generation.marketplace_archive().into_iter().collect();
     if let Requirements::Claude(platform) | Requirements::Both(platform) = requirements {
+        if generation
+            .build_artifacts()
+            .is_some_and(|build| build.platform() != platform)
+        {
+            return Err(InstallError::Invalid(
+                "the selected development generation was built for another platform".into(),
+            ));
+        }
         names.push(platform.archive().to_owned());
-        names.push(format!("appa-plugin-{version}.tar.gz"));
+        names.push(generation.plugin_archive());
     }
     if matches!(requirements, Requirements::Kagent | Requirements::Both(_)) {
-        names.push(format!("appa-runtime-{version}.tgz"));
+        names.push(generation.runtime_chart_archive().ok_or_else(|| {
+            InstallError::Invalid(
+                "kagent needs a published generation with its images and chart; a development build has none".into(),
+            )
+        })?);
     }
-    names
+    Ok(names)
+}
+
+/// The repository at this build's commit: exported from the checkout that
+/// built it when that checkout still has the commit at HEAD, otherwise the
+/// immutable source archive for the commit.
+fn source_at_commit(commit: &Commit, stage: &Path) -> Result<PathBuf, InstallError> {
+    let repository = stage.join("repository");
+    if let Some(root) = option_env!("APPA_BUILD_REPOSITORY").map(Path::new)
+        && git_head(root).as_deref() == Some(commit.as_str())
+    {
+        eprintln!("appa: exporting commit {} from {}...", &commit.as_str()[..12], root.display());
+        export_commit(root, &repository)?;
+        return Ok(repository);
+    }
+    let url = format!("{}/{commit}.tar.gz", crate::plugin_bundle::source_archive_base_url());
+    eprintln!("appa: fetching the source archive for commit {}...", &commit.as_str()[..12]);
+    let archive = stage.join("source.tar.gz");
+    crate::plugin_bundle::download_bounded(&url, &archive, MAX_ARTIFACT_BYTES)
+        .map_err(|error| InstallError::Invalid(format!("cannot fetch this build's source: {error}")))?;
+    let container = stage.join("source");
+    fs::create_dir(&container).map_err(|error| io("stage source", &container, error))?;
+    crate::plugin_bundle::extract_archive(&archive, &container)
+        .map_err(|error| InstallError::Invalid(error.to_string()))?;
+    crate::plugin_bundle::single_directory(&container).map_err(|error| InstallError::Invalid(error.to_string()))
+}
+
+fn git_head(root: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Committed content only, so a dirty checkout exports exactly its HEAD.
+fn export_commit(root: &Path, destination: &Path) -> Result<(), InstallError> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(root)
+        .args(["archive", "--format=tar", "HEAD", "marketplace"]);
+    for (source, _) in crate::plugin_layout::REPOSITORY_MAPPINGS {
+        if !source.starts_with("marketplace/") {
+            command.arg(source);
+        }
+    }
+    let output = command.output().map_err(|error| io("export the build's commit", root, error))?;
+    if !output.status.success() {
+        return Err(InstallError::Invalid(format!(
+            "git archive failed at {}: {}",
+            root.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    if output.stdout.len() as u64 > appa_package::tree::MAX_UNCOMPRESSED_BYTES {
+        return Err(InstallError::Invalid("the exported source exceeds its byte limit".into()));
+    }
+    fs::create_dir(destination).map_err(|error| io("stage exported source", destination, error))?;
+    tar::Archive::new(std::io::Cursor::new(output.stdout))
+        .unpack(destination)
+        .map_err(|error| io("unpack exported source", destination, error))
+}
+
+/// One archive for one tree, byte for byte: fixed metadata and canonical order,
+/// so the same commit yields the same digest on every install.
+fn pack_tree(root: &Path, destination: &Path) -> Result<(), InstallError> {
+    let entries = appa_package::tree::walk(root).map_err(|error| InstallError::Invalid(error.to_string()))?;
+    let file = File::create(destination).map_err(|error| io("create archive", destination, error))?;
+    let mut archive = tar::Builder::new(flate2::write::GzEncoder::new(file, flate2::Compression::default()));
+    for entry in entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_mtime(0);
+        header.set_uid(0);
+        header.set_gid(0);
+        match entry.kind {
+            appa_package::tree::EntryKind::Directory => {
+                header.set_entry_type(tar::EntryType::Directory);
+                header.set_size(0);
+                header.set_mode(0o755);
+                header.set_cksum();
+                archive
+                    .append_data(&mut header, format!("{}/", entry.portable), std::io::empty())
+                    .map_err(|error| io("archive directory", destination, error))?;
+            }
+            appa_package::tree::EntryKind::File => {
+                let metadata = fs::metadata(&entry.absolute).map_err(|error| io("inspect file", &entry.absolute, error))?;
+                header.set_entry_type(tar::EntryType::Regular);
+                header.set_size(metadata.len());
+                header.set_mode(if is_executable(&metadata) { 0o755 } else { 0o644 });
+                header.set_cksum();
+                let input = super::open_regular(&entry.absolute)?;
+                archive
+                    .append_data(&mut header, &entry.portable, input)
+                    .map_err(|error| io("archive file", &entry.absolute, error))?;
+            }
+        }
+    }
+    finish_archive(archive, destination)
+}
+
+/// The executable alone, in the archive shape the release publishes for its
+/// platform, so activation extracts a build's binary exactly like a release's.
+fn pack_binary(executable: &Path, platform: Platform, destination: &Path) -> Result<(), InstallError> {
+    let input = super::open_regular(executable)?;
+    let size = input
+        .metadata()
+        .map_err(|error| io("inspect executable", executable, error))?
+        .len();
+    if matches!(platform, Platform::WindowsAmd64 | Platform::WindowsArm64) {
+        let file = File::create(destination).map_err(|error| io("create archive", destination, error))?;
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .last_modified_time(zip::DateTime::default())
+            .unix_permissions(0o755);
+        zip.start_file("appa.exe", options)
+            .and_then(|()| std::io::copy(&mut input.take(size), &mut zip).map_err(zip::result::ZipError::Io))
+            .and_then(|_| zip.finish())
+            .map_err(|error| InstallError::Invalid(format!("cannot archive the executable: {error}")))?;
+        return Ok(());
+    }
+    let file = File::create(destination).map_err(|error| io("create archive", destination, error))?;
+    let mut archive = tar::Builder::new(flate2::write::GzEncoder::new(file, flate2::Compression::default()));
+    let mut header = tar::Header::new_gnu();
+    header.set_mtime(0);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_entry_type(tar::EntryType::Regular);
+    header.set_size(size);
+    header.set_mode(0o755);
+    header.set_cksum();
+    archive
+        .append_data(&mut header, "appa", input.take(size))
+        .map_err(|error| io("archive executable", executable, error))?;
+    finish_archive(archive, destination)
+}
+
+fn finish_archive(
+    archive: tar::Builder<flate2::write::GzEncoder<File>>,
+    destination: &Path,
+) -> Result<(), InstallError> {
+    archive
+        .into_inner()
+        .and_then(flate2::write::GzEncoder::finish)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| io("finish archive", destination, error))
+}
+
+fn is_executable(metadata: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        false
+    }
+}
+
+fn digest_of(path: &Path) -> Result<ArtifactDigest, InstallError> {
+    ArtifactDigest::of_reader(super::open_regular(path)?, MAX_ARTIFACT_BYTES).map_err(|error| io("hash archive", path, error))
 }
 
 pub(super) fn verify_artifact(path: &Path, expected: &ArtifactDigest) -> Result<(), InstallError> {
@@ -397,6 +666,45 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+
+    #[test]
+    fn a_build_generation_needs_no_marketplace_archive_and_refuses_kagent() {
+        let generation = Generation::build(
+            Commit::parse(&"a".repeat(40)).unwrap(),
+            ArtifactDigest::of_bytes(b"catalog"),
+            Platform::MacArm64,
+            &"b".repeat(64),
+            ArtifactDigest::of_bytes(b"binary"),
+            ArtifactDigest::of_bytes(b"plugin"),
+        )
+        .unwrap();
+        assert!(required_archives(&generation, Requirements::Packages).unwrap().is_empty());
+        assert_eq!(
+            required_archives(&generation, Requirements::Claude(Platform::MacArm64)).unwrap(),
+            vec![Platform::MacArm64.archive().to_owned(), BUILD_PLUGIN_ARCHIVE.to_owned()]
+        );
+        assert!(required_archives(&generation, Requirements::Claude(Platform::LinuxAmd64)).is_err());
+        assert!(required_archives(&generation, Requirements::Kagent).is_err());
+        assert!(required_archives(&generation, Requirements::Both(Platform::MacArm64)).is_err());
+    }
+
+    #[test]
+    fn packed_trees_are_byte_identical_across_runs() {
+        let source = tempfile::tempdir().unwrap();
+        fs::create_dir(source.path().join("nested")).unwrap();
+        fs::write(source.path().join("nested/file"), b"bytes").unwrap();
+        fs::write(source.path().join("top"), b"more").unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let first = output.path().join("first.tar.gz");
+        let second = output.path().join("second.tar.gz");
+        pack_tree(source.path(), &first).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        pack_tree(source.path(), &second).unwrap();
+        assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
+        let unpacked = tempfile::tempdir().unwrap();
+        crate::plugin_bundle::extract_archive(&first, unpacked.path()).unwrap();
+        assert_eq!(fs::read(unpacked.path().join("nested/file")).unwrap(), b"bytes");
+    }
 
     #[test]
     fn invalid_revision_is_rejected_without_network_access() {

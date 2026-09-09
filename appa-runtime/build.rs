@@ -75,6 +75,9 @@ fn main() {
     // overwrite the runtime override a developer set in the shell.
     println!("cargo:rustc-env=APPA_YELL_COMPILED_ENDPOINT=");
 
+    // A development build can export its own commit from the checkout that
+    // built it, without the network, for as long as that checkout has it.
+    println!("cargo:rustc-env=APPA_BUILD_REPOSITORY={}", repository.display());
     match (commit, dirty) {
         (Some(_), false) => {
             println!("cargo:rustc-env=APPA_PLUGIN_SOURCE_KIND=commit");

@@ -263,24 +263,36 @@ pub(crate) enum PluginSource {
 impl PluginSource {
     /// Offline native activation keeps this binary's compiled identity check.
     /// The developer's Explicit override is deliberately not used here.
+    /// A release build accepts only its release archive, by file digest. A
+    /// development build's archive is its own staged tree, which materialization
+    /// verifies by tree digest against the identity stamped at compilation.
     pub(crate) fn verified_archive(path: &Path) -> Result<Self, PluginBundleError> {
         let identity = BuildIdentity::compiled()?;
-        let expected = identity.release_digest.ok_or(PluginBundleError::MissingBuildIdentity)?;
-        let actual = digest_of_file(path)?;
-        if actual != expected {
-            return Err(PluginBundleError::DigestMismatch {
-                url: path.display().to_string(),
-                expected,
-                actual,
-            });
-        }
+        let tree_digest = identity.tree_digest.ok_or(PluginBundleError::MissingBuildIdentity)?;
+        let reference = match identity.release_digest {
+            Some(expected) => {
+                let actual = digest_of_file(path)?;
+                if actual != expected {
+                    return Err(PluginBundleError::DigestMismatch {
+                        url: path.display().to_string(),
+                        expected,
+                        actual,
+                    });
+                }
+                identity
+                    .release_ref
+                    .ok_or(PluginBundleError::MissingReleaseRef)?
+                    .to_owned()
+            }
+            None => format!(
+                "build {}",
+                identity.commit.map(|commit| &commit[..commit.len().min(12)]).unwrap_or("unknown")
+            ),
+        };
         Ok(Self::VerifiedArchive {
             path: path.to_owned(),
-            reference: identity
-                .release_ref
-                .ok_or(PluginBundleError::MissingReleaseRef)?
-                .to_owned(),
-            tree_digest: identity.tree_digest.ok_or(PluginBundleError::MissingBuildIdentity)?,
+            reference,
+            tree_digest,
         })
     }
 
@@ -352,6 +364,11 @@ fn strip_extended_prefix(path: &Path) -> PathBuf {
 ///
 /// This checks shape, not content. Reuse also compares the complete rendered
 /// tree with the freshly verified source.
+/// A staged marketplace root has every file a deployment renders from.
+pub(crate) fn validate_source_tree(root: &Path) -> Result<(), PluginBundleError> {
+    validate_tree(root, TreeShape::Source)
+}
+
 fn validate_tree(root: &Path, shape: TreeShape) -> Result<(), PluginBundleError> {
     let invalid = |reason: String| PluginBundleError::InvalidSource {
         path: root.to_path_buf(),
@@ -1188,7 +1205,7 @@ pub(crate) fn ensure_commit_archive(
     Ok(cached)
 }
 
-fn single_directory(container: &Path) -> Result<PathBuf, PluginBundleError> {
+pub(crate) fn single_directory(container: &Path) -> Result<PathBuf, PluginBundleError> {
     let mut entries = fs::read_dir(container).map_err(|source| PluginBundleError::ReadSource {
         path: container.to_path_buf(),
         source,

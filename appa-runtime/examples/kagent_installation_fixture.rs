@@ -75,6 +75,8 @@ fn build(
     let descriptor = serde_json::to_vec(&descriptor)?;
     let generation = Generation::parse(&descriptor)?;
     let version = generation
+        .published()
+        .expect("the fixture descriptor is a published generation")
         .release()
         .strip_prefix('v')
         .expect("generation validates its release prefix")
