@@ -1,6 +1,6 @@
 //! Marketplace command presentation. These commands never read stdin.
 
-use std::io::{self, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -59,6 +59,14 @@ pub struct Install {
     /// Kagent agent runtimes to prepare; both on first install, otherwise retained.
     #[arg(long, value_enum)]
     runtime: Option<super::kagent_images::KagentRuntime>,
+    /// Let the agent report its own blocked calls to the OpenAPPA team through the
+    /// `yell` tool. Written into the policy a first install creates; a later install
+    /// keeps the config as it is. Without either flag, a terminal is asked.
+    #[arg(long, conflicts_with = "no_agent_yell")]
+    agent_yell: bool,
+    /// Keep agent reporting off in the policy a first install creates, without asking.
+    #[arg(long)]
+    no_agent_yell: bool,
     #[command(flatten)]
     target: Target,
     #[command(flatten)]
@@ -387,6 +395,65 @@ impl Source {
     }
 }
 
+/// Whether the agent may report its own blocked calls through the `yell` tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentYell {
+    On,
+    Off,
+}
+
+impl Install {
+    /// The answer a first install writes into the policy it creates: the flag when
+    /// one is given, the person's when a terminal is there to ask, and none
+    /// otherwise, which leaves the shipped default. Never asked under `--json`.
+    fn agent_yell(&self, config: &Path) -> Result<Option<AgentYell>, InstallError> {
+        if self.agent_yell {
+            return Ok(Some(AgentYell::On));
+        }
+        if self.no_agent_yell {
+            return Ok(Some(AgentYell::Off));
+        }
+        let stdin = io::stdin();
+        let stderr = io::stderr();
+        if self.target.json || !stdin.is_terminal() || !stderr.is_terminal() {
+            return Ok(None);
+        }
+        ask_agent_yell(&mut stdin.lock(), &mut stderr.lock())
+            .map(Some)
+            .map_err(|error| super::io("ask about agent reporting", config, error))
+    }
+}
+
+/// One question, defaulting to yes on an empty line; end of input, where no one
+/// is there to answer, is a no.
+fn ask_agent_yell(input: &mut impl BufRead, output: &mut impl Write) -> io::Result<AgentYell> {
+    write!(
+        output,
+        "appa: send APPA's own decisions to the OpenAPPA team when it blocks a call?\n\
+         Never your prompts, arguments, or outputs. Change later under `[reporting]`,\n\
+         or send one yourself anytime with `appa yell`. [Y/n] "
+    )?;
+    output.flush()?;
+    let mut answer = String::new();
+    if input.read_line(&mut answer)? == 0 {
+        return Ok(AgentYell::Off);
+    }
+    Ok(match answer.trim().to_ascii_lowercase().as_str() {
+        "" | "y" | "yes" => AgentYell::On,
+        _ => AgentYell::Off,
+    })
+}
+
+/// The line the shipped policy carries, and the line a yes replaces it with.
+/// Anchored to the start of a line, so prose that quotes the setting is not
+/// mistaken for it.
+const AGENT_YELL_OFF: &str = "\nagent_yell = false";
+const AGENT_YELL_ON: &str = "\nagent_yell = true";
+
+fn with_agent_yell_on(policy: &str) -> String {
+    policy.replacen(AGENT_YELL_OFF, AGENT_YELL_ON, 1)
+}
+
 fn revision(value: &str) -> Result<String, String> {
     super::acquisition::validate_revision(value).map_err(|error| error.to_string())?;
     Ok(value.to_owned())
@@ -411,6 +478,13 @@ pub fn install(args: Install) -> ExitCode {
         let installation = Installation::open(&path)?;
         installation.recover_config()?;
         let before = super::optional_bytes(installation.config_path())?;
+        // Asked before the slow acquisition, so the person is not kept waiting to
+        // answer, and before any state changes, so a closed terminal changes nothing.
+        let agent_yell = if before.is_none() && name == "claude-code" {
+            args.agent_yell(&path)?
+        } else {
+            None
+        };
         let current = installation.selection()?;
         let platform = Platform::current()
             .ok_or_else(|| InstallError::Invalid("this platform has no published runtime binary".into()))?;
@@ -458,8 +532,12 @@ pub fn install(args: Install) -> ExitCode {
                     let Role::Plugin(plugin) = package.role else {
                         return Err(InstallError::Invalid("selected package is not a plugin".into()));
                     };
-                    String::from_utf8(super::required_bytes(&root.join(plugin.default_policy().as_str()))?)
-                        .map_err(|error| InstallError::Invalid(error.to_string()))?
+                    let text = String::from_utf8(super::required_bytes(&root.join(plugin.default_policy().as_str()))?)
+                        .map_err(|error| InstallError::Invalid(error.to_string()))?;
+                    match agent_yell {
+                        Some(AgentYell::On) => with_agent_yell_on(&text),
+                        Some(AgentYell::Off) | None => text,
+                    }
                 }
             };
             (selected, text)
@@ -827,5 +905,42 @@ fn finish(
         ExitCode::FAILURE
     } else {
         ExitCode::from(code)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The answer works by replacing the one line the shipped policy carries, so the
+    /// policy has to carry exactly one of it. Two, or none, and a yes silently does nothing.
+    #[test]
+    fn the_shipped_policy_states_the_reporting_posture_exactly_once() {
+        let text = crate::default_config::text();
+        assert_eq!(text.matches(AGENT_YELL_OFF).count(), 1);
+        assert_eq!(text.matches(AGENT_YELL_ON).count(), 0);
+    }
+
+    #[test]
+    fn a_yes_turns_reporting_on_and_changes_only_that_line() {
+        let before = crate::default_config::text();
+        let after = with_agent_yell_on(&before);
+        assert_ne!(after, before.as_ref());
+        assert_eq!(after.replacen(AGENT_YELL_ON, AGENT_YELL_OFF, 1), before.as_ref());
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let config = directory.path().join("appa.toml");
+        std::fs::write(&config, &after).expect("the answered policy is written");
+        crate::config::Config::load(&config).expect("the answered policy still loads");
+    }
+
+    #[test]
+    fn an_empty_answer_is_yes_and_end_of_input_is_no() {
+        let ask = |answer: &str| ask_agent_yell(&mut answer.as_bytes(), &mut Vec::new()).expect("the answer reads");
+        for accepted in ["\n", "y\n", "yes\n", "Y\n", " yes \n"] {
+            assert_eq!(ask(accepted), AgentYell::On, "{accepted:?}");
+        }
+        for declined in ["", "n\n", "no\n", "what?\n"] {
+            assert_eq!(ask(declined), AgentYell::Off, "{declined:?}");
+        }
     }
 }

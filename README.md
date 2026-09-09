@@ -109,9 +109,11 @@ names your policy chose with tokens such as `tool-1`, and whether to send the
 finished file, which is named before you answer and kept either way.
 
 The agent can report on its own through the `yell` tool, on a deployment that
-turns it on with `[reporting] agent_yell` in the config; nothing asks. That call
-is checked by your policy like any other, so a session narrowed to `self` or
-`internal` reaches a human review instead of sending.
+turns it on. A first `appa plugin install claude-code` asks in a terminal, and
+`--agent-yell` or `--no-agent-yell` answers for a script; `[reporting]
+agent_yell` in the config is the answer either way. That call is checked by
+your policy like any other, so a session narrowed to `self` or `internal`
+reaches a human review instead of sending.
 
 ## Status
 
