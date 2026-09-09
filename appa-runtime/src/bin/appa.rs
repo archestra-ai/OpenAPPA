@@ -253,18 +253,6 @@ fn main() -> ExitCode {
         }
         Command::Init {
             harness: Harness::ClaudeCode { plugin_source },
-        } if plugin_source.is_none() => appa_runtime::installation::cli::init_claude_code(),
-        Command::Init {
-            harness: Harness::ClaudeCode { plugin_source },
-        } => match appa_runtime::init::claude_code(plugin_source.as_deref()) {
-            Ok(description) => {
-                print!("{description}");
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                eprintln!("appa: {error}");
-                ExitCode::FAILURE
-            }
-        },
+        } => appa_runtime::installation::cli::init_claude_code(plugin_source.as_deref()),
     }
 }

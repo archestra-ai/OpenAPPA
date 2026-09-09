@@ -192,7 +192,17 @@ impl Acquired {
         let api = crate::plugin_bundle::debug_override("APPA_MARKETPLACE_API_URL")
             .unwrap_or_else(|| format!("https://api.github.com/repos/{REPOSITORY}"));
         let releases = crate::plugin_bundle::release_base_url();
-        Self::fetch_from(requested, expected_commit.as_ref(), requirements, &api, &releases)
+        let acquired = Self::fetch_from(requested, expected_commit.as_ref(), requirements, &api, &releases);
+        // A development build's own commit is rarely a published generation;
+        // its plugin twin is installable through `init` without one.
+        match acquired {
+            Err(InstallError::Invalid(message)) if revision.is_none() && !super::cli::is_published_build() => {
+                Err(InstallError::Invalid(format!(
+                    "{message}; this is a development build: `appa init claude-code` installs its own plugin"
+                )))
+            }
+            other => other,
+        }
     }
 
     fn fetch_from(

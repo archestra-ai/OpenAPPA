@@ -107,11 +107,17 @@ impl Fixture {
     /// as this deployment's own healthy runtime serving the policy init writes.
     /// A test overrides the `FAKE_*` variables for the case it reproduces.
     fn init(&self) -> Command {
+        let mut command = self.init_from_own_build();
+        command.arg("--plugin-source").arg(&self.source);
+        command
+    }
+
+    /// `appa init claude-code` with no source override: the build decides.
+    fn init_from_own_build(&self) -> Command {
         let mut command = Command::new(&self.appa);
         command
             .current_dir(&self.root)
-            .args(["init", "claude-code", "--plugin-source"])
-            .arg(&self.source)
+            .args(["init", "claude-code"])
             .env(
                 "PATH",
                 format!("{}:{}", self.bin.display(), std::env::var("PATH").unwrap_or_default()),
@@ -330,6 +336,16 @@ fn a_failure_after_the_start_stops_the_runtime_init_started() {
     );
     assert!(!fixture.claude.join("marketplace-appa").exists());
     assert!(!fixture.bin.join("clappa").exists());
+}
+
+/// A development build has no published generation. Its `init` deploys the
+/// plugin twin stamped at compilation and never opens a marketplace
+/// installation, whose first act is the `.appa` state beside the config.
+#[test]
+fn a_development_build_inits_from_its_own_source_not_the_marketplace() {
+    let fixture = Fixture::new();
+    fixture.init_from_own_build().output().expect("appa init runs");
+    assert!(!fixture.config.join(".appa").exists());
 }
 
 #[test]

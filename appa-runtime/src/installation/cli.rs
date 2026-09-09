@@ -459,17 +459,37 @@ pub fn install(args: Install) -> ExitCode {
     finish(&args.target, "plugin.install".into(), result)
 }
 
-/// `init` is the short first-run spelling of the same marketplace operation.
-pub fn init_claude_code() -> ExitCode {
-    install(Install {
-        name: "claude-code".into(),
-        target: Target {
-            config: None,
-            json: false,
-        },
-        source: Source::default(),
-        runtime: None,
-    })
+/// `init` is the short first-run spelling. A published build installs its
+/// generation through the marketplace. A development build has no published
+/// generation, so it deploys the plugin twin its own compilation stamped in,
+/// as an explicit `--plugin-source` always does.
+pub fn init_claude_code(plugin_source: Option<&str>) -> ExitCode {
+    if plugin_source.is_none() && is_published_build() {
+        return install(Install {
+            name: "claude-code".into(),
+            target: Target {
+                config: None,
+                json: false,
+            },
+            source: Source::default(),
+            runtime: None,
+        });
+    }
+    match crate::init::claude_code(plugin_source) {
+        Ok(description) => {
+            print!("{description}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("appa: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// A release build carries the tag whose generation the marketplace can fetch.
+pub(crate) fn is_published_build() -> bool {
+    option_env!("APPA_RELEASE_REF").is_some()
 }
 
 fn plugin_path(target: &Target, plugin: &str) -> Result<PathBuf, InstallError> {
