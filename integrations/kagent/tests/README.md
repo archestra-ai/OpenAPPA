@@ -36,7 +36,7 @@ twenty seconds and is meant to gate every pull request.
 
 ## Run
 
-Needs a compiled `appa` binary and the kagent v0.9.12 lane.
+Needs a compiled `appa` binary, `curl` on `PATH`, and the kagent v0.9.12 lane.
 
 ```sh
 APPA_INTEGRATION=1 uv run --project integrations/kagent/appa-kagent-adk \
@@ -71,7 +71,7 @@ writes its log into the session's pytest temp directory —
 |---|---|
 | ordinary read | `list_pods` carries no narrowing, so the real pod data reaches the model ungated |
 | exfiltration | `read_secret` would narrow a public trajectory to the ops readers, so the read is denied with runnable offers and no secret material enters the agent |
-| sanitized default | the denied read offers both the narrowing and the sanitizer; taking the sanitizer's plan authorizes the call, the re-proposed read runs, and the gate replaces its result with the derivation — key names legible, values `[redacted]` |
+| sanitized default | the denied read offers both the narrowing and the sanitizer; taking the sanitizer's plan authorizes the call, the re-proposed read runs, and the gate replaces its result with the derivation — key names legible, values `[redacted] (N characters)` |
 | forged offer | an offer id the trajectory never pursued is refused at the vouching hook, so no plan runs and no person is asked |
 | untrusted ingress | `get_pod_logs` enters suspicious, so the read is denied and the instruction inside the logs never reaches the model |
 | third-party ingress | `check_status_page` enters suspicious too, so the read is denied and the instruction embedded in the page never reaches the model |
@@ -164,7 +164,7 @@ the right turn.
 
 [policy.appa.toml](policy.appa.toml) is a test projection of
 [../demo/chart/files/demo.appa.toml](../demo/chart/files/demo.appa.toml).
-It names only this suite's Python child, omits appa-guide declarations,
+It names only this suite's Python child, reduces appa-guide declarations,
 points the same command adapters at a loopback process, and selects
 shorter harness timeouts. Each difference is commented in the file.
-`@@PYTHON@@` and `@@MOCK_PORT@@` are rendered before the runtime starts.
+`@@CURL@@`, `@@MOCK_PORT@@`, and `@@GITHUB_SERVER@@` are rendered before the runtime starts.

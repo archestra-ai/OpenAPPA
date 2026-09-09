@@ -35,7 +35,7 @@ def render_policy(*arguments):
 
 class PolicyTests(unittest.TestCase):
     def test_timeouts_follow_the_approval_window(self):
-        for window in (1, 25, 120, 240):
+        for window in (1, 25, 120, 240, 280):
             with self.subTest(window=window):
                 externals = render_policy(
                     "--set",
@@ -52,7 +52,7 @@ class PolicyTests(unittest.TestCase):
                 )
 
     def test_invalid_approval_windows_are_refused(self):
-        for window in ("0", "-1", "1.5", "null", "oops"):
+        for window in ("0", "-1", "1.5", "null", "oops", "281", "300"):
             with self.subTest(window=window):
                 with self.assertRaises(subprocess.CalledProcessError):
                     render_policy("--set", f"mocks.approvalWindowSeconds={window}")
