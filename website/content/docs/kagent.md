@@ -90,11 +90,22 @@ helm upgrade --install appa-kagent-demo \
   --set-string runtime.reasoningEffort=none \
   --force-conflicts --wait --timeout 10m
 
+# Copy the demo template into runtime-owned policy. Do not mount the demo's
+# template ConfigMap as the shared runtime's live configuration.
+DEMO_POLICY=$(mktemp)
+helm template appa-kagent-demo \
+  oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-kagent-demo \
+  --version "$APPA_VERSION" -n "$KAGENT_NAMESPACE" \
+  --set-string runtime.url="http://appa-runtime.$KAGENT_NAMESPACE.svc.cluster.local:18787" \
+  --set-string modelConfig.name=default-model-config \
+  --show-only templates/configmaps.yaml \
+  | kubectl create --dry-run=client -f - -o jsonpath='{.data.appa\.toml}' > "$DEMO_POLICY"
+
 helm upgrade --install appa-runtime \
   oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
   --version "$APPA_VERSION" -n "$KAGENT_NAMESPACE" \
   --set persistence.enabled=false \
-  --set config.existingConfigMap=appa-kagent-demo-policy \
+  --set-file config.contents="$DEMO_POLICY" \
   --force-conflicts --wait --timeout 10m
 
 kubectl rollout status deployment/appa-runtime -n "$KAGENT_NAMESPACE" --timeout=5m
