@@ -136,6 +136,10 @@ pub fn stock_audience_sources() -> Vec<SourceRegistration> {
         source("google-workspace", &["viewer", "full-members", "group/<group-address>"]),
         source("slack", &["viewer", "full-members", "user-group/<handle>"]),
         source("github", &["viewer", "org/<org>/members", "org/<org>/team/<team>"]),
+        source(
+            "linear",
+            &["viewer", "workspace/<workspace>/members", "team/<team>/members"],
+        ),
     ]
 }
 
@@ -158,7 +162,7 @@ fn collection_role(catalog: &[SourceRegistration], spec: &SelectorSpec) -> Optio
         .find(|template| template.matches(&spec.selector))?;
     Some(match template.as_str() {
         "viewer" => CollectionRole::Viewer,
-        "full-members" | "org/<org>/members" => CollectionRole::Members,
+        "full-members" | "org/<org>/members" | "workspace/<workspace>/members" => CollectionRole::Members,
         _ => CollectionRole::Named,
     })
 }
@@ -1478,6 +1482,27 @@ confined_results = ["lookup"]
         );
         let bare = Config::from_toml_str("version = 2\n").unwrap();
         assert_eq!(bare.registry_config().audience, AudienceConfig::default());
+    }
+
+    #[test]
+    fn linear_workspace_membership_and_team_selectors_have_distinct_roles() {
+        let policy = "version = 2\n\
+            [audience]\nself = [\"linear:viewer\"]\n\
+            internal = [\"linear:workspace/workspace-id/members\"]\n\
+            [audience.group.delivery]\nfrom = [\"linear:team/team-id/members\"]\n";
+        let config = Config::from_toml_str(policy).expect("Linear selectors load");
+        let audience = &config.registry_config().audience;
+        assert_eq!(audience.sources.len(), 1);
+        assert_eq!(audience.sources[0].provider, "linear");
+        assert_eq!(audience.groups.len(), 1);
+        let unsafe_internal = policy.replace(
+            "internal = [\"linear:workspace/workspace-id/members\"]",
+            "internal = [\"linear:team/team-id/members\"]",
+        );
+        assert!(
+            Config::from_toml_str(&unsafe_internal).is_err(),
+            "team membership is not workspace membership"
+        );
     }
 
     #[test]

@@ -50,17 +50,29 @@ def denial_count(value):
     return 0
 
 
-def assert_evidence(state, steps, reads, writes, denials):
+def assert_evidence(state, steps, reads, writes, denials, read_tool="get_file_contents"):
     requests = state["requests"]
     require([request["index"] for request in requests] == list(range(steps)), "model did not execute the complete test script")
     calls = state["invocations"]
-    require(sum(call["tool"] == "get_file_contents" for call in calls) == reads, "wrong real MCP read count")
+    require(sum(call["tool"] == read_tool for call in calls) == reads, "wrong real MCP read count")
     require(sum(call["tool"] == "issue_write" for call in calls) == writes, "wrong real MCP write count")
     feedback = [message.get("content") for message in requests[-1]["messages"] if message.get("role") == "tool"]
     require(sum(denial_count(message) > 0 for message in feedback) == denials, "expected policy refusals are absent from actual tool feedback")
 
 
 class Acceptance:
+    image_tag = "ci"
+    read_tool = "get_file_contents"
+
+    def read_call(self):
+        return {"tool": "get_file_contents", "args": {"owner": "acme", "repo": "public", "path": "README.md"}}
+
+    def source_config(self):
+        return (REPO / "marketplace/plugins/kagent/default.appa.toml").read_bytes()
+
+    def install_batteries(self, appa, deployed, server):
+        return json.loads(self.command([appa, "battery", "install", "github", "--config", deployed, "--server", server, "--json"]).splitlines()[-1])
+
     def __init__(self, work):
         self.work = work.resolve()
         self.work.mkdir(parents=True, exist_ok=False)
@@ -124,7 +136,7 @@ class Acceptance:
         info = json.loads(self.command(["docker", "info", "--format", "{{json .}} "]))
         require(info["Architecture"] in ("x86_64", "amd64"), "both-language acceptance requires an amd64 Docker host; no ARM relabelling")
         for kind in ("runtime", "python", "go", "fixtures"):
-            self.command(["docker", "image", "inspect", f"appa-acceptance-{kind}:ci"])
+            self.command(["docker", "image", "inspect", f"appa-acceptance-{kind}:{self.image_tag}"])
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
@@ -146,7 +158,7 @@ class Acceptance:
         images = {}
         for kind, repository in names.items():
             ref = f"{mirror}/{repository}:{release}"
-            self.command(["docker", "tag", f"appa-acceptance-{kind}:ci", ref])
+            self.command(["docker", "tag", f"appa-acceptance-{kind}:{self.image_tag}", ref])
             self.command(["docker", "push", ref], timeout=600)
             if kind != "fixtures":
                 digest = self.command(["crane", "digest", ref]).strip()
@@ -163,7 +175,7 @@ class Acceptance:
         source = self.work / "descriptor.json"
         source.write_text(json.dumps(descriptor))
         config = self.work / "source.toml"
-        config.write_bytes((REPO / "marketplace/plugins/kagent/default.appa.toml").read_bytes())
+        config.write_bytes(self.source_config())
         bundle = self.work / "fixture.tar.gz"
         fixture = json.loads(self.command(["cargo", "run", "--quiet", "--locked", "-p", "appa", "--example", "kagent_installation_fixture", "--", source, config, chart, bundle], timeout=600).splitlines()[-1])
         self.command(["cargo", "build", "--locked", "-p", "appa", "--bin", "appa"], timeout=600)
@@ -172,7 +184,7 @@ class Acceptance:
         self.command([appa, "plugin", "install", "kagent", "--config", deployed, "--from", bundle, "--sha256", fixture["sha256"], "--json"])
         endpoint = "http://marketplace-fixtures.kagent.svc.cluster.local:3000/mcp"
         server = "server-" + hashlib.sha256(endpoint.encode()).hexdigest()
-        battery = json.loads(self.command([appa, "battery", "install", "github", "--config", deployed, "--server", server, "--json"]).splitlines()[-1])
+        battery = self.install_batteries(appa, deployed, server)
         prepared = Path(battery["result"]["directory"])
         self.command([sys.executable, prepared / "verify-images.py", "--registry", mirror])
         # Refusal is tested against a copy; installed owned state is unchanged.
@@ -264,7 +276,7 @@ class Acceptance:
 
     def scenarios(self, agent_url, fixture_url, label):
         # Assertions below are completed against actual fixture invocation state.
-        read = {"tool": "get_file_contents", "args": {"owner": "acme", "repo": "public", "path": "README.md"}}
+        read = self.read_call()
         write = {"tool": "issue_write", "args": {"owner": "acme", "repo": "public", "title": "test", "body": "operator text"}}
         for case, script, expected_reads, expected_writes, denials in (
             ("read-refused", [read, {"text": "done"}], 0, 0, 1),
@@ -283,7 +295,7 @@ class Acceptance:
             require(result["result"].get("status", {}).get("state") == "completed", f"task did not complete: {result}")
             state = http(fixture_url + "/state")
             (self.work / f"{label}-{case}.json").write_text(json.dumps({"task": result, "fixture": state}, indent=2))
-            assert_evidence(state, len(script), expected_reads, expected_writes, denials)
+            assert_evidence(state, len(script), expected_reads, expected_writes, denials, self.read_tool)
 
     def approval_scenarios(self, agent_name, fixture_url):
         # Native kagent confirmation resumes before Go ADK request processors.

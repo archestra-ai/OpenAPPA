@@ -20,6 +20,12 @@ const BATTERIES = [
     logo: "/images/batteries/github.svg",
   },
   {
+    name: "Linear",
+    description: "65 tools, explicit resource audiences, and four policy profiles.",
+    href: "/battery-linear",
+    logo: "/images/batteries/linear.svg",
+  },
+  {
     name: "Grain",
     description: "Rules for 49 meeting, transcript, deal, and admin tools.",
     href: "/battery-grain",

@@ -212,6 +212,10 @@ fn deployment(root: &Path) -> std::path::PathBuf {
 }
 
 fn deployment_for(root: &Path, kagent: bool) -> std::path::PathBuf {
+    deployment_with_battery(root, kagent, false)
+}
+
+fn deployment_with_battery(root: &Path, kagent: bool, linear: bool) -> std::path::PathBuf {
     use appa_package::generation::{ArtifactDigest, Generation, Image, Platform, REPOSITORY};
     use appa_runtime::installation::{Installation, Selection};
     use std::collections::BTreeMap;
@@ -232,6 +236,23 @@ fn deployment_for(root: &Path, kagent: bool) -> std::path::PathBuf {
         "schema=1\nname='appa'\n[packages.battery.github]\npath='batteries/github'\ndigest='{}'\n",
         appa_package::TreeDigest::of_tree(&battery).unwrap()
     );
+    if linear {
+        let from = Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace/batteries/linear");
+        let to = source.join("batteries/linear");
+        std::fs::create_dir_all(&to).unwrap();
+        // Package files only; Python test caches are not release inputs.
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_file() {
+                std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+            }
+        }
+        appa_package::validate_package(&to).unwrap();
+        catalog.push_str(&format!(
+            "[packages.battery.linear]\npath='batteries/linear'\ndigest='{}'\n",
+            appa_package::TreeDigest::of_tree(&to).unwrap()
+        ));
+    }
     if kagent {
         let plugin_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace/plugins/kagent");
         let plugin = source.join("plugins/kagent");
@@ -269,6 +290,106 @@ fn deployment_for(root: &Path, kagent: bool) -> std::path::PathBuf {
     let text = b"# authored policy\n[policy]\nversion=2\n[[policy.tool]]\nname='Custom'\n[externals]\ntimeout_ms=100\nmax_body_bytes=1024\n";
     installation.commit_config(None, text, &selection).unwrap();
     config
+}
+
+#[test]
+fn actual_linear_package_installs_repeats_bundles_relocates_and_removes() {
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let config = deployment_with_battery(root.path(), false, true);
+    let original = std::fs::read_to_string(&config).unwrap();
+    let invoke = |root: &Path, args: &[&str]| {
+        let output = run(root, args);
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    invoke(
+        root.path(),
+        &["battery", "install", "linear", "--server", "linear-fixture", "--json"],
+    );
+    let installed = std::fs::read_to_string(&config).unwrap();
+    assert!(installed.contains(&original));
+    let effective = appa_runtime::config::Config::load(&config).unwrap();
+    assert_eq!(effective.policy_file().value()["tool"].as_array().unwrap().len(), 66);
+    invoke(root.path(), &["battery", "install", "linear", "--json"]);
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), installed);
+
+    let archive = root.path().join("linear.tar.gz");
+    let receipt = invoke(
+        root.path(),
+        &["bundle", "--output", archive.to_str().unwrap(), "--json"],
+    );
+    let replica = tempfile::tempdir().unwrap();
+    {
+        use appa_runtime::installation::{Acquired, Installation, Selection};
+        let acquired = Acquired::import(
+            &archive,
+            &appa_package::generation::ArtifactDigest::parse(&format!(
+                "sha256:{}",
+                receipt["result"]["sha256"].as_str().unwrap()
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let installation = Installation::open(&replica.path().join("config/appa.toml")).unwrap();
+        installation.retain(&acquired).unwrap();
+        let empty = Selection::empty(
+            acquired.generation().clone(),
+            appa_package::generation::Platform::current().unwrap(),
+        );
+        installation.commit_config(None, original.as_bytes(), &empty).unwrap();
+    }
+    invoke(
+        replica.path(),
+        &[
+            "battery",
+            "install",
+            "linear",
+            "--from",
+            archive.to_str().unwrap(),
+            "--sha256",
+            receipt["result"]["sha256"].as_str().unwrap(),
+            "--json",
+        ],
+    );
+    let replica_config = replica.path().join("config/appa.toml");
+    let effective = appa_runtime::config::Config::load(&replica_config).unwrap();
+    assert_eq!(effective.policy_file().value()["tool"].as_array().unwrap().len(), 66);
+    let helper = replica.path().join(format!(
+        "config/.appa/appa.toml/generations/{}/marketplace/batteries/linear/annotate.py",
+        "a".repeat(40)
+    ));
+    let mut child = Command::new("python3")
+        .arg(helper)
+        .current_dir(replica.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let request = serde_json::json!({"version":1,"kind":"annotation","name":"linear.approved-writes",
+        "declaration":{"hint":r#"{"rules":{"get_issue":[{"match":{"id":"ENG-1"},"audience":["alice@corp.example"]}]}}"#},
+        "artifact":{"args":{"name":"mcp/linear/get_issue","arguments":{"id":"ENG-1"}}}});
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&request).unwrap())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let annotation: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        annotation["answer"]["delta"]["audience"],
+        serde_json::json!(["alice@corp.example"])
+    );
+    invoke(root.path(), &["battery", "remove", "linear", "--json"]);
+    assert!(std::fs::read_to_string(config).unwrap().contains(&original));
 }
 
 #[test]

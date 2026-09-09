@@ -14,7 +14,7 @@ import { getAllDocs, type DocPage } from "@/lib/docs";
 
 const DIRECTIVE_DESCRIPTIONS: Record<string, string> = {
   "battery-catalog":
-    "- [Slack](/battery-slack) — rules for 19 Slack tools, with audiences from Slack users and groups.\n- [Claude Code tools](/battery-claude-code) — rules for Claude Code's Bash and Read tools.\n- [GitHub](/battery-github) — rules for 44 repository, issue, pull request, and user tools.\n- [Grain](/battery-grain) — rules for 49 meeting, transcript, deal, and admin tools.\n- [Google Workspace](/battery-google-workspace) — uses your Workspace directory and groups to build audiences.\n- [Add your own](/write-a-battery) — create and submit policy for an MCP server.",
+    "- [Slack](/battery-slack) — rules for 19 Slack tools, with audiences from Slack users and groups.\n- [Claude Code tools](/battery-claude-code) — rules for Claude Code's Bash and Read tools.\n- [GitHub](/battery-github) — rules for 44 repository, issue, pull request, and user tools.\n- [Linear](/battery-linear) — 65 tools, explicit resource audiences, and four profiles.\n- [Grain](/battery-grain) — rules for 49 meeting, transcript, deal, and admin tools.\n- [Google Workspace](/battery-google-workspace) — uses your Workspace directory and groups to build audiences.\n- [Add your own](/write-a-battery) — create and submit policy for an MCP server.",
   "fig-claude-code-hooks":
     "[Animated figure: a protected Claude Code session sends each hook event to OpenAPPA; one tool call comes back allowed, one comes back blocked with safer options.]",
   "fig-connected-agent":

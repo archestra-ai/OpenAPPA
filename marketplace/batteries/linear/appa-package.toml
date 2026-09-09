@@ -1,0 +1,9 @@
+schema = 1
+name = "linear"
+description = "Contracts for 65 Linear MCP tools, resource audience rules, and a Linear membership source."
+
+[battery]
+policy = "appa.toml"
+hosts = ["claude-code", "kagent"]
+namespaces = ["linear"]
+helpers = ["annotate.py", "audience-source.py"]

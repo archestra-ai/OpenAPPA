@@ -1,0 +1,302 @@
+# Generated from schemas.json and operations.json by build.py.
+# Override this annotator in the root config with explicit resource rules.
+[policy]
+version = 2
+
+[[policy.annotator]]
+name = "linear.read-only"
+hint = '{"rules":{}}'
+ranks = ["suspicious", "trusted"]
+marks = ["linear-review"]
+effects = ["linear.changed", "linear.sensitive"]
+
+[externals.annotators."linear.read-only"]
+command = ["python3", "annotate.py"]
+
+[[policy.tool]]
+name = "extract_images"
+server = "linear"
+description = "Extract and fetch images from markdown content. Use this to view screenshots, diagrams, or other images embedded in Linear issues, comments, or documents. Pass the markdown content (e.g., issue description) and receive the images as viewable data."
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "get_agent_skill"
+server = "linear"
+description = "Retrieve a Linear Agent skill by ID, including its full markdown instructions."
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "get_attachment"
+server = "linear"
+description = "Retrieve an attachment's content by ID."
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "get_diff"
+server = "linear"
+description = "Exact lookup for a Linear diff. Use with review URLs, GitHub PR URLs, Linear full identifiers, UUIDs, or slugs."
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "get_diff_threads"
+server = "linear"
+description = "Exact lookup for diff threads and the authenticated user's drafts. Use with review URLs, GitHub PR URLs, Linear full identifiers, UUIDs, or slugs."
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "get_document"
+server = "linear"
+description = "Retrieve a Linear document by ID or slug"
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "get_issue"
+server = "linear"
+description = "Retrieve detailed information about an issue by ID, including attachments, git branch name, and active Triage Intelligence suggestions when the issue is in triage"
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "get_issue_status"
+server = "linear"
+description = "Retrieve detailed information about an issue status in Linear by name or ID"
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "get_milestone"
+server = "linear"
+description = "Retrieve details of a specific milestone by ID or name"
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "get_notifications"
+server = "linear"
+description = "Get a page of notifications from the authenticated user's Linear inbox."
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "get_project"
+server = "linear"
+description = "Retrieve details of a specific project in Linear"
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "get_release"
+server = "linear"
+description = "Retrieve details of a release by ID or slug."
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "get_release_note"
+server = "linear"
+description = "Retrieve release notes by ID or slug, including markdown content."
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "get_status_updates"
+server = "linear"
+description = "List or get project/initiative status updates. Pass `id` to get a specific update, or filter to list."
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "get_team"
+server = "linear"
+description = "Retrieve details of a specific Linear team"
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "get_template"
+server = "linear"
+description = "Retrieve a Linear template by ID or name: the content it pre-fills, the ids it applies, its sub-issues, and its form fields. Pass the template to save_issue or save_project to apply it. References come back as ids, so read a name with the matching tool when you need one. A form template collects its answers through a form, so applying one here creates an issue with the form unanswered."
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "get_user"
+server = "linear"
+description = "Retrieve details of a specific Linear user"
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "get_workspace"
+server = "linear"
+description = "Retrieve the connected Linear workspace"
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "list_agent_skills"
+server = "linear"
+description = "List Linear Agent skills available to the authenticated user."
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "list_comments"
+server = "linear"
+description = "List comments on a Linear issue, project, initiative, document, project milestone, or project/initiative status update. Provide exactly one of `issueId`, `projectId`, `initiativeId`, `documentId`, `milestoneId`, or `statusUpdateId`. For issues, projects, and initiatives this returns both top-level discussion threads and inline description comments. Inline (anchored) comments carry a non-null `quotedText` set to the snippet of description text they reference. Returned comments include `author` and nullable `onBehalfOf`; when set, `onBehalfOf` identifies the user the agent author acted for."
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "list_cycles"
+server = "linear"
+description = "Retrieve cycles for a specific Linear team"
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "list_diffs"
+server = "linear"
+description = "List Linear diff pull requests visible to the authenticated user"
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "list_documents"
+server = "linear"
+description = "List documents in the user's Linear workspace"
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "list_issue_labels"
+server = "linear"
+description = "List available issue labels in a Linear workspace or team. A retired label carries `retiredAt` and cannot be applied to new issues."
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "list_issue_statuses"
+server = "linear"
+description = "List available issue statuses in a Linear team"
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "list_issues"
+server = "linear"
+description = "List issues in the user's Linear workspace, including active Triage Intelligence suggestions for issues in triage. For my issues, use \"me\" as the assignee. Use \"null\" for no assignee."
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "list_milestones"
+server = "linear"
+description = "List all milestones in a Linear project"
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "list_project_labels"
+server = "linear"
+description = "List available project labels in the Linear workspace. A team-scoped label carries a `team` field; different teams can hold same-named labels, so check it before acting on an ID. A retired label carries `retiredAt` and cannot be applied to new projects."
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "list_projects"
+server = "linear"
+description = "List projects in the user's Linear workspace"
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "list_release_notes"
+server = "linear"
+description = "List release notes in the workspace, optionally filtered by pipeline or covered release."
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "list_release_pipelines"
+server = "linear"
+description = "List release pipelines in the workspace."
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "list_releases"
+server = "linear"
+description = "List releases in the workspace, with optional filtering by pipeline, stage, version, and text."
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "list_teams"
+server = "linear"
+description = "List teams in the user's Linear workspace"
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "list_templates"
+server = "linear"
+description = "List the Linear issue, project, and document templates available to the authenticated user. Use this to find the template a team expects, then call get_template for its content."
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "list_users"
+server = "linear"
+description = "Retrieve users in the Linear workspace"
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
+
+[[policy.tool]]
+name = "search_documentation"
+server = "linear"
+description = "Search Linear's documentation to learn about features and usage"
+tags = ["linear", "linear-read"]
+parameters = { type = "object", additionalProperties = true }
+annotator = "linear.read-only"
