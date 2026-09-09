@@ -3,6 +3,7 @@ package appakagentadk
 import (
 	"context"
 	"fmt"
+	"iter"
 	"testing"
 
 	"google.golang.org/adk/v2/agent"
@@ -27,6 +28,27 @@ func (*resumeTestPublisher) Description() string { return "" }
 func (*resumeTestPublisher) IsLongRunning() bool { return false }
 func (p *resumeTestPublisher) ProcessRequest(_ agent.Context, req *model.LLMRequest) error {
 	return toolutils.PackTool(req, p.selected)
+}
+
+type resumeInspectModel struct {
+	callingModel
+	t *testing.T
+}
+
+func (m *resumeInspectModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	counts := make(map[string]int)
+	for _, group := range req.Config.Tools {
+		for _, declaration := range group.FunctionDeclarations {
+			counts[declaration.Name]++
+		}
+	}
+	if counts[m.tool] != 1 || len(counts) != 1 {
+		m.t.Fatalf("resume registration changed model-visible declarations: %v", counts)
+	}
+	if _, ok := req.Tools[m.tool].(*discoveredMCPTool); !ok {
+		m.t.Fatalf("resume dispatcher replaced dynamic model tool: %T", req.Tools[m.tool])
+	}
+	return m.callingModel.GenerateContent(ctx, req, stream)
 }
 
 func TestMCPConfirmationResumesInRealRunner(t *testing.T) {
@@ -54,7 +76,7 @@ func TestMCPConfirmationResumesInRealRunner(t *testing.T) {
 					t.Fatal(err)
 				}
 				tools := append([]tool.Tool{&resumeTestPublisher{selected}}, d.resumeTools()...)
-				a, err := llmagent.New(llmagent.Config{Name: "test_agent", Model: &callingModel{tool: name}, Tools: tools})
+				a, err := llmagent.New(llmagent.Config{Name: "test_agent", Model: &resumeInspectModel{callingModel: callingModel{tool: name}, t: t}, Tools: tools})
 				if err != nil {
 					t.Fatal(err)
 				}

@@ -156,6 +156,7 @@ func (d *MCPDiscovery) close(id string) {
 	}
 	run.mu.Lock()
 	defer run.mu.Unlock()
+	run.opened = false
 	for _, observation := range run.observations {
 		if observation.session != nil {
 			observation.session.Close()
