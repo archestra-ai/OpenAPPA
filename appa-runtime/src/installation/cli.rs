@@ -673,11 +673,11 @@ fn finish(
                 Some("absent") => writeln!(output, "No deployment at {path}. Run: appa init claude-code"),
                 Some("unmanaged") if is_published_build() => writeln!(
                     output,
-                    "{path} was not installed through the marketplace; nothing is selected. Run: appa plugin install claude-code"
+                    "{path} was set up without the marketplace, so nothing is tracked here. Run: appa plugin install claude-code"
                 ),
                 Some("unmanaged") => writeln!(
                     output,
-                    "{path} was not installed through the marketplace; a development build selects no packages. Include a battery's policy in the config instead."
+                    "{path} was set up by `appa init` from a checkout build, which does not track plugins or batteries. To add a battery, add its policy file to `include` in this config."
                 ),
                 _ => writeln!(output, "No {kind} packages selected for {path}."),
             }
