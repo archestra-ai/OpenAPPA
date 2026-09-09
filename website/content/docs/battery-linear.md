@@ -27,4 +27,4 @@ The audience helper supports the authenticated viewer, workspace members and tea
 
 ## Schema updates
 
-The battery pins the full captured input schemas and validates them before annotation. Its capture utility compares both official endpoints without calling mutation tools. New tools, fields and schema vocabulary need review before regeneration. Run the drift check for the account and endpoint you intend to use.
+The battery stores per-tool definition hashes and a reviewed policy contract, rather than full provider schemas. Its capture utility compares both official endpoints without invoking tools; changed hashes require reviewing the affected definitions and argument classifications. This is a development drift check, not a runtime schema comparison. Run it for the account and endpoint you intend to use.

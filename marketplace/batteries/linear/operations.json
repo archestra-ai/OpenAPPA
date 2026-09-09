@@ -4,6 +4,13 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [
+        "issue",
+        "base64Content",
+        "filename",
+        "contentType",
+        "sha256"
+      ],
       "scope_arguments": [
         "issue"
       ],
@@ -21,6 +28,10 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [
+        "issue",
+        "assetUrl"
+      ],
       "scope_arguments": [
         "assetUrl",
         "issue"
@@ -34,6 +45,9 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [
+        "name"
+      ],
       "scope_arguments": [
         "isGroup",
         "parent",
@@ -49,6 +63,9 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [
+        "id"
+      ],
       "scope_arguments": [
         "id"
       ],
@@ -58,6 +75,9 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [
+        "id"
+      ],
       "scope_arguments": [
         "id"
       ],
@@ -67,6 +87,7 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [],
       "scope_arguments": [
         "commentId",
         "draftId"
@@ -77,6 +98,10 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [
+        "type",
+        "id"
+      ],
       "scope_arguments": [
         "id",
         "type"
@@ -87,6 +112,9 @@
       "effect": null,
       "external_fetch": true,
       "kind": "read",
+      "required_arguments": [
+        "markdown"
+      ],
       "scope_arguments": [
         "markdown"
       ],
@@ -96,6 +124,9 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [
+        "id"
+      ],
       "scope_arguments": [
         "id"
       ],
@@ -105,6 +136,9 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [
+        "id"
+      ],
       "scope_arguments": [
         "id"
       ],
@@ -114,6 +148,9 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [
+        "urlOrId"
+      ],
       "scope_arguments": [
         "urlOrId"
       ],
@@ -123,6 +160,9 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [
+        "urlOrId"
+      ],
       "scope_arguments": [
         "resolved",
         "threadId",
@@ -136,6 +176,9 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [
+        "id"
+      ],
       "scope_arguments": [
         "id"
       ],
@@ -145,6 +188,9 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [
+        "id"
+      ],
       "scope_arguments": [
         "id",
         "includeCustomerNeeds",
@@ -157,6 +203,11 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [
+        "id",
+        "name",
+        "team"
+      ],
       "scope_arguments": [
         "id",
         "name",
@@ -168,6 +219,10 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [
+        "project",
+        "query"
+      ],
       "scope_arguments": [
         "project",
         "query"
@@ -178,6 +233,7 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [],
       "scope_arguments": [
         "cursor",
         "unreadOnly"
@@ -190,6 +246,9 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [
+        "query"
+      ],
       "scope_arguments": [
         "includeMembers",
         "includeMilestones",
@@ -202,6 +261,9 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [
+        "id"
+      ],
       "scope_arguments": [
         "id",
         "includeReleaseNotes"
@@ -212,6 +274,9 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [
+        "id"
+      ],
       "scope_arguments": [
         "id",
         "includeReleases"
@@ -222,6 +287,9 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [
+        "type"
+      ],
       "scope_arguments": [
         "createdAt",
         "cursor",
@@ -242,6 +310,9 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [
+        "query"
+      ],
       "scope_arguments": [
         "query"
       ],
@@ -251,6 +322,9 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [
+        "id"
+      ],
       "scope_arguments": [
         "id"
       ],
@@ -260,6 +334,9 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [
+        "query"
+      ],
       "scope_arguments": [
         "query"
       ],
@@ -269,6 +346,7 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [],
       "scope_arguments": [],
       "variable_arguments": []
     },
@@ -276,6 +354,7 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [],
       "scope_arguments": [
         "cursor"
       ],
@@ -288,6 +367,7 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [],
       "scope_arguments": [
         "cursor",
         "documentId",
@@ -307,6 +387,9 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [
+        "teamId"
+      ],
       "scope_arguments": [
         "teamId",
         "type"
@@ -317,6 +400,7 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [],
       "scope_arguments": [
         "author",
         "cursor",
@@ -336,6 +420,7 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [],
       "scope_arguments": [
         "createdAt",
         "creatorId",
@@ -357,6 +442,7 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [],
       "scope_arguments": [
         "cursor",
         "includeGroups",
@@ -372,6 +458,9 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [
+        "team"
+      ],
       "scope_arguments": [
         "team"
       ],
@@ -381,6 +470,7 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [],
       "scope_arguments": [
         "assignee",
         "createdAt",
@@ -408,6 +498,9 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [
+        "project"
+      ],
       "scope_arguments": [
         "project"
       ],
@@ -417,6 +510,7 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [],
       "scope_arguments": [
         "cursor",
         "includeGroups",
@@ -431,6 +525,7 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [],
       "scope_arguments": [
         "createdAt",
         "cursor",
@@ -455,6 +550,7 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [],
       "scope_arguments": [
         "createdAt",
         "cursor",
@@ -475,6 +571,7 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [],
       "scope_arguments": [
         "createdAt",
         "cursor",
@@ -496,6 +593,7 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [],
       "scope_arguments": [
         "createdAt",
         "cursor",
@@ -518,6 +616,7 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [],
       "scope_arguments": [
         "createdAt",
         "cursor",
@@ -534,6 +633,7 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [],
       "scope_arguments": [
         "team",
         "type"
@@ -544,6 +644,7 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [],
       "scope_arguments": [
         "cursor",
         "query",
@@ -558,6 +659,9 @@
       "effect": "linear.changed",
       "external_fetch": false,
       "kind": "write",
+      "required_arguments": [
+        "id"
+      ],
       "scope_arguments": [
         "id"
       ],
@@ -570,6 +674,9 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [
+        "urlOrId"
+      ],
       "scope_arguments": [
         "mergeMethod",
         "urlOrId"
@@ -580,6 +687,12 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [
+        "issue",
+        "filename",
+        "contentType",
+        "size"
+      ],
       "scope_arguments": [
         "issue"
       ],
@@ -595,6 +708,9 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [
+        "threadId"
+      ],
       "scope_arguments": [
         "resolved",
         "threadId"
@@ -605,6 +721,9 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [
+        "id"
+      ],
       "scope_arguments": [
         "id"
       ],
@@ -614,6 +733,9 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [
+        "id"
+      ],
       "scope_arguments": [
         "id"
       ],
@@ -623,6 +745,9 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [
+        "id"
+      ],
       "scope_arguments": [
         "id"
       ],
@@ -632,6 +757,9 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [
+        "id"
+      ],
       "scope_arguments": [
         "id"
       ],
@@ -641,6 +769,9 @@
       "effect": "linear.changed",
       "external_fetch": false,
       "kind": "write",
+      "required_arguments": [
+        "body"
+      ],
       "scope_arguments": [
         "documentId",
         "id",
@@ -660,6 +791,9 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [
+        "body"
+      ],
       "scope_arguments": [
         "anchor",
         "anchorContent",
@@ -677,6 +811,7 @@
       "effect": "linear.changed",
       "external_fetch": false,
       "kind": "write",
+      "required_arguments": [],
       "scope_arguments": [
         "cycle",
         "id",
@@ -697,6 +832,7 @@
       "effect": "linear.changed",
       "external_fetch": false,
       "kind": "write",
+      "required_arguments": [],
       "scope_arguments": [
         "addLabels",
         "addReleases",
@@ -738,6 +874,7 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [],
       "scope_arguments": [
         "id",
         "isGroup",
@@ -754,6 +891,9 @@
       "effect": "linear.changed",
       "external_fetch": false,
       "kind": "write",
+      "required_arguments": [
+        "project"
+      ],
       "scope_arguments": [
         "id",
         "project"
@@ -768,6 +908,7 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [],
       "scope_arguments": [
         "addInitiatives",
         "addTeams",
@@ -800,6 +941,7 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [],
       "scope_arguments": [
         "id",
         "isGroup",
@@ -815,6 +957,7 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [],
       "scope_arguments": [
         "commitSha",
         "completedAt",
@@ -836,6 +979,7 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [],
       "scope_arguments": [
         "id",
         "pipeline",
@@ -853,6 +997,9 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [
+        "type"
+      ],
       "scope_arguments": [
         "id",
         "initiative",
@@ -869,6 +1016,9 @@
       "effect": null,
       "external_fetch": false,
       "kind": "read",
+      "required_arguments": [
+        "query"
+      ],
       "scope_arguments": [
         "page",
         "query"
@@ -879,6 +1029,10 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [
+        "issue",
+        "user"
+      ],
       "scope_arguments": [
         "issue",
         "user"
@@ -889,6 +1043,10 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [
+        "urlOrId",
+        "decision"
+      ],
       "scope_arguments": [
         "decision",
         "urlOrId"
@@ -901,6 +1059,10 @@
       "effect": "linear.sensitive",
       "external_fetch": false,
       "kind": "sensitive",
+      "required_arguments": [
+        "issue",
+        "user"
+      ],
       "scope_arguments": [
         "issue",
         "user"

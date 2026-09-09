@@ -1,4 +1,6 @@
 import importlib.util
+import io
+from unittest.mock import patch
 import json
 import os
 from pathlib import Path
@@ -66,13 +68,39 @@ class CaptureTests(unittest.TestCase):
     def test_drift_checks_schema_and_description_not_only_tool_names(self):
         before = {"surfaces": {s: {"tools": [tool("a"), tool("removed")]} for s in capture.ENDPOINTS}}
         after = {"surfaces": {s: {"tools": [tool("a") | {"description": "different semantics"}, tool("added")]} for s in capture.ENDPOINTS}}
-        for result in capture.drift(before, after).values():
+        for result in capture.drift(capture.fingerprints(before), capture.fingerprints(after)).values():
             self.assertEqual(result, {"added": ["added"], "removed": ["removed"], "changed": ["a"]})
 
     def test_tool_order_does_not_change_drift(self):
         before = {"surfaces": {s: {"tools": [tool("a"), tool("b")]} for s in capture.ENDPOINTS}}
         after = {"surfaces": {s: {"tools": [tool("b"), tool("a")]} for s in capture.ENDPOINTS}}
-        self.assertTrue(all(not items for result in capture.drift(before, after).values() for items in result.values()))
+        self.assertTrue(all(not items for result in capture.drift(capture.fingerprints(before), capture.fingerprints(after)).values() for items in result.values()))
+
+    def test_lock_contains_hashes_and_detects_nested_schema_changes(self):
+        before = {"surfaces": {s: {"tools": [tool("a")]} for s in capture.ENDPOINTS}}
+        lock = capture.fingerprints(before)
+        after = json.loads(json.dumps(before))
+        for surface in after["surfaces"].values():
+            surface["tools"][0]["inputSchema"]["properties"]["nested"] = {"type": "object"}
+        self.assertNotIn("inputSchema", json.dumps(lock))
+        self.assertEqual(len(lock["surfaces"]["read-write"]["tools"]["a"]), 64)
+        self.assertEqual(capture.drift(lock, capture.fingerprints(after))["read-write"]["changed"], ["a"])
+
+    def test_cli_defaults_to_lock_and_full_is_explicit(self):
+        for full in (False, True):
+            clients = [FakeClient([{"tools": [tool("a")]}]) for _ in capture.ENDPOINTS]
+            output = io.StringIO()
+            with patch.object(capture, "Client", side_effect=clients), patch.dict(os.environ, {capture.TOKEN_ENV: "fixture"}), \
+                    patch.object(sys, "argv", ["capture.py"] + (["--full"] if full else [])), patch.object(sys, "stdout", output):
+                self.assertEqual(capture.main(), 0)
+            result = json.loads(output.getvalue())
+            self.assertEqual(result["schema_version"], 1 if full else 2)
+            self.assertEqual("inputSchema" in output.getvalue(), full)
+
+    def test_invalid_lock_is_rejected(self):
+        for lock in [{}, {"schema_version": 2, "surfaces": {s: {"tools": {"a": "bad"}} for s in capture.ENDPOINTS}}]:
+            with self.assertRaises(capture.CaptureError):
+                capture.validate_lock(lock)
 
     def test_cli_help_is_offline_and_missing_credential_emits_no_capture(self):
         env = dict(os.environ)

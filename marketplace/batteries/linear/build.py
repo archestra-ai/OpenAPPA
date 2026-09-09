@@ -5,7 +5,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
-from linear_schema import PROFILES, check_schema
+from contract import PROFILES
 
 ROOT = Path(__file__).resolve().parent
 
@@ -25,37 +25,33 @@ def toml(value):
 
 
 def render():
-    capture = json.loads((ROOT / "schemas.json").read_text())
-    tools = {t["name"]: t for t in capture["surfaces"]["read-write"]["tools"]}
-    readonly = {t["name"] for t in capture["surfaces"]["read-only"]["tools"]}
-    if any(t["inputSchema"] != tools[t["name"]]["inputSchema"] for t in capture["surfaces"]["read-only"]["tools"]):
-        raise ValueError("read-only and read-write input schemas differ; review separate contracts")
+    lock = json.loads((ROOT / "schema-lock.json").read_text())
+    tools = lock["surfaces"]["read-write"]["tools"]
+    readonly = set(lock["surfaces"]["read-only"]["tools"])
     operations = json.loads((ROOT / "operations.json").read_text())["operations"]
     if set(tools) != set(operations):
-        raise ValueError("captured tools and reviewed operations differ; review drift first")
+        raise ValueError("locked tools and reviewed operations differ; review drift first")
     if readonly != {name for name, op in operations.items() if op["kind"] == "read"}:
         raise ValueError("read-only surface differs from reviewed read contracts")
-    for name, op in operations.items():
-        check_schema(tools[name]["inputSchema"])
+    for op in operations.values():
         if op["kind"] not in ("read", "write", "sensitive"):
             raise ValueError("unreviewed operation kind")
         scope, variable = set(op["scope_arguments"]), set(op["variable_arguments"])
-        if scope & variable or scope | variable != set(tools[name]["inputSchema"].get("properties", {})):
-            raise ValueError("scope arguments do not match captured schema")
+        if scope & variable or not set(op["required_arguments"]) <= scope | variable:
+            raise ValueError("invalid argument classification")
     files = {}
     for profile in PROFILES:
-        lines = ['# Generated from schemas.json and operations.json by build.py.',
+        lines = ['# Generated from schema-lock.json and operations.json by build.py.',
                  '# Override this annotator in the root config with explicit resource rules.',
                  '[policy]', 'version = 2', '', '[[policy.annotator]]',
                  f'name = "linear.{profile}"', 'hint = \'{"rules":{}}\'',
                  'ranks = ["suspicious", "trusted"]', 'marks = ["linear-review"]',
                  'effects = ["linear.changed", "linear.sensitive"]', '',
                  f'[externals.annotators."linear.{profile}"]', 'command = ["python3", "annotate.py"]', '']
-        for name, tool in sorted(tools.items()):
+        for name in sorted(tools):
             if profile == "read-only" and name not in readonly:
                 continue
             lines += ['[[policy.tool]]', f'name = {toml(name)}', 'server = "linear"',
-                      f'description = {toml(tool.get("description", ""))}',
                       f'tags = ["linear", "linear-{operations[name]["kind"]}"]',
                       'parameters = { type = "object", additionalProperties = true }',
                       f'annotator = "linear.{profile}"', '']

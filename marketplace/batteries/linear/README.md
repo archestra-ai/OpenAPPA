@@ -1,10 +1,10 @@
 # Linear battery
 
 Contracts for all **65 tools** captured from Linear's official read/write MCP
-endpoint and all **36 tools** from its read-only endpoint. The snapshot is in
-`schemas.json`; the reviewed operation and argument classification is in
+endpoint and all **36 tools** from its read-only endpoint. Per-tool definition hashes are in
+`schema-lock.json`; the reviewed operation and argument classification is in
 `operations.json`. Python 3.10+ is required. The command annotator is deterministic,
-uses no model or network, and refuses unknown tools, invalid arguments, missing
+uses no model or network, and refuses unknown tools, unreviewed arguments, missing
 resource mappings, and ambiguous mappings.
 
 Installing this battery adds policy; it does not connect Linear, enable tools,
@@ -94,14 +94,13 @@ requires public input and review, even in read-only mode.
 `prepare_attachment_upload` keeps its signed URL result `self`. The subsequent
 external PUT is outside Linear MCP and needs the host's shell/HTTP policy.
 
-The runtime parameter declaration admits an object because APPA supports a
-smaller schema vocabulary than Linear. Before classification, `linear_schema.py`
-validates arguments against the **full pinned input schema**, including nullable
-values, unions, nested patches, bounds and formats. Objects also reject unknown
-nested fields unless the snapshot explicitly permits additional properties.
-This is a bounded validator,
-not a general JSON Schema library. New keywords and unclassified arguments fail
-the generation check and require review. Capture annotations never grant access.
+`operations.json` is the reviewed policy contract: operation kinds, required
+arguments, and the partition between scope and variable arguments. Scope values,
+including nested objects, must match an operator rule exactly. Variable values
+are scalars except for the reviewed text-edit `patch` operations; `contract.py`
+rejects unknown patch fields and structured values hidden in scalar content.
+Linear validates API types, formats and bounds. The battery does not ship or
+implement a general provider schema validator. Capture annotations never grant access.
 
 ## Audience source
 
@@ -168,17 +167,27 @@ Load `APPA_PROVIDER_LINEAR_TOKEN` into the environment from your secret store.
 Never put it in arguments or repository files.
 
 ```sh
-python3 marketplace/batteries/linear/capture.py --compare marketplace/batteries/linear/schemas.json > /tmp/linear-candidate.json
+python3 marketplace/batteries/linear/capture.py --compare marketplace/batteries/linear/schema-lock.json > /tmp/linear-candidate-lock.json
+# For reviewing changed definitions locally, without committing the capture:
+python3 marketplace/batteries/linear/capture.py --full --compare marketplace/batteries/linear/schema-lock.json > /tmp/linear-candidate-full.json
 ```
 
 The utility initializes both official endpoints, paginates `tools/list`, and
-never calls `tools/call`. It outputs the candidate JSON only after both captures
-succeed. Exit codes: 0 unchanged/success, 1 failure, 2 usage, 3 drift. A redirected
-file may be empty on failure. Compare added/removed tools, descriptions, schemas,
-and annotations; review operation kinds and **every argument** before replacing
-`schemas.json`, updating `operations.json`, and running `build.py`. The checked
-scope/variable partition prevents a newly added field from silently becoming free.
-Hashes identify the observed surface, not a hosted deployment version.
+never calls `tools/call`. By default it outputs a lockfile containing per-tool
+SHA-256 hashes of canonical complete definitions (including input schemas,
+descriptions and annotations), plus endpoint provenance. `--full` emits the
+observed definitions for local review instead. Neither mode changes policy files.
+Output is produced only after both captures succeed. Exit codes: 0 unchanged/success,
+1 failure, 2 usage, 3 drift. A redirected file may be empty on failure.
+
+A changed hash requires reviewing the current definition and **every argument**
+against `operations.json`. Update that contract before accepting the candidate
+lockfile and running `build.py`. Do not commit full captures or copy provider
+descriptions into policy files. The offline build checks tool coverage and the
+argument partition's internal consistency; it cannot compare fields against hashes.
+Hashes detect drift when this command runs, not during annotation, and do not
+identify a hosted deployment version. Unknown tools and arguments still refuse
+at runtime, but semantic changes to existing fields require the drift check.
 
 ```sh
 python3 marketplace/batteries/linear/build.py --check

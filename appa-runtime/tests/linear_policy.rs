@@ -159,11 +159,11 @@ builtin = "approve"
 
 #[test]
 fn native_host_names_resolve_to_the_same_linear_contracts() {
-    let tools: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(repo_root().join("marketplace/batteries/linear/schemas.json")).unwrap())
-            .unwrap();
-    for tool in tools["surfaces"]["read-write"]["tools"].as_array().unwrap() {
-        let name = tool["name"].as_str().unwrap();
+    let tools: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(repo_root().join("marketplace/batteries/linear/schema-lock.json")).unwrap(),
+    )
+    .unwrap();
+    for name in tools["surfaces"]["read-write"]["tools"].as_object().unwrap().keys() {
         let claude = (appa_adapter_claude_code::adapter().derive)(&format!("mcp__linear__{name}")).unwrap();
         let kagent = (appa_adapter_kagent::adapter().derive)(&format!("mcp:linear/{name}")).unwrap();
         assert_eq!(claude.canonical, kagent.canonical);

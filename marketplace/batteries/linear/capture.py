@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture the official Linear MCP schemas without invoking any tools.
+"""Fingerprint the official Linear MCP definitions without invoking any tools.
 
 JSON on stdout, diagnostics on stderr; no policy files are modified.
 """
@@ -152,14 +152,36 @@ def capture(client):
     raise CaptureError("tools/list exceeds pagination limit")
 
 
+def fingerprints(captured):
+    """Hash complete definitions, including schemas, descriptions and annotations."""
+    return {**captured, "schema_version": 2, "surfaces": {
+        surface: {**data, "tools": {
+            name: hashlib.sha256(canonical(tool)).hexdigest()
+            for name, tool in sorted(tool_map(data["tools"]).items())}}
+        for surface, data in captured["surfaces"].items()}}
+
+
+def validate_lock(lock):
+    if lock.get("schema_version") != 2:
+        raise CaptureError("expected a schema lockfile")
+    for surface in ENDPOINTS:
+        hashes = lock["surfaces"][surface]["tools"]
+        if not isinstance(hashes, dict) or not hashes or any(
+                not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value)
+                for value in hashes.values()):
+            raise CaptureError("invalid tool fingerprints")
+
+
 def drift(before, after):
+    validate_lock(before)
+    validate_lock(after)
     changes = {}
     for surface in ENDPOINTS:
-        old = tool_map(before["surfaces"][surface]["tools"])
-        new = tool_map(after["surfaces"][surface]["tools"])
+        old = before["surfaces"][surface]["tools"]
+        new = after["surfaces"][surface]["tools"]
         changes[surface] = {"added": sorted(new.keys() - old.keys()),
                             "removed": sorted(old.keys() - new.keys()),
-                            "changed": sorted(name for name in old.keys() & new.keys() if canonical(old[name]) != canonical(new[name]))}
+                            "changed": sorted(name for name in old.keys() & new.keys() if old[name] != new[name])}
     return changes
 
 
@@ -167,15 +189,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False,
         epilog="Requires APPA_PROVIDER_LINEAR_TOKEN. Example: python3 capture.py > /tmp/linear-candidate.json. "
                "Read both stdout and the exit code: 0 success, 1 failure, 2 usage, 3 schema drift. No tool calls or policy edits.")
-    parser.add_argument("--compare", metavar="CAPTURE", help="compare against a prior capture; include drift in output and exit 3 when changed")
+    parser.add_argument("--compare", metavar="CAPTURE", help="compare against a schema lockfile; include drift in output and exit 3 when changed")
+    parser.add_argument("--full", action="store_true", help="emit full tool definitions for local review instead of the default hash lockfile")
     args = parser.parse_args()
     try:
         previous = None
         if args.compare:
             with open(args.compare) as stream:
                 previous = json.load(stream)
-            for surface in ENDPOINTS:
-                tool_map(previous["surfaces"][surface]["tools"])
+            validate_lock(previous)
         token = os.environ.get(TOKEN_ENV, "")
         if not token or any(c in token for c in "\r\n"):
             raise CaptureError("set " + TOKEN_ENV + " before capturing")
@@ -184,8 +206,15 @@ def main():
             surfaces[surface] = {"endpoint": endpoint, **capture(Client(endpoint, token))}
         if not set(tool_map(surfaces["read-only"]["tools"])).issubset(tool_map(surfaces["read-write"]["tools"])):
             raise CaptureError("read-only inventory is not a subset of read-write inventory")
+        writable = tool_map(surfaces["read-write"]["tools"])
+        if any(tool["inputSchema"] != writable[name]["inputSchema"]
+               for name, tool in tool_map(surfaces["read-only"]["tools"]).items()):
+            raise CaptureError("read-only and read-write schemas differ; review separate contracts")
         result = {"schema_version": 1, "captured_at": datetime.now(timezone.utc).isoformat(), "surfaces": surfaces}
-        changes = drift(previous, result) if previous else None
+        lock = fingerprints(result)
+        changes = drift(previous, lock) if previous else None
+        if not args.full:
+            result = lock
         if changes is not None:
             result["drift"] = changes
         json.dump(result, sys.stdout, indent=2, sort_keys=True)

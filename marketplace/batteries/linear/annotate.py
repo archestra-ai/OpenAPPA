@@ -9,13 +9,10 @@ from pathlib import Path
 import sys
 # Installed generations are immutable: importing support code must not create caches.
 sys.dont_write_bytecode = True
-from linear_schema import PROFILES, check_schema, valid
+from contract import PROFILES, argument_names, valid_arguments
 
 ROOT = Path(__file__).resolve().parent
 OPERATIONS = json.loads((ROOT / "operations.json").read_text())["operations"]
-SCHEMAS = {t["name"]: t["inputSchema"] for t in json.loads((ROOT / "schemas.json").read_text())["surfaces"]["read-write"]["tools"]}
-for _schema in SCHEMAS.values():
-    check_schema(_schema)
 MAX_BYTES = 8 * 1024 * 1024
 # These edits can expand access, cause secondary actions, or apply inherited content.
 SENSITIVE_ARGUMENTS = {"team", "teamId", "addTeams", "setTeams", "removeTeams", "delegate", "template",
@@ -42,7 +39,7 @@ def config_from(declaration):
             if (not isinstance(rule, dict) or set(rule) - {"match", "audience", "production"}
                     or not {"match", "audience"}.issubset(rule)
                     or not isinstance(rule["match"], dict)
-                    or set(rule["match"]) - SCHEMAS[tool].get("properties", {}).keys()
+                    or set(rule["match"]) - argument_names(OPERATIONS[tool])
                     or type(rule.get("production", False)) is not bool):
                 raise Refusal("invalid resource rule")
             audience = rule["audience"]
@@ -79,13 +76,8 @@ def annotate(request):
         raise Refusal("operation was not reviewed")
     operation = OPERATIONS[tool]
     arguments = call["arguments"]
-    schema = SCHEMAS[tool]
-    if set(arguments) - schema.get("properties", {}).keys() or not set(schema.get("required", [])).issubset(arguments):
-        raise Refusal("unknown or missing arguments")
-    if not valid(schema, arguments):
-        raise Refusal("arguments do not satisfy the captured schema")
-    # APPA's parameter schema is intentionally narrower than JSON Schema. The
-    # complete pinned schema is checked here before any policy decision.
+    if not valid_arguments(operation, arguments):
+        raise Refusal("arguments do not satisfy the reviewed policy contract")
     candidates = []
     supplied_scope = set(operation["scope_arguments"]) & arguments.keys()
     for rule in config["rules"].get(tool, []):
@@ -128,7 +120,7 @@ def main():
         sys.stdout.write("\n")
         return 0
     except (ValueError, TypeError, KeyError):
-        print("Linear annotation refused: check the captured schema, profile, and resource audience rules", file=sys.stderr)
+        print("Linear annotation refused: check the policy contract, profile, and resource audience rules", file=sys.stderr)
         return 1
 
 

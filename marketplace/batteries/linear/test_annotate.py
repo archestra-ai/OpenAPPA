@@ -26,24 +26,8 @@ class AnnotationTests(unittest.TestCase):
         # profile cannot escape consult coverage when the profile list changes.
         profiles = [re.search(r'^name = "linear\.([^"\n]+)"$', body, re.MULTILINE).group(1)
                     for body in build.render().values()]
-        for tool, schema in module.SCHEMAS.items():
-            def sample(s):
-                if "const" in s: return s["const"]
-                if "enum" in s: return s["enum"][0]
-                if "oneOf" in s: return sample(s["oneOf"][0])
-                if "anyOf" in s: return sample(s["anyOf"][0])
-                kind = s.get("type")
-                if isinstance(kind, list): kind = kind[0]
-                if kind == "object": return {k:sample(s["properties"][k]) for k in s.get("required", [])}
-                if kind == "array": return [sample(s["items"]) for _ in range(s.get("minItems",0))]
-                if kind in ("number", "integer"): return max(s.get("minimum",1),s.get("exclusiveMinimum",0)+1)
-                if kind == "boolean": return False
-                if kind == "null": return None
-                if s.get("pattern") == "^[a-fA-F0-9]{64}$": return "a"*64
-                if s.get("format") == "uri": return "https://example.com/asset"
-                if s.get("format") == "date-time": return "2026-09-09T12:00:00Z"
-                return "fixture"
-            args = sample(schema)
+        for tool, operation in module.OPERATIONS.items():
+            args = {key: "fixture" for key in operation["required_arguments"]}
             for profile in profiles:
                 with self.subTest(tool=tool, profile=profile):
                     mutation = module.OPERATIONS[tool]["kind"] != "read"
@@ -62,6 +46,22 @@ class AnnotationTests(unittest.TestCase):
         args = {"id": "ENG-1", "patch": [{"op": "append", "text": "update", "team": "outside"}]}
         with self.assertRaises(module.Refusal):
             module.annotate(request("save_issue", args, match={"id": "ENG-1"}))
+
+    def test_text_patch_can_vary_without_changing_destination(self):
+        args = {"id": "ENG-1", "patch": [{"op": "append", "text": "update"}]}
+        self.assertEqual(module.annotate(request("save_issue", args, match={"id": "ENG-1"}))["answer"]["requires"]["audience"],
+                         {"contains": ["alice@corp.example"]})
+
+    def test_variable_content_cannot_hide_structured_scope_changes(self):
+        for body in [{"team": "outside"}, [{"team": "outside"}]]:
+            with self.subTest(body=body), self.assertRaises(module.Refusal):
+                module.annotate(request("save_comment", {"issueId": "ENG-1", "body": body}, match={"issueId": "ENG-1"}))
+
+    def test_provider_format_validation_is_left_to_provider(self):
+        args = {"issueId": "ENG-1", "body": ""}
+        module.annotate(request("save_comment", args, match={"issueId": "ENG-1"}))
+        with self.assertRaises(module.Refusal):
+            module.annotate(request("get_issue", {}))
 
     def test_reparent_cannot_reuse_old_issue_mapping(self):
         with self.assertRaises(module.Refusal):
