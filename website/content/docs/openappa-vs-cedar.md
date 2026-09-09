@@ -13,11 +13,11 @@ The main difference is how much of the agent's security behavior you need to bui
 
 | Built in | Cedar | OpenAPPA |
 |---|:---:|:---:|
-| Policy language and engine | ✓ | ✓ |
-| Tracks what the agent reads and does | ✕ | ✓ |
-| Saves and restores the agent's security context | ✕ | ✓ |
-| Carries data restrictions into later actions | ✕ | ✓ |
-| Plans recovery when an action is blocked | ✕ | ✓ |
+| Checks actions against your rules | ✓ | ✓ |
+| Remembers earlier tool calls | ✕ | ✓ |
+| Keeps that history after a restart | ✕ | ✓ |
+| Uses earlier reads to limit later actions | ✕ | ✓ |
+| Suggests ways to unblock an action | ✕ | ✓ |
 
 ✓ Included. ✕ Requires additional application code or a service around Cedar.
 
