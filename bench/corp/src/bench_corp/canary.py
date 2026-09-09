@@ -31,7 +31,7 @@ from .report import AgentSummary
 DEFENDED_ARM = "appa"
 EMPTY_ARM = "appa-open"
 CANARY_AGENTS = (DEFENDED_ARM, EMPTY_ARM)
-CANARY_MODELS = ("openai/gpt-5.6-luna", "deepseek/deepseek-v4-flash-0731")
+CANARY_MODELS = ("openai/gpt-5.6-terra", "deepseek/deepseek-v4-flash-0731")
 CANARY_PROMPT_PROFILE = "redteam-chaos"
 
 

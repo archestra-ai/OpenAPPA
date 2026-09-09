@@ -25,7 +25,7 @@ CORP_SYSTEMS_BIN = CORP_SYSTEMS_DIR / "target" / "debug" / "corp-systems-mcp"
 APPA_CORP_AGENT_BIN = CORP_AGENT_DIR / "target" / "debug" / "appa-corp-agent"
 FIDES_BIN = FIDES_DIR / ".venv" / "bin" / "corp-agent-fides"
 
-DEFAULT_MODEL = "openai/gpt-5.6-luna"
+DEFAULT_MODEL = "openai/gpt-5.6-terra"
 
 
 class PolicyTarget(Enum):

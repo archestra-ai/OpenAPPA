@@ -898,7 +898,7 @@ jobs:
       APPA_E2E_PRUNE_DAEMON_IMAGES: "1"
       # The Agent model uses the same endpoint as the public playground.
       # Demo sanitizers are deterministic mock policy services.
-      APPA_E2E_MODEL: openai/gpt-5.6-luna
+      APPA_E2E_MODEL: openai/gpt-5.6-terra
       APPA_E2E_BASE_URL: https://openrouter.ai/api/v1
     steps:
       # Standard runners ship about 25 GB of unused toolchains. Delete them

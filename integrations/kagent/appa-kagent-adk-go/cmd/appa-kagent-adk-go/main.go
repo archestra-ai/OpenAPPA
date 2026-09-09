@@ -255,8 +255,11 @@ const reasoningEffortEnv = "APPA_KAGENT_OPENAI_REASONING_EFFORT"
 // model of another type is untouched.
 func withReasoningEffort(agentConfig *adk.AgentConfig, effort string) {
 	effort = strings.TrimSpace(effort)
+	if effort == "" {
+		return
+	}
 	model, ok := agentConfig.Model.(*adk.OpenAI)
-	if effort == "" || !ok || model.ReasoningEffort != nil {
+	if !ok || model.ReasoningEffort != nil {
 		return
 	}
 	model.ReasoningEffort = &effort

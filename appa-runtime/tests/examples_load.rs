@@ -34,7 +34,9 @@ fn policy_files(dir: &Path) -> Vec<PathBuf> {
 }
 
 fn opens(path: &Path) {
-    let config = Config::load(path).unwrap_or_else(|error| panic!("{} does not load: {error}", path.display()));
+    let battery_dirs = [repo_root().join("marketplace/batteries")];
+    let config = Config::load_from(path, &battery_dirs)
+        .unwrap_or_else(|error| panic!("{} does not load: {error}", path.display()));
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     Runtime::open(config, dir.path().join("appa.db"), None)
         .unwrap_or_else(|error| panic!("{} does not open: {error}", path.display()));

@@ -59,7 +59,7 @@ def test_fides_native_tools_have_provider_portable_strict_schemas() -> None:
 
 
 def test_preflight_checks_pins_without_requiring_a_credential() -> None:
-    result = preflight("openrouter/openai/gpt-5.6-luna", require_credential=False)
+    result = preflight("openrouter/openai/gpt-5.6-terra", require_credential=False)
     assert result["total_samples"] == 130
     assert result["binding_identity"] == EXPECTED_BINDING_IDENTITY
     assert result["fides_binding_identity"] == "agent-framework-fides-agentthreatbench-v1"
@@ -104,9 +104,9 @@ def test_chaos_profile_is_the_same_explicit_addendum_in_every_arm() -> None:
 
 
 def test_prompt_profile_changes_and_is_pinned_by_the_run_digest() -> None:
-    standard = run_manifest("openrouter/openai/gpt-5.6-luna", "high", 300, 50)
+    standard = run_manifest("openrouter/openai/gpt-5.6-terra", "high", 300, 50)
     chaos = run_manifest(
-        "openrouter/openai/gpt-5.6-luna",
+        "openrouter/openai/gpt-5.6-terra",
         "high",
         300,
         50,

@@ -21,9 +21,16 @@ spec:
       {{ include "appa-runtime.fullname" . }} in namespace {{ .Release.Namespace }}
       at http://{{ include "appa-runtime.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}.
 
-      For init, adjust, diagnose, or lifecycle work, first call skills with
-      command appa-guide, then read the complete
-      /skills/appa-guide/references/kagent.md. Follow that reference.
+      Core communication rule: Every remedy approval explanation must be short,
+      simple, and straight to the point: exactly ONE concise sentence stating the
+      action and asking for approval on the card (e.g. "I have prepared the OpenAPPA
+      configuration for <agent>. Please approve the confirmation card to apply it.").
+      Never narrate background checks, never emit intermediate commentary, and never
+      concatenate fragmented sentences. Run all background inspection tools silently.
+
+      Follow wire rules at /skills/appa-guide/references/kagent.md. When detailed reference
+      lookup is needed, first call skills with command appa-guide. Proceed directly with the
+      inventory calls after emitting the plan message to the user.
 
       Runtime management uses only direct runtime-owned MCP tools:
       - appa_get_runtime_state reads serving policy and runtime state.
@@ -66,30 +73,53 @@ spec:
       init write is one appa_update_policy of the verified demo manifest
       with the GitHub include prepended. Never call appa_include_battery
       as the sole init write in that case; serving policy must declare
-      read_secret. release-manager
+      read_secret.       When kagent-tool-server or other servers have unconfigured tools, init must
+      draft root contracts for the tools the active cluster agents actually declare
+      (reads use delta = {}, logs/events use delta = { trust = "suspicious" }, modifying
+      actions require human-approval). Do not enumerate dozens of unused tools; undeclared
+      tools stay safely refused by default. Propose a complete starting policy. After approval,
+      call appa_update_policy to activate it. Never conclude that no change is needed
+      when discovered cluster tools remain unconfigured. release-manager
       remains a blocked delegation unless the operator separately requests it.
 
-      Inspection and proposals are read-only. A request is never approval.
-      Present the complete proposal, then wait for a later approval message.
-      A mutating runtime tool or Agent/Helm operation must first return its
-      exact APPA offer. Call execute_remedy_plan only with that returned offer
-      id to open the confirmation card. Never invent or request an offer id.
-      If no proposal is pending, approval means nothing needs applying.
+      A request is never approval to bypass human sign-off: all mutating operations
+      (appa_refresh_batteries, appa_update_policy, appa_include_battery, k8s_apply_manifest)
+      require human authorization through the native confirmation card. Never refuse to
+      update policy because persistence is disabled; policy publishing updates the ConfigMap directly.
+      To execute any requested mutation (e.g. "refresh batteries", "protect ops-assistant",
+      "protect all agents", or applying approved policy), proceed directly in a single turn
+      (prompt -> card approval -> done): invoke the mutating tool immediately, catch its APPA offer,
+      and call execute_remedy_plan to open the confirmation card directly. Do not stop the turn
+      prematurely with text or wait for chat approval before calling the tool that opens the card!
+      A mutating runtime tool or Agent/Helm operation must first return its exact APPA offer.
+      Call execute_remedy_plan only with that returned offer id to open the confirmation
+      card. Never invent or request an offer id. When execute_remedy_plan returns Authorized
+      (the user approved the card), you MUST immediately call the mutation tool again
+      (e.g. appa_update_policy, appa_refresh_batteries, or k8s_apply_manifest) to execute the approved change.
+      Never claim the payload is incomplete or refuse to re-call the tool.
 
-      Protect an existing Agent only with k8s_apply_manifest over its complete
-      observed Agent CR. Preserve every environment entry; add or replace only
+      When asked to protect an agent (e.g. "protect ops-assistant" or "protect all agents"),
+      proceed directly in a single turn (prompt -> card approval -> done): explain what you are
+      doing, construct the complete manifest, and invoke k8s_apply_manifest to open the native
+      confirmation card directly. Protect an existing Agent only with k8s_apply_manifest over
+      its complete observed Agent CR. Preserve every environment entry; add or replace only
       APPA_ENABLED and APPA_RUNTIME_URL. Never patch a generated Deployment,
       create a missing Agent, copy status, or include server-owned metadata.
       Helm mutations use published charts and require their own proposal and
       approval.
 
+      If the request asks to view or explain current policy (e.g. "show policy", "explain policy"),
+      call k8s_get_resources and appa_get_runtime_state. Report the protected agents (e.g. ops-assistant,
+      appa-guide) and explain the active rules and included batteries in plain, accessible language without
+      proposing changes.
       If the request says diagnose and inspect only, report Health, optional
       Unavailable, one OpenAPPA pieces line, and No changes applied. Do not
       suggest changes or ask for approval. Otherwise keep the final reply under
-      1,600 characters with only Observed tools, Battery reconciliation,
+      1,600 characters with Observed tools, Battery reconciliation,
       Suggested includes, optional Exceptions, OpenAPPA pieces, and the
-      approval line when a change exists. Never narrate inspection mechanics
-      or list unmatched catalog batteries.
+      approval line when a change exists. Use human, user-friendly language without
+      jargon; state which agents are protected vs unprotected, never saying "gated"
+      or "ungated". Never narrate inspection mechanics or list unmatched catalog batteries.
     modelConfig: {{ .Values.appaGuide.modelConfig | quote }}
     tools:
       - type: McpServer
@@ -112,9 +142,23 @@ spec:
         - name: APPA_RUNTIME_URL
           value: {{ printf "http://%s.%s.svc.cluster.local:%v" (include "appa-runtime.fullname" .) .Release.Namespace .Values.service.port | quote }}
         - name: APPA_KAGENT_OPENAI_REASONING_EFFORT
-          value: {{ .Values.appaGuide.reasoningEffort | quote }}
+          value: {{ .Values.appaGuide.reasoningEffort | default "none" | quote }}
         - name: APPA_GUIDE
           value: "true"
         - name: APPA_GUIDE_MCP_URL
           value: {{ printf "http://%s.%s.svc.cluster.local:%v/guide-mcp" (include "appa-runtime.fullname" .) .Release.Namespace (.Values.service.guidePort | default 18788) | quote }}
+      volumeMounts:
+        - name: appa-guide-skill-root
+          mountPath: /skills/appa-guide/SKILL.md
+          subPath: SKILL.md
+        - name: appa-guide-skill-ref
+          mountPath: /skills/appa-guide/references/kagent.md
+          subPath: kagent.md
+      volumes:
+        - name: appa-guide-skill-root
+          configMap:
+            name: {{ .Values.appaGuide.name }}-skill
+        - name: appa-guide-skill-ref
+          configMap:
+            name: {{ .Values.appaGuide.name }}-skill
 {{- end }}

@@ -125,8 +125,8 @@ error.
 ## Rules on this host
 
 - Do not configure this agent: skip the agent named `appa-guide`. The
-  router's rule on the reserved `appa/execute_remedy_plan` applies the
-  same way here.
+  router's rule on the reserved `execute_remedy_plan` applies the same
+  way here.
 - Never invent a battery. Propose only batteries `GET /batteries`
   returns. Never edit a battery. Override with a root rule.
 - Never treat a demo policy template as active configuration or as a
@@ -221,18 +221,16 @@ the same Kubernetes read with different capitalization or pluralization.
 3. List every `RemoteMCPServer` with
    `resource_type: remotemcpserver` across all namespaces with `output: json`
    in one call. Each `status.discoveredTools`
-   entry is one tool: its exact wire name and description. The policy names
-   it `mcp/<server name>/<tool>`. A server with no discovered tools is
-   uninspected — never invent its tool list.
+   entry is one tool: its exact wire name and description. A server with
+   no discovered tools is uninspected — never invent its tool list.
 4. Cross-check. A `toolNames` entry no server discovered has a name but
    no description; if its boundary is unclear, it belongs in the one
    ambiguity question below.
 5. Count these as installed tools: each Agent's declared `toolNames`,
-   kagent's built-in `host/kagent/ask_user`, and the entrypoint's gates
-   `host/kagent-gate/code_execution` and
-   `host/kagent-gate/memory_persist`. An agent with
-   `spec.declarative.memory` adds the memory tools
-   `host/kagent/load_memory` and `host/kagent/save_memory`. Its memory prefetch hands the model no function to
+   kagent's built-in `ask_user`, and the entrypoint's synthetic
+   `appa_code_execution` and `appa_memory_persist`. An agent with
+   `spec.declarative.memory` adds the memory tools `load_memory` and
+   `save_memory`. Its memory prefetch hands the model no function to
    call: no rule covers it, and the memories it appends cross no gate.
    Keep discovered-but-unattached server tools in a separate candidate
    set for battery matching.
@@ -406,27 +404,13 @@ Policy is stored in the Kubernetes ConfigMap and updates immediately via `appa_u
 whether persistence is enabled or disabled. Never refuse to propose, publish, or apply policy
 because persistence is disabled.
 
-## Tool names
+## Wire names
 
-A rule names a tool by its canonical tool id:
-
-- A tool of the `RemoteMCPServer` or `ToolServer` served at
-  `<toolset>`, the first label of the server host in `params.url`:
-  `mcp/<toolset>/<tool>`. The same tool name on two servers is two
-  contracts. A gated agent reaches that toolset only at the Kubernetes
-  service forms of the same name (`<service>`,
-  `<service>.<namespace>`, `<service>.<namespace>.svc`,
-  `<service>.<namespace>.svc.cluster.local`) or at loopback, so the
-  endpoint is a cluster service address and not an arbitrary host. The
-  name is that first label alone: a service of the same name in another
-  namespace, or an `ExternalName` Service pointing outside the cluster,
-  carries the same contract.
-- An agent called as a tool: `agent/<namespace>/<name>`. The wildcard
-  covers no spawn: a delegation needs a contract that names the agent,
-  or it stays blocked.
-- A kagent built-in: `host/kagent/<name>`. The entrypoint gates:
-  `host/kagent-gate/code_execution` and `host/kagent-gate/memory_persist`.
-- The reserved `appa/execute_remedy_plan` takes no rule.
+- MCP tools: the plain tool name. Duplicate names across servers share
+  one contract.
+- An agent called as a tool: `<namespace>__NS__<name>`, hyphens as
+  underscores. The wildcard covers no spawn: a delegation needs a
+  contract that names the agent, or it stays blocked.
 
 ## Cover the remaining tools
 

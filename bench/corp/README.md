@@ -22,7 +22,7 @@ The benchmark evaluates six agent configurations across identical task scenarios
 ### Key Principles
 - **Baselines (`-open`)**: Show agent behavior without security enforcement.
 - **Ablation (`appa-nofork`)**: Isolates the specific contribution of process branching under identical execution loops and policy rules.
-- **Controlled Environment**: All agents run with the same underlying model (configurable via `--model`, defaulting to `openai/gpt-5.6-luna`), ensuring performance differences reflect defense capabilities.
+- **Controlled Environment**: All agents run with the same underlying model (configurable via `--model`, defaulting to `openai/gpt-5.6-terra`), ensuring performance differences reflect defense capabilities.
 
 ---
 
@@ -392,7 +392,7 @@ natural control:
 
 ```bash
 uv run bench-corp chaos-screen \
-  --model openai/gpt-5.6-luna \
+  --model openai/gpt-5.6-terra \
   --agent-prompt-profile standard \
   --reps 1 --jobs 4
 ```
@@ -404,7 +404,7 @@ does not rewrite scenario prompts, inject random tool failures, or script a part
 
 ```bash
 uv run bench-corp chaos-screen \
-  --model openai/gpt-5.6-luna \
+  --model openai/gpt-5.6-terra \
   --agent-prompt-profile redteam-chaos \
   --reps 1 --jobs 4
 ```
@@ -419,7 +419,7 @@ feedback, and a subsequent supported action before claiming recovery.
 `canary` is the tripwire behind the `Nightly Canary` workflow
 (`.github/workflows/nightly-canary.yml`): the `appa` and `appa-open` arms over
 the full scenario set, one rep per cell, always under `redteam-chaos`, on a
-pinned model pair (`openai/gpt-5.6-luna`, `deepseek/deepseek-v4-flash-0731`,
+pinned model pair (`openai/gpt-5.6-terra`, `deepseek/deepseek-v4-flash-0731`,
 override with repeatable `--model`).
 
 ```bash
