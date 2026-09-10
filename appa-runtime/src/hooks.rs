@@ -12,6 +12,9 @@ use crate::api::{
     ToolResultDecision, is_control_tool,
 };
 
+/// The APPA-authored context the plugin adds independently after its SessionStart post.
+const SESSION_CONTEXT: &str = include_str!("../../marketplace/plugins/claude-code/plugin/hooks/session-context.md");
+
 fn wire(decision: &HookDecision) -> serde_json::Value {
     serde_json::to_value(WireDecision::of(decision)).expect("a wire decision serializes")
 }
@@ -110,6 +113,9 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> (u16, 
         };
         if let Some((status, decision)) = early {
             let (outcome, offers) = hook_result(&decision);
+            if root_agent_event(&event) {
+                runtime.count_appa_tokens(&root, decision_tokens(&decision), false);
+            }
             runtime.record(
                 Some(&root),
                 crate::events::RuntimeEvent::Hook {
@@ -123,13 +129,60 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> (u16, 
             return (status, wire(&decision));
         }
     }
+    let reset_appa_tokens = matches!(event, HookEvent::SessionStart { .. });
+    let count_for_root = root_agent_event(&event);
     let handled = handle_internal(runtime, event).await;
+    let mut appa_tokens = if reset_appa_tokens {
+        estimated_tokens(SESSION_CONTEXT)
+    } else {
+        0
+    };
+    if count_for_root {
+        appa_tokens = appa_tokens.saturating_add(decision_tokens(&handled.decision));
+    }
+    runtime.count_appa_tokens(&root, appa_tokens, reset_appa_tokens);
     runtime.record(Some(&root), handled.event);
     let status = match handled.decision {
         HookDecision::Refuse { .. } => 409,
         _ => 200,
     };
     (status, wire(&handled.decision))
+}
+
+/// Whether the decision text reaches the root model whose context total its statusline reports.
+/// Child-start and child-stop text belongs to the child's separate model context.
+fn root_agent_event(event: &HookEvent) -> bool {
+    match event {
+        HookEvent::SessionStart { .. } => true,
+        HookEvent::Prompt { actor, .. }
+        | HookEvent::TurnEnd { actor }
+        | HookEvent::ToolCall { actor, .. }
+        | HookEvent::SpawnResume { actor, .. }
+        | HookEvent::ToolResult { actor, .. }
+        | HookEvent::SpawnResult { actor, .. } => actor.child.is_none(),
+        HookEvent::ChildStart { .. } | HookEvent::ChildEnd { .. } => false,
+    }
+}
+
+/// Claude does not publish its tokenizer for local use. This deliberately narrow estimate
+/// counts only APPA-authored text, at the conventional four UTF-8 bytes per model token.
+fn estimated_tokens(text: &str) -> u64 {
+    u64::try_from(text.len()).unwrap_or(u64::MAX).div_ceil(4)
+}
+
+fn decision_tokens(decision: &HookDecision) -> u64 {
+    match decision {
+        HookDecision::DenyCall { feedback, .. } => estimated_tokens(feedback),
+        HookDecision::Block { reason } => estimated_tokens(reason),
+        HookDecision::ReplaceOutput { output } => estimated_tokens(output),
+        HookDecision::Refuse { detail } => estimated_tokens(detail),
+        HookDecision::Ack
+        | HookDecision::AllowCall { .. }
+        | HookDecision::PassControl
+        | HookDecision::DeliverValue { .. }
+        | HookDecision::ChildReturn { .. }
+        | HookDecision::Context { .. } => 0,
+    }
 }
 
 /// A hook that ended before an actor existed, so there is nothing to attribute it to.
@@ -584,6 +637,25 @@ mod tests {
     use crate::api::Runtime;
     use crate::config::Config;
 
+    #[test]
+    fn direct_appa_input_counts_only_appa_authored_decision_text() {
+        assert_eq!(estimated_tokens("12345"), 2);
+        assert_eq!(
+            decision_tokens(&HookDecision::DenyCall {
+                feedback: "12345678".to_string(),
+                offers: Vec::new(),
+                review: Vec::new(),
+            }),
+            2
+        );
+        assert_eq!(
+            decision_tokens(&HookDecision::DeliverValue {
+                value: "a sanitizer's derived value is not APPA prompt text".to_string(),
+            }),
+            0
+        );
+    }
+
     /// The client side of the wire, as `appa hook` runs it: the
     /// Claude Code hook JSON these tests are written in is translated onto the wire,
     /// and the wire decision is rendered back into Claude Code's hook answer.
@@ -642,6 +714,19 @@ mod tests {
 
     fn open_runtime(dir: &tempfile::TempDir) -> Runtime {
         Runtime::open(config(), dir.path().join("appa.db"), None).expect("the fixture deployment opens")
+    }
+
+    #[tokio::test]
+    async fn session_start_counts_the_appa_context_the_root_model_receives() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let started = br#"{"hook_event_name":"SessionStart","session_id":"token-count"}"#;
+        assert_eq!(through_the_wire(&runtime, started).await.0, 200);
+
+        let status = runtime
+            .status(&TrajectoryId("cc:token-count".to_string()))
+            .expect("the started trajectory has status");
+        assert_eq!(status.appa_tokens, estimated_tokens(SESSION_CONTEXT));
     }
 
     async fn call_hook(runtime: &Runtime, body: &[u8]) -> (u16, serde_json::Value) {

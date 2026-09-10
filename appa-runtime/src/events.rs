@@ -302,6 +302,9 @@ struct RootEvents {
     dropped: u64,
     dropped_through_seq: Option<u64>,
     bytes: usize,
+    /// Direct APPA-authored input shown to the root agent since its latest session start.
+    /// This is a display metric, not part of the trajectory or a policy decision.
+    appa_tokens: u64,
 }
 
 impl RootEvents {
@@ -346,6 +349,22 @@ pub(crate) struct EventLog {
 }
 
 impl EventLog {
+    /// Reset or add to one root agent's direct APPA input count. Like the diagnostic events,
+    /// this projection is bounded by `MAX_ROOTS` and disappears on process restart.
+    pub(crate) fn count_appa_tokens(&mut self, root: &TrajectoryId, tokens: u64, reset: bool) {
+        let events = self.roots.entry(root.0.clone()).or_default();
+        events.appa_tokens = if reset {
+            tokens
+        } else {
+            events.appa_tokens.saturating_add(tokens)
+        };
+        self.evict_coldest_roots();
+    }
+
+    pub(crate) fn appa_tokens(&self, root: &TrajectoryId) -> u64 {
+        self.roots.get(&root.0).map_or(0, |events| events.appa_tokens)
+    }
+
     pub(crate) fn record(&mut self, root: Option<&TrajectoryId>, event: RuntimeEvent) {
         let seq = self.next_seq;
         self.next_seq += 1;
@@ -644,6 +663,18 @@ mod tests {
             panic!("a hook event was recorded");
         };
         assert_eq!(offers.len(), MAX_OFFERS);
+    }
+
+    #[test]
+    fn appa_tokens_accumulate_and_a_session_start_resets_them() {
+        let mut log = EventLog::default();
+        log.count_appa_tokens(&root("a"), 11, true);
+        log.count_appa_tokens(&root("a"), 7, false);
+        assert_eq!(log.appa_tokens(&root("a")), 18);
+
+        log.count_appa_tokens(&root("a"), 5, true);
+        assert_eq!(log.appa_tokens(&root("a")), 5);
+        assert_eq!(log.appa_tokens(&root("unknown")), 0);
     }
 
     /// An `Option` that is `None` and an empty `Vec` must not reach the wire: a reader of a

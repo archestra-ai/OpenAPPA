@@ -25,7 +25,16 @@ try {
         throw "Runtime returned an invalid status"
     }
 
-    Write-Output "$mascotTop  trust:$($status.trust)  audience:$($status.audience)"
+    $escape = [char]0x1b
+    $appa = "~$($status.appa_tokens) APPA tokens"
+    $total = $statusInput.context_window.total_input_tokens
+    if ($total -is [ValueType] -and $total -gt 0) {
+        $percentage = (100 * [double]$status.appa_tokens / [double]$total).ToString(
+            "0.0", [Globalization.CultureInfo]::InvariantCulture
+        )
+        $appa = "$appa ($percentage%)"
+    }
+    Write-Output "$mascotTop  trust:$($status.trust) $([char]0xb7) audience:$($status.audience) $([char]0xb7) $escape[2m$appa$escape[0m"
     Write-Output $mascotBottom
 } catch {
     Write-Output $mascotTop
