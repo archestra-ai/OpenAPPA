@@ -1,0 +1,367 @@
+# Linear MCP policy. Internal must name readers authorized for all resources
+# available through this connection. Override individual resources in the root policy.
+# Every mutation requires review; no provider credentials or helper processes.
+
+[policy]
+version = 2
+
+# Reads: outside content, restricted to internal readers.
+
+[[policy.tool]]
+name = "mcp/linear/extract_images"
+delta = { trust = "suspicious", audience = ["internal"] }
+# Fetches arbitrary image URLs: input must be public and reviewed.
+requires = { audience = { contains = ["public"] }, attention = ["linear-review"] }
+
+[[policy.tool]]
+name = "mcp/linear/get_agent_skill"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/get_attachment"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/get_diff"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/get_diff_threads"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/get_document"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/get_issue"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/get_issue_status"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/get_milestone"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/get_notifications"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/get_project"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/get_release"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/get_release_note"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/get_status_updates"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/get_team"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/get_template"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/get_user"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/get_workspace"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_agent_skills"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_comments"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_cycles"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_diffs"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_documents"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_issue_labels"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_issue_statuses"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_issues"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_milestones"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_project_labels"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_projects"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_release_notes"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_release_pipelines"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_releases"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_teams"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_templates"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_users"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/search_documentation"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+# Routine writes: trusted internal input and explicit review.
+
+[[policy.tool]]
+name = "mcp/linear/mark_notification"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.changed"]
+
+[[policy.tool]]
+name = "mcp/linear/save_comment"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.changed"]
+
+[[policy.tool]]
+name = "mcp/linear/save_document"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.changed"]
+
+[[policy.tool]]
+name = "mcp/linear/save_issue"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.changed"]
+
+[[policy.tool]]
+name = "mcp/linear/save_milestone"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.changed"]
+
+# Administrative, sharing and destructive writes: explicit review.
+
+[[policy.tool]]
+name = "mcp/linear/create_attachment"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/create_attachment_from_upload"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/create_issue_label"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/delete_attachment"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/delete_comment"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/delete_diff_comment"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/delete_status_update"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/merge_diff"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/prepare_attachment_upload"
+delta = { trust = "suspicious", audience = ["self"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/resolve_diff_thread"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/restore_issue_label"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/restore_project_label"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/retire_issue_label"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/retire_project_label"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/save_diff_comment"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/save_issue_label"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/save_project"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/save_project_label"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/save_release"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/save_release_note"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/save_status_update"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/share_issue"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/submit_diff_review"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]
+
+[[policy.tool]]
+name = "mcp/linear/unshare_issue"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+effects = ["linear.sensitive"]

@@ -1,0 +1,32 @@
+# Fictional resource ACL: Alice can read ENG-1.
+include = ["../../marketplace/batteries/linear/appa.toml", "../../marketplace/batteries/github/appa.toml"]
+
+[policy]
+version = 2
+
+# Root rules replace the corresponding battery annotation.
+[[policy.tool]]
+name = "mcp/linear/get_issue(id:ENG-1)"
+parameters = { type = "object", properties = { id = { type = "string" } }, required = ["id"], additionalProperties = false }
+delta = { trust = "suspicious", audience = ["alice@corp.example"] }
+requires = { audience = { contains = ["alice@corp.example"] } }
+
+[[policy.tool]]
+name = "mcp/linear/save_comment(issueId:ENG-1)"
+parameters = { type = "object", properties = { issueId = { type = "string" }, body = { type = "string" } }, required = ["issueId", "body"], additionalProperties = false }
+delta = { trust = "suspicious", audience = ["alice@corp.example"] }
+requires = { trust = "trusted", audience = { contains = ["alice@corp.example"] }, attention = ["linear-review"] }
+effects = ["linear.changed"]
+
+[[policy.authority]]
+name = "linear-operator"
+hint = "Review the exact call, destination and content. This review cannot expand the audience."
+permits = { trust_below = "trusted", attention = ["linear-review"] }
+
+[externals]
+timeout_ms = 30000
+review_timeout_ms = 600000
+max_body_bytes = 1048576
+
+[externals.authorities.linear-operator]
+builtin = "hitl"

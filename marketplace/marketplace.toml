@@ -18,6 +18,10 @@ digest = "sha256:4098dca12850701f474bfd0284a5f2d282b9f3de30da6561b36f9a5f9a72d55
 path = "batteries/grain"
 digest = "sha256:1d72dcd5bd5ac7e5920044079f8129017734793108f002872085788dd1a8f211"
 
+[packages.battery.linear]
+path = "batteries/linear"
+digest = "sha256:ae234d868a848766fb0bfeb14cbf5ed229aeef8e0448c25dac923d1479308b40"
+
 [packages.battery.slack]
 path = "batteries/slack"
 digest = "sha256:d57d698314e80c03b2ea40be798fa71ad78c5d12dd724de3cdd8ea774df80fb7"

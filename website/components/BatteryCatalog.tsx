@@ -20,6 +20,12 @@ const BATTERIES = [
     logo: "/images/batteries/github.svg",
   },
   {
+    name: "Linear",
+    description: "TOML rules for 65 tools, internal audiences, and reviewed writes.",
+    href: "/battery-linear",
+    logo: "/images/batteries/linear.svg",
+  },
+  {
     name: "Grain",
     description: "Rules for 49 meeting, transcript, deal, and admin tools.",
     href: "/battery-grain",
