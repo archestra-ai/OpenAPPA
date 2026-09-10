@@ -3,9 +3,10 @@ from pathlib import Path
 
 import pytest
 
+from appa_shellrisk import runtime as runtime_module
 from appa_shellrisk.dataset import CommandRow
 from appa_shellrisk.policy import RISK_MARK, ModelProfile, annotation_policy
-from appa_shellrisk.runtime import HttpAnswer, RuntimeProcess, parse_bare_verdict
+from appa_shellrisk.runtime import BareOpenAiClient, HttpAnswer, RuntimeProcess, parse_bare_verdict
 
 
 def row() -> CommandRow:
@@ -24,6 +25,24 @@ def profile(token_env: str | None = "MISSING_TOKEN") -> ModelProfile:
 )
 def test_bare_verdict_requires_one_unambiguous_token(answer: str, expected: str | None) -> None:
     assert parse_bare_verdict(answer) == expected
+
+
+def test_bare_control_leaves_room_for_reasoning_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODEL_TOKEN", "secret")
+    request_body = None
+
+    def answer(_url: str, body: dict, **_kwargs: object) -> HttpAnswer:
+        nonlocal request_body
+        request_body = body
+        return HttpAnswer(200, {"choices": [{"message": {"content": "SAFE"}}]})
+
+    monkeypatch.setattr(runtime_module, "post_json", answer)
+
+    outcome = BareOpenAiClient(profile("MODEL_TOKEN")).classify(row())
+
+    assert outcome.prediction == "not_risky"
+    assert request_body is not None
+    assert request_body["max_tokens"] == 4_096
 
 
 def test_annotation_projection_maps_release_block_and_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
