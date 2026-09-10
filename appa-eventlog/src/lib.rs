@@ -42,11 +42,12 @@ use std::sync::Mutex;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 pub use appa_engine::fact::Fact;
+use appa_engine::fact::{CheckpointId, CheckpointOpening, CheckpointSnapshot};
 use appa_engine::profile::PolicyFileKey;
 use appa_engine::value::TrajectoryId;
 use appa_runtime_api::{AdapterName, inventory::ToolInventory};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Backend {
@@ -92,6 +93,28 @@ pub struct InventoryObservation {
 enum Batch {
     Facts(Vec<Fact>),
     Inventory(InventoryObservation),
+}
+
+/// The opaque checkpoint a runtime issued from one settled root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checkpoint {
+    id: CheckpointId,
+    root: TrajectoryId,
+    snapshot: CheckpointSnapshot,
+}
+
+impl Checkpoint {
+    pub fn id(&self) -> &CheckpointId {
+        &self.id
+    }
+
+    pub fn root(&self) -> &TrajectoryId {
+        &self.root
+    }
+
+    pub fn snapshot(&self) -> &CheckpointSnapshot {
+        &self.snapshot
+    }
 }
 
 impl Log {
@@ -188,6 +211,15 @@ impl From<&AppendError> for StoreErrorClass {
     }
 }
 
+impl From<&CheckpointError> for StoreErrorClass {
+    fn from(error: &CheckpointError) -> Self {
+        match error {
+            CheckpointError::Conflict { .. } => StoreErrorClass::Conflict,
+            CheckpointError::IdConflict { .. } | CheckpointError::Storage(_) => StoreErrorClass::Storage,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
     #[error("the database at {path} is damaged: {detail}")]
@@ -239,6 +271,42 @@ pub enum AppendError {
     Injected,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum CheckpointError {
+    #[error("the log is at {current}, not the position this checkpoint was read at")]
+    Conflict { current: u64 },
+    #[error("checkpoint {id} already exists for another source or snapshot")]
+    IdConflict { id: String },
+    #[error("storage failure: {0}")]
+    Storage(#[from] rusqlite::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CheckpointLookupError {
+    #[error("checkpoint not found")]
+    Unknown,
+    #[error("a stored checkpoint does not decode: {0}")]
+    Undecodable(String),
+    #[error("storage failure: {0}")]
+    Storage(#[from] rusqlite::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ForkError {
+    #[error("no checkpoint with id {id} exists")]
+    UnknownCheckpoint { id: String },
+    #[error("the detached opening does not match its durable checkpoint")]
+    CheckpointMismatch,
+    #[error("the detached opening does not use the checkpoint policy")]
+    PolicyMismatch,
+    #[error("the target root {root} is already used by another trajectory")]
+    TargetExists { root: String },
+    #[error("the opening batch is not usable as one: {detail}")]
+    Malformed { detail: String },
+    #[error("storage failure: {0}")]
+    Storage(#[from] rusqlite::Error),
+}
+
 impl LogStore {
     /// Open the log. A fresh database gets the schema and its version stamp; an existing one is
     /// checked for damage and for a version this build understands, and refused otherwise.
@@ -281,6 +349,26 @@ impl LogStore {
                      CREATE TABLE policy_files (
                          key   TEXT PRIMARY KEY,
                          bytes BLOB NOT NULL
+                     );
+                     CREATE TABLE checkpoints (
+                         id          TEXT PRIMARY KEY,
+                         source_root TEXT NOT NULL,
+                         basis       INTEGER NOT NULL,
+                         policy_key  TEXT NOT NULL,
+                         snapshot    BLOB NOT NULL
+                     );",
+                )?;
+                transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            } else if version == 1 && has_v1_schema(&transaction)? {
+                // This additive migration leaves every existing log and policy
+                // row untouched. A checkpoint has no old equivalent to recover.
+                transaction.execute_batch(
+                    "CREATE TABLE checkpoints (
+                         id          TEXT PRIMARY KEY,
+                         source_root TEXT NOT NULL,
+                         basis       INTEGER NOT NULL,
+                         policy_key  TEXT NOT NULL,
+                         snapshot    BLOB NOT NULL
                      );",
                 )?;
                 transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -312,6 +400,11 @@ impl LogStore {
     /// root or none is.
     pub fn create_root(&self, opening: Vec<Fact>, policy_file: &[u8]) -> Result<TrajectoryId, CreateError> {
         let (root, key) = opened_by(&opening)?;
+        if checkpoint_opening(&opening).is_some() {
+            return Err(CreateError::Malformed {
+                detail: "a checkpoint opening must use fork_checkpoint".to_string(),
+            });
+        }
         if PolicyFileKey::of(policy_file) != key {
             return Err(CreateError::PolicyFileMismatch);
         }
@@ -340,6 +433,158 @@ impl LogStore {
             // commit would leave the file.
             return Err(CreateError::Injected);
         }
+        transaction.commit()?;
+        Ok(root)
+    }
+
+    /// Persist a runtime-issued checkpoint only while the root remains at the
+    /// view the runtime validated. Checkpoints never add a family fact, so the
+    /// source trajectory remains unchanged.
+    pub fn checkpoint(
+        &self,
+        based_on: &Log,
+        id: CheckpointId,
+        snapshot: CheckpointSnapshot,
+    ) -> Result<Checkpoint, CheckpointError> {
+        let snapshot_bytes = serde_json::to_vec(&snapshot).expect("checkpoint snapshots serialize");
+        let policy_key = PolicyFileKey::of(&based_on.policy_file);
+        let mut connection = self.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = position(&transaction, &based_on.root)?;
+        if current != based_on.basis {
+            return Err(CheckpointError::Conflict { current });
+        }
+        let existing: Option<(String, Vec<u8>)> = transaction
+            .query_row(
+                "SELECT source_root, snapshot FROM checkpoints WHERE id = ?1",
+                params![id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((source_root, stored)) = existing {
+            if source_root == based_on.root.as_str() && stored == snapshot_bytes {
+                return Ok(Checkpoint {
+                    id,
+                    root: based_on.root.clone(),
+                    snapshot,
+                });
+            }
+            return Err(CheckpointError::IdConflict {
+                id: id.as_str().to_string(),
+            });
+        }
+        transaction.execute(
+            "INSERT INTO checkpoints (id, source_root, basis, policy_key, snapshot) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                id.as_str(),
+                based_on.root.as_str(),
+                based_on.basis as i64,
+                policy_key.as_str(),
+                snapshot_bytes
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(Checkpoint {
+            id,
+            root: based_on.root.clone(),
+            snapshot,
+        })
+    }
+
+    /// Read the server-owned checkpoint record. The runtime uses the source
+    /// root to recover the exact policy bytes before it asks the core to build
+    /// the detached opening.
+    pub fn checkpoint_by_id(&self, id: &CheckpointId) -> Result<Checkpoint, CheckpointLookupError> {
+        let connection = self.lock();
+        let row: Option<(String, Vec<u8>)> = connection
+            .query_row(
+                "SELECT source_root, snapshot FROM checkpoints WHERE id = ?1",
+                params![id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((root, snapshot)) = row else {
+            return Err(CheckpointLookupError::Unknown);
+        };
+        let snapshot =
+            serde_json::from_slice(&snapshot).map_err(|error| CheckpointLookupError::Undecodable(error.to_string()))?;
+        Ok(Checkpoint {
+            id: id.clone(),
+            root: TrajectoryId::new(root),
+            snapshot,
+        })
+    }
+
+    /// Open a root from a durable checkpoint. The checkpoint and the opening
+    /// are verified in the same transaction that reserves the target id.
+    /// Repeating the exact request returns the existing root; every other
+    /// target reuse is refused.
+    pub fn fork_checkpoint(&self, opening: Vec<Fact>, policy_file: &[u8]) -> Result<TrajectoryId, ForkError> {
+        let (root, key) = opened_by(&opening).map_err(|error| ForkError::Malformed {
+            detail: error.to_string(),
+        })?;
+        if PolicyFileKey::of(policy_file) != key {
+            return Err(ForkError::PolicyMismatch);
+        }
+        let Some(checkpoint) = checkpoint_opening(&opening) else {
+            return Err(ForkError::Malformed {
+                detail: "the opening names no checkpoint".to_string(),
+            });
+        };
+        let snapshot_bytes = serde_json::to_vec(&checkpoint.snapshot).expect("checkpoint snapshots serialize");
+        let bytes = encode(&opening);
+        let mut connection = self.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let durable: Option<(String, String, Vec<u8>)> = transaction
+            .query_row(
+                "SELECT source_root, policy_key, snapshot FROM checkpoints WHERE id = ?1",
+                params![checkpoint.id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((source_root, policy_key, stored_snapshot)) = durable else {
+            return Err(ForkError::UnknownCheckpoint {
+                id: checkpoint.id.as_str().to_string(),
+            });
+        };
+        if policy_key != key.as_str() {
+            return Err(ForkError::PolicyMismatch);
+        }
+        if source_root == root.as_str() {
+            return Err(ForkError::TargetExists {
+                root: root.as_str().to_string(),
+            });
+        }
+        if stored_snapshot != snapshot_bytes {
+            return Err(ForkError::CheckpointMismatch);
+        }
+        let existing: Option<Vec<u8>> = transaction
+            .query_row(
+                "SELECT facts FROM logs WHERE root = ?1 AND seq = 0",
+                params![root.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            let existing = decode(&existing).map_err(|error| ForkError::Malformed {
+                detail: error.to_string(),
+            })?;
+            let same = matches!(existing, Batch::Facts(facts) if checkpoint_opening(&facts).is_some_and(|found| found == checkpoint));
+            if same {
+                return Ok(root);
+            }
+            return Err(ForkError::TargetExists {
+                root: root.as_str().to_string(),
+            });
+        }
+        transaction.execute(
+            "INSERT INTO policy_files (key, bytes) VALUES (?1, ?2) ON CONFLICT (key) DO NOTHING",
+            params![key.as_str(), policy_file],
+        )?;
+        transaction.execute(
+            "INSERT INTO logs (root, seq, facts) VALUES (?1, 0, ?2)",
+            params![root.as_str(), bytes],
+        )?;
         transaction.commit()?;
         Ok(root)
     }
@@ -496,6 +741,15 @@ fn consume(counter: &std::sync::atomic::AtomicU64) -> Option<u64> {
 
 fn has_schema(connection: &Connection) -> Result<bool, rusqlite::Error> {
     let found: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('logs', 'policy_files', 'checkpoints')",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(found == 3)
+}
+
+fn has_v1_schema(connection: &Connection) -> Result<bool, rusqlite::Error> {
+    let found: i64 = connection.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('logs', 'policy_files')",
         [],
         |row| row.get(0),
@@ -525,6 +779,13 @@ fn opened_by(opening: &[Fact]) -> Result<(TrajectoryId, PolicyFileKey), CreateEr
         None => Err(CreateError::Malformed {
             detail: "the batch is empty".to_string(),
         }),
+    }
+}
+
+fn checkpoint_opening(opening: &[Fact]) -> Option<&CheckpointOpening> {
+    match opening.first() {
+        Some(Fact::TrajectoryOpened { checkpoint, .. }) => checkpoint.as_ref(),
+        _ => None,
     }
 }
 
@@ -653,6 +914,24 @@ mod tests {
             .create_root(opening(&root()), POLICY.as_bytes())
             .expect("a fresh root opens");
         store
+    }
+
+    fn settled_snapshot(store: &LogStore) -> CheckpointSnapshot {
+        let log = store.log(&root()).expect("the source reads");
+        let engine = engine();
+        let view = engine
+            .view(&root(), log.facts().to_vec(), log.basis())
+            .expect("the source history validates");
+        engine
+            .checkpoint_snapshot(&view, &root())
+            .expect("an untouched root is quiescent")
+    }
+
+    fn checkpoint_opening(target: &TrajectoryId, id: CheckpointId, snapshot: CheckpointSnapshot) -> Vec<Fact> {
+        engine()
+            .open_trajectory_from_checkpoint(target, PolicyFileKey::of(POLICY.as_bytes()), Some((id, snapshot)))
+            .expect("the detached opening seals")
+            .into_unsealed()
     }
 
     #[test]
@@ -847,6 +1126,72 @@ mod tests {
         }
         let store = LogStore::open(Backend::Sqlite { path }).expect("the store reopens");
         assert_eq!(store.log(&root()).expect("the log reads").basis(), 2);
+    }
+
+    #[test]
+    fn a_checkpoint_fork_is_atomic_idempotent_and_preserves_the_source() {
+        let store = opened();
+        let source = store.log(&root()).unwrap();
+        let snapshot = settled_snapshot(&store);
+        let id = CheckpointId::new("checkpoint-test");
+        store.checkpoint(&source, id.clone(), snapshot.clone()).unwrap();
+        assert_eq!(
+            store.log(&root()).unwrap(),
+            source,
+            "checkpointing does not append to its source"
+        );
+
+        let target = TrajectoryId::new("cc:detached");
+        let detached_opening = checkpoint_opening(&target, id.clone(), snapshot);
+        assert_eq!(
+            store
+                .fork_checkpoint(detached_opening.clone(), POLICY.as_bytes())
+                .unwrap(),
+            target
+        );
+        assert_eq!(
+            store.fork_checkpoint(detached_opening, POLICY.as_bytes()).unwrap(),
+            target,
+            "exact replay is idempotent"
+        );
+        assert!(
+            matches!(
+                store.fork_checkpoint(
+                    checkpoint_opening(&root(), id, settled_snapshot(&store)),
+                    POLICY.as_bytes()
+                ),
+                Err(ForkError::TargetExists { .. }),
+            ),
+            "a detached fork cannot alias its source root"
+        );
+        assert!(
+            matches!(
+                store.create_root(opening(&target), POLICY.as_bytes()),
+                Err(CreateError::AlreadyExists { .. }),
+            ),
+            "the detached root cannot be overwritten"
+        );
+    }
+
+    #[test]
+    fn checkpoints_survive_reopen_and_keep_their_exact_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("checkpoint.db");
+        let id = CheckpointId::new("checkpoint-restart");
+        let target = TrajectoryId::new("cc:after-restart");
+        {
+            let store = LogStore::open(Backend::Sqlite { path: path.clone() }).unwrap();
+            store.create_root(opening(&root()), POLICY.as_bytes()).unwrap();
+            let source = store.log(&root()).unwrap();
+            let snapshot = settled_snapshot(&store);
+            store.checkpoint(&source, id.clone(), snapshot).unwrap();
+        }
+        let store = LogStore::open(Backend::Sqlite { path }).unwrap();
+        let checkpoint = store.checkpoint_by_id(&id).unwrap();
+        assert_eq!(checkpoint.root().as_str(), root().as_str());
+        let opening = checkpoint_opening(&target, checkpoint.id().clone(), checkpoint.snapshot().clone());
+        store.fork_checkpoint(opening, POLICY.as_bytes()).unwrap();
+        assert!(store.log(&target).is_ok());
     }
 
     #[test]

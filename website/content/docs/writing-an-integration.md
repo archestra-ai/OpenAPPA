@@ -25,6 +25,7 @@ By default, `appa-runtime` listens on `http://127.0.0.1:8787` (`--listen`) and e
 - **`/mcp`**: Built-in Model Context Protocol endpoint. Exposes the runtime's control tool, `appa/execute_remedy_plan`, and handles human-in-the-loop (HITL) reviews when a blocked action requires approval or sanitization.
 - **`GET /health` & `GET /status`**: Liveness probes and operational status for active trajectories.
 - **`POST /reload`**: Hot-reloads policy configurations from disk without restarting the runtime process.
+- **`POST /checkpoint`**: Loopback-only trusted-adapter API for a durable root checkpoint and an independent root fork. See [Runtime checkpoints](/runtime-checkpoints) for validation and state-copy limits.
 - **`GET /binary-fingerprint`**: Deployment check. Returns the process ID, binary build digest, and config file path so CLI tools (such as `appa init`) can verify process ownership.
 - **`GET /policy-key`**: Policy synchronization check. Returns the hash of the active in-memory policy to detect disk-policy changes.
 

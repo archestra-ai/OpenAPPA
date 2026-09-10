@@ -45,7 +45,8 @@ pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
 use appa_engine::fact::{
-    BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ReturnDerivation, ReturnPolicy, ReturnSanitizer,
+    BoundaryKind, CheckpointId, CheckpointSnapshot, CloseOutcome, EffectKind, EffectSet, Fact, ReturnDerivation,
+    ReturnPolicy, ReturnSanitizer,
 };
 use appa_engine::label::{Audience, Clause, DeclaredAudience, Label, ReaderId, SymbolicAtom, Trust};
 use appa_engine::names::MarkName;
@@ -127,6 +128,9 @@ pub struct PendingReview {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExternalRequest {
     Authority {
+        /// Runtime offer identity for the one active plan execution. It is
+        /// carried into the authority artifact as review provenance only.
+        offer: OfferId,
         authority: String,
         declaration: AuthorityDeclaration,
         artifact: AuthorityArtifact,
@@ -785,6 +789,33 @@ impl RuntimeEngine {
             .into_unsealed()
     }
 
+    /// The native opening for a detached root. The core owns the snapshot
+    /// shape; the runtime only carries the sealed value to the event log.
+    pub(crate) fn checkpoint_opening(
+        &self,
+        trajectory: &TrajectoryId,
+        policy_file: &[u8],
+        checkpoint: CheckpointId,
+        snapshot: CheckpointSnapshot,
+    ) -> Vec<Fact> {
+        self.engine
+            .open_trajectory_from_checkpoint(
+                &engine_id(trajectory),
+                EnginePolicyFileKey::of(policy_file),
+                Some((checkpoint, snapshot)),
+            )
+            .expect("the engine's own checkpoint opening validates against the empty log")
+            .into_unsealed()
+    }
+
+    pub(crate) fn checkpoint_snapshot(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+    ) -> Option<CheckpointSnapshot> {
+        self.engine.checkpoint_snapshot(view, &engine_id(trajectory))
+    }
+
     /// Refuse one root's log before it is trusted, including the
     /// opening gate: the log's first record must be this root's opening under
     /// exactly the deciding engine's policy. The root is the log's own, so a
@@ -1345,6 +1376,8 @@ impl RuntimeEngine {
                         .iter()
                         .map(|gap| Requirement::of(gap, chain))
                         .collect(),
+                    logical_action_digest: logical_action_digest(&block.call),
+                    review_scope: None,
                 };
                 reviews.push(PendingReview {
                     offer: offer.clone(),
@@ -1604,6 +1637,7 @@ impl RuntimeEngine {
                         .authority(&requirement.authority)
                         .expect("plans reference only registered authorities");
                     requests.push(ExternalRequest::Authority {
+                        offer: offer_id(offer),
                         authority: name,
                         declaration: AuthorityDeclaration::of(registered, chain),
                         artifact: AuthorityArtifact {
@@ -1614,6 +1648,8 @@ impl RuntimeEngine {
                                 .iter()
                                 .map(|gap| Requirement::of(gap, chain))
                                 .collect(),
+                            logical_action_digest: logical_action_digest(call),
+                            review_scope: None,
                         },
                         review,
                     });
@@ -2342,6 +2378,10 @@ impl RuntimeEngine {
         }
         Ok(AudienceConsult::Requests(requests))
     }
+}
+
+fn logical_action_digest(call: &ResolvedCall) -> String {
+    call.digest().bytes().iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// One model-visible line for an evidence refusal: the failure class and, where they are

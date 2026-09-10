@@ -199,6 +199,17 @@ async fn validate_tools(
     )
 }
 
+async fn checkpoint(
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    let (status, response) = crate::checkpoint::answer(&state.runtime, state.adapter, &body);
+    (
+        axum::http::StatusCode::from_u16(status).expect("checkpoint answers carry valid status codes"),
+        axum::Json(response),
+    )
+}
+
 /// `ok` while this process serves the executable installed on disk; `stale <pid>` once an
 /// install replaced that file, naming the process to stop before starting the new build.
 async fn health(State(state): State<AppState>) -> String {
@@ -436,6 +447,7 @@ async fn serve(args: Args) -> ExitCode {
         .route("/binary-fingerprint", get(binary_fingerprint))
         .route("/policy-key", get(policy_key))
         .route("/status", get(status))
+        .route("/checkpoint", post(checkpoint))
         .route("/report", post(report))
         .route("/reload", post(reload))
         .route_layer(axum::middleware::from_fn(loopback_management_only));
@@ -578,6 +590,35 @@ mod tests {
         assert!(management_peer_is_allowed("127.0.0.1:1234".parse().unwrap()));
         assert!(management_peer_is_allowed("[::1]:1234".parse().unwrap()));
         assert!(!management_peer_is_allowed("10.0.0.8:1234".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_endpoint_is_reachable_only_from_loopback() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let app = axum::Router::new()
+            .route("/checkpoint", post(|| async { StatusCode::NO_CONTENT }))
+            .route_layer(axum::middleware::from_fn(loopback_management_only));
+        let request = |peer: SocketAddr| {
+            Request::builder()
+                .method("POST")
+                .uri("/checkpoint")
+                .extension(ConnectInfo(peer))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let local = app
+            .clone()
+            .oneshot(request("127.0.0.1:1234".parse().unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(local.status(), StatusCode::NO_CONTENT);
+
+        let remote = app.oneshot(request("10.0.0.8:1234".parse().unwrap())).await.unwrap();
+        assert_eq!(remote.status(), StatusCode::FORBIDDEN);
     }
 
     #[test]

@@ -24,6 +24,7 @@ use crate::elicit::Elicitation;
 use crate::engine::{EngineRefusal, Liveness, PolicyEngine, RuntimeEngine};
 use crate::external::{ConsultGates, ExternalServices};
 use crate::yell;
+use appa_engine::fact::CheckpointId;
 use appa_eventlog::{Backend, Log, LogStore};
 use appa_runtime_api::{Adapter, AdapterName};
 
@@ -352,6 +353,14 @@ pub(crate) enum EventError {
     UndeclaredSpawn { tool: String },
     #[error("storage failure: {0}")]
     Storage(String),
+    #[error("the trajectory is not quiescent; settle its pending work before checkpointing")]
+    CheckpointBusy,
+    #[error("no durable checkpoint with this id exists")]
+    UnknownCheckpoint,
+    #[error("the requested detached root is already used")]
+    CheckpointTargetExists,
+    #[error("the checkpoint belongs to another adapter")]
+    CheckpointSourceAdapter,
 }
 
 impl EventError {
@@ -396,6 +405,10 @@ impl EventError {
             | EventError::UnknownDispatch
             | EventError::OutcomeMismatch
             | EventError::UnknownOffer
+            | EventError::CheckpointBusy
+            | EventError::UnknownCheckpoint
+            | EventError::CheckpointTargetExists
+            | EventError::CheckpointSourceAdapter
             | EventError::NotAChild
             | EventError::SpawnNotTaken
             | EventError::SpawnAmbiguous
@@ -992,6 +1005,16 @@ impl Inner {
     }
 }
 
+/// Source-state evidence returned with an opaque runtime-issued checkpoint.
+/// The proxy may bind this value to its provider response independently; the
+/// runtime deliberately knows no provider message or HMAC wire format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CheckpointIssue {
+    pub(crate) id: CheckpointId,
+    pub(crate) position: u64,
+    pub(crate) digest: String,
+}
+
 impl Runtime {
     /// Opens the modules, the engine, and the store. The `[policy]`
     /// table compiles through the documented dialect into the engine's
@@ -1153,6 +1176,78 @@ impl Runtime {
         let deployment = Deployment::load(config, &self.inner.modules, self.inner.gates.clone(), self.inner.naming)
             .map_err(|error| EventError::PolicyUnavailable(error.to_string()))?;
         self.create_session_under(id, Arc::new(deployment))
+    }
+
+    /// Issue one opaque durable checkpoint for a settled root. The snapshot is
+    /// produced by the validated core projection, not reconstructed by the
+    /// adapter or by synthetic trajectory events.
+    pub(crate) fn checkpoint(&self, root: &TrajectoryId) -> Result<CheckpointIssue, EventError> {
+        const ATTEMPTS: u32 = 8;
+        for _ in 0..ATTEMPTS {
+            let log = self.inner.log(root)?;
+            let deployment = self.inner.deployment();
+            let policy = self.inner.resolve_policy(&deployment, &log)?;
+            let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
+            let snapshot = policy
+                .engine()
+                .checkpoint_snapshot(&view, root)
+                .ok_or(EventError::CheckpointBusy)?;
+            let id = CheckpointId::new(format!("checkpoint-{}", uuid::Uuid::new_v4()));
+            let digest = checkpoint_source_digest(&log);
+            match self.inner.store.checkpoint(&log, id.clone(), snapshot) {
+                Ok(_) => {
+                    return Ok(CheckpointIssue {
+                        id,
+                        position: log.basis(),
+                        digest,
+                    });
+                }
+                Err(appa_eventlog::CheckpointError::Conflict { .. }) => continue,
+                Err(error) => {
+                    self.inner
+                        .note_store_error(Some(root), crate::events::StoreOperation::Append, &error);
+                    return Err(EventError::Storage(error.to_string()));
+                }
+            }
+        }
+        Err(EventError::Contended { attempts: ATTEMPTS })
+    }
+
+    /// Open an independent root from a checkpoint. The event log verifies the
+    /// opaque checkpoint and reserves the target in one SQLite transaction.
+    pub(crate) fn fork_checkpoint(
+        &self,
+        adapter: AdapterName,
+        checkpoint: CheckpointId,
+        target: TrajectoryId,
+    ) -> Result<(), EventError> {
+        let checkpoint = self
+            .inner
+            .store
+            .checkpoint_by_id(&checkpoint)
+            .map_err(|error| match error {
+                appa_eventlog::CheckpointLookupError::Unknown => EventError::UnknownCheckpoint,
+                error => EventError::Storage(error.to_string()),
+            })?;
+        let source_root = TrajectoryId(checkpoint.root().as_str().to_string());
+        if !is_root_of_adapter(&source_root, adapter) {
+            return Err(EventError::CheckpointSourceAdapter);
+        }
+        let source = self.inner.log(&source_root)?;
+        let deployment = self.inner.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &source)?;
+        let facts = policy.engine().checkpoint_opening(
+            &target,
+            source.policy_file(),
+            checkpoint.id().clone(),
+            checkpoint.snapshot().clone(),
+        );
+        match self.inner.store.fork_checkpoint(facts, source.policy_file()) {
+            Ok(_) => Ok(()),
+            Err(appa_eventlog::ForkError::UnknownCheckpoint { .. }) => Err(EventError::UnknownCheckpoint),
+            Err(appa_eventlog::ForkError::TargetExists { .. }) => Err(EventError::CheckpointTargetExists),
+            Err(error) => Err(EventError::Storage(error.to_string())),
+        }
     }
 
     /// Reserve identities in the actor's own scope, independently of the immutable
@@ -1574,6 +1669,28 @@ impl Runtime {
     ) -> RemedyOutcome {
         self.remedy(acting, offer, arguments, None, None).await
     }
+}
+
+/// Reconstruct the source root through the served adapter instead of trusting
+/// an opaque stored prefix as a namespace claim. Host ids can contain colons,
+/// so only the first adapter separator is removed.
+fn is_root_of_adapter(root: &TrajectoryId, adapter: AdapterName) -> bool {
+    let prefix = format!("{}:", adapter.prefix());
+    root.0
+        .strip_prefix(&prefix)
+        .is_some_and(|host_id| adapter.root(host_id) == *root)
+}
+
+fn checkpoint_source_digest(log: &Log) -> String {
+    use sha2::Digest as _;
+
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(log.root().as_str().as_bytes());
+    hasher.update([0]);
+    hasher.update(log.basis().to_be_bytes());
+    hasher.update([0]);
+    hasher.update(serde_json::to_vec(log.facts()).expect("engine facts serialize for checkpoint evidence"));
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 /// The control call's arguments as a model spells them — `offer_id`, and for a plan

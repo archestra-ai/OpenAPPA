@@ -22,6 +22,14 @@ const TERMS = {
     "Reviews a blocked tool call and can approve an exception within its permits. Approval applies to that call only.",
   authorities:
     "Components that review blocked tool calls. Each can approve only the requirements listed in its permits section.",
+  logical_action_digest:
+    "Digest derived from a resolved tool and its canonical arguments. Identifies the logical action, not a provider message, execution receipt, signature, or approval.",
+  review_scope:
+    "Runtime-produced provenance for a live authority consultation: internal trajectory IDs, the active offer, and the opening policy fingerprint. It does not authenticate a reviewer or sign an authority response.",
+  opening_policy_fingerprint:
+    "SHA-256 fingerprint of the immutable policy file that opened the trajectory. A live review scope identifies that policy, not a later policy edit.",
+  checkpoint:
+    "A runtime-owned snapshot of a root's Label, completed policy effects and denials. It excludes pending dispatches, offers and live approvals, and contains no raw Values or model transcript.",
   sanitizer:
     "Cleans or validates data before an agent or tool receives it. Its permits specify the audience or trust rank allowed for the result.",
   sanitizers:

@@ -44,6 +44,14 @@ delta = {}
 name = "mcp/status/check_status_page"
 delta = { trust = "suspicious" }
 
+[[policy.tool]]
+name = "mcp/ops/post_status_update"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["public"] }
+
 # The reserved sanitizer of a structured return: the runtime holds it.
 [[policy.sanitizer]]
 name = "attest-schema"
@@ -194,6 +202,33 @@ fn ingress_call() -> serde_json::Value {
     )
 }
 
+fn root_ingress_call() -> serde_json::Value {
+    wire(
+        "tool_call",
+        serde_json::json!({"tool": "mcp:status/check_status_page", "arguments": {"service": "api"}}),
+    )
+}
+
+fn root_ingress_result() -> serde_json::Value {
+    wire(
+        "tool_result",
+        serde_json::json!({"tool": "mcp:status/check_status_page", "arguments": {"service": "api"}, "outcome": {"status": "success", "body": {"status": "degraded"}}}),
+    )
+}
+
+fn public_emit() -> serde_json::Value {
+    wire(
+        "tool_call",
+        serde_json::json!({"tool": "mcp:ops/post_status_update", "arguments": {"text": "healthy"}}),
+    )
+}
+
+fn public_emit_result() -> serde_json::Value {
+    wire(
+        "tool_result",
+        serde_json::json!({"tool": "mcp:ops/post_status_update", "arguments": {"text": "healthy"}, "outcome": {"status": "success", "body": {"posted": true}}}),
+    )
+}
 fn child_result() -> serde_json::Value {
     wire(
         "tool_result",
@@ -277,6 +312,31 @@ async fn declared(runtime: &Runtime, route: Option<&str>, schema: Option<serde_j
         .expect("the release carries the fork the child binds to")
         .to_string()
 }
+async fn declared_suspicious(runtime: &Runtime) -> String {
+    assert_eq!(answered(runtime, session_start()).await, ack());
+    let held = answered(runtime, spawn()).await;
+    assert_eq!(held["decision"], "deny_call", "a marked spawn is held: {held}");
+    let arguments = serde_json::json!({"offer_id": route_offer(&held, None).0, "label": {"trust": "suspicious"}});
+    assert_eq!(
+        answered(runtime, control_call(&arguments)).await,
+        decision("pass_control")
+    );
+    let (offer, parsed) =
+        appa_runtime::api::parse_control_arguments(&arguments.to_string()).expect("the declaration parses");
+    assert!(matches!(
+        runtime.execute_remedy_with(&acting(), offer, parsed).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    let released = answered(runtime, spawn()).await;
+    assert_eq!(
+        released["decision"], "allow_call",
+        "the declared spawn releases: {released}"
+    );
+    released["spawn_binding"]
+        .as_str()
+        .expect("the release carries the fork binding")
+        .to_string()
+}
 
 /// Every crossing the family recorded, by the sanitizer that derived it.
 fn crossings(runtime: &Runtime) -> Vec<Option<String>> {
@@ -291,8 +351,115 @@ fn crossings(runtime: &Runtime) -> Vec<Option<String>> {
         .collect()
 }
 
-/// The menu the plugin routes without the model: one offer per return route,
-/// each with the id the reserved tool takes.
+/// A clean public sink becomes unavailable after taint and remains unavailable across continuation and forks.
+#[tokio::test]
+async fn a_tainted_public_sink_stays_denied_across_continuation_and_fork() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = open(&dir);
+    assert_eq!(answered(&runtime, session_start()).await, ack());
+    assert_eq!(answered(&runtime, public_emit()).await, decision("allow_call"));
+    assert_eq!(answered(&runtime, public_emit_result()).await, ack());
+    let held = answered(&runtime, root_ingress_call()).await;
+    assert_eq!(held["decision"], "deny_call", "taint needs an engine remedy: {held}");
+    let offer = OfferId(
+        held["offers"][0]["offer_id"]
+            .as_str()
+            .expect("the taint offer has an id")
+            .to_string(),
+    );
+    assert!(matches!(
+        runtime.execute_remedy(&acting(), offer).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    assert_eq!(answered(&runtime, root_ingress_call()).await, decision("allow_call"));
+    assert_eq!(answered(&runtime, root_ingress_result()).await, ack());
+    let denied = answered(&runtime, public_emit()).await;
+    assert_eq!(denied["decision"], "deny_call", "tainted root must not emit: {denied}");
+    assert_eq!(
+        answered(
+            &runtime,
+            wire("prompt", serde_json::json!({"text": "compacted context continues"}))
+        )
+        .await,
+        ack()
+    );
+    let after_continuation = answered(&runtime, public_emit()).await;
+    assert_eq!(
+        after_continuation["decision"], "deny_call",
+        "continuation must not reset taint: {after_continuation}"
+    );
+    let binding = declared(&runtime, None, None).await;
+    assert_eq!(answered(&runtime, child_start(&binding)).await, ack());
+    let mut child_emit = public_emit();
+    child_emit["child_id"] = serde_json::json!("c1");
+    let child_denied = answered(&runtime, child_emit).await;
+    assert_eq!(
+        child_denied["decision"], "deny_call",
+        "fork inherits root taint: {child_denied}"
+    );
+    assert_eq!(answered(&runtime, child_end(RETURN)).await, ack());
+    assert_eq!(answered(&runtime, spawn_result(Some(RETURN))).await, ack());
+    assert_eq!(
+        crossings(&runtime),
+        vec![None],
+        "the admitted child return crosses once"
+    );
+}
+#[tokio::test]
+async fn a_tainted_child_does_not_narrow_its_clean_sibling() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = open(&dir);
+    let first = declared_suspicious(&runtime).await;
+    assert_eq!(answered(&runtime, child_start(&first)).await, ack());
+    let ingress = answered(&runtime, ingress_call()).await;
+    assert_eq!(
+        ingress["decision"], "deny_call",
+        "child taint needs an engine remedy: {ingress}"
+    );
+    let offer = OfferId(
+        ingress["offers"][0]["offer_id"]
+            .as_str()
+            .expect("the child taint offer has an id")
+            .to_string(),
+    );
+    let child_actor = Actor {
+        root: root(),
+        child: Some(TrajectoryId("kagent:s1:c1".to_string())),
+    };
+    assert!(matches!(
+        runtime.execute_remedy(&child_actor, offer).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    let ingress = answered(&runtime, ingress_call()).await;
+    assert_eq!(
+        ingress["decision"], "allow_call",
+        "the declared floor admits child taint: {ingress}"
+    );
+    let mut ingress_result = root_ingress_result();
+    ingress_result["child_id"] = serde_json::json!("c1");
+    assert_eq!(answered(&runtime, ingress_result).await, ack());
+    let mut first_emit = public_emit();
+    first_emit["child_id"] = serde_json::json!("c1");
+    let first_denied = answered(&runtime, first_emit).await;
+    assert_eq!(
+        first_denied["decision"], "deny_call",
+        "tainted child must not emit: {first_denied}"
+    );
+    assert_eq!(answered(&runtime, child_end_void()).await, ack());
+    assert_eq!(answered(&runtime, spawn_result(None)).await, ack());
+    let second = declared(&runtime, None, None).await;
+    let mut second_start = child_start(&second);
+    second_start["child_id"] = serde_json::json!("c2");
+    assert_eq!(answered(&runtime, second_start).await, ack());
+    let mut second_emit = public_emit();
+    second_emit["child_id"] = serde_json::json!("c2");
+    let second_allowed = answered(&runtime, second_emit).await;
+    assert_eq!(
+        second_allowed["decision"], "allow_call",
+        "a sibling starts from the parent, not child taint: {second_allowed}"
+    );
+}
+/// The menu the plugin routes without the model: one offer per return route, each with the id the reserved tool takes.
 #[tokio::test]
 async fn a_marked_spawn_is_held_on_a_menu_that_carries_every_return_route() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");

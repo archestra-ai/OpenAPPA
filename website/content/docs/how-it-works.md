@@ -78,6 +78,8 @@ builtin = "hitl"
 
 See [Authorities in Policy configuration](/contracts#authorities) for configuration and supported implementations.
 
+A live runtime consultation identifies the action and its review scope. This is request provenance, not reviewer authentication. The authority integration must authenticate its reviewer and bind the decision to that request.
+
 ### Sanitizers
 
 A sanitizer cleans data before the agent receives it or sends it to a tool. Cleaning data before the agent sends it can allow an action that would otherwise be blocked.
@@ -132,6 +134,10 @@ A subagent reads sensitive data in a separate context and returns only what the 
 Before the subagent starts, the main agent sets the return requirements, including any cleaning. These also limit what the subagent can read. OpenAPPA blocks results that do not meet them.
 
 See [Subagent Returns](/contracts#subagent-returns) for integration requirements and configuration.
+
+### Runtime Checkpoints
+
+A runtime checkpoint preserves a root's Label, completed policy effects and denials. It excludes pending dispatches, offers and live approvals. A fork from that checkpoint creates a separate root without replaying tool execution. It does not copy raw Values or replace the integration's model-context handling. See [Runtime checkpoints](/runtime-checkpoints) for the trusted-adapter API and its boundaries.
 
 ## Example: sharing information from a private customer ticket
 

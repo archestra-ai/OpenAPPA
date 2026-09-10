@@ -90,6 +90,7 @@ jsonschema = { version = "0.53.0", default-features = false }
 # other end: these features exist for `tests/hitl_elicitation.rs` and
 # never ship in the binary.
 rmcp = { version = "3", features = ["client", "transport-streamable-http-client-reqwest"] }
+tower = "0.5"
 
 [lints]
 workspace = true

@@ -9,7 +9,10 @@ use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, SanitizerLinea
 use crate::check::{self, CallRole, CheckOutcome, Narrowing, RawBlock};
 use crate::contract::ToolAnnotation;
 use crate::execute::{self, PlanError};
-use crate::fact::{BoundaryKind, Fact, ObservedResult, ReturnDerivation, ReturnPolicy, ReturnSanitizer};
+use crate::fact::{
+    BoundaryKind, CheckpointId, CheckpointOpening, CheckpointSnapshot, Fact, ObservedResult, ReturnDerivation,
+    ReturnPolicy, ReturnSanitizer,
+};
 use crate::label::{Expansions, Label, MembershipContext, SymbolicAtom};
 use crate::names::{AuthorityName, SanitizerName};
 use crate::params::{ArgumentError, CanonicalArguments};
@@ -2455,6 +2458,18 @@ impl Engine {
         trajectory: &TrajectoryId,
         policy_file_key: crate::profile::PolicyFileKey,
     ) -> Result<ValidatedFactBatch, TransitionRefusal> {
+        self.open_trajectory_from_checkpoint(trajectory, policy_file_key, None)
+    }
+
+    /// The opening batch of an independent root that inherits a durable,
+    /// previously validated checkpoint. The event log verifies the checkpoint
+    /// identity before persisting this opening.
+    pub fn open_trajectory_from_checkpoint(
+        &self,
+        trajectory: &TrajectoryId,
+        policy_file_key: crate::profile::PolicyFileKey,
+        checkpoint: Option<(CheckpointId, CheckpointSnapshot)>,
+    ) -> Result<ValidatedFactBatch, TransitionRefusal> {
         let empty = EngineView::validated(Projection::empty(0), self.identity, trajectory.clone());
         self.seal(
             &empty,
@@ -2465,8 +2480,15 @@ impl Engine {
                 policy_digest: self.identity,
                 policy_file_key,
                 open_vectors: self.open_vectors(),
+                checkpoint: checkpoint.map(|(id, snapshot)| CheckpointOpening { id, snapshot }),
             }],
         )
+    }
+
+    /// The settled state that can begin an independent root. `None` means the
+    /// trajectory is unopened, ended, or still has a pending lifecycle act.
+    pub fn checkpoint_snapshot(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<CheckpointSnapshot> {
+        view.projection().checkpoint_snapshot(trajectory)
     }
 
     /// Convert untrusted provider bytes into the only call representation accepted by this
@@ -9528,6 +9550,7 @@ mod tests {
                     policy_digest,
                     policy_file_key,
                     open_vectors,
+                    checkpoint,
                 },
             ] => {
                 assert_eq!(policy_file_key, &key, "the opening names the file it opened under");
@@ -9536,6 +9559,7 @@ mod tests {
                 assert_eq!(profile, e.profile());
                 assert_eq!(*policy_digest, e.identity());
                 assert_eq!(open_vectors, &e.open_vectors());
+                assert!(checkpoint.is_none());
                 assert_eq!(open_vectors.len(), 1);
             }
             other => panic!("expected exactly the opening record, got {other:?}"),

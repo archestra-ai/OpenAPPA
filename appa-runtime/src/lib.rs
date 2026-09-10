@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod batteries;
+mod checkpoint;
 pub mod config;
 mod default_config;
 pub mod describe;

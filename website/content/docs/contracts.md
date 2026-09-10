@@ -876,7 +876,13 @@ Every implementation is limited by the authority's `permits`, including automati
 
 ### Authority protocol
 
-OpenAPPA sends the authority the proposed tool call and the requirements that need approval. The consult request puts `hint` and `permits` in `declaration`. The `artifact` field contains the tool name in `tool`, its `arguments`, and the unmet `requirements`.
+OpenAPPA sends the authority the proposed tool call and the requirements that need approval. The consult request puts `hint` and `permits` in `declaration`. The `artifact` contains `tool`, `arguments`, the unmet `requirements`, and `logical_action_digest`.
+
+The digest comes from the resolved tool and its canonical arguments. It identifies the logical action, not a provider message or execution receipt.
+
+A live runtime consultation also includes `review_scope`. It contains internal `root_id` and optional `child_id` trajectory IDs, the active `offer_id`, and `opening_policy_fingerprint`. An in-process preview without a live offer omits this scope.
+
+These fields provide request provenance. They do not authenticate a reviewer or sign an authority response. The authority integration must authenticate its reviewer and bind the ruling to this request. The runtime consumes the answer through the active consultation and applies the authority's `permits`. It does not verify a separate response signature over `review_scope`.
 
 Each entry in `requirements` uses one of these forms:
 
@@ -1165,7 +1171,13 @@ A consult request is a JSON request that OpenAPPA sends to an external component
   "artifact": {
     "tool": "send_email",
     "arguments": { "recipient": "auditor@external.com", "body": "Ticket summary" },
-    "requirements": [{ "kind": "audience", "required": 1 }]
+    "requirements": [{ "kind": "audience", "required": 1 }],
+    "logical_action_digest": "<resolved-call-digest>",
+    "review_scope": {
+      "root_id": "kagent:support-run",
+      "offer_id": "<active-offer-id>",
+      "opening_policy_fingerprint": "<64-character-policy-sha256>"
+    }
   }
 }
 ```
@@ -1182,7 +1194,7 @@ Each component uses these fields differently:
 
 | Kind | `declaration` | `artifact` | `answer` |
 |---|---|---|---|
-| `authority` | `hint`, `permits` | `tool`, `arguments`, `requirements` | `ruling`, optional `reason` |
+| `authority` | `hint`, `permits` | `tool`, `arguments`, `requirements`, `logical_action_digest`; `review_scope` for a live runtime offer | `ruling`, optional `reason` |
 | `sanitizer` | `hint`, `on`, `permits`; `parameters` for input rewrites | `tool` when known, `body` | `body` |
 | `annotation` | `hint`, `inputs`, `trust_ranks`, `audiences`, `attention_marks`, `effects` | `args` | `delta`, `requires`, `emits` |
 | `audience` | `templates` | `selector` or `member` | `members` or `principal` |
