@@ -7,6 +7,15 @@ description: Create, test, and submit a battery for your MCP server.
 
 This guide shows MCP server authors how to create and publish a battery for their server.
 
+Define tool contracts in TOML, using argument matching where appropriate. Add an
+annotator when determining a contract requires additional logic or information
+from the provider.
+
+For example, a push to a public GitHub repository requires data that may be shared
+publicly. A push to a private repository requires data that may be shared with
+that repository's readers. Determining the repository's visibility and readers
+may require a GitHub API lookup.
+
 > **Ask your coding agent**
 >
 > Copy this prompt into your coding agent:
@@ -41,8 +50,8 @@ marketplace/batteries/
     |-- README.md
     |-- appa-package.toml
     |-- appa.toml
-    |-- annotator.py
-    `-- test_annotator.py
+    |-- annotator.py       # optional
+    `-- test_annotator.py  # when an annotator is included
 ```
 
 `appa-package.toml` is the package manifest: the battery's name and
@@ -51,7 +60,7 @@ scripts its bindings name. Run `bash scripts/appa-marketplace.sh` to generate
 the catalog entry and content digest, then commit `marketplace/marketplace.toml`
 with the package. CI checks that the generated catalog is current.
 
-`appa.toml` contains the tool contracts. Add an annotator when a contract depends on the call's arguments. Add an audience source when the service's users or groups define who can receive data.
+`appa.toml` contains the tool contracts. An annotator determines contracts that static rules cannot express. An audience source supplies provider users or groups for the deployment's audience configuration.
 
 The battery `README.md` must name the server version and list the covered tools. It must also explain each contract, script, test, and known limit.
 
