@@ -772,6 +772,60 @@ async def test_a_tool_result_crosses_and_enforces_each_answer():
     }
 
 
+@pytest.mark.parametrize("approved", [True, False])
+async def test_native_spawn_pause_and_resume_keep_one_runtime_dispatch(approved):
+    hook = Hook(ALLOW, ACK, ACK, ACK, ACK)
+    plugin = plugin_over(hook)
+    session = FakeSession("s1")
+    tool = FakeTool("kagent__NS__billing_agent")
+    args = {"request": "restart"}
+    first = dispatch(session)
+    await plugin.before_tool_callback(tool=tool, tool_args=args, tool_context=first)
+    await plugin.after_tool_callback(
+        tool=tool, tool_args=args, tool_context=first, result={"status": "pending", "waiting_for": "subagent_approval"}
+    )
+    await plugin.after_run_callback(invocation_context=FakeInvocationContext(session, "i1"))
+    assert [event["event"] for event in hook.events] == ["tool_call", "ping"]
+    confirmation = FakeConfirmation(approved)
+    confirmation.payload = {"task_id": "paused-task", "context_id": "paused-child"}
+    resumed = dispatch(session, invocation_id="i2", tool_confirmation=confirmation)
+    await plugin.before_tool_callback(tool=tool, tool_args=args, tool_context=resumed)
+    assert hook.events[-1]["event"] == "spawn_resume"
+    assert hook.events[-1]["spawned_id"] == "paused-child"
+    assert hook.events[-1]["arguments"] == args
+    await plugin.after_tool_callback(
+        tool=tool,
+        tool_args=args,
+        tool_context=resumed,
+        result={"result": "done", "subagent_session_id": "paused-child"},
+    )
+    await plugin.after_run_callback(invocation_context=FakeInvocationContext(session, "i2"))
+    assert [event["event"] for event in hook.events] == [
+        "tool_call",
+        "ping",
+        "spawn_resume",
+        "spawn_result",
+        "turn_end",
+    ]
+    assert not plugin._paused_spawns
+
+
+async def test_native_spawn_resume_refusal_never_runs_or_proposes_a_new_call():
+    hook = Hook({"protocol": 1, "decision": "block", "reason": "wrong child"})
+    plugin = plugin_over(hook)
+    confirmation = FakeConfirmation(True)
+    confirmation.payload = {"context_id": "wrong-child"}
+    context = dispatch(FakeSession("s1"), tool_confirmation=confirmation)
+    with pytest.raises(AppaFailClosed, match="wrong child"):
+        await plugin.before_tool_callback(
+            tool=FakeTool("kagent__NS__billing_agent"),
+            tool_args={},
+            tool_context=context,
+        )
+    assert [event["event"] for event in hook.events] == ["spawn_resume"]
+    assert not plugin._dispatch_leases
+
+
 async def test_a_spawn_return_crosses_as_the_spawn_result_in_both_reply_shapes():
     hook = Hook(ACK, ACK)
     plugin = plugin_over(hook)
@@ -809,16 +863,22 @@ async def test_a_child_return_substitutes_what_the_parent_receives():
     assert returned == {"result": "the redacted summary"}
 
 
-async def test_a_tool_failure_crosses_as_a_failure_outcome():
+@pytest.mark.parametrize(
+    "tool_name,event", [("k8s_scale", "tool_result"), ("kagent__NS__billing_agent", "spawn_result")]
+)
+async def test_a_tool_failure_crosses_as_a_failure_outcome(tool_name, event):
     hook = Hook(ACK)
     plugin = plugin_over(hook)
     returned = await plugin.on_tool_error_callback(
-        tool=FakeTool("k8s_scale"),
+        tool=FakeTool(tool_name),
         tool_args={"replicas": 3},
         tool_context=FakeContext(FakeSession("s1")),
         error=RuntimeError("connection refused"),
     )
     assert returned is None, "an acknowledged failure propagates the original error"
+    assert hook.events[0]["event"] == event
+    assert "spawned_id" not in hook.events[0]
+    assert "value" not in hook.events[0]
     assert hook.events[0]["outcome"] == {"status": "failure", "message": "connection refused"}
 
 

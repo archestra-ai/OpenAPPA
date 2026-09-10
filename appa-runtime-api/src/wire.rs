@@ -110,6 +110,7 @@ pub enum EventName {
     Prompt,
     TurnEnd,
     ToolCall,
+    SpawnResume,
     ToolResult,
     SpawnResult,
     ChildStart,
@@ -184,6 +185,13 @@ fn fields_read(name: EventName) -> &'static [Field] {
             Field::Tool,
             Field::Arguments,
             Field::Ruling,
+        ],
+        EventName::SpawnResume => &[
+            Field::RootId,
+            Field::ChildId,
+            Field::Tool,
+            Field::Arguments,
+            Field::SpawnedId,
         ],
         EventName::ToolResult | EventName::SpawnResult => &[
             Field::RootId,
@@ -501,6 +509,17 @@ impl WireEvent {
                     ..Self::bare(adapter, EventName::ToolCall)
                 }
             }
+            HookEvent::SpawnResume { actor, call, child } => {
+                let (root_id, child_id) = ids(actor)?;
+                Self {
+                    root_id: Some(root_id),
+                    child_id,
+                    tool: Some(call.tool.clone()),
+                    arguments: Some(call.arguments.clone()),
+                    spawned_id: Some(child_host_id(&actor.root, child)?),
+                    ..Self::bare(adapter, EventName::SpawnResume)
+                }
+            }
             HookEvent::ToolResult { actor, call, outcome } => {
                 let (root_id, child_id) = ids(actor)?;
                 Self {
@@ -679,6 +698,26 @@ impl WireEvent {
                 None => Err(malformed("prompt without its text")),
             },
             EventName::TurnEnd => accepted(HookEvent::TurnEnd { actor: actor()? }),
+            EventName::SpawnResume => {
+                let actor = actor()?;
+                let (raw, derived) = derived_call(tool, arguments)?;
+                if !derived.spawn {
+                    return Err(malformed("spawn_resume requires an agent tool"));
+                }
+                let id = spawned_id
+                    .as_deref()
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(|| malformed("spawn_resume requires spawned_id"))?;
+                let child = child_of(&actor.root, id);
+                accepted(HookEvent::SpawnResume {
+                    actor,
+                    call: ProposedCall {
+                        tool: derived.canonical.into_string(),
+                        arguments: raw.arguments,
+                    },
+                    child,
+                })
+            }
             EventName::ToolCall => {
                 let actor = actor()?;
                 let (raw, derived) = derived_call(tool, arguments)?;
@@ -1231,6 +1270,35 @@ mod tests {
                 .expect("parses")
                 .expect("is an event");
             assert!(accepted.names_children.is_empty(), "{event}");
+        }
+    }
+
+    #[test]
+    fn spawn_resume_requires_a_derived_spawn_and_exact_fields() {
+        let body = serde_json::json!({"protocol":1,"adapter":"kagent","event":"spawn_resume",
+            "root_id":"r1","tool":"spawn","arguments":{"request":"continue"},"spawned_id":"c1"});
+        let accepted = WireEvent::read(&serde_json::to_vec(&body).unwrap())
+            .unwrap()
+            .into_event(&SERVED)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(accepted.event, HookEvent::SpawnResume { .. }));
+        for (field, value) in [
+            ("tool", serde_json::json!("read")),
+            ("spawned_id", serde_json::json!("")),
+            ("ruling", serde_json::json!("approve")),
+            ("value", serde_json::json!("unchecked text")),
+            ("inventory", serde_json::json!({})),
+        ] {
+            let mut invalid = body.clone();
+            invalid[field] = value;
+            assert!(
+                WireEvent::read(&serde_json::to_vec(&invalid).unwrap())
+                    .unwrap()
+                    .into_event(&SERVED)
+                    .is_err(),
+                "{field}"
+            );
         }
     }
 

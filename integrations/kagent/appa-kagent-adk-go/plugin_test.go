@@ -848,6 +848,85 @@ func TestASpawnReturnCrossesAsTheSpawnResultInBothReplyShapes(t *testing.T) {
 	}
 }
 
+func TestRemoteApprovalKeepsTheOriginalSpawnOpen(t *testing.T) {
+	for _, approved := range []bool{true, false} {
+		t.Run(fmt.Sprint(approved), func(t *testing.T) {
+			h := newHook(t, allow, ack, ack, ack, ack)
+			p := pluginOver(t, h)
+			sess := newFakeSession("s1")
+			ctx := newFakeContext(sess)
+			remote := &fakeTool{"kagent__NS__billing_agent"}
+			args := map[string]any{"request": "total the invoices"}
+			if _, err := p.beforeTool(ctx, remote, args); err != nil {
+				t.Fatal(err)
+			}
+			pending := map[string]any{"status": "pending", "waiting_for": "subagent_approval", "subagent_session_id": "child-ctx"}
+			if _, err := p.afterTool(ctx, remote, args, pending, nil); err != nil {
+				t.Fatal(err)
+			}
+			p.afterRun(ctx)
+			if got := h.kinds(); !reflect.DeepEqual(got, []string{"tool_call", "ping"}) {
+				t.Fatalf("pause closed the original dispatch: %v", got)
+			}
+			resumed := newFakeContext(sess).forInvocation("i2")
+			resumed.confirmation = &toolconfirmation.ToolConfirmation{Confirmed: approved, Payload: map[string]any{"context_id": "child-ctx", "task_id": "child-task"}}
+			if _, err := p.beforeTool(resumed, remote, args); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := p.afterTool(resumed, remote, args, map[string]any{"result": "done", "subagent_session_id": "child-ctx"}, nil); err != nil {
+				t.Fatal(err)
+			}
+			p.afterRun(resumed)
+			want := []string{"tool_call", "ping", "spawn_resume", "spawn_result", "turn_end"}
+			if got := h.kinds(); !reflect.DeepEqual(got, want) {
+				t.Fatalf("resume lifecycle: %v, want %v", got, want)
+			}
+			resume := h.recorded()[2]
+			if resume["spawned_id"] != "child-ctx" || !reflect.DeepEqual(resume["arguments"], args) {
+				t.Fatalf("resume lost the original child/call: %v", resume)
+			}
+		})
+	}
+}
+
+func TestRemotePauseDoesNotHideOtherTurnEnds(t *testing.T) {
+	h := newHook(t)
+	p := pluginOver(t, h)
+	ctx := newFakeContext(newFakeSession("s1"))
+	pending := map[string]any{"status": "pending", "waiting_for": "subagent_approval"}
+	if _, err := p.afterTool(ctx, &fakeTool{"kagent__NS__billing_agent"}, nil, pending, nil); err != nil {
+		t.Fatal(err)
+	}
+	p.afterRun(newFakeContext(newFakeSession("other")).forInvocation("i2"))
+	// Further work in the paused invocation must restore ordinary cleanup,
+	// including when that new proposal is refused.
+	if _, err := p.beforeTool(ctx, &fakeTool{"k8s_scale"}, map[string]any{}); err == nil {
+		t.Fatal("the scripted ack must not allow an ordinary tool call")
+	}
+	p.afterRun(ctx)
+	want := []string{"ping", "turn_end", "tool_call", "turn_end"}
+	if got := h.kinds(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("pause escaped its invocation/lifecycle: %v", got)
+	}
+}
+
+func TestRemoteResumeRefusalNeverFallsBackToANewCall(t *testing.T) {
+	for _, payload := range []any{nil, map[string]any{"context_id": ""}, map[string]any{"context_id": "wrong-child"}} {
+		h := newHook(t, map[string]any{"protocol": 1, "decision": "block", "reason": "wrong child"})
+		p := pluginOver(t, h)
+		ctx := newFakeContext(newFakeSession("s1"))
+		ctx.confirmation = &toolconfirmation.ToolConfirmation{Confirmed: true, Payload: payload}
+		if _, err := p.beforeTool(ctx, &fakeTool{"kagent__NS__billing_agent"}, map[string]any{}); err == nil {
+			t.Fatal("an invalid resume was allowed")
+		}
+		for _, event := range h.recorded() {
+			if event["event"] != "spawn_resume" {
+				t.Fatalf("invalid resume fell back to another event: %v", event)
+			}
+		}
+	}
+}
+
 func TestAChildReturnSubstitutesWhatTheParentReceives(t *testing.T) {
 	h := newHook(t, map[string]any{"protocol": 1, "decision": "child_return", "value": "the redacted summary"})
 	p := pluginOver(t, h)
@@ -875,6 +954,31 @@ func TestAToolFailureCrossesAsAFailureOutcome(t *testing.T) {
 	wantOutcome := map[string]any{"status": "failure", "message": "connection refused"}
 	if got := h.recorded()[0]["outcome"]; !reflect.DeepEqual(got, wantOutcome) {
 		t.Errorf("the failure outcome drifted: got %v, want %v", got, wantOutcome)
+	}
+}
+
+func TestRemoteFailureClosesASpawnNotAnOrdinaryToolCall(t *testing.T) {
+	h := newHook(t, ack)
+	p := pluginOver(t, h)
+	ctx := newFakeContext(newFakeSession("s1"))
+	remote := &fakeTool{"kagent__NS__billing_agent"}
+	args := map[string]any{"request": "total the invoices"}
+	failure := errors.New("remote transport failed")
+	if returned, err := p.onToolError(ctx, remote, args, failure); err != nil || returned != nil {
+		t.Fatalf("acknowledged failure must propagate: %v, %v", returned, err)
+	}
+	if _, err := p.afterTool(ctx, remote, args, nil, failure); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.kinds(); !reflect.DeepEqual(got, []string{"spawn_result"}) {
+		t.Fatalf("remote error used the wrong event or reported twice: %v", got)
+	}
+	event := h.recorded()[0]
+	if !reflect.DeepEqual(event["outcome"], failureOutcome(failure.Error())) {
+		t.Fatalf("failure outcome changed: %v", event)
+	}
+	if _, exists := event["spawned_id"]; exists {
+		t.Fatal("a transport failure must not invent a child result identity")
 	}
 }
 
@@ -2221,6 +2325,20 @@ func (m *scriptedModel) read() []*model.LLMRequest {
 	return append([]*model.LLMRequest{}, m.seen...)
 }
 
+func TestSyntheticCallsHaveUniqueIDsThatADKWillNotStrip(t *testing.T) {
+	seen := map[string]bool{}
+	for _, response := range []*model.LLMResponse{
+		returnCallResponse("first"), returnCallResponse("second"),
+		reviewCallResponse("offer-1"), reviewCallResponse("offer-1"),
+	} {
+		id := response.Content.Parts[0].FunctionCall.ID
+		if id == "" || strings.HasPrefix(id, "adk-") || seen[id] {
+			t.Fatalf("synthetic calls need distinct provider-visible IDs, got %q", id)
+		}
+		seen[id] = true
+	}
+}
+
 func TestAChildScopeStopsThroughTheReturnGateInARealRunner(t *testing.T) {
 	// The gate, end to end, in the adk/v2 loop of the locked major. The
 	// child speaks its answer, the plugin turns that stop into one gate
@@ -2288,8 +2406,22 @@ func TestAChildScopeStopsThroughTheReturnGateInARealRunner(t *testing.T) {
 		t.Errorf("the value of the child crosses at child_end: got %v, want %v", got, wantEnd)
 	}
 	read := scripted.read()
-	if len(read) == 0 {
-		t.Fatal("the model must have read at least one request")
+	if len(read) < 2 {
+		t.Fatal("the model must read the return gate's result on its next request")
+	}
+	var callID, responseID string
+	for _, content := range read[1].Contents {
+		for _, part := range content.Parts {
+			if call := part.FunctionCall; call != nil && call.Name == ReturnTool {
+				callID = call.ID
+			}
+			if response := part.FunctionResponse; response != nil && response.Name == ReturnTool {
+				responseID = response.ID
+			}
+		}
+	}
+	if callID == "" || responseID != callID {
+		t.Fatalf("the next model request needs a nonempty matching return call/result ID, got %q and %q", callID, responseID)
 	}
 	if _, registered := read[0].Tools[ReturnTool]; !registered {
 		t.Errorf("the child reads the gate on every request, got %v", read[0].Tools)

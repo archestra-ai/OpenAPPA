@@ -113,21 +113,14 @@ def crossing(task, tool: str = CHILD_TOOL) -> dict:
 
 # ------------------------------------------------- one added fixture
 #
-# The harness fixtures serve every case here except the last one, which
-# needs two parents to meet in one child session. kagent keys a child
-# session by the caller's user id and the context id the caller sends,
-# and its python remote-agent tool draws a fresh context id in every
-# constructor while kagent derives the user id from the calling session
-# (`A2A_USER_<context id>`). Two python parents therefore reach the child
-# in two sessions. kagent's go tool sends every delegation of one pod
-# into one context id, which is the shape the (root, child) pair exists
-# for. The fixture pins both halves of the key, so the shared child
-# session is deterministic on the lane this suite drives.
+# Pin the stock transport's context and user to simulate a shared child.
+# The APPA wrapper must replace that context for each new delegation,
+# even when the upstream constructor gives both parents the same ID.
 
 
 @pytest.fixture
-def one_child_session(monkeypatch) -> str:
-    """Send every delegation of this case into one child session."""
+def shared_transport_context(monkeypatch) -> str:
+    """Give every stock remote tool the same default child context."""
     from kagent.adk import _remote_a2a_tool
     from kagent.adk.converters import request_converter
 
@@ -314,21 +307,12 @@ def test_an_uncovered_agent_is_refused_without_disabling_covered_tools(stack):
     assert stack.child_turns() == [], "no uncovered delegation reaches a child"
 
 
-def test_two_parents_delegate_in_turn_into_one_child_session(stack, one_child_session):
-    """Two parent sessions, one child session, both returns crossing.
+def test_two_parents_get_isolated_children_despite_a_shared_transport_default(stack, shared_transport_context):
+    """Each parent gets a fresh child and its own checked return.
 
-    A child opens once per (root, child) pair, not once per session. The
-    second parent enters the session the first left behind, so a plugin
-    that opens a child by session freshness sends no `child_start` for
-    it. The runtime then binds no fork for the second parent, refuses
-    the child's events, and the second return never crosses. Both
-    returns crossing is the regression this case holds.
-
-    The case asserts the binding, not the child's work. The second entry
-    replays the first entry's transcript, so the child's script is spent
-    and the harness answers past its end. Both parents name the same
-    child session, which is what one child serving two parents in turn
-    looks like from the caller's side.
+    The stock constructor offers the same context to both calls. The
+    APPA wrapper must isolate them, so neither parent inherits the other
+    child's transcript or binds its already-used fork.
     """
     stack.script_child(GREET, [{"text": ANALYST}])
     turns = [
@@ -339,12 +323,14 @@ def test_two_parents_delegate_in_turn_into_one_child_session(stack, one_child_se
     second = stack.say(BRIEF, turns)
 
     assert first.context_id != second.context_id, "each parent ran in its own session"
+    children = set()
     for parent, task in (("the first parent", first), ("the second parent", second)):
         assert task.state == "completed", parent
         returned = crossing(task)
         assert returned.get("appa") is None, f"the child's return crosses the gate of {parent}: {returned}"
-        assert returned.get("result"), f"the child answered {parent} with something: {returned}"
-        assert returned.get("subagent_session_id") == one_child_session, (
-            f"one child session served {parent}: {returned}"
-        )
+        assert returned.get("result") == ANALYST, f"the fresh child returned its exact answer to {parent}: {returned}"
+        child = returned.get("subagent_session_id")
+        assert child and child != shared_transport_context, f"the stock shared context was not reused: {returned}"
+        assert child not in children, f"each parent needs a distinct child: {returned}"
+        children.add(child)
     assert first.confirmation() is None and second.confirmation() is None, "nobody is asked"

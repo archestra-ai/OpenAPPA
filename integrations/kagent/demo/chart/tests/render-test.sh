@@ -130,6 +130,9 @@ expect 1 '^kind: Job$'
 expect 1 'name: SEED_AGENT_REF, value: "kagent/cluster-ops"'
 expect_env 6 APPA_RUNTIME_URL http://appa-runtime.appa.svc.cluster.local:18787
 expect 2 'never call ask_user'
+expect 2 '^            - get_file_contents$'
+expect 2 '^            - issue_write$'
+expect 2 "Follow the policy's feedback and the operator's selected remedy"
 expect 2 'The release manager approves or refuses version bumps for the shop namespace\.$'
 
 must_render kagent --set agents.go.enabled=false --set agents.childName=release-manager-go

@@ -3268,7 +3268,7 @@ fn fork_heading(advice: ForkAdvice) -> &'static str {
         ForkAdvice::Narrowing {
             standing: FloorStanding::Below,
             ..
-        } => "Not acceptable here:",
+        } => "Raw result exceeds the parent's limit:",
     }
 }
 
@@ -3310,17 +3310,19 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
                 .to_string()
         }
         (FloorStanding::Below, true) => format!(
-            "This session is a subagent, and this change falls below the floor its parent declared: this session \
-             cannot accept it, and a subagent started here under the bare floor cannot either.\nA subagent started \
+            "The parent does not allow this session to admit the raw result. This restriction does not forbid \
+             an output sanitizer offered under Continue: execute that offer and retry the call.\nWithout an \
+             output sanitizer, a further subagent under the bare floor cannot admit the raw result either. \
+             A subagent started \
              here with a return sanitizer can: delegate {delegated} there, and declare that sanitizer when the \
              spawn asks for the return declaration."
         ),
         (FloorStanding::Below, false) => {
-            "This session is a subagent, and this change falls below the floor its parent declared: neither this \
-             session nor any subagent started here can accept it, and no registered return sanitizer carries \
-             this change back without applying it.\nDo not start a subagent for this. Finish without this call, \
-             or return a plain note that the work needs a subagent declared with a lower floor or a return \
-             sanitizer, so the parent can start one."
+            "The parent does not allow this session to admit the raw result. This restriction does not forbid \
+             an output sanitizer offered under Continue: execute that offer and retry the call.\nIf no output \
+             sanitizer is offered, finish without the raw result. A further subagent cannot bypass this floor, \
+             and no registered return sanitizer carries the change back. Tell the parent that the work needs \
+             a child declared with a lower floor or a return sanitizer."
                 .to_string()
         }
     }
@@ -3343,6 +3345,22 @@ mod tests {
     use appa_engine::names::{AnnotatorName, MarkName};
     use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RemedyStep};
     use appa_engine::value::{RawResultDigest, ToolName, ValueBody};
+
+    #[test]
+    fn a_parent_floor_restricts_raw_results_not_offered_output_sanitizers() {
+        for sanitized_return in [false, true] {
+            let advice = super::ForkAdvice::Narrowing {
+                standing: super::FloorStanding::Below,
+                sanitized_return,
+            };
+            assert_eq!(super::fork_heading(advice), "Raw result exceeds the parent's limit:");
+            let text = super::fork_advice_text(advice, false);
+            assert!(text.contains("does not allow this session to admit the raw result"));
+            assert!(text.contains("does not forbid an output sanitizer offered under Continue"));
+            assert!(text.contains("execute that offer and retry the call"));
+            assert!(!text.contains("Finish without this call"));
+        }
+    }
 
     #[test]
     fn a_sanitizer_consult_names_its_point_and_the_tool_the_value_belongs_to() {

@@ -65,6 +65,11 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
             let _: Box<serde_json::value::RawValue> = arguments;
             let _: bool = spawn;
         }
+        HookEvent::SpawnResume { actor, call, child } => {
+            let _: Actor = actor;
+            let _: ProposedCall = call;
+            let _: TrajectoryId = child;
+        }
         HookEvent::ToolResult {
             actor: _,
             call: _,

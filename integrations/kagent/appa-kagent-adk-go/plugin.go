@@ -69,6 +69,7 @@ package appakagentadk
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -227,6 +228,8 @@ type AppaPluginKagent struct {
 	// control call that opens its confirmation.
 	pendingReviews   map[string]map[string]struct{}
 	reviewAuthorized map[string]struct{}
+	// pausedSpawns keeps native child approval from ending its open dispatch.
+	pausedSpawns map[string]struct{}
 	// invocationIDs maps each running invocation to its trajectory ids.
 	// adk-go hands the tool and agent callbacks a context that refuses
 	// Session() and Agent() — only the run-level InvocationContext
@@ -296,6 +299,7 @@ func New(cfg Config) (*AppaPluginKagent, error) {
 		reviews:          map[string]string{},
 		pendingReviews:   map[string]map[string]struct{}{},
 		reviewAuthorized: map[string]struct{}{},
+		pausedSpawns:     map[string]struct{}{},
 		invocationIDs:    map[string]trajectoryIDs{},
 		opened:           map[trajectoryIDs]struct{}{},
 		crossed:          map[string]string{},
@@ -335,7 +339,16 @@ func (p *AppaPluginKagent) openInvocation(ictx agent.InvocationContext) trajecto
 func (p *AppaPluginKagent) closeInvocation(invocationID string) {
 	p.mu.Lock()
 	delete(p.invocationIDs, invocationID)
+	delete(p.pausedSpawns, invocationID)
 	p.mu.Unlock()
+}
+
+func (p *AppaPluginKagent) consumePausedSpawn(invocationID string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, paused := p.pausedSpawns[invocationID]
+	delete(p.pausedSpawns, invocationID)
+	return paused
 }
 
 // idsFor is the trajectory of the invocation a tool or agent callback
@@ -1167,9 +1180,10 @@ func (p *AppaPluginKagent) holdTheStop(invocationID string, resp *model.LLMRespo
 }
 
 // returnCallResponse is the stop of a child, as one call to the return
-// gate.
+// gate. ADK removes its reserved adk-* IDs while rebuilding model history.
+// Own the ID so OpenAI-compatible providers can match the replayed result.
 func returnCallResponse(text string) *model.LLMResponse {
-	call := &genai.FunctionCall{Name: ReturnTool, Args: map[string]any{"text": text}}
+	call := &genai.FunctionCall{ID: "appa-" + rand.Text(), Name: ReturnTool, Args: map[string]any{"text": text}}
 	return modelResponse(&genai.Part{FunctionCall: call})
 }
 
@@ -1184,7 +1198,7 @@ func modelResponse(part *genai.Part) *model.LLMResponse {
 }
 
 func reviewCallResponse(offer string) *model.LLMResponse {
-	call := &genai.FunctionCall{Name: ReservedTool, Args: map[string]any{"offer_id": offer}}
+	call := &genai.FunctionCall{ID: "appa-" + rand.Text(), Name: ReservedTool, Args: map[string]any{"offer_id": offer}}
 	return modelResponse(&genai.Part{FunctionCall: call})
 }
 
@@ -1249,6 +1263,7 @@ func (p *AppaPluginKagent) afterAgent(ctx agent.Context) (*genai.Content, error)
 // -- the tool gate ------------------------------------------------
 
 func (p *AppaPluginKagent) beforeTool(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+	p.consumePausedSpawn(ctx.InvocationID())
 	if p.isReturnGate(t) {
 		// APPA owns the return gate. Its body posts the stop of the
 		// child, so the call itself crosses no tool gate. The test is
@@ -1300,6 +1315,21 @@ func (p *AppaPluginKagent) beforeTool(ctx agent.Context, t tool.Tool, args map[s
 			}
 			p.forgetReview(offer)
 		}
+	}
+	if confirmation := ctx.ToolConfirmation(); IsSpawn(spelled) && confirmation != nil {
+		payload, _ := confirmation.Payload.(map[string]any)
+		spawnedID, _ := payload["context_id"].(string)
+		if strings.TrimSpace(spawnedID) == "" {
+			return nil, failClosed("the resumed remote call has no child context_id")
+		}
+		decision, err := p.post(ctx, spawnResumeEvent(ids.rootID, spelled, plainJSON(orEmpty(args)), spawnedID, ids.childID))
+		if err != nil {
+			return nil, err
+		}
+		if decision.Kind != "ack" {
+			return nil, failClosed("appa answered the spawn resume with %s", decision.describe())
+		}
+		return nil, nil
 	}
 	call := toolCallEvent(ids.rootID, spelled, plainJSON(orEmpty(args)), ids.childID, ruling)
 	if p.discovery != nil {
@@ -1361,6 +1391,15 @@ func (p *AppaPluginKagent) afterTool(ctx agent.Context, t tool.Tool, args, resul
 		return nil, failClosed("the tool %s is outside the gated inventory, and its result cannot cross", t.Name())
 	}
 	arguments := plainJSON(orEmpty(args))
+	if IsSpawn(spelled) && result["status"] == "pending" && result["waiting_for"] == "subagent_approval" {
+		if err := p.pingHook(ctx); err != nil {
+			return nil, err
+		}
+		p.mu.Lock()
+		p.pausedSpawns[ctx.InvocationID()] = struct{}{}
+		p.mu.Unlock()
+		return nil, nil
+	}
 	// A nil result is the tool's own return of nothing, which the ADK
 	// hands this point before it decides whether the call has finished.
 	// A long-running tool and a spawn both deliver later, so the nil
@@ -1432,7 +1471,11 @@ func (p *AppaPluginKagent) onToolError(ctx agent.Context, t tool.Tool, args map[
 	if !known {
 		return nil, failClosed("the tool %s is outside the gated inventory, and its failure cannot cross", t.Name())
 	}
-	decision, err := p.post(ctx, toolResultEvent(ids.rootID, spelled, plainJSON(orEmpty(args)), failureOutcome(toolErr.Error()), ids.childID))
+	failure := toolResultEvent(ids.rootID, spelled, plainJSON(orEmpty(args)), failureOutcome(toolErr.Error()), ids.childID)
+	if IsSpawn(spelled) {
+		failure = spawnResultEvent(ids.rootID, spelled, plainJSON(orEmpty(args)), failureOutcome(toolErr.Error()), "", "", ids.childID)
+	}
+	decision, err := p.post(ctx, failure)
 	if err != nil {
 		return nil, err
 	}
@@ -1617,7 +1660,9 @@ func (p *AppaPluginKagent) afterRun(ictx agent.InvocationContext) {
 	if !pinned {
 		ids = classify(ictx.Session())
 	}
-	p.postQuiet(turnEndEvent(ids.rootID, ids.childID))
+	if !p.consumePausedSpawn(ictx.InvocationID()) {
+		p.postQuiet(turnEndEvent(ids.rootID, ids.childID))
+	}
 	p.releaseScope(ictx.InvocationID())
 	p.closeInvocation(ictx.InvocationID())
 	p.dropCrossed(ictx.InvocationID())
@@ -1682,8 +1727,8 @@ func contentText(content *genai.Content) string {
 // spawnReturn extracts the (spawned child id, returned value) a spawn
 // result carries. The kagent remote-agent tool answers with a result
 // map whose "result" holds the child's reply and whose
-// "subagent_session_id" holds the child's context id; error and
-// input-required branches carry neither, and both shapes cross.
+// "subagent_session_id" holds the child's context id. Native pending
+// approval is handled before this function: it is not a completed result.
 func spawnReturn(result map[string]any) (spawnedID, value string) {
 	if result == nil {
 		return "", ""

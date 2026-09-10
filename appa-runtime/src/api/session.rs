@@ -424,6 +424,36 @@ impl Session {
         .await
     }
 
+    /// Resume the exact suspended call without releasing a second dispatch.
+    /// Rebinding the same pair inherits the parent's current label in the child.
+    pub fn on_spawn_resume(&self, call: ProposedCall, child: TrajectoryId) -> Result<(), EventError> {
+        let opened = self.inner.log(&self.root)?;
+        let policy = self.inner.resolve_policy(&self.deployment, &opened)?;
+        let decision = self.drive(&policy, Some(opened), true, |context| {
+            let open = context.open_dispatches();
+            let dispatch = classify_report(&call, || context.canonical_bytes(&call), &open)
+                .map_err(|case| self.refuse_report(case, &call, &open))?;
+            let fork = appa_engine::value::ForkId::of(&dispatch);
+            match context.fork_status(&fork) {
+                ForkStatus::Bound(bound) if bound == engine_id(&child) => {}
+                _ => return Err(EventError::BindingMismatch),
+            }
+            match context.policy.engine().liveness(context.view, &child) {
+                Liveness::Live => {}
+                Liveness::Ended => return Err(EventError::TrajectoryEnded),
+                Liveness::Unopened => return Err(EventError::SpawnNotTaken),
+            }
+            Ok(EngineEvent::BindFork {
+                fork,
+                child: child.clone(),
+            })
+        })?;
+        match decision.then {
+            Next::Done => Ok(()),
+            _ => Err(EventError::UnexpectedDecision),
+        }
+    }
+
     /// The spawn call's own result, keyed on where its fork stands and on
     /// the child the harness names. A prepared fork binds to the named
     /// child here: the harness's acknowledgement can land before the
@@ -3782,6 +3812,69 @@ context_control = true
 
     async fn release_spawn(session: &mut Session, spawn: ProposedCall) -> SpawnBinding {
         declared_spawn(session, spawn).await
+    }
+
+    #[tokio::test]
+    async fn a_spawn_resume_keeps_the_original_dispatch_and_binding() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
+        session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the child opens");
+        let dispatches = runtime.open_dispatches(&root(), &root());
+        session
+            .on_spawn_resume(fetch(serde_json::json!({"a": 1})), child("c1"))
+            .expect("same call resumes");
+        assert_eq!(runtime.open_dispatches(&root(), &root())[0].id, dispatches[0].id);
+        assert_eq!(fork_opened_count(&runtime), 1);
+        assert_eq!(resumed_count(&runtime), 1);
+    }
+
+    #[tokio::test]
+    async fn a_spawn_resume_refuses_mismatched_or_finished_work_without_mutation() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
+        let before = runtime.log_basis(&root());
+        assert!(
+            session
+                .on_spawn_resume(fetch(serde_json::json!({"a": 1})), child("c1"))
+                .is_err()
+        );
+        assert_eq!(runtime.log_basis(&root()), before, "an unbound fork cannot resume");
+        let child_session = session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the child opens");
+        for (call, target) in [
+            (fetch(serde_json::json!({"a": 2})), child("c1")),
+            (fetch(serde_json::json!({"a": 1})), child("other")),
+            (leak(), child("c1")),
+        ] {
+            let before = runtime.log_basis(&root());
+            assert!(session.on_spawn_resume(call, target).is_err());
+            assert_eq!(runtime.log_basis(&root()), before);
+        }
+        child_session.on_child_end(None).await.expect("the child ends");
+        let before = runtime.log_basis(&root());
+        assert!(
+            session
+                .on_spawn_resume(fetch(serde_json::json!({"a": 1})), child("c1"))
+                .is_err()
+        );
+        assert_eq!(runtime.log_basis(&root()), before, "ended child cannot resume");
+        session.on_turn_end().await.expect("dispatch abandoned");
+        let before = runtime.log_basis(&root());
+        assert!(
+            session
+                .on_spawn_resume(fetch(serde_json::json!({"a": 1})), child("c1"))
+                .is_err()
+        );
+        assert_eq!(runtime.log_basis(&root()), before, "closed dispatch cannot resume");
     }
 
     #[tokio::test]

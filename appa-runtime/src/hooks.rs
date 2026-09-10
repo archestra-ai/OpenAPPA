@@ -162,6 +162,7 @@ fn hook_root(event: &HookEvent) -> &TrajectoryId {
         HookEvent::Prompt { actor, .. }
         | HookEvent::TurnEnd { actor }
         | HookEvent::ToolCall { actor, .. }
+        | HookEvent::SpawnResume { actor, .. }
         | HookEvent::ToolResult { actor, .. }
         | HookEvent::SpawnResult { actor, .. } => &actor.root,
     }
@@ -219,6 +220,7 @@ fn hook_shape(event: &HookEvent) -> (crate::events::HookKind, Option<String>) {
         HookEvent::Prompt { .. } => (HookKind::Prompt, None),
         HookEvent::TurnEnd { .. } => (HookKind::TurnEnd, None),
         HookEvent::ToolCall { call, .. } => (HookKind::ToolCall, Some(call.tool.clone())),
+        HookEvent::SpawnResume { call, .. } => (HookKind::SpawnResume, Some(call.tool.clone())),
         HookEvent::ToolResult { call, .. } => (HookKind::ToolResult, Some(call.tool.clone())),
         HookEvent::ChildStart { .. } => (HookKind::ChildStart, None),
         HookEvent::ChildEnd { .. } => (HookKind::ChildEnd, None),
@@ -333,6 +335,20 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
                     review,
                 },
                 Err(error) => fold(error, deny),
+            }
+        }
+        HookEvent::SpawnResume { actor, call, child } => {
+            match on_actor(runtime, &actor, MissingStart::Refuse, |session| {
+                let (call, child) = (call.clone(), child.clone());
+                async move { session.on_spawn_resume(call, child) }
+            })
+            .await
+            {
+                Ok(()) => {
+                    runtime.take_prompted(&actor);
+                    HookDecision::Ack
+                }
+                Err(error) => fold(error, block),
             }
         }
         HookEvent::ToolResult { actor, call, outcome } => {
@@ -1353,6 +1369,63 @@ mod tests {
             .await,
             HookDecision::Ack,
             "an unchanged crossing needs no answer",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_native_spawn_resume_keeps_the_dispatch_across_an_approval_prompt() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let root = TrajectoryId("cc:s1".to_string());
+        handle(&runtime, HookEvent::SessionStart { root: root.clone() }).await;
+        let binding = declared_spawn(&runtime, &root).await;
+        let child = TrajectoryId("cc:s1:c1".to_string());
+        handle(
+            &runtime,
+            HookEvent::ChildStart {
+                root: root.clone(),
+                child: child.clone(),
+                spawn: SpawnRef::Binding(binding),
+            },
+        )
+        .await;
+        let actor = Actor {
+            root: root.clone(),
+            child: None,
+        };
+        let original = runtime.open_dispatches(&root, &root)[0].id.clone();
+        handle(
+            &runtime,
+            HookEvent::Prompt {
+                actor: actor.clone(),
+                text: "approve".into(),
+            },
+        )
+        .await;
+        let wrong = handle(
+            &runtime,
+            HookEvent::SpawnResume {
+                actor: actor.clone(),
+                call: spawn_call(),
+                child: TrajectoryId("cc:s1:other".into()),
+            },
+        )
+        .await;
+        assert!(matches!(wrong, HookDecision::Block { .. }));
+        let resumed = handle(
+            &runtime,
+            HookEvent::SpawnResume {
+                actor: actor.clone(),
+                call: spawn_call(),
+                child,
+            },
+        )
+        .await;
+        assert_eq!(resumed, HookDecision::Ack);
+        assert_eq!(runtime.open_dispatches(&root, &root)[0].id, original);
+        assert!(
+            !runtime.take_prompted(&actor),
+            "successful resume consumed the prompt marker"
         );
     }
 

@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+from contextlib import contextmanager
 
 import pytest
 
@@ -228,19 +229,51 @@ class Chat:
         return False
 
     def tool_results(self) -> str:
-        """The page text with every tool card's response section expanded —
-        "Results" on a tool card, "Output" on the sub-agent card an
-        agent-as-tool call gets — so the tool responses the dashboard
-        renders, the runtime's own denial feedback included, are readable."""
-        for label in ("Results", "Output"):
-            for button in self.page.get_by_role("button", name=label).all():
-                try:
-                    if button.is_visible():
-                        button.click()
-                        self.page.wait_for_timeout(300)
-                except Exception:  # noqa: BLE001, S112 - a card that re-rendered mid-click
+        """Only rendered result sections, excluding arguments and assistant prose."""
+        return "\n".join(self.result_texts())
+
+    def result_texts(self, tool: str | None = None) -> list[str]:
+        # Pinned kagent v0.9.12 ToolDisplay/AgentCallDisplay put each result
+        # button and its output <pre> in the same immediate parent. Scope
+        # there, never to the card (which also contains arguments) or page.
+        results = []
+        for label in ("Results", "Error", "Output"):
+            for button in self.page.get_by_role("button", name=label, exact=True).all():
+                if not button.is_visible():
                     continue
-        return self.page.inner_text("body")
+                if tool is not None:
+                    card = button.locator("xpath=ancestor::div[contains(concat(' ', normalize-space(@class), ' '), ' min-w-full ')][1]")
+                    if card.locator(".font-medium").first.inner_text().strip() != tool:
+                        continue
+                output = button.locator("xpath=..").locator("pre")
+                if not output.count():
+                    button.click()
+                output.first.wait_for(state="visible", timeout=5000)
+                results.extend(output.all_inner_texts())
+        return results
+
+    def has_result(self, tool: str, **expected: object) -> bool:
+        def objects(value):
+            if isinstance(value, dict):
+                yield value
+                for child in value.values():
+                    yield from objects(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from objects(child)
+            elif isinstance(value, str):
+                try:
+                    decoded = json.loads(value)
+                except ValueError:
+                    return
+                if not isinstance(decoded, str):
+                    yield from objects(decoded)
+
+        return any(
+            all(body.get(key) == value for key, value in expected.items())
+            for result in self.result_texts(tool)
+            for body in objects(result)
+        )
 
     def tool_details(self) -> str:
         """Expand tool arguments and results for exact-call assertions."""
@@ -301,12 +334,20 @@ class Board:
                 entry
                 for entry in json.load(response)["pending"]
                 if entry.get("tool") == tool
+                or (str(entry.get("tool", "")).startswith("mcp/") and str(entry["tool"]).rsplit("/", 1)[-1] == tool)
             ]
 
-    def rule(self, tool: str, ruling: str, timeout_s: float = 120.0) -> dict | None:
+    def rule(
+        self,
+        tool: str,
+        ruling: str,
+        timeout_s: float = 120.0,
+        stop: threading.Event | None = None,
+    ) -> dict | None:
         """Wait for the consult on `tool` to be parked, then rule on it; None if none came."""
-        deadline = time.time() + timeout_s
-        while time.time() < deadline:
+        stop = stop or threading.Event()
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline and not stop.is_set():
             try:
                 for entry in self.pending(tool):
                     body = json.dumps(
@@ -321,17 +362,36 @@ class Board:
                         data=body,
                         headers={"content-type": "application/json"},
                     )
-                    with urllib.request.urlopen(request, timeout=5):
-                        return entry
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        if json.load(response).get("decided") == entry["id"]:
+                            return entry
             except OSError:
                 pass
-            time.sleep(0.5)
+            stop.wait(0.5)
         return None
 
-    def rule_in_background(self, tool: str, ruling: str) -> threading.Thread:
-        thread = threading.Thread(target=self.rule, args=(tool, ruling), daemon=True)
+    @contextmanager
+    def ruling(self, tool: str, ruling: str):
+        """A scoped board member; require an acknowledged ruling, even on denial."""
+        stop = threading.Event()
+        outcome = {}
+
+        def run():
+            try:
+                outcome["entry"] = self.rule(tool, ruling, stop=stop)
+            except Exception as error:  # noqa: BLE001 -- propagate worker failures to the test thread
+                outcome["error"] = error
+
+        thread = threading.Thread(target=run, daemon=True)
         thread.start()
-        return thread
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join(11)
+        assert not thread.is_alive(), "the board member stopped before the next scenario"
+        assert "error" not in outcome, f"board request failed: {outcome.get('error')}"
+        assert outcome.get("entry"), f"the board acknowledged an actual {ruling} ruling for {tool}"
 
 
 @pytest.fixture()
