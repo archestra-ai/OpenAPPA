@@ -80,7 +80,9 @@ pub enum InitError {
     Starter(String),
     #[error("the runtime endpoint {endpoint} is taken: {message}")]
     RuntimeIdentity { endpoint: String, message: String },
-    #[error("the appa runtime (pid {pid}) still answers {endpoint} after being stopped. Stop it, then rerun appa plugin install claude-code.")]
+    #[error(
+        "the appa runtime (pid {pid}) still answers {endpoint} after being stopped. Stop it, then rerun appa plugin install claude-code."
+    )]
     RuntimeSurvived { pid: i32, endpoint: String },
     #[error("the runtime at {endpoint} does not answer for its policy: {message}")]
     PolicyKey { endpoint: String, message: String },
@@ -218,16 +220,8 @@ fn install_claude(
     } else {
         replace_plugin(&deployment.root, &marketplaces, &installations)
     };
-    let switch = registration.and_then(|()| {
-        switch_over(
-            &appa,
-            &config,
-            &composed_policy,
-            &endpoint,
-            &paths,
-            &mut compensation,
-        )
-    });
+    let switch =
+        registration.and_then(|()| switch_over(&appa, &config, &composed_policy, &endpoint, &paths, &mut compensation));
     let runtime_outcome = match switch {
         Ok(outcome) => {
             compensation.commit();

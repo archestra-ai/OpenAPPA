@@ -42,7 +42,10 @@ fn local_list_shows_this_builds_catalog_and_does_not_initialize_an_installation(
         assert_eq!(document["operation"], format!("{kind}.list"));
         assert_eq!(document["result"]["deployment"], "absent");
         assert!(
-            matches!(document["result"]["catalog"]["source"].as_str(), Some("build" | "checkout")),
+            matches!(
+                document["result"]["catalog"]["source"].as_str(),
+                Some("build" | "checkout")
+            ),
             "{document}"
         );
         let packages = document["result"]["packages"].as_array().unwrap();
@@ -306,7 +309,10 @@ fn deployment_for(root: &Path, kagent: Option<&[&str]>) -> std::path::PathBuf {
             let text = std::fs::read_to_string(&manifest).unwrap();
             std::fs::write(
                 &manifest,
-                text.replace("[plugin]\n", &format!("[plugin]\nbatteries = [{}]\n", quoted.join(", "))),
+                text.replace(
+                    "[plugin]\n",
+                    &format!("[plugin]\nbatteries = [{}]\n", quoted.join(", ")),
+                ),
             )
             .unwrap();
         }

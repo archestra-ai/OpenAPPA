@@ -238,7 +238,10 @@ impl VerifiedArchive {
             }
             None => format!(
                 "build {}",
-                identity.commit.map(|commit| &commit[..commit.len().min(12)]).unwrap_or("unknown")
+                identity
+                    .commit
+                    .map(|commit| &commit[..commit.len().min(12)])
+                    .unwrap_or("unknown")
             ),
         };
         Ok(Self {
