@@ -7,16 +7,14 @@ description: Create, test, and submit a battery for your MCP server.
 
 This guide shows MCP server authors how to create and publish a battery for their server.
 
-Batteries should be **as lean as possible, but not leaner**. Use static TOML when
-it describes the contract, including argument matching where that is sufficient.
-Add machinery when a useful, correct decision needs facts or interpretation that
-the available declarative rules cannot supply.
+Define tool contracts in TOML, using argument matching where appropriate. Add an
+annotator when determining a contract requires additional logic or information
+from the provider.
 
-For example, GitHub push requirements depend on whether the destination is public
-or private and who can read it. Resolving those provider facts can be necessary
-for a useful integration; private does not mean accessible to every organization
-member. Keep that logic focused on the provider problem and reuse the runtime's
-existing enforcement mechanisms.
+For example, a push to a public GitHub repository requires data that may be shared
+publicly. A push to a private repository requires data that may be shared with
+that repository's readers. Determining the repository's visibility and readers
+may require a GitHub API lookup.
 
 > **Ask your coding agent**
 >
@@ -52,8 +50,8 @@ marketplace/batteries/
     |-- README.md
     |-- appa-package.toml
     |-- appa.toml
-    |-- annotator.py       # only if needed
-    `-- test_annotator.py  # tests for that implementation
+    |-- annotator.py       # optional
+    `-- test_annotator.py  # when an annotator is included
 ```
 
 `appa-package.toml` is the package manifest: the battery's name and
@@ -62,7 +60,7 @@ scripts its bindings name. Run `bash scripts/appa-marketplace.sh` to generate
 the catalog entry and content digest, then commit `marketplace/marketplace.toml`
 with the package. CI checks that the generated catalog is current.
 
-`appa.toml` contains the tool contracts. Use argument matching first; add an annotator when the contract needs logic or provider facts those rules cannot express. Add an audience source when the integration needs to discover provider users or groups; membership alone does not establish resource access.
+`appa.toml` contains the tool contracts. An annotator determines contracts that static rules cannot express. An audience source supplies provider users or groups for the deployment's audience configuration.
 
 The battery `README.md` must name the server version and list the covered tools. It must also explain each contract, script, test, and known limit.
 
