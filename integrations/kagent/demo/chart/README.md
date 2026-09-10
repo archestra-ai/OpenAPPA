@@ -7,7 +7,7 @@ Fixture-only OpenAPPA demo for kagent. The chart installs:
 - the `demo-tools` MCP server, including a canned GitHub battery showcase;
 - deterministic mock implementations for demo policy components;
 - an inert, rendered policy template;
-- sixteen seeded dashboard chats.
+- five seeded dashboard chats on `cluster-ops`, matching the website scenarios.
 
 The chart does not install `appa-runtime`, serving policy, persistence,
 provider credentials, a `ModelConfig`, or `appa-guide`. The dedicated
@@ -28,7 +28,7 @@ The defaults expect:
 ## Install
 
 ```sh
-APPA_VERSION=0.15.0 # x-release-please-version
+APPA_VERSION=0.17.1 # x-release-please-version
 helm upgrade --install appa-kagent-demo \
   oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-kagent-demo \
   --version "$APPA_VERSION" -n kagent \
@@ -47,6 +47,15 @@ behavior and the matched GitHub battery. Reply with approval, then approve
 the enforced kagent confirmation card. Typed runtime MCP operations update
 and reload the complete runtime-owned policy.
 
+The policy names the delegated children by their canonical ids,
+`agent/<namespace>/<child>`
+([files/demo.appa.toml](files/demo.appa.toml)), rendered from the release
+namespace, `agents.childName` and `agents.go.childName`. The names must be
+DNS-1123 labels ([values.schema.json](values.schema.json)). The seeded
+showcase chats are captured transcripts and keep the `kagent__NS__…`
+function-call names of their capture: that is how kagent renders an agent
+tool, and the entrypoint maps it to the `agent/…` id the policy names.
+
 The demo ConfigMap is never mounted or served directly. Installing or
 upgrading this chart cannot change runtime policy.
 
@@ -59,8 +68,8 @@ upgrading this chart cannot change runtime policy.
 | `modelConfig.name` | `default-model-config` | Existing kagent ModelConfig used by every demo Agent. |
 | `tools.image.*` | `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-demo-tools:v<appVersion>` | Demo MCP server image. |
 | `mocks.image.*` | `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-demo-mocks:v<appVersion>` | Demo policy-service image. |
-| `mocks.approvalWindowSeconds` | `25` | Change-board ruling window, below the policy's 30-second consult timeout. |
-| `seed.enabled` | `true` | Replay the sixteen showcase chats after install. |
+| `mocks.approvalWindowSeconds` | `120` | Change-board ruling window, from 1 to 280 seconds. The HTTP timeout adds 5 seconds; the runtime adds 5 more, with a 30-second minimum. |
+| `seed.enabled` | `true` | Replay the five website scenario chats after install or upgrade; remove replaced seed-owned chats without touching user-created chats. |
 | `seed.controllerUrl` | controller in the release namespace | kagent controller receiving seeded sessions. |
 | `agents.childName` | `log-analyst` | Python child named by the rendered delegation contract. |
 | `agents.go.enabled` | `false` | Also install the three Go demo Agents. |

@@ -57,7 +57,7 @@ manifested smoke set:
 
 ```sh
 uv run appa-agentthreatbench smoke \
-  --model openrouter/openai/gpt-5.6-luna \
+  --model openrouter/openai/gpt-5.6-terra \
   --reasoning-effort high
 ```
 
@@ -65,10 +65,10 @@ uv run appa-agentthreatbench smoke \
 
 ```sh
 uv run appa-agentthreatbench run \
-  --model openrouter/openai/gpt-5.6-luna \
+  --model openrouter/openai/gpt-5.6-terra \
   --reasoning-effort high \
   --max-concurrency 50 \
-  --run-name full-gpt-5.6-luna
+  --run-name full-gpt-5.6-terra
 ```
 
 `--max-concurrency` configures both the global Inspect sample limit and the
@@ -106,11 +106,11 @@ mediated arm retains its policy-specific scaffold.
 
 ```sh
 uv run appa-agentthreatbench run \
-  --model openrouter/openai/gpt-5.6-luna \
+  --model openrouter/openai/gpt-5.6-terra \
   --reasoning-effort high \
   --agent-prompt-profile agent-threat-chaos \
   --max-concurrency 50 \
-  --run-name full-gpt-5.6-luna-chaos
+  --run-name full-gpt-5.6-terra-chaos
 ```
 
 The prompt profile and its SHA-256 digest are part of the run manifest and run

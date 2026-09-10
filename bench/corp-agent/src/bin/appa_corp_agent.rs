@@ -29,7 +29,7 @@ use appa_example_agent::{
     TranscriptHead,
 };
 use appa_runtime::api::{AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, Runtime, TrajectoryId};
-use appa_runtime::config::{AnnotatorImplementation, Config, Endpoint, Implementation};
+use appa_runtime::config::{AnnotatorImplementation, AudienceImplementation, Config, Endpoint, Implementation};
 use clap::Parser;
 use corp_systems::systems::System;
 use corporate_agent_demo::shim::{self, CorpWorld};
@@ -66,7 +66,7 @@ struct Args {
     prompt: String,
 
     /// OpenRouter model id.
-    #[arg(long, env = "APPA_DEMO_MODEL", default_value = "openai/gpt-5.6-luna")]
+    #[arg(long, env = "APPA_DEMO_MODEL", default_value = "openai/gpt-5.6-terra")]
     model: String,
 
     /// OpenRouter API key. Falls back to $OPENROUTER_API_KEY or a `.env` file.
@@ -182,7 +182,7 @@ async fn main() -> anyhow::Result<()> {
             OpenAiConfig::openrouter(args.model.clone(), api_key).with_request_timeout(Duration::from_secs(300)),
         ),
         ToolShim::new(format!("{origin}{}", shim::TOOLS_PATH)),
-        ToolCatalogue::new(catalogue::advertised(&compiled, forking)),
+        ToolCatalogue::new(catalogue::advertised(&compiled, forking))?,
     )
     .with_head(head)
     .with_limits(Limits {
@@ -199,10 +199,10 @@ async fn main() -> anyhow::Result<()> {
         max_fork_depth: args.max_fork_depth,
     });
     if forking {
-        agent = agent.with_spawn_tool(SpawnTool {
-            name: ToolName::new(catalogue::FORK),
-            errand: ArgumentKey::new(catalogue::ERRAND),
-        });
+        agent = agent.with_spawn_tool(SpawnTool::new(
+            ToolName::new(catalogue::FORK),
+            ArgumentKey::new(catalogue::ERRAND),
+        )?);
     }
 
     let root = TrajectoryId("appa-corp-agent".to_string());
@@ -299,16 +299,22 @@ fn bind_hosted_externals(config: &mut Config, origin: &str) -> usize {
             AnnotatorImplementation::Resolver(endpoint) => Some(endpoint),
             AnnotatorImplementation::Command(_) => None,
         });
+    let audience = externals
+        .audience
+        .values_mut()
+        .filter_map(|binding| match &mut binding.implementation {
+            AudienceImplementation::Resolver(endpoint) => Some(endpoint),
+            AudienceImplementation::Command(_) | AudienceImplementation::Readers(_) => None,
+        });
     let endpoints = externals
         .authorities
         .values_mut()
         .chain(externals.sanitizers.values_mut())
-        .chain(externals.audience.values_mut())
-        .chain(externals.identity.values_mut())
         .filter_map(|implementation| match implementation {
             Implementation::Resolver(endpoint) => Some(endpoint),
             Implementation::Builtin(_) | Implementation::Command(_) => None,
         })
+        .chain(audience)
         .chain(annotators);
     let mut bound = 0;
     for endpoint in endpoints {
@@ -428,7 +434,7 @@ mod tests {
             "appa-corp-agent",
             "summarise the open deploy tickets",
             "--model",
-            "openai/gpt-5.6-luna",
+            "openai/gpt-5.6-terra",
             "--data-root",
             "/episode/data",
             "--sink-root",

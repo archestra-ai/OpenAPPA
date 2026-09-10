@@ -8,7 +8,8 @@ export function CodeBlock(props: React.HTMLAttributes<HTMLPreElement>) {
 
   const copy = async () => {
     const text = preRef.current?.textContent ?? "";
-    await navigator.clipboard.writeText(text);
+    const codeToCopy = text.endsWith("\n") ? text : `${text}\n`;
+    await navigator.clipboard.writeText(codeToCopy);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };

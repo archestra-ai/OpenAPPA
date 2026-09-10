@@ -27,7 +27,7 @@ namespace=${APPA_E2E_NAMESPACE:-kagent}
 runtime_namespace=${APPA_E2E_RUNTIME_NAMESPACE:-appa}
 kagent_version=${KAGENT_VERSION:-0.9.12}
 tag=${APPA_E2E_IMAGE_TAG:-ci}
-model=${APPA_E2E_MODEL:-openai/gpt-5.6-luna}
+model=${APPA_E2E_MODEL:-openai/gpt-5.6-terra}
 base_url=${APPA_E2E_BASE_URL:-https://openrouter.ai/api/v1}
 wait_seconds=${APPA_E2E_WAIT_SECONDS:-300}
 key=${OPENROUTER_API_KEY:-}
@@ -73,6 +73,8 @@ helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-c
 echo "== helm install kagent $kagent_version"
 helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version "$kagent_version" -n "$namespace" \
+  --set kmcp.podSecurityContext.runAsUser=65532 \
+  --set kmcp.podSecurityContext.runAsGroup=65532 \
   --set controller.agentImage.registry=docker.io \
   --set controller.agentImage.repository=library/appa-kagent-adk \
   --set-string controller.agentImage.tag="$tag" \

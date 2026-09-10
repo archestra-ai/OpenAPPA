@@ -2,7 +2,7 @@
 
 import httpx
 import pytest
-from conftest import FakeInvocationContext, FakeSession, Hook, plugin_over
+from conftest import INVENTORY, FakeInvocationContext, FakeSession, Hook, plugin_over
 
 from appa_kagent_adk.gates import (
     CODE_EXECUTION_TOOL,
@@ -14,8 +14,8 @@ from appa_kagent_adk.gates import (
 from appa_kagent_adk.identity import SessionIdentity
 from appa_kagent_adk.plugin import AppaFailClosed
 
-ALLOW = {"decision": "allow_call"}
-ACK = {"decision": "ack"}
+ALLOW = {"protocol": 1, "decision": "allow_call"}
+ACK = {"protocol": 1, "decision": "ack"}
 
 
 class FakeExecutor:
@@ -41,7 +41,7 @@ class FakeCodeInput:
 
 def gate_over(hook: Hook) -> SyncHookGate:
     client = httpx.Client(transport=hook.transport())
-    return SyncHookGate("http://127.0.0.1:8787", SessionIdentity(), client=client)
+    return SyncHookGate("http://127.0.0.1:8787", SessionIdentity(), INVENTORY, client=client)
 
 
 def test_allowed_code_runs_and_its_output_crosses_as_a_tool_result():
@@ -53,18 +53,19 @@ def test_allowed_code_runs_and_its_output_crosses_as_a_tool_result():
     assert inner.ran == ["print(6*7)"]
     call, outcome = hook.events
     assert call == {
+        "protocol": 1,
+        "adapter": "kagent",
         "event": "tool_call",
         "root_id": "s1",
         "tool": CODE_EXECUTION_TOOL,
         "arguments": {"code": "print(6*7)"},
-        "spawn": False,
     }
     assert outcome["event"] == "tool_result"
     assert outcome["outcome"]["body"] == {"stdout": "6 * 7 = 42", "stderr": ""}
 
 
 def test_denied_code_never_reaches_the_subprocess():
-    hook = Hook({"decision": "deny_call", "feedback": "blocked: code egress is not permitted"})
+    hook = Hook({"protocol": 1, "decision": "deny_call", "feedback": "blocked: code egress is not permitted"})
     inner = FakeExecutor()
     executor = GatedCodeExecutor(inner, gate_over(hook))
     result = executor.execute_code(FakeInvocationContext(FakeSession("s1")), FakeCodeInput("import socket"))
@@ -73,8 +74,35 @@ def test_denied_code_never_reaches_the_subprocess():
     assert result.stdout == ""
 
 
+def test_code_gate_keeps_the_invocation_identity_when_headers_change():
+    hook = Hook(ALLOW, ACK)
+    gate = gate_over(hook)
+    context = FakeInvocationContext(FakeSession("s1"))
+    gate._identity.open_invocation(context)
+    context.session.state["headers"] = {"x-kagent-root-context-id": "another-root"}
+    GatedCodeExecutor(FakeExecutor(), gate).execute_code(context, FakeCodeInput("print(42)"))
+    assert [(event["root_id"], event.get("child_id")) for event in hook.events] == [
+        ("s1", None),
+        ("s1", None),
+    ]
+
+
+def test_a_denied_code_run_names_the_tool_the_model_dispatches():
+    """The stderr of a refused run is what the model reads, so the
+    redispatch line of the block names the tool ADK dispatches, not the
+    spelling the gate sent."""
+    block = (
+        "[appa] Blocked.\n  - Run mcp:server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7/"
+        "k8s_get_pods first; it clears: the source is untrusted."
+    )
+    hook = Hook({"protocol": 1, "decision": "deny_call", "feedback": block})
+    executor = GatedCodeExecutor(FakeExecutor(), gate_over(hook))
+    result = executor.execute_code(FakeInvocationContext(FakeSession("s1")), FakeCodeInput("import socket"))
+    assert result.stderr == "[appa] Blocked.\n  - Run k8s_get_pods first; it clears: the source is untrusted."
+
+
 def test_a_blocked_code_output_is_withheld_from_the_model():
-    hook = Hook(ALLOW, {"decision": "block", "reason": "nothing crosses"})
+    hook = Hook(ALLOW, {"protocol": 1, "decision": "block", "reason": "nothing crosses"})
     executor = GatedCodeExecutor(FakeExecutor(), gate_over(hook))
     result = executor.execute_code(FakeInvocationContext(FakeSession("s1")), FakeCodeInput("print(6*7)"))
     assert result.stdout == ""
@@ -126,7 +154,7 @@ async def test_an_allowed_persist_runs_the_stock_callback_and_reports():
 
 
 async def test_a_denied_persist_writes_nothing_to_the_memory_backend():
-    hook = Hook({"decision": "deny_call", "feedback": "blocked: the session holds confidential values"})
+    hook = Hook({"protocol": 1, "decision": "deny_call", "feedback": "blocked: the session holds confidential values"})
     plugin = plugin_over(hook)
     ran = []
     agent = FakeAgent([stock_persist_callback(ran)])
@@ -134,6 +162,25 @@ async def test_a_denied_persist_writes_nothing_to_the_memory_backend():
     await agent.after_agent_callback[0](MemoryCallbackContext(FakeSession("s1")))
     assert ran == [], "a denied persist skips add_session_to_memory"
     assert [event["event"] for event in hook.events] == ["tool_call"]
+
+
+async def test_memory_gate_keeps_the_invocation_identity_across_the_persist():
+    hook = Hook(ALLOW, ACK)
+    plugin = plugin_over(hook)
+    context = MemoryCallbackContext(FakeSession("child", {"headers": {"x-kagent-root-context-id": "root"}}))
+    plugin._identity.open_invocation(context._invocation_context)
+    context._invocation_context.session.state["headers"] = {"x-kagent-root-context-id": "another-root"}
+
+    async def auto_save_session_to_memory_callback(callback_context):
+        callback_context._invocation_context.session.state["headers"] = {"x-kagent-root-context-id": "third-root"}
+
+    agent = FakeAgent([auto_save_session_to_memory_callback])
+    assert gate_memory_persist(agent, plugin)
+    await agent.after_agent_callback[0](context)
+    assert [(event["root_id"], event.get("child_id")) for event in hook.events] == [
+        ("root", "child"),
+        ("root", "child"),
+    ]
 
 
 def test_an_agent_without_the_stock_callback_is_left_alone():

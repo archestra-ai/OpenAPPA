@@ -239,6 +239,20 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_battery_directory_reached_through_a_link_keeps_its_name() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let real = root.path().join("real");
+        let link = root.path().join("link");
+        write_battery(&real, "slack", &["send"]);
+        std::os::unix::fs::symlink(&real, &link).expect("link to the batteries directory");
+
+        // The include arrives canonical, as `resolve_include` leaves it.
+        let include = fs::canonicalize(real.join("slack/appa.toml")).expect("canonical include");
+        assert_eq!(name_from_resolved(&include, &[link]).as_deref(), Some("slack"));
+    }
+
     #[test]
     fn list_walks_directories_in_order_and_first_name_wins() {
         let root = tempfile::tempdir().expect("temporary directory");

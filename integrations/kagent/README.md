@@ -24,10 +24,12 @@ integrations/kagent/
 ├── e2e/                     # Live matrices against a Helm-installed stack
 │   ├── a2a/                 # Matrix tests over the A2A protocol
 │   └── ui/                  # Browser matrix tests driving the kagent dashboard
-├── examples/                # Reference policies (e.g. kagent.appa.toml)
-├── fixtures/                # Canonical wire event fixtures shared across languages
 └── IMPLEMENTATION.md        # Technical architecture and wire specifications
 ```
+
+The reference policy and the canonical wire event fixtures the two plugin
+lanes share are in the kagent plugin package,
+`marketplace/plugins/kagent/`.
 
 ### 1. Python Runtime (`appa-kagent-adk/`)
 Wraps kagent's published Python runtime container image. It ships `AppaPluginKagent`, a Google ADK `BasePlugin` that maps lifecycle callbacks to OpenAPPA `/hook` events. It appends the plugin and the `execute_remedy_plan` tool to the agent entrypoint.
@@ -35,15 +37,15 @@ Wraps kagent's published Python runtime container image. It ships `AppaPluginKag
 ### 2. Go Runtime (`appa-kagent-adk-go/`)
 Implements `AppaPluginKagent` for Google Go ADK v2. It provides a replacement runtime main that registers the plugin, manages session lineage headers across delegations, and coordinates human-in-the-loop approvals.
 
-### 3. Codec Crate (`appa-adapter-kagent`)
-The Rust codec crate lives at [`appa-adapter-kagent/`](../../appa-adapter-kagent) in the workspace root. It compiles directly into `appa-runtime` and parses wire events sent by `AppaPluginKagent`.
+### 3. Adapter Crate (`appa-adapter-kagent`)
+The Rust adapter crate lives at [`appa-adapter-kagent/`](../../appa-adapter-kagent) in the workspace root. It is compiled directly into `appa-runtime`. Both plugins post the canonical hook envelope ([`appa-runtime-api/src/wire.rs`](../../appa-runtime-api/src/wire.rs)) to `POST /hook`; the crate derives the canonical tool id and whether a call is a spawn from the structured tool spelling they send (`mcp:<toolset>/<tool>`, `agent:<namespace>/<agent>`, `builtin:<name>`, `gate:<name>`, `appa:execute_remedy_plan`).
 
 ### 4. Guide Skill (`../appa-guide/`)
 The `appa-guide` agent runs in kagent using Kubernetes tools and `appa_match_batteries`. It drafts policy in chat and updates the runtime ConfigMap under kagent confirmation cards.
 
 ## Quickstart
 
-These commands require Helm v4 to support server-side apply.
+These commands require Helm v4 to support server-side apply. They configure OpenAI specifically. For another provider, use that provider's kagent configuration and ModelConfig instead of the `providers.openAI.*` values. The public [kagent guide](../../website/content/docs/kagent.md) documents required registry and Git egress, supported image architectures, and the existing-cluster installation path.
 
 ### 1. Install kagent with the OpenAPPA plugin
 
@@ -56,6 +58,9 @@ export OPENAI_API_KEY="<your-api-key>"
 Deploy the CRDs, provider secret, and controller:
 
 ```sh
+bash <<'BASH'
+set -euo pipefail
+
 : "${OPENAI_API_KEY:?Set OPENAI_API_KEY before installing kagent}"
 
 # 1. Install kagent CRDs
@@ -63,7 +68,7 @@ helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-c
   --version 0.9.12 -n kagent --create-namespace --force-conflicts
 
 # 2. Install kagent with the appa plugin image
-APPA_VERSION=0.15.0 # x-release-please-version
+APPA_VERSION=0.17.1 # x-release-please-version
 OPENAI_API_KEY_B64="$(printf %s "$OPENAI_API_KEY" | base64 | tr -d '\n')"
 kubectl apply -f - <<EOF
 apiVersion: v1
@@ -79,12 +84,15 @@ unset OPENAI_API_KEY_B64
 
 helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version 0.9.12 -n kagent \
+  --set registry=ghcr.io \
+  --set kmcp.podSecurityContext.runAsUser=65532 \
+  --set kmcp.podSecurityContext.runAsGroup=65532 \
   --set controller.agentImage.registry=europe-west1-docker.pkg.dev \
   --set controller.agentImage.repository=friendly-path-465518-r6/appa-public/appa-kagent-adk \
   --set providers.default=openAI \
   --set-string providers.openAI.apiKeySecretRef=kagent-openai \
   --set-string providers.openAI.apiKeySecretKey=OPENAI_API_KEY \
-  --set-string providers.openAI.model=gpt-5.6-luna \
+  --set-string providers.openAI.model=gpt-5.6-terra \
   --set k8s-agent.enabled=false \
   --set kgateway-agent.enabled=false \
   --set istio-agent.enabled=false \
@@ -100,11 +108,20 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --force-conflicts \
   --wait --timeout 10m \
   --set controller.agentImage.tag="v$APPA_VERSION"
+BASH
 ```
+
+The explicit KMCP user and group preserve `runAsNonRoot` while avoiding
+`CreateContainerConfigError` with the bundled KMCP 0.3.0 image, which defaults to root.
 
 ### 2. Deploy appa-runtime
 
 ```sh
+bash <<'BASH'
+set -euo pipefail
+
+APPA_VERSION=0.17.1 # x-release-please-version
+
 helm upgrade --install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
   --version "$APPA_VERSION" -n appa --create-namespace \
   --set persistence.enabled=true \
@@ -112,11 +129,19 @@ helm upgrade --install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-p
   --set appaGuide.namespace=kagent \
   --set-string appaGuide.reasoningEffort=none \
   --force-conflicts --wait --timeout 10m
+BASH
 ```
+
+`appaGuide.reasoningEffort=none` fills an otherwise unset OpenAI `reasoning_effort`. It is required by `gpt-5.6-terra` for function tools. A ModelConfig value takes precedence, and non-OpenAI models are unchanged.
 
 ### 3. Deploy demo fixtures
 
 ```sh
+bash <<'BASH'
+set -euo pipefail
+
+APPA_VERSION=0.17.1 # x-release-please-version
+
 helm upgrade --install appa-kagent-demo \
   oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-kagent-demo \
   --version "$APPA_VERSION" -n kagent \
@@ -124,9 +149,10 @@ helm upgrade --install appa-kagent-demo \
   --set-string modelConfig.name=default-model-config \
   --set-string runtime.reasoningEffort=none \
   --force-conflicts --wait --timeout 10m
+BASH
 ```
 
-### 4. Enable gating on an agent
+### 4. Configure an agent with OpenAPPA
 
 Set `APPA_ENABLED=true` and provide the runtime URL:
 
@@ -134,7 +160,7 @@ Set `APPA_ENABLED=true` and provide the runtime URL:
 apiVersion: kagent.dev/v1alpha2
 kind: Agent
 metadata:
-  name: sre-agent
+  name: <your-agent-name>
   namespace: kagent
 spec:
   declarative:
@@ -150,15 +176,22 @@ If `APPA_RUNTIME_URL` is unreachable, tool calls stop fail-closed before executi
 
 ### 5. Open the interactive demo
 
-Forward the dashboard:
+Forward the dashboard. This command stays in the foreground; `Ctrl-C` stops only the local forward:
 
 ```sh
 kubectl port-forward -n kagent svc/kagent-ui 8080:8080
 ```
 
 1. Open `http://localhost:8080/agents/kagent/appa-guide/chat` and send `init`.
-2. Review the proposed policy and approve the confirmation card.
-3. Open `cluster-ops` to run the demonstration scenarios. See [demo/SCENARIOS.md](demo/SCENARIOS.md).
+2. Review the complete proposal. In a later message, approve that exact proposal and ask the guide to open its confirmation card.
+3. Approve the native kagent card. The guide writes, synchronizes, and reloads the policy, or leaves the prior policy serving on rejection or failure.
+4. Start a new `cluster-ops` chat to use the activated policy. Existing Trajectories retain their policy snapshot. See [demo/SCENARIOS.md](demo/SCENARIOS.md).
+
+### 6. Uninstall
+
+The three scoped cleanup blocks in the public [kagent guide](../../website/content/docs/kagent.md#uninstall) are canonical. They remove only the demo release, restore and verify stock Agent images before a separately requested runtime removal, or remove kagent and its cluster-scoped CRDs.
+
+The runtime PVC is retained by default. Inspect its StorageClass reclaim policy before deleting the PVC. Removing `kagent-crds` is cluster-wide and can affect custom resources in every namespace.
 
 ## Building from source
 

@@ -15,6 +15,9 @@ import json
 import logging
 import os
 import re
+import threading
+import time
+import urllib.request
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -233,6 +236,98 @@ def store(plain: bytes, compressed: bytes, kind: str) -> tuple[str, bool]:
     return digest, False
 
 
+_SLACK_LOCK = threading.Lock()
+_SLACK_DISPATCH_TIMESTAMPS: list[float] = []
+SLACK_RATE_LIMIT_BURST = 10
+SLACK_RATE_LIMIT_WINDOW_SECS = 60.0
+MAX_SLACK_MESSAGE_CHARS = 2500
+
+
+def _allow_slack_dispatch() -> bool:
+    """Thread-safe rate limiter: allow at most SLACK_RATE_LIMIT_BURST notifications per window."""
+    now = time.monotonic()
+    cutoff = now - SLACK_RATE_LIMIT_WINDOW_SECS
+    with _SLACK_LOCK:
+        while _SLACK_DISPATCH_TIMESTAMPS and _SLACK_DISPATCH_TIMESTAMPS[0] < cutoff:
+            _SLACK_DISPATCH_TIMESTAMPS.pop(0)
+        if len(_SLACK_DISPATCH_TIMESTAMPS) >= SLACK_RATE_LIMIT_BURST:
+            return False
+        _SLACK_DISPATCH_TIMESTAMPS.append(now)
+        return True
+
+
+def sanitize_message_for_slack(message: str) -> str:
+    """Break mentions and truncate long messages to avoid Block Kit overflows."""
+    # Inserting a zero-width space after '@' neuters @channel, @here, @everyone, and user mentions.
+    neutered = message.replace("@", "@\u200b").strip()
+    if not neutered:
+        return "(empty message)"
+    if len(neutered) > MAX_SLACK_MESSAGE_CHARS:
+        return neutered[:MAX_SLACK_MESSAGE_CHARS] + "… (truncated)"
+    return neutered
+
+
+def format_slack_payload(document: dict[str, Any], digest: str, kind: str, bucket_name: str) -> dict[str, Any]:
+    """Structure the Slack alert: plain_text message body, and a context footer with metadata."""
+    raw_message = document.get("message", "")
+    safe_message = sanitize_message_for_slack(raw_message if isinstance(raw_message, str) else "")
+    has_trajectory = "yes" if entries(document) > 0 else "no"
+    object_path = f"reports/{kind}/{digest}.json.gz"
+    gcs_link = f"https://console.cloud.google.com/storage/browser/_details/{bucket_name}/{object_path}"
+    fallback = f"Yell report ({digest[:8]}): {safe_message[:200]}"
+
+    return {
+        "text": fallback,
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "plain_text",
+                    "text": safe_message,
+                    "emoji": False,
+                },
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Trajectory*: {has_trajectory} | <{gcs_link}|gzip>",
+                    }
+                ],
+            },
+        ],
+    }
+
+
+def notify_slack(document: dict[str, Any], digest: str, kind: str) -> bool:
+    """Forward a new report to Slack if configured and within rate limits."""
+    webhook = os.environ.get("APPA_YELL_SLACK_WEBHOOK")
+    if not webhook:
+        return False
+    bucket_name = os.environ.get("APPA_YELL_BUCKET")
+    if not bucket_name:
+        logger.warning("APPA_YELL_BUCKET unset; skipping slack notification")
+        return False
+    if not _allow_slack_dispatch():
+        logger.warning("slack notification rate limit reached; dropping alert for %s", digest[:8])
+        return False
+
+    payload = format_slack_payload(document, digest, kind, bucket_name)
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        webhook,
+        data=data,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=1.5):
+            return True
+    except Exception:
+        logger.exception("could not notify slack of yell report")
+        return False
+
+
 @functions_framework.http
 def receive(request: Any) -> tuple[Any, int, dict[str, str]]:
     """One report in, one receipt out."""
@@ -258,4 +353,7 @@ def receive(request: Any) -> tuple[Any, int, dict[str, str]]:
             "entries": entries(document),
         },
     )
+    if not duplicate:
+        notify_slack(document, digest, kind)
+
     return {"receipt_id": f"r-{digest[:32]}", "duplicate": duplicate}, 200, json_headers

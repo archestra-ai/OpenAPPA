@@ -3,6 +3,29 @@
   "title": "appa-runtime values",
   "type": "object",
   "properties": {
+    "config": {
+      "type": "object",
+      "required": ["existingConfigMap", "existingClaim", "key", "contents", "files"],
+      "additionalProperties": false,
+      "properties": {
+        "existingConfigMap": { "type": "string" },
+        "existingClaim": { "type": "string" },
+        "key": { "type": "string", "minLength": 1, "maxLength": 253 },
+        "contents": { "type": "string" },
+        "files": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["data", "executable"],
+            "additionalProperties": false,
+            "properties": {
+              "data": { "type": "string" },
+              "executable": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    },
     "image": {
       "type": "object",
       "properties": {

@@ -4,7 +4,7 @@ Shared OpenAPPA runtime for a Kubernetes cluster. One replica. Agents
 that set `APPA_RUNTIME_URL` to this Service, with `APPA_ENABLED=true`,
 are gated by the policy in the ConfigMap.
 
-The image of this chart version is `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-runtime:v0.15.0`. # x-release-please-version
+The image of this chart version is `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-runtime:v0.17.1`. # x-release-please-version
 
 ## Install
 
@@ -41,6 +41,9 @@ The option is off by default because the runtime chart also supports
 clusters without kagent. The target namespace, kagent model config, and
 tool-server name are configurable under `appaGuide`. An empty
 `appaGuide.skill.ref` pins the skill to the chart's `v<appVersion>` tag.
+An override must name a branch or tag. kagent 0.9.12 cannot initialize
+Git skills from commit SHAs; the chart rejects SHA-shaped overrides before
+deployment. This limitation does not affect marketplace package commit pins.
 
 Enabling `appaGuide` opens a separate guide MCP listener on Service port
 `18788`. Only the `appa-guide` Agent receives that URL and management
@@ -107,6 +110,27 @@ cluster and requires human approval for policy management. Every
 unrelated tool remains fail-closed. Typed runtime MCP tools validate,
 publish, reload, and roll back policy and battery changes. Set
 `config.existingConfigMap` to manage that ConfigMap yourself.
+
+For a complete small configuration tree, `config.files` maps relative paths to
+`{data: <canonical base64>, executable: <boolean>}`. The chart stores those bytes
+under SHA-256 keys and projects their original paths below `/etc/appa` with mode
+`0444` or `0555`. `config.contents` remains the root policy at `config.key`.
+The runtime working directory is `/etc/appa`, so declared relative helper paths
+retain their layout. File contents and executable intent affect the pod checksum.
+Paths must be relative, with no empty, dot, parent, backslash, colon, or control-character
+components; components beginning with `..` are reserved. File/parent collisions
+and collisions with the root policy are refused before deployment.
+
+The encoded tree budget is 750 KiB, including a conservative allowance for keys,
+paths and metadata. For larger trees, populate a PVC with the complete prepared
+tree and set `config.existingClaim` to its name. The chart mounts it read-only at
+`/etc/appa`; it does not create, populate, verify or delete this claim. Files must
+be readable by runtime UID 65532, and helpers must retain executable permission.
+The root policy must exist at `config.key`. This mode is mutually exclusive with
+`config.contents`, `config.files`, and `config.existingConfigMap`, and does not
+support appa-guide's ConfigMap editing. Changes to an external volume require an
+operator-controlled rollout; the chart cannot hash its contents. Configuration
+files are not Secrets: do not embed credentials in Helm values or ConfigMaps.
 
 When `config.contents` stays empty, an upgrade replaces the live policy
 key if it is still the packaged bootstrap. It preserves that key when

@@ -3,7 +3,7 @@
 A small MCP server (streamable HTTP) exposing ten cluster-ops tools
 named by the demo policy (`integrations/kagent/demo/chart/files/demo.appa.toml`)
 and two canned public-GitHub tools covered by the shipped GitHub battery. The example
-policy (`integrations/kagent/examples/kagent.appa.toml`) names seven of
+policy (`marketplace/plugins/kagent/default.appa.toml`) names seven of
 them and `ask_user`, so under it the runtime refuses `lookup_runbook`,
 `scale_deployment` and `rollback_deployment` at the `ToolCall` hook.
 The data is canned so every scenario replays exactly. The hazards are
@@ -149,7 +149,7 @@ def post_status_update(text: str) -> dict:
     return {"posted": True, "text": text}
 
 
-@mcp.tool(name="mcp__github__get_file_contents")
+@mcp.tool(name="get_file_contents")
 def get_file_contents(owner: str, repo: str, path: str) -> dict:
     """Read a file from a canned public GitHub repository."""
     content = GITHUB_FILES.get((owner, repo, path))
@@ -164,7 +164,7 @@ def get_file_contents(owner: str, repo: str, path: str) -> dict:
     }
 
 
-@mcp.tool(name="mcp__github__issue_write")
+@mcp.tool(name="issue_write")
 def issue_write(owner: str, repo: str, title: str, body: str) -> dict:
     """Create an issue in a canned public GitHub repository."""
     return {

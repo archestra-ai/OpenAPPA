@@ -15,12 +15,13 @@ use serde::Deserialize;
 
 use crate::builtins::{ClaudeCodeBackend, LoadedModule, MODULE_OUTPUT_CEILING, ModuleRegistry, ModulesError, Stock};
 use crate::config::{
-    AnnotatorImplementation, CLAUDE_CODE_BUILTIN, Endpoint, EndpointHost, Externals, Implementation, LLM_BUILTIN,
-    ResolverCommand, Section,
+    AnnotatorImplementation, AudienceImplementation, CLAUDE_CODE_BUILTIN, Endpoint, EndpointHost, Externals,
+    Implementation, LLM_BUILTIN, ResolverCommand, Section,
 };
-use crate::consult::{Consult, ConsultBody, ConsultKind, ModelPrompt};
+use crate::consult::{AudienceSourceArtifact, Consult, ConsultBody, ConsultKind, ModelPrompt};
 use crate::elicit::Elicitation;
 use crate::llm::{LlmBackend, LlmGate};
+use appa_engine::label::ReaderId;
 use appa_policy::AnnotatorBuiltin;
 
 const HITL: &str = "hitl";
@@ -99,6 +100,9 @@ enum Backend {
     Hitl,
     ClaudeCode(ClaudeCodeBackend),
     Llm(LlmBackend),
+    /// An inline roster: answers a member lookup from the table, in process, and nothing
+    /// else.
+    Readers(BTreeMap<ReaderId, ReaderId>),
     /// `appa replay`'s stand-in for the parties a remedy consults: every authority
     /// approves, every sanitizer returns the body unchanged. No configuration can name it;
     /// only `Runtime::open_in_memory` installs it, over whatever the deployment bound.
@@ -119,7 +123,6 @@ fn kind_of(section: Section) -> ConsultKind {
         Section::Sanitizers => ConsultKind::Sanitizer,
         Section::Annotators => ConsultKind::Annotation,
         Section::Audience => ConsultKind::AudienceSource,
-        Section::Identity => ConsultKind::Identity,
     }
 }
 
@@ -146,6 +149,19 @@ const CLAUDE_CONSULT_PERMITS: usize = 4;
 /// How many `command` consults may run at once across a runtime: every trajectory's
 /// pending consults fan out together, and each is a process.
 const COMMAND_CONSULT_PERMITS: usize = 8;
+
+/// Settle a batch of consults, every sibling included, as many at a time as the
+/// command gate admits. A consult's deadline covers its wait for a permit, so a wider
+/// fan-out would time out in the queue rather than run; a narrower one would cost a
+/// batch the sum of its members instead of its slowest.
+pub(crate) async fn settle_batch<F: std::future::Future>(consults: impl IntoIterator<Item = F>) -> Vec<F::Output> {
+    use futures_util::StreamExt;
+
+    futures_util::stream::iter(consults)
+        .buffered(COMMAND_CONSULT_PERMITS)
+        .collect()
+        .await
+}
 
 /// The per-runtime gates on consults that cost a process or a provider request, shared by
 /// every deployment snapshot the runtime serves: a reload's old and new snapshots contend
@@ -235,8 +251,6 @@ impl ExternalServices {
         let tables = [
             (Section::Authorities, config.authorities),
             (Section::Sanitizers, config.sanitizers),
-            (Section::Audience, config.audience),
-            (Section::Identity, config.identity),
         ];
         let mut backends: BTreeMap<ConsultKind, BTreeMap<String, Backend>> = BTreeMap::new();
         for (section, table) in tables {
@@ -276,6 +290,19 @@ impl ExternalServices {
             annotators.insert(name, backend);
         }
         backends.insert(ConsultKind::Annotation, annotators);
+        let audience = config
+            .audience
+            .into_iter()
+            .map(|(name, binding)| {
+                let backend = match binding.implementation {
+                    AudienceImplementation::Resolver(endpoint) => Backend::Url(endpoint),
+                    AudienceImplementation::Command(command) => Backend::Command(command),
+                    AudienceImplementation::Readers(readers) => Backend::Readers(readers),
+                };
+                (name, backend)
+            })
+            .collect();
+        backends.insert(ConsultKind::AudienceSource, audience);
         Ok(ExternalServices {
             http,
             http_loopback,
@@ -319,6 +346,15 @@ impl ExternalServices {
             Backend::Url(endpoint) => self.post_consult(endpoint, consult).await,
             Backend::Command(command) => self.run_command_consult(command, consult).await,
             Backend::Stock(stock) => stock.answer(consult).ok_or(NoAnswerReason::Malformed),
+            Backend::Readers(readers) => match &consult.body {
+                ConsultBody::AudienceSource {
+                    artifact: AudienceSourceArtifact::Member { member },
+                    ..
+                } => Ok(serde_json::json!({
+                    "principal": readers.get(&ReaderId::new(member.as_str())).map(ReaderId::as_str)
+                })),
+                _ => Err(NoAnswerReason::Unregistered),
+            },
             Backend::Module(module) => self.call_module(module, consult).await,
             Backend::Hitl => match (ruling, elicitation, &consult.body) {
                 (Some(ruling), _, ConsultBody::Authority { .. }) => {
@@ -520,7 +556,7 @@ fn builtin_backend(
     let module = match section {
         Section::Authorities => registry.authority(&builtin),
         Section::Sanitizers => registry.sanitizer(&builtin),
-        Section::Annotators | Section::Audience | Section::Identity => None,
+        Section::Annotators | Section::Audience => None,
     };
     let backend = match (section, builtin.as_str()) {
         (Section::Authorities, HITL) => Some(Backend::Hitl),
@@ -861,6 +897,7 @@ fn classify_transport(error: reqwest::Error) -> NoAnswerReason {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    #[cfg(unix)]
     use std::sync::OnceLock;
     use std::time::Duration;
 
@@ -868,15 +905,16 @@ mod tests {
     use axum::routing::post;
 
     use super::*;
+    #[cfg(unix)]
     use crate::builtins::run_claude_code;
-    use crate::config::Token;
+    use crate::config::{AudienceBinding, Token};
     use crate::consult::{
         AnnotationArtifact, AnnotationDeclaration, AudienceSourceArtifact, AudienceSourceDeclaration,
         AuthorityArtifact, AuthorityDeclaration, DeclaredPermits, DeclaredSanitizerTransition, MembersAnswer,
         SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
     };
-    use appa_engine::audience::MemberClaims;
 
+    #[cfg(unix)]
     fn process_environment() -> &'static tokio::sync::Mutex<()> {
         static ENVIRONMENT: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
         ENVIRONMENT.get_or_init(|| tokio::sync::Mutex::new(()))
@@ -927,7 +965,16 @@ mod tests {
                 })
             })
             .collect();
-        let audience = url.iter().map(|url| ("slack".to_string(), endpoint(url))).collect();
+        let audience = url
+            .iter()
+            .map(|url| {
+                let binding = AudienceBinding {
+                    implementation: AudienceImplementation::Resolver(Endpoint::new(url.to_string(), None)),
+                    lookup: None,
+                };
+                ("slack".to_string(), binding)
+            })
+            .collect();
         Externals {
             timeout: Duration::from_millis(timeout_ms),
             review_timeout: Duration::from_millis(timeout_ms),
@@ -936,7 +983,6 @@ mod tests {
             sanitizers: BTreeMap::new(),
             annotators,
             audience,
-            identity: BTreeMap::new(),
             claude_code: Default::default(),
             llm: None,
         }
@@ -1106,7 +1152,7 @@ mod tests {
                             serde_json::json!({"templates": ["user-group/<handle>"]})
                         );
                         assert_eq!(request["artifact"]["selector"], "user-group/eng");
-                        r#"{"version":1,"answer":{"members":[{"id":"slack:U1","verified_email":"alice@corp.com"},{"id":"slack:U2"}]}}"#
+                        r#"{"version":1,"answer":{"members":["alice@corp.com","slack:U2"]}}"#
                     }
                     other => panic!("unexpected kind {other}"),
                 }
@@ -1151,16 +1197,7 @@ mod tests {
             ConsultOutcome::Answer(answer) => assert_eq!(
                 MembersAnswer::from_wire(&answer),
                 Some(MembersAnswer {
-                    members: vec![
-                        MemberClaims {
-                            id: "slack:U1".to_string(),
-                            verified_email: Some("alice@corp.com".to_string()),
-                        },
-                        MemberClaims {
-                            id: "slack:U2".to_string(),
-                            verified_email: None,
-                        },
-                    ]
+                    members: vec!["alice@corp.com".to_string(), "slack:U2".to_string()]
                 })
             ),
             other => panic!("the source answers, got {other:?}"),
@@ -1529,6 +1566,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
     }
 
     /// Split the fake claude's NUL-separated argument capture.
+    #[cfg(unix)]
     fn captured_args(path: &std::path::Path) -> Vec<String> {
         let raw = std::fs::read(path).expect("the fake captured arguments");
         let raw = raw.strip_suffix(&[0u8]).expect("every argument ends in NUL");
@@ -1537,6 +1575,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             .collect()
     }
 
+    #[cfg(unix)]
     fn arg_after<'a>(args: &'a [String], flag: &str) -> &'a str {
         let position = args
             .iter()
@@ -1669,7 +1708,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn the_claude_builtin_serves_every_kind_but_audience() {
+    async fn the_claude_builtin_serves_every_consult_kind_it_may_bind() {
         let dir = tempfile::tempdir().expect("a fixture directory is created");
         let command = fake_claude(
             dir.path(),
@@ -1700,28 +1739,10 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 .await,
             ConsultOutcome::Answer(_)
         ));
-
-        let mut config = externals(None, 2000, 65_536);
-        config.audience.insert(
-            "judge".to_string(),
-            Implementation::Builtin(CLAUDE_CODE_BUILTIN.to_string()),
-        );
-        assert!(matches!(
-            ExternalServices::new(
-                config,
-                &ModuleRegistry::empty(),
-                BTreeMap::new(),
-                ConsultGates::of(4, 8)
-            ),
-            Err(ModulesError::UnknownBuiltin {
-                section: "audience",
-                ..
-            })
-        ));
     }
 
     #[tokio::test]
-    async fn the_llm_builtin_serves_every_kind_but_identity() {
+    async fn the_llm_builtin_serves_every_consult_kind_it_may_bind() {
         let url = stub(Router::new().route(
             "/v1/messages",
             post(|| async {
@@ -1765,24 +1786,48 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 .await,
             ConsultOutcome::Answer(_)
         ));
+    }
 
+    /// A roster answers a member lookup in process — the mapped reader, or `null` for a
+    /// member it does not list — and answers nothing else.
+    #[tokio::test]
+    async fn a_readers_roster_answers_member_lookups_in_process() {
         let mut config = externals(None, 2000, 65_536);
-        config.llm = Some(profile);
-        config
-            .identity
-            .insert("judge".to_string(), Implementation::Builtin(LLM_BUILTIN.to_string()));
-        assert!(matches!(
-            ExternalServices::new(
-                config,
-                &ModuleRegistry::empty(),
-                BTreeMap::new(),
-                ConsultGates::of(4, 8)
-            ),
-            Err(ModulesError::UnknownBuiltin {
-                section: "identity",
-                ..
-            })
-        ));
+        config.audience.insert(
+            "people".to_string(),
+            AudienceBinding {
+                implementation: AudienceImplementation::Readers(
+                    [(ReaderId::new("github:alice"), ReaderId::new("alice@corp.example"))]
+                        .into_iter()
+                        .collect(),
+                ),
+                lookup: None,
+            },
+        );
+        let services = services_over(config);
+        let lookup = |member: &str| Consult {
+            name: "people".to_string(),
+            body: ConsultBody::AudienceSource {
+                declaration: AudienceSourceDeclaration { templates: vec![] },
+                artifact: AudienceSourceArtifact::Member {
+                    member: member.to_string(),
+                },
+            },
+        };
+        assert_eq!(
+            services.consult(&lookup("github:alice"), None, None).await,
+            ConsultOutcome::Answer(serde_json::json!({"principal": "alice@corp.example"}))
+        );
+        assert_eq!(
+            services.consult(&lookup("github:bob"), None, None).await,
+            ConsultOutcome::Answer(serde_json::json!({"principal": null}))
+        );
+        assert_eq!(
+            services
+                .consult(&audience_consult("people", "org/acme/members"), None, None)
+                .await,
+            ConsultOutcome::NoAnswer(NoAnswerReason::Unregistered)
+        );
     }
 
     #[tokio::test]

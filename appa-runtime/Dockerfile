@@ -24,6 +24,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY appa-example-agent appa-example-agent
 COPY appa-agent-python appa-agent-python
 COPY appa-engine appa-engine
+COPY appa-package appa-package
 COPY appa-policy appa-policy
 COPY appa-runtime appa-runtime
 COPY appa-runtime-api appa-runtime-api
@@ -35,9 +36,9 @@ COPY bench bench
 COPY website-chat-playground website-chat-playground
 # appa's build.rs stages these two plugin trees into the binary's build
 # identity. Kagent harness and chart changes must not invalidate this compile.
-COPY integrations/claude-code integrations/claude-code
+COPY marketplace/plugins/claude-code marketplace/plugins/claude-code
+COPY marketplace/batteries marketplace/batteries
 COPY integrations/appa-guide integrations/appa-guide
-COPY batteries batteries
 COPY website/content/docs/contracts.md website/content/docs/contracts.md
 # The salt `appa yell` signs reports with. Compiled in by client.rs, so the
 # build needs the file even though nothing in the image reads it.
@@ -45,14 +46,17 @@ COPY receiver/appa-yell/salt.txt receiver/appa-yell/salt.txt
 RUN cargo build --release --locked --package appa
 
 FROM python:3.13-slim@sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285
-RUN pip install --no-cache-dir 'pyyaml==6.0.2' \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir 'pyyaml==6.0.2' \
     && groupadd --system --gid 65532 appa \
     && useradd --system --uid 65532 --gid 65532 --home-dir /var/lib/appa --create-home appa \
     && mkdir -p /opt/appa /etc/appa \
     && chown appa:appa /var/lib/appa /etc/appa
 
 COPY --from=builder --chown=appa:appa /build/target/release/appa /usr/local/bin/appa
-COPY --chown=appa:appa batteries /opt/appa/batteries
+COPY --chown=appa:appa marketplace/batteries /opt/appa/batteries
 COPY --chown=appa:appa scripts/appa-refresh-batteries.py /usr/local/bin/appa-refresh-batteries
 COPY --chown=appa:appa scripts/appa-guide-runtime.py /opt/appa/appa-guide-runtime
 RUN chmod 0755 /usr/local/bin/appa-refresh-batteries /opt/appa/appa-guide-runtime \

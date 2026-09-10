@@ -6,11 +6,15 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use appa_engine::audience::well_formed_reader;
+use appa_engine::label::ReaderId;
 use serde::Deserialize;
 
 #[derive(Debug, Clone)]
 pub struct Config {
     policy: PolicyFile,
+    pub(crate) server_aliases: BTreeMap<String, String>,
+    pub(crate) inventory: appa_runtime_api::inventory::ToolInventory,
     pub externals: Externals,
     /// Deployment knobs that describe this machine's reporting posture, not its policy.
     /// Deliberately outside [`PolicyFile`]: changing one must not move the policy file key
@@ -77,8 +81,9 @@ pub struct ExternalBindings {
     pub authorities: BTreeMap<String, Binding>,
     pub sanitizers: BTreeMap<String, Binding>,
     pub annotators: BTreeMap<String, Binding>,
+    /// An embedded host binds an audience source by URL or command; `lookup` and `readers`
+    /// are written in a file.
     pub audience: BTreeMap<String, Binding>,
-    pub identity: BTreeMap<String, Binding>,
     pub claude_code: ClaudeCode,
     pub llm: Option<LlmBinding>,
 }
@@ -95,7 +100,6 @@ impl ExternalBindings {
             sanitizers: BTreeMap::new(),
             annotators: BTreeMap::new(),
             audience: BTreeMap::new(),
-            identity: BTreeMap::new(),
             claude_code: ClaudeCode::default(),
             llm: None,
         }
@@ -181,12 +185,9 @@ pub struct Externals {
     /// One implementation per policy-declared `[[annotator]]` that names no `builtin` on
     /// its declaration. An Annotator that carries a stock builtin takes no entry here.
     pub annotators: BTreeMap<String, AnnotatorImplementation>,
-    /// One implementation per audience source provider the policy's `[audience.*]` tables
-    /// reference, under the provider's name.
-    pub audience: BTreeMap<String, Implementation>,
-    /// The one custom identity implementation the policy's `[identity]` selects, under its
-    /// name. The shipped `verified-email` implementation is deterministic and takes no entry.
-    pub identity: BTreeMap<String, Implementation>,
+    /// One entry per audience source provider the policy's `[audience]` table references,
+    /// under the provider's name, plus one per entry a provider's `lookup` names.
+    pub audience: BTreeMap<String, AudienceBinding>,
     /// Deployment knobs for the stock `claude-code` builtin.
     pub claude_code: ClaudeCode,
     /// The profile the stock `llm` builtin consults, where the deployment declares one.
@@ -194,11 +195,37 @@ pub struct Externals {
 }
 
 impl Externals {
+    /// The lookup routing these bindings declare: each redirected audience provider and
+    /// the entry that answers its member lookups.
+    pub(crate) fn lookup_targets(&self) -> BTreeMap<String, String> {
+        self.audience
+            .iter()
+            .filter_map(|(name, binding)| Some((name.clone(), binding.lookup.clone()?)))
+            .collect()
+    }
+
     /// How many `llm` consults this deployment lets run at once: `max_concurrent` of its
     /// profile, none without one.
     pub(crate) fn llm_bound(&self) -> usize {
         self.llm.as_ref().map_or(0, |profile| profile.max_concurrent)
     }
+}
+
+/// The lookup routing a composed document declares, read from its `[externals.audience]`
+/// table: what a stored policy file compiles under at replay, and what a file that does not
+/// load is described with.
+pub(crate) fn lookup_targets_of(document: &toml::Value) -> BTreeMap<String, String> {
+    document
+        .get("externals")
+        .and_then(|externals| externals.get("audience"))
+        .and_then(toml::Value::as_table)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|(name, entry)| Some((name.clone(), entry.get("lookup")?.as_str()?.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// How this deployment runs the stock `claude-code` builtin. `command` overrides the
@@ -262,6 +289,25 @@ pub enum Implementation {
 pub enum AnnotatorImplementation {
     Resolver(Endpoint),
     Command(ResolverCommand),
+}
+
+/// One `[externals.audience.<name>]` entry: how it answers, and — for a provider whose
+/// member lookups go elsewhere — the entry that answers them instead.
+#[derive(Debug, Clone)]
+pub struct AudienceBinding {
+    pub implementation: AudienceImplementation,
+    /// The entry that answers this provider's member lookups. `None`: the provider's own.
+    pub lookup: Option<String>,
+}
+
+/// How one audience entry answers: an HTTP endpoint, a local command, or an inline roster
+/// the runtime reads itself — the reader each qualified member maps to. A roster answers
+/// member lookups only, so it binds a `lookup` target and never a policy provider.
+#[derive(Debug, Clone)]
+pub enum AudienceImplementation {
+    Resolver(Endpoint),
+    Command(ResolverCommand),
+    Readers(BTreeMap<ReaderId, ReaderId>),
 }
 
 /// A command binding's argv, the directory of the config that declared it, and the one
@@ -426,6 +472,20 @@ pub enum ConfigError {
     ImplementationChoice { section: &'static str, name: String },
     #[error("the {section} entry {name:?} cannot be builtin")]
     BuiltinNotAllowed { section: &'static str, name: String },
+    #[error("the audience entry {name:?} maps {member:?}, {reason}")]
+    BadReaderMapping {
+        name: String,
+        member: String,
+        reason: String,
+    },
+    #[error("the audience entry {name:?} sends its lookups to {target:?}, which is not an [externals.audience] entry")]
+    UnknownLookupTarget { name: String, target: String },
+    #[error(
+        "the audience entry {name:?} sends its lookups to {target:?}, which sends its own lookups elsewhere; a lookup target answers directly"
+    )]
+    ChainedLookup { name: String, target: String },
+    #[error("the audience entry {name:?} is a readers table, which only another entry's lookup can name")]
+    ReadersWithoutLookup { name: String },
     #[error("the {section} entry {name:?} names the builtin {builtin:?}, which is not a valid implementation name")]
     InvalidBuiltinName {
         section: &'static str,
@@ -448,26 +508,24 @@ pub enum ConfigError {
     UnrepresentableEmbeddedSetting { field: &'static str },
 }
 
-/// The five sections a component binds under. Every section takes the same transports;
-/// which builtin names a section accepts is the one difference.
+/// The four sections a component binds under. Every section takes a URL or a command;
+/// which builtin names a section accepts is the one difference, and the audience section
+/// alone takes a `readers` roster and a `lookup` redirect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Section {
     Authorities,
     Sanitizers,
     Annotators,
-    /// One audience source per provider: `[externals.audience.<provider>]`.
+    /// One audience source per provider, plus lookup targets: `[externals.audience.<name>]`.
     Audience,
-    /// The one custom identity implementation: `[externals.identity.<name>]`.
-    Identity,
 }
 
 impl Section {
-    pub(crate) const ALL: [Section; 5] = [
+    pub(crate) const ALL: [Section; 4] = [
         Section::Authorities,
         Section::Sanitizers,
         Section::Annotators,
         Section::Audience,
-        Section::Identity,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -476,7 +534,6 @@ impl Section {
             Section::Sanitizers => "sanitizers",
             Section::Annotators => "annotators",
             Section::Audience => "audience",
-            Section::Identity => "identity",
         }
     }
 
@@ -492,11 +549,10 @@ impl Section {
     /// Whether `builtin` is a name this section may bind. Authorities and sanitizers take
     /// the stock names, the model builtins, and any module-grammar name (the module's
     /// presence is checked when the deployment opens); an Annotator names a stock builtin
-    /// on its policy declaration instead, and an audience source or a custom identity
-    /// implementation is never a builtin.
+    /// on its policy declaration instead, and an audience entry is never a builtin.
     fn check_builtin(self, name: &str, builtin: &str) -> Result<(), ConfigError> {
         let allowed = match self {
-            Section::Annotators | Section::Audience | Section::Identity => {
+            Section::Annotators | Section::Audience => {
                 return Err(ConfigError::BuiltinNotAllowed {
                     section: self.name(),
                     name: name.to_string(),
@@ -536,6 +592,13 @@ struct RawConfig {
     /// reaches [`PolicyFile::bytes`]. See [`Config::load`].
     #[serde(default)]
     reporting: RawReporting,
+    /// Offline packaging inputs, not part of the policy identity.
+    #[serde(default)]
+    bundle: RawBundle,
+    #[serde(default)]
+    server_aliases: BTreeMap<String, String>,
+    #[serde(default)]
+    appa_inventory: appa_runtime_api::inventory::ToolInventory,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -543,6 +606,33 @@ struct RawConfig {
 struct RawReporting {
     #[serde(default)]
     agent_yell: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBundle {
+    #[serde(default, deserialize_with = "bundle_files")]
+    files: Vec<String>,
+}
+
+fn bundle_files<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    let files = Vec::<String>::deserialize(deserializer)?;
+    let mut seen = std::collections::BTreeSet::new();
+    for file in &files {
+        let windows_prefix =
+            file.as_bytes().get(1) == Some(&b':') && file.as_bytes().first().is_some_and(u8::is_ascii_alphabetic);
+        if file.is_empty() || file.contains(['\\', '\0']) || Path::new(file).is_absolute() || windows_prefix {
+            return Err(serde::de::Error::custom(format!(
+                "bundle file {file:?} must be a nonempty relative source path using forward slashes"
+            )));
+        }
+        if !seen.insert(file) {
+            return Err(serde::de::Error::custom(format!(
+                "bundle file {file:?} is declared more than once"
+            )));
+        }
+    }
+    Ok(files)
 }
 
 #[derive(Debug, Deserialize)]
@@ -565,34 +655,33 @@ struct RawExternals {
     #[serde(default)]
     annotators: BTreeMap<String, RawBinding>,
     #[serde(default)]
-    audience: BTreeMap<String, RawBinding>,
-    #[serde(default)]
-    identity: BTreeMap<String, RawBinding>,
+    audience: BTreeMap<String, RawAudienceBinding>,
     claude_code: Option<RawClaudeCode>,
     llm: Option<RawLlm>,
 }
 
 impl RawExternals {
-    fn section(&self, section: Section) -> &BTreeMap<String, RawBinding> {
-        match section {
-            Section::Authorities => &self.authorities,
-            Section::Sanitizers => &self.sanitizers,
-            Section::Annotators => &self.annotators,
-            Section::Audience => &self.audience,
-            Section::Identity => &self.identity,
-        }
-    }
-
     /// Every command entry, by origin key.
     fn command_keys(&self) -> std::collections::BTreeSet<String> {
-        Section::ALL
+        let bindings = [
+            (Section::Authorities, &self.authorities),
+            (Section::Sanitizers, &self.sanitizers),
+            (Section::Annotators, &self.annotators),
+        ];
+        bindings
             .into_iter()
-            .flat_map(|section| {
-                self.section(section)
+            .flat_map(|(section, table)| {
+                table
                     .iter()
                     .filter(|(_, binding)| binding.command.is_some())
                     .map(move |(name, _)| section.origin_key(name))
             })
+            .chain(
+                self.audience
+                    .iter()
+                    .filter(|(_, binding)| binding.command.is_some())
+                    .map(|(name, _)| Section::Audience.origin_key(name)),
+            )
             .collect()
     }
 }
@@ -623,6 +712,16 @@ struct RawBinding {
     token_env: Option<String>,
     builtin: Option<String>,
     command: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAudienceBinding {
+    url: Option<String>,
+    token_env: Option<String>,
+    command: Option<Vec<String>>,
+    readers: Option<BTreeMap<String, String>>,
+    lookup: Option<String>,
 }
 
 fn default_review_timeout_ms() -> u64 {
@@ -672,11 +771,6 @@ impl Config {
             .filter_map(declaration_name)
             .map(str::to_owned)
             .collect::<std::collections::BTreeSet<_>>();
-        if root.appa_composed.is_some() && !root.include.is_empty() {
-            return Err(ConfigError::InvalidComposedMetadata {
-                reason: "stored composition metadata cannot appear with include".to_string(),
-            });
-        }
         let mut origins = root_command_origins(&root, &source_dir)?;
         let mut seen = std::collections::BTreeSet::new();
         let mut included_batteries = std::collections::BTreeSet::new();
@@ -728,6 +822,13 @@ impl Config {
             .as_table_mut()
             .expect("RawConfig parsed the root as a table")
             .remove("reporting");
+        // Keep authored packaging inputs out of the composed policy, just as
+        // reporting settings remain local to the deployment root.
+        let _ = &root.bundle.files;
+        document
+            .as_table_mut()
+            .expect("RawConfig parsed the root as a table")
+            .remove("bundle");
 
         let composed = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
         let raw: RawConfig = toml::from_str(&composed).map_err(|source| ConfigError::UnparsablePolicy { source })?;
@@ -760,6 +861,27 @@ impl Config {
 
     pub fn policy_file(&self) -> &PolicyFile {
         &self.policy
+    }
+
+    /// Pin host observations beside the authored policy in the same stored snapshot.
+    /// No process-local alias map is needed to reopen or replay this session.
+    pub(crate) fn with_inventory(&self, inventory: appa_runtime_api::inventory::ToolInventory) -> Result<Self, String> {
+        let mut document: toml::Value =
+            toml::from_str(std::str::from_utf8(self.policy.bytes()).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+        document.as_table_mut().ok_or("policy document is not a table")?.insert(
+            "appa_inventory".into(),
+            toml::Value::try_from(&inventory).map_err(|error| error.to_string())?,
+        );
+        let mut config = self.clone();
+        config.policy = PolicyFile::new(
+            toml::to_string(&document)
+                .map_err(|error| error.to_string())?
+                .into_bytes(),
+            self.policy.value.clone(),
+        );
+        config.inventory = inventory;
+        Ok(config)
     }
 
     pub fn included_batteries(&self) -> &[String] {
@@ -812,7 +934,6 @@ impl Config {
             sanitizers,
             annotators,
             audience,
-            identity,
             claude_code,
             llm,
         } = raw.externals;
@@ -831,6 +952,8 @@ impl Config {
         };
         Ok(Config {
             policy: PolicyFile::new(text.into_bytes(), raw.policy),
+            server_aliases: raw.server_aliases,
+            inventory: raw.appa_inventory,
             reporting,
             included_batteries,
             externals: Externals {
@@ -843,8 +966,7 @@ impl Config {
                     .into_iter()
                     .map(|(name, implementation)| (name, annotator_implementation(implementation)))
                     .collect(),
-                audience: resolve(Section::Audience, audience)?,
-                identity: resolve(Section::Identity, identity)?,
+                audience: resolve_audience_bindings(audience, &origins, &lookup)?,
                 claude_code: resolve_claude_code(claude_code)?,
                 llm,
             },
@@ -877,7 +999,6 @@ fn embedded_document(policy: toml::Value, bindings: &ExternalBindings) -> Result
         (Section::Sanitizers, &bindings.sanitizers),
         (Section::Annotators, &bindings.annotators),
         (Section::Audience, &bindings.audience),
-        (Section::Identity, &bindings.identity),
     ] {
         if entries.is_empty() {
             continue;
@@ -1017,8 +1138,19 @@ fn policy_version(policy: &toml::Value) -> Option<i64> {
     policy.as_table()?.get("version")?.as_integer()
 }
 
+/// Resolve root command origins without reading their working directories.
+/// The caller supplies the absolute directory of the declaring root config.
+pub(crate) fn root_command_directories(
+    text: &str,
+    source_dir: &Path,
+) -> Result<BTreeMap<String, PathBuf>, ConfigError> {
+    let root: RawConfig = toml::from_str(text).map_err(|source| ConfigError::UnparsablePolicy { source })?;
+    root_command_origins(&root, source_dir)
+}
+
 /// The working directory of every command entry the root declares: the root's own
-/// directory, or — for stored composed bytes — the directory the metadata recorded.
+/// directory, or the directory its metadata recorded. Included commands acquire
+/// their own origins during composition and are not keys in this root map.
 fn root_command_origins(root: &RawConfig, source_dir: &Path) -> Result<BTreeMap<String, PathBuf>, ConfigError> {
     let commands = root.externals.command_keys();
     let Some(metadata) = &root.appa_composed else {
@@ -1279,12 +1411,136 @@ fn resolve_binding(
             }
             Ok(Implementation::Builtin(builtin))
         }
-        (None, None, Some(argv)) => resolve_command(section, name, argv, token_env, origins),
+        (None, None, Some(argv)) => Ok(Implementation::Command(resolve_command(
+            section, name, argv, token_env, origins,
+        )?)),
         _ => Err(ConfigError::ImplementationChoice {
             section: section.name(),
             name: name.to_string(),
         }),
     }
+}
+
+/// The audience section's entries: a URL or command source, or a `readers` roster, each
+/// with the optional `lookup` redirect. A redirect names another entry of this table that
+/// answers directly — never one that redirects in turn — and a roster exists only to be
+/// named by one.
+fn resolve_audience_bindings(
+    raw: BTreeMap<String, RawAudienceBinding>,
+    origins: &BTreeMap<String, PathBuf>,
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<BTreeMap<String, AudienceBinding>, ConfigError> {
+    let section = Section::Audience;
+    let mut bindings = BTreeMap::new();
+    for (name, entry) in raw {
+        let RawAudienceBinding {
+            url,
+            token_env,
+            command,
+            readers,
+            lookup: redirect,
+        } = entry;
+        let implementation = match (url, command, readers) {
+            (Some(url), None, None) => {
+                let url = validated_url(section.name(), &name, url)?;
+                let token = resolve_token(section.name(), &name, token_env, lookup)?;
+                AudienceImplementation::Resolver(Endpoint::new(url, token))
+            }
+            (None, Some(argv), None) => {
+                AudienceImplementation::Command(resolve_command(section, &name, argv, token_env, origins)?)
+            }
+            (None, None, Some(readers)) if token_env.is_none() => {
+                AudienceImplementation::Readers(resolve_readers(&name, readers)?)
+            }
+            _ => {
+                return Err(ConfigError::ImplementationChoice {
+                    section: section.name(),
+                    name,
+                });
+            }
+        };
+        bindings.insert(
+            name,
+            AudienceBinding {
+                implementation,
+                lookup: redirect,
+            },
+        );
+    }
+    for (name, binding) in &bindings {
+        let Some(target) = &binding.lookup else {
+            continue;
+        };
+        let Some(answering) = bindings.get(target) else {
+            return Err(ConfigError::UnknownLookupTarget {
+                name: name.clone(),
+                target: target.clone(),
+            });
+        };
+        if answering.lookup.is_some() {
+            return Err(ConfigError::ChainedLookup {
+                name: name.clone(),
+                target: target.clone(),
+            });
+        }
+    }
+    // A roster exists for the providers that send it their lookups, and every key belongs
+    // to one of them: a key under any other prefix could never be asked.
+    for (name, binding) in &bindings {
+        let AudienceImplementation::Readers(readers) = &binding.implementation else {
+            continue;
+        };
+        let routed: std::collections::BTreeSet<&str> = bindings
+            .iter()
+            .filter(|(_, other)| other.lookup.as_deref() == Some(name))
+            .map(|(provider, _)| provider.as_str())
+            .collect();
+        if routed.is_empty() {
+            return Err(ConfigError::ReadersWithoutLookup { name: name.clone() });
+        }
+        if let Some(member) = readers.keys().find(|member| {
+            !member
+                .provider_prefix()
+                .is_some_and(|provider| routed.contains(provider))
+        }) {
+            return Err(ConfigError::BadReaderMapping {
+                name: name.clone(),
+                member: member.as_str().to_string(),
+                reason: "whose provider sends no lookups to this roster".to_string(),
+            });
+        }
+    }
+    Ok(bindings)
+}
+
+/// A roster's entries under the one reader shape rule: each key a provider-qualified
+/// member, each value an address or a reader in that member's own provider namespace.
+fn resolve_readers(name: &str, readers: BTreeMap<String, String>) -> Result<BTreeMap<ReaderId, ReaderId>, ConfigError> {
+    let refused = |member: &str, reason: &str| ConfigError::BadReaderMapping {
+        name: name.to_string(),
+        member: member.to_string(),
+        reason: reason.to_string(),
+    };
+    readers
+        .into_iter()
+        .map(|(member, principal)| {
+            let member = ReaderId::new(member);
+            let Some(provider) = member.provider_prefix().filter(|_| member.is_literal()) else {
+                return Err(refused(member.as_str(), "which is not a <provider>:<id> member"));
+            };
+            let principal = ReaderId::new(principal);
+            if !well_formed_reader(provider, &principal) {
+                return Err(refused(
+                    member.as_str(),
+                    &format!(
+                        "to {:?}, which is neither an address nor a {provider}-qualified id",
+                        principal.as_str()
+                    ),
+                ));
+            }
+            Ok((member, principal))
+        })
+        .collect()
 }
 
 /// A command's `token_env` is the opposite of a URL's: the runtime sends nothing, it
@@ -1298,7 +1554,7 @@ fn resolve_command(
     argv: Vec<String>,
     token_env: Option<String>,
     origins: &BTreeMap<String, PathBuf>,
-) -> Result<Implementation, ConfigError> {
+) -> Result<ResolverCommand, ConfigError> {
     if argv.is_empty() || argv.iter().any(String::is_empty) {
         return Err(ConfigError::InvalidCommand {
             section: section.name(),
@@ -1326,14 +1582,14 @@ fn resolve_command(
     }
     #[cfg(unix)]
     {
-        Ok(Implementation::Command(ResolverCommand {
+        Ok(ResolverCommand {
             argv,
             cwd: origins
                 .get(&section.origin_key(name))
                 .expect("every composed command binding records its source")
                 .clone(),
             token_env,
-        }))
+        })
     }
 }
 
@@ -1472,6 +1728,98 @@ fn is_loopback(url: &reqwest::Url) -> bool {
 mod tests {
     use super::*;
 
+    const BUNDLE_ROOT: &str = "[policy]\nversion=2\n[externals]\ntimeout_ms=5000\nmax_body_bytes=65536\n";
+
+    #[test]
+    fn bundle_files_do_not_change_policy_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, BUNDLE_ROOT).unwrap();
+        let before = Config::load(&path).unwrap();
+        std::fs::write(
+            &path,
+            format!("{BUNDLE_ROOT}[bundle]\nfiles=[\"local.py\", \"../shared/data.json\"]\n"),
+        )
+        .unwrap();
+        let after = Config::load(&path).unwrap();
+        assert_eq!(before.policy_file().bytes(), after.policy_file().bytes());
+        assert!(!String::from_utf8_lossy(after.policy_file().bytes()).contains("bundle"));
+    }
+
+    #[test]
+    fn bundle_files_reject_unknown_types_and_unsafe_source_paths() {
+        for table in [
+            "file=[]",
+            "files=\"helper.py\"",
+            "files=[1]",
+            "files=[\"\"]",
+            "files=[\"/absolute.py\"]",
+            "files=['C:/helper.py']",
+            "files=['C:helper.py']",
+            "files=['helper\\file.py']",
+            "files=['helper.py', 'helper.py']",
+        ] {
+            let text = format!("{BUNDLE_ROOT}[bundle]\n{table}\n");
+            assert!(toml::from_str::<RawConfig>(&text).is_err(), "accepted {table}");
+        }
+        assert!(toml::from_str::<RawConfig>(&format!("{BUNDLE_ROOT}[bundle]\n")).is_ok());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("appa.toml"),
+            format!("include=['included.toml']\n{BUNDLE_ROOT}"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("included.toml"),
+            "[policy]\nversion=2\n[bundle]\nfiles=[]\n",
+        )
+        .unwrap();
+        assert!(
+            matches!(Config::load(&dir.path().join("appa.toml")), Err(ConfigError::IncludedTopLevel { field, .. }) if field == "bundle")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn root_command_metadata_and_include_origins_compose() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_dir = dir.path().canonicalize().unwrap();
+        let command_dir = root_dir.join("snapshot-root");
+        let included_dir = root_dir.join("shared");
+        std::fs::create_dir(&included_dir).unwrap();
+        std::fs::write(
+            included_dir.join("policy.toml"),
+            "[policy]\nversion=2\n[externals.sanitizers.shared]\ncommand=['python3','helper.py']\n",
+        )
+        .unwrap();
+        let text = format!(
+            "include=['shared/policy.toml']\n{BUNDLE_ROOT}[externals.annotators.root]\ncommand=['python3','root.py']\n[appa_composed.command_cwd]\n'annotators.root'={}\n",
+            toml::Value::String(command_dir.to_str().unwrap().to_owned())
+        );
+        let origins = root_command_directories(&text, &root_dir).unwrap();
+        assert_eq!(
+            origins,
+            BTreeMap::from([("annotators.root".to_owned(), command_dir.clone())])
+        );
+        // No filesystem access to the recorded cwd is needed for composition.
+        assert!(!command_dir.exists());
+        std::fs::write(root_dir.join("appa.toml"), &text).unwrap();
+        let config = Config::load(&root_dir.join("appa.toml")).unwrap();
+        let AnnotatorImplementation::Command(root) = &config.externals.annotators["root"] else {
+            panic!("root command missing")
+        };
+        let Implementation::Command(shared) = &config.externals.sanitizers["shared"] else {
+            panic!("included command missing")
+        };
+        assert_eq!(root.cwd, command_dir);
+        assert_eq!(shared.cwd, included_dir);
+        let mismatched = text.replace("'annotators.root'=", "'sanitizers.shared'=");
+        assert!(matches!(
+            root_command_directories(&mismatched, &root_dir),
+            Err(ConfigError::InvalidComposedMetadata { .. })
+        ));
+    }
+
     const MINIMAL: &str = r#"
         [policy]
         anything = "the runtime does not interpret this"
@@ -1495,16 +1843,27 @@ mod tests {
     /// The transport one resolved entry selected, the same view over every section.
     enum Bound<'a> {
         Url,
-        Command(&'a ResolverCommand),
+        // Config rejects command bindings on non-Unix hosts.
+        Command(#[cfg_attr(not(unix), allow(dead_code))] &'a ResolverCommand),
         Builtin(&'a str),
+        Readers,
     }
 
     fn bound<'a>(section: Section, config: &'a Config, name: &str) -> Option<Bound<'a>> {
         let table = match section {
             Section::Authorities => &config.externals.authorities,
             Section::Sanitizers => &config.externals.sanitizers,
-            Section::Audience => &config.externals.audience,
-            Section::Identity => &config.externals.identity,
+            Section::Audience => {
+                return config
+                    .externals
+                    .audience
+                    .get(name)
+                    .map(|binding| match &binding.implementation {
+                        AudienceImplementation::Resolver(_) => Bound::Url,
+                        AudienceImplementation::Command(command) => Bound::Command(command),
+                        AudienceImplementation::Readers(_) => Bound::Readers,
+                    });
+            }
             Section::Annotators => {
                 return config
                     .externals
@@ -1636,7 +1995,12 @@ mod tests {
         );
 
         let config = parse_with(&with("APPA_PROVIDER_SLACK_TOKEN"), set).expect("the bound credential validates");
-        let Some(Implementation::Command(command)) = config.externals.audience.get("slack") else {
+        let Some(AudienceImplementation::Command(command)) = config
+            .externals
+            .audience
+            .get("slack")
+            .map(|binding| &binding.implementation)
+        else {
             panic!("the slack audience source is a command")
         };
         assert_eq!(command.token_env.as_deref(), Some("APPA_PROVIDER_SLACK_TOKEN"));
@@ -1742,16 +2106,82 @@ mod tests {
                 accepts(section, builtin);
             }
         }
-        // An Annotator names a stock builtin on its policy declaration, never here.
-        for section in [Section::Annotators, Section::Audience, Section::Identity] {
-            for builtin in ["hitl", "approve", "redact-email", "claude-code", "llm", "some-module"] {
-                assert!(
-                    matches!(cell(section, builtin), Err(ConfigError::BuiltinNotAllowed { .. })),
-                    "{} must refuse builtin {builtin}",
-                    section.name()
-                );
-            }
+        // An Annotator names a stock builtin on its policy declaration, never here; an
+        // audience entry has no builtin key at all.
+        for builtin in ["hitl", "approve", "redact-email", "claude-code", "llm", "some-module"] {
+            assert!(
+                matches!(
+                    cell(Section::Annotators, builtin),
+                    Err(ConfigError::BuiltinNotAllowed { .. })
+                ),
+                "annotators must refuse builtin {builtin}"
+            );
+            assert!(
+                toml::from_str::<RawConfig>(&entry(Section::Audience, &format!("builtin = \"{builtin}\""))).is_err(),
+                "audience must refuse builtin {builtin}"
+            );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_audience_lookup_names_a_direct_target_and_a_roster_is_only_a_target() {
+        let with = |audience: &str| format!("{MINIMAL}\n{audience}\n");
+        let source = "[externals.audience.github]\ncommand = [\"python3\", \"source.py\"]\nlookup = \"people\"\n";
+        let roster = "[externals.audience.people]\nreaders = { \"github:alice\" = \"alice@corp.example\", \"github:bob\" = \"github:robert\" }\n";
+
+        let config = parse(&with(&format!("{source}{roster}"))).expect("a roster target validates");
+        assert_eq!(config.externals.audience["github"].lookup.as_deref(), Some("people"));
+        let Some(AudienceImplementation::Readers(readers)) = config
+            .externals
+            .audience
+            .get("people")
+            .map(|binding| &binding.implementation)
+        else {
+            panic!("the roster binds as readers");
+        };
+        assert_eq!(
+            readers.get(&ReaderId::new("github:alice")).map(ReaderId::as_str),
+            Some("alice@corp.example")
+        );
+
+        assert!(matches!(
+            parse(&with(source)),
+            Err(ConfigError::UnknownLookupTarget { .. })
+        ));
+        assert!(matches!(
+            parse(&with(roster)),
+            Err(ConfigError::ReadersWithoutLookup { .. })
+        ));
+        let chained = format!(
+            "{source}[externals.audience.people]\ncommand = [\"python3\", \"people.py\"]\nlookup = \"github\"\n"
+        );
+        assert!(matches!(parse(&with(&chained)), Err(ConfigError::ChainedLookup { .. })));
+        let self_lookup = "[externals.audience.github]\ncommand = [\"python3\", \"source.py\"]\nlookup = \"github\"\n";
+        assert!(matches!(
+            parse(&with(self_lookup)),
+            Err(ConfigError::ChainedLookup { .. })
+        ));
+
+        for (member, principal) in [
+            ("alice", "alice@corp.example"),
+            ("github:alice", "public"),
+            ("github:alice", "slack:U1"),
+            ("github:alice", "alice"),
+            ("github:", "alice@corp.example"),
+            ("githuub:alice", "alice@corp.example"),
+        ] {
+            let bad = format!("{source}[externals.audience.people]\nreaders = {{ \"{member}\" = \"{principal}\" }}\n");
+            assert!(
+                matches!(parse(&with(&bad)), Err(ConfigError::BadReaderMapping { .. })),
+                "{member} -> {principal} must be refused"
+            );
+        }
+        let two = format!("{source}[externals.audience.people]\nreaders = {{}}\nurl = \"https://x.internal\"\n");
+        assert!(matches!(
+            parse(&with(&two)),
+            Err(ConfigError::ImplementationChoice { .. })
+        ));
     }
 
     #[test]
@@ -2095,8 +2525,9 @@ mod tests {
                 command = ["python3", "scrub.py"]
                 [externals.audience.slack]
                 command = ["python3", "slack-audience.py"]
-                [externals.identity.corp-identity]
-                command = ["python3", "identity.py"]
+                lookup = "people"
+                [externals.audience.people]
+                command = ["python3", "people.py"]
             "#,
         )
         .expect("write included config");
@@ -2114,7 +2545,7 @@ mod tests {
             (Section::Annotators, "battery"),
             (Section::Sanitizers, "scrub"),
             (Section::Audience, "slack"),
-            (Section::Identity, "corp-identity"),
+            (Section::Audience, "people"),
         ] {
             assert_eq!(
                 command_cwd(section, name),

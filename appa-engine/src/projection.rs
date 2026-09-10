@@ -1169,7 +1169,6 @@ impl Views<'_> {
         const NONE: &AudienceEvidence = &AudienceEvidence {
             sources: Vec::new(),
             lookups: Vec::new(),
-            identity: Vec::new(),
         };
         self.projection
             .candidates

@@ -43,7 +43,7 @@ spec:
   policyTypes: [Ingress]
   ingress:
     - ports:
-        - { protocol: TCP, port: runtime }
+        - { protocol: TCP, port: {{ .Values.service.port }} }
     - from:
         - namespaceSelector:
             matchLabels:
@@ -52,6 +52,6 @@ spec:
             matchLabels:
               app.kubernetes.io/name: {{ .Values.appaGuide.name | quote }}
       ports:
-        - { protocol: TCP, port: guide-mcp }
+        - { protocol: TCP, port: {{ .Values.service.guidePort | default 18788 }} }
 {{- end }}
 {{- end }}

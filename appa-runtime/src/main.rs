@@ -12,6 +12,8 @@ use std::process::ExitCode;
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
+use appa_runtime_api::AdapterName;
+pub use appa_runtime_api::AdapterName as Adapter;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
 use axum::http::header::AUTHORIZATION;
@@ -25,7 +27,6 @@ use crate::api::{Reloaded, Runtime};
 use crate::config::Config;
 use crate::default_config;
 use crate::{hooks, mcp};
-use appa_runtime_api::Codec;
 
 fn ensure_default_config(path: &Path) -> io::Result<bool> {
     let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
@@ -84,39 +85,19 @@ struct Args {
     )]
     mcp_allowed_hosts: Vec<String>,
 
-    #[arg(long, value_enum, default_value_t = Adapter::ClaudeCode, global = true)]
-    adapter: Adapter,
+    #[arg(long, default_value_t = AdapterName::ClaudeCode, global = true)]
+    adapter: AdapterName,
 
     #[arg(short, action = clap::ArgAction::Count)]
     verbose: u8,
 }
 
-/// The adapter surface this binary can serve. The one place harness
-/// names appear in this crate: each variant maps to one codec crate.
-///
-/// Public because the MCP service is: the tools it serves name the harness in what they
-/// build, so a caller that mounts the service chooses one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum Adapter {
-    ClaudeCode,
-    Kagent,
-}
-
-impl Adapter {
-    /// kagent's spawns are other agents called as tools: a child runs only under a contract
-    /// that names the agent. Claude Code's `Task` keeps the wildcard's cover.
-    fn spawn_coverage(self) -> crate::api::SpawnCoverage {
-        match self {
-            Adapter::ClaudeCode => crate::api::SpawnCoverage::Wildcard,
-            Adapter::Kagent => crate::api::SpawnCoverage::Declared,
-        }
-    }
-
-    fn codec(self) -> Codec {
-        match self {
-            Adapter::ClaudeCode => appa_adapter_claude_code::codec(),
-            Adapter::Kagent => appa_adapter_kagent::codec(),
-        }
+/// The derivation the runtime applies to every call of the host it serves. The one
+/// place this crate names the adapter crates.
+fn served(adapter: AdapterName) -> appa_runtime_api::Adapter {
+    match adapter {
+        AdapterName::ClaudeCode => appa_adapter_claude_code::adapter(),
+        AdapterName::Kagent => appa_adapter_kagent::adapter(),
     }
 }
 
@@ -191,10 +172,7 @@ pub(crate) fn binary_digest(path: &Path) -> io::Result<String> {
 #[derive(Clone)]
 struct AppState {
     runtime: Arc<Runtime>,
-    codec: Codec,
-    /// Which harness this process serves. A report names it, because the same policy behaves
-    /// differently under a harness that declares its spawns and one that does not.
-    adapter: Adapter,
+    adapter: appa_runtime_api::Adapter,
     config: PathBuf,
     battery_dirs: Vec<PathBuf>,
     battery_state: Arc<RwLock<mcp::BatteryState>>,
@@ -292,9 +270,20 @@ async fn hook(
     State(state): State<AppState>,
     body: axum::body::Bytes,
 ) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
-    let (status, body) = hooks::answer(&state.runtime, &state.codec, &body).await;
+    let (status, body) = hooks::answer(&state.runtime, &state.adapter, &body).await;
     let status = axum::http::StatusCode::from_u16(status).expect("hook answers carry valid status codes");
     (status, axum::Json(body))
+}
+
+async fn validate_tools(
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    let (status, report) = crate::tool_validation::answer(&state.runtime, state.adapter, &body);
+    (
+        axum::http::StatusCode::from_u16(status).expect("validation answers carry valid status codes"),
+        axum::Json(report),
+    )
 }
 
 /// `ok` while this process serves the executable installed on disk; `stale <pid>` once an
@@ -354,6 +343,20 @@ async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (
         included: config.included_batteries().iter().cloned().collect(),
         serving_tools: config.tool_names().into_iter().collect(),
     };
+    let refused = |refusal: String| {
+        tracing::warn!(%refusal, "the reload was refused; the running deployment keeps serving");
+        (axum::http::StatusCode::UNPROCESSABLE_ENTITY, refusal)
+    };
+    let prepared = state
+        .runtime
+        .prepare_reload(config)
+        .map_err(|refusal| refused(refusal.to_string()))?;
+    // The new sources are probed before anything swaps, and before the battery lock below
+    // is taken: nothing holds a std lock across the await.
+    prepared
+        .probe_sources()
+        .await
+        .map_err(|refusal| refused(refusal.to_string()))?;
     let mut published = state
         .battery_state
         .write()
@@ -361,16 +364,9 @@ async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (
     // The matcher holds this lock while reading policy metadata. Keep it
     // across the synchronous policy swap so no response can describe the
     // old policy after the new one starts serving.
-    match state.runtime.reload(config) {
-        Ok(reloaded) => {
-            *published = battery_state;
-            Ok(axum::Json(reloaded))
-        }
-        Err(refusal) => {
-            tracing::warn!(%refusal, "the reload was refused; the running deployment keeps serving");
-            Err((axum::http::StatusCode::UNPROCESSABLE_ENTITY, refusal.to_string()))
-        }
-    }
+    let reloaded = state.runtime.install(prepared);
+    *published = battery_state;
+    Ok(axum::Json(reloaded))
 }
 
 #[derive(serde::Deserialize)]
@@ -432,7 +428,7 @@ async fn report(
         // making it a per-caller boundary. The recently active trajectory may well belong to
         // someone else's session on this machine, and loopback is the only thing between them.
         selection: crate::yell::Selection::Recent,
-        harness: state.adapter,
+        harness: state.adapter.name,
     };
     state
         .runtime
@@ -491,23 +487,32 @@ async fn serve(args: Args) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // A served deployment answers one host, and the adapter is that host: it derives the
+    // canonical identity the policy must name, its inverse spells a recorded name back for
+    // the model, and its rule settles which contracts release a spawn.
+    let adapter = served(args.adapter);
     let battery_state = Arc::new(RwLock::new(mcp::BatteryState {
         catalog: crate::batteries::snapshot(&battery_dirs),
         included: config.included_batteries().iter().cloned().collect::<BTreeSet<_>>(),
         serving_tools: config.tool_names().into_iter().collect(),
     }));
-    let runtime = match Runtime::open(config, args.db, args.modules_dir) {
-        Ok(runtime) => Arc::new(runtime.with_spawn_coverage(args.adapter.spawn_coverage())),
+    let runtime = match Runtime::open_served(config, args.db, args.modules_dir, adapter) {
+        Ok(runtime) => Arc::new(runtime),
         Err(error) => {
             eprintln!("appa runtime: {error}");
             return ExitCode::FAILURE;
         }
     };
+    // Every audience source the policy references answers once before the runtime serves:
+    // a source that is down or reports a malformed reader stops the start here.
+    if let Err(error) = runtime.probe_sources().await {
+        eprintln!("appa runtime: {error}");
+        return ExitCode::FAILURE;
+    }
 
     let state = AppState {
         runtime: Arc::clone(&runtime),
-        codec: args.adapter.codec(),
-        adapter: args.adapter,
+        adapter,
         config: config_path,
         battery_state: Arc::clone(&battery_state),
         battery_dirs,
@@ -521,10 +526,18 @@ async fn serve(args: Args) -> ExitCode {
         .route("/report", post(report))
         .route("/reload", post(reload))
         .route_layer(axum::middleware::from_fn(loopback_management_only));
-    let stock = axum::Router::new().route("/hook", post(hook)).nest_service(
-        "/mcp",
-        mcp::service_with_allowed_hosts(Arc::clone(&runtime), &args.mcp_allowed_hosts, args.adapter),
-    );
+    let stock = axum::Router::new()
+        .route("/hook", post(hook))
+        .route(
+            "/validate",
+            post(validate_tools).layer(axum::extract::DefaultBodyLimit::max(
+                appa_runtime_api::inventory::MAX_INVENTORY_BYTES,
+            )),
+        )
+        .nest_service(
+            "/mcp",
+            mcp::service_with_allowed_hosts(Arc::clone(&runtime), &args.mcp_allowed_hosts, args.adapter),
+        );
     let proxy_token = match proxy_token_from_env() {
         Ok(token) => token,
         Err(error) => {

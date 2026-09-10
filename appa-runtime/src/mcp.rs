@@ -81,6 +81,10 @@ pub struct MatchBatteriesArgs {
     pub actor: String,
     /// The observed server or host source these names came from.
     pub source: String,
+    /// Exact configured MCP URL from the observed kagent connection. Required
+    /// for MCP coverage checks; omit for namespace/delegations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
     /// Exact tool wire names observed from the host's live inventory.
     pub tools: Vec<String>,
 }
@@ -192,9 +196,12 @@ async fn execute_remedy(
     let arguments = RemedyArguments::from(args);
     // Requires the vouched trajectory from the preceding hook.
     let Ok((acting, ruling)) = runtime.take_vouched(&PermitKey::offer(&quoted)) else {
-        return render(RemedyOutcome::Refused {
-            detail: "no live offer with this id exists".to_string(),
-        });
+        return render(
+            runtime,
+            RemedyOutcome::Refused {
+                detail: "no live offer with this id exists".to_string(),
+            },
+        );
     };
     let elicitation = Elicitation::new(request, runtime.review_timeout());
     let started = std::time::Instant::now();
@@ -216,7 +223,7 @@ async fn execute_remedy(
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         },
     );
-    render(outcome)
+    render(runtime, outcome)
 }
 
 #[tool_router]
@@ -334,7 +341,7 @@ impl RuntimeToolService {
     }
 
     #[tool(
-        description = "Match exact tool wire names observed from one named host source against the runtime's current battery catalog and report whether each match is already included. Exact aliases win over host-qualified suffix matches. Use this result as the only source of battery suggestions."
+        description = "Match observed native tool names against the battery catalog. Matches are suggestions, not permission. Supply the exact configured MCP endpoint to check coverage against the serving policy and obtain its server identity for an approved battery binding. Without an endpoint MCP coverage is unknown. Use source namespace/delegations for agent names."
     )]
     pub async fn appa_match_batteries(&self, Parameters(args): Parameters<MatchBatteriesArgs>) -> CallToolResult {
         if !take_management_vouch(&self.runtime, "appa_match_batteries", &args) {
@@ -346,12 +353,24 @@ impl RuntimeToolService {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let observed = observed_for_source(&args.source, &args.tools);
         let matches = match_batteries(&state.catalog.batteries, &state.included, &observed);
-        let unconfigured_tools = unconfigured_tools(&state.serving_tools, &observed);
+        let (server, coverage) = match source_coverage(&self.runtime, &args.source, args.endpoint.as_deref(), &observed)
+        {
+            Ok(result) => result,
+            Err(error) => return CallToolResult::error(vec![ContentBlock::text(error)]),
+        };
+        let unconfigured_tools: Vec<_> = coverage
+            .tools
+            .iter()
+            .filter(|check| matches!(check.status, crate::tool_validation::ToolStatus::Invalid { .. }))
+            .map(|check| &check.tool)
+            .collect();
         let body = serde_json::to_string(&serde_json::json!({
             "source": args.source,
             "matches": matches,
             "serving_tools": &state.serving_tools,
             "unconfigured_tools": unconfigured_tools,
+            "server": server,
+            "coverage": coverage,
         }))
         .expect("battery matches contain only serializable values");
         CallToolResult::success(vec![ContentBlock::text(body)])
@@ -473,7 +492,8 @@ fn match_tool(declarations: &[String], observed: &str) -> Option<ToolMatch> {
         .iter()
         .filter(|declaration| {
             selector_name(declaration)
-                .rsplit_once("__")
+                .rsplit_once('/')
+                .or_else(|| selector_name(declaration).rsplit_once("__"))
                 .is_some_and(|(_, tail)| tail == observed)
         })
         .cloned()
@@ -489,16 +509,86 @@ fn selector_name(declaration: &str) -> &str {
     declaration.split_once('(').map_or(declaration, |(name, _)| name)
 }
 
-fn unconfigured_tools(serving: &BTreeSet<String>, observed: &[String]) -> Vec<String> {
-    let configured: BTreeSet<&str> = serving.iter().map(|tool| selector_name(tool)).collect();
-    observed
-        .iter()
-        .map(String::as_str)
-        .filter(|tool| !tool.is_empty() && !configured.contains(tool))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
+fn source_coverage(
+    runtime: &Runtime,
+    source: &str,
+    endpoint: Option<&str>,
+    observed: &[String],
+) -> Result<(Option<String>, crate::tool_validation::ValidationReport), String> {
+    use crate::tool_validation::{ToolCheck, ToolStatus, ValidationReport};
+    use appa_runtime_api::inventory::{InventorySource, InventoryStatus, ObservedTool, ToolInventory};
+    use sha2::{Digest, Sha256};
+
+    let mut inventory = ToolInventory::default();
+    let server = if let Some(namespace) = source.strip_suffix("/delegations") {
+        if endpoint.is_some() {
+            return Err("delegations do not have an MCP endpoint".into());
+        }
+        for name in observed {
+            let (encoded_namespace, agent) = name
+                .split_once("__NS__")
+                .ok_or("delegation names must identify their namespace and agent")?;
+            if encoded_namespace.replace('_', "-") != namespace {
+                return Err("a delegation belongs to a different source namespace".into());
+            }
+            inventory.tools.push(ObservedTool {
+                name: name.clone(),
+                tool: format!("agent:{namespace}/{}", agent.replace('_', "-")),
+            });
+        }
+        None
+    } else if let Some(endpoint) = endpoint {
+        let url = url::Url::parse(endpoint).map_err(|_| "endpoint must be an HTTP(S) URL")?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+        {
+            return Err("endpoint must be an HTTP(S) URL without userinfo or a fragment".into());
+        }
+        let server = format!("server-{:x}", Sha256::digest(endpoint.as_bytes()));
+        inventory.tools = observed
+            .iter()
+            .map(|name| ObservedTool {
+                name: name.clone(),
+                tool: format!("mcp:{server}/{name}"),
+            })
+            .collect();
+        inventory.sources.push(InventorySource {
+            server: server.clone(),
+            status: InventoryStatus::Partial,
+            dynamic: true,
+            detail: None,
+        });
+        Some(server)
+    } else {
+        return Ok((
+            None,
+            ValidationReport {
+                tools: observed
+                    .iter()
+                    .map(|name| ToolCheck {
+                        tool: name.clone(),
+                        status: ToolStatus::Unknown {
+                            reason: "supply the configured MCP endpoint to check source coverage".into(),
+                        },
+                    })
+                    .collect(),
+                tools_may_change: true,
+                ..ValidationReport::default()
+            },
+        ));
+    };
+    let mut report = runtime
+        .preflight_inventory(None, appa_adapter_kagent::adapter(), &inventory)
+        .map_err(|error| error.to_string())?;
+    if !report.errors.is_empty() {
+        return Err(report.errors.join("; "));
+    }
+    // Other sources' unresolved declarations say nothing about this observation.
+    report.tools.retain(|check| observed.contains(&check.tool));
+    Ok((server, report))
 }
 
 fn observed_for_source(source: &str, observed: &[String]) -> Vec<String> {
@@ -520,17 +610,20 @@ fn observed_for_source(source: &str, observed: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn render(outcome: RemedyOutcome) -> CallToolResult {
+/// The runtime keys the released call on its canonical identity, which is not a name any
+/// host advertises. What the model is told to call is that identity spelled the way its own
+/// harness dispatches it ([`Runtime::model_spelling`]).
+fn render(runtime: &Runtime, outcome: RemedyOutcome) -> CallToolResult {
     match outcome {
         RemedyOutcome::Authorized { call } => CallToolResult::success(vec![ContentBlock::text(format!(
             "[appa] Authorized. Call the {} tool again with exactly these arguments: {}",
-            call.tool,
+            runtime.model_spelling(&call.tool),
             call.arguments.get(),
         ))]),
         RemedyOutcome::Substituted { call } => CallToolResult::success(vec![ContentBlock::text(format!(
             "[appa] Substituted. The sanitizer replaced the arguments and the call is released. \
              Call the {} tool with exactly these arguments to run it: {}",
-            call.tool,
+            runtime.model_spelling(&call.tool),
             call.arguments.get(),
         ))]),
         RemedyOutcome::Returned { value } => CallToolResult::success(vec![ContentBlock::text(value)]),
@@ -816,17 +909,6 @@ mod tests {
         );
         assert!(!match_batteries(&catalog, &BTreeSet::new(), &["get_file_contents".to_string()])[0].included);
         assert_eq!(
-            unconfigured_tools(
-                &BTreeSet::from(["list_pods".to_string(), "read_secret(name:payments*)".to_string()]),
-                &[
-                    "issue_write".to_string(),
-                    "read_secret".to_string(),
-                    "list_pods".to_string()
-                ],
-            ),
-            ["issue_write"],
-        );
-        assert_eq!(
             observed_for_source(
                 "team-alpha/delegations",
                 &[
@@ -837,6 +919,114 @@ mod tests {
             ),
             ["team_alpha__NS__log_analyst", "team_alpha__NS__release_manager"],
         );
+    }
+
+    #[test]
+    fn shipped_battery_matches_native_names_without_claiming_coverage() {
+        let catalog = crate::batteries::snapshot(&[
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace/batteries")
+        ]);
+        let names = vec!["get_file_contents".into(), "issue_write".into()];
+        let matches = match_batteries(&catalog.batteries, &BTreeSet::new(), &names);
+        let github = matches.iter().find(|item| item.battery == "github").unwrap();
+        assert!(!github.included);
+        assert_eq!(github.tools.len(), 2);
+        assert!(github.tools.iter().all(|item| item.match_kind == "suffix"));
+        assert!(
+            github
+                .tools
+                .iter()
+                .all(|item| item.declarations.iter().all(|name| name.starts_with("mcp/github/")))
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::open(config(), dir.path().join("appa.db"), None).unwrap();
+        let (_, report) = source_coverage(&runtime, "kagent/github", None, &names).unwrap();
+        assert!(
+            report
+                .tools
+                .iter()
+                .all(|check| matches!(check.status, crate::tool_validation::ToolStatus::Unknown { .. }))
+        );
+        let (_, report) =
+            source_coverage(&runtime, "kagent/github", Some("https://github.example/mcp"), &names).unwrap();
+        assert!(
+            report
+                .tools
+                .iter()
+                .all(|check| matches!(check.status, crate::tool_validation::ToolStatus::Invalid { .. }))
+        );
+    }
+
+    #[test]
+    fn coverage_uses_policy_bindings_and_explicit_delegation_contracts() {
+        use crate::tool_validation::ToolStatus;
+        use sha2::{Digest, Sha256};
+        let endpoint = "https://github.example/mcp";
+        let server = format!("server-{:x}", Sha256::digest(endpoint.as_bytes()));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("appa.toml");
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+            [server_aliases]
+            github = "{server}"
+            [externals]
+            timeout_ms = 1000
+            max_body_bytes = 4096
+            [policy]
+            version = 2
+            [[policy.tool]]
+            name = "mcp/github/get_file_contents"
+            [[policy.tool]]
+            name = "list_pods"
+            [[policy.tool]]
+            name = "agent/kagent/log-analyst"
+        "#
+            ),
+        )
+        .unwrap();
+        let runtime = Runtime::open(Config::load(&path).unwrap(), dir.path().join("appa.db"), None).unwrap();
+        let names = vec!["get_file_contents".into(), "list_pods".into()];
+        let (identity, covered) = source_coverage(&runtime, "kagent/github", Some(endpoint), &names).unwrap();
+        assert_eq!(identity.as_deref(), Some(server.as_str()));
+        assert!(
+            covered
+                .tools
+                .iter()
+                .filter(|check| names.contains(&check.tool))
+                .all(|check| check.status == ToolStatus::Valid)
+        );
+        let (_, other) = source_coverage(&runtime, "kagent/other", Some("https://other.example/mcp"), &names).unwrap();
+        assert!(
+            other
+                .tools
+                .iter()
+                .any(|check| check.tool == "get_file_contents" && matches!(check.status, ToolStatus::Invalid { .. }))
+        );
+        assert!(
+            other
+                .tools
+                .iter()
+                .any(|check| check.tool == "list_pods" && check.status == ToolStatus::Valid)
+        );
+        let agents = observed_for_source("kagent/delegations", &["log-analyst".into(), "release-manager".into()]);
+        let (_, report) = source_coverage(&runtime, "kagent/delegations", None, &agents).unwrap();
+        assert!(
+            report
+                .tools
+                .iter()
+                .any(|check| check.tool == "kagent__NS__log_analyst" && check.status == ToolStatus::Valid)
+        );
+        assert!(
+            report
+                .tools
+                .iter()
+                .any(|check| check.tool == "kagent__NS__release_manager"
+                    && matches!(check.status, ToolStatus::Invalid { .. }))
+        );
+        assert!(source_coverage(&runtime, "other/delegations", None, &agents).is_err());
     }
 
     #[tokio::test]
@@ -870,6 +1060,7 @@ mod tests {
                 .appa_match_batteries(Parameters(MatchBatteriesArgs {
                     actor: "direct".to_string(),
                     source: "server".to_string(),
+                    endpoint: None,
                     tools: vec!["tool".to_string()],
                 }))
                 .await
@@ -912,7 +1103,7 @@ mod tests {
                 detail: "no live offer with this id exists".to_string(),
             },
         );
-        assert_eq!(render(outcome).is_error, Some(true));
+        assert_eq!(render(&runtime, outcome).is_error, Some(true));
     }
 
     #[tokio::test]
@@ -932,6 +1123,111 @@ mod tests {
             runtime.claim_offer(&offer).is_some(),
             "the offer is claimable again once its execution ended"
         );
+    }
+
+    /// The one served-deployment fixture: a policy that narrows on the tool it names, so
+    /// the first proposal blocks with an acceptance the model can execute unaided.
+    async fn authorized_under(adapter: appa_runtime_api::Adapter, root: &str, tool: &str) -> String {
+        let policy = format!(
+            r#"
+            [policy]
+            version = 2
+
+            [[policy.tool]]
+            name = "{tool}"
+            delta = {{ audience = ["hr"] }}
+
+            [externals]
+            timeout_ms = 1000
+            max_body_bytes = 4096
+            "#
+        );
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, policy).expect("the fixture writes");
+        let config = Config::load(&path).expect("the fixture validates");
+        let runtime = Runtime::open_served(config, dir.path().join("appa.db"), None, adapter)
+            .expect("the served deployment opens");
+
+        let root = crate::api::TrajectoryId(root.to_string());
+        let session = runtime.create_session(root.clone()).expect("a fresh id opens");
+        let denied = session
+            .on_tool_call(
+                ProposedCall {
+                    tool: tool.to_string(),
+                    arguments: raw(serde_json::json!({})),
+                },
+                false,
+            )
+            .await
+            .expect("the block is delivered");
+        assert!(matches!(denied, ToolCallDecision::Deny { .. }));
+        let offer = runtime
+            .minted_offers(&root, &root)
+            .into_iter()
+            .next()
+            .expect("the block surfaced an offer");
+        let outcome = runtime.execute_remedy(&acting(root.0.as_str()), offer).await;
+        assert!(
+            matches!(outcome, RemedyOutcome::Authorized { .. }),
+            "accepting the narrowing releases the call: {outcome:?}"
+        );
+        let rendered = render(&runtime, outcome);
+        rendered
+            .content
+            .first()
+            .and_then(|block| block.as_text())
+            .map(|text| text.text.clone())
+            .expect("the answer is one text block")
+    }
+
+    /// The canonical identity keys the released call, and no host advertises it. What the
+    /// model is told to call again is its own harness's spelling.
+    #[tokio::test]
+    async fn an_authorized_remedy_names_the_tool_the_host_dispatches() {
+        for (adapter, root, tool, dispatched) in [
+            (
+                appa_adapter_claude_code::adapter(),
+                "cc:mcp-served",
+                "host/claude-code/Read",
+                "Read",
+            ),
+            (
+                appa_adapter_claude_code::adapter(),
+                "cc:mcp-served-mcp",
+                "mcp/github/create_issue",
+                "mcp__github__create_issue",
+            ),
+            (
+                appa_adapter_kagent::adapter(),
+                "kagent:mcp-served",
+                "mcp/k8s/get_pods",
+                "mcp:k8s/get_pods",
+            ),
+            (
+                appa_adapter_kagent::adapter(),
+                "kagent:mcp-served-builtin",
+                "host/kagent/memory_persist",
+                "builtin:memory_persist",
+            ),
+        ] {
+            let text = authorized_under(adapter, root, tool).await;
+            assert!(
+                text.contains(dispatched) && !text.contains(tool),
+                "the model is told to call {dispatched}, not {tool}: {text}"
+            );
+        }
+    }
+
+    /// An embedded host names its own tools, so what the runtime recorded is already what
+    /// its model calls and nothing is spelled away.
+    #[test]
+    fn an_embedded_deployment_addresses_the_model_by_the_recorded_name() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config(), dir.path().join("appa.db"), None).expect("the deployment opens");
+        for recorded in ["wire", "host/claude-code/Read", "mcp/k8s/get_pods"] {
+            assert_eq!(runtime.model_spelling(recorded), recorded);
+        }
     }
 
     fn acting(trajectory: &str) -> crate::api::Actor {
@@ -1057,7 +1353,7 @@ mod tests {
         appa_runtime_api::HookEvent::ToolCall {
             actor: actor.clone(),
             call: ProposedCall {
-                tool: "execute_remedy_plan".to_string(),
+                tool: appa_runtime_api::CONTROL_TOOL.to_string(),
                 arguments: raw(serde_json::json!({ "offer_id": quoted.0 })),
             },
             spawn: false,

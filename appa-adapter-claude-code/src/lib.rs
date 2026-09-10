@@ -1,14 +1,45 @@
-//! The Claude Code codec: hook JSON to the runtime's vocabulary and
-//! back.
+//! The Claude Code adapter: two pure translations, no policy, no state,
+//! no runtime calls. The compiler enforces the boundary, since this
+//! crate depends only on `appa-runtime-api`.
 //!
-//! A pure codec — no policy, no state, no runtime calls;
-//! the compiler enforces the
-//! boundary, since this crate depends only on `appa-runtime-api`. It
-//! derives trajectory ids from Claude Code's own ids with the `cc:`
-//! prefix, maps each hook onto one `HookEvent`, and renders every
-//! `HookDecision` in the hook wire format Claude Code expects. The
-//! wire shapes come from recorded live hook examples
-//! (`runtime/tests/fixtures/hooks.jsonl`).
+//! 1. [`codec`] runs on the client side of the wire, inside the `appa
+//!    hook` command Claude Code's hooks invoke. It parses Claude Code's
+//!    own hook JSON (recorded live examples in
+//!    `runtime/tests/fixtures/hooks.jsonl`) into at most one `HookEvent`
+//!    whose tool spelling is still Claude Code's raw one, with trajectory
+//!    ids derived from Claude Code's own ids under the `cc:` prefix, and
+//!    renders every `HookDecision` in the hook wire format Claude Code
+//!    expects.
+//! 2. [`adapter`] runs on the server side. From the raw spelling of one
+//!    call the runtime derives the call's canonical identity and whether
+//!    it is the spawn, and from a proposed call's arguments which family
+//!    children they name; the wire carries none of these, so nothing a
+//!    client sends is trusted for them. It also carries the derivation's
+//!    inverse, so the runtime can say a tool's Claude Code spelling —
+//!    the name this model can dispatch — where it addresses the model.
+//!
+//! Tool identity, a bijection over the raw spellings it accepts; the
+//! adapter's inverse reads the table right to left:
+//!
+//! | raw spelling | canonical |
+//! |---|---|
+//! | `mcp__plugin_appa-runtime_appa__execute_remedy_plan` | `appa/execute_remedy_plan`, the runtime's control tool |
+//! | `mcp__<server>__<tool>`, split at the first `__` after the prefix | `mcp/<server>/<tool>` |
+//! | any other `[A-Za-z0-9_.-]+` | `host/claude-code/<name>` |
+//!
+//! A raw spelling outside that domain is refused and the call blocks:
+//! `mcp__` with no second `__`, an empty server or tool segment, or a
+//! character outside the segment grammar. The server segment never
+//! contains `__`, because it is what precedes the first one. The spawn
+//! tools `Agent` and `Task` are host tools, `host/claude-code/Agent` and
+//! `host/claude-code/Task`; the `agent` family is not Claude Code's.
+//!
+//! Read right to left the table is partial. The control spelling
+//! occupies a cell the `mcp` row would otherwise own, so
+//! `mcp/plugin_appa-runtime_appa/execute_remedy_plan` — an ordinary tool
+//! a policy may declare — has no Claude Code spelling. Where the runtime
+//! would name that tool it says the canonical id, never a spelling that
+//! dispatches the control tool instead.
 //!
 //! Hook mapping:
 //!
@@ -17,7 +48,7 @@
 //! | `SessionStart` | `SessionStart` |
 //! | `UserPromptSubmit` | `Prompt` |
 //! | `PreToolUse` | `ToolCall`; the `Agent` (`Task`) tool is the spawn |
-//! | `PostToolUse` for `Agent` (`Task`) | `SpawnResult` when the response names the subagent (`agentId`) or carries its message (`content`); `ToolResult` otherwise |
+//! | `PostToolUse` for `Agent` (`Task`) | `SpawnResult`, naming the subagent (`agentId`) and carrying its message (`content`) where the response has them |
 //! | `PostToolUse`, `PostToolUseFailure` | `ToolResult` (the Q14 outcome mapping) |
 //! | `SubagentStart` | `ChildStart`, naming the family's spawn in flight |
 //! | `SubagentStop` | `ChildEnd` carrying `last_assistant_message` as the return; `TurnEnd` for a helper with an empty `agent_type` |
@@ -49,7 +80,12 @@
 //! delivers the child's message in `content` after the child's stop, and
 //! the same `SpawnResult` replays the crossing the stop decided; a
 //! message the runtime never checked at a stop is withheld from the
-//! parent. Claude Code's own helper agents stop with an empty
+//! parent. Every post-use hook of the spawn's tool is that spawn's
+//! result, whatever its response carries: which lifecycle a result runs
+//! is the runtime's derivation from the tool, so a response that names
+//! no child and carries no message is the same event with both fields
+//! empty, never another lifecycle the runtime would then contradict.
+//! Claude Code's own helper agents stop with an empty
 //! `agent_type`, no `SubagentStart` and no tool calls: their stop is the
 //! child's `TurnEnd`, and no return is claimed. A call whose arguments
 //! name a family child's output file or transcript (`names_children`)
@@ -78,10 +114,15 @@
 //! Code applies the replacement only when it has the tool's own output
 //! shape — otherwise it silently keeps the original. So the codec never
 //! answers with a bare placeholder: it restates the response it was
-//! handed with its leaves redacted. For the spawn's result the swap is
-//! the `content` text — the one field of the `Agent` response Claude
-//! Code shows the parent model; the rest, the run's own metadata, stays
-//! for the transcript. For every other builtin tool every leaf is
+//! handed with its leaves redacted. Which restatement one result gets
+//! follows the tool that produced it, as the runtime's own derivation
+//! does, and never the event it arrived as. For the spawn's result the
+//! swap is the `content` text — the one field of the `Agent` response
+//! Claude Code shows the parent model; the rest stays for the transcript
+//! where it is one of the metadata keys that response carries, and is
+//! redacted like any other leaf where it is not, so a response under the
+//! spawn's name that is not the spawn's own shape carries nothing to the
+//! model. For every other builtin tool every leaf is
 //! redacted: the text takes the tool's content field — `Bash` `stdout`,
 //! `Read` `file.content`, `Grep` `content`, `WebFetch` `result`, `Write`
 //! `content` — or, where the shape has no known one, the place of its
@@ -103,7 +144,10 @@
 //! non-2xx answer too — so a runtime refusal at `PostToolUse` also
 //! withholds. A tool whose output shape validates another fixed-value
 //! string field would keep the original; the fixed-value list is the
-//! codec's to extend.
+//! codec's to extend. A `PostToolUse` this codec cannot read at all is
+//! withheld too, from the tool and response its bytes still carry: the
+//! result has run either way, and a hook that only exits non-zero leaves
+//! that output in front of the model.
 //!
 //! A `PreToolUse` release carries no slot for the spawn binding, and
 //! needs none: the child start names the spawn in flight instead.
@@ -111,15 +155,87 @@
 use serde::Deserialize;
 
 use appa_runtime_api::{
-    Actor, Codec, HookDecision, HookEvent, OutcomeBody, ParseRefusal, ProposedCall, SpawnRef, ToolOutcome, TrajectoryId,
+    Actor, Adapter, AdapterName, CanonicalTool, Codec, Derived, HookDecision, HookEvent, OutcomeBody, ParseRefusal,
+    ProposedCall, SpawnRef, ToolOutcome, TrajectoryId,
 };
 
+/// The client-side shape translation `appa hook` runs.
 pub fn codec() -> Codec {
     Codec {
         parse,
         render,
-        names_children,
+        withholding,
     }
+}
+
+/// The server-side derivation the runtime applies to every Claude Code call.
+pub fn adapter() -> Adapter {
+    Adapter {
+        name: AdapterName::ClaudeCode,
+        derive,
+        names_children,
+        spell,
+    }
+}
+
+/// The registered spelling of the runtime's own control tool: the `appa` MCP server
+/// inside the `appa-runtime` plugin. Only this spelling is the control tool; a
+/// lookalike on another server is an ordinary checked call.
+const CONTROL_TOOL_RAW: &str = "mcp__plugin_appa-runtime_appa__execute_remedy_plan";
+
+const MCP_PREFIX: &str = "mcp__";
+
+/// The crate-level mapping table: the control spelling, then `mcp__<server>__<tool>` split
+/// at the first `__` after the prefix, then `host/claude-code/<name>`. `CanonicalTool::of`
+/// refuses an empty segment and a character outside the grammar, so the map is a bijection
+/// over the spellings it accepts.
+fn canonical(raw: &str) -> Result<CanonicalTool, ParseRefusal> {
+    let refused = |detail: String| ParseRefusal::Malformed {
+        detail: format!("tool {raw:?} is outside the Claude Code adapter's domain: {detail}"),
+    };
+    if raw == CONTROL_TOOL_RAW {
+        return Ok(CanonicalTool::control());
+    }
+    match raw.strip_prefix(MCP_PREFIX) {
+        Some(rest) => match rest.split_once("__") {
+            Some((server, tool)) => CanonicalTool::of("mcp", server, tool).map_err(|error| refused(error.to_string())),
+            None => Err(refused(format!("{MCP_PREFIX}<server>__<tool> names no tool segment"))),
+        },
+        None => CanonicalTool::of("host", "claude-code", raw).map_err(|error| refused(error.to_string())),
+    }
+}
+
+/// The inverse of [`canonical`] over its range: what Claude Code calls the tool one
+/// canonical identity names, which is the name the runtime says whenever it tells this
+/// model to run something. Every answer is checked against [`canonical`], so a spelling
+/// this returns is one that derives back to the identity it was asked about, and a
+/// canonical id outside the derivation's range answers `None` — the caller says the
+/// canonical id instead.
+///
+/// Three families of id have no Claude Code spelling. The `agent` family and another
+/// host's namespace render nothing. `host/claude-code/<name>` whose name is itself an
+/// `mcp__` spelling, and `mcp/plugin_appa-runtime_appa/execute_remedy_plan` — an ordinary
+/// tool named `execute_remedy_plan` on a server named like the runtime's own plugin —
+/// render a spelling Claude Code dispatches to a different identity, so neither is a
+/// spelling of the id it came from.
+fn spell(tool: &CanonicalTool) -> Option<String> {
+    if tool.is_control() {
+        return Some(CONTROL_TOOL_RAW.to_string());
+    }
+    let mut segments = tool.as_str().split('/');
+    let raw = match (segments.next()?, segments.next()?, segments.next()?) {
+        ("mcp", server, name) => format!("{MCP_PREFIX}{server}__{name}"),
+        ("host", "claude-code", name) => name.to_string(),
+        _ => return None,
+    };
+    (canonical(&raw).as_ref() == Ok(tool)).then_some(raw)
+}
+
+fn derive(raw: &str) -> Result<Derived, ParseRefusal> {
+    Ok(Derived {
+        canonical: canonical(raw)?,
+        spawn: is_spawn_tool(raw),
+    })
 }
 
 /// The family children a call's arguments name by Claude Code's own file spellings: a
@@ -127,6 +243,9 @@ pub fn codec() -> Codec {
 /// transcript (`subagents/agent-<agent>.jsonl`). Every string leaf of the arguments is scanned,
 /// so a path inside a shell command is caught as a `Read` path is. The default spellings only:
 /// a renamed copy, a symlink, or a relative path the shell resolves is not.
+///
+/// The wire asks this at a proposed call and nowhere else, so the scan runs once per call and
+/// never over a result's payload.
 fn names_children(actor: &Actor, call: &ProposedCall) -> Vec<TrajectoryId> {
     let Ok(arguments) = serde_json::from_str::<serde_json::Value>(call.arguments.get()) else {
         return Vec::new();
@@ -153,15 +272,25 @@ fn collect_agent_files(value: &serde_json::Value, agents: &mut Vec<String>) {
     }
 }
 
-/// Every `<prefix><id><suffix>` in `text` whose id is one Claude Code mints (letters, digits,
-/// `-` and `_`).
+/// Every `<prefix><id><suffix>` in `text` that is a whole path token: the id is one Claude
+/// Code mints (letters, digits, `-` and `_`), and neither end of the match continues into a
+/// longer name. So `mytasks/a1.output` and `tasks/a1.output.bak` name no child — they are
+/// neither documented file — while a path inside a shell command or a quoted argument still
+/// is one, because a separator, a quote or the end of the string ends the token.
 fn agent_file_ids(text: &str, prefix: &str, suffix: &str) -> Vec<String> {
     let is_id_char = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    // A name character continues the file name a match would have to be all of. `.`
+    // separates one extension from the next, so it belongs to the name, not to its edge.
+    let is_name_char = move |c: char| is_id_char(c) || c == '.';
     text.match_indices(prefix)
         .filter_map(|(at, _)| {
+            if text[..at].chars().next_back().is_some_and(is_name_char) {
+                return None;
+            }
             let rest = &text[at + prefix.len()..];
             let id: String = rest.chars().take_while(|c| is_id_char(*c)).collect();
-            (!id.is_empty() && rest[id.len()..].starts_with(suffix)).then_some(id)
+            let tail = rest.strip_prefix(id.as_str())?.strip_prefix(suffix)?;
+            (!id.is_empty() && !tail.starts_with(is_name_char)).then_some(id)
         })
         .collect()
 }
@@ -203,7 +332,7 @@ fn is_fixed_value(key: &str, value: &str) -> bool {
 const REDACTED: &str = "[appa] redacted";
 
 fn is_mcp_tool(tool: &str) -> bool {
-    tool.starts_with("mcp__")
+    tool.starts_with(MCP_PREFIX)
 }
 
 fn content_slot(tool: &str) -> Option<&'static str> {
@@ -291,31 +420,30 @@ impl WireEvent {
         }
     }
 
-    /// The spawn's result when the parent's `Agent` response names the
-    /// subagent (`agentId`) or carries its message (`content`): a launch
-    /// acknowledgement names the child and carries no message. A response
-    /// with neither is a plain tool result.
-    fn spawn_return(&self) -> Option<(Option<TrajectoryId>, Option<String>)> {
-        let response = self.tool_response.as_ref()?;
+    /// The subagent the parent's `Agent` response names (`agentId`) and
+    /// the message it carries (`content`), each where the response has
+    /// it: a launch acknowledgement names the child and carries no
+    /// message, and a response with neither fills no spawn field. Which
+    /// lifecycle the runtime runs is its own derivation from the tool,
+    /// never this shape, so an unrecognized response is the spawn's
+    /// result with both fields empty rather than another lifecycle.
+    fn spawn_return(&self) -> (Option<TrajectoryId>, Option<String>) {
+        let Some(response) = self.tool_response.as_ref() else {
+            return (None, None);
+        };
         let child = response
             .get("agentId")
             .and_then(|id| non_empty(id.as_str()))
             .map(|agent| self.child_id(agent));
-        let content = response.get("content").filter(|content| !content.is_null());
-        if child.is_none() && content.is_none() {
-            return None;
-        }
-        let value = content.map(|content| match text_blocks(content) {
-            Some(texts) => texts.join("\n"),
-            None => content.to_string(),
-        });
-        Some((
-            child,
-            value
-                .as_deref()
-                .and_then(|value| non_empty(Some(value)))
-                .map(str::to_string),
-        ))
+        let value = response
+            .get("content")
+            .filter(|content| !content.is_null())
+            .map(|content| match text_blocks(content) {
+                Some(texts) => texts.join("\n"),
+                None => content.to_string(),
+            })
+            .filter(|value| !value.is_empty());
+        (child, value)
     }
 }
 
@@ -376,20 +504,16 @@ fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
             None => Err(malformed("PreToolUse without a tool call")),
         },
         "PostToolUse" => match event.call() {
-            Some(call) if is_spawn_tool(&call.tool) => match event.spawn_return() {
-                Some((child, value)) => Ok(Some(HookEvent::SpawnResult {
+            Some(call) if is_spawn_tool(&call.tool) => {
+                let (child, value) = event.spawn_return();
+                Ok(Some(HookEvent::SpawnResult {
                     actor: event.actor(),
                     call,
                     outcome: map_outcome(event.tool_response.as_ref()),
                     child,
                     value,
-                })),
-                None => Ok(Some(HookEvent::ToolResult {
-                    actor: event.actor(),
-                    call,
-                    outcome: map_outcome(event.tool_response.as_ref()),
-                })),
-            },
+                }))
+            }
             Some(call) => Ok(Some(HookEvent::ToolResult {
                 actor: event.actor(),
                 call,
@@ -460,11 +584,15 @@ fn render(event: &HookEvent, decision: &HookDecision) -> serde_json::Value {
             Some(replacement) => replaced(replacement, Some(reason)),
             None => block(reason),
         },
-        // The admitted text in place of the body the model asked for.
-        HookDecision::ReplaceOutput { output } => match replacement(event, output) {
-            Some(replacement) => replaced(replacement, None),
-            None => block(output),
-        },
+        // What stands in for the body the model asked for: an admitted value, or the
+        // runtime's own words about the result. Claude Code dispatches the spellings this
+        // adapter derives from, so nothing here is spelled back and both render alike.
+        HookDecision::ReplaceOutput { output } | HookDecision::DeliverValue { value: output } => {
+            match replacement(event, output) {
+                Some(replacement) => replaced(replacement, None),
+                None => block(output),
+            }
+        }
         // No hook rewrites what a subagent's stop delivers, so the
         // subagent is held until it returns the crossing value itself.
         HookDecision::ChildReturn { value } => match replacement(event, value) {
@@ -500,32 +628,93 @@ struct Replacement {
 
 fn replacement(event: &HookEvent, text: &str) -> Option<Replacement> {
     match event {
-        HookEvent::SpawnResult { outcome, .. } => {
-            let mut response = delivered(outcome)?;
-            let output = match response.as_object_mut() {
-                Some(object) => {
-                    object.insert(
-                        "content".to_string(),
-                        serde_json::json!([{ "type": "text", "text": text }]),
-                    );
-                    response
-                }
-                None => serde_json::Value::String(text.to_string()),
-            };
-            Some(Replacement { output, context: None })
-        }
-        HookEvent::ToolResult { call, outcome, .. } => {
-            let response = delivered(outcome)?;
-            Some(if is_mcp_tool(&call.tool) {
-                Replacement {
-                    output: serde_json::json!([{ "type": "text", "text": text }]),
-                    context: None,
-                }
-            } else {
-                swap_leaves(&call.tool, response, text)
-            })
+        HookEvent::SpawnResult { call, outcome, .. } | HookEvent::ToolResult { call, outcome, .. } => {
+            Some(restated(&call.tool, delivered(outcome)?, text))
         }
         _ => None,
+    }
+}
+
+/// One delivered response restated in place of itself, keyed on the tool that produced it
+/// exactly as the runtime's own derivation is. The event a result arrived as decides
+/// nothing here: a spawn's response is restated as one under the spawn's tools and by the
+/// ordinary redaction under every other, so the two readings of one result cannot disagree.
+fn restated(tool: &str, response: serde_json::Value, text: &str) -> Replacement {
+    match is_spawn_tool(tool) {
+        true => spawn_replacement(response, text),
+        false => tool_replacement(tool, response, text),
+    }
+}
+
+/// The keys Claude Code's `Agent` response carries beside `content`: the run's own
+/// metadata, which names no part of the subagent's message. Every key of every recorded
+/// `Agent` response in `runtime/tests/fixtures`, over the synchronous and the asynchronous
+/// shape. A key a later version adds is redacted until it is listed here, so the list
+/// going stale withholds more, never less.
+fn is_spawn_metadata(key: &str) -> bool {
+    matches!(
+        key,
+        "agentId"
+            | "agentType"
+            | "canReadOutputFile"
+            | "description"
+            | "harnessNoteCount"
+            | "harnessSectionHash"
+            | "harnessTailCount"
+            | "isAsync"
+            | "outputFile"
+            | "prompt"
+            | "resolvedModel"
+            | "status"
+            | "toolStats"
+            | "totalDurationMs"
+            | "totalTokens"
+            | "totalToolUseCount"
+            | "usage"
+    )
+}
+
+/// The spawn's result restated: the swap is the `content` text, the one field of the
+/// `Agent` response Claude Code shows the parent model, and the run's own metadata stays
+/// for the transcript. A field that is not one of the response's known metadata keys is
+/// a payload this codec does not recognize, so its leaves are redacted as an ordinary
+/// tool's are: a response under the spawn's name that is not the spawn's own shape — the
+/// bytes a refused hook still carries included — crosses nothing.
+fn spawn_replacement(response: serde_json::Value, text: &str) -> Replacement {
+    let output = match response {
+        serde_json::Value::Object(fields) => {
+            // The text takes the `content` field, never a leaf.
+            let mut placed = true;
+            let mut object: serde_json::Map<String, serde_json::Value> = fields
+                .into_iter()
+                .map(|(key, field)| match is_spawn_metadata(&key) {
+                    true => (key, field),
+                    false => {
+                        let redacted = redact(field, Some(&key), text, None, &mut placed);
+                        (key, redacted)
+                    }
+                })
+                .collect();
+            object.insert(
+                "content".to_string(),
+                serde_json::json!([{ "type": "text", "text": text }]),
+            );
+            serde_json::Value::Object(object)
+        }
+        _ => serde_json::Value::String(text.to_string()),
+    };
+    Replacement { output, context: None }
+}
+
+/// One tool's result restated: an MCP result as a single text block, whose keys are content
+/// too, and every other tool's own output shape with its leaves redacted.
+fn tool_replacement(tool: &str, response: serde_json::Value, text: &str) -> Replacement {
+    match is_mcp_tool(tool) {
+        true => Replacement {
+            output: serde_json::json!([{ "type": "text", "text": text }]),
+            context: None,
+        },
+        false => swap_leaves(tool, response, text),
     }
 }
 
@@ -655,6 +844,36 @@ fn deny(reason: &str) -> serde_json::Value {
     })
 }
 
+/// The little of a hook event this codec still reads once [`parse`] has refused the rest:
+/// the hook's name, and the tool and response a post-use hook carries. Nothing here is a
+/// field a hook must be well formed to have.
+#[derive(Debug, Deserialize)]
+struct RefusedEvent {
+    hook_event_name: String,
+    #[serde(default)]
+    tool_name: Option<String>,
+    #[serde(default)]
+    tool_response: Option<serde_json::Value>,
+}
+
+/// The withholding for hook bytes [`parse`] refused. A post-use hook reports a result the
+/// tool has already produced, and Claude Code keeps that output unless the answer replaces
+/// it — so the shape those bytes still carry is read for the replacement, and a post-use
+/// hook too broken to name a tool and its response is answered by the reason alone. Every
+/// other hook answers `None`: nothing has run there, and the client's blocking exit is what
+/// stops the action — a stop hook included, where Claude Code reads that exit as the block.
+fn withholding(body: &[u8], reason: &str) -> Option<serde_json::Value> {
+    let event: RefusedEvent = serde_json::from_slice(body).ok()?;
+    let text = withheld(reason);
+    match event.hook_event_name.as_str() {
+        "PostToolUse" | "PostToolUseFailure" => Some(match (event.tool_name.as_deref(), event.tool_response) {
+            (Some(tool), Some(response)) => replaced(restated(tool, response, &text), Some(reason)),
+            _ => block(reason),
+        }),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -691,6 +910,286 @@ mod tests {
             "tool_input": {"prompt": "List the files.", "subagent_type": "Explore"},
             "tool_response": response,
         })
+    }
+
+    fn proposed(tool: &str, arguments: serde_json::Value) -> (Actor, ProposedCall) {
+        (
+            Actor {
+                root: root(),
+                child: None,
+            },
+            ProposedCall {
+                tool: tool.to_string(),
+                arguments: raw(arguments),
+            },
+        )
+    }
+
+    fn derived(tool: &str) -> Result<Derived, ParseRefusal> {
+        (adapter().derive)(tool)
+    }
+
+    fn named_children(tool: &str, arguments: serde_json::Value) -> Vec<TrajectoryId> {
+        let (actor, call) = proposed(tool, arguments);
+        (adapter().names_children)(&actor, &call)
+    }
+
+    #[test]
+    fn the_adapter_serves_claude_code() {
+        assert_eq!(adapter().name, AdapterName::ClaudeCode);
+    }
+
+    #[test]
+    fn each_raw_spelling_maps_onto_its_canonical_identity() {
+        for (raw, expected) in [
+            ("Bash", "host/claude-code/Bash"),
+            ("Agent", "host/claude-code/Agent"),
+            ("Task", "host/claude-code/Task"),
+            ("mcp__github__create_issue", "mcp/github/create_issue"),
+            ("mcp__github__a__b", "mcp/github/a__b"),
+            (
+                "mcp__plugin_appa-runtime_appa__other",
+                "mcp/plugin_appa-runtime_appa/other",
+            ),
+            ("mcp__appa__execute_remedy_plan", "mcp/appa/execute_remedy_plan"),
+            ("mcp__a.b-c__T.o-o_l", "mcp/a.b-c/T.o-o_l"),
+            ("mcp_x", "host/claude-code/mcp_x"),
+            (CONTROL_TOOL_RAW, appa_runtime_api::CONTROL_TOOL),
+        ] {
+            let canonical = canonical(raw).unwrap_or_else(|refusal| panic!("{raw} maps: {refusal:?}"));
+            assert_eq!(canonical.as_str(), expected, "{raw}");
+            assert_eq!(canonical.is_control(), raw == CONTROL_TOOL_RAW, "{raw}");
+            assert_eq!(
+                (adapter().spell)(&canonical).as_deref(),
+                Some(raw),
+                "the inverse spells {expected} back as the name Claude Code dispatches"
+            );
+        }
+    }
+
+    /// A canonical id no Claude Code spelling derives to has no Claude Code spelling.
+    /// `mcp/plugin_appa-runtime_appa/execute_remedy_plan` is the ordinary tool a policy
+    /// may declare on a server named like the runtime's own plugin: its rendering is the
+    /// reserved control spelling, which names another tool, so it has none.
+    #[test]
+    fn a_canonical_id_outside_the_range_has_no_host_spelling() {
+        for name in [
+            "agent/kagent/log-analyst",
+            "host/kagent/memory_persist",
+            "host/kagent-gate/outer",
+            "host/claude-code/mcp__github__x",
+            "mcp/plugin_appa-runtime_appa/execute_remedy_plan",
+        ] {
+            let canonical = CanonicalTool::parse(name).expect("the fixture is canonical");
+            assert_eq!((adapter().spell)(&canonical), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_spelling_outside_the_domain_is_a_named_refusal() {
+        for raw in [
+            "",
+            "mcp__",
+            "mcp__github",
+            "mcp____x",
+            "mcp__github__",
+            "mcp__git hub__x",
+            "mcp__github__x(y)",
+            "Bash(command:ls)",
+            "a/b",
+            "host/claude-code/Bash",
+            "agent/kagent/x",
+            "appa/execute_remedy_plan",
+            "*",
+        ] {
+            match canonical(raw) {
+                Err(ParseRefusal::Malformed { detail }) => {
+                    assert!(
+                        detail.contains(&format!("{raw:?}")),
+                        "the refusal names {raw:?}: {detail}"
+                    );
+                }
+                other => panic!("{raw:?} must be refused, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_derivation_carries_the_canonical_identity_and_spawn() {
+        for tool in ["Agent", "Task"] {
+            let derived = derived(tool).expect("derives");
+            assert!(derived.spawn, "{tool} is the spawn");
+            assert_eq!(derived.canonical.as_str(), format!("host/claude-code/{tool}"));
+        }
+        assert!(!derived("Bash").expect("derives").spawn);
+        assert!(matches!(derived("mcp__github"), Err(ParseRefusal::Malformed { .. })));
+    }
+
+    #[test]
+    fn a_calls_arguments_name_the_family_children_they_spell() {
+        assert!(named_children("Agent", serde_json::json!({"prompt": "list files"})).is_empty());
+        assert_eq!(
+            named_children(
+                "Bash",
+                serde_json::json!({"command": "cat tasks/a1.output; grep x subagents/agent-a2.jsonl tasks/a1.output"}),
+            ),
+            vec![
+                TrajectoryId("cc:s1:a1".to_string()),
+                TrajectoryId("cc:s1:a2".to_string())
+            ],
+        );
+        assert_eq!(
+            named_children(
+                "Read",
+                serde_json::json!({"file_path": "/home/u/.claude/subagents/agent-b7.jsonl", "meta": [{"p": "tasks/x-1.output"}]}),
+            ),
+            vec![
+                TrajectoryId("cc:s1:b7".to_string()),
+                TrajectoryId("cc:s1:x-1".to_string())
+            ],
+        );
+        assert!(
+            named_children("Read", serde_json::json!({"file_path": "tasks/a1.txt"})).is_empty(),
+            "another suffix names no child"
+        );
+    }
+
+    /// The scan reads one whole path token. A name that only contains the spelling —
+    /// another directory ending in `tasks`, a copy under another extension — is a
+    /// different file, and a call touching it names no child.
+    #[test]
+    fn a_path_that_merely_contains_the_spelling_names_no_child() {
+        for path in [
+            "mytasks/a1.output",
+            "tasks/a1.output.bak",
+            "notes/tasks/a1.outputs",
+            "mysubagents/agent-a1.jsonl",
+            "subagents/agent-a1.jsonl.gz",
+            "backup-subagents/agent-a1.jsonl",
+        ] {
+            assert!(
+                named_children("Read", serde_json::json!({ "file_path": path })).is_empty(),
+                "{path} names neither documented child file"
+            );
+            assert!(
+                named_children("Bash", serde_json::json!({ "command": format!("cat {path}") })).is_empty(),
+                "{path} names neither documented child file inside a command"
+            );
+        }
+    }
+
+    /// The boundary keeps the scan working where the path is one argument of a shell
+    /// command: quotes, separators and the ends of the string all end the token.
+    #[test]
+    fn a_child_file_is_found_wherever_a_path_token_ends() {
+        for command in [
+            "cat tasks/a1.output",
+            "cat \"tasks/a1.output\"",
+            "cat 'tasks/a1.output'",
+            "cat ./tasks/a1.output",
+            "cat ../run/tasks/a1.output",
+            "cat /home/u/tasks/a1.output | wc -l",
+            "cat $(ls tasks/a1.output)",
+            "cp tasks/a1.output,tasks/a1.output.bak",
+        ] {
+            assert_eq!(
+                named_children("Bash", serde_json::json!({ "command": command })),
+                vec![TrajectoryId("cc:s1:a1".to_string())],
+                "{command}"
+            );
+        }
+    }
+
+    mod laws {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn segment_chars() -> impl Strategy<Value = String> {
+            "[A-Za-z0-9_.-]{0,10}"
+        }
+
+        fn raw_spelling() -> impl Strategy<Value = String> {
+            prop_oneof![
+                segment_chars(),
+                (segment_chars(), segment_chars()).prop_map(|(server, tool)| format!("mcp__{server}__{tool}")),
+                (segment_chars(), segment_chars(), segment_chars())
+                    .prop_map(|(server, tool, more)| format!("mcp__{server}__{tool}__{more}")),
+                segment_chars().prop_map(|rest| format!("mcp__{rest}")),
+                Just(CONTROL_TOOL_RAW.to_string()),
+            ]
+        }
+
+        /// Every canonical identity a policy may declare, including the ones no Claude
+        /// Code spelling derives to: the control tool's own server and name, another
+        /// host's namespace, and a host tool named like an `mcp__` spelling.
+        fn canonical_id() -> impl Strategy<Value = CanonicalTool> {
+            let family = prop_oneof![Just("mcp"), Just("host"), Just("agent")];
+            let namespace = prop_oneof![
+                Just("plugin_appa-runtime_appa".to_string()),
+                Just("claude-code".to_string()),
+                Just("kagent".to_string()),
+                segment_chars(),
+            ];
+            let name = prop_oneof![
+                Just("execute_remedy_plan".to_string()),
+                Just("mcp__github__x".to_string()),
+                segment_chars(),
+            ];
+            prop_oneof![
+                (family, namespace, name).prop_filter_map("a canonical identity", |(family, namespace, name)| {
+                    CanonicalTool::of(family, &namespace, &name).ok()
+                }),
+                raw_spelling().prop_filter_map("an accepted spelling", |raw| canonical(&raw).ok()),
+            ]
+        }
+
+        proptest! {
+            #[test]
+            fn an_accepted_spelling_parses_back_and_is_control_only_when_registered(raw in raw_spelling()) {
+                if let Ok(canonical) = canonical(&raw) {
+                    prop_assert_eq!(CanonicalTool::parse(canonical.as_str()), Ok(canonical.clone()));
+                    prop_assert_eq!(canonical.is_control(), raw == CONTROL_TOOL_RAW);
+                    prop_assert!(!canonical.as_str().starts_with("agent/"), "{}", canonical);
+                }
+            }
+
+            /// The inverse is total over the derivation's range and returns the exact
+            /// spelling Claude Code dispatches, so the runtime never has to keep one.
+            #[test]
+            fn the_inverse_spells_every_derived_identity_back(raw in raw_spelling()) {
+                if let Ok(canonical) = canonical(&raw) {
+                    let spelled = (adapter().spell)(&canonical);
+                    prop_assert_eq!(spelled.as_deref(), Some(raw.as_str()));
+                }
+            }
+
+            /// The other direction, over every canonical identity a policy may declare:
+            /// a spelling the inverse yields is one Claude Code dispatches to the very
+            /// identity it was asked about. An identity whose rendering would name
+            /// another tool is spelled `None` instead, never that rendering.
+            #[test]
+            fn a_spelled_identity_is_the_one_its_spelling_derives_to(tool in canonical_id()) {
+                if let Some(spelled) = (adapter().spell)(&tool) {
+                    prop_assert_eq!(canonical(&spelled), Ok(tool));
+                }
+            }
+
+            #[test]
+            fn an_mcp_server_segment_never_contains_a_double_underscore(server in segment_chars(), tool in segment_chars()) {
+                if let Ok(canonical) = canonical(&format!("mcp__{server}__{tool}")) {
+                    let namespace = canonical.as_str().split('/').nth(1).expect("a namespace segment");
+                    prop_assert!(!namespace.contains("__"), "{}", canonical);
+                    prop_assert!(canonical.as_str().starts_with("mcp/"), "{}", canonical);
+                }
+            }
+
+            #[test]
+            fn the_map_is_injective(left in raw_spelling(), right in raw_spelling()) {
+                if let (Ok(a), Ok(b)) = (canonical(&left), canonical(&right)) {
+                    prop_assert_eq!(a == b, left == right, "{} vs {}", left, right);
+                }
+            }
+        }
     }
 
     #[test]
@@ -947,10 +1446,13 @@ mod tests {
     #[test]
     fn a_blank_agent_id_names_no_child() {
         let event = agent_post_tool_use(serde_json::json!({"status": "async_launched", "agentId": ""}));
-        assert!(
-            matches!(parse_value(&event), Ok(Some(HookEvent::ToolResult { .. }))),
-            "an acknowledgement naming no subagent is a plain tool result"
-        );
+        match parse_value(&event) {
+            Ok(Some(HookEvent::SpawnResult { child, value, .. })) => {
+                assert_eq!(child, None, "a blank agentId names no child");
+                assert_eq!(value, None);
+            }
+            other => panic!("the spawn's post-use hook is its result: {other:?}"),
+        }
         let call = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "session_id": "s1",
@@ -1006,21 +1508,26 @@ mod tests {
         }
         let mut anonymous = launched;
         anonymous.as_object_mut().expect("an object").remove("agentId");
-        assert!(
-            matches!(
-                parse_value(&agent_post_tool_use(anonymous)),
-                Ok(Some(HookEvent::ToolResult { .. }))
-            ),
-            "a response naming no subagent is a plain tool result",
-        );
+        match parse_value(&agent_post_tool_use(anonymous)) {
+            Ok(Some(HookEvent::SpawnResult { child, value, .. })) => {
+                assert_eq!(child, None, "a response naming no subagent names no child");
+                assert_eq!(value, None);
+            }
+            other => panic!("the spawn's post-use hook is its result: {other:?}"),
+        }
         let mut undelivered = agent_post_tool_use(serde_json::Value::Null);
         undelivered
             .as_object_mut()
             .expect("the fixture is an object")
             .remove("tool_response");
         match parse_value(&undelivered) {
-            Ok(Some(HookEvent::ToolResult { outcome, .. })) => assert_eq!(outcome, ToolOutcome::Indeterminate),
-            other => panic!("expected a ToolResult event, got {other:?}"),
+            Ok(Some(HookEvent::SpawnResult {
+                outcome, child, value, ..
+            })) => {
+                assert_eq!(outcome, ToolOutcome::Indeterminate);
+                assert_eq!((child, value), (None, None));
+            }
+            other => panic!("the spawn's post-use hook is its result: {other:?}"),
         }
     }
 
@@ -1306,6 +1813,21 @@ mod tests {
         assert_eq!(
             render(
                 &event,
+                &HookDecision::DeliverValue {
+                    value: "the output is confined".to_string(),
+                }
+            ),
+            render(
+                &event,
+                &HookDecision::ReplaceOutput {
+                    output: "the output is confined".to_string(),
+                }
+            ),
+            "this codec spells nothing back, so an admitted value and the runtime's own words render alike",
+        );
+        assert_eq!(
+            render(
+                &event,
                 &HookDecision::Block {
                     reason: "this outcome does not match the open dispatch".to_string(),
                 }
@@ -1433,6 +1955,9 @@ mod tests {
             HookDecision::ReplaceOutput {
                 output: "the output is confined".to_string(),
             },
+            HookDecision::DeliverValue {
+                value: "the admitted derivation".to_string(),
+            },
             HookDecision::Refuse {
                 detail: "storage failure".to_string(),
             },
@@ -1538,6 +2063,185 @@ mod tests {
             }),
         );
         assert_eq!(render(&event, &HookDecision::Ack), serde_json::json!({}));
+    }
+
+    /// A response the codec does not recognize as the spawn's own shape crosses no leaf,
+    /// whichever side reads it: the parsed spawn result and the bytes a refused hook still
+    /// carries are both restated leaf by leaf, as an ordinary tool's response is. The
+    /// metadata the `Agent` response does carry is what stays.
+    #[test]
+    fn an_unrecognized_response_under_the_spawns_tool_carries_nothing_across() {
+        let response = serde_json::json!({
+            "result": "the secret",
+            "nested": {"note": "the secret", "count": 3},
+            "flag": true,
+        });
+        let refused = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "s1",
+            "tool_name": "Agent",
+            "tool_response": response.clone(),
+        });
+        assert!(parse_value(&refused).is_err(), "the fixture is one parse refuses");
+        let salvaged = withholding(
+            &serde_json::to_vec(&refused).expect("the fixture serializes"),
+            "unreadable",
+        )
+        .expect("a post-use hook reports a result");
+        let rendered = render(
+            &spawn_result(response),
+            &HookDecision::Block {
+                reason: "unreadable".to_string(),
+            },
+        );
+        for answer in [salvaged, rendered] {
+            let output = &answer["hookSpecificOutput"]["updatedToolOutput"];
+            assert!(
+                !output.to_string().contains("the secret"),
+                "an unrecognized payload never reaches the model: {answer}",
+            );
+            assert_eq!(
+                output["content"],
+                serde_json::json!([{"type": "text", "text": withheld("unreadable")}]),
+                "the swap is still the message the parent model reads: {answer}",
+            );
+            assert_eq!(output["result"], REDACTED);
+            assert_eq!(output["nested"]["note"], REDACTED);
+            assert_eq!(output["nested"]["count"], 0);
+            assert_eq!(output["flag"], false);
+        }
+
+        let launched = serde_json::json!({
+            "isAsync": true,
+            "status": "async_launched",
+            "agentId": "a2",
+            "agentType": "Explore",
+            "description": "Compute 6*7",
+            "prompt": "Compute 6*7",
+            "outputFile": "/tmp/a2.md",
+            "canReadOutputFile": false,
+            "resolvedModel": "the model",
+            "totalDurationMs": 15484,
+        });
+        let answer = render(
+            &spawn_result(launched.clone()),
+            &HookDecision::Block {
+                reason: "unreadable".to_string(),
+            },
+        );
+        let output = &answer["hookSpecificOutput"]["updatedToolOutput"];
+        for (key, value) in launched.as_object().expect("the fixture is an object") {
+            assert_eq!(&output[key], value, "the run's own metadata stays: {answer}");
+        }
+    }
+
+    /// The codec's reading of a post-use hook and the derivation that decides the
+    /// lifecycle agree on every response shape: under the spawn's tools the event is the
+    /// spawn's result, with the child and the returned message each present only where the
+    /// response has one, and under any other tool it is never one.
+    #[test]
+    fn every_post_use_of_the_spawns_tool_is_a_spawn_result() {
+        let responses = [
+            agent_response(),
+            serde_json::json!({"agentId": "a1"}),
+            serde_json::json!({"content": [{"type": "text", "text": "x"}]}),
+            serde_json::json!({"result": "the secret"}),
+            serde_json::json!({}),
+            serde_json::Value::Null,
+        ];
+        for tool in ["Agent", "Task", "Bash"] {
+            let spawn = derived(tool).expect("derives").spawn;
+            for response in &responses {
+                let mut event = agent_post_tool_use(response.clone());
+                event["tool_name"] = serde_json::Value::String(tool.to_string());
+                let parsed = parse_value(&event);
+                assert_eq!(
+                    matches!(parsed, Ok(Some(HookEvent::SpawnResult { .. }))),
+                    spawn,
+                    "{tool} on {response}: the codec and the derivation disagree ({parsed:?})",
+                );
+            }
+        }
+    }
+
+    /// A post-use hook this codec cannot read still reports a result the tool produced, so
+    /// it is answered by the same replacement a parsed one gets — built from the tool and
+    /// response its bytes still carry. Here the hook misses `tool_input`, which every parse
+    /// of a post-use hook requires.
+    #[test]
+    fn an_unreadable_post_use_hook_still_withholds_the_result_it_reports() {
+        let refused = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "tool_response": {"stdout": "root:x:0:0"},
+        });
+        assert!(parse_value(&refused).is_err(), "the fixture is one parse refuses");
+        let answer = withholding(
+            &serde_json::to_vec(&refused).expect("the fixture serializes"),
+            "unreadable",
+        )
+        .expect("a post-use hook reports a result");
+        assert_eq!(
+            answer,
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "updatedToolOutput": {"stdout": "[appa] the tool result was withheld: unreadable"},
+                },
+                "decision": "block",
+                "reason": "unreadable",
+            }),
+        );
+
+        let spawn = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "s1",
+            "tool_name": "Agent",
+            "tool_response": agent_response(),
+        });
+        let answer = withholding(
+            &serde_json::to_vec(&spawn).expect("the fixture serializes"),
+            "unreadable",
+        )
+        .expect("a spawn's post-use hook reports a result");
+        assert_eq!(
+            answer["hookSpecificOutput"]["updatedToolOutput"]["content"],
+            serde_json::json!([{"type": "text", "text": "[appa] the tool result was withheld: unreadable"}]),
+            "the subagent's message is what the parent model reads: {answer}",
+        );
+        assert!(
+            !answer.to_string().contains("one file: readme.txt"),
+            "the withheld message never reaches the model: {answer}",
+        );
+    }
+
+    /// Nothing has run at any other hook, and bytes that are no JSON at all report no
+    /// result either: the client's blocking exit is what stops those, with nothing printed.
+    #[test]
+    fn only_a_post_use_hooks_bytes_report_a_result_to_withhold() {
+        for hook in ["PreToolUse", "SubagentStop", "Stop", "SessionStart", "Notification"] {
+            let event = serde_json::json!({"hook_event_name": hook, "session_id": "s1", "tool_name": "Bash"});
+            assert_eq!(
+                withholding(
+                    &serde_json::to_vec(&event).expect("the fixture serializes"),
+                    "unreadable"
+                ),
+                None,
+                "{hook} reports no result the harness has already produced",
+            );
+        }
+        assert_eq!(withholding(b"not json", "unreadable"), None);
+
+        let broken = serde_json::json!({"hook_event_name": "PostToolUseFailure", "session_id": "s1"});
+        assert_eq!(
+            withholding(
+                &serde_json::to_vec(&broken).expect("the fixture serializes"),
+                "unreadable"
+            ),
+            Some(serde_json::json!({"decision": "block", "reason": "unreadable"})),
+            "a post-use hook naming no response carries the reason alone",
+        );
     }
 
     #[test]

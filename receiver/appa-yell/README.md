@@ -86,7 +86,8 @@ configuration: region, ingress, scaling, environment. `APPA_YELL_BUCKET` is
 set there.
 
 `.github/workflows/appa-yell.yml` owns the code, and only the code. It runs on
-a manual dispatch from `main` and passes `gcloud functions deploy` no flag
+every push to `main` that touches this directory or the workflow itself, or on
+a manual dispatch from `main`, and passes `gcloud functions deploy` no flag
 that Terraform owns, so a deploy cannot roll configuration backward. For the
 same reason in the other direction, the Terraform resource must ignore changes
 to its `build_config` source — otherwise the next apply would roll the

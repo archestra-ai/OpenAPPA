@@ -20,6 +20,7 @@ appa-adapter-kagent = { path = "../appa-adapter-kagent" }
 appa-builtin = { path = "../appa-builtin" }
 appa-engine = { workspace = true }
 appa-eventlog = { workspace = true }
+appa-package = { workspace = true }
 appa-policy = { workspace = true }
 appa-runtime-api = { path = "../appa-runtime-api" }
 # `query` decodes the statusline's one GET parameter (`/status`).
@@ -28,6 +29,7 @@ axum = { workspace = true, features = ["query"] }
 # Already in the tree through rmcp and schemars, so this adds nothing to the build.
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 clap = { version = "4", features = ["derive", "env"] }
+base64 = "0.22"
 # `join_all` runs one evidence batch's independent consults concurrently.
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 libloading = "0.9"
@@ -49,6 +51,8 @@ tar = "0.4"
 tempfile = "3"
 tokio = { workspace = true }
 toml = { workspace = true }
+toml_edit = "0.25"
+zip = { version = "6", default-features = false, features = ["deflate-flate2"] }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
@@ -61,7 +65,13 @@ rig-agent = { version = "0.42", default-features = false }
 # Depended on only to name the crypto provider; see the workspace manifest.
 rustls = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+# `build.rs` includes `src/plugin_layout.rs`, which re-exports the canonical
+# tree digest from the marketplace crate.
 [build-dependencies]
+appa-package = { workspace = true }
 sha2 = { workspace = true }
 tar = "0.4"
 # The release gate checks the compiled yell endpoint the way the client parses

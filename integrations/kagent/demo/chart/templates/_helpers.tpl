@@ -45,19 +45,23 @@ Fails the render on a missing or repeated name. Renders nothing.
 {{- end -}}
 
 {{/*
-The inert demo policy template with the agent-tool names kagent dispatches:
-<namespace>__NS__<agent>, hyphens as underscores. The names check
-establishes both child values. Its local command adapters forward consults
-to the demo mock Service in this release namespace. appa-guide copies the
-approved template into the policy ConfigMap owned by appa-runtime.
+The inert demo policy template with the canonical ids of this release's
+agent tools, agent/<namespace>/<agent>. The names check establishes both
+child values. Its local command adapters forward consults to the demo
+mock Service in this release namespace. appa-guide copies the approved
+template into the policy ConfigMap owned by appa-runtime.
 */}}
 {{- define "appa-demo.policy" -}}
 {{- include "appa-demo.requireDistinctAgentNames" . -}}
-{{- $ns := .Release.Namespace | replace "-" "_" -}}
-{{- $child := .Values.agents.childName | replace "-" "_" -}}
-{{- $childGo := .Values.agents.go.childName | replace "-" "_" -}}
+{{- $ns := .Release.Namespace -}}
+{{- $child := .Values.agents.childName -}}
+{{- $childGo := .Values.agents.go.childName -}}
 {{- $mock := printf "http://appa-demo-mocks.%s.svc.cluster.local:8081" .Release.Namespace -}}
-{{- /* Substitute the longest agent name first so the plain one cannot
-       match inside the go one. The file defaults stay loadable in CI. */ -}}
-{{- .Files.Get "files/demo.appa.toml" | replace "kagent__NS__log_analyst_go" (printf "%s__NS__%s" $ns $childGo) | replace "kagent__NS__log_analyst" (printf "%s__NS__%s" $ns $child) | replace "http://appa-demo-mocks.kagent.svc.cluster.local:8081" $mock -}}
+{{- $githubServer := printf "server-%s" (printf "http://demo-tools.%s.svc.cluster.local:3000/mcp" $ns | sha256sum) -}}
+{{- $httpTimeout := add .Values.mocks.approvalWindowSeconds 5 -}}
+{{- $runtimeTimeout := mul (max 30 (add $httpTimeout 5)) 1000 -}}
+{{- /* Substitute the defaults as whole quoted names, so the plain one
+       cannot match inside the go one. The file defaults stay loadable
+       in CI (appa-runtime/tests/examples_load.rs). */ -}}
+{{- .Files.Get "files/demo.appa.toml" | replace "\"agent/kagent/log-analyst-go\"" (printf "\"agent/%s/%s\"" $ns $childGo) | replace "\"agent/kagent/log-analyst\"" (printf "\"agent/%s/%s\"" $ns $child) | replace "http://appa-demo-mocks.kagent.svc.cluster.local:8081" $mock | replace "server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7" $githubServer | replace "\"--max-time\", \"125\"" (printf "\"--max-time\", \"%d\"" $httpTimeout) | replace "\ntimeout_ms = 130000\n" (printf "\ntimeout_ms = %d\n" $runtimeTimeout) -}}
 {{- end -}}

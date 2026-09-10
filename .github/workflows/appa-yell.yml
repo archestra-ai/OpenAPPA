@@ -1,7 +1,8 @@
 name: Deploy appa-yell
 
 # The receiver behind `appa yell`. Its tests and lint run in ci.yml; this
-# workflow only deploys, on a manual dispatch from main, like appa-demo's.
+# workflow only deploys: on every push to main that touches the receiver or
+# this file, and on a manual dispatch from main.
 #
 # This workflow owns the function's *code* and nothing else. Scaling, ingress,
 # IAM, the runtime service account, the bucket and its retention belong to the
@@ -14,7 +15,8 @@ name: Deploy appa-yell
 #
 # Required repository secrets: APPA_YELL_GCP_SERVICE_ACCOUNT,
 # APPA_YELL_GCP_WORKLOAD_IDENTITY_PROVIDER (a deploy identity of its own, not
-# appa-demo's). Required repository variable: APPA_YELL_ENDPOINT.
+# appa-demo's). Optional repository secret: APPA_YELL_SLACK_WEBHOOK.
+# Required repository variable: APPA_YELL_ENDPOINT.
 #
 # The deploy identity is bound to *this file at this path on main* — Google
 # checks the `job_workflow_ref` claim, because every workflow on a ref mints
@@ -23,6 +25,11 @@ name: Deploy appa-yell
 # the infra repository, not here.
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - receiver/appa-yell/**
+      - .github/workflows/appa-yell.yml
   workflow_dispatch:
 
 permissions: {}
@@ -60,15 +67,19 @@ jobs:
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
       - name: Deploy the function source
+        env:
+          SLACK_WEBHOOK: ${{ secrets.APPA_YELL_SLACK_WEBHOOK }}
         run: |
           # CLOUDSDK_CORE_PROJECT is set by the auth step from the deploy identity.
+          # Always set APPA_YELL_SLACK_WEBHOOK so deleting the secret clears the variable.
           gcloud functions deploy "$FUNCTION" \
             --gen2 \
             --region "$REGION" \
             --source receiver/appa-yell \
             --runtime python312 \
             --entry-point receive \
-            --build-service-account "projects/$CLOUDSDK_CORE_PROJECT/serviceAccounts/appa-yell-build@$CLOUDSDK_CORE_PROJECT.iam.gserviceaccount.com"
+            --build-service-account "projects/$CLOUDSDK_CORE_PROJECT/serviceAccounts/appa-yell-build@$CLOUDSDK_CORE_PROJECT.iam.gserviceaccount.com" \
+            --update-env-vars "APPA_YELL_SLACK_WEBHOOK=$SLACK_WEBHOOK"
 
       - name: Smoke test the deployed endpoint
         env:

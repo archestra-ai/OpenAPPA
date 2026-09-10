@@ -103,7 +103,7 @@ Useful flags:
 | Flag | Meaning |
 |------|---------|
 | `--policy <path>` | APPA policy file (**required**) |
-| `--model <id>` | OpenRouter model id (env `APPA_DEMO_MODEL`; default `openai/gpt-5.6-luna`) |
+| `--model <id>` | OpenRouter model id (env `APPA_DEMO_MODEL`; default `openai/gpt-5.6-terra`) |
 | `--max-forks <n>` | fork budget for the whole run; `0` disables branching (default 8) |
 | `--max-fork-depth <n>` | how deep the trajectory family may nest (default 1) |
 | `--data-root <path>` | corpus root the in-process systems read (env `CORP_DATA_ROOT`; default: sibling `corp-systems/data`) |

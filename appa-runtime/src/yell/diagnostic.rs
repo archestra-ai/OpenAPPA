@@ -455,22 +455,22 @@ mod tests {
         version = 2
 
         [[policy.tool]]
-        name = "Bash"
+        name = "host/claude-code/Bash"
 
         [[policy.tool]]
-        name = "Write"
+        name = "host/claude-code/Write"
 
         [[policy.tool]]
-        name = "AskUserQuestion"
+        name = "host/claude-code/AskUserQuestion"
 
         [[policy.tool]]
-        name = "Task"
+        name = "host/claude-code/Task"
 
         [[policy.tool]]
-        name = "Agent"
+        name = "host/claude-code/Agent"
 
         [[policy.tool]]
-        name = "Read"
+        name = "host/claude-code/Read"
 
         [policy.deployment]
         context_control = true
@@ -506,14 +506,20 @@ mod tests {
                 "cc:{}",
                 event["session_id"].as_str().expect("each fixture names its session")
             ));
-            let body = serde_json::to_vec(&event).expect("the fixture re-serializes");
+            let host_body = serde_json::to_vec(&event).expect("the fixture re-serializes");
+            let Some(parsed) = (codec.parse)(&host_body).expect("the fixture parses") else {
+                continue;
+            };
+            let wire = appa_runtime_api::WireEvent::from_event(appa_runtime_api::AdapterName::ClaudeCode, &parsed)
+                .expect("the fixture crosses the canonical wire");
+            let body = serde_json::to_vec(&wire).expect("the wire serializes");
             // A marked spawn blocks until its return is declared; the recorded session then
             // proposes it again. Declaring here is what lets the fork facts reach the log.
             let spawn = event["hook_event_name"] == "PreToolUse"
                 && event["tool_name"] == "Agent"
                 && event.get("agent_id").is_none();
             if spawn {
-                crate::hooks::answer(&runtime, &codec, &body).await;
+                crate::hooks::answer(&runtime, &appa_adapter_claude_code::adapter(), &body).await;
                 let quoted = runtime
                     .minted_offers(&id, &id)
                     .into_iter()
@@ -535,7 +541,7 @@ mod tests {
                     "the declaration approves the spawn, got {outcome:?}"
                 );
             }
-            let (status, answer) = crate::hooks::answer(&runtime, &codec, &body).await;
+            let (status, answer) = crate::hooks::answer(&runtime, &appa_adapter_claude_code::adapter(), &body).await;
             assert_eq!(status, 200, "the recorded session replays: {answer}");
             // The recorded file holds several sessions, and the last of them opens no root.
             // The one this test exports is the last that did open one — the session with the

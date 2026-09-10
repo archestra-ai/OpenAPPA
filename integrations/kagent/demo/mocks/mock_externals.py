@@ -21,8 +21,8 @@ Four components, all deterministic and logged to stdout:
   `ops-*` ids narrow the produced value to the `ops` audience, and
   any other id gets no answer.
 - POST /authorize — authority "release-window", human-less. Approves
-  the consulted call iff any top-level string argument equals
-  "catalog-cache"; every other call is denied with a reason.
+  only `scale_deployment` for `arguments.name == "catalog-cache"`; every
+  other call is denied with a reason.
 - POST /approve — authority "change-board", people out of band. Parks
   the consult until a ruling arrives on the side channel, or answers
   no-answer (504) when the approval window closes first:
@@ -52,12 +52,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 WIRE_VERSION = 1
 
 # How long a change-board consult waits for a ruling before it answers
-# nothing. Inside the policy's externals.timeout_ms (30 s in the demo
-# policy) by design.
+# nothing. Its configured value must remain below the policy's
+# externals.timeout_ms.
 APPROVAL_WINDOW_S = 25.0
 
 # The one deployment whose changes sit inside the release window.
 RELEASE_WINDOW_DEPLOYMENT = "catalog-cache"
+RELEASE_WINDOW_TOOL = "scale_deployment"
+CANONICAL_RELEASE_WINDOW_TOOL = re.compile(r"mcp/server-[0-9a-f]{64}/scale_deployment")
 
 # The audience an ops-* runbook narrows its reader set to. The produced
 # contract may only use values from the declared mandate, so the answer
@@ -114,14 +116,16 @@ def authorize(artifact: object) -> tuple[dict, str]:
     """The release-window ruling: approve only the catalog-cache change."""
     tool = artifact.get("tool") if isinstance(artifact, dict) else None
     arguments = artifact.get("arguments") if isinstance(artifact, dict) else None
-    named = [value for value in arguments.values() if isinstance(value, str)] if isinstance(arguments, dict) else []
-    if RELEASE_WINDOW_DEPLOYMENT in named:
+    is_scale = tool == RELEASE_WINDOW_TOOL or (
+        isinstance(tool, str) and CANONICAL_RELEASE_WINDOW_TOOL.fullmatch(tool) is not None
+    )
+    if is_scale and isinstance(arguments, dict) and arguments.get("name") == RELEASE_WINDOW_DEPLOYMENT:
         return (
             {"ruling": "approve", "reason": f"{RELEASE_WINDOW_DEPLOYMENT} is inside the release window"},
             f"tool={tool} deployment={RELEASE_WINDOW_DEPLOYMENT} -> approve",
         )
     return (
-        {"ruling": "deny", "reason": "only catalog-cache restarts are inside the release window"},
+        {"ruling": "deny", "reason": "only catalog-cache scale changes are inside the release window"},
         f"tool={tool} arguments={json.dumps(arguments, sort_keys=True)} -> deny",
     )
 
@@ -176,7 +180,7 @@ def derive(body: str) -> str:
     """
 
     def rewrite(text: str) -> str:
-        return SECRET_VALUE.sub(REDACTION, drop_instructions(text))
+        return SECRET_VALUE.sub(lambda match: f"{REDACTION} ({len(match.group())} characters)", drop_instructions(text))
 
     try:
         parsed = json.loads(body)
@@ -244,6 +248,8 @@ class ChangeBoard:
         if ruling not in ("approve", "deny"):
             return False
         with self._cond:
+            if not request_id and len(self._parked) == 1:
+                request_id = next(iter(self._parked))
             entry = self._parked.get(request_id) if isinstance(request_id, str) else None
             if entry is None or entry["ruling"] is not None:
                 return False

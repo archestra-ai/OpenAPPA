@@ -127,31 +127,23 @@ trust = "trusted"
 attention = ["human-approval"]
 
 [[policy.tool]]
-name = "skills"
+name = "host/kagent/skills"
 delta = {}
 
 [[policy.tool]]
-name = "read_file"
+name = "host/kagent/read_file"
 delta = {}
 
 [[policy.tool]]
-name = "appa_match_batteries"
+name = "mcp/appa-guide/appa_match_batteries"
 delta = {}
 
 [[policy.tool]]
-name = "appa_get_runtime_state"
+name = "mcp/appa-guide/appa_get_runtime_state"
 delta = {}
 
 [[policy.tool]]
-name = "appa_include_battery"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-attention = ["human-approval"]
-
-[[policy.tool]]
-name = "appa_reload_policy"
+name = "mcp/appa-guide/appa_include_battery"
 delta = {}
 
 [policy.tool.requires]
@@ -159,7 +151,7 @@ trust = "trusted"
 attention = ["human-approval"]
 
 [[policy.tool]]
-name = "appa_update_policy"
+name = "mcp/appa-guide/appa_reload_policy"
 delta = {}
 
 [policy.tool.requires]
@@ -167,7 +159,15 @@ trust = "trusted"
 attention = ["human-approval"]
 
 [[policy.tool]]
-name = "appa_refresh_batteries"
+name = "mcp/appa-guide/appa_update_policy"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+attention = ["human-approval"]
+
+[[policy.tool]]
+name = "mcp/appa-guide/appa_refresh_batteries"
 delta = {}
 
 [policy.tool.requires]

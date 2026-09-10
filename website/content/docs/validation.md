@@ -21,30 +21,30 @@ The policy tags files read from `/hr/*` with an audience limit, and requires ema
 version = 2
 
 [[policy.tool]]
-name = "Read(path:/hr/*)"
+name = "mcp/files/read(path:/hr/*)"
 delta = { audience = ["hr@archestra.ai"] }
 
 [[policy.tool]]
-name = "Email"
+name = "mcp/mail/send"
 requires = { audience = { contains = ["$to"] } }
 delta = {}
 ```
 
-A trace file tests this interaction over three steps:
+A trace names each tool by the canonical tool id the policy declares. A trace file tests this interaction over three steps:
 
 ```text
 # secret-stays-inside.appa
-Read {
+mcp/files/read {
   path: "/hr/salaries.csv"
 }
 expect allow
 
-Email {
+mcp/mail/send {
   to: "x@other.com"
 }
 expect deny
 
-Email {
+mcp/mail/send {
   to: "hr@archestra.ai"
 }
 expect allow
@@ -53,10 +53,10 @@ expect allow
 Here is what happens during replay:
 
 1. **Read file (`expect allow`):**  
-   The agent calls `Read` on `/hr/salaries.csv`. The engine matches `Read(path:/hr/*)` and allows the call. Replay records an empty output, and the contract's `delta` restricts the trajectory's audience to `hr@archestra.ai`.
+   The agent calls `mcp/files/read` on `/hr/salaries.csv`. The engine matches `mcp/files/read(path:/hr/*)` and allows the call. Replay records an empty output, and the contract's `delta` restricts the trajectory's audience to `hr@archestra.ai`.
 
 2. **Block external recipient (`expect deny`):**  
-   The agent tries to email `x@other.com`. The `Email` rule requires the recipient to be inside the current audience (`hr@archestra.ai`). Because `x@other.com` is outside the audience, the engine blocks the call without offering a remedy.
+   The agent tries to email `x@other.com`. The `mcp/mail/send` rule requires the recipient to be inside the current audience (`hr@archestra.ai`). Because `x@other.com` is outside the audience, the engine blocks the call without offering a remedy.
 
 3. **Allow internal recipient (`expect allow`):**  
    The agent emails `hr@archestra.ai`. The recipient matches the allowed audience, so the engine lets the call through.
@@ -90,7 +90,7 @@ appa replay -v --config appa.toml traces/
 Trace files (`.appa`) are plain text and line-oriented. Each step pairs a proposed tool call with its expected decision:
 
 ```text
-Email {
+mcp/mail/send {
   to: "person@example.com"
   subject: "Status report"
 }
@@ -99,10 +99,10 @@ expect allow
 
 ### Tool calls
 
-- **Tool name:** Start with the tool name and `{`. If a tool takes no arguments, write `{}`.
+- **Tool name:** Start with the canonical tool id and `{`. If a tool takes no arguments, write `{}`. A name that is not a canonical tool id is refused, and so is the runtime's own control tool `appa/execute_remedy_plan`: a trace holds the calls the model proposes, and `expect` takes the offers.
 - **Arguments:** Put one `key: <JSON value>` per line. Values must be valid JSON (quotes around strings, raw numbers or booleans, JSON objects or arrays).
 - **Comments:** Empty lines and lines starting with `#` are ignored.
-- **Errors:** Replay reports the file and line number if an argument repeats, a JSON value is invalid, or a call lacks an `expect` line.
+- **Errors:** Replay reports the file and line number if the tool name is not a canonical tool id, an argument repeats, a JSON value is invalid, or a call lacks an `expect` line.
 
 ### Expectations
 
@@ -123,7 +123,7 @@ External services behave differently depending on their type:
 
 - **Authorities and sanitizers:** Handled by built-in test stand-ins. Replay grants approval and accepts sanitization without sending HTTP requests or asking users.
 - **Annotators:** Called live. [Annotators](/contracts#annotators) generate dynamic contracts for proposed tool calls, so replay needs their responses to make policy decisions.
-- **Audience and identity services:** Called live. Replay queries configured providers to check dynamic group membership ([audience sources](/contracts#configure-audience-membership)) and canonicalize user identities ([identity services](/contracts#identity-resolution)).
+- **Audience sources:** Called live. Replay queries configured providers to check dynamic group membership ([audience sources](/contracts#configure-audience-membership)). Replay does not probe the sources before it starts.
 
 If a live external service fails or times out, replay reports that the step could not run instead of a policy failure.
 
@@ -132,7 +132,7 @@ If a live external service fails or times out, replay reports that the step coul
 When all steps match, replay prints `ok` for each file. If a step fails, replay prints the location and the mismatch:
 
 ```text
-secret-stays-inside.appa:6: Email: got allow, want deny
+secret-stays-inside.appa:6: mcp/mail/send: got allow, want deny
 FAIL  secret-stays-inside.appa
 1 file: 0 ok, 1 failed, 0 could not run
 ```

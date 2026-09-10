@@ -111,7 +111,8 @@ impl Engine {
     pub fn open_vectors(&self) -> Vec<OpenVector> {
         let tools = self
             .registry
-            .tool_names()
+            .tools()
+            .map(|declaration| declaration.name())
             .chain(self.registry.provider_run_annotations().map(|tool| &tool.name));
         profile::derive_open_vectors(self.profile(), tools)
     }
@@ -3223,7 +3224,7 @@ mod tests {
     /// The policy's wildcard: `name = "*"`, no metadata, routed through `by`.
     fn wildcard(by: &str) -> crate::contract::ToolDeclaration {
         crate::contract::ToolDeclaration::Annotated {
-            name: ToolName::new(crate::registry::WILDCARD_TOOL_NAME),
+            name: ToolName::new(crate::registry::WILDCARD_SPELLING),
             tags: vec![],
             description: None,
             parameters: crate::params::ToolParameters::open(),
@@ -9473,6 +9474,40 @@ mod tests {
     }
 
     #[test]
+    fn replay_rejects_a_dispatch_switched_to_a_later_overlapping_contract() {
+        let e = engine(vec![plain_tool("mcp/*/read"), plain_tool("mcp/demo/read")]);
+        let records = vec![opened(&e)];
+        let view = e.view(&traj(), records.clone(), 1).unwrap();
+        let call = e.resolve_call(ToolName::new("mcp/demo/read"), b"{}").unwrap();
+        let decision = e
+            .handle(
+                &view,
+                EngineEvent::Proposals(ProposalBatch {
+                    id: crate::transition::ProposalBatchId::new("overlap"),
+                    trajectory: traj(),
+                    provider_results: Vec::new(),
+                    proposals: vec![raw(&call)],
+                    spawn: None,
+                    offer_nonce: nonce(),
+                    evidence: Vec::new(),
+                    audience: crate::audience::AudienceEvidence::default(),
+                }),
+            )
+            .unwrap();
+        let mut log = [records, decision.append.unwrap().into_unsealed()].concat();
+        e.validate_replay(&log).unwrap();
+        let mut changed = false;
+        for fact in &mut log {
+            if let Fact::DispatchOpened { declaration, .. } = fact {
+                *declaration = crate::value::ToolDeclarationId::new(1).unwrap();
+                changed = true;
+            }
+        }
+        assert!(changed);
+        assert_eq!(e.validate_replay(&log), Err(TransitionRefusal::UnbackedDecision));
+    }
+
+    #[test]
     fn provider_run_tools_leave_every_plan_family() {
         let mut target = plain_tool("wire");
         target.requires = Requires {
@@ -10651,14 +10686,12 @@ mod tests {
         raw(&call("send", json!({ "to": to })))
     }
 
-    fn slack_member(id: &str, email: Option<&str>) -> crate::audience::MemberClaims {
-        crate::audience::MemberClaims {
-            id: id.to_string(),
-            verified_email: email.map(str::to_string),
-        }
+    /// The reader Slack reports for one account: its confirmed address, else its id.
+    fn slack_member(id: &str, email: Option<&str>) -> ReaderId {
+        ReaderId::new(email.unwrap_or(id))
     }
 
-    fn user_group(handle: &str, members: Vec<crate::audience::MemberClaims>) -> crate::audience::SourceClaims {
+    fn user_group(handle: &str, members: Vec<ReaderId>) -> crate::audience::SourceClaims {
         crate::audience::SourceClaims {
             provider: "slack".to_string(),
             selector: format!("user-group/{handle}"),
@@ -10951,7 +10984,7 @@ mod tests {
     fn audience_evidence_is_batch_payload() {
         let e = audience_engine(vec![], known(TRUSTED, Audience::restricted([corp_reader("alice")])));
         let log = vec![opened(&e)];
-        let team = |member: crate::audience::MemberClaims| source_evidence(vec![user_group("team", vec![member])]);
+        let team = |member: ReaderId| source_evidence(vec![user_group("team", vec![member])]);
         let first = e
             .handle(
                 &viewing(&e, &log),
@@ -11085,7 +11118,7 @@ mod tests {
             "the produced cap is read extensionally, so the act asks for exactly its group"
         );
 
-        let team = |members: Vec<crate::audience::MemberClaims>| source_evidence(vec![user_group("team", members)]);
+        let team = |members: Vec<ReaderId>| source_evidence(vec![user_group("team", members)]);
         let evidence = team(vec![slack_member("slack:UA", Some("alice@corp.com"))]);
         let decision = e
             .handle(&viewing(&e, &log), batch_with(evidence.clone()))
@@ -11277,7 +11310,7 @@ mod tests {
         );
     }
 
-    fn wide_as_reported() -> Vec<crate::audience::MemberClaims> {
+    fn wide_as_reported() -> Vec<ReaderId> {
         vec![
             slack_member("slack:UA", Some("alice@corp.com")),
             slack_member("slack:UC", Some("carol@other.com")),
@@ -11343,25 +11376,6 @@ mod tests {
                 crate::audience::EvidenceRefusal::ContradictedPin { .. }
             ))
         ));
-    }
-
-    /// Two admissible evidence sets can still disagree once merged — the pinned selector and
-    /// a fresh one report the same member under different verified addresses. The spend
-    /// refuses the merged reading as it refuses any other conflicting claim.
-    #[test]
-    fn a_spend_refuses_a_merged_reading_whose_claims_conflict() {
-        let conflicting = source_evidence(vec![user_group(
-            "narrow",
-            vec![slack_member("slack:UA", Some("mallory@other.com"))],
-        )]);
-        assert_eq!(
-            spending_under_pins(conflicting).err(),
-            Some(TransitionError::ForeignEvidence(
-                crate::audience::EvidenceRefusal::ConflictingClaims {
-                    id: "slack:UA".to_string()
-                }
-            ))
-        );
     }
 
     #[test]
@@ -13665,7 +13679,7 @@ mod tests {
                 lookups: vec![crate::audience::MemberLookup {
                     provider: "slack".to_string(),
                     member: "slack:U1".to_string(),
-                    claims: Some(slack_member("slack:U1", None)),
+                    principal: Some(slack_member("slack:U1", None)),
                 }],
                 ..source_evidence(vec![user_group("team", vec![slack_member("slack:U1", None)])])
             };

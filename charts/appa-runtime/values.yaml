@@ -66,8 +66,13 @@ affinity: {}
 # appa-guide bootstrap policy. Set existingConfigMap to use a ConfigMap you manage.
 config:
   existingConfigMap: ""
+  # Already populated PVC with the complete /etc/appa tree, mounted read-only.
+  # Mutually exclusive with contents, files and existingConfigMap.
+  existingClaim: ""
   key: appa.toml
   contents: ""
+  # Relative path -> {data: canonical base64, executable: boolean}.
+  files: {}
 
 # Trajectory log and a writable batteries overlay. Off uses emptyDir.
 # The skill refreshes the shared runtime's release battery layer only when this is on.
@@ -103,7 +108,7 @@ appaGuide:
   namespace: kagent
   modelConfig: default-model-config
   # Fills reasoning_effort when the referenced OpenAI ModelConfig omits it.
-  reasoningEffort: ""
+  reasoningEffort: "none"
   toolServer:
     name: kagent-tool-server
   skill:

@@ -16,11 +16,16 @@ use appa_runtime::hooks;
 #[cfg(unix)]
 use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
 
-fn toml_files(dir: &Path) -> Vec<PathBuf> {
+/// The policies a package directory ships, by the suffix every one of them
+/// carries. The package's own `appa-package.toml` manifest is not a policy.
+fn policy_files(dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
         let path = entry.expect("the directory entry is readable").path();
-        if path.extension().is_some_and(|extension| extension == "toml") {
+        if path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().ends_with(".appa.toml"))
+        {
             found.push(path);
         }
     }
@@ -29,7 +34,9 @@ fn toml_files(dir: &Path) -> Vec<PathBuf> {
 }
 
 fn opens(path: &Path) {
-    let config = Config::load(path).unwrap_or_else(|error| panic!("{} does not load: {error}", path.display()));
+    let battery_dirs = [repo_root().join("marketplace/batteries")];
+    let config = Config::load_from(path, &battery_dirs)
+        .unwrap_or_else(|error| panic!("{} does not load: {error}", path.display()));
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     Runtime::open(config, dir.path().join("appa.db"), None)
         .unwrap_or_else(|error| panic!("{} does not open: {error}", path.display()));
@@ -37,7 +44,7 @@ fn opens(path: &Path) {
 
 #[test]
 fn every_shipped_example_opens() {
-    let examples = toml_files(&repo_root().join("integrations/claude-code/examples"));
+    let examples = policy_files(&repo_root().join("marketplace/plugins/claude-code"));
     assert!(
         examples.len() >= 2,
         "both shipped examples were checked, not {examples:?}"
@@ -49,7 +56,7 @@ fn every_shipped_example_opens() {
 
 #[test]
 fn the_kagent_policies_open() {
-    opens(&repo_root().join("integrations/kagent/examples/kagent.appa.toml"));
+    opens(&repo_root().join("marketplace/plugins/kagent/default.appa.toml"));
     opens(&repo_root().join("integrations/kagent/demo/chart/files/demo.appa.toml"));
 }
 
@@ -68,10 +75,10 @@ fn composed_with_the_battery(dir: &tempfile::TempDir) -> Config {
     std::fs::create_dir_all(&battery_dir).expect("the battery directory is created");
 
     let repository = repo_root();
-    let default = std::fs::read_to_string(repository.join("integrations/claude-code/examples/claude-code.appa.toml"))
+    let default = std::fs::read_to_string(repository.join("marketplace/plugins/claude-code/default.appa.toml"))
         .expect("the initialized default is readable");
     std::fs::copy(
-        repository.join("batteries/claude-code/appa.toml"),
+        repository.join("marketplace/batteries/claude-code/appa.toml"),
         battery_dir.join("appa.toml"),
     )
     .expect("the battery file is copied");
@@ -113,7 +120,7 @@ fn the_initialized_default_composes_with_the_claude_code_battery() {
         .as_array()
         .expect("the composed tools are an array");
     for (name, annotator) in [
-        ("Bash", "claude-code.bash-requirements"),
+        ("host/claude-code/Bash", "claude-code.bash-requirements"),
         ("*", "claude-code.undeclared-tool"),
     ] {
         let matches = tools
@@ -125,7 +132,7 @@ fn the_initialized_default_composes_with_the_claude_code_battery() {
     }
     let read = tools
         .iter()
-        .filter(|tool| tool["name"].as_str() == Some("Read"))
+        .filter(|tool| tool["name"].as_str() == Some("host/claude-code/Read"))
         .collect::<Vec<_>>();
     assert_eq!(
         read.len(),
@@ -209,7 +216,7 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
         "cat ~/.ssh/id_ed25519",
         "cat /home/me/.aws/credentials",
     ] {
-        let refused = propose(&runtime, call("Bash", "command", command)).await;
+        let refused = propose(&runtime, call("host/claude-code/Bash", "command", command)).await;
         let HookDecision::DenyCall { offers, .. } = refused else {
             panic!("`{command}` is refused, got {refused:?}");
         };
@@ -217,7 +224,7 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
     }
 
     for path in ["./README.md", "../src/main.rs", "src/.gitignore/../main.rs"] {
-        let ordinary = call("Read", "file_path", path);
+        let ordinary = call("host/claude-code/Read", "file_path", path);
         assert_eq!(
             propose(&runtime, ordinary.clone()).await,
             HookDecision::AllowCall { spawn: None },
@@ -226,7 +233,7 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
         ran(&runtime, ordinary).await;
     }
 
-    let read = call("Read", "file_path", ".env");
+    let read = call("host/claude-code/Read", "file_path", ".env");
     let narrowing = propose(&runtime, read.clone()).await;
     let HookDecision::DenyCall { feedback, .. } = narrowing else {
         panic!("reading `.env` is offered as a narrowing to `self`, got {narrowing:?}");
@@ -241,7 +248,7 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
     );
     ran(&runtime, read).await;
 
-    let publication = propose(&runtime, call("Artifact", "file_path", "page.html")).await;
+    let publication = propose(&runtime, call("host/claude-code/Artifact", "file_path", "page.html")).await;
     let HookDecision::DenyCall {
         feedback,
         offers,
@@ -278,15 +285,15 @@ async fn the_slack_battery_allows_public_writes_and_blocks_leaking_self_secrets(
     std::fs::create_dir_all(&claude_battery_dir).expect("claude battery directory is created");
 
     let repository = repo_root();
-    let default = std::fs::read_to_string(repository.join("integrations/claude-code/examples/claude-code.appa.toml"))
+    let default = std::fs::read_to_string(repository.join("marketplace/plugins/claude-code/default.appa.toml"))
         .expect("the initialized default is readable");
     std::fs::copy(
-        repository.join("batteries/slack/appa.toml"),
+        repository.join("marketplace/batteries/slack/appa.toml"),
         slack_battery_dir.join("appa.toml"),
     )
     .expect("slack battery file is copied");
     std::fs::copy(
-        repository.join("batteries/claude-code/appa.toml"),
+        repository.join("marketplace/batteries/claude-code/appa.toml"),
         claude_battery_dir.join("appa.toml"),
     )
     .expect("claude battery file is copied");
@@ -306,7 +313,7 @@ async fn the_slack_battery_allows_public_writes_and_blocks_leaking_self_secrets(
     );
 
     let slack_send = ProposedCall {
-        tool: "mcp__claude_ai_Slack__slack_send_message".to_string(),
+        tool: "mcp/claude_ai_Slack/slack_send_message".to_string(),
         arguments: raw(serde_json::json!({ "channel_id": "C123", "text": "hello" })),
     };
 
@@ -319,7 +326,7 @@ async fn the_slack_battery_allows_public_writes_and_blocks_leaking_self_secrets(
     ran(&runtime, slack_send.clone()).await;
 
     // 2. Read .env and accept narrowing to self
-    let read_env = call("Read", "file_path", ".env");
+    let read_env = call("host/claude-code/Read", "file_path", ".env");
     let narrowing = propose(&runtime, read_env.clone()).await;
     let HookDecision::DenyCall { feedback, .. } = narrowing else {
         panic!("reading .env narrows to self");

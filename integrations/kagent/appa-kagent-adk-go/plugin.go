@@ -51,6 +51,19 @@
 // that offers a return route never reaches the model: the plugin takes
 // the bare floor, runs that plan on the /mcp endpoint of the runtime,
 // and proposes the same call again.
+//
+// A tool crosses under the spelling its inventory gives it, and the
+// inverse runs on the way back. The runtime names a tool to the model
+// by that same spelling — in the redispatch line of a block, in the
+// tool a remedy releases — and the model dispatches the raw ADK name,
+// so every runtime string the plugin hands the model is spelled back
+// through the inventory first (forModel). The bytes a child's return
+// crossed with are the exception: they reach the parent as the runtime
+// crossed them, and the wire names which kind it carries: a
+// deliver_value holds the admitted value of a confined or sanitized
+// result, which reaches the model byte for byte, and a replace_output
+// holds the runtime's own staged-narrowing text, which is spelled back
+// with the rest.
 package appakagentadk
 
 import (
@@ -125,6 +138,9 @@ const (
 	returnBlocked = "[appa] this return did not cross: %s"
 )
 
+// The call gate's own refusal of a name the inventory does not carry.
+const outsideInventory = "[appa] the tool %s is outside the gated inventory of this agent, so the call was refused"
+
 const (
 	denyKey  = "appa"
 	denied   = "denied"
@@ -168,25 +184,25 @@ type Config struct {
 	// RuntimeURL is the appa-runtime base URL (APPA_RUNTIME_URL).
 	// Required.
 	RuntimeURL string
-	// SpawnTools names the agent-as-tool entries of this agent: the
-	// wire names of the remote agents in the rendered config. Calls to
-	// these tools classify as spawns. Name-based because the kagent go
-	// runtime builds remote-agent tools as plain function tools, so no
-	// distinctive type exists to classify by (VERIFICATION.md).
-	SpawnTools []string
+	// Inventory spells every tool this agent can dispatch
+	// (inventory.go). A call of a name outside it is refused at the
+	// gate, and a spelled agent: tool classifies as a spawn.
+	Inventory Inventory
 	// HTTPClient overrides the transport; nil means a default client.
 	// Timeouts are per request, so the client needs none of its own.
 	HTTPClient *http.Client
+	Discovery  *MCPDiscovery
 }
 
 // AppaPluginKagent posts one wire event per gated ADK callback and
 // enforces the answered decision. Construct it with New and register
 // the plugin ADKPlugin returns.
 type AppaPluginKagent struct {
-	hookURL    string
-	mcpURL     string
-	client     *http.Client
-	spawnTools map[string]struct{}
+	hookURL   string
+	mcpURL    string
+	client    *http.Client
+	inventory Inventory
+	discovery *MCPDiscovery
 	// returnTool is the tool a child scope stops through. adk-go
 	// resolves the call from the request the plugin registered it on.
 	returnTool *returnGate
@@ -271,15 +287,11 @@ func New(cfg Config) (*AppaPluginKagent, error) {
 	if client == nil {
 		client = &http.Client{}
 	}
-	spawnTools := make(map[string]struct{}, len(cfg.SpawnTools))
-	for _, name := range cfg.SpawnTools {
-		spawnTools[name] = struct{}{}
-	}
 	p := &AppaPluginKagent{
 		hookURL:          strings.TrimRight(cfg.RuntimeURL, "/") + "/hook",
 		mcpURL:           strings.TrimRight(cfg.RuntimeURL, "/") + "/mcp",
 		client:           client,
-		spawnTools:       spawnTools,
+		inventory:        cfg.Inventory,
 		invocationAgents: map[string]string{},
 		reviews:          map[string]string{},
 		pendingReviews:   map[string]map[string]struct{}{},
@@ -290,6 +302,19 @@ func New(cfg Config) (*AppaPluginKagent, error) {
 		answered:         map[string]struct{}{},
 	}
 	p.returnTool = &returnGate{plugin: p}
+	p.discovery = cfg.Discovery
+	if p.discovery != nil {
+		p.discovery.plugin = p
+		base := Inventory{spellings: make(map[string]string), names: make(map[string]string)}
+		for name, spelling := range p.inventory.spellings {
+			if strings.HasPrefix(spelling, "mcp:") && !strings.HasPrefix(spelling, "mcp:"+GuideToolset+"/") {
+				continue
+			}
+			base.spellings[name] = spelling
+			base.names[spelling] = name
+		}
+		p.inventory = base
+	}
 	p.remedyCall = p.remedyOverMCP
 	return p, nil
 }
@@ -676,9 +701,82 @@ func isFresh(sess session.Session) bool {
 	return true
 }
 
-func (p *AppaPluginKagent) isSpawn(t tool.Tool) bool {
-	_, spawn := p.spawnTools[t.Name()]
-	return spawn
+// spelling is the wire spelling of a dispatched tool; false outside the
+// inventory.
+func (p *AppaPluginKagent) spelling(ctx agent.Context, t tool.Tool) (string, bool) {
+	if resumed, ok := t.(*mcpResumeTool); ok {
+		selected, available := resumed.selected(ctx)
+		if !available {
+			return "", false
+		}
+		return selected.spelling, true
+	}
+	if discovered, ok := t.(*discoveredMCPTool); ok {
+		return discovered.spelling, true
+	}
+	if p.discovery != nil {
+		run := p.discovery.run(ctx.InvocationID())
+		run.mu.Lock()
+		defer run.mu.Unlock()
+		return run.names.Spelling(t.Name())
+	}
+	return p.inventory.Spelling(t.Name())
+}
+
+// forModel is runtime text as the model must read it.
+//
+// A tool crosses the wire under its spelling, and the runtime names it
+// back the same way — in the redispatch line of a block, in the tool
+// the remedy releases. The model dispatches the raw ADK name, so every
+// runtime string this plugin hands the model goes through the
+// inventory first.
+func (p *AppaPluginKagent) forModel(ctx context.Context, text string) string {
+	if invocation, ok := ctx.(interface{ InvocationID() string }); ok && p.discovery != nil {
+		run := p.discovery.run(invocation.InvocationID())
+		run.mu.Lock()
+		defer run.mu.Unlock()
+		return run.names.Despell(text)
+	}
+	return p.inventory.Despell(text)
+}
+
+// remedyRendering is the reserved tool's own answer, spelled for the
+// model, or nil to leave a result alone.
+//
+// The runtime writes that answer itself and names the released tool in
+// it, by the spelling this plugin sent. Every other tool spells its own
+// result, and the plugin hands it on untouched.
+func (p *AppaPluginKagent) remedyRendering(ctx context.Context, t tool.Tool, result map[string]any) map[string]any {
+	if t.Name() != ReservedTool || result == nil {
+		return nil
+	}
+	spelled, _ := despelled(result, func(text string) string { return p.forModel(ctx, text) }).(map[string]any)
+	return spelled
+}
+
+// despelled is a copy of one tool result with every string spelled for
+// the model. A tool result is a JSON value of any shape — the MCP
+// content blocks of the reserved tool among them — so the walk reaches
+// every string it carries.
+func despelled(value any, despell func(string) string) any {
+	switch typed := value.(type) {
+	case string:
+		return despell(typed)
+	case map[string]any:
+		spelled := make(map[string]any, len(typed))
+		for key, item := range typed {
+			spelled[key] = despelled(item, despell)
+		}
+		return spelled
+	case []any:
+		spelled := make([]any, len(typed))
+		for index, item := range typed {
+			spelled[index] = despelled(item, despell)
+		}
+		return spelled
+	default:
+		return value
+	}
 }
 
 // claimScope reports whether the named agent scope is the invocation's
@@ -751,6 +849,14 @@ func (p *AppaPluginKagent) openScope(ctx context.Context, sess session.Session, 
 	if opening == nil {
 		return "", nil
 	}
+	if p.discovery != nil {
+		if invocation, ok := ctx.(interface{ InvocationID() string }); ok {
+			run := p.discovery.run(invocation.InvocationID())
+			run.mu.Lock()
+			opening["inventory"] = run.inventory
+			run.mu.Unlock()
+		}
+	}
 	decision, err := p.post(ctx, opening)
 	if err != nil {
 		return "", err
@@ -761,7 +867,7 @@ func (p *AppaPluginKagent) openScope(ctx context.Context, sess session.Session, 
 		// The return policy of the fork needs words. The child reads
 		// them in front of the request its parent sent, and that
 		// request stands unchanged.
-		contract = decision.Text
+		contract = p.forModel(ctx, decision.Text)
 	case decision.Kind != "ack":
 		return "", failClosed("appa refused the session: %s", decision.describe())
 	}
@@ -774,14 +880,31 @@ func (p *AppaPluginKagent) openScope(ctx context.Context, sess session.Session, 
 	return contract, nil
 }
 
-func (p *AppaPluginKagent) onUserMessage(ictx agent.InvocationContext, userMessage *genai.Content) (*genai.Content, error) {
+func (p *AppaPluginKagent) onUserMessage(ictx agent.InvocationContext, userMessage *genai.Content) (result *genai.Content, resultErr error) {
+	defer func() {
+		if resultErr != nil && p.discovery != nil {
+			p.discovery.close(ictx.InvocationID())
+		}
+	}()
 	if isChatApproval(contentText(userMessage)) {
 		p.authorizeReview(ictx.InvocationID())
 	}
 	ids := p.openInvocation(ictx)
+	if p.discovery != nil {
+		_, err := p.discovery.prepare(agent.NewContext(ictx), ids, ids.childID != "" || !isFresh(ictx.Session()))
+		if err != nil {
+			return nil, err
+		}
+	}
 	contract, err := p.openScope(ictx, ictx.Session(), ids)
 	if err != nil {
 		return nil, err
+	}
+	if p.discovery != nil {
+		run := p.discovery.run(ictx.InvocationID())
+		run.mu.Lock()
+		run.opened = true
+		run.mu.Unlock()
 	}
 	decision, err := p.post(ictx, promptEvent(ids.rootID, contentText(userMessage), ids.childID))
 	if err != nil {
@@ -1137,6 +1260,15 @@ func (p *AppaPluginKagent) beforeTool(ctx agent.Context, t tool.Tool, args map[s
 	if !ok {
 		return nil, failClosed("no trajectory is pinned for invocation %s", ctx.InvocationID())
 	}
+	spelled, known := p.spelling(ctx, t)
+	if !known {
+		// A name the inventory never saw has no spelling on the wire,
+		// so nothing crosses: the gate refuses it here and the model
+		// reads the refusal as the result of its call.
+		log.Printf("appa: the tool %s is outside the gated inventory, so the call is refused", t.Name())
+		p.answerOwn(ctx.FunctionCallID())
+		return map[string]any{"result": fmt.Sprintf(outsideInventory, t.Name()), denyKey: denied}, nil
+	}
 	if IsManagementTool(t.Name()) {
 		actor := ids.rootID
 		if ids.childID != "" {
@@ -1169,7 +1301,13 @@ func (p *AppaPluginKagent) beforeTool(ctx agent.Context, t tool.Tool, args map[s
 			p.forgetReview(offer)
 		}
 	}
-	call := toolCallEvent(ids.rootID, t.Name(), plainJSON(orEmpty(args)), p.isSpawn(t), ids.childID, ruling)
+	call := toolCallEvent(ids.rootID, spelled, plainJSON(orEmpty(args)), ids.childID, ruling)
+	if p.discovery != nil {
+		run := p.discovery.run(ctx.InvocationID())
+		run.mu.Lock()
+		call["inventory"] = run.inventory
+		run.mu.Unlock()
+	}
 	decision, err := p.post(ctx, call)
 	if err != nil {
 		return nil, err
@@ -1186,7 +1324,7 @@ func (p *AppaPluginKagent) beforeTool(ctx agent.Context, t tool.Tool, args map[s
 	case "deny_call":
 		p.rememberReviews(ctx.InvocationID(), decision.Review)
 		p.answerOwn(ctx.FunctionCallID())
-		return map[string]any{"result": decision.Feedback, denyKey: denied}, nil
+		return map[string]any{"result": p.forModel(ctx, decision.Feedback), denyKey: denied}, nil
 	default:
 		return nil, failClosed("appa answered the tool call with %s", decision.describe())
 	}
@@ -1218,44 +1356,61 @@ func (p *AppaPluginKagent) afterTool(ctx agent.Context, t tool.Tool, args, resul
 	if !ok {
 		return nil, failClosed("no trajectory is pinned for invocation %s", ctx.InvocationID())
 	}
-	arguments := plainJSON(orEmpty(args))
-	// A nil result with no error is a deferred or long-running tool:
-	// nothing has entered attention, and the dispatch is genuinely
-	// unresolved at this point.
-	outcome := indeterminateOutcome()
-	if result != nil {
-		outcome = successOutcome(plainJSON(result))
+	spelled, known := p.spelling(ctx, t)
+	if !known {
+		return nil, failClosed("the tool %s is outside the gated inventory, and its result cannot cross", t.Name())
 	}
-	if p.isSpawn(t) {
+	arguments := plainJSON(orEmpty(args))
+	// A nil result is the tool's own return of nothing, which the ADK
+	// hands this point before it decides whether the call has finished.
+	// A long-running tool and a spawn both deliver later, so the nil
+	// each hands here leaves its dispatch unresolved; every other nil
+	// is a completed call, and the null it returned is the body the
+	// model reads — a success without a body would say instead that the
+	// result was not carried, which it was.
+	outcome := successOutcome(plainJSON(result))
+	if result == nil && (t.IsLongRunning() || IsSpawn(spelled)) {
+		outcome = indeterminateOutcome()
+	}
+	if IsSpawn(spelled) {
 		spawnedID, value := spawnReturn(result)
-		decision, err := p.post(ctx, spawnResultEvent(ids.rootID, t.Name(), arguments, outcome, spawnedID, value, ids.childID))
+		decision, err := p.post(ctx, spawnResultEvent(ids.rootID, spelled, arguments, outcome, spawnedID, value, ids.childID))
 		if err != nil {
 			return nil, err
 		}
 		switch decision.Kind {
 		case "ack":
 			return nil, nil
-		case "child_return":
+		case "child_return", "deliver_value":
+			// The bytes the value crossed with, never spelled over:
+			// the parent receives what the runtime admitted.
 			return map[string]any{"result": decision.Value}, nil
 		case "replace_output":
-			return map[string]any{"result": decision.Output}, nil
+			return map[string]any{"result": p.forModel(ctx, decision.Output)}, nil
 		case "block":
-			return withheldResult(decision.Reason), nil
+			return withheldResult(p.forModel(ctx, decision.Reason)), nil
 		default:
 			return nil, failClosed("appa answered the spawn result with %s", decision.describe())
 		}
 	}
-	decision, err := p.post(ctx, toolResultEvent(ids.rootID, t.Name(), arguments, outcome, ids.childID))
+	decision, err := p.post(ctx, toolResultEvent(ids.rootID, spelled, arguments, outcome, ids.childID))
 	if err != nil {
 		return nil, err
 	}
 	switch decision.Kind {
 	case "ack":
-		return nil, nil
+		return p.remedyRendering(ctx, t, result), nil
+	case "deliver_value":
+		// The admitted value of a confined or sanitized result, as it
+		// crossed. Spelling it back would hand the model other bytes
+		// than the ones the runtime admitted.
+		return map[string]any{"result": decision.Value}, nil
 	case "replace_output":
-		return map[string]any{"result": decision.Output}, nil
+		// The runtime's own words about this result, which name the
+		// control tool by a spelling the ADK cannot dispatch.
+		return map[string]any{"result": p.forModel(ctx, decision.Output)}, nil
 	case "block":
-		return withheldResult(decision.Reason), nil
+		return withheldResult(p.forModel(ctx, decision.Reason)), nil
 	default:
 		return nil, failClosed("appa answered the tool result with %s", decision.describe())
 	}
@@ -1273,17 +1428,30 @@ func (p *AppaPluginKagent) onToolError(ctx agent.Context, t tool.Tool, args map[
 	if !ok {
 		return nil, failClosed("no trajectory is pinned for invocation %s", ctx.InvocationID())
 	}
-	decision, err := p.post(ctx, toolResultEvent(ids.rootID, t.Name(), plainJSON(orEmpty(args)), failureOutcome(toolErr.Error()), ids.childID))
+	spelled, known := p.spelling(ctx, t)
+	if !known {
+		return nil, failClosed("the tool %s is outside the gated inventory, and its failure cannot cross", t.Name())
+	}
+	decision, err := p.post(ctx, toolResultEvent(ids.rootID, spelled, plainJSON(orEmpty(args)), failureOutcome(toolErr.Error()), ids.childID))
 	if err != nil {
 		return nil, err
 	}
 	switch decision.Kind {
 	case "ack":
+		if confirmation := ctx.ToolConfirmation(); confirmation != nil && !confirmation.Confirmed && errors.Is(toolErr, tool.ErrConfirmationRejected) {
+			// ADK's generic rejection sounds like a failed tool or approval
+			// service. Report the actual human decision, after recording the
+			// failure with the runtime, so the model does not seek a workaround.
+			p.answerOwn(ctx.FunctionCallID())
+			return map[string]any{"result": "[appa] the operator rejected this request. The proposed call did not run. Stop this operation; do not request or await approval again.", denyKey: denied}, nil
+		}
 		return nil, nil // the original error propagates
+	case "deliver_value":
+		return map[string]any{"result": decision.Value}, nil
 	case "replace_output":
-		return map[string]any{"result": decision.Output}, nil
+		return map[string]any{"result": p.forModel(ctx, decision.Output)}, nil
 	case "block":
-		return withheldResult(decision.Reason), nil
+		return withheldResult(p.forModel(ctx, decision.Reason)), nil
 	default:
 		return nil, failClosed("appa answered the tool failure with %s", decision.describe())
 	}
@@ -1362,7 +1530,7 @@ func (p *AppaPluginKagent) holdTheReturn(ctx agent.Context, text string) (map[st
 		}
 		return p.crossing(ctx.InvocationID(), decision.Value), nil
 	case "block":
-		return map[string]any{"result": fmt.Sprintf(returnBlocked, decision.Reason)}, nil
+		return map[string]any{"result": fmt.Sprintf(returnBlocked, p.forModel(ctx, decision.Reason))}, nil
 	default:
 		return nil, failClosed("appa answered the child end with %s", decision.describe())
 	}
@@ -1423,7 +1591,7 @@ func (p *AppaPluginKagent) declareReturn(
 	ctx agent.Context, ids trajectoryIDs, call map[string]any, offer Offer, denial Decision,
 ) (Decision, error) {
 	arguments := map[string]any{"offer_id": offer.OfferID, "label": map[string]any{}}
-	vouch, err := p.post(ctx, toolCallEvent(ids.rootID, ReservedTool, arguments, false, ids.childID, ""))
+	vouch, err := p.post(ctx, toolCallEvent(ids.rootID, ControlTool, arguments, ids.childID, ""))
 	if err != nil {
 		return Decision{}, err
 	}
@@ -1454,6 +1622,9 @@ func (p *AppaPluginKagent) afterRun(ictx agent.InvocationContext) {
 	p.closeInvocation(ictx.InvocationID())
 	p.dropCrossed(ictx.InvocationID())
 	p.clearInvocationReviews(ictx.InvocationID())
+	if p.discovery != nil {
+		p.discovery.close(ictx.InvocationID())
+	}
 }
 
 func isChatApproval(text string) bool {

@@ -16,7 +16,10 @@ use appa_eventlog::{
     ProxyApprovalAdmission, ProxyBatchBinding, ProxyBatchPosition, ProxyDispatchBinding, ProxyEventAdmission,
     ProxyEventCompletion, ProxyOfferBinding,
 };
-use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, Ruling, ToolOutcome, TrajectoryId};
+use appa_runtime_api::{
+    Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, Ruling, SpawnBinding, SpawnRef, ToolOutcome,
+    TrajectoryId,
+};
 
 use crate::api::{BatchCallDecision, OfferId, OfferKind, RemedyArguments, RemedyOutcome, Runtime, ToolResultDecision};
 
@@ -92,6 +95,35 @@ struct GenericToolCall {
     event: String,
     #[serde(default)]
     ruling: Option<serde_json::Value>,
+}
+
+/// The proxy owns this compact event shape independently of the runtime hook wire. It names
+/// canonical tool ids directly because the proxy, not a kagent adapter, authenticates its peer.
+#[derive(serde::Deserialize)]
+struct ProxyHookEvent {
+    event: String,
+    #[serde(default)]
+    root_id: Option<String>,
+    #[serde(default)]
+    child_id: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    tool: Option<String>,
+    #[serde(default)]
+    arguments: Option<Box<serde_json::value::RawValue>>,
+    #[serde(default)]
+    spawn: Option<bool>,
+    #[serde(default)]
+    ruling: Option<String>,
+    #[serde(default)]
+    outcome: Option<ProxyOutcome>,
+    #[serde(default)]
+    spawned_id: Option<String>,
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(default)]
+    spawn_binding: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -401,15 +433,14 @@ async fn dispatch_kagent(runtime: &Runtime, root_id: &str, raw: &str) -> (serde_
             Vec::new(),
         );
     }
-    let codec = appa_adapter_kagent::codec();
-    let parsed = match (codec.parse)(raw.as_bytes()) {
+    let parsed = match parse_kagent_event(raw) {
         Ok(Some(event)) => event,
         Ok(None) => return (serde_json::json!({"decision": "ack"}), Vec::new()),
         Err(_) => return (refuse("kagent event was refused"), Vec::new()),
     };
     let original = tool_call(&parsed);
     let decision = crate::hooks::handle_recorded(runtime, parsed.clone()).await;
-    let mut rendered = (codec.render)(&parsed, &decision);
+    let mut rendered = render_kagent_decision(&decision);
     let bindings = match (original, &decision) {
         (Some((tool, arguments)), HookDecision::DenyCall { offers, .. }) => {
             let arguments_sha256 = match stable_arguments_sha256(arguments) {
@@ -938,6 +969,14 @@ async fn dispatch_tool_result(runtime: &Runtime, raw: &str) -> (serde_json::Valu
                 Vec::new(),
             ),
         },
+        Ok(ToolResultDecision::Deliver { value }) => (
+            serde_json::json!({
+                "decision": "result_admitted",
+                "call_id": result.call_id,
+                "presentation": value,
+            }),
+            Vec::new(),
+        ),
         Ok(ToolResultDecision::Replace { placeholder, offers }) => {
             let (offers, bindings) = typed_offers(
                 runtime,
@@ -1409,6 +1448,143 @@ async fn resolve_offer(
             Vec::new(),
             approval_id,
         ),
+    }
+}
+
+fn parse_kagent_event(raw: &str) -> Result<Option<HookEvent>, ()> {
+    let event: ProxyHookEvent = serde_json::from_str(raw).map_err(|_| ())?;
+    let root = || -> Result<TrajectoryId, ()> {
+        event
+            .root_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .map(kagent_root)
+            .ok_or(())
+    };
+    let actor = || -> Result<Actor, ()> {
+        let root = root()?;
+        let child = event
+            .child_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .map(|child| TrajectoryId(format!("{}:{child}", root.0)));
+        Ok(Actor { root, child })
+    };
+    let call = || -> Result<ProposedCall, ()> {
+        match (event.tool.clone(), event.arguments.clone()) {
+            (Some(tool), Some(arguments)) => Ok(ProposedCall { tool, arguments }),
+            _ => Err(()),
+        }
+    };
+    let outcome = || -> Result<ToolOutcome, ()> {
+        match event.outcome.as_ref() {
+            Some(outcome) => proxy_outcome(ProxyOutcome {
+                status: outcome.status.clone(),
+                body: outcome.body.clone(),
+                message: outcome.message.clone(),
+            })
+            .ok_or(()),
+            None => Err(()),
+        }
+    };
+    match event.event.as_str() {
+        "ping" => Ok(None),
+        "session_start" => Ok(Some(HookEvent::SessionStart { root: root()? })),
+        "prompt" => Ok(Some(HookEvent::Prompt {
+            actor: actor()?,
+            text: event.text.clone().ok_or(())?,
+        })),
+        "turn_end" => Ok(Some(HookEvent::TurnEnd { actor: actor()? })),
+        "tool_call" => {
+            let ruling = match event.ruling.as_deref() {
+                None => None,
+                Some("approve") => Some(Ruling::Approve),
+                Some("deny") => Some(Ruling::Deny),
+                Some(_) => return Err(()),
+            };
+            Ok(Some(HookEvent::ToolCall {
+                actor: actor()?,
+                call: call()?,
+                spawn: event.spawn.ok_or(())?,
+                ruling,
+            }))
+        }
+        "tool_result" => Ok(Some(HookEvent::ToolResult {
+            actor: actor()?,
+            call: call()?,
+            outcome: outcome()?,
+        })),
+        "spawn_result" => {
+            let actor = actor()?;
+            Ok(Some(HookEvent::SpawnResult {
+                call: call()?,
+                outcome: outcome()?,
+                child: event
+                    .spawned_id
+                    .as_deref()
+                    .filter(|id| !id.is_empty())
+                    .map(|child| TrajectoryId(format!("{}:{child}", actor.root.0))),
+                value: event.value.clone().filter(|value| !value.is_empty()),
+                actor,
+            }))
+        }
+        "child_start" => {
+            let root = root()?;
+            let child = event
+                .child_id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .map(|child| TrajectoryId(format!("{}:{child}", root.0)))
+                .ok_or(())?;
+            let spawn = match event.spawn_binding.clone() {
+                Some(binding) if binding.is_empty() => return Err(()),
+                Some(binding) => SpawnRef::Binding(SpawnBinding(binding)),
+                None => SpawnRef::InFlight,
+            };
+            Ok(Some(HookEvent::ChildStart { root, child, spawn }))
+        }
+        "child_end" => {
+            let root = root()?;
+            let child = event
+                .child_id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .map(|child| TrajectoryId(format!("{}:{child}", root.0)))
+                .ok_or(())?;
+            Ok(Some(HookEvent::ChildEnd {
+                root,
+                child,
+                value: event.value.clone().filter(|value| !value.is_empty()),
+            }))
+        }
+        _ => Err(()),
+    }
+}
+
+fn render_kagent_decision(decision: &HookDecision) -> serde_json::Value {
+    match decision {
+        HookDecision::Ack => serde_json::json!({"decision": "ack"}),
+        HookDecision::AllowCall { spawn } => match spawn {
+            Some(binding) => serde_json::json!({"decision": "allow_call", "spawn_binding": binding.0}),
+            None => serde_json::json!({"decision": "allow_call"}),
+        },
+        HookDecision::PassControl => serde_json::json!({"decision": "pass_control"}),
+        HookDecision::DenyCall {
+            feedback,
+            offers,
+            review,
+        } => serde_json::json!({
+            "decision": "deny_call",
+            "feedback": feedback,
+            "offers": offers.iter().map(|offer| serde_json::json!({"offer_id": offer.id})).collect::<Vec<_>>(),
+            "review": review.iter().map(|review| serde_json::json!({"offer_id": review.offer, "text": review.text})).collect::<Vec<_>>(),
+        }),
+        HookDecision::Block { reason } => serde_json::json!({"decision": "block", "reason": reason}),
+        HookDecision::ReplaceOutput { output } => serde_json::json!({"decision": "replace_output", "output": output}),
+        HookDecision::DeliverValue { value } => serde_json::json!({"decision": "deliver_value", "value": value}),
+        HookDecision::ChildReturn { value } => serde_json::json!({"decision": "child_return", "value": value}),
+        HookDecision::Context { text } => serde_json::json!({"decision": "context", "text": text}),
+        HookDecision::Refuse { detail } => serde_json::json!({"decision": "refuse", "detail": detail}),
     }
 }
 

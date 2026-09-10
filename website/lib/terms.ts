@@ -39,9 +39,21 @@ const TERMS = {
   remedies:
     "Actionable paths returned on a policy refusal explaining how to unblock execution safely (e.g. human approval, sanitizer, or narrowing acceptance).",
 
+  /* Tool identity */
+  "canonical tool id":
+    "The identity APPA records for a tool: <family>/<namespace>/<tool>, with families mcp, host, and agent. Policies accept canonical or host-native names. An unqualified kagent rule can span MCP servers; server restricts it to one connection. Discovery supplies evidence, not permission. A trajectory retains its opening policy and accepted tool identities.",
+  "<family>/<namespace>/<tool>":
+    "The shape of a canonical tool id. The family is mcp, host, or agent; each segment matches [A-Za-z0-9_.-]+; a namespace never contains __. The one id outside these families is appa/execute_remedy_plan.",
+  "appa/execute_remedy_plan":
+    "The runtime's own control tool, the one member of the appa family. A policy cannot declare it; the runtime recognizes it before any contract and runs the remedy plan the call quotes.",
+  adapter:
+    "The runtime's translation layer for host events and tool identities. It derives canonical tool ids, spawn-ness, and child names. The heavier host lifecycle belongs to a plugin; Claude Code and kagent are the initial hosts.",
+  "raw tool spelling":
+    "The host's spelling for a tool, such as mcp__github__create_issue in Claude Code. The agent keeps its normal names, and policies may use native names too. The adapter translates wire spellings to canonical identities for recording and back for model-facing suggestions.",
+
   /* Tool contracts */
   "Tool(argument:pattern)":
-    "An ordered tool contract selector. A selector holds one or more comma-separated argument:pattern clauses, and a contract matches only when every clause matches its own top-level string argument. OpenAPPA uses the first matching contract. An asterisk matches any text; a bare tool name is the fallback. A sanitizer rewrite that selects another contract is judged as a new call under it.",
+    "An ordered tool contract selector. Every argument:pattern clause must match its top-level string argument. OpenAPPA uses the first matching contract in authored order, including overlapping native and canonical names. An asterisk matches any argument text; a bare name is the fallback. A sanitizer rewrite selecting another contract is judged under that contract.",
   delta:
     "The label contribution of an admitted call result. A delta never expands permissions: it intersects reader sets, lowers the trust rank, or leaves the trajectory label unchanged.",
   requires:
@@ -57,20 +69,18 @@ const TERMS = {
   public:
     "The reserved unrestricted audience state, not a reader ID: no audience restriction applies. An agent with public reach can send data to any outbound destination. As a placeholder argument it names the Public audience, which only a Public trajectory includes. Never a group member.",
   "@name":
-    "A mention of a symbolic audience: @finance names a configured [[policy.audience.group]], and @provider:selector reads a source collection directly. The mention stays symbolic in labels and the log; membership is read from the configured sources per act and pinned.",
+    "A mention of a symbolic audience: @finance names a configured [policy.audience.group.<name>], and @provider:selector reads a source collection directly. The mention stays symbolic in labels and the log; membership is read from the configured sources per act and pinned.",
   "@finance":
     "A mention of a configured named audience. It stays symbolic in labels and the log; its membership is read from the audience sources per act and pinned.",
-  "[[policy.audience.group]]":
-    "One configured named audience: its bare name (mentioned as @name), an optional within assertion into a built-in audience, and the from selectors that supply its members. Multiple sources are unioned.",
-  "[policy.audience.self]":
-    "Configures the self audience: the identity OpenAPPA acts for. Uses viewer selectors to read that identity from the configured sources. Results from multiple sources are combined.",
-  "[policy.audience.internal]":
-    "The mapping of the built-in internal audience: full-membership collections, and for GitHub only explicitly selected organizations. Multiple sources are unioned.",
+  "[policy.audience]":
+    "Maps the built-in audiences to membership sources. self lists viewer selectors for the identity OpenAPPA acts for; internal lists full-membership collections, and for GitHub only explicitly selected organizations. Multiple sources are unioned.",
+  "[policy.audience.group.<name>]":
+    "One configured named audience, mentioned as @name: an optional within assertion into a built-in audience, and the from selectors that supply its members. Multiple sources are unioned.",
   self: "The identity OpenAPPA acts for. This can be a person or a service. The configured viewer sources supply its reader IDs, which are combined into the self audience.",
-  "[policy.identity]":
-    "Selects how OpenAPPA converts member details into reader IDs. If omitted, OpenAPPA uses verified-email. To use your own service, set implementation to its name and configure it under [externals.identity.<name>].",
-  "verified-email":
-    "Uses the membership service's verified_email field as the reader ID. The service must verify who owns the email; OpenAPPA only checks its format. A value such as finance causes an error. If the field is absent, OpenAPPA keeps the provider ID. This is the default identity implementation.",
+  lookup:
+    "On [externals.audience.<provider>]: the name of another [externals.audience.<name>] entry that answers this provider's member lookups. OpenAPPA then also looks up every group member of that provider that is not an email address.",
+  readers:
+    "On an [externals.audience.<name>] entry that a lookup names: an inline table from <provider>:<id> to reader ID. OpenAPPA answers member lookups from it without calling a service. A member absent from the table keeps its ID.",
   inputs:
     "The values an annotator reads, each mapped from $tool_call on its declaration. Without an explicit mapping, the annotator reads the complete tool call: name, description when declared, and arguments.",
   ranks:
@@ -88,7 +98,7 @@ const TERMS = {
   declaration:
     "Instructions and limits that OpenAPPA includes in a consult request. These come from the policy, not from the agent. Their fields depend on the component receiving the request.",
   artifact:
-    "The request data sent to a component: for example, a tool call to review, text to clean, or a member's identity details.",
+    "The request data sent to a component: for example, a tool call to review, text to clean, or a member to look up.",
   internal:
     "Data for members of the organization, as defined by the policy. After reading it, the agent needs a permitted remedy to share data outside that audience.",
   "{public, trusted}":
@@ -104,7 +114,7 @@ const TERMS = {
   contains:
     "Under requires.audience: the current audience must include these readers; a $arg placeholder is allowed only here. Under requires.effects: the trajectory already recorded this effect.",
   within:
-    "Under requires.audience: the current audience must sit within this audience; a tool_input rewrite cannot clear it. On an [[policy.audience.group]]: the trusted policy assertion that the group sits within a built-in audience (self or internal).",
+    "Under requires.audience: the current audience must sit within this audience; a tool_input rewrite cannot clear it. On a [policy.audience.group.<name>]: the trusted policy assertion that the group sits within a built-in audience (self or internal).",
   excludes:
     "Blocks a call if a listed effect is already recorded or declared by another call that has been allowed but has not finished.",
   tags: "Names that connect tools to authorities and sanitizers. One matching tag is enough. Without tags, an authority or sanitizer is not limited to particular tools. Attention approvals use permits.attention instead.",
@@ -143,7 +153,7 @@ const TERMS = {
   from: "In a sanitizer's permits: for audience, the readers the source audience must contain; for trust, the rank the source must meet or exceed.",
   to: "The audience or trust rank assigned to a sanitizer's result.",
   resolver:
-    "The implementation answering for one registered external: the endpoint, command, builtin, or model behind an authority, sanitizer, annotator, audience source, or identity binding.",
+    "The implementation answering for one registered external: the endpoint, command, builtin, or model behind an authority, sanitizer, annotator, or audience source.",
   return_schema:
     "The JSON Schema a parent supplies when selecting an attest-schema plan. It specifies the fields and values the child may return. The child receives these requirements when it starts.",
   "attest-schema":

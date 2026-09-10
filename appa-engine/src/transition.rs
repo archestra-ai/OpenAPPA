@@ -61,9 +61,9 @@ pub struct ProposalBatch {
     /// The typed evidence the runtime obtained for this act. A batch carrying none is the
     /// ordinary case; the engine asks only when a block turns on a fact.
     pub evidence: Vec<Evidence>,
-    /// The pinned audience primitives the runtime gathered for this act: the source claims,
-    /// member lookups, and (under a custom identity implementation) identity mappings that
-    /// answer every atom the engine named in a `MembershipNeeded` refusal of this same act.
+    /// The pinned audience primitives the runtime gathered for this act: the source answers
+    /// and member lookups that answer every atom the engine named in a `MembershipNeeded`
+    /// refusal of this same act.
     pub audience: AudienceEvidence,
 }
 

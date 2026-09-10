@@ -8,6 +8,7 @@ pub mod describe;
 pub mod hook_client;
 pub mod hooks;
 pub mod init;
+pub mod installation;
 mod management;
 pub mod mcp;
 pub mod plugin_bundle;
@@ -16,6 +17,7 @@ pub mod replay;
 #[path = "main.rs"]
 pub mod runtime_cli;
 pub mod tls;
+pub mod tool_validation;
 
 mod builtins;
 mod consult;

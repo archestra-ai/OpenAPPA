@@ -15,7 +15,7 @@ use common::{repo_root, stage_bundle};
 /// The key of the policy a first install writes: the shipped default, which
 /// composes to the same bytes wherever it is loaded from.
 fn default_policy_key() -> String {
-    let example = repo_root().join("integrations/claude-code/examples/claude-code.appa.toml");
+    let example = repo_root().join("marketplace/plugins/claude-code/default.appa.toml");
     let config = Config::load(&example).expect("the shipped default loads");
     PolicyFileKey::of(config.policy_file().bytes()).as_str().to_owned()
 }
@@ -148,6 +148,40 @@ impl Fixture {
     }
 }
 
+#[test]
+fn release_override_probe_reaches_endpoint_before_deployment_paths() {
+    let fixture = Fixture::new();
+    for endpoint in ["http://127.0.0.1:0", "http://127.0.0.1:8787"] {
+        let mut command = fixture.init();
+        for variable in [
+            "HOME",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "APPA_INSTALL_DIR",
+            "APPA_CONFIG_DIR",
+            "APPA_DATA_DIR",
+            "CLAUDE_CONFIG_DIR",
+        ] {
+            command.env_remove(variable);
+        }
+        let output = command.env("APPA_ENDPOINT", endpoint).output().expect("probe runs");
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let expected = if cfg!(debug_assertions) && endpoint.ends_with(":0") {
+            "is not a usable runtime endpoint"
+        } else {
+            "cannot find a home directory; set HOME or the relevant APPA directory variables"
+        };
+        assert!(stderr.contains(expected), "{stderr}");
+        assert!(!fixture.config.exists());
+        assert!(!fixture.data.exists());
+        assert!(!fixture.root.join("claude.log").exists());
+    }
+}
+
 /// Everything a failed upgrade must leave as it found it.
 #[derive(Debug, PartialEq, Eq)]
 struct Installed {
@@ -183,6 +217,16 @@ fn previous_install(fixture: &Fixture) -> Installed {
 
 fn launcher_is_armed(fixture: &Fixture) -> bool {
     fs::read_to_string(fixture.bin.join("clappa")).is_ok_and(|launcher| !launcher.contains("init did not complete"))
+}
+
+#[test]
+fn launcher_uses_the_install_directory_not_the_source_binary_cache() {
+    let fixture = Fixture::new();
+    let launchers = fixture.root.join("launchers");
+    let output = fixture.init().env("APPA_INSTALL_DIR", &launchers).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(launchers.join("clappa").is_file());
+    assert!(!fixture.bin.join("clappa").exists());
 }
 
 #[test]
@@ -334,7 +378,7 @@ fn the_plugin_source_override_is_hidden_from_normal_help() {
 
 /// The shipped default config, byte for byte: what a first init seeds.
 fn shipped_default_config() -> String {
-    fs::read_to_string(repo_root().join("integrations/claude-code/examples/claude-code.appa.toml"))
+    fs::read_to_string(repo_root().join("marketplace/plugins/claude-code/default.appa.toml"))
         .expect("the shipped default is readable")
 }
 

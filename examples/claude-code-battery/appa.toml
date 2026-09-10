@@ -1,8 +1,8 @@
 # Compose complete Claude Code and Slack battery configurations.
 
 include = [
-  "../../batteries/claude-code/appa.toml",
-  "../../batteries/slack/appa.toml",
+  "../../marketplace/batteries/claude-code/appa.toml",
+  "../../marketplace/batteries/slack/appa.toml",
 ]
 
 [policy]
@@ -21,12 +21,10 @@ attention = ["hitl"]
 # Audience mappings are root-only. The Slack battery ships the source
 # script; mapping its collections here registers the `slack` provider,
 # so the binding below must sit beside the mapping. The script reads
-# its token from APPA_SLACK_TOKEN.
-[policy.audience.self]
-from = ["slack:viewer"]
-
-[policy.audience.internal]
-from = ["slack:full-members"]
+# its token from APPA_PROVIDER_SLACK_TOKEN.
+[policy.audience]
+self = ["slack:viewer"]
+internal = ["slack:full-members"]
 
 # A directory read pages through a whole workspace, so the limits here
 # are sized for the audience sources rather than for a single annotation.
@@ -39,13 +37,13 @@ max_body_bytes = 1048576
 builtin = "hitl"
 
 [externals.audience.slack]
-command = ["python3", "../../batteries/slack/audience-source.py"]
+command = ["python3", "../../marketplace/batteries/slack/audience-source.py"]
 token_env = "APPA_PROVIDER_SLACK_TOKEN"   # the one variable this command inherits
 
 # Root contracts run before every included battery. This local rule bypasses
 # the shipped Bash classifier for `cargo test` and adds a fresh approval step.
 [[policy.tool]]
-name = "Bash(command:cargo test)"
+name = "host/claude-code/Bash(command:cargo test)"
 
 [policy.tool.requires]
 trust = "trusted"
@@ -64,7 +62,7 @@ audiences = []
 marks = ["hitl"]
 
 [[policy.tool]]
-name = "Read"
+name = "host/claude-code/Read"
 description = "Reads a file and returns its contents."
 annotator = "local.read-sensitivity"
 

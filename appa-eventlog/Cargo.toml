@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 appa-engine = { workspace = true }
+appa-runtime-api = { workspace = true }
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

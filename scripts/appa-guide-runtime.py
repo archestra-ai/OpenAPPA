@@ -496,20 +496,20 @@ def annotate_apply(request: dict) -> dict:
     except yaml.YAMLError as error:
         raise ValueError(f"apply manifest is not valid YAML: {error}") from error
     documents = [document for document in documents if document is not None]
-    if len(documents) != 1:
-        raise ValueError("apply manifest must be exactly one Agent document")
-    document = documents[0]
-    if not isinstance(document, dict):
-        raise TypeError("apply manifest must be one mapping")
-    if document.get("kind") != "Agent":
-        raise ValueError("appa-guide Kubernetes apply supports only Agent manifests")
-    if "status" in document:
-        raise ValueError("Agent apply must carry complete spec and no status")
-    spec = document.get("spec")
-    if spec is None:
-        raise ValueError("Agent apply must carry complete spec and no status")
-    if not isinstance(spec, dict):
-        raise TypeError("Agent apply spec must be a mapping")
+    if not documents:
+        raise ValueError("apply manifest must carry at least one Agent document")
+    for document in documents:
+        if not isinstance(document, dict):
+            raise TypeError("apply manifest must be one mapping")
+        if document.get("kind") != "Agent":
+            raise ValueError("appa-guide Kubernetes apply supports only Agent manifests")
+        if "status" in document:
+            raise ValueError("Agent apply must carry complete spec and no status")
+        spec = document.get("spec")
+        if spec is None:
+            raise ValueError("Agent apply must carry complete spec and no status")
+        if not isinstance(spec, dict):
+            raise TypeError("Agent apply spec must be a mapping")
     return {
         "version": 1,
         "answer": {

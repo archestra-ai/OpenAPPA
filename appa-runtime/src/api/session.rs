@@ -6,30 +6,28 @@ use std::sync::Arc;
 use crate::elicit::Elicitation;
 
 use crate::consult::{
-    AnnotationAnswer, AnnotationArtifact, AudienceSourceArtifact, AudienceSourceDeclaration, Consult, ConsultBody,
-    LookupAnswer, MembersAnswer, PrincipalAnswer, SanitizerAnswer,
+    AnnotationAnswer, AnnotationArtifact, Consult, ConsultBody, LookupAnswer, MembersAnswer, SanitizerAnswer,
 };
 use crate::engine::{
     AuthorityVerdict, BatchCallDecision, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest,
     Feedback, ForkStatus, Liveness, Next, OfferNonce, OpenDispatch, Presentation, RemedyArguments, engine_id,
 };
 use crate::external::ConsultOutcome;
+use appa_engine::label::ReaderId;
 
 use super::{
     ChildReturnDecision, Deployment, EventError, ExactCall, Inner, OfferId, OutcomeBody, ProposedCall, RemedyDecision,
     SpawnRef, SpawnResultDecision, ToolCallDecision, ToolOutcome, ToolResultDecision, TrajectoryId,
 };
 
-/// The runtime's own control tool, recognized by its exact
-/// wire names: the bare name and each name the runtime's distribution
-/// channels produce — the directly registered MCP server and the
-/// `appa-runtime` plugin's server. Selecting an offer is not a checked
-/// flow. A lookalike on another server — say
-/// `mcp__evil__execute_remedy_plan` — is an ordinary checked call.
+/// The runtime's own control tool, recognized by its one canonical
+/// identity, `appa/execute_remedy_plan`: the served adapter derives it
+/// from the host's registered spelling of the runtime's MCP server, and
+/// nothing else derives it. Selecting an offer is not a checked flow. A
+/// lookalike on another server — say `mcp/evil/execute_remedy_plan` —
+/// is an ordinary checked call.
 pub(crate) fn is_control_tool(tool: &str) -> bool {
-    tool == "execute_remedy_plan"
-        || tool == "mcp__appa__execute_remedy_plan"
-        || tool == "mcp__plugin_appa-runtime_appa__execute_remedy_plan"
+    tool == appa_runtime_api::CONTROL_TOOL
 }
 
 /// Why a reported outcome named no reportable dispatch. The threat model puts
@@ -135,11 +133,8 @@ fn outcome_decision(decision: EngineDecision) -> Result<ToolResultDecision, Even
             placeholder,
             offers: Vec::new(),
         }),
-        // An admitted value delivered in place of the raw output.
-        Next::PresentToModel(Presentation::Value { value }) => Ok(ToolResultDecision::Replace {
-            placeholder: value,
-            offers: Vec::new(),
-        }),
+        // An admitted value delivered in place of the raw output, as it crossed.
+        Next::PresentToModel(Presentation::Value { value }) => Ok(ToolResultDecision::Deliver { value }),
         Next::PresentToModel(Presentation::Blocked { feedback, offers }) => Ok(ToolResultDecision::Replace {
             placeholder: feedback,
             offers: offers
@@ -276,7 +271,10 @@ impl Session {
         if let Some(open) = self.substituted_release(&call)? {
             return self.claim_or_abandon(call, open).await;
         }
-        if spawn && self.inner.spawn_coverage() == super::SpawnCoverage::Declared && !self.names_tool(&call.tool)? {
+        if spawn
+            && self.inner.naming.spawn_coverage() == super::SpawnCoverage::Declared
+            && !self.names_tool(&call.tool)?
+        {
             tracing::debug!(trajectory = %self.trajectory.0, tool = %call.tool, "spawn denied: the policy names no such agent");
             return Err(EventError::UndeclaredSpawn {
                 tool: call.tool.clone(),
@@ -360,7 +358,7 @@ impl Session {
             return Err(EventError::CallOutstanding);
         };
         let (spawn_call, _) = &calls[*spawn];
-        if self.inner.spawn_coverage() == super::SpawnCoverage::Declared && !self.names_tool(&spawn_call.tool)? {
+        if self.inner.naming.spawn_coverage() == super::SpawnCoverage::Declared && !self.names_tool(&spawn_call.tool)? {
             return Err(EventError::UndeclaredSpawn {
                 tool: spawn_call.tool.clone(),
             });
@@ -918,7 +916,7 @@ impl Session {
                         // no-answer then aborts the invocation, discarding the
                         // siblings' answers, before another engine round or any append.
                         let consults = requests.into_iter().map(|request| self.consult(request, None, None));
-                        for answered in futures_util::future::join_all(consults).await {
+                        for answered in crate::external::settle_batch(consults).await {
                             evidence.push(answered?);
                         }
                     }
@@ -1142,19 +1140,10 @@ impl Session {
                 selector,
                 templates,
             } => {
-                let consult = Consult {
-                    name: provider.clone(),
-                    body: ConsultBody::AudienceSource {
-                        declaration: AudienceSourceDeclaration {
-                            templates: templates.clone(),
-                        },
-                        artifact: AudienceSourceArtifact::Selector {
-                            selector: selector.clone(),
-                        },
-                    },
-                };
+                let consult = Consult::audience_selector(provider, selector, templates.clone());
                 let members = match self.timed_consult(&consult, None, None).await {
-                    ConsultOutcome::Answer(answer) => MembersAnswer::from_wire(&answer).map(|answer| answer.members),
+                    ConsultOutcome::Answer(answer) => MembersAnswer::from_wire(&answer)
+                        .map(|answer| answer.members.into_iter().map(ReaderId::new).collect()),
                     ConsultOutcome::NoAnswer(_) => None,
                 };
                 ExternalEvidence::AudienceSource {
@@ -1166,42 +1155,21 @@ impl Session {
             ExternalRequest::MemberLookup {
                 provider,
                 member,
+                answering,
                 templates,
             } => {
-                let consult = Consult {
-                    name: provider.clone(),
-                    body: ConsultBody::AudienceSource {
-                        declaration: AudienceSourceDeclaration {
-                            templates: templates.clone(),
-                        },
-                        artifact: AudienceSourceArtifact::Member { member: member.clone() },
-                    },
-                };
-                let claims = match self.timed_consult(&consult, None, None).await {
-                    ConsultOutcome::Answer(answer) => LookupAnswer::from_wire(&answer).map(|answer| answer.claims),
+                // The evidence stays keyed by the member's own provider, whichever entry
+                // answered.
+                let consult = Consult::member_lookup(answering, member, templates.clone());
+                let principal = match self.timed_consult(&consult, None, None).await {
+                    ConsultOutcome::Answer(answer) => {
+                        LookupAnswer::from_wire(&answer).map(|answer| answer.principal.map(ReaderId::new))
+                    }
                     ConsultOutcome::NoAnswer(_) => None,
                 };
                 ExternalEvidence::MemberLookup {
                     provider: provider.clone(),
                     member: member.clone(),
-                    claims,
-                }
-            }
-            ExternalRequest::Identity { implementation, claims } => {
-                let consult = Consult {
-                    name: implementation.clone(),
-                    body: ConsultBody::Identity {
-                        artifact: claims.clone(),
-                    },
-                };
-                let principal = match self.timed_consult(&consult, None, None).await {
-                    ConsultOutcome::Answer(answer) => PrincipalAnswer::from_wire(&answer)
-                        .map(|answer| appa_engine::label::ReaderId::new(answer.principal)),
-                    ConsultOutcome::NoAnswer(_) => None,
-                };
-                ExternalEvidence::Identity {
-                    implementation: implementation.clone(),
-                    id: claims.id.clone(),
                     principal,
                 }
             }
@@ -1593,7 +1561,7 @@ starting_label = { trust = "suspicious" }
         let policy = r#"
 version = 2
 [[policy.tool]]
-name = "execute_remedy_plan"
+name = "appa/execute_remedy_plan"
 "#;
         assert!(matches!(
             Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None),
@@ -1749,9 +1717,8 @@ name = "execute_remedy_plan"
             .expect("the re-reported outcome admits");
         assert_eq!(
             replaced,
-            ToolResultDecision::Replace {
-                placeholder: "scrubbed".to_string(),
-                offers: Vec::new(),
+            ToolResultDecision::Deliver {
+                value: "scrubbed".to_string()
             },
         );
         let log = runtime.log_facts(&root());
@@ -2135,7 +2102,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
                 post(|| async {
                     axum::Json(serde_json::json!({
                         "version": 1,
-                        "answer": {"members": [{"id": "slack:U1", "verified_email": "alice@corp.example"}]}
+                        "answer": {"members": ["alice@corp.example"]}
                     }))
                 }),
             );
@@ -2151,8 +2118,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let policy = r#"
 version = 2
 
-[[policy.audience.group]]
-name = "team"
+[policy.audience.group.team]
 from = ["slack:user-group/team"]
 
 [[policy.tool]]
@@ -3492,9 +3458,8 @@ confined_results = ["leak"]
         let decision = run_sanitize_offer(&runtime, &mut session).await;
         assert_eq!(
             decision,
-            ToolResultDecision::Replace {
-                placeholder: "scrubbed".to_string(),
-                offers: Vec::new(),
+            ToolResultDecision::Deliver {
+                value: "scrubbed".to_string()
             },
             "the derivation is admitted and the raw is withheld",
         );
@@ -4924,9 +4889,9 @@ context_control = true
         let session = runtime.create_session(root()).expect("a fresh id opens");
         assert!(matches!(
             session
-                .on_tool_call(control_call("mcp__evil__execute_remedy_plan"), false)
+                .on_tool_call(control_call("mcp/evil/execute_remedy_plan"), false)
                 .await,
-            Err(EventError::UndeclaredTool { tool }) if tool == "mcp__evil__execute_remedy_plan",
+            Err(EventError::UndeclaredTool { tool }) if tool == "mcp/evil/execute_remedy_plan",
         ));
     }
 
