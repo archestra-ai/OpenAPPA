@@ -76,7 +76,7 @@ The policy names a tool by its canonical tool id, not by Claude Code's own spell
 |---|---|
 | `mcp__<server>__<tool>`, split at the first `__` after `mcp__` | `mcp/<server>/<tool>` — `mcp__github__create_issue` is `mcp/github/create_issue` |
 | A built-in tool: `Bash`, `Read`, `Edit`, `Agent`, … | `host/claude-code/<name>` — `host/claude-code/Bash` |
-| The remedy tool of the APPA plugin | `appa/execute_remedy_plan`, which no policy declares |
+| `mcp__appa__execute_remedy_plan`, the remedy tool of the runtime's own `appa` MCP server | `appa/execute_remedy_plan`, which no policy declares |
 
 Argument selectors keep their shape: `host/claude-code/Read(file_path:*)`. `Agent` and `Task` start a child trajectory; the runtime derives that from the adapter, so the policy does not declare it. The [Policy reference](/contracts#tool-names) has the grammar.
 

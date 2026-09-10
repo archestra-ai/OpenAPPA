@@ -91,7 +91,7 @@ The agent keeps using its host's tool names. A plugin implements the host lifecy
 |---|---|---|
 | Claude Code | `mcp__<server>__<tool>` — split at the first `__` after `mcp__` | `mcp/<server>/<tool>` |
 | Claude Code | A built-in tool: `Bash`, `Read`, `Edit`, `Agent`, … | `host/claude-code/<name>` |
-| Claude Code | The remedy tool of the APPA plugin | `appa/execute_remedy_plan` |
+| Claude Code | `mcp__appa__execute_remedy_plan`, the remedy tool of the runtime's own `appa` MCP server | `appa/execute_remedy_plan` |
 | kagent | A tool discovered from a configured MCP endpoint | `mcp/<source-id>/<tool>` |
 | kagent | An agent called as a tool | `agent/<namespace>/<agent>` |
 | kagent | A kagent built-in, such as `ask_user`, `load_memory`, `save_memory`, `prefetch_memory`, or a skill tool | `host/kagent/<name>` |
