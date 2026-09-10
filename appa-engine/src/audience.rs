@@ -234,12 +234,70 @@ impl SelectorTemplate {
     }
 }
 
-/// One registered audience source: a provider name and the selector templates it serves.
-/// Batteries register sources; one provider is registered exactly once per deployment.
+/// One template a source declares, with what its collections may feed beyond named
+/// audiences and direct mentions: `Some(Self_)` names the requesting principal and feeds
+/// `self`; `Some(Internal)` is a full membership and feeds `internal`; `None` feeds neither.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclaredTemplate {
+    pub template: SelectorTemplate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feeds: Option<ChainAudience>,
+}
+
+impl DeclaredTemplate {
+    pub fn new(template: impl Into<String>, feeds: Option<ChainAudience>) -> DeclaredTemplate {
+        DeclaredTemplate {
+            template: SelectorTemplate::new(template),
+            feeds,
+        }
+    }
+
+    /// A template feeding neither built-in audience: named groups and direct mentions only.
+    pub fn named(template: impl Into<String>) -> DeclaredTemplate {
+        DeclaredTemplate::new(template, None)
+    }
+
+    pub fn role(&self) -> TemplateRole {
+        match self.feeds {
+            Some(ChainAudience::Self_) => TemplateRole::Viewer,
+            Some(ChainAudience::Internal) => TemplateRole::Members,
+            None => TemplateRole::Named,
+        }
+    }
+}
+
+/// What one declared collection may feed: `self` (the requesting principal), `internal`
+/// (a full membership), or only named audiences and direct mentions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TemplateRole {
+    Viewer,
+    Members,
+    Named,
+}
+
+/// One registered audience source: a provider name and the selector templates it declares
+/// beside its binding. One provider is registered exactly once per deployment.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceRegistration {
     pub provider: String,
-    pub templates: Vec<SelectorTemplate>,
+    pub templates: Vec<DeclaredTemplate>,
+}
+
+impl SourceRegistration {
+    /// The template a selector of this source matches, if any.
+    pub fn template_of(&self, selector: &str) -> Option<&DeclaredTemplate> {
+        self.templates
+            .iter()
+            .find(|declared| declared.template.matches(selector))
+    }
+
+    /// The declared template spellings, as a consult's declaration carries them.
+    pub fn template_spellings(&self) -> Vec<String> {
+        self.templates
+            .iter()
+            .map(|declared| declared.template.as_str().to_string())
+            .collect()
+    }
 }
 
 /// One configured named audience: `[audience.group.<name>] within / from`.
@@ -277,7 +335,7 @@ pub struct AudienceConfig {
 /// indexed. Built once at load behind the registry's structural lints.
 #[derive(Clone, Debug, Default)]
 pub struct AudienceRegistry {
-    providers: BTreeMap<String, Vec<SelectorTemplate>>,
+    providers: BTreeMap<String, Vec<DeclaredTemplate>>,
     self_from: BTreeSet<SelectorSpec>,
     internal_from: BTreeSet<SelectorSpec>,
     groups: BTreeMap<GroupName, NamedAudience>,
@@ -369,7 +427,7 @@ impl AudienceRegistry {
         &self.provider_names
     }
 
-    pub fn templates(&self, provider: &str) -> Option<&[SelectorTemplate]> {
+    pub fn templates(&self, provider: &str) -> Option<&[DeclaredTemplate]> {
         self.providers.get(provider).map(Vec::as_slice)
     }
 
@@ -416,7 +474,7 @@ impl AudienceRegistry {
             .providers
             .get(provider)
             .ok_or_else(|| Unroutable::UnknownProvider(provider.to_string()))?;
-        if templates.iter().any(|template| template.matches(selector)) {
+        if templates.iter().any(|declared| declared.template.matches(selector)) {
             Ok(SelectorSpec {
                 provider: provider.to_string(),
                 selector: selector.to_string(),
@@ -787,17 +845,17 @@ mod tests {
                 SourceRegistration {
                     provider: "google-workspace".into(),
                     templates: vec![
-                        SelectorTemplate::new("viewer"),
-                        SelectorTemplate::new("full-members"),
-                        SelectorTemplate::new("group/<group-address>"),
+                        DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)),
+                        DeclaredTemplate::new("full-members", Some(ChainAudience::Internal)),
+                        DeclaredTemplate::named("group/<group-address>"),
                     ],
                 },
                 SourceRegistration {
                     provider: "slack".into(),
                     templates: vec![
-                        SelectorTemplate::new("viewer"),
-                        SelectorTemplate::new("full-members"),
-                        SelectorTemplate::new("user-group/<handle>"),
+                        DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)),
+                        DeclaredTemplate::new("full-members", Some(ChainAudience::Internal)),
+                        DeclaredTemplate::named("user-group/<handle>"),
                     ],
                 },
             ],

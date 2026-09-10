@@ -31,8 +31,8 @@ Gists, Notifications, Projects, security alerts) are not listed here.
 A tool the policy does not name is blocked; add rules for them in your
 root config if you enable those sets.
 
-**`audience-source.py`** — the `github` audience source. It answers the
-stock catalog's selectors over the GitHub REST API:
+**`audience-source.py`** — the `github` audience source. It answers
+these selectors over the GitHub REST API:
 
 - `github:viewer` — the token's own reader: its primary verified email
   from `/user/emails`, else `github:<login>`. Feeds `self`.
@@ -53,8 +53,10 @@ large organization needs `externals.timeout_ms` sized for it. The member lookup
 resolves a `github:<login>` member the same way and answers `null`
 for a login GitHub does not know.
 
-The source is not wired by this file: audience mappings are root-only,
-and the binding must sit beside them. In the root config:
+The battery binds the source itself, under `[externals.audience.github]`
+in `appa.toml`, and declares the three templates above as its
+`selectors`. Audience mappings are root-only, so the root config maps
+the chain onto them:
 
 ```toml
 [policy.audience]
@@ -64,14 +66,13 @@ internal = ["github:org/archestra-ai/members"]
 [policy.audience.group.finance]
 within = "internal"
 from = ["github:org/archestra-ai/team/finance"]
-
-[externals.audience.github]
-command = ["python3", "batteries/github/audience-source.py"]
-token_env = "APPA_PROVIDER_GITHUB_TOKEN"
 ```
 
-A command path is resolved against the directory of the config file
-that names it, so write the path as your root config sees the battery.
+Every consult carries the declared templates, and the script refuses
+one whose declaration differs from what it serves (exit status 2)
+before it reads a token: a policy and a script of different versions
+never answer each other. The runtime probes `viewer` and the mapped
+`org/<org>/members` at startup, so the skew surfaces before a decision.
 
 The script reads its token from `APPA_PROVIDER_GITHUB_TOKEN`, which the
 binding's `token_env` forwards. The token needs the `read:org` and

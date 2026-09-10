@@ -945,6 +945,7 @@ url = "{annotator_url}"
 
 [externals.audience.slack]
 url = "{audience_url}"
+selectors = [{{ template = "user-group/<handle>" }}]
 "#
     )
 }

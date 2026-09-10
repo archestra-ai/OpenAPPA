@@ -60,11 +60,11 @@ scripts its bindings name. Run `bash scripts/appa-marketplace.sh` to generate
 the catalog entry and content digest, then commit `marketplace/marketplace.toml`
 with the package. CI checks that the generated catalog is current.
 
-`appa.toml` contains the tool contracts. An annotator determines contracts that static rules cannot express. An audience source supplies provider users or groups for the deployment's audience configuration.
+`appa.toml` contains the tool contracts. An annotator determines contracts that static rules cannot express. An audience source supplies the members of the provider's collections: the viewer, the full membership, groups, and per-resource readers such as one channel's members. The battery binds it under `[externals.audience.<provider>]` with `command`, `token_env`, and the `selectors` it serves, and names the provider under `audiences` in `appa-package.toml`. Contracts in the battery may then name those collections with selector placeholders, such as `@slack:channel/$channel_id`.
 
 The battery `README.md` must name the server version and list the covered tools. It must also explain each contract, script, test, and known limit.
 
-Add the battery config to `include` in `examples/claude-code-battery/appa.toml`. Add the Authority and audience source settings it needs.
+Add the battery config to `include` in `examples/claude-code-battery/appa.toml`. Add the Authority settings and the `[policy.audience]` mappings it needs; the battery binds its own audience source.
 
 The test suite loads this example to make sure all included batteries work together.
 
@@ -72,9 +72,7 @@ The test suite loads this example to make sure all included batteries work toget
 
 ### Unit tests
 
-Write tests for every annotator and audience source. Use saved API responses instead of calling the real service.
-
-Test expected input, invalid input, provider errors, and missing data.
+Write tests for every annotator and audience source that need no credential: the consult envelope, the template check against `declaration.templates`, argument and selector handling, and every refusal path. An audience source must refuse a declaration that lists templates it does not serve, before it reads its token; test that refusal. Check the service against the real provider with a replay trace and a real token, as described below.
 
 For example, to test a Python battery:
 

@@ -136,6 +136,14 @@ matched battery covers.
 - Static contracts can reference `self` and `internal` without an audience
   source. Checking a literal recipient against either audience requires an
   explicit audience source.
+- A tool that reads or writes one resource whose readers a source can list
+  (a Slack channel, a GitHub repository, a Linear team) uses a selector
+  placeholder instead of `internal`: `delta = { audience = ["@slack:channel/$channel_id"] }`
+  for a read, `requires = { audience = { contains = ["@slack:channel/$channel_id"] } }`
+  for a write. The spelling must match a template the provider declares under
+  `selectors` on its `[externals.audience.<provider>]` binding, and every
+  `$argument` must be a required string in the contract's `parameters`. Use it
+  whenever the matched battery declares such a template.
 - An annotator's answer writes an audience as a static contract does: `self`,
   `internal`, an `@` mention, or a literal reader, inside its mandate's
   `audiences`. Omitted, the mandate admits every audience the policy writes.

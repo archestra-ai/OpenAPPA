@@ -55,7 +55,7 @@ const TERMS = {
   "Tool(argument:pattern)":
     "An ordered tool contract selector. Every argument:pattern clause must match its top-level string argument. OpenAPPA uses the first matching contract in authored order, including overlapping native and canonical names. An asterisk matches any argument text; a bare name is the fallback. A sanitizer rewrite selecting another contract is judged under that contract.",
   delta:
-    "The label contribution of an admitted call result. A delta never expands permissions: it intersects reader sets, lowers the trust rank, or leaves the trajectory label unchanged.",
+    "The label contribution of an admitted call result. A delta never expands permissions: it intersects reader sets, lowers the trust rank, or leaves the trajectory label unchanged. Its audience may be one selector placeholder such as @slack:channel/$channel_id, resolved from the call's arguments at check time.",
   requires:
     "The prerequisites for executing a tool call: rules on allowed readers, trust levels, and required history.",
   audience:
@@ -69,16 +69,18 @@ const TERMS = {
   public:
     "The reserved unrestricted audience state, not a reader ID: no audience restriction applies. An agent with public reach can send data to any outbound destination. As a placeholder argument it names the Public audience, which only a Public trajectory includes. Never a group member.",
   "@name":
-    "A mention of a symbolic audience: @finance names a configured [policy.audience.group.<name>], and @provider:selector reads a source collection directly. The mention stays symbolic in labels and the log; membership is read from the configured sources per act and pinned.",
+    "A mention of a symbolic audience: @finance names a configured [policy.audience.group.<name>], and @provider:selector reads a source collection directly. A selector segment written as $argument is a selector placeholder, filled from the call's argument at check time. The mention stays symbolic in labels and the log; membership is read from the configured sources per act and pinned.",
   "@finance":
     "A mention of a configured named audience. It stays symbolic in labels and the log; its membership is read from the audience sources per act and pinned.",
   "[policy.audience]":
-    "Maps the built-in audiences to membership sources. self lists viewer selectors for the identity OpenAPPA acts for; internal lists full-membership collections, and for GitHub only explicitly selected organizations. Multiple sources are unioned.",
+    "Maps the built-in audiences to membership sources. self lists selectors of templates declared with feeds = self, the identity OpenAPPA acts for; internal lists selectors of templates declared with feeds = internal, and for GitHub only explicitly selected organizations. A provider exists in the policy when a selector here references it. Multiple sources are unioned.",
   "[policy.audience.group.<name>]":
     "One configured named audience, mentioned as @name: an optional within assertion into a built-in audience, and the from selectors that supply its members. Multiple sources are unioned.",
   self: "The identity OpenAPPA acts for. This can be a person or a service. The configured viewer sources supply its reader IDs, which are combined into the self audience.",
   lookup:
-    "On [externals.audience.<provider>]: the name of another [externals.audience.<name>] entry that answers this provider's member lookups. OpenAPPA then also looks up every group member of that provider that is not an email address.",
+    "On [externals.audience.<provider>]: the name of another [externals.audience.<name>] entry that answers this provider's member lookups. OpenAPPA then also looks up every group member of that provider that is not an email address. A root entry whose only key is lookup routes a provider that an included battery binds.",
+  selectors:
+    "On [externals.audience.<provider>]: the selector templates the service understands, each with an optional feeds role, self or internal. Every selector or mention the policy writes must match one; a selector placeholder must match one with $argument only on <variable> segments. The declaration enters the policy identity, and every consult carries it as declaration.templates for the service to check.",
   readers:
     "On an [externals.audience.<name>] entry that a lookup names: an inline table from <provider>:<id> to reader ID. OpenAPPA answers member lookups from it without calling a service. A member absent from the table keeps its ID.",
   inputs:
@@ -86,7 +88,7 @@ const TERMS = {
   ranks:
     "Trust ranks an annotator may use in delta.trust and requires.trust. If omitted, it may use every rank in trust_chain.",
   audiences:
-    "Audiences an annotator may use in its answer. public is always allowed and must not be listed here. An empty list allows only public; omitting the field allows audiences declared in the policy.",
+    "Audiences an annotator may use in its answer. public is always allowed and must not be listed here. An empty list allows only public; omitting the field allows audiences declared in the policy. A selector placeholder entry is instantiated per call, so the answer may name only the resource the call's arguments spell.",
   marks:
     "Attention marks an annotator may require. An empty list allows none. If omitted, it may use every mark declared in an authority's permits.attention.",
   "$tool_call":
@@ -112,7 +114,7 @@ const TERMS = {
   emits:
     "The effects listed in an annotator's JSON answer. OpenAPPA records them when the tool succeeds. Policy TOML uses the field name effects.",
   contains:
-    "Under requires.audience: the current audience must include these readers; a $arg placeholder is allowed only here. Under requires.effects: the trajectory already recorded this effect.",
+    "Under requires.audience: the current audience must include these readers; a whole-entry $arg placeholder is allowed only here, and a selector placeholder such as @slack:channel/$channel_id is allowed here and in delta. Under requires.effects: the trajectory already recorded this effect.",
   within:
     "Under requires.audience: the current audience must sit within this audience; a tool_input rewrite cannot clear it. On a [policy.audience.group.<name>]: the trusted policy assertion that the group sits within a built-in audience (self or internal).",
   excludes:

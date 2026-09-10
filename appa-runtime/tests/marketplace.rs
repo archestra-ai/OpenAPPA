@@ -231,6 +231,86 @@ fn every_battery_composes_into_each_host_it_declares() {
     }
 }
 
+/// Every audience source a battery binds refuses a consult whose declared
+/// templates are not the ones it serves, and does so before it reads a
+/// credential: with no `APPA_PROVIDER_*` variable set, the matching
+/// declaration reaches the token check (exit 1) and a foreign one stops at
+/// the declaration check (exit 2). A policy and a script of different
+/// versions never answer each other, whatever the policy declares.
+#[test]
+fn every_bound_audience_source_checks_its_declaration_before_its_credential() {
+    let root = marketplace_root();
+    let mut checked = 0;
+    for entry in &manifest().packages {
+        let directory = root.join(entry.path.as_str());
+        let Role::Battery(battery) = validate_package(&directory).expect("the package validates").role else {
+            continue;
+        };
+        let installed = tempfile::tempdir().expect("a temp dir is creatable");
+        copy_tree(&directory, installed.path());
+        let policy: toml::Value = toml::from_str(
+            &std::fs::read_to_string(installed.path().join(battery.policy.as_str())).expect("the battery policy reads"),
+        )
+        .expect("the battery policy is TOML");
+        for source in appa_policy::declared_sources(&policy).expect("the battery declares its sources") {
+            let provider = &source.provider;
+            let argv: Vec<&str> = policy["externals"]["audience"][provider]["command"]
+                .as_array()
+                .expect("a battery binds its source by a command")
+                .iter()
+                .map(|word| word.as_str().expect("an argv word"))
+                .collect();
+            let served: Vec<String> = source
+                .templates
+                .iter()
+                .map(|t| t.template.as_str().to_owned())
+                .collect();
+            let mut foreign = served.clone();
+            foreign.push("foreign/<x>".to_owned());
+            for (templates, expected) in [(served, 1), (foreign, 2)] {
+                let consult = serde_json::json!({
+                    "version": 1,
+                    "kind": "audience",
+                    "name": provider,
+                    "declaration": { "templates": templates },
+                    "artifact": { "selector": "viewer" },
+                });
+                let mut child = Command::new(argv[0])
+                    .args(&argv[1..])
+                    .current_dir(installed.path())
+                    .env_clear()
+                    .env("PATH", std::env::var("PATH").unwrap_or_default())
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("the helper spawns");
+                child
+                    .stdin
+                    .take()
+                    .expect("stdin is piped")
+                    .write_all(consult.to_string().as_bytes())
+                    .expect("the consult writes");
+                let output = child.wait_with_output().expect("the helper exits");
+                assert_eq!(
+                    output.status.code(),
+                    Some(expected),
+                    "{provider} of {}: {}",
+                    entry.path,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(
+                    output.stdout.is_empty(),
+                    "{provider} of {} answered without a credential",
+                    entry.path
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked >= 3, "the shipped batteries bind audience sources");
+}
+
 /// One package directory, as a deployment would hold it.
 fn copy_tree(source: &Path, destination: &Path) {
     std::fs::create_dir_all(destination).expect("the destination is creatable");
@@ -353,13 +433,48 @@ fn a_battery_that_validates_loads() {
             format!("[deployment]\nname = \"x\"\n{}", body(tool, "")),
         ),
         ("no policy version", no, no, format!("[policy]\n\n{tool}")),
+        (
+            "a source declaring the selectors it serves",
+            yes,
+            yes,
+            body(
+                tool,
+                &format!(
+                    "{command}selectors = [{{ template = \"viewer\", feeds = \"self\" }}, {{ template = \"channel/<id>\" }}]\n"
+                ),
+            ),
+        ),
+        (
+            "a selector feeding an audience outside the chain",
+            no,
+            no,
+            body(
+                tool,
+                &format!("{command}selectors = [{{ template = \"viewer\", feeds = \"public\" }}]\n"),
+            ),
+        ),
+        (
+            "a selector declared twice",
+            no,
+            no,
+            body(
+                tool,
+                &format!("{command}selectors = [{{ template = \"viewer\" }}, {{ template = \"viewer\" }}]\n"),
+            ),
+        ),
     ];
 
     for (what, validates_expected, loads_expected, fragment) in fragments {
         let package = tempfile::tempdir().expect("a temp dir is creatable");
+        // The manifest declares the audience source a row binds: which sources a
+        // battery binds is a separate rule, tested in `appa-package`.
+        let audiences = match fragment.contains("[externals.audience.probe]") {
+            true => "audiences = [\"probe\"]\n",
+            false => "",
+        };
         std::fs::write(
             package.path().join("appa-package.toml"),
-            "schema = 1\nname = \"probe\"\ndescription = \"a fragment on a rule's edge\"\n\n[battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n",
+            format!("schema = 1\nname = \"probe\"\ndescription = \"a fragment on a rule's edge\"\n\n[battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n{audiences}"),
         )
         .expect("the manifest is writable");
         std::fs::write(package.path().join("appa.toml"), &fragment).expect("the policy is writable");

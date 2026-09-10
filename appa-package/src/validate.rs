@@ -1,6 +1,7 @@
 //! The one coarse operation over a package directory: parse its manifest and
 //! refuse everything a marketplace package may not be.
 
+use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -9,7 +10,7 @@ use toml::Value;
 
 use crate::manifest::ManifestError;
 use crate::names::{CredentialPrefix, Namespace, PackageName, RelativePath};
-use crate::package::{MANIFEST_FILE, Package, Role};
+use crate::package::{Battery, MANIFEST_FILE, Package, Role};
 use crate::tree::{self, EntryKind, TreeDigestError};
 
 /// Why a directory is not a package. Every variant names the file it read.
@@ -85,6 +86,12 @@ pub enum PackageError {
         contract: String,
         namespaces: String,
     },
+    #[error("{policy} binds the audience sources [{bound}] but the manifest declares [{declared}]")]
+    PolicyAudienceMismatch {
+        policy: PathBuf,
+        bound: String,
+        declared: String,
+    },
 }
 
 /// Read `<dir>/appa-package.toml` and refuse a package that is not
@@ -109,7 +116,7 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
             for helper in &battery.helpers {
                 contained.resolve(helper, "battery.helpers", EntryKind::File)?;
             }
-            check_policy(&policy, &package.name, &battery.namespaces, &battery.helpers)?;
+            check_policy(&policy, &package.name, battery)?;
         }
         Role::Plugin(plugin) => {
             contained.resolve(plugin.default_policy(), "plugin.default_policy", EntryKind::File)?;
@@ -186,13 +193,11 @@ const DECLARATION_ARRAYS: [&str; 4] = ["tool", "annotator", "authority", "saniti
 
 /// A battery is a fragment a deployment includes, not a deployment: it neither
 /// includes further files nor sets the root-only externals, it runs only its own
-/// declared helpers, and it names only contracts in the namespaces it declares.
-fn check_policy(
-    policy: &Path,
-    name: &PackageName,
-    namespaces: &[Namespace],
-    helpers: &[RelativePath],
-) -> Result<(), PackageError> {
+/// declared helpers, it names only contracts in the namespaces it declares, and
+/// it binds exactly the audience sources it declares.
+fn check_policy(policy: &Path, name: &PackageName, battery: &Battery) -> Result<(), PackageError> {
+    let namespaces = &battery.namespaces;
+    let helpers = &battery.helpers;
     let text = std::fs::read_to_string(policy).map_err(|source| PackageError::PolicyRead {
         policy: policy.to_path_buf(),
         source,
@@ -255,6 +260,22 @@ fn check_policy(
 
     if let Some(externals) = document.get("externals") {
         check_externals(policy, externals, name, helpers)?;
+    }
+    // A marketplace gives each audience provider one owner by the manifest
+    // alone, so the manifest lists exactly the providers the policy binds.
+    let bound: BTreeSet<&str> = document
+        .get("externals")
+        .and_then(|externals| externals.get("audience"))
+        .and_then(Value::as_table)
+        .map(|bindings| bindings.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    let declared: BTreeSet<&str> = battery.audiences.iter().map(String::as_str).collect();
+    if bound != declared {
+        return Err(PackageError::PolicyAudienceMismatch {
+            policy: policy.to_path_buf(),
+            bound: bound.into_iter().collect::<Vec<_>>().join(", "),
+            declared: declared.into_iter().collect::<Vec<_>>().join(", "),
+        });
     }
 
     // A contract may carry an argument filter — `mcp/ns/send(channel:C1)` — so
@@ -354,6 +375,9 @@ fn check_binding(
                     prefix,
                 });
             }
+            // An audience source declares the selector templates it serves
+            // beside its binding; the loader parses the templates themselves.
+            "selectors" if external.starts_with("audience.") && declares_selectors(value) => {}
             _ => return Err(refuse()),
         }
     }
@@ -361,6 +385,44 @@ fn check_binding(
         true => Ok(()),
         false => Err(refuse()),
     }
+}
+
+/// A `selectors` array as the config loader reads it: a non-empty list of
+/// tables, each a `template` string with an optional `feeds` of `self` or
+/// `internal`, no template twice. A template is `/`-separated non-empty
+/// segments, each a literal or a `<variable>`, none starting with `$`.
+fn declares_selectors(value: &Value) -> bool {
+    let Some(entries) = value.as_array() else {
+        return false;
+    };
+    let mut seen = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Some(table) = entry.as_table() else {
+            return false;
+        };
+        if !table.keys().all(|key| key == "template" || key == "feeds") {
+            return false;
+        }
+        let Some(template) = table.get("template").and_then(Value::as_str) else {
+            return false;
+        };
+        let well_formed = |segment: &str| {
+            let bracketed = segment.starts_with('<') || segment.ends_with('>');
+            !segment.is_empty()
+                && !segment.starts_with('$')
+                && (!bracketed || (segment.starts_with('<') && segment.ends_with('>') && segment.len() > 2))
+        };
+        if template.is_empty() || !template.split('/').all(well_formed) || seen.contains(&template) {
+            return false;
+        }
+        seen.push(template);
+        match table.get("feeds") {
+            None => {}
+            Some(feeds) if matches!(feeds.as_str(), Some("self" | "internal")) => {}
+            Some(_) => return false,
+        }
+    }
+    !seen.is_empty()
 }
 
 /// A battery ships the programs it runs, so an argv is exactly `python3` and one
@@ -440,11 +502,13 @@ mod tests {
     use crate::package::Plugin;
 
     const BATTERY_MANIFEST: &str = "schema = 1\nname = \"github\"\ndescription = \"GitHub MCP server\"\n\n\
-         [battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n";
+         [battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n\
+         audiences = [\"github\"]\n";
 
     const BATTERY_POLICY: &str = "[policy]\nversion = 2\n\n\
          [[policy.tool]]\nname = \"mcp/github/get_me\"\ndelta = {}\n\n\
-         [externals.audience.github]\ncommand = [\"python3\", \"audience-source.py\"]\n";
+         [externals.audience.github]\ncommand = [\"python3\", \"audience-source.py\"]\n\
+         selectors = [{ template = \"viewer\", feeds = \"self\" }, { template = \"repo/<owner>/<repo>/collaborators\" }]\n";
 
     /// A battery package on disk, with the policy body the caller wants.
     fn battery(policy: &str) -> tempfile::TempDir {
@@ -677,6 +741,71 @@ mod tests {
                 "accepted token_env {var:?}"
             );
         }
+    }
+
+    /// The manifest lists exactly the audience sources the policy binds: a
+    /// marketplace assigns each provider one owner by reading manifests alone.
+    #[test]
+    fn a_battery_binds_exactly_the_audience_sources_it_declares() {
+        let bound_but_undeclared = battery(BATTERY_POLICY);
+        fs::write(
+            bound_but_undeclared.path().join("appa-package.toml"),
+            BATTERY_MANIFEST.replace("audiences = [\"github\"]\n", ""),
+        )
+        .unwrap();
+        let declared_but_unbound = battery(&BATTERY_POLICY[..BATTERY_POLICY.find("[externals").unwrap()]);
+        for (directory, case) in [
+            (bound_but_undeclared, "bound but undeclared"),
+            (declared_but_unbound, "declared but unbound"),
+        ] {
+            assert!(
+                matches!(
+                    validate_package(directory.path()),
+                    Err(PackageError::PolicyAudienceMismatch { .. })
+                ),
+                "accepted a battery {case}"
+            );
+        }
+    }
+
+    /// A `selectors` array is the one extra key an audience binding carries,
+    /// and each entry is a `template` string with an optional `feeds` string.
+    #[test]
+    fn an_audience_binding_declares_selectors_in_the_loaders_shape() {
+        let declared = "selectors = [{ template = \"viewer\", feeds = \"self\" }, { template = \"repo/<owner>/<repo>/collaborators\" }]\n";
+        for replacement in [
+            "selectors = [\"viewer\"]\n",
+            "selectors = []\n",
+            "selectors = [{ feeds = \"self\" }]\n",
+            "selectors = [{ template = \"viewer\", feeds = 1 }]\n",
+            "selectors = [{ template = \"viewer\", feeds = \"public\" }]\n",
+            "selectors = [{ template = \"viewer\", roster = \"x\" }]\n",
+            "selectors = [{ template = \"viewer\" }, { template = \"viewer\" }]\n",
+            "selectors = [{ template = \"\" }]\n",
+            "selectors = [{ template = \"repo//collaborators\" }]\n",
+            "selectors = [{ template = \"channel/$id\" }]\n",
+            "selectors = [{ template = \"channel/<id\" }]\n",
+            "selectors = \"viewer\"\n",
+        ] {
+            let directory = battery(&BATTERY_POLICY.replace(declared, replacement));
+            assert!(
+                matches!(
+                    validate_package(directory.path()),
+                    Err(PackageError::PolicyExternalCommand { .. })
+                ),
+                "accepted {replacement}"
+            );
+        }
+        let annotator = battery(&format!(
+            "{BATTERY_POLICY}\n[externals.annotators.github]\ncommand = [\"python3\", \"audience-source.py\"]\n{declared}"
+        ));
+        assert!(
+            matches!(
+                validate_package(annotator.path()),
+                Err(PackageError::PolicyExternalCommand { .. })
+            ),
+            "accepted selectors on an annotator binding"
+        );
     }
 
     /// A declared path names one kind of thing. Containment alone accepts a

@@ -6,8 +6,8 @@ Workspace directory.
 
 ## Files
 
-**`audience-source.py`** — answers the stock catalog's selectors over
-Google's OpenID userinfo and Admin SDK Directory APIs:
+**`audience-source.py`** — answers these selectors over Google's
+OpenID userinfo and Admin SDK Directory APIs:
 
 - `google-workspace:viewer` — the token's own reader: its email when
   the userinfo endpoint marks it verified, else
@@ -26,8 +26,10 @@ the account's primary email, so an alias resolves to the same reader
 as the account; it answers `null` for an address the directory does
 not know.
 
-The source is not wired by this file: audience mappings are root-only,
-and the binding must sit beside them. In the root config:
+The battery binds the source itself, under
+`[externals.audience.google-workspace]` in `appa.toml`, and declares
+the three templates above as its `selectors`. Audience mappings are
+root-only, so the root config maps the chain onto them:
 
 ```toml
 [policy.audience]
@@ -37,14 +39,13 @@ internal = ["google-workspace:full-members"]
 [policy.audience.group.finance]
 within = "internal"
 from = ["google-workspace:group/finance@corp.com"]
-
-[externals.audience.google-workspace]
-command = ["python3", "batteries/google-workspace/audience-source.py"]
-token_env = "APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN"
 ```
 
-A command path is resolved against the directory of the config file
-that names it, so write the path as your root config sees the battery.
+Every consult carries the declared templates, and the script refuses
+one whose declaration differs from what it serves (exit status 2)
+before it reads a token: a policy and a script of different versions
+never answer each other. The runtime probes `viewer` and
+`full-members` at startup, so the skew surfaces before a decision.
 
 The script reads its token from `APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN`,
 which the binding's `token_env` forwards: an OAuth2 access token with the

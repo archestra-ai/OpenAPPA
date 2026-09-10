@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use appa_engine::audience::well_formed_reader;
+use appa_engine::audience::{DeclaredTemplate, SourceRegistration, well_formed_reader};
 use appa_engine::label::ReaderId;
 use serde::Deserialize;
 
@@ -204,11 +204,31 @@ impl Externals {
             .collect()
     }
 
+    /// The audience sources these bindings declare: each entry with selector templates,
+    /// as the policy compiles under them.
+    pub(crate) fn source_registrations(&self) -> Vec<SourceRegistration> {
+        self.audience
+            .iter()
+            .filter(|(_, binding)| !binding.templates.is_empty())
+            .map(|(name, binding)| SourceRegistration {
+                provider: name.clone(),
+                templates: binding.templates.clone(),
+            })
+            .collect()
+    }
+
     /// How many `llm` consults this deployment lets run at once: `max_concurrent` of its
     /// profile, none without one.
     pub(crate) fn llm_bound(&self) -> usize {
         self.llm.as_ref().map_or(0, |profile| profile.max_concurrent)
     }
+}
+
+/// The audience sources a composed document declares, read from its `[externals.audience]`
+/// table: what a stored policy file compiles under at replay, and what a file that does not
+/// load is described with.
+pub(crate) fn source_registrations_of(document: &toml::Value) -> Result<Vec<SourceRegistration>, ConfigError> {
+    appa_policy::declared_sources(document).map_err(|error| ConfigError::SelectorDeclaration(Box::new(error)))
 }
 
 /// The lookup routing a composed document declares, read from its `[externals.audience]`
@@ -298,6 +318,9 @@ pub struct AudienceBinding {
     pub implementation: AudienceImplementation,
     /// The entry that answers this provider's member lookups. `None`: the provider's own.
     pub lookup: Option<String>,
+    /// The selector templates this source declares it serves. Empty for a roster and for
+    /// an entry that only answers another provider's lookups: neither is a policy source.
+    pub templates: Vec<DeclaredTemplate>,
 }
 
 /// How one audience entry answers: an HTTP endpoint, a local command, or an inline roster
@@ -404,6 +427,8 @@ pub enum ConfigError {
     IncludedPolicyField { path: String, field: String },
     #[error("included config {path} cannot set externals field {field:?}")]
     IncludedExternalsField { path: String, field: String },
+    #[error("[externals.audience] {0}")]
+    SelectorDeclaration(Box<appa_policy::ConfigError>),
     #[error("included config {path} uses policy version {found}, but the root uses {root}")]
     IncludedVersion { path: String, root: i64, found: i64 },
     #[error("included config {path} repeats [externals.{section}] entry {name:?}")]
@@ -722,6 +747,16 @@ struct RawAudienceBinding {
     command: Option<Vec<String>>,
     readers: Option<BTreeMap<String, String>>,
     lookup: Option<String>,
+    /// The selector templates this source serves, with what each may feed.
+    #[serde(default)]
+    selectors: Vec<RawSelector>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSelector {
+    template: String,
+    feeds: Option<String>,
 }
 
 fn default_review_timeout_ms() -> u64 {
@@ -1338,14 +1373,29 @@ fn compose_include(
             .as_table_mut()
             .expect("RawExternals requires named external tables");
         for (name, entry) in entries {
-            if destination.contains_key(name) {
-                return Err(ConfigError::DuplicateExternal {
-                    path: include_path.display().to_string(),
-                    section: section_name.clone(),
-                    name: name.clone(),
-                });
+            // A root entry whose only key is `lookup` routes the member lookups of a
+            // provider a battery binds; the routing rides on the battery's entry. Any
+            // other same-named pair is two bindings of one provider.
+            let routed_lookup = match (section, destination.get(name), entry.as_table()) {
+                (Section::Audience, Some(toml::Value::Table(root)), Some(_))
+                    if root.len() == 1 && root.contains_key("lookup") =>
+                {
+                    root.get("lookup").cloned()
+                }
+                (_, Some(_), _) => {
+                    return Err(ConfigError::DuplicateExternal {
+                        path: include_path.display().to_string(),
+                        section: section_name.clone(),
+                        name: name.clone(),
+                    });
+                }
+                (_, None, _) => None,
+            };
+            let mut entry = entry.clone();
+            if let (Some(lookup), Some(table)) = (routed_lookup, entry.as_table_mut()) {
+                table.insert("lookup".to_string(), lookup);
             }
-            destination.insert(name.clone(), entry.clone());
+            destination.insert(name.clone(), entry);
             origins.insert(
                 section.origin_key(name),
                 include_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf(),
@@ -1439,7 +1489,25 @@ fn resolve_audience_bindings(
             command,
             readers,
             lookup: redirect,
+            selectors,
         } = entry;
+        let mut templates: Vec<DeclaredTemplate> = Vec::new();
+        for selector in &selectors {
+            let declared = appa_policy::parse_declared_template(&name, &selector.template, selector.feeds.as_deref())
+                .map_err(|error| ConfigError::SelectorDeclaration(Box::new(error)))?;
+            if templates.iter().any(|known| known.template == declared.template) {
+                return Err(ConfigError::SelectorDeclaration(Box::new(
+                    appa_policy::ConfigError::BadSelectorDeclaration {
+                        provider: name.clone(),
+                        template: selector.template.clone(),
+                        reason: "is declared twice".to_string(),
+                    },
+                )));
+            }
+            templates.push(declared);
+        }
+        // A roster answers lookups only and a source declares what it serves, so a roster
+        // with `selectors` is neither.
         let implementation = match (url, command, readers) {
             (Some(url), None, None) => {
                 let url = validated_url(section.name(), &name, url)?;
@@ -1449,7 +1517,7 @@ fn resolve_audience_bindings(
             (None, Some(argv), None) => {
                 AudienceImplementation::Command(resolve_command(section, &name, argv, token_env, origins)?)
             }
-            (None, None, Some(readers)) if token_env.is_none() => {
+            (None, None, Some(readers)) if token_env.is_none() && templates.is_empty() => {
                 AudienceImplementation::Readers(resolve_readers(&name, readers)?)
             }
             _ => {
@@ -1464,6 +1532,7 @@ fn resolve_audience_bindings(
             AudienceBinding {
                 implementation,
                 lookup: redirect,
+                templates,
             },
         );
     }

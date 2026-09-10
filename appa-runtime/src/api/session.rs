@@ -2053,7 +2053,7 @@ delta = {}
 starting_label = { audience = ["alice@corp.example"] }
 "#;
         let text = format!(
-            "[policy]\n{policy}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.audience.slack]\nurl = \"{source}\"\n"
+            "[policy]\n{policy}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.audience.slack]\nurl = \"{source}\"\nselectors = [{{ template = \"user-group/<handle>\" }}]\n"
         );
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let path = dir.path().join("appa.toml");

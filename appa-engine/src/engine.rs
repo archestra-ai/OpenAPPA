@@ -10634,7 +10634,7 @@ mod tests {
         crate::audience::AudienceConfig {
             sources: vec![crate::audience::SourceRegistration {
                 provider: "slack".to_string(),
-                templates: vec![crate::audience::SelectorTemplate::new("user-group/<handle>")],
+                templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
             }],
             groups: handles
                 .iter()

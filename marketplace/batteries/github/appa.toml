@@ -25,12 +25,21 @@
 #   #
 # To cover a whole organisation instead, match `owner:my-org`.
 #
-# The battery also ships `audience-source.py`, the `github` audience
-# source. Audience mappings are root-only, so the binding sits beside
-# them in the root config, not here — the README shows the wiring.
+# The battery also binds `audience-source.py`, the `github` audience
+# source, and declares the selectors it serves. The root config maps
+# `self` and `internal` onto them — the README shows the wiring.
 
 [policy]
 version = 2
+
+[externals.audience.github]
+command = ["python3", "audience-source.py"]
+token_env = "APPA_PROVIDER_GITHUB_TOKEN"
+selectors = [
+  { template = "viewer", feeds = "self" },
+  { template = "org/<org>/members", feeds = "internal" },
+  { template = "org/<org>/team/<team>" },
+]
 
 # --- who am I: no outside content, nothing sent ---
 

@@ -198,6 +198,13 @@ class EnvelopeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("APPA_PROVIDER_GITHUB_TOKEN", result.stderr)
 
+    def test_a_foreign_declaration_is_refused_before_the_token_is_read(self):
+        declared = self.envelope()["declaration"]["templates"]
+        for templates in [declared + ["channel/<id>"], declared[1:], [], list(reversed(declared))]:
+            result = self.run_script(self.envelope(declaration={"templates": templates}), {"PATH": "/usr/bin:/bin"})
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(result.stdout, "")
+
 
 if __name__ == "__main__":
     unittest.main()

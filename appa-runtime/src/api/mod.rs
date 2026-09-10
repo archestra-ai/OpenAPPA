@@ -1988,8 +1988,10 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
     }
     bound_exactly("annotator", bound_by_deployment.into_iter(), &externals.annotators)?;
     // Every provider the policy references is bound, and so is every entry a provider's
-    // `lookup` names. A roster answers member lookups only, so a provider whose selectors
-    // the policy reads never binds one.
+    // `lookup` names. A bound provider the policy never references stays idle rather than
+    // refused: a battery binds its own source, and a deployment may include the battery
+    // for its tool rules alone. A roster answers member lookups only, so a provider whose
+    // selectors the policy reads never binds one.
     let providers: std::collections::BTreeSet<&str> = rc
         .audience
         .sources
@@ -2001,7 +2003,7 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
         .filter_map(|provider| externals.audience.get(*provider))
         .filter_map(|binding| binding.lookup.as_deref())
         .collect();
-    bound_exactly(
+    no_unbound(
         "audience source",
         providers.iter().chain(targets.iter()).copied(),
         &externals.audience,
@@ -2025,13 +2027,23 @@ fn bound_exactly<'a, Implementation>(
     bound: &std::collections::BTreeMap<String, Implementation>,
 ) -> Result<(), OpenError> {
     let registered: std::collections::BTreeSet<&str> = registered.collect();
-    if let Some(name) = registered.iter().find(|name| !bound.contains_key(**name)) {
-        return Err(OpenError::UnboundExternal {
-            kind,
-            name: (*name).to_string(),
-        });
-    }
+    no_unbound(kind, registered.iter().copied(), bound)?;
     no_undeclared(kind, registered.into_iter(), bound)
+}
+
+fn no_unbound<'a, Implementation>(
+    kind: &'static str,
+    registered: impl Iterator<Item = &'a str>,
+    bound: &std::collections::BTreeMap<String, Implementation>,
+) -> Result<(), OpenError> {
+    let mut registered = registered;
+    match registered.find(|name| !bound.contains_key(*name)) {
+        Some(name) => Err(OpenError::UnboundExternal {
+            kind,
+            name: name.to_string(),
+        }),
+        None => Ok(()),
+    }
 }
 
 fn no_undeclared<'a, Implementation>(
@@ -2064,8 +2076,12 @@ fn compile_policy(config: &Config, naming: ToolNaming) -> Result<appa_policy::Co
     .map_err(OpenError::UnsupportedPolicy)?;
     let text = toml::to_string(&policy)
         .map_err(|error| OpenError::UnsupportedPolicy(format!("the policy table does not serialize: {error}")))?;
-    appa_policy::Config::from_toml_str_routed(&text, config.externals.lookup_targets())
-        .map_err(|error| OpenError::Policy(Box::new(error)))
+    appa_policy::Config::from_toml_str_routed(
+        &text,
+        config.externals.lookup_targets(),
+        config.externals.source_registrations(),
+    )
+    .map_err(|error| OpenError::Policy(Box::new(error)))
 }
 
 /// The `[policy]` table of a stored policy file, with the key of the bytes it came from.
@@ -2133,7 +2149,9 @@ fn compile_stored_for_host(bytes: &[u8], naming: ToolNaming) -> Result<appa_poli
     let policy = resolve_served_policy(policy, naming, &inventory, &aliases)?;
     let text =
         toml::to_string(&policy).map_err(|error| format!("the stored policy table does not serialize: {error}"))?;
-    appa_policy::Config::from_toml_str_routed(&text, crate::config::lookup_targets_of(&value))
+    let sources = crate::config::source_registrations_of(&value)
+        .map_err(|error| format!("the stored policy declares its audience sources badly: {error}"))?;
+    appa_policy::Config::from_toml_str_routed(&text, crate::config::lookup_targets_of(&value), sources)
         .map_err(|error| format!("the stored policy does not load: {error}"))
 }
 

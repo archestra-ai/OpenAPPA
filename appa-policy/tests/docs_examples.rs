@@ -93,8 +93,10 @@ fn every_toml_fence_in_the_policy_reference_loads() {
         let table: toml::Table = fence
             .parse()
             .unwrap_or_else(|error| panic!("a fence is not valid TOML: {error}\n{fence}"));
+        let sources = appa_policy::declared_sources(&toml::Value::Table(table.clone()))
+            .unwrap_or_else(|error| panic!("a fence declares its audience sources badly: {error}\n{fence}"));
         let Some(policy) = as_policy(table) else { continue };
-        if let Err(error) = Config::from_toml_str(&policy) {
+        if let Err(error) = Config::from_toml_str_routed(&policy, std::collections::BTreeMap::new(), sources) {
             panic!("a policy example does not load: {error}\n{policy}");
         }
     }

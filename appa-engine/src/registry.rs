@@ -1792,7 +1792,7 @@ mod tests {
         crate::audience::AudienceConfig {
             sources: vec![crate::audience::SourceRegistration {
                 provider: "slack".to_string(),
-                templates: vec![crate::audience::SelectorTemplate::new("user-group/<handle>")],
+                templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
             }],
             groups: handles
                 .iter()
@@ -1939,7 +1939,10 @@ mod tests {
         use crate::audience::{NamedAudience, SourceRegistration};
         let source = |provider: &str| SourceRegistration {
             provider: provider.to_string(),
-            templates: vec![crate::audience::SelectorTemplate::new("viewer")],
+            templates: vec![crate::audience::DeclaredTemplate::new(
+                "viewer",
+                Some(ChainAudience::Self_),
+            )],
         };
         // A `:` makes one member id qualified under two providers, `@` makes members
         // non-literal, and an empty name owns no namespace.
@@ -3001,7 +3004,7 @@ mod tests {
         grouped.audience = crate::audience::AudienceConfig {
             sources: vec![crate::audience::SourceRegistration {
                 provider: "slack".to_string(),
-                templates: vec![crate::audience::SelectorTemplate::new("user-group/<handle>")],
+                templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
             }],
             groups: vec![crate::audience::NamedAudience {
                 name: crate::names::GroupName::new("desk"),

@@ -18,7 +18,8 @@ batteries/
 |-- claude-code/
 |   `-- appa.toml
 `-- slack/
-    `-- appa.toml
+    |-- appa.toml
+    `-- audience-source.py
 ```
 
 To include batteries in your config, list them in `appa.toml`:
@@ -42,6 +43,7 @@ OpenAPPA combines these files into one config.
 | Version | Every file uses the same version. |
 | Annotators | Each annotator name must be unique. |
 | Script path | A script path is relative to the config file that names it. |
+| Audience sources | A battery binds the membership service it ships and declares its selector templates. A root entry for the same provider may carry only `lookup`. |
 
 OpenAPPA checks the combined config before using it. If a reload fails, the current config keeps running.
 
@@ -147,6 +149,44 @@ delta = {}
 [externals.authorities.approve-small-payment]
 command = ["python3", "./approve-small-payment.py"]
 ```
+
+## Audience sources
+
+A battery that covers a provider with its own directory ships a membership service beside its config and binds it. The binding declares the selector templates the service understands under `selectors`; the battery's own contracts may then name those collections, including per-resource ones such as one channel's members:
+
+```toml
+# batteries/slack/appa.toml
+[[policy.tool]]
+name = "mcp/claude_ai_Slack/slack_read_channel"
+parameters = { type = "object", properties = { channel_id = { type = "string" } }, required = ["channel_id"] }
+delta = { audience = ["@slack:channel/$channel_id"] }
+
+[externals.audience.slack]
+command = ["python3", "audience-source.py"]
+token_env = "APPA_PROVIDER_SLACK_TOKEN"
+selectors = [
+  { template = "viewer", feeds = "self" },
+  { template = "full-members", feeds = "internal" },
+  { template = "user-group/<handle>" },
+  { template = "channel/<id>" },
+]
+```
+
+The root config decides what the built-in audiences mean and supplies the credential. It maps `self` and `internal` under `[policy.audience]`, which only the root can carry, and exports the token variable the battery names. To route the provider's member lookups elsewhere, the root adds an entry for the same provider whose only key is `lookup`; any other key beside the battery's binding is a duplicate and fails to load.
+
+```toml
+# root config
+include = ["./batteries/slack/appa.toml"]
+
+[policy]
+version = 2
+
+[policy.audience]
+self = ["slack:viewer"]
+internal = ["slack:full-members"]
+```
+
+Every consult OpenAPPA sends the service carries the declared templates as `declaration.templates`. The shipped services compare that list with the templates they serve and refuse a mismatch before reading their token, and the start-up probe of `viewer` and `full-members` triggers that check before any agent call. See [Configure audience membership](/contracts#configure-audience-membership) for the declaration and the request protocol.
 
 ## Customise a battery
 

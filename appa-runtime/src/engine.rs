@@ -2199,7 +2199,7 @@ impl RuntimeEngine {
                 } => {
                     let routable = audience
                         .templates(provider)
-                        .is_some_and(|templates| templates.iter().any(|template| template.matches(selector)));
+                        .is_some_and(|templates| templates.iter().any(|declared| declared.template.matches(selector)));
                     if !routable {
                         continue;
                     }
@@ -2522,9 +2522,12 @@ pub(crate) fn selector_templates(
     audience: &appa_engine::audience::AudienceRegistry,
     provider: &str,
 ) -> Option<Vec<String>> {
-    audience
-        .templates(provider)
-        .map(|templates| templates.iter().map(|template| template.as_str().to_string()).collect())
+    audience.templates(provider).map(|templates| {
+        templates
+            .iter()
+            .map(|declared| declared.template.as_str().to_string())
+            .collect()
+    })
 }
 
 #[derive(Debug, Default)]

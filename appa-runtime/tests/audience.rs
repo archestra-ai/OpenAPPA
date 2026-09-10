@@ -49,15 +49,17 @@ max_body_bytes = 4096
 
 [externals.audience.slack]
 url = "AUDIENCE_URL"
+selectors = [{ template = "viewer", feeds = "self" }, { template = "full-members", feeds = "internal" }, { template = "user-group/<handle>" }]
 "#;
 
 /// The `[externals.audience]` block of `POLICY`, for the variants that replace it.
-const SLACK_BINDING: &str = "[externals.audience.slack]\nurl = \"AUDIENCE_URL\"\n";
+const SLACK_BINDING: &str = "[externals.audience.slack]\nurl = \"AUDIENCE_URL\"\nselectors = [{ template = \"viewer\", feeds = \"self\" }, { template = \"full-members\", feeds = \"internal\" }, { template = \"user-group/<handle>\" }]\n";
 
 /// Slack's member lookups answered in process from a roster.
 const ROSTER_BINDINGS: &str = r#"
 [externals.audience.slack]
 url = "AUDIENCE_URL"
+selectors = [{ template = "viewer", feeds = "self" }, { template = "full-members", feeds = "internal" }, { template = "user-group/<handle>" }]
 lookup = "people"
 
 [externals.audience.people]
@@ -69,6 +71,7 @@ readers = { "slack:U-bob" = "bob@corp.example" }
 const LOOKUP_URL_BINDINGS: &str = r#"
 [externals.audience.slack]
 url = "AUDIENCE_URL"
+selectors = [{ template = "viewer", feeds = "self" }, { template = "full-members", feeds = "internal" }, { template = "user-group/<handle>" }]
 lookup = "people"
 
 [externals.audience.people]
@@ -435,7 +438,7 @@ async fn a_retired_trajectory_keeps_the_lookup_routing_it_opened_under() {
 
     // Slack's lookups move to `directory`; a new GitHub group keeps `people` bound.
     let retargeted = format!(
-        "{}\n[externals.audience.directory]\nurl = \"{url}\"\n\n[externals.audience.github]\nurl = \"{url}\"\nlookup = \"people\"\n",
+        "{}\n[externals.audience.directory]\nurl = \"{url}\"\n\n[externals.audience.github]\nurl = \"{url}\"\nlookup = \"people\"\nselectors = [{{ template = \"org/<org>/members\", feeds = \"internal\" }}]\n",
         policy
             .replace("AUDIENCE_URL", &url)
             .replace("lookup = \"people\"", "lookup = \"directory\"")
@@ -472,12 +475,15 @@ async fn a_retired_trajectory_keeps_the_lookup_routing_it_opened_under() {
 fn a_referenced_audience_source_must_be_bound() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let path = dir.path().join("appa.toml");
-    let unbound = POLICY.replace("[externals.audience.slack]\nurl = \"AUDIENCE_URL\"\n", "");
+    let unbound = POLICY.replace(SLACK_BINDING, "");
     std::fs::write(&path, unbound).expect("the fixture writes");
+    // The binding carries the provider's declaration, so without it the policy's own
+    // `slack:` references have no provider to resolve against.
     let config = Config::load(&path).expect("the file validates");
     assert!(matches!(
         Runtime::open(config, dir.path().join("appa.db"), None),
-        Err(appa_runtime::api::OpenError::UnboundExternal { .. })
+        Err(appa_runtime::api::OpenError::Policy(error))
+            if matches!(*error, appa_policy::ConfigError::UndeclaredProvider { .. })
     ));
 }
 

@@ -78,6 +78,10 @@ pub struct Battery {
     /// product names each of them.
     pub namespaces: Vec<Namespace>,
     pub helpers: Vec<RelativePath>,
+    /// The audience source providers this battery binds under
+    /// `[externals.audience.<provider>]`. A marketplace gives each provider one
+    /// owner, as it does each namespace.
+    pub audiences: Vec<String>,
 }
 
 /// A plugin package, with installation fields specific to its host.
@@ -222,6 +226,8 @@ struct RawBattery {
     namespaces: Vec<String>,
     #[serde(default)]
     helpers: Vec<String>,
+    #[serde(default)]
+    audiences: Vec<String>,
 }
 
 impl RawBattery {
@@ -260,11 +266,22 @@ impl RawBattery {
         for helper in &self.helpers {
             helpers.push(relative(helper, "battery.helpers", path)?);
         }
+        let mut audiences: Vec<String> = Vec::new();
+        for provider in &self.audiences {
+            if provider.is_empty() || provider.chars().any(char::is_whitespace) || audiences.contains(provider) {
+                return Err(ManifestError::Audience {
+                    path: path.to_path_buf(),
+                    provider: provider.clone(),
+                });
+            }
+            audiences.push(provider.clone());
+        }
         Ok(Battery {
             policy,
             hosts,
             namespaces,
             helpers,
+            audiences,
         })
     }
 }
@@ -394,6 +411,7 @@ mod tests {
                 policy: RelativePath::parse("appa.toml").unwrap(),
                 hosts: vec![Host::ClaudeCode],
                 namespaces: vec![Namespace::parse("github").unwrap()],
+                audiences: vec![],
                 helpers: vec![RelativePath::parse("audience-source.py").unwrap()],
             }
         );
@@ -436,6 +454,22 @@ mod tests {
         ));
 
         assert!(matches!(refused, Err(ManifestError::RepeatedNamespace { .. })));
+    }
+
+    /// An audience provider list is read the same way: one name each, and a
+    /// name is a bare provider token.
+    #[test]
+    fn a_battery_declares_each_audience_source_once_by_a_bare_name() {
+        for audiences in ["[\"github\", \"github\"]", "[\"\"]", "[\"git hub\"]"] {
+            let refused = manifest(&BATTERY.replace(
+                "helpers = [\"audience-source.py\"]",
+                &format!("audiences = {audiences}\nhelpers = [\"audience-source.py\"]"),
+            ));
+            assert!(
+                matches!(refused, Err(ManifestError::Audience { .. })),
+                "accepted {audiences}"
+            );
+        }
     }
 
     #[test]
