@@ -265,7 +265,7 @@ path_dir=$(case_dir on-path-hint)
 if env APPA_REPOSITORY_URL="$origin/good" APPA_INSTALL_DIR="$path_dir" \
   PATH="$path_dir:$PATH" sh "$installer" \
   >"$work/on-path.out" 2>"$work/on-path.err" &&
-  grep -q '^Next: appa init claude-code$' "$work/on-path.out"; then
+  grep -q '^Next: appa plugin install claude-code$' "$work/on-path.out"; then
   report PASS on-path-hint
 else
   cat "$work/on-path.out" "$work/on-path.err" >&2

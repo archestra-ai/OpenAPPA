@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use appa_package::generation::{ArtifactDigest, Commit, DESCRIPTOR_FILE, Generation, Platform};
-use appa_package::{Marketplace, Package, PackageKind, PackageName, Role, TreeDigest};
+use appa_package::{Battery, Marketplace, Package, PackageEntry, PackageKind, PackageName, Role, TreeDigest};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -36,7 +36,7 @@ pub enum InstallError {
     Invalid(String),
     #[error("{} changed during installation; no replacement was made", .0.display())]
     Changed(PathBuf),
-    #[error("installation recovery is required at {}: {reason}", path.display())]
+    #[error("the install did not finish: {reason} Its record is {}; rerunning the install completes it.", path.display())]
     Recovery { path: PathBuf, reason: String },
 }
 
@@ -91,32 +91,14 @@ impl Selection {
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| InstallError::Invalid("config filename must be UTF-8".into()))?;
-        let catalog = Marketplace::read(&marketplace.join("marketplace.toml"))
-            .map_err(|error| InstallError::Invalid(error.to_string()))?;
         let mut document: toml_edit::DocumentMut = text
             .parse()
             .map_err(|error: toml_edit::TomlError| InstallError::Invalid(error.to_string()))?;
         let mut proposed = self.clone();
         proposed.generation = generation;
         for owned in &mut proposed.includes {
-            let entry = catalog
-                .packages
-                .iter()
-                .find(|entry| entry.kind == PackageKind::Battery && entry.name.as_str() == owned.battery)
-                .ok_or_else(|| {
-                    InstallError::Invalid(format!("battery {} is absent from the new generation", owned.battery))
-                })?;
-            let package = Package::read(&marketplace.join(entry.path.as_str()).join(appa_package::MANIFEST_FILE))
-                .map_err(|error| InstallError::Invalid(error.to_string()))?;
-            let Role::Battery(battery) = package.role else {
-                return Err(InstallError::Invalid("catalog battery has another role".into()));
-            };
-            let replacement = format!(
-                ".appa/{filename}/generations/{}/marketplace/{}/{}",
-                proposed.generation.commit(),
-                entry.path,
-                battery.policy
-            );
+            let (entry, battery) = battery_package(marketplace, &owned.battery)?;
+            let replacement = owned_include_path(filename, proposed.generation.commit(), &entry, &battery);
             let includes = document
                 .get_mut("include")
                 .and_then(toml_edit::Item::as_array_mut)
@@ -131,6 +113,17 @@ impl Selection {
         proposed.validate_packages(marketplace)?;
         *self = proposed;
         Ok(document.to_string())
+    }
+
+    /// The include path of a selected battery's policy as this selection retains
+    /// it, relative to the config `config` names.
+    pub fn owned_include(&self, config: &Path, marketplace: &Path, name: &PackageName) -> Result<String, InstallError> {
+        let filename = config
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| InstallError::Invalid("config filename must be UTF-8".into()))?;
+        let (entry, battery) = battery_package(marketplace, name.as_str())?;
+        Ok(owned_include_path(filename, self.commit(), &entry, &battery))
     }
 
     pub fn empty(generation: Generation, platform: Platform) -> Self {
@@ -205,6 +198,15 @@ impl Selection {
         if self.schema != 1 {
             return Err(InstallError::Invalid("unsupported selection schema".into()));
         }
+        if self
+            .generation
+            .build_artifacts()
+            .is_some_and(|build| build.platform() != self.platform)
+        {
+            return Err(InstallError::Invalid(
+                "the installed build was made for another platform".into(),
+            ));
+        }
         for name in self.plugins.iter().chain(&self.batteries) {
             PackageName::parse(name).map_err(|error| InstallError::Invalid(error.to_string()))?;
         }
@@ -239,9 +241,7 @@ impl Selection {
                     Role::Plugin(plugin) if package.name.as_str() == name => Some(plugin),
                     _ => None,
                 })
-                .ok_or_else(|| {
-                    InstallError::Invalid(format!("plugin {name} is absent from the selected generation"))
-                })?;
+                .ok_or_else(|| InstallError::Invalid(format!("plugin {name} is absent from the installed version")))?;
             if hosts.contains(&plugin.host()) {
                 return Err(InstallError::Invalid(
                     "two selected plugins target the same host".into(),
@@ -256,9 +256,7 @@ impl Selection {
                     Role::Battery(battery) if package.name.as_str() == name => Some(battery),
                     _ => None,
                 })
-                .ok_or_else(|| {
-                    InstallError::Invalid(format!("battery {name} is absent from the selected generation"))
-                })?;
+                .ok_or_else(|| InstallError::Invalid(format!("battery {name} is absent from the installed version")))?;
             if hosts.iter().any(|host| !battery.hosts.contains(host)) {
                 return Err(InstallError::Invalid(format!(
                     "battery {name} does not support every selected host"
@@ -469,7 +467,8 @@ impl Installation {
 
     /// Read-only inspection does not create directories or acquire a mutation
     /// lock. Atomic selection publication gives readers a complete record.
-    pub fn inspect(config: &Path) -> Result<Option<Selection>, InstallError> {
+    /// Where this config's installation keeps its state, whether or not it exists yet.
+    fn state_directory(config: &Path) -> Result<PathBuf, InstallError> {
         let path = std::path::absolute(config).map_err(|error| io("resolve config", config, error))?;
         let parent = path
             .parent()
@@ -481,10 +480,32 @@ impl Installation {
         for directory in [parent.join(".appa"), state.clone()] {
             require_directory_or_absent(&directory)?;
         }
+        Ok(state)
+    }
+
+    /// The marketplace tree retained for the selected generation: what a listing
+    /// reads offline, and what an install of this generation reads again.
+    pub fn retained_marketplace(config: &Path, selection: &Selection) -> Result<PathBuf, InstallError> {
+        let marketplace = Self::state_directory(config)?
+            .join("generations")
+            .join(selection.commit().as_str())
+            .join("marketplace");
+        if !marketplace.is_dir() {
+            return Err(InstallError::Invalid(format!(
+                "the installed version {} is not retained at {}; rerun: appa plugin install claude-code",
+                selection.commit(),
+                marketplace.display()
+            )));
+        }
+        Ok(marketplace)
+    }
+
+    pub fn inspect(config: &Path) -> Result<Option<Selection>, InstallError> {
+        let state = Self::state_directory(config)?;
         if optional_bytes(&state.join("transaction.json"))?.is_some() {
             return Err(InstallError::Recovery {
                 path: state.join("transaction.json"),
-                reason: "an installation transaction is pending; rerun the interrupted install".into(),
+                reason: "an earlier install was interrupted.".into(),
             });
         }
         read_selection(&state.join("active.json"))
@@ -634,7 +655,7 @@ impl Installation {
             archive
                 .append_dir_all("marketplace", &marketplace)
                 .map_err(|error| io("archive packages", &marketplace, error))?;
-            for name in acquisition::required_archives(selection.generation(), selection.requirements()) {
+            for name in acquisition::required_archives(selection.generation(), selection.requirements())? {
                 let digest = selection.generation().archives()[&name].clone();
                 let path = self.state.join("artifacts").join(digest.hex());
                 acquisition::verify_artifact(&path, &digest)?;
@@ -697,7 +718,7 @@ impl Installation {
             let cached = Generation::parse(&descriptor).map_err(|error| InstallError::Invalid(error.to_string()))?;
             if &cached != generation {
                 return Err(InstallError::Invalid(
-                    "one commit has conflicting generation descriptors".into(),
+                    "one commit has conflicting version descriptors".into(),
                 ));
             }
             verify_packages(&destination.join("marketplace"), generation)?;
@@ -864,7 +885,7 @@ impl Installation {
         let transaction: ConfigTransaction =
             serde_json::from_slice(&bytes).map_err(|error| InstallError::Recovery {
                 path: path.clone(),
-                reason: error.to_string(),
+                reason: format!("its record does not parse: {error}."),
             })?;
         transaction.selection.validate()?;
         let selected_claude = transaction.selection.plugins.contains("claude-code");
@@ -882,7 +903,7 @@ impl Installation {
         if !activation_matches {
             return Err(InstallError::Recovery {
                 path: path.clone(),
-                reason: "journal activation does not match its selected host".into(),
+                reason: "its record names an activation that does not match its selected host.".into(),
             });
         }
         let current = optional_bytes(&self.config)?;
@@ -912,7 +933,7 @@ impl Installation {
             };
             validate().map_err(|error| InstallError::Recovery {
                 path: path.clone(),
-                reason: error.to_string(),
+                reason: format!("{error}."),
             })?;
             if transaction.activation != Activation::None {
                 let activate = || {
@@ -941,7 +962,10 @@ impl Installation {
                 };
                 activate().map_err(|error| InstallError::Recovery {
                     path: path.clone(),
-                    reason: error.to_string(),
+                    reason: match error {
+                        InstallError::Recovery { reason, .. } => reason,
+                        other => format!("{other}."),
+                    },
                 })?;
             }
             let selected =
@@ -958,14 +982,14 @@ impl Installation {
                 kagent::remove_previous(self, previous, &transaction.selection).map_err(|error| {
                     InstallError::Recovery {
                         path: path.clone(),
-                        reason: error.to_string(),
+                        reason: format!("{error}."),
                     }
                 })?;
             }
         } else if current != transaction.before {
             return Err(InstallError::Recovery {
                 path,
-                reason: "config differs from both recorded states; resolve the manual edit before retrying".into(),
+                reason: "the config differs from both recorded states; resolve the manual edit before retrying.".into(),
             });
         }
         fs::remove_file(&path).map_err(|error| io("finish config transaction", &path, error))?;
@@ -1212,6 +1236,32 @@ fn verify_packages(root: &Path, generation: &Generation) -> Result<Vec<Package>,
     }
     appa_package::check_ownership(&packages).map_err(|error| InstallError::Invalid(error.to_string()))?;
     Ok(packages)
+}
+
+/// A battery of the catalog under `marketplace`, with its catalog entry.
+pub(crate) fn battery_package(marketplace: &Path, name: &str) -> Result<(PackageEntry, Battery), InstallError> {
+    let catalog = Marketplace::read(&marketplace.join("marketplace.toml"))
+        .map_err(|error| InstallError::Invalid(error.to_string()))?;
+    let entry = catalog
+        .packages
+        .into_iter()
+        .find(|entry| entry.kind == PackageKind::Battery && entry.name.as_str() == name)
+        .ok_or_else(|| InstallError::Invalid(format!("battery {name} is absent from this version")))?;
+    let package = Package::read(&marketplace.join(entry.path.as_str()).join(appa_package::MANIFEST_FILE))
+        .map_err(|error| InstallError::Invalid(error.to_string()))?;
+    match package.role {
+        Role::Battery(battery) => Ok((entry, battery)),
+        Role::Plugin(_) => Err(InstallError::Invalid(format!("{name} is not a battery"))),
+    }
+}
+
+/// The one spelling of an installer-owned include: the battery policy inside the
+/// retained marketplace of `commit`, relative to the config file's directory.
+fn owned_include_path(filename: &str, commit: &Commit, entry: &PackageEntry, battery: &Battery) -> String {
+    format!(
+        ".appa/{filename}/generations/{commit}/marketplace/{}/{}",
+        entry.path, battery.policy
+    )
 }
 
 #[cfg(test)]

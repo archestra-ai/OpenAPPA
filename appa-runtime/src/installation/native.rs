@@ -8,7 +8,7 @@ use std::process::ExitCode;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use appa_package::generation::{ArtifactDigest, Generation, Platform};
+use appa_package::generation::{ArtifactDigest, Artifacts, Generation, Platform};
 use serde::{Deserialize, Serialize};
 
 use super::{InstallError, Installation, acquisition, io, open_regular, require_directory_or_absent, sync_directory};
@@ -30,6 +30,8 @@ struct BinaryIdentity {
     commit: Option<String>,
     release: Option<String>,
     plugin_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    plugin_tree_sha256: Option<String>,
 }
 
 pub fn build_info() -> ExitCode {
@@ -39,6 +41,7 @@ pub fn build_info() -> ExitCode {
         commit: option_env!("APPA_BUILD_COMMIT").map(str::to_owned),
         release: option_env!("APPA_RELEASE_REF").map(str::to_owned),
         plugin_sha256: option_env!("APPA_PLUGIN_SHA256").map(str::to_owned),
+        plugin_tree_sha256: option_env!("APPA_PLUGIN_TREE_SHA256").map(str::to_owned),
     };
     let mut output = std::io::stdout().lock();
     match serde_json::to_writer(&mut output, &identity)
@@ -70,9 +73,10 @@ impl ClaudeArtifacts {
             ));
         }
         let archives = generation.archives();
-        let binary_digest = &archives[platform.archive()];
-        let plugin_name = format!("appa-plugin-{}.tar.gz", &generation.release()[1..]);
-        let plugin_digest = &archives[&plugin_name];
+        let binary_digest = archives
+            .get(platform.archive())
+            .ok_or_else(|| InstallError::Invalid("the installed version has no executable for this platform".into()))?;
+        let plugin_digest = &archives[&generation.plugin_archive()];
         let binary_archive = installation.state.join("artifacts").join(binary_digest.hex());
         let archive = installation.state.join("artifacts").join(plugin_digest.hex());
         acquisition::verify_artifact(&binary_archive, binary_digest)?;
@@ -114,14 +118,24 @@ impl ClaudeArtifacts {
         let identity: BinaryIdentity = serde_json::from_slice(&identity_output).map_err(|error| {
             InstallError::Invalid(format!("selected binary returned invalid build identity: {error}"))
         })?;
+        let same_artifacts = match generation.artifacts() {
+            Artifacts::Published(published) => {
+                identity.release.as_deref() == Some(published.release())
+                    && identity.plugin_sha256.as_deref() == Some(plugin_digest.hex())
+            }
+            Artifacts::Build(build) => {
+                identity.release.is_none()
+                    && identity.plugin_sha256.is_none()
+                    && identity.plugin_tree_sha256.as_deref() == Some(build.plugin_tree())
+            }
+        };
         if identity.schema != 1
             || identity.protocol != appa_package::PROTOCOL
             || identity.commit.as_deref() != Some(generation.commit().as_str())
-            || identity.release.as_deref() != Some(generation.release())
-            || identity.plugin_sha256.as_deref() != Some(plugin_digest.hex())
+            || !same_artifacts
         {
             return Err(InstallError::Invalid(
-                "selected runtime and native plugin do not belong to the same generation".into(),
+                "the selected runtime and native plugin do not belong to the same version".into(),
             ));
         }
         let destination = directory.join(binary_digest.hex());
@@ -278,6 +292,19 @@ fn spawn(
     })
 }
 
+/// The one line of a failed activation's stderr that says why: its last
+/// diagnostic, with the `appa: ` prefix and the progress lines (which end in
+/// `...`) left out. A child that said nothing is reported by its exit status.
+fn failure_cause(stderr: &str, status: std::process::ExitStatus) -> String {
+    stderr
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty() && !line.ends_with("..."))
+        .map(|line| line.strip_prefix("appa: ").unwrap_or(line).to_owned())
+        .map(|line| if line.ends_with('.') { line } else { format!("{line}.") })
+        .unwrap_or_else(|| format!("the selected binary exited with {status}."))
+}
+
 fn invoke(binary: &Path, arguments: &[&std::ffi::OsStr], timeout: Duration) -> Result<Vec<u8>, InstallError> {
     let mut stdout = tempfile::tempfile().map_err(|error| io("capture native result", binary, error))?;
     let mut stderr = tempfile::tempfile().map_err(|error| io("capture native diagnostics", binary, error))?;
@@ -359,7 +386,7 @@ fn invoke(binary: &Path, arguments: &[&std::ffi::OsStr], timeout: Duration) -> R
             .map_err(|error| io("read native diagnostics", binary, error))?;
         return Err(InstallError::Recovery {
             path: binary.to_owned(),
-            reason: format!("native command exited with {status}: {}", message.trim()),
+            reason: format!("activation failed: {}", failure_cause(&message, status)),
         });
     }
     #[cfg(windows)]

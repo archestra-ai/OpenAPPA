@@ -67,7 +67,7 @@ fn the_complete_battery_examples_open() {
     opens(&repo_root().join("examples/test-github-battery/github-battery-test.toml"));
 }
 
-/// The initialized default with the Claude Code battery included, as `appa init` composes
+/// The initialized default with the Claude Code battery included, as `appa plugin install claude-code` composes
 /// them: the battery's rules run before the default's.
 #[cfg(unix)]
 fn composed_with_the_battery(dir: &tempfile::TempDir) -> Config {

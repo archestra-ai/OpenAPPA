@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 mod common;
 use common::{repo_root, stage_bundle};
 
-/// The key of the policy a first install writes: the shipped default, which
-/// composes to the same bytes wherever it is loaded from.
+/// The key of the policy the fixture's config carries: the shipped default,
+/// which composes to the same bytes wherever it is loaded from.
 fn default_policy_key() -> String {
     let example = repo_root().join("marketplace/plugins/claude-code/default.appa.toml");
     let config = Config::load(&example).expect("the shipped default loads");
@@ -43,19 +43,35 @@ fn install_fake_curl(bin: &Path) {
     executable(&curl);
 }
 
+/// The staged plugin tree of this checkout, packed as the archive a development
+/// build's generation carries and its activation verifies by tree digest.
+fn pack_bundle(root: &Path) -> PathBuf {
+    let staged = stage_bundle(root);
+    let archive = root.join("plugin-source.tar.gz");
+    let file = fs::File::create(&archive).expect("the archive is created");
+    let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(file, flate2::Compression::fast()));
+    builder.append_dir_all(".", &staged).expect("the staged tree packs");
+    builder
+        .into_inner()
+        .and_then(flate2::write::GzEncoder::finish)
+        .expect("the archive is finished");
+    archive
+}
+
 fn runtime_fingerprint(deployed: &Path) -> String {
     let digest = Sha256::digest(fs::read(deployed).expect("runtime bytes"));
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Where init deploys the harness binary: private to appa, never on PATH.
+/// Where activation deploys the harness binary: private to appa, never on PATH.
 fn deployed_binary(data: &Path) -> std::path::PathBuf {
     data.join("bin/appa")
 }
 
 /// One isolated install: private home, install, config, data and Claude
-/// directories, fake `claude` and `curl` first on PATH, and the installed-plugin
-/// directory the fake registry points at, carrying the fixture starter.
+/// directories, fake `claude` and `curl` first on PATH, the installed-plugin
+/// directory the fake registry points at, carrying the fixture starter, and the
+/// config the marketplace would have written, holding the shipped default.
 struct Fixture {
     _directory: tempfile::TempDir,
     root: PathBuf,
@@ -65,7 +81,7 @@ struct Fixture {
     claude: PathBuf,
     plugin: PathBuf,
     appa: PathBuf,
-    source: PathBuf,
+    archive: PathBuf,
 }
 
 impl Fixture {
@@ -89,29 +105,36 @@ impl Fixture {
             executable(&target);
         }
         fs::write(plugin.join("statusline.sh"), "#!/bin/sh\nexit 0\n").expect("statusline");
-        let source = stage_bundle(&root);
+        let config = root.join("config");
+        fs::create_dir_all(&config).expect("config directory");
+        fs::write(config.join("appa.toml"), shipped_default_config()).expect("the config is written");
+        let archive = pack_bundle(&root);
         Self {
             _directory: directory,
-            config: root.join("config"),
+            config,
             data: root.join("data"),
             root,
             bin,
             claude,
             plugin,
             appa,
-            source,
+            archive,
         }
     }
 
-    /// `appa init claude-code` against this fixture, with the endpoint answering
-    /// as this deployment's own healthy runtime serving the policy init writes.
-    /// A test overrides the `FAKE_*` variables for the case it reproduces.
-    fn init(&self) -> Command {
+    /// `appa activate-claude` against this fixture, as `appa plugin install
+    /// claude-code` runs it once the generation is retained, with the endpoint
+    /// answering as this deployment's own healthy runtime serving the fixture's
+    /// policy. A test overrides the `FAKE_*` variables for the case it reproduces.
+    fn activate(&self) -> Command {
         let mut command = Command::new(&self.appa);
         command
             .current_dir(&self.root)
-            .args(["init", "claude-code", "--plugin-source"])
-            .arg(&self.source)
+            .arg("activate-claude")
+            .arg("--config")
+            .arg(self.config.join("appa.toml"))
+            .arg("--archive")
+            .arg(&self.archive)
             .env(
                 "PATH",
                 format!("{}:{}", self.bin.display(), std::env::var("PATH").unwrap_or_default()),
@@ -148,11 +171,23 @@ impl Fixture {
     }
 }
 
+/// The release workflow proves a released binary ignores `APPA_ENDPOINT` by
+/// running activation against a config that does not exist: the endpoint is
+/// settled first, so a build that reads the seam refuses the value, and one
+/// that ignores it fails on the config. Home and directory variables are
+/// removed so nothing outside the fixture is reached either way.
 #[test]
 fn release_override_probe_reaches_endpoint_before_deployment_paths() {
     let fixture = Fixture::new();
     for endpoint in ["http://127.0.0.1:0", "http://127.0.0.1:8787"] {
-        let mut command = fixture.init();
+        let mut command = Command::new(&fixture.appa);
+        command
+            .current_dir(&fixture.root)
+            .arg("activate-claude")
+            .arg("--config")
+            .arg("./no-such-dir/appa.toml")
+            .arg("--archive")
+            .arg("./no-such-archive.tar.gz");
         for variable in [
             "HOME",
             "USERPROFILE",
@@ -173,12 +208,12 @@ fn release_override_probe_reaches_endpoint_before_deployment_paths() {
         let expected = if cfg!(debug_assertions) && endpoint.ends_with(":0") {
             "is not a usable runtime endpoint"
         } else {
-            "cannot find a home directory; set HOME or the relevant APPA directory variables"
+            "does not load"
         };
         assert!(stderr.contains(expected), "{stderr}");
-        assert!(!fixture.config.exists());
         assert!(!fixture.data.exists());
         assert!(!fixture.root.join("claude.log").exists());
+        assert!(!fixture.root.join("no-such-dir").exists());
     }
 }
 
@@ -202,11 +237,11 @@ impl Installed {
     }
 }
 
-/// An install a previous init left, with bytes of its own in every file a later
-/// init rewrites, so a restore that merely reinstalls this build is told apart
-/// from one that puts the previous files back.
+/// An install a previous activation left, with bytes of its own in every file a
+/// later activation rewrites, so a restore that merely reinstalls this build is
+/// told apart from one that puts the previous files back.
 fn previous_install(fixture: &Fixture) -> Installed {
-    assert!(fixture.init().output().expect("appa init runs").status.success());
+    assert!(fixture.activate().output().expect("appa activates").status.success());
     fs::write(fixture.deployed_binary(), b"the previous build").expect("the previous binary is written");
     fs::write(fixture.statusline(), b"the previous statusline").expect("the previous statusline is written");
     let settings = fs::read_to_string(fixture.settings()).expect("settings are readable");
@@ -216,14 +251,14 @@ fn previous_install(fixture: &Fixture) -> Installed {
 }
 
 fn launcher_is_armed(fixture: &Fixture) -> bool {
-    fs::read_to_string(fixture.bin.join("clappa")).is_ok_and(|launcher| !launcher.contains("init did not complete"))
+    fs::read_to_string(fixture.bin.join("clappa")).is_ok_and(|launcher| !launcher.contains("did not complete"))
 }
 
 #[test]
 fn launcher_uses_the_install_directory_not_the_source_binary_cache() {
     let fixture = Fixture::new();
     let launchers = fixture.root.join("launchers");
-    let output = fixture.init().env("APPA_INSTALL_DIR", &launchers).output().unwrap();
+    let output = fixture.activate().env("APPA_INSTALL_DIR", &launchers).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(launchers.join("clappa").is_file());
     assert!(!fixture.bin.join("clappa").exists());
@@ -237,7 +272,7 @@ fn a_failure_before_the_statusline_puts_the_previous_binary_back() {
     // binary has already been replaced.
     fs::remove_file(fixture.plugin.join("statusline.sh")).expect("the plugin statusline is removed");
 
-    let failed = fixture.init().output().expect("appa init runs");
+    let failed = fixture.activate().output().expect("appa activates");
 
     assert!(!failed.status.success());
     assert_eq!(Installed::of(&fixture), before);
@@ -254,10 +289,10 @@ fn a_failure_at_the_start_puts_the_previous_statusline_back() {
     let before = previous_install(&fixture);
 
     let failed = fixture
-        .init()
+        .activate()
         .env("FAKE_STARTER_FAILS", "1")
         .output()
-        .expect("appa init runs");
+        .expect("appa activates");
 
     assert!(!failed.status.success());
     assert_eq!(Installed::of(&fixture), before);
@@ -272,12 +307,12 @@ fn a_failure_at_the_start_puts_the_previous_statusline_back() {
 /// it. A concurrent init, or one that crashed mid-switch, may still need its own,
 /// so a successful init removes only the one it made.
 #[test]
-fn another_inits_rollback_source_survives_a_successful_init() {
+fn another_activations_rollback_source_survives_a_successful_activation() {
     let fixture = Fixture::new();
     let other = fixture.data.join(".appa-init-recovery-424242");
     fs::create_dir_all(other.join("plugin")).expect("the other rollback source is written");
-    assert!(fixture.init().output().expect("appa init runs").status.success());
-    let upgrade = fixture.init().output().expect("appa init runs");
+    assert!(fixture.activate().output().expect("appa activates").status.success());
+    let upgrade = fixture.activate().output().expect("appa activates");
     assert!(upgrade.status.success(), "{}", String::from_utf8_lossy(&upgrade.stderr));
 
     assert!(
@@ -301,14 +336,14 @@ fn another_inits_rollback_source_survives_a_successful_init() {
 /// cannot be reconciled, so init fails and binds nothing to it rather than
 /// reporting it healthy.
 #[test]
-fn a_policy_key_timeout_fails_init() {
+fn a_policy_key_timeout_fails_activation() {
     let fixture = Fixture::new();
 
     let failed = fixture
-        .init()
+        .activate()
         .env("FAKE_POLICY_KEY_TIMEOUT", "1")
         .output()
-        .expect("appa init runs");
+        .expect("appa activates");
 
     assert!(!failed.status.success());
     assert_eq!(
@@ -327,16 +362,16 @@ fn a_policy_key_timeout_fails_init() {
 /// the runtime it started is stopped, and no file or registration it wrote
 /// survives to bind a session to a runtime whose policy init could not settle.
 #[test]
-fn a_failure_after_the_start_stops_the_runtime_init_started() {
+fn a_failure_after_the_start_stops_the_runtime_activation_started() {
     let fixture = Fixture::new();
     let stand_in = fixture.root.join("stand-in");
 
     let failed = fixture
-        .init()
+        .activate()
         .env("FAKE_RUNTIME_STAND_IN", &stand_in)
         .env_remove("FAKE_POLICY_KEY")
         .output()
-        .expect("appa init runs");
+        .expect("appa activates");
 
     assert!(!failed.status.success());
     let pid: i32 = fs::read_to_string(stand_in.join("pid"))
@@ -366,17 +401,8 @@ fn a_failure_after_the_start_stops_the_runtime_init_started() {
     assert!(!fixture.bin.join("clappa").exists());
 }
 
-#[test]
-fn the_plugin_source_override_is_hidden_from_normal_help() {
-    let output = Command::new(env!("CARGO_BIN_EXE_appa"))
-        .args(["init", "claude-code", "--help"])
-        .output()
-        .expect("appa help runs");
-    assert!(output.status.success());
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("plugin-source"));
-}
-
-/// The shipped default config, byte for byte: what a first init seeds.
+/// The shipped default config, byte for byte: what the marketplace writes on a
+/// first install, and what the fixture's config holds.
 fn shipped_default_config() -> String {
     fs::read_to_string(repo_root().join("marketplace/plugins/claude-code/default.appa.toml"))
         .expect("the shipped default is readable")
@@ -395,20 +421,20 @@ fn registered_copies(fixture: &Fixture) -> Option<usize> {
         .map(Vec::len)
 }
 
-fn successful_init(fixture: &Fixture) {
-    let output = fixture.init().output().expect("appa init runs");
+fn successful_activation(fixture: &Fixture) {
+    let output = fixture.activate().output().expect("appa activates");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 }
 
 #[test]
-fn a_first_init_installs_the_bundle_and_registers_one_plugin() {
+fn a_first_activation_installs_the_bundle_and_registers_one_plugin() {
     let fixture = Fixture::new();
     let reloads = fixture.root.join("reloads");
     let output = fixture
-        .init()
+        .activate()
         .env("FAKE_RELOADS", &reloads)
         .output()
-        .expect("appa init runs");
+        .expect("appa activates");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 
     // The harness binary lands on an appa-private path, not on PATH, and the
@@ -441,7 +467,7 @@ fn a_first_init_installs_the_bundle_and_registers_one_plugin() {
 #[test]
 fn a_rerun_keeps_the_config_and_replaces_the_plugin_once() {
     let fixture = Fixture::new();
-    successful_init(&fixture);
+    successful_activation(&fixture);
     let config = fixture.config.join("appa.toml");
     let authored = format!(
         "{}\n# an edit init keeps\n",
@@ -449,7 +475,7 @@ fn a_rerun_keeps_the_config_and_replaces_the_plugin_once() {
     );
     fs::write(&config, &authored).expect("the edit is written");
 
-    successful_init(&fixture);
+    successful_activation(&fixture);
 
     assert_eq!(fs::read_to_string(&config).ok(), Some(authored));
     assert_eq!(registered_copies(&fixture), Some(1));
@@ -470,15 +496,15 @@ fn a_rerun_keeps_the_config_and_replaces_the_plugin_once() {
 #[test]
 fn a_failed_switch_restores_the_registered_plugin_and_the_launcher() {
     let fixture = Fixture::new();
-    successful_init(&fixture);
+    successful_activation(&fixture);
     let before = Installed::of(&fixture);
 
     for failure in ["marketplace-add", "plugin-install"] {
         let failed = fixture
-            .init()
+            .activate()
             .env("FAKE_CLAUDE_FAIL_ONCE", failure)
             .output()
-            .expect("appa init runs");
+            .expect("appa activates");
         assert!(!failed.status.success(), "the injected {failure} failure must surface");
         assert_eq!(
             Installed::of(&fixture),
@@ -504,7 +530,7 @@ fn a_failed_switch_restores_the_registered_plugin_and_the_launcher() {
 #[test]
 fn a_foreign_runtime_is_refused_before_claude_is_touched() {
     let fixture = Fixture::new();
-    successful_init(&fixture);
+    successful_activation(&fixture);
     let fingerprint = runtime_fingerprint(&fixture.appa);
     let mine = fixture.config.join("appa.toml");
 
@@ -514,11 +540,11 @@ fn a_foreign_runtime_is_refused_before_claude_is_touched() {
     ] {
         let before = claude_calls(&fixture).lines().count();
         let refused = fixture
-            .init()
+            .activate()
             .env("FAKE_RUNTIME_FINGERPRINT", build)
             .env("FAKE_RUNTIME_CONFIG", serving)
             .output()
-            .expect("appa init runs");
+            .expect("appa activates");
         assert!(
             !refused.status.success(),
             "a runtime claiming build {build} at {} must be refused",
@@ -542,40 +568,41 @@ fn a_foreign_runtime_is_refused_before_claude_is_touched() {
 }
 
 #[test]
-fn a_failed_rollback_disarms_the_launcher_until_an_init_completes() {
+fn a_failed_rollback_disarms_the_launcher_until_an_activation_completes() {
     let fixture = Fixture::new();
-    successful_init(&fixture);
+    successful_activation(&fixture);
 
     let unrecoverable = fixture
-        .init()
+        .activate()
         .env("FAKE_CLAUDE_FAIL_ONCE", "plugin-install-always")
         .output()
-        .expect("appa init runs");
+        .expect("appa activates");
     assert!(!unrecoverable.status.success());
     assert!(
         !launcher_is_armed(&fixture),
         "a failed rollback must leave clappa refusing to launch an unprotected session",
     );
 
-    successful_init(&fixture);
+    successful_activation(&fixture);
     assert!(launcher_is_armed(&fixture));
 }
 
 /// A runtime of this deployment that survived the install keeps serving the policy it
-/// loaded at startup, and only the install can notice. Nothing here is interactive, so the
-/// reconcile reloads rather than asks.
+/// loaded at startup, and only the install can notice. Nothing is asked: the reconcile
+/// reloads, and the runtime must then answer with the policy it was asked to load.
 #[test]
-fn init_reloads_a_surviving_runtime_that_serves_an_older_policy() {
+fn activation_reloads_a_surviving_runtime_that_serves_an_older_policy() {
     let fixture = Fixture::new();
     let reloads = fixture.root.join("reloads");
     let output = fixture
-        .init()
-        // This deployment's own runtime, serving a policy that is not the file init
-        // wrote: the one state a reload is for.
-        .env("FAKE_POLICY_KEY", "a-policy-this-init-did-not-compose")
+        .activate()
+        // This deployment's own runtime, serving a policy that is not the file the
+        // marketplace wrote: the one state a reload is for.
+        .env("FAKE_POLICY_KEY", "a-policy-this-activation-did-not-compose")
+        .env("FAKE_POLICY_KEY_AFTER_RELOAD", default_policy_key())
         .env("FAKE_RELOADS", &reloads)
         .output()
-        .expect("appa init runs");
+        .expect("appa activates");
 
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(
@@ -585,12 +612,12 @@ fn init_reloads_a_surviving_runtime_that_serves_an_older_policy() {
 }
 
 #[test]
-fn init_keeps_a_custom_statusline() {
+fn activation_keeps_a_custom_statusline() {
     let fixture = Fixture::new();
     let custom = serde_json::json!({"statusLine": {"type": "command", "command": "my-status"}});
     fs::write(fixture.settings(), custom.to_string()).expect("custom settings");
 
-    successful_init(&fixture);
+    successful_activation(&fixture);
 
     let settings: serde_json::Value =
         serde_json::from_slice(&fs::read(fixture.settings()).expect("settings remain")).expect("settings JSON");
@@ -608,7 +635,7 @@ fn relative_directory_overrides_are_rendered_absolute() {
     let fixture = Fixture::new();
     let root = &fixture.root;
     let output = fixture
-        .init()
+        .activate()
         // Relative, resolved against the fixture's working directory and no other.
         .env("APPA_INSTALL_DIR", "bin")
         .env("APPA_CONFIG_DIR", "config")
@@ -616,7 +643,7 @@ fn relative_directory_overrides_are_rendered_absolute() {
         // The deployment the answering runtime claims: this init's own config.
         .env("FAKE_RUNTIME_CONFIG", root.join("config/appa.toml"))
         .output()
-        .expect("appa init runs");
+        .expect("appa activates");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 
     let deployment = fs::read_dir(root.join("state/deployments"))
@@ -655,12 +682,12 @@ fn relative_directory_overrides_are_rendered_absolute() {
 fn a_runtime_that_fails_verification_after_the_switch_undoes_it() {
     let fixture = Fixture::new();
     let output = fixture
-        .init()
+        .activate()
         // The preflight sees this build; everything after it sees a stranger.
         .env("FAKE_CURL_CALLS", fixture.root.join("curl-calls"))
         .env("FAKE_RUNTIME_FINGERPRINT_LATER", "not-this-build")
         .output()
-        .expect("appa init runs");
+        .expect("appa activates");
 
     assert!(
         !output.status.success(),

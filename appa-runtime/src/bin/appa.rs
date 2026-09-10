@@ -68,12 +68,6 @@ enum Command {
         check: bool,
     },
 
-    /// Initialize OpenAPPA for an agent harness.
-    Init {
-        #[command(subcommand)]
-        harness: Harness,
-    },
-
     /// Replay trace files against a policy and check every expectation.
     Replay {
         #[arg(long, env = "APPA_CONFIG")]
@@ -146,16 +140,6 @@ enum PluginCommand {
     Remove(appa_runtime::installation::cli::PluginRemove),
 }
 
-#[derive(Subcommand)]
-enum Harness {
-    /// Install this build's Claude Code plugin and initialize its local deployment.
-    ClaudeCode {
-        /// Developer override: a staged marketplace root to deploy.
-        #[arg(long, hide = true)]
-        plugin_source: Option<String>,
-    },
-}
-
 fn main() -> ExitCode {
     if env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("runtime")) {
         let args = iter::once(OsString::from("appa runtime")).chain(env::args_os().skip(2));
@@ -188,7 +172,7 @@ fn main() -> ExitCode {
             config,
             archive,
             previous_binary,
-        } => match appa_runtime::init::claude_code_prepared(&config, &archive, previous_binary.as_deref()) {
+        } => match appa_runtime::init::activate_claude_code(&config, &archive, previous_binary.as_deref()) {
             Ok(_) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("appa: {error}");
@@ -251,20 +235,5 @@ fn main() -> ExitCode {
                 ExitCode::SUCCESS
             }
         }
-        Command::Init {
-            harness: Harness::ClaudeCode { plugin_source },
-        } if plugin_source.is_none() => appa_runtime::installation::cli::init_claude_code(),
-        Command::Init {
-            harness: Harness::ClaudeCode { plugin_source },
-        } => match appa_runtime::init::claude_code(plugin_source.as_deref()) {
-            Ok(description) => {
-                print!("{description}");
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                eprintln!("appa: {error}");
-                ExitCode::FAILURE
-            }
-        },
     }
 }

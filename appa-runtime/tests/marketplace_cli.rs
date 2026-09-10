@@ -29,20 +29,76 @@ fn run(root: &Path, args: &[&str]) -> Output {
     child.wait_with_output().unwrap()
 }
 
+/// Before any install, a listing shows what this build can install: the whole
+/// catalog of its own tree, offline, none of it installed. It reads state only.
 #[test]
-fn local_list_is_structured_and_does_not_initialize_an_installation() {
+fn local_list_shows_this_builds_catalog_and_does_not_initialize_an_installation() {
     let root = tempfile::tempdir().unwrap();
-    for kind in ["plugin", "battery"] {
+    for (kind, expected) in [("plugin", "claude-code"), ("battery", "github")] {
         let output = run(root.path(), &[kind, "list", "--json"]);
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(document["status"], "ok");
         assert_eq!(document["operation"], format!("{kind}.list"));
-        assert_eq!(document["result"]["packages"], serde_json::json!([]));
+        assert_eq!(document["result"]["deployment"], "absent");
+        assert!(
+            matches!(
+                document["result"]["catalog"]["source"].as_str(),
+                Some("build" | "checkout")
+            ),
+            "{document}"
+        );
+        let packages = document["result"]["packages"].as_array().unwrap();
+        assert!(packages.iter().any(|package| package["name"] == expected), "{document}");
+        for package in packages {
+            assert_eq!(package["installed"], false);
+            assert!(package["description"].as_str().is_some_and(|text| !text.is_empty()));
+        }
         assert!(document.get("error").is_none());
         assert!(output.stderr.is_empty());
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
+    let text = run(root.path(), &["plugin", "list"]);
+    assert!(text.status.success());
+    assert!(text.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&text.stdout).lines().count() > 1);
+}
+
+/// An install with no name orients instead of mutating: the exit is the parser's,
+/// stdout stays empty in text mode and carries the usage envelope in JSON mode,
+/// and no state is created.
+#[test]
+fn install_without_a_name_orients_and_changes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    for kind in ["plugin", "battery"] {
+        let output = run(root.path(), &[kind, "install"]);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(!output.stderr.is_empty());
+        let output = run(root.path(), &[kind, "install", "--json"]);
+        assert_eq!(output.status.code(), Some(2));
+        let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(document["error"]["code"], "usage");
+        assert!(output.stderr.is_empty());
+    }
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn list_names_the_deployment_state() {
+    let root = tempfile::tempdir().unwrap();
+    let document = |output: Output| -> serde_json::Value { serde_json::from_slice(&output.stdout).unwrap() };
+    let absent = document(run(root.path(), &["battery", "list", "--json"]));
+    assert_eq!(absent["result"]["deployment"], "absent");
+    std::fs::create_dir_all(root.path().join("config")).unwrap();
+    std::fs::write(root.path().join("config/appa.toml"), b"").unwrap();
+    let unmanaged = document(run(root.path(), &["battery", "list", "--json"]));
+    assert_eq!(unmanaged["result"]["deployment"], "unmanaged");
+    assert!(
+        unmanaged["result"]["packages"]
+            .as_array()
+            .is_some_and(|packages| packages.iter().all(|package| package["installed"] == false))
+    );
 }
 
 #[test]
@@ -208,10 +264,12 @@ fn invalid_install_input_is_refused_before_creating_state_or_contacting_a_host()
 }
 
 fn deployment(root: &Path) -> std::path::PathBuf {
-    deployment_for(root, false)
+    deployment_for(root, None)
 }
 
-fn deployment_for(root: &Path, kagent: bool) -> std::path::PathBuf {
+/// `kagent` stages the real kagent plugin beside the github battery; the slice
+/// is the battery list its manifest includes.
+fn deployment_for(root: &Path, kagent: Option<&[&str]>) -> std::path::PathBuf {
     use appa_package::generation::{ArtifactDigest, Generation, Image, Platform, REPOSITORY};
     use appa_runtime::installation::{Installation, Selection};
     use std::collections::BTreeMap;
@@ -232,7 +290,7 @@ fn deployment_for(root: &Path, kagent: bool) -> std::path::PathBuf {
         "schema=1\nname='appa'\n[packages.battery.github]\npath='batteries/github'\ndigest='{}'\n",
         appa_package::TreeDigest::of_tree(&battery).unwrap()
     );
-    if kagent {
+    if let Some(included) = kagent {
         let plugin_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace/plugins/kagent");
         let plugin = source.join("plugins/kagent");
         std::fs::create_dir_all(&plugin).unwrap();
@@ -244,6 +302,19 @@ fn deployment_for(root: &Path, kagent: bool) -> std::path::PathBuf {
                     std::fs::copy(entry.absolute, target).unwrap();
                 }
             }
+        }
+        if !included.is_empty() {
+            let manifest = plugin.join("appa-package.toml");
+            let quoted: Vec<String> = included.iter().map(|name| format!("'{name}'")).collect();
+            let text = std::fs::read_to_string(&manifest).unwrap();
+            std::fs::write(
+                &manifest,
+                text.replace(
+                    "[plugin]\n",
+                    &format!("[plugin]\nbatteries = [{}]\n", quoted.join(", ")),
+                ),
+            )
+            .unwrap();
         }
         catalog.push_str(&format!(
             "[packages.plugin.kagent]\npath='plugins/kagent'\ndigest='{}'\n",
@@ -274,7 +345,7 @@ fn deployment_for(root: &Path, kagent: bool) -> std::path::PathBuf {
 #[test]
 fn kagent_prepares_updates_roundtrips_offline_and_removes_without_host_activation() {
     let source = tempfile::tempdir().unwrap();
-    let config = deployment_for(source.path(), true);
+    let config = deployment_for(source.path(), Some(&[]));
     let config_name = config.to_str().unwrap();
     let invoke = |args: &[&str]| {
         let output = run(source.path(), args);
@@ -359,6 +430,44 @@ fn kagent_prepares_updates_roundtrips_offline_and_removes_without_host_activatio
         invoke(&["plugin", "remove", "kagent", "--config", config_name, "--json"])["result"]["state"],
         "unchanged"
     );
+}
+
+/// A first plugin install selects the batteries its manifest includes; a later
+/// install respects the person's removal of one.
+#[test]
+fn a_first_plugin_install_includes_the_batteries_its_manifest_names_once() {
+    let source = tempfile::tempdir().unwrap();
+    let config = deployment_for(source.path(), Some(&["github"]));
+    let config_name = config.to_str().unwrap();
+    let invoke = |args: &[&str]| {
+        let output = run(source.path(), args);
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let installed = invoke(&["plugin", "install", "kagent", "--config", config_name, "--json"]);
+    assert_eq!(installed["result"]["batteries"], serde_json::json!(["github"]));
+    let listed = invoke(&["battery", "list", "--config", config_name, "--json"]);
+    assert_eq!(listed["result"]["packages"][0]["name"], "github");
+    assert_eq!(listed["result"]["packages"][0]["installed"], true);
+    let effective = appa_runtime::config::Config::load(&config).unwrap();
+    assert!(
+        effective.policy_file().value()["tool"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"].as_str() == Some("mcp/github/read"))
+    );
+
+    invoke(&["battery", "remove", "github", "--config", config_name, "--json"]);
+    let again = invoke(&["plugin", "install", "kagent", "--config", config_name, "--json"]);
+    assert_eq!(again["result"]["batteries"], serde_json::json!([]));
+    let listed = invoke(&["battery", "list", "--config", config_name, "--json"]);
+    assert_eq!(listed["result"]["packages"][0]["installed"], false);
 }
 
 #[test]

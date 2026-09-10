@@ -13,7 +13,7 @@ You need Claude Code and `curl`.
 
 ```sh
 curl -fsSL https://openappa.com/install.sh | sh
-~/.local/bin/appa init claude-code
+~/.local/bin/appa plugin install claude-code
 ```
 
 The installer downloads the release binary for your Linux or macOS machine,
@@ -21,13 +21,16 @@ verifies its checksum, and places `appa` in `~/.local/bin`. It prints a hint
 when that directory is not on your `PATH`. Set `APPA_VERSION` to a release tag
 to install that release instead of the latest one. On Windows, unpack the zip
 from the [releases page](https://github.com/archestra-ai/OpenAPPA/releases)
-and run `appa init claude-code` from it. From a checkout, `cargo install --path
-appa-runtime --force` builds the binary instead of downloading one.
+and run `appa plugin install claude-code` from it. From a checkout, `cargo
+install --path appa-runtime --force` builds the binary instead of downloading
+one.
 
-Initialization prints progress while it resolves the matching plugin, updates
-Claude Code, and starts the runtime. If a different APPA build already owns the
-runtime endpoint, it asks before stopping that process; an unidentified
-listener is never stopped automatically.
+The install prints progress while it selects the version, updates Claude Code,
+and starts the runtime, and it never prompts. A release binary installs the
+version published for its tag; a checkout build installs its own plugin tree,
+exported from the commit it was built from. If a different APPA
+deployment already owns the runtime endpoint, the install refuses and names the
+process to stop. An unidentified listener is never stopped automatically.
 
 Initialization installs `clappa` beside `appa` so the short command works below.
 
@@ -177,7 +180,7 @@ rm -rf ~/.local/share/appa/bin ~/.local/share/appa/deployments ~/.local/share/ap
 rm -f ~/.local/bin/appa ~/.local/bin/clappa ~/.local/bin/appa-statusline.sh
 rm -f ~/.cargo/bin/clappa && cargo uninstall appa   # checkout builds only
 
-# drop the statusline entry appa init wrote, and keep one of your own:
+# drop the statusline entry the install wrote, and keep one of your own:
 jq 'if (.statusLine.command? // "") | test("appa-statusline") then del(.statusLine) else . end' \
   ~/.claude/settings.json > ~/.claude/settings.json.new &&
   mv ~/.claude/settings.json.new ~/.claude/settings.json

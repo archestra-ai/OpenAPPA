@@ -1,10 +1,10 @@
 //! Marketplace command presentation. These commands never read stdin.
 
-use std::io::{self, Write};
-use std::path::PathBuf;
+use std::io::{self, BufRead, IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use appa_package::generation::{ArtifactDigest, Platform};
+use appa_package::generation::{ArtifactDigest, Commit, Generation, Platform};
 use appa_package::{Marketplace, PackageKind, PackageName, Role};
 use clap::Args;
 use serde::Serialize;
@@ -28,13 +28,12 @@ impl Target {
 }
 
 #[derive(Debug, Args)]
-#[command(after_help = "Examples:\n  appa plugin list\n  appa battery list --config ./deployment/appa.toml --json")]
+#[command(
+    after_help = "Examples:\n  appa plugin list\n  appa battery list --config ./deployment/appa.toml --json\n\nLists every package in the catalog with its status. The catalog is the one\nretained for the installed version, read offline; before a first install it is\nthis build's own, which a release binary fetches."
+)]
 pub struct List {
     #[command(flatten)]
     target: Target,
-    /// Fetch the official catalog for the selected generation. Otherwise offline.
-    #[arg(long)]
-    available: bool,
 }
 
 #[derive(Debug, Args)]
@@ -51,15 +50,23 @@ pub struct Bundle {
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  appa plugin install claude-code\n  appa plugin install kagent --config ./deployment/appa.toml --runtime both\n  appa plugin install claude-code --from ./appa-bundle.tar.gz --sha256 <trusted-sha256>\n\nClaude registration activates and verifies its runtime. Kagent prepares local\nHelm values, Agent snippets and image checks; it does not deploy to a cluster.\nNever prompts. An explicit revision updates the entire selected generation;\na bundle restores its selection."
+    after_help = "Examples:\n  appa plugin install claude-code\n  appa plugin install kagent --config ./deployment/appa.toml --runtime both\n  appa plugin install claude-code --from ./appa-bundle.tar.gz --sha256 <trusted-sha256>\n\nClaude registration activates and verifies its runtime. Kagent prepares local\nHelm values, Agent snippets and image checks; it does not deploy to a cluster.\nNever prompts. An explicit revision moves the whole deployment to that version;\na bundle restores its selection."
 )]
 pub struct Install {
-    /// Host plugin to install.
+    /// Host plugin to install. Omitted, the catalog is listed instead.
     #[arg(value_parser = ["claude-code", "kagent"])]
-    name: String,
+    name: Option<String>,
     /// Kagent agent runtimes to prepare; both on first install, otherwise retained.
     #[arg(long, value_enum)]
     runtime: Option<super::kagent_images::KagentRuntime>,
+    /// Let the agent report its own blocked calls to the OpenAPPA team through the
+    /// `yell` tool. Written into the policy a first install creates; a later install
+    /// keeps the config as it is. Without either flag, a terminal is asked.
+    #[arg(long, conflicts_with = "no_agent_yell")]
+    agent_yell: bool,
+    /// Keep agent reporting off in the policy a first install creates, without asking.
+    #[arg(long)]
+    no_agent_yell: bool,
     #[command(flatten)]
     target: Target,
     #[command(flatten)]
@@ -71,9 +78,9 @@ pub struct Install {
     after_help = "Examples:\n  appa battery install github\n  appa battery install github --config ./deployment/appa.toml --server work-github\n\nAdds the policy include in this operation. Does not create an MCP connection,\nenable tools, acquire credentials, or activate optional authority bindings."
 )]
 pub struct BatteryInstall {
-    /// Policy battery to add to this deployment.
+    /// Policy battery to add to this deployment. Omitted, the catalog is listed instead.
     #[arg(value_parser = package_name)]
-    name: PackageName,
+    name: Option<PackageName>,
     #[command(flatten)]
     target: Target,
     #[command(flatten)]
@@ -113,7 +120,7 @@ pub fn remove_plugin(args: PluginRemove) -> ExitCode {
             }
             Ok(Some(current)) if !current.plugins.contains(&args.name) => {
                 return Ok((
-                    Some(current.commit().to_string()),
+                    Some(Version::of(current.generation())),
                     serde_json::json!({"plugin":args.name,"state":"unchanged"}),
                 ));
             }
@@ -129,7 +136,7 @@ pub fn remove_plugin(args: PluginRemove) -> ExitCode {
         };
         if !selection.plugins.contains(&args.name) {
             return Ok((
-                Some(selection.commit().to_string()),
+                Some(Version::of(selection.generation())),
                 serde_json::json!({"plugin":args.name,"state":state}),
             ));
         }
@@ -141,7 +148,7 @@ pub fn remove_plugin(args: PluginRemove) -> ExitCode {
         eprintln!("appa: verifying ownership and removing {} support...", args.name);
         installation.commit_installation(Some(&before), &before, &selection)?;
         Ok((
-            Some(selection.commit().to_string()),
+            Some(Version::of(selection.generation())),
             serde_json::json!({"plugin":args.name,"state":"removed","runtime":"kept"}),
         ))
     })();
@@ -157,39 +164,35 @@ fn server_name(value: &str) -> Result<String, String> {
 }
 
 pub fn install_battery(args: BatteryInstall) -> ExitCode {
+    let Some(name) = args.name.clone() else {
+        return orient(PackageKind::Battery, &args.target);
+    };
     let result = (|| {
         let path = args.target.path();
+        if !path.exists() {
+            return Err(InstallError::Invalid(format!(
+                "no deployment at {}; run: appa plugin install claude-code",
+                path.display()
+            )));
+        }
         crate::config::Config::load(&path).map_err(|error| InstallError::Invalid(error.to_string()))?;
         let installation = Installation::open(&path)?;
         installation.recover_config()?;
         let before = super::required_bytes(installation.config_path())?;
         let current = installation.selection()?.ok_or_else(|| {
-            InstallError::Invalid("no selected generation; install a host plugin for this config first".into())
+            InstallError::Invalid(format!(
+                "{} was set up without the marketplace, so no version is installed; run: appa plugin install claude-code",
+                path.display()
+            ))
         })?;
         let acquired = args
             .source
             .acquire(&installation, Some(&current), current.requirements())?;
         installation.retain(&acquired)?;
-        let catalog = Marketplace::read(&acquired.marketplace().join("marketplace.toml"))
-            .map_err(|error| InstallError::Invalid(error.to_string()))?;
-        let entry = catalog
-            .packages
-            .iter()
-            .find(|entry| entry.kind == PackageKind::Battery && entry.name == args.name)
-            .ok_or_else(|| InstallError::Invalid(format!("battery {} is absent from this generation", args.name)))?;
-        let package = appa_package::Package::read(
-            &acquired
-                .marketplace()
-                .join(entry.path.as_str())
-                .join(appa_package::MANIFEST_FILE),
-        )
-        .map_err(|error| InstallError::Invalid(error.to_string()))?;
-        let Role::Battery(battery) = package.role else {
-            return Err(InstallError::Invalid("selected package is not a battery".into()));
-        };
+        let (_, battery) = super::battery_package(acquired.marketplace(), name.as_str())?;
         let (mut selection, text) = match acquired.imported() {
             Some(imported) => {
-                if !imported.selection().batteries.contains(args.name.as_str()) {
+                if !imported.selection().batteries.contains(name.as_str()) {
                     return Err(InstallError::Invalid(
                         "bundle does not select the requested battery".into(),
                     ));
@@ -201,37 +204,27 @@ pub fn install_battery(args: BatteryInstall) -> ExitCode {
                 String::from_utf8(before.clone()).map_err(|error| InstallError::Invalid(error.to_string()))?,
             ),
         };
-        selection.select(PackageKind::Battery, &args.name);
+        selection.select(PackageKind::Battery, &name);
         let mut text = selection.relocate(
             &text,
             acquired.generation().clone(),
             installation.config_path(),
             acquired.marketplace(),
         )?;
-        let filename = installation
-            .config_path()
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("installation requires UTF-8 config name");
-        let include = format!(
-            ".appa/{filename}/generations/{}/marketplace/{}/{}",
-            selection.commit(),
-            entry.path,
-            battery.policy
-        );
-        text = selection.include_battery(&text, &args.name, &include)?;
+        let include = selection.owned_include(installation.config_path(), acquired.marketplace(), &name)?;
+        text = selection.include_battery(&text, &name, &include)?;
         if let Some(server) = &args.server {
             if battery.namespaces.len() != 1 {
                 return Err(InstallError::Invalid("this battery has multiple namespaces; configure server_aliases explicitly in the deployment config".into()));
             }
-            text = selection.associate_battery(&text, &args.name, battery.namespaces[0].as_str(), server)?;
+            text = selection.associate_battery(&text, &name, battery.namespaces[0].as_str(), server)?;
         }
         eprintln!("appa: validating and activating the selected policy...");
         installation.commit_installation(Some(&before), text.as_bytes(), &selection)?;
         let prepared = prepared_directory(&installation)?;
         Ok((
-            Some(selection.commit().to_string()),
-            battery_result(args.name.as_str(), "installed", prepared),
+            Some(Version::of(selection.generation())),
+            battery_result(name.as_str(), "installed", prepared),
         ))
     })();
     finish(&args.target, "battery.install".into(), result)
@@ -249,7 +242,7 @@ pub fn remove_battery(args: BatteryRemove) -> ExitCode {
             .ok_or_else(|| InstallError::Invalid("no installed selection for this config".into()))?;
         if !selection.batteries.contains(args.name.as_str()) {
             return Ok((
-                Some(selection.commit().to_string()),
+                Some(Version::of(selection.generation())),
                 serde_json::json!({"battery": args.name.as_str(), "state": "unchanged"}),
             ));
         }
@@ -270,7 +263,7 @@ pub fn remove_battery(args: BatteryRemove) -> ExitCode {
         installation.commit_installation(Some(&before), text.as_bytes(), &selection)?;
         let prepared = prepared_directory(&installation)?;
         Ok((
-            Some(selection.commit().to_string()),
+            Some(Version::of(selection.generation())),
             battery_result(args.name.as_str(), "removed", prepared),
         ))
     })();
@@ -314,7 +307,7 @@ impl Source {
                             .map_err(|error| InstallError::Invalid(error.to_string()))?;
                         if generation.commit() != &commit {
                             return Err(InstallError::Invalid(
-                                "retained generation names a different commit".into(),
+                                "the retained version names a different commit".into(),
                             ));
                         }
                         Ok(Selection::empty(
@@ -329,8 +322,17 @@ impl Source {
         } else {
             current.cloned()
         };
+        // A development build replaces a development generation with itself,
+        // so a rebuilt checkout installs what it built. A published selection
+        // stays until an explicit revision changes it.
+        let retained = retained.filter(|selected| {
+            self.revision.is_some()
+                || is_published_build()
+                || selected.generation().published().is_some()
+                || Acquired::is_own_build(selected.generation())
+        });
         if let Some(selected) = retained {
-            let complete = super::acquisition::required_archives(selected.generation(), requirements)
+            let complete = super::acquisition::required_archives(selected.generation(), requirements)?
                 .iter()
                 .all(|name| {
                     installation
@@ -340,21 +342,90 @@ impl Source {
                         .exists()
                 });
             if complete {
-                eprintln!("appa: verifying the retained generation...");
+                eprintln!("appa: verifying the retained version...");
                 return Acquired::retained(installation, &selected, requirements);
             }
-            eprintln!("appa: fetching missing artifacts for the selected generation...");
-            let acquired = Acquired::fetch(Some(selected.generation().release()), requirements)?;
+            eprintln!("appa: fetching missing artifacts for the installed version...");
+            let acquired = match selected.generation().published() {
+                Some(published) => Acquired::fetch(Some(published.release()), requirements)?,
+                None if Acquired::is_own_build(selected.generation()) => Acquired::build(requirements)?,
+                None => {
+                    return Err(InstallError::Invalid(
+                        "the retained build is incomplete and belongs to another build; reinstall with that build or with a published version (--revision)".into(),
+                    ));
+                }
+            };
             if acquired.generation() != selected.generation() {
                 return Err(InstallError::Invalid(
-                    "published generation differs from the retained descriptor".into(),
+                    "the fetched version differs from the retained descriptor".into(),
                 ));
             }
             return Ok(acquired);
         }
-        eprintln!("appa: resolving the published generation and fetching its artifacts...");
-        Acquired::fetch(self.revision.as_deref(), requirements)
+        if self.revision.is_some() || is_published_build() {
+            eprintln!("appa: resolving the published version and fetching its artifacts...");
+        }
+        Acquired::own(self.revision.as_deref(), requirements)
     }
+}
+
+/// Whether the agent may report its own blocked calls through the `yell` tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentYell {
+    On,
+    Off,
+}
+
+impl Install {
+    /// The answer a first install writes into the policy it creates: the flag when
+    /// one is given, the person's when a terminal is there to ask, and none
+    /// otherwise, which leaves the shipped default. Never asked under `--json`.
+    fn agent_yell(&self, config: &Path) -> Result<Option<AgentYell>, InstallError> {
+        if self.agent_yell {
+            return Ok(Some(AgentYell::On));
+        }
+        if self.no_agent_yell {
+            return Ok(Some(AgentYell::Off));
+        }
+        let stdin = io::stdin();
+        let stderr = io::stderr();
+        if self.target.json || !stdin.is_terminal() || !stderr.is_terminal() {
+            return Ok(None);
+        }
+        ask_agent_yell(&mut stdin.lock(), &mut stderr.lock())
+            .map(Some)
+            .map_err(|error| super::io("ask about agent reporting", config, error))
+    }
+}
+
+/// One question, defaulting to yes on an empty line; end of input, where no one
+/// is there to answer, is a no.
+fn ask_agent_yell(input: &mut impl BufRead, output: &mut impl Write) -> io::Result<AgentYell> {
+    write!(
+        output,
+        "appa: send APPA's own decisions to the OpenAPPA team when it blocks a call?\n\
+         Never your prompts, arguments, or outputs. Change later under `[reporting]`,\n\
+         or send one yourself anytime with `appa yell`. [Y/n] "
+    )?;
+    output.flush()?;
+    let mut answer = String::new();
+    if input.read_line(&mut answer)? == 0 {
+        return Ok(AgentYell::Off);
+    }
+    Ok(match answer.trim().to_ascii_lowercase().as_str() {
+        "" | "y" | "yes" => AgentYell::On,
+        _ => AgentYell::Off,
+    })
+}
+
+/// The line the shipped policy carries, and the line a yes replaces it with.
+/// Anchored to the start of a line, so prose that quotes the setting is not
+/// mistaken for it.
+const AGENT_YELL_OFF: &str = "\nagent_yell = false";
+const AGENT_YELL_ON: &str = "\nagent_yell = true";
+
+fn with_agent_yell_on(policy: &str) -> String {
+    policy.replacen(AGENT_YELL_OFF, AGENT_YELL_ON, 1)
 }
 
 fn revision(value: &str) -> Result<String, String> {
@@ -367,25 +438,35 @@ fn archive_digest(value: &str) -> Result<ArtifactDigest, String> {
 }
 
 pub fn install(args: Install) -> ExitCode {
+    let Some(name) = args.name.clone() else {
+        return orient(PackageKind::Plugin, &args.target);
+    };
     let result = (|| {
-        if args.runtime.is_some() && args.name != "kagent" {
+        if args.runtime.is_some() && name != "kagent" {
             return Err(InstallError::Invalid("--runtime applies only to kagent".into()));
         }
-        let path = plugin_path(&args.target, &args.name)?;
+        let path = plugin_path(&args.target, &name)?;
         if path.exists() {
             crate::config::Config::load(&path).map_err(|error| InstallError::Invalid(error.to_string()))?;
         }
         let installation = Installation::open(&path)?;
         installation.recover_config()?;
         let before = super::optional_bytes(installation.config_path())?;
+        // Asked before the slow acquisition, so the person is not kept waiting to
+        // answer, and before any state changes, so a closed terminal changes nothing.
+        let agent_yell = if before.is_none() && name == "claude-code" {
+            args.agent_yell(&path)?
+        } else {
+            None
+        };
         let current = installation.selection()?;
         let platform = Platform::current()
             .ok_or_else(|| InstallError::Invalid("this platform has no published runtime binary".into()))?;
-        let claude = args.name == "claude-code"
+        let claude = name == "claude-code"
             || current
                 .as_ref()
                 .is_some_and(|selection| selection.plugins.contains("claude-code"));
-        let kagent = args.name == "kagent"
+        let kagent = name == "kagent"
             || current
                 .as_ref()
                 .is_some_and(|selection| selection.plugins.contains("kagent"));
@@ -397,79 +478,92 @@ pub fn install(args: Install) -> ExitCode {
         };
         let acquired = args.source.acquire(&installation, current.as_ref(), requirements)?;
         installation.retain(&acquired)?;
-        let name = PackageName::parse(&args.name).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let package = PackageName::parse(&name).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        // A bundle restores its own selection and a reinstall keeps the
+        // person's battery choices; only the plugin's first install brings its
+        // batteries along.
+        let mut included = Vec::new();
         let (mut selection, text) = if let Some(imported) = acquired.imported() {
-            if !imported.selection().plugins.contains(&args.name) {
+            if !imported.selection().plugins.contains(&name) {
                 return Err(InstallError::Invalid(
                     "the bundle does not select the requested plugin".into(),
                 ));
             }
             imported.configuration(&installation)?
         } else {
+            let catalog = Marketplace::read(&acquired.marketplace().join("marketplace.toml"))
+                .map_err(|error| InstallError::Invalid(error.to_string()))?;
+            let entry = catalog
+                .packages
+                .iter()
+                .find(|entry| entry.kind == PackageKind::Plugin && entry.name == package)
+                .ok_or_else(|| InstallError::Invalid("plugin is absent from this version".into()))?;
+            let root = acquired.marketplace().join(entry.path.as_str());
+            let manifest = appa_package::Package::read(&root.join(appa_package::MANIFEST_FILE))
+                .map_err(|error| InstallError::Invalid(error.to_string()))?;
+            let Role::Plugin(plugin) = manifest.role else {
+                return Err(InstallError::Invalid("selected package is not a plugin".into()));
+            };
+            let first_install = !current
+                .as_ref()
+                .is_some_and(|selection| selection.plugins.contains(&name));
+            if first_install {
+                included = plugin.batteries().to_vec();
+            }
             let selected = current.unwrap_or_else(|| Selection::empty(acquired.generation().clone(), platform));
             let text = match before.as_deref() {
                 Some(bytes) => {
                     String::from_utf8(bytes.to_vec()).map_err(|error| InstallError::Invalid(error.to_string()))?
                 }
                 None => {
-                    let catalog = Marketplace::read(&acquired.marketplace().join("marketplace.toml"))
+                    let text = String::from_utf8(super::required_bytes(&root.join(plugin.default_policy().as_str()))?)
                         .map_err(|error| InstallError::Invalid(error.to_string()))?;
-                    let entry = catalog
-                        .packages
-                        .iter()
-                        .find(|entry| entry.kind == PackageKind::Plugin && entry.name == name)
-                        .ok_or_else(|| InstallError::Invalid("plugin is absent from this generation".into()))?;
-                    let root = acquired.marketplace().join(entry.path.as_str());
-                    let package = appa_package::Package::read(&root.join(appa_package::MANIFEST_FILE))
-                        .map_err(|error| InstallError::Invalid(error.to_string()))?;
-                    let Role::Plugin(plugin) = package.role else {
-                        return Err(InstallError::Invalid("selected package is not a plugin".into()));
-                    };
-                    String::from_utf8(super::required_bytes(&root.join(plugin.default_policy().as_str()))?)
-                        .map_err(|error| InstallError::Invalid(error.to_string()))?
+                    match agent_yell {
+                        Some(AgentYell::On) => with_agent_yell_on(&text),
+                        Some(AgentYell::Off) | None => text,
+                    }
                 }
             };
             (selected, text)
         };
-        selection.select(PackageKind::Plugin, &name);
+        selection.select(PackageKind::Plugin, &package);
         if let Some(runtime) = args.runtime {
             selection.kagent_runtime = Some(runtime);
         }
-        let text = selection.relocate(
+        let mut text = selection.relocate(
             &text,
             acquired.generation().clone(),
             installation.config_path(),
             acquired.marketplace(),
         )?;
+        included.retain(|battery| !selection.batteries.contains(battery.as_str()));
+        for battery in &included {
+            selection.select(PackageKind::Battery, battery);
+            let include = selection.owned_include(installation.config_path(), acquired.marketplace(), battery)?;
+            text = selection.include_battery(&text, battery, &include)?;
+        }
         eprintln!("appa: verifying artifacts and preparing selected plugins...");
         installation.commit_installation(before.as_deref(), text.as_bytes(), &selection)?;
-        let result = if args.name == "kagent" {
+        let batteries: Vec<&str> = included.iter().map(PackageName::as_str).collect();
+        let result = if name == "kagent" {
             let installed = installation
                 .selection()?
                 .ok_or_else(|| InstallError::Invalid("installation selection is missing".into()))?;
             let digest = installed
                 .kagent_assets
                 .ok_or_else(|| InstallError::Invalid("kagent preparation is missing".into()))?;
-            serde_json::json!({"plugin":args.name,"state":"prepared","directory":installation.state.join("kagent").join(digest.hex()),"cluster":"unchanged"})
+            serde_json::json!({"plugin":name,"state":"prepared","batteries":batteries,"directory":installation.state.join("kagent").join(digest.hex()),"cluster":"unchanged"})
         } else {
-            serde_json::json!({"plugin": args.name, "state": "registered", "runtime": "verified"})
+            serde_json::json!({"plugin": name, "state": "registered", "batteries": batteries, "runtime": "verified"})
         };
-        Ok((Some(selection.commit().to_string()), result))
+        Ok((Some(Version::of(selection.generation())), result))
     })();
     finish(&args.target, "plugin.install".into(), result)
 }
 
-/// `init` is the short first-run spelling of the same marketplace operation.
-pub fn init_claude_code() -> ExitCode {
-    install(Install {
-        name: "claude-code".into(),
-        target: Target {
-            config: None,
-            json: false,
-        },
-        source: Source::default(),
-        runtime: None,
-    })
+/// A release build carries the tag whose generation the marketplace can fetch.
+pub(crate) fn is_published_build() -> bool {
+    option_env!("APPA_RELEASE_REF").is_some()
 }
 
 fn plugin_path(target: &Target, plugin: &str) -> Result<PathBuf, InstallError> {
@@ -498,6 +592,38 @@ fn battery_result(name: &str, state: &str, prepared: Option<PathBuf>) -> serde_j
     result
 }
 
+/// The version a deployment is at, as a person names it: the release tag when
+/// one was published, otherwise the commit a build came from.
+#[derive(Debug, Clone, Serialize)]
+struct Version {
+    commit: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    release: Option<String>,
+}
+
+impl Version {
+    fn of(generation: &Generation) -> Self {
+        Self {
+            commit: generation.commit().to_string(),
+            release: generation.published().map(|published| published.release().to_owned()),
+        }
+    }
+
+    fn build(commit: &Commit) -> Self {
+        Self {
+            commit: commit.to_string(),
+            release: None,
+        }
+    }
+
+    fn label(&self) -> String {
+        match &self.release {
+            Some(release) => format!("version {release}"),
+            None => format!("build {}", &self.commit[..self.commit.len().min(12)]),
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct Receipt {
     schema_version: u32,
@@ -505,7 +631,7 @@ struct Receipt {
     operation: String,
     deployment: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
-    generation: Option<String>,
+    version: Option<Version>,
     #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -520,36 +646,149 @@ struct Failure {
 }
 
 pub fn list(kind: PackageKind, args: List) -> ExitCode {
-    let path = args.target.path();
-    let result = (|| {
-        let selection = Installation::inspect(&path)?;
-        let installed = selection
-            .as_ref()
-            .map(|selection| selection.names(kind).clone())
-            .unwrap_or_default();
-        let mut revision = selection.as_ref().map(|selection| selection.commit().to_string());
-        let names = if args.available {
-            // A malformed selected config must not be hidden by a successful
-            // catalog fetch. Ordinary local listing only reads selection state.
-            if path.exists() {
-                crate::config::Config::load(&path).map_err(|error| InstallError::Invalid(error.to_string()))?;
-            }
-            let acquired = Acquired::fetch(revision.as_deref(), Requirements::Packages)?;
-            revision = Some(acquired.generation().commit().to_string());
-            let catalog = Marketplace::read(&acquired.marketplace().join("marketplace.toml"))
-                .map_err(|error| InstallError::Invalid(error.to_string()))?;
-            catalog.packages.into_iter().filter(|entry| entry.kind == kind)
-                .map(|entry| serde_json::json!({"name": entry.name.as_str(), "installed": installed.contains(entry.name.as_str())}))
-                .collect::<Vec<_>>()
-        } else {
-            installed
-                .iter()
-                .map(|name| serde_json::json!({"name": name, "installed": true}))
-                .collect()
-        };
-        Ok((revision, serde_json::json!({"packages": names})))
-    })();
-    finish(&args.target, format!("{kind}.list"), result)
+    finish(&args.target, format!("{kind}.list"), listing(kind, &args.target))
+}
+
+/// Every package of `kind` in the catalog, with whether this deployment selects
+/// it. The catalog is the retained one of the selected generation, read
+/// offline; a deployment without a selection lists this build's own.
+fn listing(kind: PackageKind, target: &Target) -> Result<(Option<Version>, serde_json::Value), InstallError> {
+    let path = target.path();
+    let selection = Installation::inspect(&path)?;
+    let installed = selection
+        .as_ref()
+        .map(|selection| selection.names(kind).clone())
+        .unwrap_or_default();
+    let deployment = match (&selection, path.exists()) {
+        (Some(_), _) => "installed",
+        (None, true) => "unmanaged",
+        (None, false) => "absent",
+    };
+    let stage =
+        tempfile::tempdir().map_err(|error| super::io("stage catalog", Path::new("temporary directory"), error))?;
+    let mut fetched = None;
+    let (source, version, marketplace) = match &selection {
+        Some(selection) => (
+            "retained",
+            Some(Version::of(selection.generation())),
+            Installation::retained_marketplace(&path, selection)?,
+        ),
+        None if is_published_build() => {
+            let acquired = fetched.insert(Acquired::fetch(None, Requirements::Packages)?);
+            (
+                "published",
+                Some(Version::of(acquired.generation())),
+                acquired.marketplace().to_path_buf(),
+            )
+        }
+        None => match Acquired::build_catalog(stage.path())? {
+            (Some(commit), marketplace) => ("build", Some(Version::build(&commit)), marketplace),
+            (None, marketplace) => ("checkout", None, marketplace),
+        },
+    };
+    let catalog = Marketplace::read(&marketplace.join("marketplace.toml"))
+        .map_err(|error| InstallError::Invalid(error.to_string()))?;
+    let packages = catalog
+        .packages
+        .iter()
+        .filter(|entry| entry.kind == kind)
+        .map(|entry| {
+            let manifest = marketplace.join(entry.path.as_str()).join(appa_package::MANIFEST_FILE);
+            let package =
+                appa_package::Package::read(&manifest).map_err(|error| InstallError::Invalid(error.to_string()))?;
+            Ok(serde_json::json!({
+                "name": entry.name.as_str(),
+                "installed": installed.contains(entry.name.as_str()),
+                "description": package.description,
+            }))
+        })
+        .collect::<Result<Vec<_>, InstallError>>()?;
+    let mut catalog = serde_json::json!({"source": source});
+    if let Some(version) = &version {
+        catalog["commit"] = serde_json::Value::from(version.commit.as_str());
+    }
+    Ok((
+        version,
+        serde_json::json!({"packages": packages, "deployment": deployment, "catalog": catalog}),
+    ))
+}
+
+/// An install without a name is a request for orientation, not a mutation: the
+/// catalog goes to stderr with the usage line, and the exit is the parser's.
+fn orient(kind: PackageKind, target: &Target) -> ExitCode {
+    let usage = format!("Usage: appa {kind} install <NAME>");
+    if target.json {
+        return usage_envelope(&format!(
+            "a {kind} name is required. {usage}; list them with: appa {kind} list --json"
+        ));
+    }
+    let stderr = io::stderr();
+    let mut stderr = stderr.lock();
+    let _ = match listing(kind, target) {
+        Ok((_, result)) => render_listing(&mut stderr, kind.as_str(), &result, &target.path()),
+        Err(error) => writeln!(stderr, "appa: {error}"),
+    };
+    let _ = writeln!(stderr, "\n{usage}");
+    ExitCode::from(2)
+}
+
+/// The catalog as a table, then the deployment's state when nothing is installed
+/// yet, so the next command is on the screen.
+/// " with battery x" / " with batteries x and y" for a plugin receipt, empty when
+/// the install included none.
+fn with_batteries(result: &serde_json::Value) -> String {
+    let names: Vec<&str> = result["batteries"]
+        .as_array()
+        .map(|batteries| batteries.iter().filter_map(serde_json::Value::as_str).collect())
+        .unwrap_or_default();
+    match names.as_slice() {
+        [] => String::new(),
+        [one] => format!(" with battery {one}"),
+        [head @ .., last] => format!(" with batteries {} and {last}", head.join(", ")),
+    }
+}
+
+fn render_listing(output: &mut impl Write, kind: &str, result: &serde_json::Value, path: &Path) -> io::Result<()> {
+    let packages = result["packages"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let name = |package: &serde_json::Value| package["name"].as_str().unwrap_or_default().to_owned();
+    if packages.is_empty() {
+        let source = result["catalog"]["source"].as_str().unwrap_or("selected");
+        writeln!(output, "No {kind} packages in the {source} catalog.")?;
+    } else {
+        let width = packages
+            .iter()
+            .map(|package| name(package).chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(4);
+        writeln!(output, "{:<width$}  {:<11}  DESCRIPTION", "NAME", "STATUS")?;
+        for package in packages {
+            let status = if package["installed"] == true {
+                "● installed"
+            } else {
+                "○ available"
+            };
+            writeln!(
+                output,
+                "{:<width$}  {status}  {}",
+                name(package),
+                package["description"].as_str().unwrap_or_default()
+            )?;
+        }
+    }
+    match result["deployment"].as_str() {
+        Some("absent") => writeln!(
+            output,
+            "\nNo deployment at {} yet. Run: appa plugin install claude-code",
+            path.display()
+        ),
+        Some("unmanaged") => writeln!(
+            output,
+            "\n{} was set up without the marketplace, so nothing is tracked here. Run: appa plugin install claude-code",
+            path.display()
+        ),
+        _ => Ok(()),
+    }
 }
 
 pub fn bundle(args: Bundle) -> ExitCode {
@@ -558,7 +797,7 @@ pub fn bundle(args: Bundle) -> ExitCode {
         let digest = installation.export_bundle(&args.output)?;
         let revision = installation
             .selection()?
-            .map(|selection| selection.commit().to_string());
+            .map(|selection| Version::of(selection.generation()));
         Ok((
             revision,
             serde_json::json!({"archive": args.output, "sha256": digest.hex()}),
@@ -570,8 +809,12 @@ pub fn bundle(args: Bundle) -> ExitCode {
 /// Parser failures happen before deployment resolution; they cannot truthfully
 /// name a selected deployment or generation yet.
 pub fn usage_error(error: &clap::Error) -> ExitCode {
+    usage_envelope(&error.to_string())
+}
+
+fn usage_envelope(message: &str) -> ExitCode {
     let document = serde_json::json!({"schema_version": 1, "status": "error", "operation": "parse",
-        "error": {"code": "usage", "message": error.to_string(), "recovery_required": false}});
+        "error": {"code": "usage", "message": message, "recovery_required": false}});
     let mut output = io::stdout().lock();
     match serde_json::to_writer(&mut output, &document)
         .map_err(io::Error::other)
@@ -586,16 +829,16 @@ pub fn usage_error(error: &clap::Error) -> ExitCode {
 fn finish(
     target: &Target,
     operation: String,
-    result: Result<(Option<String>, serde_json::Value), InstallError>,
+    result: Result<(Option<Version>, serde_json::Value), InstallError>,
 ) -> ExitCode {
     let (receipt, code) = match result {
-        Ok((generation, result)) => (
+        Ok((version, result)) => (
             Receipt {
                 schema_version: 1,
                 status: "ok",
                 operation,
                 deployment: target.path(),
-                generation,
+                version,
                 result: Some(result),
                 error: None,
             },
@@ -615,7 +858,7 @@ fn finish(
                     status: "error",
                     operation,
                     deployment: target.path(),
-                    generation: None,
+                    version: None,
                     result: None,
                     error: Some(Failure {
                         code,
@@ -635,28 +878,12 @@ fn finish(
             .and_then(|()| writeln!(output))
     } else if let Some(error) = &receipt.error {
         writeln!(io::stderr().lock(), "appa: {}", error.message)
-    } else if let Some(packages) = receipt
-        .result
-        .as_ref()
-        .and_then(|result| result.get("packages"))
-        .and_then(serde_json::Value::as_array)
-    {
-        if packages.is_empty() {
-            writeln!(output, "No packages selected for {}.", receipt.deployment.display())
-        } else {
-            packages.iter().try_for_each(|package| {
-                writeln!(
-                    output,
-                    "{}{}",
-                    package["name"].as_str().unwrap_or_default(),
-                    if package["installed"] == true {
-                        " (installed)"
-                    } else {
-                        ""
-                    }
-                )
-            })
-        }
+    } else if let Some(kind) = receipt.operation.strip_suffix(".list") {
+        let result = receipt
+            .result
+            .as_ref()
+            .expect("a successful listing carries its result");
+        render_listing(&mut output, kind, result, &receipt.deployment)
     } else if let Some(plugin) = receipt
         .result
         .as_ref()
@@ -664,13 +891,17 @@ fn finish(
         .and_then(serde_json::Value::as_str)
     {
         if receipt.operation == "plugin.remove" {
+            let result = receipt.result.as_ref().expect("plugin result is present");
             writeln!(
                 output,
-                "Plugin {plugin}: {} for {}; configuration and data preserved.",
-                receipt.result.as_ref().expect("plugin result is present")["state"]
-                    .as_str()
-                    .unwrap_or_default(),
-                receipt.deployment.display()
+                "Plugin {plugin}: {} for {}; configuration and data preserved{}.",
+                result["state"].as_str().unwrap_or_default(),
+                receipt.deployment.display(),
+                if result["runtime"] == "kept" {
+                    ", and the runtime keeps running"
+                } else {
+                    ""
+                }
             )
         } else if plugin == "kagent" {
             let result = receipt.result.as_ref().expect("plugin result is present");
@@ -681,11 +912,17 @@ fn finish(
                 result["directory"].as_str().unwrap_or_default()
             )
         } else {
+            let result = receipt.result.as_ref().expect("plugin result is present");
             writeln!(
                 output,
-                "Installed {plugin} for {} (generation {}); runtime verified.",
+                "Installed {plugin}{} for {} ({}); runtime verified.",
+                with_batteries(result),
                 receipt.deployment.display(),
-                receipt.generation.as_deref().unwrap_or("unknown")
+                receipt
+                    .version
+                    .as_ref()
+                    .map(Version::label)
+                    .unwrap_or_else(|| "unknown version".to_owned())
             )
         }
     } else if let Some(battery) = receipt.result.as_ref().and_then(|result| result.get("battery")) {
@@ -725,5 +962,42 @@ fn finish(
         ExitCode::FAILURE
     } else {
         ExitCode::from(code)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The answer works by replacing the one line the shipped policy carries, so the
+    /// policy has to carry exactly one of it. Two, or none, and a yes silently does nothing.
+    #[test]
+    fn the_shipped_policy_states_the_reporting_posture_exactly_once() {
+        let text = crate::default_config::text();
+        assert_eq!(text.matches(AGENT_YELL_OFF).count(), 1);
+        assert_eq!(text.matches(AGENT_YELL_ON).count(), 0);
+    }
+
+    #[test]
+    fn a_yes_turns_reporting_on_and_changes_only_that_line() {
+        let before = crate::default_config::text();
+        let after = with_agent_yell_on(&before);
+        assert_ne!(after, before.as_ref());
+        assert_eq!(after.replacen(AGENT_YELL_ON, AGENT_YELL_OFF, 1), before.as_ref());
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let config = directory.path().join("appa.toml");
+        std::fs::write(&config, &after).expect("the answered policy is written");
+        crate::config::Config::load(&config).expect("the answered policy still loads");
+    }
+
+    #[test]
+    fn an_empty_answer_is_yes_and_end_of_input_is_no() {
+        let ask = |answer: &str| ask_agent_yell(&mut answer.as_bytes(), &mut Vec::new()).expect("the answer reads");
+        for accepted in ["\n", "y\n", "yes\n", "Y\n", " yes \n"] {
+            assert_eq!(ask(accepted), AgentYell::On, "{accepted:?}");
+        }
+        for declined in ["", "n\n", "no\n", "what?\n"] {
+            assert_eq!(ask(declined), AgentYell::Off, "{declined:?}");
+        }
     }
 }

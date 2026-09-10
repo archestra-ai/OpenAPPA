@@ -132,6 +132,9 @@ pub(super) fn prepare(
     let Some(runtime) = selection.kagent_runtime else {
         return Ok(None);
     };
+    let published = selection.generation.published().ok_or_else(|| {
+        invalid("kagent needs a published version with its images and chart; a development build has none")
+    })?;
     selection.validate()?;
     let text = std::str::from_utf8(config).map_err(invalid)?;
     selection.validate_owned_config(text)?;
@@ -267,7 +270,7 @@ pub(super) fn prepare(
     };
     let values = serde_json::json!({
         "fullnameOverride":"appa-runtime",
-        "image":{"repository":Image::Runtime.repository(),"digest":selection.generation.images()[&Image::Runtime].digest()},
+        "image":{"repository":Image::Runtime.repository(),"digest":published.images()[&Image::Runtime].digest()},
         "appaGuide":{"enabled":false}, "config":config_values
     });
     write_synced(&root.join("runtime-values.json"), &json(&values)?)?;
@@ -280,7 +283,10 @@ pub(super) fn prepare(
     } else {
         "Configuration is embedded in runtime-values.json. The identical assets/ tree is also available for offline sync. Treat both as private configuration; do not put credentials in ConfigMaps.\n"
     };
-    let chart = format!("appa-runtime-{}.tgz", &selection.generation.release()[1..]);
+    let chart = selection
+        .generation
+        .runtime_chart_archive()
+        .expect("a published version names its chart");
     let instructions = format!(
         "{instructions}\nAfter reviewing KAGENT.md and verifying images, deploy from this directory with your explicit context:\n\nhelm upgrade --install appa-runtime ./{chart} --kube-context YOUR_CONTEXT --namespace appa --create-namespace --values runtime-values.json\n\nThis command is shown for the operator; APPA did not execute it.\n"
     );
@@ -368,7 +374,9 @@ mod tests {
         assert_eq!(values["config"]["key"], "appa.toml");
         assert_eq!(
             values["image"]["digest"],
-            selected.generation.images()[&Image::Runtime].digest().as_str()
+            selected.generation.published().unwrap().images()[&Image::Runtime]
+                .digest()
+                .as_str()
         );
         assert_eq!(fs::read(prepared.join("assets/appa.toml")).unwrap(), CONFIG.as_bytes());
         installation

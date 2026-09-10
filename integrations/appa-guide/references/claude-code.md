@@ -209,11 +209,14 @@ After approval:
 1. Run `appa describe --config <live-path>` again. If the config,
    batteries, Authorities, audience sources, or named audiences changed since
    the proposal, revise the proposal and ask for approval again.
-2. Copy each approved battery directory beside the root config under
-   `batteries/<name>/` and add its `appa.toml` to the root `include` list. Use
-   the installed marketplace clone so supporting scripts stay on the same
-   APPA version. Leave an existing copied battery unchanged unless the user
-   asked to refresh it.
+2. Include each approved battery with
+   `appa battery install <name> --config <live-path>`, adding
+   `--server <connection-id>` when the host reports the connection under
+   another identity. The command adds the battery's `appa.toml` to the root
+   `include` list from the installed version, validates the result, and
+   reloads the runtime. Never copy a battery directory or write its include
+   by hand: `appa battery list` and `appa battery remove` recognize only
+   includes the command wrote, and a version move updates only those.
 3. Add any root support the battery requires, such as its human-approval
    Authority. If an existing `builtin hitl` Authority handles the relevant
    attention mark but cannot review public audiences, expand its permits
@@ -251,10 +254,10 @@ not guess.
 7. Run `appa describe --config <live-path>` again. If the config, batteries,
    Authorities, audience sources, or named audiences changed since the
    proposal, revise the proposal and ask for approval again.
-8. Copy each newly approved battery directory from the installed marketplace
-   beside the root config under `batteries/<name>/`, add its `appa.toml` to the
-   root `include` list, and add any root support it requires. Leave an existing
-   copied battery unchanged unless the user asked to refresh it.
+8. Include each newly approved battery with
+   `appa battery install <name> --config <live-path>`, as in `init` mode, and
+   add any root support it requires. To take one out, use
+   `appa battery remove <name> --config <live-path>`.
 9. Apply only the approved root-rule changes. To change battery behavior, add
    or edit a root rule; never modify the battery.
 10. Reload and report the result as described below.

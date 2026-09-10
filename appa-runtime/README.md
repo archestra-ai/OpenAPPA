@@ -18,19 +18,20 @@ The Claude Code adapter requires the `claude` command, `curl`, and Cargo when bu
 Every `appa` build knows the SHA-256 of the plugin artifact belonging to its own
 release and accepts no other bytes. On Linux and macOS the installer fetches
 the release archive, verifies its checksum, and places `appa` in
-`~/.local/bin`; init then downloads that artifact, verifies it, and caches it:
+`~/.local/bin`; the install then fetches the version published for that
+release, verifies it, and retains it:
 
 ```sh
 curl -fsSL https://openappa.com/install.sh | sh
-~/.local/bin/appa init claude-code
+~/.local/bin/appa plugin install claude-code
 ```
 
 A build from a checkout carries its exact Git commit and plugin-tree digest, so
-the same command works there too:
+the same command installs that build's own plugin tree, without the network:
 
 ```sh
 cargo install --path appa-runtime --force
-appa init claude-code
+appa plugin install claude-code
 ```
 
 The result does not depend on the working directory. It replaces an existing APPA plugin instead of stacking

@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use super::claude::{installed_plugin_root, plugin_registry, run_claude};
 use super::{CLAPPA, InitError, MARKETPLACE, PLUGIN, appa_filename, deployment_paths};
-use crate::plugin_bundle::{self, Endpoint, PluginSource, Population};
+use crate::plugin_bundle::{self, Endpoint, VerifiedArchive};
 
 #[cfg(unix)]
 const REMOVING: &str = "#!/bin/sh\nprintf 'APPA plugin removal is incomplete; rerun appa plugin remove claude-code with the same config.\\n' >&2\nexit 1\n";
@@ -20,19 +20,13 @@ const REMOVING: &str = "@echo off\r\necho APPA plugin removal is incomplete; rer
 pub fn claude_code_remove(config: &Path, archive: &Path) -> Result<(), InitError> {
     let paths = deployment_paths()?;
     let _profile_lock = super::lock_claude_profile(&paths.claude_dir)?;
-    let source = PluginSource::verified_archive(archive)?;
-    let PluginSource::VerifiedArchive { path, tree_digest, .. } = source else {
-        unreachable!("verified_archive constructs only VerifiedArchive")
-    };
+    let source = VerifiedArchive::of(archive)?;
     let scratch = tempfile::tempdir().map_err(|source| InitError::WriteFile {
         path: std::env::temp_dir(),
         source,
     })?;
     let deployment = plugin_bundle::materialize(
-        Population::VerifiedArchive {
-            path: &path,
-            expected: tree_digest,
-        },
+        source.population(),
         scratch.path(),
         &paths.data_dir.join("bin").join(appa_filename()),
         config,

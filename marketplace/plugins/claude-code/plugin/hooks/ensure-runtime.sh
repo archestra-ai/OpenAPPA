@@ -1,13 +1,13 @@
 #!/bin/sh
 # Starts the installed `appa runtime` process when no healthy runtime answers.
-# Two callers share it: `appa init claude-code` and every protected
+# Two callers share it: `appa plugin install claude-code` and every protected
 # SessionStart, which runs it before the hooks post
 # their first event. A protected session therefore needs no login service,
 # and an install that ends here leaves the runtime up, so the first
 # protected session pays nothing for the start. Exit 0 means a healthy
 # runtime answers; any other exit makes the chained protection hook block,
 # and tells the install that it has nothing to report as running.
-# Installing the binary is not this script's job: `appa init claude-code`
+# Installing the binary is not this script's job: `appa plugin install claude-code`
 # installs it before registering this plugin, and renders its absolute path
 # into appa-paths.sh beside this file. Nothing here consults PATH.
 #
@@ -112,7 +112,7 @@ case $answer in
 esac
 
 if [ ! -x "$APPA_BIN" ]; then
-  printf 'appa protection: appa is not installed at %s. Run in a plain terminal: appa init claude-code\n' \
+  printf 'appa protection: appa is not installed at %s. Run in a plain terminal: appa plugin install claude-code\n' \
     "$APPA_BIN" >&2
   exit 1
 fi

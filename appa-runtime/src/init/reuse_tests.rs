@@ -14,7 +14,7 @@ fn prepared_registration_reuse_preserves_native_state_on_success_and_failure() {
         let root_path = fs::canonicalize(root.path()).unwrap();
         let config = root_path.join("config/appa.toml");
         fs::create_dir_all(config.parent().unwrap()).unwrap();
-        create_default_config(&config).unwrap();
+        fs::write(&config, crate::default_config::text().as_bytes()).unwrap();
         let ComposedPolicy::Key(key) = verify_config(&config).unwrap() else {
             panic!("fixture policy is known")
         };
@@ -87,7 +87,6 @@ fn prepared_registration_reuse_child() {
         fs::set_permissions(target, fs::Permissions::from_mode(0o755)).unwrap();
     }
     let config = paths.config_dir.join("appa.toml");
-    create_default_config(&config).unwrap();
     let appa = env::current_exe().unwrap();
     let deployed_appa = paths.data_dir.join("bin/appa");
     fs::create_dir_all(deployed_appa.parent().unwrap()).unwrap();
@@ -150,13 +149,7 @@ fn prepared_registration_reuse_child() {
         .collect();
     let statusline_before = fs::read(&statusline).unwrap();
     let log = root.join("claude.log");
-    let result = install_claude(
-        PluginSource::Explicit(source),
-        Configuration::Prepared {
-            config,
-            previous_binary: None,
-        },
-    );
+    let result = install_claude(Population::Tree(&source), "test source", endpoint, config, None);
     if failure {
         assert!(matches!(result, Err(InitError::Starter(_))), "{result:?}");
     } else {

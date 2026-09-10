@@ -1,10 +1,10 @@
-//! Native deployment bootstrap. The CLI installs machine state; harness skills only author policy.
+//! Native deployment activation. The marketplace installs machine state through
+//! this module; harness skills only author policy.
 
 use crate::config::ConfigError;
-use crate::plugin_bundle::{self, Endpoint, PluginBundleError, PluginSource, Population};
+use crate::plugin_bundle::{self, Endpoint, PluginBundleError, Population, VerifiedArchive};
 use std::env;
 use std::fs;
-use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 // Only the PowerShell helpers below spawn a process; nothing else in this module does.
 #[cfg(windows)]
@@ -28,18 +28,15 @@ use self::claude::{
     prepare_plugin_recovery, registered_deployment_matches, replace_plugin, run_claude, start_runtime,
     undo_plugin_switch,
 };
-use self::config::{
-    ComposedPolicy, ConfigOutcome, create_default_config, discard_file, offer_agent_yell, offer_config_rewrite,
-    verify_config,
-};
+use self::config::{ComposedPolicy, discard_file, verify_config};
 use self::endpoint::{
-    RuntimeOutcome, clear_foreign_endpoint, clear_stale_endpoint, endpoint_health, reconcile_policy,
-    stop_owned_appa_runtime, verify_runtime_deployment,
+    RuntimeOutcome, clear_stale_endpoint, endpoint_health, reconcile_policy, stop_owned_appa_runtime,
+    verify_runtime_deployment,
 };
 #[cfg(windows)]
 use self::paths::windows_identity;
-use self::paths::{DeploymentPaths, appa_filename, deployment_paths, same_file};
-use self::receipt::{Receipt, Style, source_label};
+use self::paths::{DeploymentPaths, appa_filename, deployment_paths, friendly_path, same_file};
+use self::receipt::{Receipt, Style};
 
 const MARKETPLACE: &str = "appa";
 
@@ -81,9 +78,11 @@ pub enum InitError {
     MissingPluginFile(PathBuf),
     #[error("the installed Claude plugin could not start `appa runtime`: {0}")]
     Starter(String),
-    #[error("a different Appa runtime is already running at {endpoint}; {message}")]
+    #[error("the runtime endpoint {endpoint} is taken: {message}")]
     RuntimeIdentity { endpoint: String, message: String },
-    #[error("the appa runtime (pid {pid}) still answers {endpoint} after being stopped; stop it and rerun init")]
+    #[error(
+        "the appa runtime (pid {pid}) still answers {endpoint} after being stopped. Stop it, then rerun appa plugin install claude-code."
+    )]
     RuntimeSurvived { pid: i32, endpoint: String },
     #[error("the runtime at {endpoint} does not answer for its policy: {message}")]
     PolicyKey { endpoint: String, message: String },
@@ -102,26 +101,23 @@ pub enum InitError {
     },
 }
 
-/// Install the plugin belonging to this binary's own release into Claude Code,
-/// together with this binary, as one bundle.
+/// Activate a validated deployment: this binary, its matching native plugin
+/// archive, and the config the marketplace wrote, as one bundle.
 ///
-/// The sequence is ordered so that nothing outside a temporary file changes
-/// until the plugin source has been resolved and verified, and so that the
-/// endpoint is cleared before Claude is switched over. Directories, the config
-/// and the deployment are written before that clearing; all three are additive
-/// and none of them is what Claude reads.
-pub fn claude_code(explicit_source: Option<&str>) -> Result<String, InitError> {
-    progress("resolving the matching plugin");
-    install_claude(PluginSource::resolve(explicit_source)?, Configuration::Initialize)
-}
-
-/// Activate a previously validated deployment with this release binary and
-/// its matching native archive. Never asks questions or fetches packages.
-pub fn claude_code_prepared(
+/// `appa plugin install claude-code` runs this after the generation is
+/// retained. Nothing here asks a question or fetches a package. The sequence is
+/// ordered so that nothing outside a temporary file changes until the archive
+/// has been verified, and so that the endpoint is settled before Claude is
+/// switched over. Directories and the deployment are written before that
+/// settling; both are additive and neither is what Claude reads.
+pub fn activate_claude_code(
     config: &Path,
     archive: &Path,
     previous_binary: Option<&Path>,
 ) -> Result<String, InitError> {
+    // The endpoint is settled before anything is read: a release build ignores
+    // the environment here, and the release check proves it on this refusal.
+    let endpoint = Endpoint::resolve()?;
     let config = std::path::absolute(config).map_err(|source| InitError::AbsolutePath {
         path: config.to_owned(),
         source,
@@ -130,26 +126,18 @@ pub fn claude_code_prepared(
         path: config.clone(),
         source: Box::new(source),
     })?;
-    install_claude(
-        PluginSource::verified_archive(archive)?,
-        Configuration::Prepared {
-            config,
-            previous_binary: previous_binary.map(Path::to_owned),
-        },
-    )
+    let source = VerifiedArchive::of(archive)?;
+    install_claude(source.population(), &source.label(), endpoint, config, previous_binary)
 }
 
-enum Configuration {
-    Initialize,
-    Prepared {
-        config: PathBuf,
-        previous_binary: Option<PathBuf>,
-    },
-}
-
-fn install_claude(source: PluginSource, configuration: Configuration) -> Result<String, InitError> {
+fn install_claude(
+    population: Population<'_>,
+    origin: &str,
+    endpoint: Endpoint,
+    config: PathBuf,
+    previous_binary: Option<&Path>,
+) -> Result<String, InitError> {
     let appa = env::current_exe().map_err(InitError::CurrentExecutable)?;
-    let endpoint = Endpoint::resolve()?;
     let paths = deployment_paths()?;
     let _profile_lock = lock_claude_profile(&paths.claude_dir)?;
     let installations = installed_plugin_installations(&paths.claude_dir)?;
@@ -169,90 +157,33 @@ fn install_claude(source: PluginSource, configuration: Configuration) -> Result<
             source,
         }
     })?;
-    let (config, config_outcome) = match &configuration {
-        Configuration::Prepared { config, .. } => (config.clone(), ConfigOutcome::Kept),
-        Configuration::Initialize => {
-            let config = paths.config_dir.join("appa.toml");
-            let outcome = match create_default_config(&config)? {
-                ConfigOutcome::Kept => offer_config_rewrite(&config)?,
-                created => created,
-            };
-            if outcome != ConfigOutcome::Kept {
-                offer_agent_yell(&config)?;
-            }
-            (config, outcome)
-        }
-    };
     let composed_policy = verify_config(&config)?;
 
     // 3. Materialize the deployment, or validate and reuse an existing one.
     progress("preparing the plugin bundle");
-    let deployments = paths.data_dir.join("deployments");
-    let deploy = |population| {
-        plugin_bundle::materialize(
-            population,
-            &deployments,
-            &deployed_appa,
-            &config,
-            &paths.data_dir,
-            &endpoint,
-        )
-    };
-    let deployment = match &source {
-        PluginSource::Explicit(path) => deploy(Population::Tree(path))?,
-        PluginSource::VerifiedArchive { path, tree_digest, .. } => deploy(Population::VerifiedArchive {
-            path,
-            expected: *tree_digest,
-        })?,
-        PluginSource::Release { reference, digest } => {
-            let archive = plugin_bundle::ensure_archive(
-                *digest,
-                reference,
-                env!("CARGO_PKG_VERSION"),
-                &paths.data_dir.join("cache").join("plugin"),
-                &plugin_bundle::release_base_url(),
-            )?;
-            deploy(Population::Archive(&archive))?
-        }
-        PluginSource::Commit { commit, digest } => {
-            let archive = plugin_bundle::ensure_commit_archive(
-                commit,
-                *digest,
-                &paths.data_dir.join("cache").join("plugin"),
-                &plugin_bundle::source_archive_base_url(),
-            )?;
-            deploy(Population::Archive(&archive))?
-        }
-        PluginSource::Local { root, digest } => deploy(Population::Repository {
-            root,
-            expected: *digest,
-        })?,
-    };
+    let deployment = plugin_bundle::materialize(
+        population,
+        &paths.data_dir.join("deployments"),
+        &deployed_appa,
+        &config,
+        &paths.data_dir,
+        &endpoint,
+    )?;
+    let reuse_registration = registered_deployment_matches(&paths.claude_dir, &deployment.root)?;
 
-    let reuse_registration = matches!(configuration, Configuration::Prepared { .. })
-        && registered_deployment_matches(&paths.claude_dir, &deployment.root)?;
-
-    // 4. Clear the endpoint before Claude is switched over. A runtime that will not
-    //    stop aborts init here, rather than leaving a new plugin registered
+    // 4. Settle the endpoint before Claude is switched over. A runtime that will
+    //    not stop aborts here, rather than leaving a new plugin registered
     //    against an old runtime that a rerun cannot dislodge.
     progress("checking the runtime endpoint");
     //    A runtime whose binary an install replaced on disk still owns the
     //    endpoint, and its health answer names the stale pid.
-    if matches!(configuration, Configuration::Initialize) {
-        clear_stale_endpoint(&endpoint)?;
-        //    A healthy runtime from another build is stopped only after an explicit
-        //    confirmation and only when it identifies a same-user appa pid.
-        clear_foreign_endpoint(&appa, &config, &endpoint)?;
-    } else if endpoint_health(&endpoint)?.is_some() {
-        // A prepared install cannot answer an interactive question on behalf
-        // of a different deployment. Updates stop their proven prior runtime
-        // in the outer installation transaction before reaching activation.
+    clear_stale_endpoint(&endpoint)?;
+    if endpoint_health(&endpoint)?.is_some() {
+        // Nobody is asked on behalf of a different deployment. An update stops
+        // the runtime of the binary it replaces, once that runtime proves to be
+        // serving this config; any other owner is refused with its pid named.
         if let Err(current_error) = verify_runtime_deployment(&appa, &config, &endpoint) {
-            let Configuration::Prepared {
-                previous_binary: Some(previous),
-                ..
-            } = &configuration
-            else {
+            let Some(previous) = previous_binary else {
                 return Err(current_error);
             };
             let pid = verify_runtime_deployment(previous, &config, &endpoint)?;
@@ -289,17 +220,8 @@ fn install_claude(source: PluginSource, configuration: Configuration) -> Result<
     } else {
         replace_plugin(&deployment.root, &marketplaces, &installations)
     };
-    let switch = registration.and_then(|()| {
-        switch_over(
-            &appa,
-            &config,
-            &composed_policy,
-            &endpoint,
-            &paths,
-            &mut compensation,
-            &configuration,
-        )
-    });
+    let switch =
+        registration.and_then(|()| switch_over(&appa, &config, &composed_policy, &endpoint, &paths, &mut compensation));
     let runtime_outcome = match switch {
         Ok(outcome) => {
             compensation.commit();
@@ -329,9 +251,8 @@ fn install_claude(source: PluginSource, configuration: Configuration) -> Result<
     cleanup_plugin_recovery(recovery.as_ref());
 
     Ok(Receipt {
-        adapter: source_label(&source, &deployment),
+        adapter: format!("{origin} -> {}", friendly_path(&deployment.root)),
         config,
-        config_outcome,
         runtime_outcome,
     }
     .render(Style::of_stdout()))
@@ -382,8 +303,7 @@ fn lock_claude_profile(directory: &Path) -> Result<fs::File, InitError> {
 /// policy, so the reconcile is inside the transaction: a refusal there means the
 /// endpoint belongs to someone else, and a plugin left registered against it is
 /// the same skew as a plugin left registered against a runtime that failed
-/// verification. A decline is not a refusal: it answers `Ok` and the install
-/// stands.
+/// verification.
 fn switch_over(
     appa: &Path,
     config: &Path,
@@ -391,7 +311,6 @@ fn switch_over(
     endpoint: &Endpoint,
     paths: &DeploymentPaths,
     compensation: &mut Compensation,
-    configuration: &Configuration,
 ) -> Result<RuntimeOutcome, InitError> {
     let deployed_appa = paths.data_dir.join("bin").join(appa_filename());
     install_runtime(appa, &deployed_appa, compensation)?;
@@ -409,10 +328,7 @@ fn switch_over(
             endpoint: endpoint.clone(),
         });
     }
-    match configuration {
-        Configuration::Initialize => reconcile_policy(endpoint, config, composed_policy),
-        Configuration::Prepared { .. } => endpoint::reconcile_prepared_policy(endpoint, config, composed_policy),
-    }
+    reconcile_policy(endpoint, config, composed_policy)
 }
 
 /// What the switch has changed on disk and in process state, so a failure can
@@ -523,7 +439,7 @@ fn file_before(path: &Path) -> Result<Option<Vec<u8>>, InitError> {
 }
 
 fn progress(message: &str) {
-    eprintln!("appa init: {message}...");
+    eprintln!("appa: {message}...");
 }
 
 /// Copy the binary to its deployed path, keeping the bytes it replaces beside it
@@ -720,42 +636,6 @@ fn powershell<const N: usize>(command: &str, environment: [(&str, String); N]) -
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// What a yes-or-no question resolves to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Answer {
-    Yes,
-    No,
-}
-
-/// A yes-or-no question put to the person running init, with the answer an
-/// empty line means; the prompt capitalizes that choice.
-struct Confirmation {
-    question: String,
-    default: Answer,
-}
-
-impl Confirmation {
-    /// Ask on `output` and read one line from `input`. End of input, where no
-    /// one is there to answer, is a no whatever the default.
-    fn ask(&self, input: &mut impl BufRead, output: &mut impl Write) -> std::io::Result<Answer> {
-        let choices = match self.default {
-            Answer::Yes => "[Y/n]",
-            Answer::No => "[y/N]",
-        };
-        write!(output, "{} {choices} ", self.question)?;
-        output.flush()?;
-        let mut answer = String::new();
-        if input.read_line(&mut answer)? == 0 {
-            return Ok(Answer::No);
-        }
-        Ok(match answer.trim().to_ascii_lowercase().as_str() {
-            "" => self.default,
-            "y" | "yes" => Answer::Yes,
-            _ => Answer::No,
-        })
-    }
-}
-
 #[cfg(windows)]
 const CLAPPA: (&str, &str) = ("clappa.cmd", "@echo off\r\nset APPA_GATE=1\r\nclaude %*\r\n");
 #[cfg(not(windows))]
@@ -801,12 +681,12 @@ fn install_disabled_clappa(install_dir: &Path) -> Result<(), InitError> {
     #[cfg(windows)]
     let (path, contents) = (
         install_dir.join("clappa.cmd"),
-        "@echo off\r\necho appa init did not complete; rerun appa init claude-code 1>&2\r\nexit /b 1\r\n",
+        "@echo off\r\necho appa plugin install did not complete; rerun appa plugin install claude-code 1>&2\r\nexit /b 1\r\n",
     );
     #[cfg(not(windows))]
     let (path, contents) = (
         install_dir.join("clappa"),
-        "#!/bin/sh\nprintf 'appa init did not complete; rerun appa init claude-code\\n' >&2\nexit 1\n",
+        "#!/bin/sh\nprintf 'appa plugin install did not complete; rerun appa plugin install claude-code\\n' >&2\nexit 1\n",
     );
     fs::write(&path, contents).map_err(|source| InitError::WriteFile {
         path: path.clone(),
@@ -914,27 +794,5 @@ mod tests {
         drop(first);
         assert!(root.path().join(".appa-install.lock").is_file());
         assert!(lock_claude_profile(root.path()).is_ok());
-    }
-
-    #[test]
-    fn an_empty_answer_takes_the_default_and_end_of_input_refuses() {
-        let ask = |default: Answer, answer: &str| {
-            let confirmation = Confirmation {
-                question: "continue?".to_owned(),
-                default,
-            };
-            confirmation
-                .ask(&mut answer.as_bytes(), &mut Vec::new())
-                .expect("the answer reads")
-        };
-        for default in [Answer::Yes, Answer::No] {
-            for answer in ["y\n", "YES\n", " yes \n"] {
-                assert_eq!(ask(default, answer), Answer::Yes, "{answer:?} under {default:?}");
-            }
-            for answer in ["n\n", "no\n", "anything else\n", ""] {
-                assert_eq!(ask(default, answer), Answer::No, "{answer:?} under {default:?}");
-            }
-            assert_eq!(ask(default, "\n"), default);
-        }
     }
 }

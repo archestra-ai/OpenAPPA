@@ -30,6 +30,11 @@ pub(super) fn artifacts(
     generation: &Generation,
     runtime: KagentRuntime,
 ) -> Result<BTreeMap<String, Vec<u8>>, InstallError> {
+    let published = generation.published().ok_or_else(|| {
+        InstallError::Invalid(
+            "kagent needs a published version with its images and chart; a development build has none".into(),
+        )
+    })?;
     let mut files = BTreeMap::new();
     let (registry, prefix) = IMAGE_REGISTRY
         .split_once('/')
@@ -39,26 +44,26 @@ pub(super) fn artifacts(
         "kagent-values.json".to_owned(),
         json!({"controller": {"agentImage": {
             "registry": registry, "repository": format!("{prefix}/appa-kagent-adk"),
-            "tag": generation.release(), "pullPolicy": "IfNotPresent"
+            "tag": published.release(), "pullPolicy": "IfNotPresent"
         }}}),
     );
     let mut images = BTreeMap::new();
     for (name, image) in std::iter::once(("runtime", Image::Runtime)).chain(runtime.languages().iter().copied()) {
-        let digests = generation
+        let digests = published
             .images()
             .get(&image)
-            .ok_or_else(|| InstallError::Invalid(format!("generation has no {name} image")))?;
+            .ok_or_else(|| InstallError::Invalid(format!("this version has no {name} image")))?;
         images.insert(
             name,
             json!({"repository": image.repository(),
-            "tag": generation.release(), "digest": digests.digest(),
+            "tag": published.release(), "digest": digests.digest(),
             "platforms": digests.platforms()}),
         );
     }
     documents.insert(
         "images.json".to_owned(),
         json!({"schema": 1,
-        "generation": generation.commit(), "registry": IMAGE_REGISTRY,
+        "commit": generation.commit(), "registry": IMAGE_REGISTRY,
         "runtime_url": "http://appa-runtime.appa.svc.cluster.local:18787",
         "images": images}),
     );
@@ -370,7 +375,10 @@ mod tests {
                 values["controller"]["agentImage"]["repository"],
                 "friendly-path-465518-r6/appa-public/appa-kagent-adk"
             );
-            assert_eq!(values["controller"]["agentImage"]["tag"], selected.generation.release());
+            assert_eq!(
+                values["controller"]["agentImage"]["tag"],
+                selected.generation.published().unwrap().release()
+            );
         }
     }
 

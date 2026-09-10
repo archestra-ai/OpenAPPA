@@ -65,14 +65,14 @@ fastest way to watch a policy make a decision on real work:
 
 ```sh
 curl -fsSL https://openappa.com/install.sh | sh
-~/.local/bin/appa init claude-code
+~/.local/bin/appa plugin install claude-code
 ```
 
 The installer verifies the checksum of the release binary for Linux or macOS
 and places it in `~/.local/bin`. Windows users unpack the zip from the
 [releases page](https://github.com/archestra-ai/OpenAPPA/releases). From a
 checkout, `cargo install --path appa-runtime --force` builds the binary
-instead.
+instead, and the same install command installs that build's own plugin tree.
 
 A release binary resolves the plugin from its baked release tag and digest. A
 clean checkout build resolves the plugin from its baked Git commit and verifies
@@ -93,7 +93,7 @@ Setup, upgrade and uninstall: [Claude Code
 integration](https://openappa.com/claude-code) ·
 [`marketplace/plugins/claude-code`](marketplace/plugins/claude-code/README.md).
 
-Plugin and battery installation, explicit generation updates, offline bundles,
+Plugin and battery installation, explicit version updates, offline bundles,
 and kagent deployment preparation: [marketplace guide](marketplace/README.md).
 
 ## Testing
@@ -124,9 +124,11 @@ names your policy chose with tokens such as `tool-1`, and whether to send the
 finished file, which is named before you answer and kept either way.
 
 The agent can report on its own through the `yell` tool, on a deployment that
-turns it on. `appa init` asks; `[reporting] agent_yell` in the config is the
-answer. That call is checked by your policy like any other, so a session
-narrowed to `self` or `internal` reaches a human review instead of sending.
+turns it on. A first `appa plugin install claude-code` asks in a terminal, and
+`--agent-yell` or `--no-agent-yell` answers for a script; `[reporting]
+agent_yell` in the config is the answer either way. That call is checked by
+your policy like any other, so a session narrowed to `self` or `internal`
+reaches a human review instead of sending.
 
 ## Status
 

@@ -4,12 +4,12 @@
 # The staged tree is a Claude Code marketplace root: the directory named by
 # `claude plugin marketplace add`, and the layout `skills/appa-guide/SKILL.md`
 # reads as <marketplace-root>. The release packages it as
-# appa-plugin-<version>.tar.gz, and `appa init claude-code` accepts exactly the
-# bytes whose SHA-256 its own build baked in.
+# appa-plugin-<version>.tar.gz, and a release binary's activation accepts
+# exactly the bytes whose SHA-256 its own build baked in.
 #
 # `plugin_layout::REPOSITORY_MAPPINGS` is the single definition of what this
 # copies, and a runtime unit test digests this script's real output against the
-# mapping's, so a release bundle that drifts from what init stages fails CI here
+# mapping's, so a release bundle that drifts from what the build stages fails CI here
 # rather than at someone's install.
 set -eu
 

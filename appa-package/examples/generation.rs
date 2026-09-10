@@ -127,7 +127,7 @@ mod tests {
         let document = render(&dist, &marketplace, &images, &"a".repeat(40), "v1.0.0").unwrap();
         let generation = Generation::parse(document.as_bytes()).unwrap();
         assert_eq!(
-            generation.binaries()[&Platform::MacArm64],
+            generation.published().unwrap().binaries()[&Platform::MacArm64],
             ArtifactDigest::of_bytes(b"runtime")
         );
         fs::remove_file(dist.join(Platform::MacArm64.archive())).unwrap();

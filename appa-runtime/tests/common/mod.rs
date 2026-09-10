@@ -145,8 +145,8 @@ pub fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// The marketplace root a developer passes to `--plugin-source`, staged into
-/// `into` by the same mapping the build and init use.
+/// This checkout's marketplace root, staged into `into` by the same mapping the
+/// build and the install use.
 pub fn stage_bundle(into: &Path) -> PathBuf {
     let staged = into.join("plugin-source");
     appa_runtime::plugin_bundle::stage_repository(&repo_root(), &staged).expect("the checkout stages");

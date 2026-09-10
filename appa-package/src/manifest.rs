@@ -28,6 +28,8 @@ pub enum ManifestError {
     },
     #[error("{path} declares the namespace `{namespace}` twice")]
     RepeatedNamespace { path: PathBuf, namespace: String },
+    #[error("{path} includes the battery `{battery}` twice")]
+    RepeatedBattery { path: PathBuf, battery: String },
     #[error("{path} is not valid TOML: {source}")]
     Syntax {
         path: PathBuf,

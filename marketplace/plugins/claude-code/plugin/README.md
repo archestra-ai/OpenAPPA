@@ -10,7 +10,7 @@ The plugin protects only sessions launched with `APPA_GATE=1` (the
 `clappa` command). The hooks read the variable from the Claude Code
 process environment, fixed at launch, so a session cannot turn the
 protection off. In every other session the plugin is inert: it checks
-nothing, starts nothing, and prints nothing. The native `appa init
+nothing, starts nothing, and prints nothing. The native `appa plugin install
 claude-code` command installs the runtime and registers this plugin.
 
 The plugin ships the POSIX hook commands (`hooks/hooks.json`). Native
@@ -18,7 +18,7 @@ Windows swaps in `hooks/hooks.windows.json`, which drives the
 `hooks/hook.ps1` adapter to block failed prompt, tool-call, and
 successful tool-result admission; WSL runs the POSIX hooks as-is.
 `statusline.sh` and `statusline.ps1` provide matching status displays
-for protected sessions. `appa init` registers the platform script in Claude's
+for protected sessions. The install registers the platform script in Claude's
 global statusline setting, so each script exits without printing anything when
 `APPA_GATE=1` is absent. Plain `claude` therefore keeps its normal status area.
 
@@ -62,6 +62,6 @@ APPA_GATE=1 claude --plugin-dir "$bundle/plugin"
 
 # installed from this checkout
 cargo install --path appa-runtime --force
-appa init claude-code
+appa plugin install claude-code
 clappa
 ```

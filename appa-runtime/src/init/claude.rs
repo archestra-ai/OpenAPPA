@@ -331,7 +331,7 @@ pub(super) fn prepare_plugin_recovery(
     copy_directory(source, &marketplace.join("plugin"))?;
     let manifest = serde_json::to_vec_pretty(&serde_json::json!({
         "name": MARKETPLACE,
-        "description": "Temporary rollback source created by appa init.",
+        "description": "Temporary rollback source created by appa plugin install.",
         "owner": { "name": "Archestra" },
         "plugins": [{ "name": "appa-runtime", "source": "./plugin" }]
     }))

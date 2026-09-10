@@ -47,59 +47,58 @@ scanned; agents passed on the command line are not.
 
 This flow needs the `claude` command, `curl`, and Cargo when building from a checkout.
 
-`appa init` installs one bundle: the plugin belonging to the running binary and
-that binary. Release builds carry an immutable tag and artifact digest; clean
-checkout builds carry an immutable commit and plugin-tree digest. The result
-does not depend on the working directory.
+`appa plugin install claude-code` installs one bundle: the plugin belonging to
+the running binary and that binary. It selects a version, verifies every
+artifact against that version's descriptor before anything outside a temporary
+file changes, retains them under the deployment's `.appa/` state so a later
+install needs no network, and activates the plugin with that version's own
+binary. The result does not depend on the working directory.
 
-From a release binary, that digest is baked in. The installer verifies the
-checksum of the binary for Linux or macOS and places it in `~/.local/bin`
-(Windows: unpack the zip from the releases page). Init then downloads the
-artifact once, verifies it against the digest before anything outside a
-temporary file changes, and caches it, so a later init needs no network:
+A release binary installs the version published for its tag. The installer
+verifies the checksum of the binary for Linux or macOS and places it in
+`~/.local/bin` (Windows: unpack the zip from the releases page):
 
 ```sh
 curl -fsSL https://openappa.com/install.sh | sh
-~/.local/bin/appa init claude-code
+~/.local/bin/appa plugin install claude-code
 ```
 
-A clean checkout build downloads the source archive for its exact commit,
-stages the marketplace tree, and verifies the digest baked at compilation. A
-build with local plugin changes uses that exact checkout and verifies that it
-has not changed since compilation.
+A checkout build has no published version, so it installs itself: the version
+is the plugin tree of the commit it was built from, exported from that checkout
+without the network, and its binary is the one running the command.
 
 ```sh
 cargo install --path appa-runtime --force
-appa init claude-code
+appa plugin install claude-code
 ```
 
-Init reports each slow phase on stderr. If another installed APPA build owns
-the runtime endpoint, init identifies its process and asks `Stop it and
-continue? [Y/n]` before sending any signal. It never offers to stop an
-unidentified listener or another user's process.
+The install reports each slow phase on stderr and never prompts. If another
+APPA deployment owns the runtime endpoint, it refuses and names the process to
+stop; an unidentified listener or another user's process is never stopped.
 
-Init installs `clappa` beside `appa` so the short command works in later examples.
+The install puts `clappa` beside `appa` so the short command works in later
+examples.
 
-Init uninstalls an existing user-scoped APPA plugin and replaces its marketplace
+It uninstalls an existing user-scoped APPA plugin and replaces its marketplace
 before installing, so branch tests never stack two APPA hook sets.
 
-Initialization deploys the `appa` binary to a private path under the data
-directory and renders that exact path into the hooks, so a hook never resolves
-`appa` through `PATH`. It creates the starting policy only when it is missing,
-installs `clappa`, preserves a custom Claude statusline, registers the plugin,
-and starts the runtime through the same starter used at SessionStart. A
-successful command therefore proves that one runtime and one plugin from the
-selected source are active.
+Activation deploys the `appa` binary to a private path under the data directory
+and renders that exact path into the hooks, so a hook never resolves `appa`
+through `PATH`. A first install writes the starting policy; a later one keeps
+the file it finds. Activation installs `clappa`, preserves a custom Claude
+statusline, registers the plugin, and starts the runtime through the same
+starter used at SessionStart. A successful command therefore proves that one
+runtime and one plugin from the installed version are active.
 
 Deployments are content-addressed and immutable: Claude is pointed at a
 directory that cannot change under it, rather than at a checkout or a remote
-marketplace. Re-running init repairs a deployment whose structure or rendered
-paths are wrong and is otherwise a no-op.
+marketplace. Re-running the install repairs a deployment whose structure or
+rendered paths are wrong and is otherwise a no-op.
 
 Linux binaries require glibc 2.34 or newer. Alpine and other musl-only
 systems are not supported by the release assets.
 
-The plugin ships POSIX and native Windows hook commands. `appa init` activates
+The plugin ships POSIX and native Windows hook commands. The install activates
 the PowerShell adapter on native Windows; WSL uses the POSIX hooks.
 
 ### File locations
@@ -118,13 +117,13 @@ The runtime creates the starting policy only when the policy path does
 not exist. It never replaces the policy or database.
 
 Set `APPA_INSTALL_DIR`, `APPA_CONFIG_DIR`, or `APPA_DATA_DIR` in the
-environment to change these locations; `appa init` and the hooks follow them.
+environment to change these locations; the install and the hooks follow them.
 
 ## Protect a Claude Code session
 
 The plugin is present in every session but inert until a session
 opts in with `APPA_GATE=1`. Keep normal `claude` sessions unprotected
-and use a separate `clappa` command for protected ones. `appa init` creates
+and use a separate `clappa` command for protected ones. The install creates
 it as an executable beside the `appa` command — a PATH command works in
 every open terminal with no shell reload, unlike an alias:
 
@@ -152,8 +151,8 @@ nothing healthy answers `/health` — normally a no-op, because the install
 left it running — or replaces a runtime that answers `stale <pid>`,
 which a running process does once an install replaced its binary on
 disk. It then blocks every action while the runtime is unavailable. The starter
-never installs software; rerun `appa init claude-code` when the binary or
-plugin is missing. There is no login service: a runtime
+never installs software; rerun `appa plugin install claude-code` when the
+binary or plugin is missing. There is no login service: a runtime
 that dies mid-session blocks the session until the next session start
 brings it back. Check the runtime with:
 
@@ -237,9 +236,9 @@ Only this explicit live mode consumes Claude usage.
 ## Upgrade
 
 Rerun the installer (or `cargo install` from the new checkout), then rerun
-`appa init claude-code`. Init replaces
-the deployed runtime and the APPA marketplace together, always as one bundle,
-and preserves policy and database files.
+`appa plugin install claude-code`. It replaces the deployed runtime and the APPA
+marketplace together, always as one bundle, and preserves policy and database
+files.
 
 **Restart any running `clappa` session after an upgrade.** Claude loads a
 session's hooks at session start, and the hook wire between plugin and runtime
@@ -265,13 +264,13 @@ rm -rf ~/.local/share/appa/bin ~/.local/share/appa/deployments ~/.local/share/ap
 rm -f ~/.local/bin/appa ~/.local/bin/clappa ~/.local/bin/appa-statusline.sh
 rm -f ~/.cargo/bin/clappa && cargo uninstall appa   # checkout builds only
 
-# drop the statusline entry appa init wrote, and keep one of your own:
+# drop the statusline entry the install wrote, and keep one of your own:
 jq 'if (.statusLine.command? // "") | test("appa-statusline") then del(.statusLine) else . end' \
   ~/.claude/settings.json > ~/.claude/settings.json.new &&
   mv ~/.claude/settings.json.new ~/.claude/settings.json
 ```
 
-`appa init` writes the `statusLine` entry into your own settings, so
+The install writes the `statusLine` entry into your own settings, so
 removing the script alone leaves Claude Code running a command that no
 longer exists. The `jq` line removes that entry only while it runs
 `appa-statusline.sh`, so a statusline of your own survives untouched.
@@ -283,7 +282,7 @@ separately if you added one instead of the command.
 ## Statusline
 
 Claude Code reads `statusLine` only from your own global settings — a plugin
-cannot set it. `appa init` adds the platform script there unless you already
+cannot set it. The install adds the platform script there unless you already
 have a custom statusline. In a protected session the script shows the APPA pixel
 mascot plus the session's current Trust and Audience, read from the
 process's `GET /status`. In an unprotected session it prints nothing and never
