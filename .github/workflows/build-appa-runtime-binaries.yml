@@ -15,8 +15,8 @@ on:
         description: Version the built binary must report
         required: true
         type: string
-      plugin_sha256:
-        description: SHA-256 of the plugin artifact these binaries must accept
+      batteries_sha256:
+        description: SHA-256 of the batteries artifact these binaries must accept
         required: true
         type: string
 permissions: {}
@@ -84,12 +84,12 @@ jobs:
           release_ref: ${{ inputs.release_ref }}
           source_commit: ${{ inputs.source_commit }}
 
-      # The binary accepts only the plugin artifact whose digest it is built
+      # The binary accepts only the batteries artifact whose digest it is built
       # with. Baking it in at compile time is what makes a shipped binary
-      # unable to install any other release's plugin.
+      # unable to install any other release's batteries archive.
       - name: Build binary
         env:
-          APPA_PLUGIN_SHA256: ${{ inputs.plugin_sha256 }}
+          APPA_BATTERIES_SHA256: ${{ inputs.batteries_sha256 }}
           # The tag/ref is compiled in beside the digest. Runtime init never
           # guesses it from the Cargo version, which may also describe later
           # development commits before the next release.
@@ -136,8 +136,8 @@ jobs:
           EXECUTABLE: ${{ matrix.executable }}
           TARGET: ${{ matrix.target }}
         run: |
-          # Binary only. The plugin ships once, platform-independently, as
-          # appa-plugin-<version>.tar.gz, and init fetches exactly the artifact
+          # Binary only. The batteries archive ships once, platform-independently, as
+          # appa-batteries-<version>.tar.gz, and init fetches exactly the artifact
           # whose digest this binary was built with.
           mkdir -p "dist/${ASSET}"
           cp "target/${TARGET}/release/${EXECUTABLE}" "dist/${ASSET}/${EXECUTABLE}"
@@ -175,7 +175,7 @@ jobs:
           # Every debug-only seam is read through one gate that
           # [profile.release] pins shut, so a released binary must ignore a
           # malformed APPA_ENDPOINT and carry on; one that refuses the value
-          # read it, and could be pointed at another release's plugin.
+          # read it, and could be pointed at another release's batteries archive.
           #
           # Activation settles the endpoint before it reads anything, so the
           # config it is pointed at is what fails next, and that failure is
@@ -297,7 +297,7 @@ jobs:
             # Every debug-only seam is read through one gate that
             # [profile.release] pins shut, so a released binary must ignore a
             # malformed APPA_ENDPOINT and carry on; one that refuses the value
-            # read it, and could be pointed at another release's plugin.
+            # read it, and could be pointed at another release's batteries archive.
             #
             # Activation settles the endpoint before it reads anything, so the
             # config it is pointed at is what fails next, and that failure is

@@ -1,5 +1,5 @@
-//! The repository paths that make up the plugin archive a generation carries,
-//! and the tree the build digests for its identity.
+//! The repository paths that make up the batteries archive a generation
+//! carries, and the tree the build digests for its identity.
 //!
 //! This module is also compiled by `build.rs`, which reads only the mappings,
 //! so keep its dependencies to `std`. One mapping drives build-time identity
@@ -13,7 +13,7 @@ use std::path::Path;
 /// archive carries only the batteries a policy may include.
 pub const REPOSITORY_MAPPINGS: [(&str, &str); 1] = [("marketplace/batteries", "batteries")];
 
-/// Stage the plugin archive's tree from an OpenAPPA repository checkout.
+/// Stage the batteries archive's tree from an OpenAPPA repository checkout.
 pub fn stage_repository(repository: &Path, destination: &Path) -> io::Result<()> {
     fs::create_dir_all(destination)?;
     for (source, target) in REPOSITORY_MAPPINGS {

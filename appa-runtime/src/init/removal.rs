@@ -4,7 +4,6 @@ use std::fs;
 use std::path::Path;
 
 use super::{CLAPPA, InitError, appa_filename, deployment_paths, file_before, mcp, settings, skill, write_state};
-use crate::installation::archive::VerifiedArchive;
 
 #[cfg(unix)]
 pub(super) const REMOVING: &str = "#!/bin/sh\nprintf 'APPA plugin removal is incomplete; rerun appa plugin remove claude-code with the same config.\\n' >&2\nexit 1\n";
@@ -16,10 +15,9 @@ pub(super) const REMOVING: &str = "@echo off\r\necho APPA plugin removal is inco
 /// removed. The runtime, configuration, retained artifacts and trajectory data
 /// stay put. The `--config` flag of the bridge stays because the installed
 /// binary invokes it; the profile carries everything removal needs.
-pub fn claude_code_remove(_config: &Path, archive: &Path) -> Result<(), InitError> {
+pub fn claude_code_remove(_config: &Path) -> Result<(), InitError> {
     let paths = deployment_paths()?;
     let _profile_lock = super::lock_claude_profile(&paths.claude_dir)?;
-    VerifiedArchive::of(archive)?;
     let deployed = paths.data_dir.join("bin").join(appa_filename());
     let launcher = paths.install_dir.join(CLAPPA.0);
     let launcher_before = file_before(&launcher)?;

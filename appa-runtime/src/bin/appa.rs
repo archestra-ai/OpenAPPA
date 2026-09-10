@@ -23,8 +23,6 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
         #[arg(long)]
-        archive: PathBuf,
-        #[arg(long)]
         previous_binary: Option<PathBuf>,
     },
     /// Internal journalled removal using the selected release executable.
@@ -32,8 +30,6 @@ enum Command {
     RemoveClaude {
         #[arg(long)]
         config: PathBuf,
-        #[arg(long)]
-        archive: PathBuf,
     },
     /// Inspect host plugin packages for a deployment.
     Plugin {
@@ -193,9 +189,8 @@ fn main() -> ExitCode {
         Command::BuildInfo => appa_runtime::installation::native::build_info(),
         Command::ActivateClaude {
             config,
-            archive,
             previous_binary,
-        } => match appa_runtime::init::activate_claude_code(&config, &archive, previous_binary.as_deref()) {
+        } => match appa_runtime::init::activate_claude_code(&config, previous_binary.as_deref()) {
             Ok(_) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("appa: {error}");
@@ -215,7 +210,7 @@ fn main() -> ExitCode {
         Command::Plugin {
             command: PluginCommand::Remove(args),
         } => appa_runtime::installation::cli::remove_plugin(args),
-        Command::RemoveClaude { config, archive } => match appa_runtime::init::claude_code_remove(&config, &archive) {
+        Command::RemoveClaude { config } => match appa_runtime::init::claude_code_remove(&config) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("appa: {error}");

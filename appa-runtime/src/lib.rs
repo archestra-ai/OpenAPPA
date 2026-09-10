@@ -23,6 +23,7 @@ pub mod statusline;
 pub mod tls;
 pub mod tool_validation;
 
+mod batteries_layout;
 mod builtins;
 mod consult;
 mod elicit;
@@ -30,5 +31,4 @@ mod engine;
 mod events;
 mod external;
 mod llm;
-pub mod plugin_layout;
 pub mod yell;

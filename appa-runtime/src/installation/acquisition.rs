@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use appa_package::generation::{
-    ArtifactDigest, BUILD_PLUGIN_ARCHIVE, Commit, DESCRIPTOR_FILE, Generation, Platform, REPOSITORY,
+    ArtifactDigest, BUILD_BATTERIES_ARCHIVE, Commit, DESCRIPTOR_FILE, Generation, Platform, REPOSITORY,
 };
 use serde::Deserialize;
 
@@ -192,7 +192,7 @@ impl Acquired {
     pub fn is_own_build(generation: &Generation) -> bool {
         generation.build_artifacts().is_some_and(|build| {
             Some(generation.commit().as_str()) == option_env!("APPA_BUILD_COMMIT")
-                && Some(build.plugin_tree()) == option_env!("APPA_PLUGIN_TREE_SHA256")
+                && Some(build.batteries_tree()) == option_env!("APPA_BATTERIES_TREE_SHA256")
         })
     }
 
@@ -220,7 +220,7 @@ impl Acquired {
         }
     }
 
-    /// A development build installs itself: the plugin tree staged from its
+    /// A development build installs itself: the batteries tree staged from its
     /// commit, which must digest to what the build stamped, the marketplace
     /// tree at that commit, and this process's own executable. Kagent needs
     /// published images and a chart, which a build cannot supply.
@@ -232,8 +232,8 @@ impl Acquired {
             )
         })?;
         let commit = Commit::parse(commit).map_err(|error| InstallError::Invalid(error.to_string()))?;
-        let plugin_tree = option_env!("APPA_PLUGIN_TREE_SHA256")
-            .ok_or_else(|| InstallError::Invalid("this build carries no plugin identity".into()))?;
+        let batteries_tree = option_env!("APPA_BATTERIES_TREE_SHA256")
+            .ok_or_else(|| InstallError::Invalid("this build carries no batteries identity".into()))?;
         let platform = Platform::current()
             .ok_or_else(|| InstallError::Invalid("this platform has no published runtime binary".into()))?;
         if matches!(requirements, Requirements::Kagent | Requirements::Both(_)) {
@@ -245,22 +245,22 @@ impl Acquired {
             tempfile::tempdir().map_err(|error| io("stage acquisition", Path::new("temporary directory"), error))?;
         let repository = source_at_commit(&commit, stage.path())?;
         let staged = stage.path().join("plugin");
-        crate::plugin_layout::stage_repository(&repository, &staged)
-            .map_err(|error| InstallError::Invalid(format!("cannot stage the plugin tree: {error}")))?;
+        crate::batteries_layout::stage_repository(&repository, &staged)
+            .map_err(|error| InstallError::Invalid(format!("cannot stage the batteries tree: {error}")))?;
         let actual = appa_package::canonical_tree_digest(&staged)
             .map_err(|error| InstallError::Invalid(error.to_string()))?
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        if actual != plugin_tree {
+        if actual != batteries_tree {
             return Err(InstallError::Invalid(format!(
-                "the plugin tree at commit {commit} does not match this build; rebuild from that commit"
+                "the batteries tree at commit {commit} does not match this build; rebuild from that commit"
             )));
         }
         let marketplace = repository.join("marketplace");
         let catalog = ArtifactDigest::of_bytes(&super::required_bytes(&marketplace.join("marketplace.toml"))?);
-        let plugin_archive = stage.path().join(BUILD_PLUGIN_ARCHIVE);
-        pack_tree(&staged, &plugin_archive)?;
+        let batteries_archive = stage.path().join(BUILD_BATTERIES_ARCHIVE);
+        pack_tree(&staged, &batteries_archive)?;
         let binary_archive = stage.path().join(platform.archive());
         let executable =
             std::env::current_exe().map_err(|error| io("locate this executable", Path::new("appa"), error))?;
@@ -269,9 +269,9 @@ impl Acquired {
             commit.clone(),
             catalog,
             platform,
-            plugin_tree,
+            batteries_tree,
             digest_of(&binary_archive)?,
-            digest_of(&plugin_archive)?,
+            digest_of(&batteries_archive)?,
         )
         .map_err(|error| InstallError::Invalid(error.to_string()))?;
         verify_packages(&marketplace, &generation).map_err(|error| {
@@ -407,7 +407,7 @@ pub(super) fn required_archives(
             ));
         }
         names.push(platform.archive().to_owned());
-        names.push(generation.plugin_archive());
+        names.push(generation.batteries_archive());
     }
     if matches!(requirements, Requirements::Kagent | Requirements::Both(_)) {
         names.push(generation.runtime_chart_archive().ok_or_else(|| {
@@ -463,7 +463,7 @@ fn git_head(root: &Path) -> Option<String> {
 }
 
 /// Committed content only, so a dirty checkout exports exactly its HEAD. The
-/// marketplace tree holds every source `plugin_layout` maps.
+/// marketplace tree holds every source `batteries_layout` maps.
 fn export_commit(root: &Path, destination: &Path) -> Result<(), InstallError> {
     let output = Command::new("git")
         .arg("-C")
@@ -714,7 +714,10 @@ mod tests {
         );
         assert_eq!(
             required_archives(&generation, Requirements::Claude(Platform::MacArm64)).unwrap(),
-            vec![Platform::MacArm64.archive().to_owned(), BUILD_PLUGIN_ARCHIVE.to_owned()]
+            vec![
+                Platform::MacArm64.archive().to_owned(),
+                BUILD_BATTERIES_ARCHIVE.to_owned()
+            ]
         );
         assert!(required_archives(&generation, Requirements::Claude(Platform::LinuxAmd64)).is_err());
         assert!(required_archives(&generation, Requirements::Kagent).is_err());
@@ -767,7 +770,7 @@ mod tests {
         let descriptor = serde_json::to_vec(&serde_json::json!({"schema": 1, "repository": REPOSITORY,
             "commit": "a".repeat(40), "release": "v1.0.0", "protocol": appa_package::PROTOCOL,
             "catalog": ArtifactDigest::of_bytes(catalog), "marketplace": ArtifactDigest::of_bytes(&archive),
-            "claude_plugin": digest, "runtime_chart": digest,
+            "batteries": digest, "runtime_chart": digest,
             "binaries": Platform::ALL.into_iter().map(|p| (p, digest.clone())).collect::<BTreeMap<_, _>>(),
             "images": Image::ALL.into_iter().map(|i| (i, serde_json::json!({"digest": digest,
                 "platforms": {"linux/amd64": digest}}))).collect::<BTreeMap<_, _>>() }))
