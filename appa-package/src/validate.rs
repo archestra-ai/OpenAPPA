@@ -113,9 +113,6 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
         }
         Role::Plugin(plugin) => {
             contained.resolve(plugin.default_policy(), "plugin.default_policy", EntryKind::File)?;
-            if let crate::package::Plugin::ClaudeCode { plugin_dir, .. } = plugin {
-                contained.resolve(plugin_dir, "plugin.plugin_dir", EntryKind::Directory)?;
-            }
         }
     }
     Ok(package)
@@ -494,13 +491,10 @@ mod tests {
         fs::write(
             directory.path().join("appa-package.toml"),
             "schema = 1\nname = \"claude-code\"\ndescription = \"Claude Code plugin\"\n\n\
-             [plugin]\nhost = \"claude-code\"\nprotocol = 1\ndefault_policy = \"default.appa.toml\"\n\
-             plugin_dir = \"plugin\"\nplugin = \"appa-runtime\"\n",
+             [plugin]\nhost = \"claude-code\"\nprotocol = 1\ndefault_policy = \"default.appa.toml\"\n",
         )
         .unwrap();
         fs::write(directory.path().join("default.appa.toml"), "[policy]\nversion = 2\n").unwrap();
-        fs::create_dir(directory.path().join("plugin")).unwrap();
-        fs::write(directory.path().join("plugin/plugin.json"), "{}\n").unwrap();
         directory
     }
 
@@ -572,20 +566,6 @@ mod tests {
             validate_package(directory.path()),
             Err(PackageError::MissingPath {
                 field: "battery.helpers",
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn a_plugin_directory_that_is_absent_is_refused() {
-        let directory = claude_code_adapter();
-        fs::remove_dir_all(directory.path().join("plugin")).unwrap();
-
-        assert!(matches!(
-            validate_package(directory.path()),
-            Err(PackageError::MissingPath {
-                field: "plugin.plugin_dir",
                 ..
             })
         ));
@@ -713,25 +693,6 @@ mod tests {
             validate_package(directory.path()),
             Err(PackageError::WrongKind {
                 field: "battery.helpers",
-                ..
-            })
-        ));
-
-        let plugin = tempfile::tempdir().unwrap();
-        fs::write(
-            plugin.path().join("appa-package.toml"),
-            "schema = 1\nname = \"claude-code\"\ndescription = \"Claude Code plugin\"\n\n\
-             [plugin]\nhost = \"claude-code\"\nprotocol = 1\ndefault_policy = \"default.appa.toml\"\n\
-             plugin_dir = \"plugin\"\nplugin = \"appa-runtime\"\n",
-        )
-        .unwrap();
-        fs::write(plugin.path().join("default.appa.toml"), "[policy]\nversion = 2\n").unwrap();
-        fs::write(plugin.path().join("plugin"), "not a tree").unwrap();
-
-        assert!(matches!(
-            validate_package(plugin.path()),
-            Err(PackageError::WrongKind {
-                field: "plugin.plugin_dir",
                 ..
             })
         ));

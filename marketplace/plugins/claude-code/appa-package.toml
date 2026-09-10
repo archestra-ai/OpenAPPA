@@ -7,5 +7,3 @@ host = "claude-code"
 protocol = 1
 default_policy = "default.appa.toml"
 batteries = ["claude-code"]
-plugin_dir = "plugin"
-plugin = "appa-runtime"

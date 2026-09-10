@@ -364,7 +364,7 @@ mod tests {
             &format!(
                 "schema = 1\nname = \"{name}\"\ndescription = \"an plugin\"\n\n\
                  [plugin]\nhost = \"claude-code\"\nprotocol = 1\ndefault_policy = \"d.toml\"\n\
-                 batteries = [{batteries}]\nplugin_dir = \"plugin\"\nplugin = \"appa-runtime\"\n"
+                 batteries = [{batteries}]\n"
             ),
             Path::new("appa-package.toml"),
         )
