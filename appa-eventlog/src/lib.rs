@@ -8,8 +8,8 @@
 //! This crate is where the log is written and read. The record encoding, the database, and the
 //! conditional append are private to it: a caller hands it [`Fact`]s and gets [`Log`]s back, and
 //! never names SQL, a row, or a byte. Where the log is kept is the closed [`Backend`] enum,
-//! dispatched by `match` — no trait, because two SQLite connection modes are not two
-//! implementations.
+//! dispatched by `match`: SQLite for standalone use and optional PostgreSQL for
+//! embedded hosts that install the schema through their own migrations.
 //!
 //! Two tables, and no derived state:
 //!
@@ -46,6 +46,9 @@ use appa_engine::profile::PolicyFileKey;
 use appa_engine::value::TrajectoryId;
 use appa_runtime_api::{AdapterName, inventory::ToolInventory};
 
+#[cfg(feature = "postgres")]
+pub mod postgres;
+
 const SCHEMA_VERSION: i64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,10 +59,17 @@ pub enum Backend {
     /// Private to one [`LogStore`] and gone when it drops. An in-memory adapter sits
     /// beside the durable one deliberately: the decision core cannot tell them apart.
     Memory,
+    /// Schema is installed by the embedding application's migrations.
+    #[cfg(feature = "postgres")]
+    Postgres {
+        url: String,
+    },
 }
 
 pub struct LogStore {
-    connection: Mutex<Connection>,
+    connection: Option<Mutex<Connection>>,
+    #[cfg(feature = "postgres")]
+    postgres: Option<postgres::PostgresStore>,
     #[cfg(feature = "fault-injection")]
     commits_until_failure: std::sync::atomic::AtomicU64,
     #[cfg(feature = "fault-injection")]
@@ -160,6 +170,8 @@ impl From<&CreateError> for StoreErrorClass {
             CreateError::Malformed { .. } => StoreErrorClass::Malformed,
             CreateError::PolicyFileMismatch => StoreErrorClass::PolicyMismatch,
             CreateError::Storage(_) => StoreErrorClass::Storage,
+            #[cfg(feature = "postgres")]
+            CreateError::Postgres(_) => StoreErrorClass::Storage,
             #[cfg(feature = "fault-injection")]
             CreateError::Injected => StoreErrorClass::Storage,
         }
@@ -173,6 +185,8 @@ impl From<&ReadError> for StoreErrorClass {
             ReadError::PolicyFileMissing { .. } => StoreErrorClass::PolicyUnavailable,
             ReadError::Undecodable(_) => StoreErrorClass::Undecodable,
             ReadError::Storage(_) => StoreErrorClass::Storage,
+            #[cfg(feature = "postgres")]
+            ReadError::Postgres(_) => StoreErrorClass::Storage,
         }
     }
 }
@@ -182,6 +196,8 @@ impl From<&AppendError> for StoreErrorClass {
         match error {
             AppendError::Conflict { .. } => StoreErrorClass::Conflict,
             AppendError::Storage(_) => StoreErrorClass::Storage,
+            #[cfg(feature = "postgres")]
+            AppendError::Postgres(_) => StoreErrorClass::Storage,
             #[cfg(feature = "fault-injection")]
             AppendError::Injected => StoreErrorClass::Storage,
         }
@@ -196,6 +212,9 @@ pub enum OpenError {
     ForeignSchema { path: String, found: i64, expected: i64 },
     #[error("storage failure: {0}")]
     Storage(#[from] rusqlite::Error),
+    #[cfg(feature = "postgres")]
+    #[error("PostgreSQL storage failure: {0}")]
+    Postgres(#[from] postgres::PostgresError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -211,6 +230,9 @@ pub enum CreateError {
     PolicyFileMismatch,
     #[error("storage failure: {0}")]
     Storage(#[from] rusqlite::Error),
+    #[cfg(feature = "postgres")]
+    #[error("PostgreSQL storage failure: {0}")]
+    Postgres(#[from] postgres::PostgresError),
     #[cfg(feature = "fault-injection")]
     #[error("injected failure before commit")]
     Injected,
@@ -226,6 +248,9 @@ pub enum ReadError {
     Undecodable(String),
     #[error("storage failure: {0}")]
     Storage(#[from] rusqlite::Error),
+    #[cfg(feature = "postgres")]
+    #[error("PostgreSQL storage failure: {0}")]
+    Postgres(#[from] postgres::PostgresError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -234,18 +259,41 @@ pub enum AppendError {
     Conflict { current: u64 },
     #[error("storage failure: {0}")]
     Storage(#[from] rusqlite::Error),
+    #[cfg(feature = "postgres")]
+    #[error("PostgreSQL storage failure: {0}")]
+    Postgres(#[from] postgres::PostgresError),
     #[cfg(feature = "fault-injection")]
     #[error("injected failure before commit")]
     Injected,
 }
 
 impl LogStore {
+    /// Coordinate host-owned receipts with the connection that writes event batches.
+    /// The embedding host must serialize operations during an outer transaction.
+    #[cfg(feature = "postgres")]
+    pub fn postgres(&self) -> Option<&postgres::PostgresStore> {
+        self.postgres.as_ref()
+    }
+
     /// Open the log. A fresh database gets the schema and its version stamp; an existing one is
     /// checked for damage and for a version this build understands, and refused otherwise.
     pub fn open(backend: Backend) -> Result<LogStore, OpenError> {
+        #[cfg(feature = "postgres")]
+        if let Backend::Postgres { url } = &backend {
+            return Ok(LogStore {
+                connection: None,
+                postgres: Some(postgres::PostgresStore::open(url.clone())?),
+                #[cfg(feature = "fault-injection")]
+                commits_until_failure: std::sync::atomic::AtomicU64::new(0),
+                #[cfg(feature = "fault-injection")]
+                contended_appends: std::sync::atomic::AtomicU64::new(0),
+            });
+        }
         let (mut connection, path) = match &backend {
             Backend::Sqlite { path } => (Connection::open(path)?, path.display().to_string()),
             Backend::Memory => (Connection::open_in_memory()?, ":memory:".to_string()),
+            #[cfg(feature = "postgres")]
+            Backend::Postgres { .. } => unreachable!("handled above"),
         };
         if matches!(backend, Backend::Sqlite { .. }) {
             let probe = || -> Result<String, rusqlite::Error> {
@@ -299,7 +347,9 @@ impl LogStore {
             transaction.commit()?;
         }
         Ok(LogStore {
-            connection: Mutex::new(connection),
+            connection: Some(Mutex::new(connection)),
+            #[cfg(feature = "postgres")]
+            postgres: None,
             #[cfg(feature = "fault-injection")]
             commits_until_failure: std::sync::atomic::AtomicU64::new(0),
             #[cfg(feature = "fault-injection")]
@@ -316,6 +366,10 @@ impl LogStore {
             return Err(CreateError::PolicyFileMismatch);
         }
         let bytes = encode(&opening);
+        #[cfg(feature = "postgres")]
+        if let Some(pg) = &self.postgres {
+            return pg.create(&root, &key, policy_file, bytes);
+        }
         let mut connection = self.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute(
@@ -348,6 +402,10 @@ impl LogStore {
     /// to open one — reading the whole log to learn only this would cost the caller a second
     /// read on the path that then goes on to read it properly.
     pub fn has_root(&self, root: &TrajectoryId) -> Result<bool, ReadError> {
+        #[cfg(feature = "postgres")]
+        if let Some(pg) = &self.postgres {
+            return pg.has_root(root).map_err(Into::into);
+        }
         let connection = self.lock();
         let found: Option<i64> = connection
             .query_row(
@@ -362,6 +420,10 @@ impl LogStore {
     /// Read one root's whole log, with the position it stands at and the policy file it opened
     /// under.
     pub fn log(&self, root: &TrajectoryId) -> Result<Log, ReadError> {
+        #[cfg(feature = "postgres")]
+        if let Some(pg) = &self.postgres {
+            return pg.log(root);
+        }
         let (batches, policy_file) = {
             let connection = self.lock();
             stored(&connection, root)?
@@ -383,6 +445,10 @@ impl LogStore {
     }
 
     fn append_bytes(&self, based_on: &Log, bytes: Vec<u8>) -> Result<(), AppendError> {
+        #[cfg(feature = "postgres")]
+        if let Some(pg) = &self.postgres {
+            return pg.append(based_on, bytes);
+        }
         let mut connection = self.lock();
         #[cfg(feature = "fault-injection")]
         if self.contention_fires() {
@@ -478,6 +544,8 @@ impl LogStore {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.connection
+            .as_ref()
+            .expect("SQLite-only operation")
             .lock()
             .expect("the log store mutex is never poisoned: no panics under the lock")
     }
@@ -947,5 +1015,92 @@ mod tests {
         let first = opened();
         assert!(first.log(&root()).is_ok());
         assert!(matches!(memory().log(&root()), Err(ReadError::UnknownRoot { .. })));
+    }
+
+    /// Run against an Archestra-migrated, disposable PostgreSQL database:
+    /// OPENAPPA_TEST_DATABASE_URL=... cargo test -p appa-eventlog --features postgres -- --ignored
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_preserves_encoding_cas_and_outer_transaction_atomicity() {
+        let url = std::env::var("OPENAPPA_TEST_DATABASE_URL").expect("test database URL");
+        let first = LogStore::open(Backend::Postgres { url: url.clone() }).unwrap();
+        let second = LogStore::open(Backend::Postgres { url }).unwrap();
+        let unique = tempfile::tempdir().unwrap();
+        let id = TrajectoryId::new(format!("pg-test:{}", unique.path().display()));
+        let facts = vec![Fact::Boundary {
+            trajectory: id.clone(),
+            kind: appa_engine::fact::BoundaryKind::VoidReturn,
+        }];
+        let sqlite = memory();
+        first.create_root(opening(&id), POLICY.as_bytes()).unwrap();
+        sqlite.create_root(opening(&id), POLICY.as_bytes()).unwrap();
+        assert_eq!(first.log(&id).unwrap(), sqlite.log(&id).unwrap());
+        assert!(matches!(
+            second.create_root(opening(&id), POLICY.as_bytes()),
+            Err(CreateError::AlreadyExists { .. })
+        ));
+
+        let before = first.log(&id).unwrap();
+        let tx = first.postgres().unwrap().begin().unwrap();
+        first.append(&before, &facts).unwrap();
+        first.append(&first.log(&id).unwrap(), &facts).unwrap();
+        assert_eq!(first.log(&id).unwrap().basis(), 3);
+        assert_eq!(
+            second.log(&id).unwrap(),
+            before,
+            "uncommitted hook writes are invisible"
+        );
+        drop(tx);
+        assert_eq!(first.log(&id).unwrap(), before, "all hook writes roll back together");
+
+        let tx = first.postgres().unwrap().begin().unwrap();
+        first.append(&before, &facts).unwrap();
+        tx.commit().unwrap();
+        assert!(matches!(
+            second.append(&before, &facts),
+            Err(AppendError::Conflict { current: 2 })
+        ));
+        sqlite.append(&sqlite.log(&id).unwrap(), &facts).unwrap();
+        assert_eq!(second.log(&id).unwrap(), sqlite.log(&id).unwrap());
+
+        let observation = observed(id.as_str(), "demo");
+        first.append_inventory(&first.log(&id).unwrap(), &observation).unwrap();
+        sqlite
+            .append_inventory(&sqlite.log(&id).unwrap(), &observation)
+            .unwrap();
+        assert_eq!(second.log(&id).unwrap(), sqlite.log(&id).unwrap());
+
+        let stale = first.log(&id).unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        let outcomes = std::thread::scope(|scope| {
+            let a = scope.spawn(|| {
+                barrier.wait();
+                first.append(&stale, &facts)
+            });
+            let b = scope.spawn(|| {
+                barrier.wait();
+                second.append(&stale, &facts)
+            });
+            [a.join().unwrap(), b.join().unwrap()]
+        });
+        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|result| matches!(result, Err(AppendError::Conflict { current: 4 })))
+                .count(),
+            1
+        );
+        assert_eq!(second.log(&id).unwrap().basis(), 4);
+
+        first
+            .postgres()
+            .unwrap()
+            .with_client(move |client| {
+                client.execute("DELETE FROM openappa_events WHERE root=$1", &[&id.as_str()])?;
+                Ok(())
+            })
+            .unwrap();
     }
 }
