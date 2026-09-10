@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 
-import { PixelLockup, PixelMark, PixelWordmark } from "@/components/Logo";
+import { PixelAlertMark, PixelLockup, PixelMark, PixelWordmark } from "@/components/Logo";
 import { StlViewer } from "@/components/StlViewer";
 
 /* The Branding page's assets: the mark, the wordmark and the lockup, drawn by
@@ -17,13 +17,27 @@ import { StlViewer } from "@/components/StlViewer";
 type ThemeName = "light" | "dark";
 
 /** The only tokens the marks are drawn with. */
-const MARK_TOKENS = ["--text-strong", "--text-weak", "--bg"] as const;
+const MARK_TOKENS = ["--text-strong", "--text-weak", "--bg", "--appa-throat", "--appa-teeth", "--spark"] as const;
 type MarkToken = (typeof MARK_TOKENS)[number];
 type Palette = Record<MarkToken, string>;
 
 const FALLBACK: Record<ThemeName, Palette> = {
-  light: { "--text-strong": "hsl(30, 8%, 11%)", "--text-weak": "hsl(32, 3%, 54%)", "--bg": "hsl(40, 25%, 99%)" },
-  dark: { "--text-strong": "hsl(40, 12%, 93%)", "--text-weak": "hsl(33, 4%, 50%)", "--bg": "hsl(30, 6%, 8%)" },
+  light: {
+    "--text-strong": "hsl(30, 8%, 11%)",
+    "--text-weak": "hsl(32, 3%, 54%)",
+    "--bg": "hsl(40, 25%, 99%)",
+    "--appa-throat": "hsl(30, 8%, 11%)",
+    "--appa-teeth": "hsl(40, 25%, 99%)",
+    "--spark": "#fcc405",
+  },
+  dark: {
+    "--text-strong": "hsl(40, 12%, 93%)",
+    "--text-weak": "hsl(33, 4%, 50%)",
+    "--bg": "hsl(30, 6%, 8%)",
+    "--appa-throat": "hsl(30, 6%, 8%)",
+    "--appa-teeth": "hsl(40, 12%, 93%)",
+    "--spark": "#fcc405",
+  },
 };
 
 /**
@@ -191,33 +205,70 @@ function blinkFrame(source: SVGSVGElement, scale: number) {
   };
 }
 
+const ALERT_FRAMES: { shiftY: number; sparksOpacity: number; delay: number }[] = [
+  { shiftY: 0, sparksOpacity: 1, delay: 240 },
+  { shiftY: -1, sparksOpacity: 1, delay: 180 },
+  { shiftY: 0, sparksOpacity: 0.3, delay: 120 },
+  { shiftY: 1, sparksOpacity: 1, delay: 180 },
+  { shiftY: 0, sparksOpacity: 1, delay: 240 },
+  { shiftY: 0, sparksOpacity: 0.3, delay: 120 },
+];
+
+function alertFrame(shiftY: number, sparksOpacity: number) {
+  return (clone: SVGSVGElement) => {
+    const body = clone.querySelector<SVGGElement>(".appa-alert-body");
+    if (body && shiftY !== 0) {
+      body.setAttribute("transform", `translate(0 ${shiftY})`);
+    }
+    const sparks = clone.querySelector<SVGGElement>(".appa-alert-sparks");
+    if (sparks) {
+      sparks.setAttribute("opacity", String(sparksOpacity));
+    }
+  };
+}
+
 async function gifBlob(source: SVGSVGElement, palette: Palette): Promise<Blob> {
   // GIF's transparency is one bit, which would ragged the mark's edges — so
   // every frame is flattened onto the theme's own background instead.
-  //
-  // Only the blink is animated. The float is a 2% drift on a 5.5s cycle that
-  // never lines up with the 5s blink, so carrying it would mean either a
-  // 55-second loop or a visible jump at the seam — and it is the eyes anyone
-  // looks at. An asset with eyes gets six frames; one without gets a still.
-  const frames = source.querySelector(".appa-mark-eyes") ? BLINK : [{ eyes: 1, delay: 0 }];
+  const isAlert = Boolean(source.querySelector(".appa-alert-sparks"));
+  const isBlink = Boolean(source.querySelector(".appa-mark-eyes"));
 
   const { GIFEncoder, applyPalette, quantize } = await import("gifenc");
   const gif = GIFEncoder();
   let colors: number[][] | null = null;
 
-  for (const [at, frame] of frames.entries()) {
-    const canvas = await rasterize(source, palette, palette["--bg"], blinkFrame(source, frame.eyes));
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("no 2d context");
-    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    // Every frame is the same handful of flat colours, so one table serves
-    // them all — quantizing per frame would risk the palette shifting mid-blink.
-    colors ??= quantize(data, 16);
-    gif.writeFrame(applyPalette(data, colors), canvas.width, canvas.height, {
-      palette: at === 0 ? colors : undefined,
-      delay: frame.delay,
-      repeat: 0, // loop forever
-    });
+  if (isAlert) {
+    for (const [at, frame] of ALERT_FRAMES.entries()) {
+      const canvas = await rasterize(
+        source,
+        palette,
+        palette["--bg"],
+        alertFrame(frame.shiftY, frame.sparksOpacity),
+      );
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("no 2d context");
+      const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      colors ??= quantize(data, 16);
+      gif.writeFrame(applyPalette(data, colors), canvas.width, canvas.height, {
+        palette: at === 0 ? colors : undefined,
+        delay: frame.delay,
+        repeat: 0,
+      });
+    }
+  } else {
+    const frames = isBlink ? BLINK : [{ eyes: 1, delay: 0 }];
+    for (const [at, frame] of frames.entries()) {
+      const canvas = await rasterize(source, palette, palette["--bg"], isBlink ? blinkFrame(source, frame.eyes) : undefined);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("no 2d context");
+      const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      colors ??= quantize(data, 16);
+      gif.writeFrame(applyPalette(data, colors), canvas.width, canvas.height, {
+        palette: at === 0 ? colors : undefined,
+        delay: frame.delay,
+        repeat: 0,
+      });
+    }
   }
 
   gif.finish();
@@ -499,14 +550,22 @@ export function BrandAssets() {
           <PixelWordmark word="OpenAPPA" capHeight={38} />
         </AssetPanel>
         <AssetPanel
-          className="brand-panel-wide"
           file="openappa-lockup"
           name="The lockup"
           note="mark · wordmark, both sized from the cap height"
           palette={palette}
           theme={theme}
         >
-          <PixelLockup capHeight={30} />
+          <PixelLockup capHeight={22} style={{ maxWidth: "100%", height: "auto" }} />
+        </AssetPanel>
+        <AssetPanel
+          file="openappa-alert"
+          name="The alert mark"
+          note="34 × 22 pixels · Appa yelling"
+          palette={palette}
+          theme={theme}
+        >
+          <PixelAlertMark size={136} />
         </AssetPanel>
       </div>
 
@@ -561,20 +620,6 @@ export function BrandAssets() {
             </ul>
           </div>
         ))}
-        <div className="brand-model">
-          <div className="brand-model-head">
-            <span className="brand-model-title">Situational marks</span>
-            <span className="brand-model-note">not for general identity</span>
-          </div>
-          <ul>
-            <li>
-              <a download="openappa-alert.png" href="/brand/appa-yell.png">
-                appa-yell.png
-              </a>
-              <span>the alert mark — reserved for 404s and halted trajectories</span>
-            </li>
-          </ul>
-        </div>
       </div>
     </div>
   );

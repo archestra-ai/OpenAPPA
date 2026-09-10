@@ -56,6 +56,10 @@
   --info: hsl(215, 60%, 40%);
   --info-bg: hsl(215, 55%, 93%);
 
+  --appa-throat: var(--text-strong);
+  --appa-teeth: var(--bg);
+  --spark: #fcc405;
+
   /* syntax — neutrals carry structure, hue only where it informs */
   --syn-comment: hsl(32, 4%, 44%);
   --syn-keyword: hsl(30, 8%, 11%);
@@ -129,6 +133,10 @@
   --danger-bg: hsl(6, 40%, 14%);
   --info: hsl(212, 55%, 65%);
   --info-bg: hsl(215, 30%, 14%);
+
+  --appa-throat: var(--bg);
+  --appa-teeth: var(--text-strong);
+  --spark: #fcc405;
 
   --syn-comment: hsl(33, 5%, 60%);
   --syn-keyword: hsl(40, 12%, 93%);
@@ -2626,8 +2634,38 @@ samp {
 
 .brand-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
+}
+
+@media (max-width: 680px) {
+  .brand-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@keyframes appa-sparks-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.65;
+  }
+}
+
+.appa-alert-sparks {
+  animation: appa-sparks-pulse 1.8s ease-in-out infinite;
+}
+
+.appa-alert-shake {
+  animation: appa-yell-shake 4.5s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .appa-alert-sparks,
+  .appa-alert-shake {
+    animation: none;
+  }
 }
 
 .brand-toolbar {
