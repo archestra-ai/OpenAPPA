@@ -40,19 +40,16 @@ def user(id, email=None, **flags):
 
 
 class SelectorTests(unittest.TestCase):
-    def test_viewer_is_the_tokens_own_principal(self):
+    def test_viewer_is_the_tokens_own_confirmed_email(self):
         call = fixture_api(
             [
                 ("auth.test", {}, {"ok": True, "user_id": "U1", "team_id": "T1"}),
                 ("users.info", {"user": "U1"}, {"ok": True, "user": user("U1", "alice@corp.com")}),
             ]
         )
-        self.assertEqual(
-            AUDIENCE_SOURCE.answer(call, {"selector": "viewer"}),
-            {"members": [{"id": "slack:U1", "verified_email": "alice@corp.com"}]},
-        )
+        self.assertEqual(AUDIENCE_SOURCE.answer(call, {"selector": "viewer"}), {"members": ["alice@corp.com"]})
 
-    def test_an_unconfirmed_profile_address_is_not_a_verified_claim(self):
+    def test_an_unconfirmed_profile_address_leaves_the_qualified_id(self):
         call = fixture_api(
             [
                 ("auth.test", {}, {"ok": True, "user_id": "U1", "team_id": "T1"}),
@@ -71,10 +68,7 @@ class SelectorTests(unittest.TestCase):
                 ),
             ]
         )
-        self.assertEqual(
-            AUDIENCE_SOURCE.answer(call, {"selector": "viewer"}),
-            {"members": [{"id": "slack:U1"}]},
-        )
+        self.assertEqual(AUDIENCE_SOURCE.answer(call, {"selector": "viewer"}), {"members": ["slack:U1"]})
 
     def test_a_page_without_members_is_a_failure_not_a_partial_answer(self):
         call = fixture_api(
@@ -119,12 +113,7 @@ class SelectorTests(unittest.TestCase):
         )
         self.assertEqual(
             AUDIENCE_SOURCE.answer(call, {"selector": "full-members"}),
-            {
-                "members": [
-                    {"id": "slack:U1", "verified_email": "alice@corp.com"},
-                    {"id": "slack:U9"},
-                ]
-            },
+            {"members": ["alice@corp.com", "slack:U9"]},
         )
 
     def test_a_user_group_reports_its_own_membership_guests_included(self):
@@ -153,12 +142,7 @@ class SelectorTests(unittest.TestCase):
         )
         self.assertEqual(
             AUDIENCE_SOURCE.answer(call, {"selector": "user-group/finance"}),
-            {
-                "members": [
-                    {"id": "slack:U1", "verified_email": "alice@corp.com"},
-                    {"id": "slack:U2", "verified_email": "auditor@consulting.com"},
-                ]
-            },
+            {"members": ["alice@corp.com", "auditor@consulting.com"]},
         )
 
     def test_an_unknown_user_group_handle_is_a_failure_not_an_empty_answer(self):
@@ -179,25 +163,22 @@ class SelectorTests(unittest.TestCase):
 
 
 class MemberLookupTests(unittest.TestCase):
-    def test_a_known_member_reports_its_claims(self):
+    def test_a_member_with_a_confirmed_email_resolves_to_it(self):
         call = fixture_api(
             [("users.info", {"user": "U1"}, {"ok": True, "user": user("U1", "alice@corp.com")})]
         )
         self.assertEqual(
             AUDIENCE_SOURCE.answer(call, {"member": "slack:U1"}),
-            {"claims": {"id": "slack:U1", "verified_email": "alice@corp.com"}},
+            {"principal": "alice@corp.com"},
         )
 
-    def test_a_member_without_an_email_keeps_the_bare_claim(self):
+    def test_a_member_without_an_email_is_the_reader_as_written(self):
         call = fixture_api([("users.info", {"user": "U9"}, {"ok": True, "user": user("U9")})])
-        self.assertEqual(
-            AUDIENCE_SOURCE.answer(call, {"member": "slack:U9"}),
-            {"claims": {"id": "slack:U9"}},
-        )
+        self.assertEqual(AUDIENCE_SOURCE.answer(call, {"member": "slack:U9"}), {"principal": "slack:U9"})
 
     def test_an_unknown_member_is_a_definitive_null(self):
         call = fixture_api([("users.info", {"user": "U404"}, {"ok": False, "error": "user_not_found"})])
-        self.assertEqual(AUDIENCE_SOURCE.answer(call, {"member": "slack:U404"}), {"claims": None})
+        self.assertEqual(AUDIENCE_SOURCE.answer(call, {"member": "slack:U404"}), {"principal": None})
 
     def test_any_other_lookup_error_is_a_failure(self):
         call = fixture_api([("users.info", {"user": "U1"}, {"ok": False, "error": "ratelimited"})])

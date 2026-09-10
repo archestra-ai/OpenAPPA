@@ -3,22 +3,23 @@
 Serves the stock `google-workspace` selector catalog over Google's
 OpenID userinfo and Admin SDK Directory APIs:
 
-  viewer                   the token's own principal
+  viewer                   the token's own reader
   full-members             every active Workspace user — no suspended,
                            no archived accounts
   group/<group-address>    one Workspace group, nested groups expanded
 
-and the member lookup that canonicalizes one
-`google-workspace:<address>` reader.
+and the member lookup that resolves one `google-workspace:<address>`
+member to its reader.
 
-A Workspace account's primary email is administered and attested by the
-Workspace itself, so directory members carry it as their verified
-email; the viewer's email is attested by the userinfo endpoint's own
-verified flag. Belonging to a group proves membership, not identity: a
-group member outside the directory belongs to the group like any other
-— the group is the source of truth for its own membership — but keeps
-its qualified identity, because the Workspace administers no account
-for that address and attests nothing about it.
+A member is an email address. A directory account's primary email is
+administered by the Workspace itself, so `full-members` reports it; the
+viewer's address is attested by the userinfo endpoint's own verified
+flag, and without it the viewer stays the qualified
+`google-workspace:<address>`. A group reports each member under the
+address the group lists — the group is the source of truth for its own
+membership, whatever the member's domain — and the lookup of a
+`google-workspace:<address>` member answers the account's primary
+address, so an alias resolves to the same reader as the account.
 
 Credentials come from APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN: an OAuth2 access
 token with the admin.directory.user.readonly and
@@ -74,37 +75,17 @@ def paginated(call, url, key, **params):
             return
 
 
-def claims_of(address):
-    return {"id": f"google-workspace:{address}", "verified_email": address}
-
-
 def viewer_members(call):
     info = call(USERINFO_URL)
     address = info.get("email")
     if not address:
         raise RuntimeError("the userinfo answer names no email")
-    claims = {"id": f"google-workspace:{address}"}
-    if info.get("email_verified"):
-        claims["verified_email"] = address
-    return [claims]
-
-
-def directory_users(call, active_only):
-    """Every account this Workspace administers.
-
-    `active_only` separates two different questions. Who belongs to the
-    workspace right now excludes a suspended or archived account. Whether the
-    Workspace administers an address does not: it still owns that identity, and
-    a direct member lookup attests it, so a group expansion must agree.
-    """
-    users = paginated(call, f"{DIRECTORY_ROOT}/users", "users", customer="my_customer", maxResults=500)
-    if not active_only:
-        return list(users)
-    return [user for user in users if not user.get("suspended") and not user.get("archived")]
+    return [address if info.get("email_verified") else f"google-workspace:{address}"]
 
 
 def full_members(call):
-    return [claims_of(user["primaryEmail"]) for user in directory_users(call, active_only=True)]
+    users = paginated(call, f"{DIRECTORY_ROOT}/users", "users", customer="my_customer", maxResults=500)
+    return [user["primaryEmail"] for user in users if not user.get("suspended") and not user.get("archived")]
 
 
 def group_members(call, address):
@@ -130,24 +111,10 @@ def group_members(call, address):
                     # A CUSTOMER member stands for the whole domain; an
                     # unexpandable entry must fail, never under-report.
                     raise RuntimeError(f"group {address} holds an unexpandable {other} member")
-    if not addresses:
-        return []
-    # Membership proves that someone belongs to the group. Only a directory
-    # account proves that this Workspace administers their email identity, and
-    # the API's own member `type` does not draw that line: its EXTERNAL value
-    # is documented as unused, so an outside auditor arrives as an ordinary
-    # USER. One directory pass answers the question the type cannot — after the
-    # traversal, so an empty or unexpandable group never pays for it. A member
-    # the directory does not administer belongs to the group like any other,
-    # but the Workspace attests nothing about their address: they keep their
-    # qualified identity and merge with no other provider's reader.
-    administered = {user["primaryEmail"] for user in directory_users(call, active_only=False)}
-    return [
-        claims_of(email) if email in administered else {"id": f"google-workspace:{email}"} for email in addresses
-    ]
+    return addresses
 
 
-def member_claims(call, member):
+def member_principal(call, member):
     prefix = "google-workspace:"
     if not member.startswith(prefix) or member == prefix:
         raise ValueError(f"{member!r} is not a google-workspace-qualified member")
@@ -155,11 +122,9 @@ def member_claims(call, member):
         user = call(f"{DIRECTORY_ROOT}/users/{urllib.parse.quote(member[len(prefix):], safe='')}")
     except NotFound:
         # The Workspace definitively does not know this member, who
-        # keeps the qualified identity.
+        # stays the reader as written.
         return None
-    # The claims echo the queried spelling — claims for another id are
-    # refused — and carry the account's administered primary address.
-    return {"id": member, "verified_email": user["primaryEmail"]}
+    return user["primaryEmail"]
 
 
 def answer(call, artifact):
@@ -179,7 +144,7 @@ def answer(call, artifact):
                     raise ValueError(f"{selector!r} names no collection this source serves")
             return {"members": members}
         case ["member"]:
-            return {"claims": member_claims(call, artifact["member"])}
+            return {"principal": member_principal(call, artifact["member"])}
         case _:
             raise ValueError("the artifact must carry exactly a selector or a member")
 

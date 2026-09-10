@@ -20,8 +20,8 @@
 //! survive in labels and durable events. A check answers from a sound derivability calculus
 //! over policy-declared facts — the chain, `within` assertions — where that suffices, and
 //! otherwise evaluates the exact denotation from the operation's pinned evidence: primitive
-//! source answers, member lookups, and identity mappings ([`audience`]), from which identity
-//! application, union, and the symmetric `within` closure are recomputed on replay. A failed
+//! source answers and member lookups ([`audience`]), from which principal substitution,
+//! union, and the symmetric `within` closure are recomputed on replay. A failed
 //! derivation never denies; a missing answer is a membership ask, never a label state.
 //!
 //! Every released tool call carries one complete concrete annotation

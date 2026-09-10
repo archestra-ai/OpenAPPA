@@ -32,23 +32,15 @@ def fixture_api(responses):
     return call
 
 
-def empty_directory():
-    """A directory pass reporting no administered account."""
-    return (f"{DIRECTORY}/users", {"customer": "my_customer", "maxResults": 500}, {"users": []})
-
-
 class SelectorTests(unittest.TestCase):
-    def test_viewer_carries_its_email_only_when_verified(self):
+    def test_viewer_is_its_email_only_when_verified(self):
         call = fixture_api([(USERINFO, {}, {"email": "alice@corp.com", "email_verified": True})])
-        self.assertEqual(
-            AUDIENCE_SOURCE.answer(call, {"selector": "viewer"}),
-            {"members": [{"id": "google-workspace:alice@corp.com", "verified_email": "alice@corp.com"}]},
-        )
+        self.assertEqual(AUDIENCE_SOURCE.answer(call, {"selector": "viewer"}), {"members": ["alice@corp.com"]})
 
         call = fixture_api([(USERINFO, {}, {"email": "alice@corp.com", "email_verified": False})])
         self.assertEqual(
             AUDIENCE_SOURCE.answer(call, {"selector": "viewer"}),
-            {"members": [{"id": "google-workspace:alice@corp.com"}]},
+            {"members": ["google-workspace:alice@corp.com"]},
         )
 
     def test_full_members_excludes_suspended_and_archived_accounts(self):
@@ -74,24 +66,14 @@ class SelectorTests(unittest.TestCase):
         )
         self.assertEqual(
             AUDIENCE_SOURCE.answer(call, {"selector": "full-members"}),
-            {
-                "members": [
-                    {"id": "google-workspace:alice@corp.com", "verified_email": "alice@corp.com"},
-                    {"id": "google-workspace:bob@corp.com", "verified_email": "bob@corp.com"},
-                ]
-            },
+            {"members": ["alice@corp.com", "bob@corp.com"]},
         )
 
-    def test_a_group_expands_nested_groups_and_keeps_external_members(self):
+    def test_a_group_expands_nested_groups_and_keeps_outside_members_as_listed(self):
         finance_url = f"{DIRECTORY}/groups/finance%40corp.com/members"
         leads_url = f"{DIRECTORY}/groups/leads%40corp.com/members"
         call = fixture_api(
             [
-                (
-                    f"{DIRECTORY}/users",
-                    {"customer": "my_customer", "maxResults": 500},
-                    {"users": [{"primaryEmail": "alice@corp.com"}, {"primaryEmail": "bob@corp.com"}]},
-                ),
                 (
                     finance_url,
                     {"maxResults": 200},
@@ -121,67 +103,10 @@ class SelectorTests(unittest.TestCase):
         )
         self.assertEqual(
             AUDIENCE_SOURCE.answer(call, {"selector": "group/finance@corp.com"}),
-            {
-                "members": [
-                    {"id": "google-workspace:alice@corp.com", "verified_email": "alice@corp.com"},
-                    # The auditor belongs to the group, but no directory
-                    # account administers that address, so nothing is attested.
-                    {"id": "google-workspace:auditor@consulting.com"},
-                    {"id": "google-workspace:bob@corp.com", "verified_email": "bob@corp.com"},
-                ]
-            },
-        )
-
-    def test_a_group_member_the_directory_does_not_administer_is_never_attested(self):
-        # Same address, same member type, two Workspaces: only the one that
-        # administers the account attests it.
-        url = f"{DIRECTORY}/groups/finance%40corp.com/members"
-        listing = {"members": [{"type": "USER", "email": "alice@corp.com"}]}
-
-        outside = fixture_api([empty_directory(), (url, {"maxResults": 200}, listing)])
-        self.assertEqual(
-            AUDIENCE_SOURCE.answer(outside, {"selector": "group/finance@corp.com"}),
-            {"members": [{"id": "google-workspace:alice@corp.com"}]},
-        )
-
-        administered = fixture_api(
-            [
-                (
-                    f"{DIRECTORY}/users",
-                    {"customer": "my_customer", "maxResults": 500},
-                    {"users": [{"primaryEmail": "alice@corp.com"}]},
-                ),
-                (url, {"maxResults": 200}, listing),
-            ]
-        )
-        self.assertEqual(
-            AUDIENCE_SOURCE.answer(administered, {"selector": "group/finance@corp.com"}),
-            {"members": [{"id": "google-workspace:alice@corp.com", "verified_email": "alice@corp.com"}]},
-        )
-
-    def test_a_group_member_the_directory_administers_is_attested_however_the_account_stands(self):
-        # Suspended memberships leave the group, but an archived account is one
-        # the Workspace still administers: a direct member lookup attests that
-        # address, so the group expansion must not disagree with itself.
-        url = f"{DIRECTORY}/groups/finance%40corp.com/members"
-        call = fixture_api(
-            [
-                (
-                    f"{DIRECTORY}/users",
-                    {"customer": "my_customer", "maxResults": 500},
-                    {"users": [{"primaryEmail": "old@corp.com", "archived": True}]},
-                ),
-                (url, {"maxResults": 200}, {"members": [{"type": "USER", "email": "old@corp.com"}]}),
-            ]
-        )
-        self.assertEqual(
-            AUDIENCE_SOURCE.answer(call, {"selector": "group/finance@corp.com"}),
-            {"members": [{"id": "google-workspace:old@corp.com", "verified_email": "old@corp.com"}]},
+            {"members": ["alice@corp.com", "auditor@consulting.com", "bob@corp.com"]},
         )
 
     def test_an_unexpandable_group_member_is_a_failure_not_an_under_report(self):
-        # No directory fixture: the traversal fails before anything needs
-        # attesting, so the tenant-wide pass is never paid for.
         url = f"{DIRECTORY}/groups/everyone%40corp.com/members"
         call = fixture_api([(url, {"maxResults": 200}, {"members": [{"type": "CUSTOMER", "id": "C123"}]})])
         with self.assertRaises(RuntimeError):
@@ -193,7 +118,7 @@ class SelectorTests(unittest.TestCase):
         with self.assertRaises(AUDIENCE_SOURCE.NotFound):
             AUDIENCE_SOURCE.answer(call, {"selector": "group/typo@corp.com"})
 
-    def test_an_empty_group_answers_without_a_directory_pass(self):
+    def test_an_empty_group_is_an_empty_answer(self):
         url = f"{DIRECTORY}/groups/empty%40corp.com/members"
         call = fixture_api([(url, {"maxResults": 200}, {"members": []})])
         self.assertEqual(AUDIENCE_SOURCE.answer(call, {"selector": "group/empty@corp.com"}), {"members": []})
@@ -206,12 +131,12 @@ class SelectorTests(unittest.TestCase):
 
 
 class MemberLookupTests(unittest.TestCase):
-    def test_a_known_member_echoes_the_queried_spelling_with_its_primary_address(self):
+    def test_a_known_member_resolves_to_the_accounts_primary_address(self):
         url = f"{DIRECTORY}/users/alias%40corp.com"
         call = fixture_api([(url, {}, {"primaryEmail": "alice@corp.com"})])
         self.assertEqual(
             AUDIENCE_SOURCE.answer(call, {"member": "google-workspace:alias@corp.com"}),
-            {"claims": {"id": "google-workspace:alias@corp.com", "verified_email": "alice@corp.com"}},
+            {"principal": "alice@corp.com"},
         )
 
     def test_an_unknown_member_is_a_definitive_null(self):
@@ -219,7 +144,7 @@ class MemberLookupTests(unittest.TestCase):
         call = fixture_api([(url, {}, AUDIENCE_SOURCE.NotFound(url))])
         self.assertEqual(
             AUDIENCE_SOURCE.answer(call, {"member": "google-workspace:ghost@corp.com"}),
-            {"claims": None},
+            {"principal": None},
         )
 
     def test_a_foreign_or_bare_member_spelling_is_refused(self):

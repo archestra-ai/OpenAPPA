@@ -220,13 +220,19 @@ class MCPDiscovery(BaseToolset):
             if report is None or report["errors"]:
                 raise ConfigRefused("MCP inventory configuration is invalid")
             invalid = {check["tool"] for check in report["tools"] if check["status"] == "invalid"}
-            if invalid and not state.opened:
-                raise ConfigRefused("MCP tools are not covered by policy: " + ", ".join(sorted(invalid)))
+            # Only dynamic MCP tools can be removed from model exposure. Static
+            # builtins and remote agents remain callable so the runtime, not a
+            # local fallback, denies their uncovered calls.
+            invalid_dynamic = invalid.intersection(selected)
+            state.names = ToolInventory(
+                {entry["name"]: entry["tool"] for entry in inventory["tools"] if entry["name"] not in invalid_dynamic}
+            )
+            # The opening inventory must contain only covered identities. The
+            # static mapping above remains available for the later call gate.
             inventory["tools"] = [entry for entry in inventory["tools"] if entry["name"] not in invalid]
-            state.names = ToolInventory({entry["name"]: entry["tool"] for entry in inventory["tools"]})
-            state.selected = [tool for name, (tool, _) in sorted(selected.items()) if name not in invalid]
+            state.selected = [tool for name, (tool, _) in sorted(selected.items()) if name not in invalid_dynamic]
             for name, (tool, identity) in selected.items():
-                if name not in invalid:
+                if name not in invalid_dynamic:
                     state.identities[tool] = identity
             state.evidence = inventory
             return state

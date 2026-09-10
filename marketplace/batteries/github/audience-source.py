@@ -2,16 +2,21 @@
 
 Serves the stock `github` selector catalog over the GitHub REST API:
 
-  viewer                  the token's own principal
+  viewer                  the token's own reader
   org/<org>/members       one explicitly selected organization's members
   org/<org>/team/<team>   one organization team, by slug
 
-and the member lookup that canonicalizes one `github:<login>` reader.
+and the member lookup that resolves one `github:<login>` member to its
+reader.
 
-Only the viewer carries a verified email: GitHub attests the token
-owner's addresses through /user/emails, while a profile's public email
-is whatever its owner typed, so every other member keeps the bare
-`github:<login>` identity and distinct identities never merge by guess.
+A member is the email address GitHub verifies for the account, else the
+qualified `github:<login>`. The viewer's address is the token owner's
+primary verified address from /user/emails. Any other member's address
+is the email published on its profile, read from /users/{login}:
+GitHub lets an account publish only one of its verified addresses
+there, so a published profile email is attested. An account that
+publishes none stays `github:<login>` and merges with no other
+provider's reader.
 
 Credentials come from APPA_PROVIDER_GITHUB_TOKEN (read:org and user:email
 scopes). Any GitHub error or missing answer exits nonzero: the runtime
@@ -19,6 +24,7 @@ treats that as no answer and refuses the operation, so an API hiccup
 never becomes a policy decision.
 """
 
+import concurrent.futures
 import json
 import os
 import sys
@@ -77,41 +83,58 @@ def paginated(call, path):
         page += 1
 
 
-def bare_claims(login):
-    return {"id": f"github:{login}"}
+def qualified(login):
+    return f"github:{login}"
 
 
-def viewer_members(call):
-    claims = bare_claims(call("/user")["login"])
+def viewer_reader(call):
+    login = call("/user")["login"]
     try:
         addresses = call("/user/emails")
     except (NotFound, Forbidden):
         # The token cannot read its own addresses; the viewer keeps the
-        # bare identity rather than a guessed email.
+        # qualified id rather than a guessed email.
         addresses = []
     for address in addresses:
         if address.get("primary") and address.get("verified"):
-            claims["verified_email"] = address["email"]
-    return [claims]
+            return address["email"]
+    return qualified(login)
+
+
+def profile_reader(call, login):
+    """The address the account publishes on its profile — GitHub admits
+    only a verified one there — else the qualified id in the caller's
+    spelling, so a lookup answers the member as the selector spelled it
+    whatever case GitHub canonicalizes the login to."""
+    match call(f"/users/{urllib.parse.quote(login, safe='')}").get("email"):
+        case str() as email if email:
+            return email
+        case _:
+            return qualified(login)
+
+
+# Profile reads a collection answer waits on at once: enough to keep a
+# large organization inside one consult budget, few enough for the
+# secondary rate limit GitHub applies to concurrent requests.
+PROFILE_READS = 8
 
 
 def collection_members(call, path):
-    return [bare_claims(user["login"]) for user in paginated(call, path) if user.get("type") == "User"]
+    logins = [user["login"] for user in paginated(call, path) if user.get("type") == "User"]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=PROFILE_READS) as pool:
+        return list(pool.map(lambda login: profile_reader(call, login), logins))
 
 
-def member_claims(call, member):
+def member_principal(call, member):
     prefix = "github:"
     if not member.startswith(prefix) or member == prefix:
         raise ValueError(f"{member!r} is not a github-qualified member")
     try:
-        call(f"/users/{urllib.parse.quote(member[len(prefix):], safe='')}")
+        return profile_reader(call, member[len(prefix) :])
     except NotFound:
-        # GitHub definitively does not know this member, who keeps the
-        # qualified identity.
+        # GitHub definitively does not know this member, who stays the
+        # reader as written.
         return None
-    # The claims echo the queried spelling: GitHub canonicalizes login
-    # case in its response, and claims for another id are refused.
-    return {"id": member}
 
 
 def answer(call, artifact):
@@ -122,7 +145,7 @@ def answer(call, artifact):
             selector = artifact["selector"]
             match selector:
                 case "viewer":
-                    members = viewer_members(call)
+                    members = [viewer_reader(call)]
                 case str():
                     match selector.split("/"):
                         case ["org", org, "members"] if org:
@@ -137,7 +160,7 @@ def answer(call, artifact):
                     raise ValueError("the selector must be a string")
             return {"members": members}
         case ["member"]:
-            return {"claims": member_claims(call, artifact["member"])}
+            return {"principal": member_principal(call, artifact["member"])}
         case _:
             raise ValueError("the artifact must carry exactly a selector or a member")
 

@@ -2,13 +2,18 @@
 
 Serves the stock `slack` selector catalog over the Slack Web API:
 
-  viewer               the token's own principal
+  viewer               the token's own reader
   full-members         every full workspace member — no guests, no
                        Slack Connect participants, no bots, no
                        deactivated accounts
   user-group/<handle>  one user group's members, as Slack reports them
 
-and the member lookup that canonicalizes one `slack:U...` reader.
+and the member lookup that resolves one `slack:U...` member to its
+reader.
+
+A member is the account's profile email where Slack marks the address
+confirmed, else the qualified `slack:<id>`, which merges with no other
+provider's reader.
 
 Credentials come from APPA_PROVIDER_SLACK_TOKEN (a bot or user token with
 users:read, users:read.email, and usergroups:read). Any Slack error,
@@ -53,22 +58,18 @@ def api_ok(call, method, **params):
     return response
 
 
-def verified_email_of(user):
+def confirmed_email_of(user):
     """The profile address, only where Slack marks it confirmed: an
-    unconfirmed address would seat this account on another reader's
-    principal."""
+    unconfirmed address would seat this account on another reader."""
     email = user.get("profile", {}).get("email")
     if isinstance(email, str) and email and user.get("is_email_confirmed"):
         return email
     return None
 
 
-def claims_of(user):
-    claims = {"id": f"slack:{user['id']}"}
-    email = verified_email_of(user)
-    if email:
-        claims["verified_email"] = email
-    return claims
+def reader_of(user):
+    email = confirmed_email_of(user)
+    return email if email else f"slack:{user['id']}"
 
 
 def list_users(call):
@@ -100,14 +101,14 @@ def is_full_member(user, team_id):
 
 
 def viewer_members(call):
-    identity = api_ok(call, "auth.test")
-    user = api_ok(call, "users.info", user=identity["user_id"])["user"]
-    return [claims_of(user)]
+    auth = api_ok(call, "auth.test")
+    user = api_ok(call, "users.info", user=auth["user_id"])["user"]
+    return [reader_of(user)]
 
 
 def full_members(call):
     team_id = api_ok(call, "auth.test")["team_id"]
-    return [claims_of(user) for user in list_users(call) if is_full_member(user, team_id)]
+    return [reader_of(user) for user in list_users(call) if is_full_member(user, team_id)]
 
 
 def user_group_members(call, handle):
@@ -125,11 +126,11 @@ def user_group_members(call, handle):
         if user is None:
             raise RuntimeError(f"the directory does not report group member {user_id}")
         if not user.get("deleted"):
-            members.append(claims_of(user))
+            members.append(reader_of(user))
     return members
 
 
-def member_claims(call, member):
+def member_principal(call, member):
     prefix = "slack:"
     if not member.startswith(prefix) or member == prefix:
         raise ValueError(f"{member!r} is not a slack-qualified member")
@@ -137,16 +138,13 @@ def member_claims(call, member):
     if not isinstance(response, dict):
         raise RuntimeError("users.info failed: malformed response")
     if response.get("ok"):
-        # The claims echo the queried spelling: claims for another id
-        # are refused.
-        claims = {"id": member}
-        email = verified_email_of(response["user"])
-        if email:
-            claims["verified_email"] = email
-        return claims
+        email = confirmed_email_of(response["user"])
+        # Without a confirmed address the member is the reader as
+        # written, in the queried spelling.
+        return email if email else member
     if response.get("error") == "user_not_found":
-        # Slack definitively does not know this member, who keeps the
-        # qualified identity.
+        # Slack definitively does not know this member, who stays the
+        # reader as written.
         return None
     raise RuntimeError(f"users.info failed: {response.get('error')}")
 
@@ -168,7 +166,7 @@ def answer(call, artifact):
                     raise ValueError(f"{selector!r} names no collection this source serves")
             return {"members": members}
         case ["member"]:
-            return {"claims": member_claims(call, artifact["member"])}
+            return {"principal": member_principal(call, artifact["member"])}
         case _:
             raise ValueError("the artifact must carry exactly a selector or a member")
 

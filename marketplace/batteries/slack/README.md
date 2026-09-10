@@ -24,7 +24,7 @@ autonomously without human interruption, while requester secrets
 **`audience-source.py`** — the `slack` audience source. It answers the
 stock catalog's selectors over the Slack Web API:
 
-- `slack:viewer` — the token's own principal. Feeds `self`, so use a
+- `slack:viewer` — the token's own reader. Feeds `self`, so use a
   user token when the session acts for a person; a bot token makes the
   bot the viewer.
 - `slack:full-members` — every full member of the token's own
@@ -35,25 +35,22 @@ stock catalog's selectors over the Slack Web API:
   Feeds `internal`.
 - `slack:user-group/<handle>` — one user group, exactly as Slack
   reports it — a guest in the group is in the audience. Feeds
-  `[[audience.group]]` entries.
+  `group` entries.
 
-It also answers the member lookup that canonicalizes a `slack:U...`
-reader. A verified email comes from a Slack profile only where Slack
-marks the address confirmed; every other member keeps the qualified
-`slack:` identity.
+A member is the account's profile email where Slack marks the address
+confirmed, else `slack:<id>`, which merges with no other provider's
+reader. The member lookup resolves a `slack:U...` member the same way
+and answers `null` for an id Slack does not know.
 
 The source is not wired by this file: audience mappings are root-only,
 and the binding must sit beside them. In the root config:
 
 ```toml
-[policy.audience.self]
-from = ["slack:viewer"]
+[policy.audience]
+self = ["slack:viewer"]
+internal = ["slack:full-members"]
 
-[policy.audience.internal]
-from = ["slack:full-members"]
-
-[[policy.audience.group]]
-name = "finance"
+[policy.audience.group.finance]
 within = "internal"
 from = ["slack:user-group/finance"]
 

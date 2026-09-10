@@ -31,7 +31,10 @@ OFFER_ID = re.compile(r"[a-f0-9]{16}")
 # The two delegations name their agents from the same values the wire
 # names come from, so a renamed child is asked for under its own name.
 DELEGATE = f"ask the {CHILD.replace('-', ' ')} to analyze the crash logs of checkout-api-b2k1 and give me its summary"
-DELEGATE_UNDECLARED = f"ask the {UNDECLARED.replace('-', ' ')} to approve a version bump of checkout-api to 2.4.1"
+DELEGATE_UNDECLARED = (
+    f"delegate this task to the {UNDECLARED.replace('-', ' ')}: approve a version bump of checkout-api to 2.4.1. "
+    "Call that agent tool; do not decide the request yourself."
+)
 
 
 def test_an_ordinary_read_flows_real_data(chat, shots_dir):

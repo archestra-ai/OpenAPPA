@@ -17,7 +17,7 @@ Install kagent and appa first by following the public
 chart:
 
 ```sh
-APPA_VERSION=0.16.0 # x-release-please-version
+APPA_VERSION=0.17.1 # x-release-please-version
 helm upgrade --install appa-kagent-demo \
   oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-kagent-demo \
   --version "$APPA_VERSION" -n kagent \
@@ -43,9 +43,11 @@ and proposes the behavior. Approve the proposal in chat and then approve
 the enforced confirmation card. A vouched runtime MCP operation validates,
 publishes, and reloads the policy. A new `cluster-ops` chat uses it.
 
-The dashboard contains sixteen seeded chats. They cover confidential
-reads, suspicious ingress, sanitization, human approval, deterministic
-Authorities, and delegated Agents. See [SCENARIOS.md](SCENARIOS.md).
+The `cluster-ops` dashboard contains five seeded chats, one per
+[website demonstration scenario](https://openappa.com/kagent#demonstration-scenarios):
+confidential read, untrusted ingress, human review, subagents, and dynamic
+input rules. The dynamic input rules chat contains both runbook prompts.
+No other demo Agent receives seeded chats.
 
 ## What the fixture chart owns
 
@@ -55,7 +57,7 @@ Authorities, and delegated Agents. See [SCENARIOS.md](SCENARIOS.md).
 - the `demo-tools` Deployment, Service, and `RemoteMCPServer`;
 - the `appa-demo-mocks` Deployment and Service;
 - `ConfigMap/appa-kagent-demo-policy`, which is inert until approved;
-- an idempotent seed Job for the sixteen captured chats.
+- an idempotent seed Job for the five captured chats.
 
 Every Agent sets `APPA_ENABLED=true` and the configured
 `APPA_RUNTIME_URL`. Parent and child therefore use the same runtime and
@@ -70,11 +72,10 @@ The fixture chart owns no runtime Deployment, runtime Service, serving
 policy, PersistentVolumeClaim, provider Secret, ModelConfig, or
 `appa-guide` Agent.
 
-`demo-tools` also exposes canned `mcp__github__get_file_contents` and
-`mcp__github__issue_write`
-calls for a public repository. They have no rules in the demo template.
-`appa-guide` discovers their exact GitHub battery match and proposes the
-include. Repository text then enters as suspicious, while trusted issue
+`demo-tools` also exposes canned `get_file_contents` and `issue_write`
+calls for a public repository. The demo template includes the GitHub battery
+and binds it to the demo MCP endpoint. `appa-guide` proposes that configuration
+when it is missing from the serving policy. Repository text then enters as suspicious, while trusted issue
 text supplied by the operator can still publish.
 
 ## Tests

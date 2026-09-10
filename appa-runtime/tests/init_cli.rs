@@ -171,6 +171,52 @@ impl Fixture {
     }
 }
 
+/// The release workflow proves a released binary ignores `APPA_ENDPOINT` by
+/// running activation against a config that does not exist: the endpoint is
+/// settled first, so a build that reads the seam refuses the value, and one
+/// that ignores it fails on the config. Home and directory variables are
+/// removed so nothing outside the fixture is reached either way.
+#[test]
+fn release_override_probe_reaches_endpoint_before_deployment_paths() {
+    let fixture = Fixture::new();
+    for endpoint in ["http://127.0.0.1:0", "http://127.0.0.1:8787"] {
+        let mut command = Command::new(&fixture.appa);
+        command
+            .current_dir(&fixture.root)
+            .arg("activate-claude")
+            .arg("--config")
+            .arg("./no-such-dir/appa.toml")
+            .arg("--archive")
+            .arg("./no-such-archive.tar.gz");
+        for variable in [
+            "HOME",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "APPA_INSTALL_DIR",
+            "APPA_CONFIG_DIR",
+            "APPA_DATA_DIR",
+            "CLAUDE_CONFIG_DIR",
+        ] {
+            command.env_remove(variable);
+        }
+        let output = command.env("APPA_ENDPOINT", endpoint).output().expect("probe runs");
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let expected = if cfg!(debug_assertions) && endpoint.ends_with(":0") {
+            "is not a usable runtime endpoint"
+        } else {
+            "does not load"
+        };
+        assert!(stderr.contains(expected), "{stderr}");
+        assert!(!fixture.data.exists());
+        assert!(!fixture.root.join("claude.log").exists());
+        assert!(!fixture.root.join("no-such-dir").exists());
+    }
+}
+
 /// Everything a failed upgrade must leave as it found it.
 #[derive(Debug, PartialEq, Eq)]
 struct Installed {

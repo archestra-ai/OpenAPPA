@@ -317,7 +317,7 @@ fn check_externals(
 
 /// The external kinds an included file may bind. A battery is an included
 /// fragment, so this is exactly the set the config loader accepts from one.
-pub const BINDABLE_KINDS: [&str; 5] = ["authorities", "sanitizers", "annotators", "audience", "identity"];
+pub const BINDABLE_KINDS: [&str; 4] = ["authorities", "sanitizers", "annotators", "audience"];
 
 /// One binding of one external. A battery runs the programs it ships and
 /// nothing else: the `command` shape naming a declared helper is the only one
@@ -752,7 +752,10 @@ mod tests {
                 "[policy.audience]\ncustomer = []\n\n",
                 "a policy field only a root carries",
             ),
-            ("[policy.identity]\nme = []\n\n", "another root-only policy field"),
+            (
+                "[policy.deployment]\nstarting_label = { audience = [\"internal\"] }\n\n",
+                "another root-only policy field",
+            ),
         ] {
             let directory = battery(&BATTERY_POLICY.replace(head, &format!("{head}{body}")));
             assert!(

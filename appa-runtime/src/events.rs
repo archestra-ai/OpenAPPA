@@ -139,7 +139,6 @@ pub(crate) enum ExternalRole {
     Sanitizer,
     Annotator,
     AudienceSource,
-    Identity,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -207,7 +206,6 @@ impl From<crate::consult::ConsultKind> for ExternalRole {
             crate::consult::ConsultKind::Sanitizer => ExternalRole::Sanitizer,
             crate::consult::ConsultKind::Annotation => ExternalRole::Annotator,
             crate::consult::ConsultKind::AudienceSource => ExternalRole::AudienceSource,
-            crate::consult::ConsultKind::Identity => ExternalRole::Identity,
         }
     }
 }

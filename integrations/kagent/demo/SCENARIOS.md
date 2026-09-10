@@ -104,7 +104,7 @@ rollback_deployment(name: "checkout-api")
 This scenario establishes information-flow boundaries on repository tools.
 
 1. **Policy rule:**
-   The GitHub battery labels repository contents as `suspicious`. It requires `trusted` data for `mcp__github__issue_write`.
+   The GitHub battery labels repository contents as `suspicious`. It requires `trusted` data for `issue_write`.
 
 2. **Engine decision:**
    Reading repository files succeeds. However, forwarding that unvetted repository text to `issue_write` is blocked because suspicious data cannot flow into trusted sinks.

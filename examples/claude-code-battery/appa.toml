@@ -21,12 +21,10 @@ attention = ["hitl"]
 # Audience mappings are root-only. The Slack battery ships the source
 # script; mapping its collections here registers the `slack` provider,
 # so the binding below must sit beside the mapping. The script reads
-# its token from APPA_SLACK_TOKEN.
-[policy.audience.self]
-from = ["slack:viewer"]
-
-[policy.audience.internal]
-from = ["slack:full-members"]
+# its token from APPA_PROVIDER_SLACK_TOKEN.
+[policy.audience]
+self = ["slack:viewer"]
+internal = ["slack:full-members"]
 
 # A directory read pages through a whole workspace, so the limits here
 # are sized for the audience sources rather than for a single annotation.

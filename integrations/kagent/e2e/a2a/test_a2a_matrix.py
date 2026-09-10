@@ -26,7 +26,10 @@ OFFER_ID = re.compile(r"[a-f0-9]{16}")
 # The two delegations name their agents from the same values the wire
 # names come from, so a renamed child is asked for under its own name.
 DELEGATE = f"ask the {CHILD.replace('-', ' ')} to analyze the crash logs of checkout-api-b2k1 and give me its summary"
-DELEGATE_UNDECLARED = f"ask the {UNDECLARED.replace('-', ' ')} to approve a version bump of checkout-api to 2.4.1"
+DELEGATE_UNDECLARED = (
+    f"delegate this task to the {UNDECLARED.replace('-', ' ')}: approve a version bump of checkout-api to 2.4.1. "
+    "Call that agent tool; do not decide the request yourself."
+)
 # The shapes an allowed delegation's response takes on the wire. Both
 # are the crossing itself, replayed at the parent: `returned` carries
 # the child's session id beside the value, and `bare` carries the value

@@ -96,6 +96,21 @@ integration](https://openappa.com/claude-code) ·
 Plugin and battery installation, explicit version updates, offline bundles,
 and kagent deployment preparation: [marketplace guide](marketplace/README.md).
 
+## Testing
+
+Run the repository-wide evaluation before handing off a change:
+
+```sh
+scripts/appa-eval.sh
+```
+
+It runs the Rust, Python, and Go suites, the deterministic kagent integration,
+the website checks, and the real Claude Code harness against local scripted
+inference. It does not need a model account. Use `--quick` for the shorter
+inner loop. Use `--live-model` only when you intend to consume the configured
+Claude account for an additional compatibility canary. Individual integration
+READMEs document narrower commands for focused iteration.
+
 ## When APPA is in the way
 
 ```sh
