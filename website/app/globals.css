@@ -56,6 +56,10 @@
   --info: hsl(215, 60%, 40%);
   --info-bg: hsl(215, 55%, 93%);
 
+  --appa-throat: var(--text-strong);
+  --appa-teeth: var(--bg);
+  --spark: #fcc405;
+
   /* syntax — neutrals carry structure, hue only where it informs */
   --syn-comment: hsl(32, 4%, 44%);
   --syn-keyword: hsl(30, 8%, 11%);
@@ -129,6 +133,10 @@
   --danger-bg: hsl(6, 40%, 14%);
   --info: hsl(212, 55%, 65%);
   --info-bg: hsl(215, 30%, 14%);
+
+  --appa-throat: var(--bg);
+  --appa-teeth: var(--text-strong);
+  --spark: #fcc405;
 
   --syn-comment: hsl(33, 5%, 60%);
   --syn-keyword: hsl(40, 12%, 93%);
@@ -2326,6 +2334,181 @@ samp {
 }
 
 /* ————————————————————————————————————————————————
+   Error & Not Found pages — Appa sounding the alarm
+   ———————————————————————————————————————————————— */
+.error-page {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: calc(100vh - var(--header-h) - 120px);
+  padding: 4rem 1.5rem 5rem;
+  text-align: center;
+}
+
+.error-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 32rem;
+  margin: 0 auto;
+}
+
+.error-mascot-wrap {
+  position: relative;
+  margin-bottom: 2rem;
+}
+
+.error-mascot-wrap img {
+  display: block;
+  width: 160px;
+  height: auto;
+  image-rendering: pixelated;
+  filter: drop-shadow(0 4px 20px rgba(253, 196, 6, 0.25));
+  animation: appa-yell-shake 4.5s ease-in-out infinite;
+}
+
+@keyframes appa-yell-shake {
+  0%, 86%, 100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  88% {
+    transform: translateY(-2px) rotate(-1.5deg) scale(1.02);
+  }
+  90% {
+    transform: translateY(1px) rotate(1.5deg) scale(1.02);
+  }
+  92% {
+    transform: translateY(-2px) rotate(-1deg) scale(1.02);
+  }
+  94% {
+    transform: translateY(1px) rotate(1deg) scale(1.01);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .error-mascot-wrap img {
+    animation: none;
+  }
+}
+
+.error-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  margin-bottom: 1rem;
+  border-radius: 9999px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  background: var(--danger-bg);
+  color: var(--danger);
+  border: 1px solid var(--border-weak);
+}
+
+.error-title {
+  margin: 0 0 0.75rem;
+  font-size: clamp(1.75rem, 4vw, 2.25rem);
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--text-strong);
+  letter-spacing: -0.02em;
+}
+
+.error-desc {
+  margin: 0 0 2rem;
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text-weak);
+  max-width: 28rem;
+}
+
+.error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.error-btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 18px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--text-inverted);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+  transition: background 0.15s ease;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.error-btn-primary:hover {
+  background: var(--accent-hover);
+}
+
+.error-btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 18px;
+  border-radius: 8px;
+  background: var(--bg-weak);
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+  border: 1px solid var(--border-weak);
+  transition: background 0.15s ease, border-color 0.15s ease;
+  cursor: pointer;
+}
+
+.error-btn-secondary:hover {
+  background: var(--bg-weak-hover);
+  border-color: var(--border);
+}
+
+.error-details {
+  margin-top: 2rem;
+  width: 100%;
+  max-width: 28rem;
+  text-align: left;
+}
+
+.error-details summary {
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-weak);
+}
+
+.error-details summary:hover {
+  color: var(--text-strong);
+}
+
+.error-details pre {
+  margin-top: 0.5rem;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--bg-weak);
+  border: 1px solid var(--border-weak);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-weak);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ————————————————————————————————————————————————
    Policy stack figure — one policy, many enforcement points
    ———————————————————————————————————————————————— */
 .policy-stack-figure {
@@ -2451,8 +2634,38 @@ samp {
 
 .brand-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
+}
+
+@media (max-width: 680px) {
+  .brand-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@keyframes appa-sparks-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.65;
+  }
+}
+
+.appa-alert-sparks {
+  animation: appa-sparks-pulse 1.8s ease-in-out infinite;
+}
+
+.appa-alert-shake {
+  animation: appa-yell-shake 4.5s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .appa-alert-sparks,
+  .appa-alert-shake {
+    animation: none;
+  }
 }
 
 .brand-toolbar {
@@ -2559,7 +2772,8 @@ samp {
   gap: 10px;
 }
 
-.brand-panel-actions button {
+.brand-panel-actions button,
+.brand-panel-actions a {
   cursor: pointer;
   border: 0;
   background: none;
@@ -2571,7 +2785,8 @@ samp {
   text-underline-offset: 3px;
 }
 
-.brand-panel-actions button:hover:enabled {
+.brand-panel-actions button:hover:enabled,
+.brand-panel-actions a:hover {
   color: var(--accent);
 }
 
