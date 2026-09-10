@@ -119,8 +119,9 @@ def tool_call(
     return _event("tool_call", root_id, child_id, tool=tool, arguments=arguments, ruling=ruling)
 
 
-def spawn_resume(root_id: str, tool: str, arguments: dict[str, Any], spawned_id: str,
-                 child_id: str | None = None) -> dict[str, Any]:
+def spawn_resume(
+    root_id: str, tool: str, arguments: dict[str, Any], spawned_id: str, child_id: str | None = None
+) -> dict[str, Any]:
     return _event("spawn_resume", root_id, child_id, tool=tool, arguments=arguments, spawned_id=spawned_id)
 
 

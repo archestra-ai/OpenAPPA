@@ -51,6 +51,5 @@ def isolate_remote_agents(agent):
     # once per turn. The UI uses each response's actual subagent_session_id
     # when call metadata has none, as on the Go isolated-session path.
     agent.tools = [
-        IsolatedRemoteToolset(tool) if isinstance(tool, KAgentRemoteA2AToolset) else tool
-        for tool in agent.tools
+        IsolatedRemoteToolset(tool) if isinstance(tool, KAgentRemoteA2AToolset) else tool for tool in agent.tools
     ]

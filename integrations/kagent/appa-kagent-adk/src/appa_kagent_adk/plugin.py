@@ -721,8 +721,12 @@ class AppaPluginKagent(BasePlugin):
         spelled = self._spelling(tool, tool_context)
         if spelled is None:
             raise AppaFailClosed(f"the tool {tool.name} is outside the gated inventory, and its result cannot cross")
-        if (is_spawn(spelled) and isinstance(result, dict) and result.get("status") == "pending"
-                and result.get("waiting_for") == "subagent_approval"):
+        if (
+            is_spawn(spelled)
+            and isinstance(result, dict)
+            and result.get("status") == "pending"
+            and result.get("waiting_for") == "subagent_approval"
+        ):
             try:
                 await self._ping()
                 self._paused_spawns.add(tool_context.invocation_id)

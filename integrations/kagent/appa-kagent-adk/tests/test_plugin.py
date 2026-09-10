@@ -781,8 +781,9 @@ async def test_native_spawn_pause_and_resume_keep_one_runtime_dispatch(approved)
     args = {"request": "restart"}
     first = dispatch(session)
     await plugin.before_tool_callback(tool=tool, tool_args=args, tool_context=first)
-    await plugin.after_tool_callback(tool=tool, tool_args=args, tool_context=first,
-                                     result={"status": "pending", "waiting_for": "subagent_approval"})
+    await plugin.after_tool_callback(
+        tool=tool, tool_args=args, tool_context=first, result={"status": "pending", "waiting_for": "subagent_approval"}
+    )
     await plugin.after_run_callback(invocation_context=FakeInvocationContext(session, "i1"))
     assert [event["event"] for event in hook.events] == ["tool_call", "ping"]
     confirmation = FakeConfirmation(approved)
@@ -792,11 +793,19 @@ async def test_native_spawn_pause_and_resume_keep_one_runtime_dispatch(approved)
     assert hook.events[-1]["event"] == "spawn_resume"
     assert hook.events[-1]["spawned_id"] == "paused-child"
     assert hook.events[-1]["arguments"] == args
-    await plugin.after_tool_callback(tool=tool, tool_args=args, tool_context=resumed,
-                                     result={"result": "done", "subagent_session_id": "paused-child"})
+    await plugin.after_tool_callback(
+        tool=tool,
+        tool_args=args,
+        tool_context=resumed,
+        result={"result": "done", "subagent_session_id": "paused-child"},
+    )
     await plugin.after_run_callback(invocation_context=FakeInvocationContext(session, "i2"))
     assert [event["event"] for event in hook.events] == [
-        "tool_call", "ping", "spawn_resume", "spawn_result", "turn_end",
+        "tool_call",
+        "ping",
+        "spawn_resume",
+        "spawn_result",
+        "turn_end",
     ]
     assert not plugin._paused_spawns
 
@@ -809,7 +818,9 @@ async def test_native_spawn_resume_refusal_never_runs_or_proposes_a_new_call():
     context = dispatch(FakeSession("s1"), tool_confirmation=confirmation)
     with pytest.raises(AppaFailClosed, match="wrong child"):
         await plugin.before_tool_callback(
-            tool=FakeTool("kagent__NS__billing_agent"), tool_args={}, tool_context=context,
+            tool=FakeTool("kagent__NS__billing_agent"),
+            tool_args={},
+            tool_context=context,
         )
     assert [event["event"] for event in hook.events] == ["spawn_resume"]
     assert not plugin._dispatch_leases

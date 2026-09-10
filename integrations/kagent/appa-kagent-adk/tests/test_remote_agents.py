@@ -25,9 +25,9 @@ async def test_parallel_and_sequential_calls_get_distinct_child_ids():
     original = Remote()
     tool = IsolatedRemoteTool(original)
     context = SimpleNamespace(tool_confirmation=None)
-    first, second = await asyncio.gather(*[
-        tool.run_async(args={"request": str(i)}, tool_context=context) for i in range(2)
-    ])
+    first, second = await asyncio.gather(
+        *[tool.run_async(args={"request": str(i)}, tool_context=context) for i in range(2)]
+    )
     third = await tool.run_async(args={"request": "again"}, tool_context=context)
     assert len({result["subagent_session_id"] for result in [first, second, third]}) == 3
     assert original._last_context_id == "shared"
