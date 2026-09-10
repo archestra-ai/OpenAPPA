@@ -1,8 +1,10 @@
-//! Who owns the runtime endpoint, and what an activation may do about it.
+//! The runtime endpoint: its one validated value, who owns it, and what an
+//! activation may do about it.
 
-use crate::plugin_bundle::Endpoint;
+use crate::installation::archive::debug_override;
 #[cfg(unix)]
 use std::ffi::OsStr;
+use std::net::SocketAddr;
 use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
@@ -13,6 +15,60 @@ use super::config::ComposedPolicy;
 use super::paths::same_file;
 #[cfg(windows)]
 use super::powershell;
+
+/// The address the deployment's runtime listens on and every consumer talks to.
+///
+/// One value, validated once before any mutation, delivered explicitly to each
+/// consumer rather than left to per-file default constants. The production
+/// address is fixed; `APPA_ENDPOINT` overrides it in debug builds only, which is
+/// the seam the endpoint tests need.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Endpoint {
+    url: String,
+}
+
+impl Endpoint {
+    pub(super) fn resolve() -> Result<Self, InitError> {
+        let configured = debug_override("APPA_ENDPOINT");
+        Self::parse(configured.as_deref().unwrap_or(crate::runtime_url::DEFAULT_RUNTIME_URL))
+    }
+
+    /// `http://` plus a loopback literal and a port. No path, no trailing slash,
+    /// no hostname: anything else is refused up front rather than half-applied.
+    pub(super) fn parse(text: &str) -> Result<Self, InitError> {
+        let malformed = |reason: &str| InitError::MalformedEndpoint {
+            value: text.to_owned(),
+            reason: reason.to_owned(),
+        };
+        let authority = text
+            .strip_prefix("http://")
+            .ok_or_else(|| malformed("it must begin with http://"))?;
+        if authority.contains('/') {
+            return Err(malformed("it must carry no path and no trailing slash"));
+        }
+        let listen: SocketAddr = authority
+            .parse()
+            .map_err(|_| malformed("it must be a literal address and port, such as 127.0.0.1:8787"))?;
+        if !listen.ip().is_loopback() {
+            return Err(malformed("it must be a loopback address"));
+        }
+        if listen.port() == 0 {
+            return Err(malformed("it must name a fixed port"));
+        }
+        Ok(Self {
+            url: format!("http://{authority}"),
+        })
+    }
+
+    pub(super) fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// The URL of one runtime path, for probes such as `/binary-fingerprint`.
+    pub(super) fn join(&self, path: &str) -> String {
+        format!("{}{path}", self.url)
+    }
+}
 
 /// What this activation did about the policy the running runtime serves.
 ///
@@ -463,6 +519,29 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    #[test]
+    fn endpoint_accepts_loopback_and_refuses_everything_else() {
+        assert_eq!(
+            Endpoint::parse("http://127.0.0.1:8787").unwrap().url(),
+            "http://127.0.0.1:8787"
+        );
+        assert!(Endpoint::parse("http://[::1]:9000").is_ok());
+        for rejected in [
+            "https://127.0.0.1:8787",
+            "http://127.0.0.1:8787/",
+            "http://127.0.0.1:8787/mcp",
+            "http://localhost:8787",
+            "http://10.0.0.1:8787",
+            "http://127.0.0.1:0",
+            "127.0.0.1:8787",
+        ] {
+            assert!(
+                matches!(Endpoint::parse(rejected), Err(InitError::MalformedEndpoint { .. })),
+                "accepted {rejected}"
+            );
+        }
+    }
 
     /// A stand-in the ownership check can find and the signal can reach.
     ///

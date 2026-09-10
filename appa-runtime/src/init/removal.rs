@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use super::{CLAPPA, InitError, appa_filename, deployment_paths, file_before, mcp, settings, skill, write_state};
-use crate::plugin_bundle::VerifiedArchive;
+use crate::installation::archive::VerifiedArchive;
 
 #[cfg(unix)]
 const REMOVING: &str = "#!/bin/sh\nprintf 'APPA plugin removal is incomplete; rerun appa plugin remove claude-code with the same config.\\n' >&2\nexit 1\n";

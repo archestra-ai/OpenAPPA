@@ -13,7 +13,6 @@ pub mod installation;
 mod loopback_http;
 mod management;
 pub mod mcp;
-pub mod plugin_bundle;
 pub mod replay;
 #[path = "main.rs"]
 pub mod runtime_cli;
@@ -31,5 +30,5 @@ mod engine;
 mod events;
 mod external;
 mod llm;
-mod plugin_layout;
+pub mod plugin_layout;
 pub mod yell;

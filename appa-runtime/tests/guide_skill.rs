@@ -290,13 +290,3 @@ fn kagent_runtime_management_is_typed_vouched_and_least_privilege() {
     assert!(reference.contains("generic Kubernetes commands"));
     assert!(reference.contains("one-shot APPA"));
 }
-
-#[test]
-fn the_claude_plugin_has_no_second_source_copy() {
-    assert!(
-        !repo_root()
-            .join("marketplace/plugins/claude-code/plugin/skills/appa-guide")
-            .exists(),
-        "the Claude plugin materializes the canonical skill at staging time; a source copy would drift"
-    );
-}

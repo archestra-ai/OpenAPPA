@@ -145,11 +145,11 @@ pub fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// This checkout's marketplace root, staged into `into` by the same mapping the
-/// build and the install use.
+/// This checkout's plugin archive tree, staged into `into` by the same mapping
+/// the build and the install use.
 pub fn stage_bundle(into: &Path) -> PathBuf {
     let staged = into.join("plugin-source");
-    appa_runtime::plugin_bundle::stage_repository(&repo_root(), &staged).expect("the checkout stages");
+    appa_runtime::plugin_layout::stage_repository(&repo_root(), &staged).expect("the checkout stages");
     staged
 }
 

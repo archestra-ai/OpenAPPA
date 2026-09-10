@@ -7,7 +7,7 @@
 //! the appa-guide skill is written from bytes compiled into the binary.
 
 use crate::config::ConfigError;
-use crate::plugin_bundle::{self, Endpoint, PluginBundleError, VerifiedArchive};
+use crate::installation::archive::{self, ArchiveError, VerifiedArchive};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -28,7 +28,7 @@ pub use self::removal::claude_code_remove;
 
 use self::config::{ComposedPolicy, discard_file, verify_config};
 use self::endpoint::{
-    RuntimeOutcome, clear_stale_endpoint, endpoint_health, reconcile_policy, stop_owned_appa_runtime,
+    Endpoint, RuntimeOutcome, clear_stale_endpoint, endpoint_health, reconcile_policy, stop_owned_appa_runtime,
     verify_runtime_deployment,
 };
 #[cfg(windows)]
@@ -66,6 +66,8 @@ pub enum InitError {
     McpConflict { url: String },
     #[error("{path} is not the appa-guide skill an APPA install writes; move it aside, then rerun the install")]
     SkillConflict { path: PathBuf },
+    #[error("{value} is not a usable runtime endpoint: {reason}")]
+    MalformedEndpoint { value: String, reason: String },
     #[error("the deployed binary could not bring `appa runtime` up: {0}")]
     Starter(String),
     #[error("the runtime endpoint {endpoint} is taken: {message}")]
@@ -83,7 +85,7 @@ pub enum InitError {
         message: String,
     },
     #[error(transparent)]
-    PluginBundle(#[from] PluginBundleError),
+    Archive(#[from] ArchiveError),
     #[error("{operation}; restoring the previous installation also failed: {recovery}")]
     Recovery {
         operation: Box<InitError>,
@@ -318,7 +320,7 @@ fn switch_over(
 /// Bring the deployed runtime up through the deployed binary itself, the start
 /// every protected SessionStart performs; a healthy runtime is left as it is.
 fn start_runtime(target: &HookTarget<'_>) -> Result<(), InitError> {
-    let mut command = match plugin_bundle::debug_override("APPA_RUNTIME_STARTER") {
+    let mut command = match archive::debug_override("APPA_RUNTIME_STARTER") {
         Some(starter) => {
             let mut command = Command::new("sh");
             command.arg(starter);

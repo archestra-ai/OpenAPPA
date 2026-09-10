@@ -93,7 +93,7 @@ impl ClaudeArtifacts {
         if binary_name == "appa.exe" {
             extract_windows_binary(&binary_archive, &stage.path().join(binary_name))?;
         } else {
-            crate::plugin_bundle::extract_bundle_archive(&binary_archive, stage.path())
+            super::archive::extract_bundle_archive(&binary_archive, stage.path())
                 .map_err(|error| InstallError::Invalid(error.to_string()))?;
         }
         let entries: Vec<_> = fs::read_dir(stage.path())
