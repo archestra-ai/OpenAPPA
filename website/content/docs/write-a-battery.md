@@ -2,221 +2,195 @@
 title: Create your own battery
 category: Batteries
 order: 6.7
-description: Create, test, and submit a battery for your MCP server.
+description: Build the smallest useful security contract for a tool interface.
 ---
 
-This guide shows MCP server authors how to create and publish a battery for their server.
+A battery should be **as lean as possible, but not leaner**. Start with TOML
+contracts. Add machinery when a useful, correct decision needs facts or reasoning
+that those contracts cannot supply.
+
+A battery describes a specific tool interface: what data calls send, who may see
+results, how much to trust those results, what changes, and what requires review.
+Identify the MCP implementation and supported tool sets, not just the provider's
+brand. Two servers for the same service can expose different interfaces.
 
 > **Ask your coding agent**
 >
-> Copy this prompt into your coding agent:
->
 > ```text
-> Read https://openappa.com/write-a-battery and follow the guide.
->
-> Inspect the MCP server in this repository.
-> Create a battery for it.
-> Add its documentation and catalogue card.
-> Run every available check.
-> Do not guess when the server code does not answer a question.
-> Tell me what you created and what you verified.
-> Tell me what I still need to review.
+> Read https://openappa.com/write-a-battery and inspect this server's implementation.
+> Build the smallest useful battery for its supported tool interface.
+> Use TOML for known contracts and expressible argument-dependent decisions.
+> Add a resolver or annotator only for a concrete decision TOML cannot supply.
+> Explain which provider facts it needs and what happens when they are unavailable.
+> Keep deployment choices in the root policy. Do not invent resource permissions.
+> Add focused behavioral evidence, documentation, and the catalogue entry.
+> Run the checks relevant to the change. Report coverage, assumptions, and limits.
 > ```
 
-## What happens next
+## Choose the implementation from the decision
 
-1. **Read.** Your agent reads the server code and docs. It lists every tool, its inputs and results, and anything it can change.
-2. **Build.** It creates the battery, tests, documentation page, and catalogue card. It records the exact server version and links each rule to the source that supports it.
-3. **Review.** You open those links, check the rules, resolve any unanswered questions, and submit the pull request.
+| What determines the contract? | Start with | Example |
+| --- | --- | --- |
+| Known tool behavior | Static TOML | A tool always publishes its input publicly. |
+| Arguments already present in the call | TOML selectors, parameter constraints, and argument references | A destination reader is supplied in `to`; a configured resource has a known audience. |
+| Current provider state | A deterministic annotator or resolver | A GitHub repository's visibility and permitted readers determine a push's audience requirement. |
+| Behavior that cannot be classified by those rules | An existing bounded interpretation mechanism | The Claude Code Bash annotator interprets a proposed shell command. |
 
-:::battery-review-checklist:::
+Argument dependence alone does not require Python. Conversely, a static rule that
+forces operators to maintain every changing repository ACL manually may be too
+limited to provide the integration you intend to support.
 
-## Add the battery files
+### Example: pushing to GitHub
 
-Create a folder under `marketplace/batteries/`:
+The same push tool can target a public or private repository. The call identifies
+the repository, but does not establish who can read it.
+
+- A public destination requires input that may be shared publicly.
+- A private destination requires input that may be shared with its permitted
+  readers. `private` does not mean that every organization member has access.
+- A failed lookup must never be interpreted as public visibility. Refuse unless
+  the complete contract has an explicitly justified conservative fallback.
+  Requiring public input can protect outbound confidentiality; it does not make
+  the returned content public or establish that the action itself is acceptable.
+
+A useful mixed public/private integration therefore needs provider lookup or an
+explicit, maintained source of resource permissions. That machinery earns its
+place. Keep the provider lookup and interpretation focused; the runtime already
+owns contract enforcement and the review mechanism.
+
+The [repository visibility example](https://github.com/archestra-ai/OpenAPPA/tree/main/examples/test-github-battery)
+illustrates an annotator making a provider request. It is a read example using a
+configured private audience, **not a complete repository ACL resolver or push
+integration**. Visibility alone cannot establish that configured audience.
+
+Read and write audiences have different constraints. A result label may name a
+subset of its authorized readers. A write's audience requirement must cover
+**every reader of the destination**. A common subset can safely restrict reads
+across several resources while being insufficient for writes to those resources.
+An annotator must establish both outbound requirements and returned-content labels;
+mutation responses can contain existing private data.
+
+## Keep ownership explicit
+
+The battery owns reviewed tool semantics and documented defaults. The deployment
+owns credentials, physical server bindings, resource audience mappings, identity
+policy, and the authority that can approve an action. A requirement for review
+can be packaged; choosing who may grant that review belongs to the root policy.
+
+An audience source discovers provider users or groups. An identity resolver
+establishes which principals those provider claims represent. A resource ACL
+resolver establishes who may read a particular resource. These are different
+questions: workspace membership does not establish access to every private
+channel, repository, meeting, or issue.
+
+Optional provider implementations can ship alongside their contracts. Separate
+ownership does not require a new package type. Activate and configure them from
+the deployment where required by the existing configuration model.
+
+Root tool rules take precedence over included rules and supply a complete
+replacement annotation. Preserve the relevant trust, audience, review and effect
+fields when overriding a resource. If the rule assumes a fixed argument shape,
+constrain it with `parameters`; for example, `additionalProperties = false`
+prevents an unexpected related-content or reassignment field from reusing that
+rule. Use supported policy constraints rather than copying the provider's entire
+API validator.
+
+## Start with three files
 
 ```text
-marketplace/batteries/
-`-- your-server/
-    |-- README.md
-    |-- appa-package.toml
-    |-- appa.toml
-    |-- annotator.py
-    `-- test_annotator.py
+marketplace/batteries/your-server/
+  appa-package.toml
+  appa.toml
+  README.md
 ```
 
-`appa-package.toml` is the package manifest: the battery's name and
-description, the policy file, the hosts it is composed with, and the helper
-scripts its bindings name. Run `bash scripts/appa-marketplace.sh` to generate
-the catalog entry and content digest, then commit `marketplace/marketplace.toml`
-with the package. CI checks that the generated catalog is current.
+`appa-package.toml` declares the package name, description, policy file, supported
+hosts and namespaces. Declare helpers only when the package actually needs them.
+`appa.toml` contains the contracts, using canonical tool IDs such as
+`mcp/<server>/<tool>` or `host/claude-code/<tool>`.
 
-`appa.toml` contains the tool contracts. Add an annotator when a contract depends on the call's arguments. Add an audience source when the service's users or groups define who can receive data.
+The README records the supported server implementation/version, tool coverage,
+source evidence, setup, assumptions and known limits. A deliberate subset is
+acceptable: name the unsupported tools. A tool omitted from this battery receives
+no permission from it; a deployment's other rules may still cover it.
 
-The battery `README.md` must name the server version and list the covered tools. It must also explain each contract, script, test, and known limit.
+Add an annotator, audience source, sanitizer or its tests only when its behavior
+is part of the integration. A helper should solve a named provider problem. It
+should not introduce another rule language, a general schema validator, a build
+system or copies of runtime behavior without a demonstrated need.
 
-Add the battery config to `include` in `examples/claude-code-battery/appa.toml`. Add the Authority and audience source settings it needs.
+For executable components:
 
-The test suite loads this example to make sure all included batteries work together.
+- Use the existing consult protocol and constrain the declaration's mandate.
+- Keep credentials out of files and arguments; use the supported environment binding.
+- Never turn provider errors, partial membership or unresolved permissions into
+  a successful empty answer or a broader audience.
+- If results are cached, define freshness and invalidation; stale ACLs can change a decision.
+- Keep reusable plumbing shared where an implementation already exists. Add a
+  shared abstraction only when repeated work demonstrates the need.
 
-## Test the battery
+## Keep maintenance evidence small
 
-### Unit tests
+Review the upstream implementation or authoritative documentation. Tool names and
+MCP annotations alone do not establish security behavior. Reads can send secrets
+in queries; writes can return existing private content; apparently read-only
+helpers can fetch arbitrary external URLs.
 
-Write tests for every annotator and audience source. Use saved API responses instead of calling the real service.
+Record the reviewed revision or observed endpoint and capture date. When schema
+drift tracking is useful, retain fingerprints and use maintenance tooling to fetch
+current definitions for review. Full captures can remain local or CI artifacts.
+A hash detects a changed definition when compared; it neither validates calls nor
+proves that unchanged definitions imply unchanged server behavior. Do not add a
+provider-specific generator just to maintain these records.
 
-Test expected input, invalid input, provider errors, and missing data.
+## Test the decisions the battery adds
 
-For example, to test a Python battery:
+Use the shared package/composition checks and [`appa replay`](/validation). A small
+trace should demonstrate the relevant boundary: an allowed operation, a refused
+operation, and a downstream consequence such as private content being unable to
+reach a public sink. Exercise a changed resource or scope when the contract depends
+on one. Prefer those cases over asserting a generated rule list against itself.
+
+A static battery does not need a Python test suite or a Rust test file by default.
+Use a focused runtime integration test when replay cannot exercise the required
+boundary. Do not repeat generic host, approval, installation, or rollback tests
+for each provider.
+
+Executable provider logic does need direct tests. Use synthetic or sanitized
+provider responses for its branches and failure behavior: for example, public and
+private repositories, unknown permissions, pagination failures and identity
+claims. Keep Python fixtures in Python or data files, rather than embedding a
+second implementation in Rust strings.
+
+Replay does not execute the proposed tools, but configured external annotators
+can still make network calls. Use fixtures for deterministic checks and label any
+live provider verification separately.
 
 ```sh
-python3 -m unittest discover -s marketplace/batteries/your-server -p 'test_*.py'
+# After editing the package, regenerate and commit the catalogue with it:
+bash scripts/appa-marketplace.sh
+bash scripts/appa-marketplace.sh --check
+# Shared package tests include verification of committed package digests:
+cargo test --locked -p appa --test marketplace
+# For a deployment example and its behavior trace:
+appa replay --config examples/your-battery/appa.toml examples/your-battery/behavior.appa
+# Only when the battery has Python implementation tests:
+python3 -B -m unittest discover -s marketplace/batteries/your-server -p 'test_*.py'
 ```
 
-After you add the battery to `examples/claude-code-battery/appa.toml`, check that the complete config still loads:
+Add a focused deployment example if setup needs explanation. There is no need to
+append every provider to one growing Claude Code configuration; shared marketplace
+checks compose each battery with its declared hosts.
 
-```sh
-cargo test -p appa --test examples_load
-```
+## Submit a reviewable change
 
-This test detects invalid battery config and conflicts with other included batteries. CI also runs Python tests under `marketplace/batteries/*/test_*.py`.
+Include the package, updated `marketplace/marketplace.toml`, a documentation page
+under `website/content/docs/`, and a card in `website/components/BatteryCatalog.tsx`.
+Add only the helpers, examples and behavioral evidence the integration needs.
 
-### Integration test
+The PR should explain the supported interface, the decisions the battery makes,
+why any machinery is necessary, its assumptions, and what was actually verified.
+Run relevant checks and repository CI. An unresolved security question should
+remain an explicit limit or refused case until evidence answers it.
 
-Use [`appa replay` validation](/validation) to test the battery end to end. Replay proposes tool calls and checks the decisions from OpenAPPA. It does not run the tools.
-
-In this example, a GitHub MCP battery uses a `github.repository-visibility` annotator. The annotator reads the repository owner and name, calls the GitHub API, and returns a complete contract for the call:
-
-- A public repository gives the result `suspicious` trust and a `public` audience.
-- A private repository gives the result `suspicious` trust and limits the audience to `internal`.
-
-The battery defines the GitHub tool contracts and the Python annotator that resolves repository visibility:
-
-```toml
-# examples/test-github-battery/github-battery.toml
-[policy]
-version = 2
-
-[[policy.annotator]]
-name = "github.repository-visibility"
-ranks = ["suspicious"]
-audiences = ["github:internal"]
-
-[[policy.tool]]
-name = "mcp/github/get_file_contents"
-annotator = "github.repository-visibility"
-
-[externals.annotators."github.repository-visibility"]
-command = ["python3", "repository-visibility.py"]
-token_env = "APPA_PROVIDER_GITHUB_TOKEN"
-```
-
-The battery implementation and the complete replay example are available in [`examples/test-github-battery`](https://github.com/archestra-ai/OpenAPPA/tree/main/examples/test-github-battery).
-
-The complete `github-battery-test.toml` config includes the battery and adds two tools that are not part of it. These tools make the trust and audience changes observable.
-
-```toml
-include = ["github-battery.toml"]
-
-[policy]
-version = 2
-trust_chain = ["suspicious", "trusted"]
-
-# This tool tests the trust change from the GitHub result.
-[[policy.tool]]
-name = "mcp/shell/run_command"
-requires = { trust = "trusted" }
-delta = {}
-
-# This tool tests who can receive the GitHub result.
-[[policy.tool]]
-name = "mcp/mail/send"
-requires = { trust = "suspicious", audience = { contains = ["$to"] } }
-delta = {}
-
-[policy.tool.parameters]
-type = "object"
-required = ["to"]
-
-[policy.tool.parameters.properties.to]
-type = "string"
-
-[externals]
-timeout_ms = 30000
-max_body_bytes = 65536
-```
-
-The `github-repository-visibility.appa` trace uses one public repository and one private repository that the GitHub token can read:
-
-```appa
-# Public repository content is suspicious, but it can remain public.
-mcp/github/get_file_contents {
-  owner: "your-org"
-  repo: "your-public-repo"
-  path: "README.md"
-}
-expect allow
-
-# Suspicious content cannot enter a tool that requires trusted input.
-mcp/shell/run_command {
-  command: "deploy"
-}
-expect deny
-
-# Public repository content can go to a public destination.
-mcp/mail/send {
-  to: "public"
-}
-expect allow
-
-# Private repository content narrows the audience.
-mcp/github/get_file_contents {
-  owner: "your-org"
-  repo: "your-private-repo"
-  path: "README.md"
-}
-expect allow
-
-# Private repository content cannot go to a public destination.
-mcp/mail/send {
-  to: "public"
-}
-expect deny
-
-# The configured private-repository audience can receive the content.
-mcp/mail/send {
-  to: "github:internal"
-}
-expect allow
-```
-
-Run the replay with a GitHub token that can read both repositories:
-
-```sh
-APPA_PROVIDER_GITHUB_TOKEN=... appa replay \
-  --config examples/test-github-battery/github-battery-test.toml \
-  examples/test-github-battery/github-repository-visibility.appa
-```
-
-Replay calls the configured annotator for each GitHub tool call. The annotator can call the GitHub API. The GitHub MCP tool and the other tools do not run.
-
-## Open the pull request
-
-Open a pull request against `archestra-ai/OpenAPPA` `main`. Include:
-
-- the new battery folder;
-- its `README.md`, scripts, and tests;
-- the updated `include` list in `examples/claude-code-battery/appa.toml`;
-- a battery documentation page under `website/content/docs/`;
-- a card in `website/components/BatteryCatalog.tsx`; and
-- the server repository, exact version or commit, covered tools, and test results in the pull request description.
-
-## Verify the pull request
-
-The pull request is ready for review when:
-
-1. Repository CI passes.
-2. Every contract uses the canonical tool id (`mcp/<server>/<tool>`) and the exact arguments from that server version.
-3. Every script passes its tests and refuses invalid input.
-4. The test that loads all batteries passes.
-5. The catalogue card opens the battery documentation page.
+:::battery-review-checklist:::
