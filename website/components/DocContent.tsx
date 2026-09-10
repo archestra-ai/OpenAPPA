@@ -77,17 +77,15 @@ const DIRECTIVES: Record<string, () => ReactNode> = {
         What should I review?
       </summary>
       <div className="mt-3 border-t border-[var(--border)] pt-3 leading-relaxed">
-        <p>Review the recorded source evidence and check:</p>
+        <p>Open the links next to each rule and check:</p>
         <ul className="mt-2 list-disc space-y-2 pl-5">
-          <li>The supported server implementation, tool sets, and any deliberate omissions are explicit.</li>
+          <li>The battery includes every tool in the server version it names.</li>
           <li>It identifies every tool that sends data or changes something.</li>
           <li>Each action sends data only to the people or services you expect.</li>
           <li>Only the right people can see each result.</li>
           <li>Data from sources you have not checked is <code>suspicious</code>, not <code>trusted</code>.</li>
-          <li>Review requirements and the authority that may satisfy them are explicit.</li>
-          <li>Each helper solves a decision that the available TOML rules cannot supply.</li>
-          <li>Provider lookup failures and unknown permissions cannot silently broaden access.</li>
-          <li>Tests exercise the battery’s decisions; assumptions and unresolved questions are documented.</li>
+          <li>The battery asks a person before every action that needs approval.</li>
+          <li>The agent lists every question it could not answer from the server code or docs.</li>
         </ul>
       </div>
     </details>
