@@ -1,23 +1,31 @@
-# OpenAPPA consults on ShellRisk-Bench
+# OpenAPPA Annotator on ShellRisk-Bench
 
-This harness evaluates `appa-runtime/src/consult.rs` against the pinned
+This harness evaluates the native model-backed Annotator against the pinned
 [ShellRisk-Bench](https://huggingface.co/datasets/kontext-security/ShellRisk-Bench)
-v0.1 test split. It measures one narrow capability: whether a model-backed
-OpenAPPA consult classifies a proposed Bash command as risky. It does not
+v0.1 test split. It measures whether this Annotator configuration classifies a
+proposed Bash command as risky, with a separately instructed bare LLM as a
+reference. It does not
 evaluate OpenAPPA's other flow decisions or execute any benchmark command.
 
-The harness compares three paths through the same model:
+The harness compares two configurations using the same model:
 
-| Arm | Question | OpenAPPA path |
+| Arm | Question | Path |
 |---|---|---|
-| `annotator` | Can the native Annotator infer a `shell-risk-review` requirement? | Claude Code `/hook`, LLM Annotator, strict annotation schema, Engine decision |
-| `authority` | Can a model authority apply the benchmark taxonomy? | `/hook` offer and vouch, MCP `execute_remedy_plan`, LLM authority, strict ruling schema |
-| `bare` | How does the benchmark's one-word prompt perform? | Direct OpenAI-compatible chat completion; no OpenAPPA mediation |
+| `annotator` | Does the native Annotator require `shell-risk-review` for commands labelled risky? | Claude Code `/hook`, LLM Annotator, strict annotation schema, Engine decision |
+| `bare` | How does the benchmark's explicit risky/safe prompt perform? | Direct OpenAI-compatible chat completion; no OpenAPPA mediation |
 
-The `annotator` arm deliberately gives the model only the self-describing mark.
-It does not copy the benchmark taxonomy into untrusted Bash arguments or change
-the native Annotator prompt. The `authority` and `bare` arms are controls that
-receive the taxonomy explicitly.
+The Annotator receives its native security-annotation instructions and the
+`shell-risk-review` mark, without the benchmark's risk taxonomy. The bare LLM
+receives that taxonomy explicitly. Instructions, output schemas, and request
+paths differ, so this is not a controlled measurement of APPA's effect on
+classification accuracy. Results describe these configurations, not an inherent
+advantage of an APPA role. The native Annotator has no trusted policy-guidance
+field; placing classification instructions in tool arguments or the tool
+description would put them in input that its system prompt treats as untrusted.
+
+The Annotator policy declares an Authority only to make the review mark
+available. The harness scores whether the mark is required; it never invokes
+that Authority or executes a remedy plan.
 
 ## Setup and smoke test
 
@@ -26,43 +34,40 @@ cargo build --package appa
 uv sync --project bench/shellrisk
 export OPENROUTER_API_KEY=...
 uv run --project bench/shellrisk appa-shellrisk preflight
-uv run --project bench/shellrisk appa-shellrisk run \
-  --arm annotator \
-  --limit 2 \
-  --jobs 1
+uv run --project bench/shellrisk appa-shellrisk smoke
 ```
 
-Preflight makes no model request. It validates the pinned dataset and checks
+Preflight makes no model requests. It validates the pinned dataset and checks
 that the selected runtime binary and credential variable exist.
 
 Defaults use OpenRouter's OpenAI-compatible endpoint and
-`openai/gpt-5.6-luna`. APPA arms support every provider implemented by the
-runtime. The bare control currently requires an OpenAI-compatible profile.
+`openai/gpt-5.6-luna`. The Annotator supports every provider implemented by the
+runtime. The bare reference currently requires an OpenAI-compatible profile.
 Pass an empty `--url` to use a provider's default endpoint.
 
-`smoke` runs six commands in every selected arm. Selection is deterministic,
-approximately balanced by label, and interleaved by upstream source. The
-authority arm is sequential because it uses one MCP session. Annotator and
-bare requests honor `--jobs`; the runtime also enforces `--max-concurrent`.
+`smoke` runs six commands in both arms by default. Use `--arm annotator` or
+`--arm bare` to select one. Selection is deterministic, approximately balanced
+by label, and interleaved by upstream source. Both arms honor `--jobs`; the
+runtime also enforces `--max-concurrent`.
 
 ## Complete evaluation
 
-The complete test split contains 4,194 commands. A complete run is only
-available through the explicit `--full` flag:
+The complete test split contains 4,194 commands. A complete run requires the
+explicit `--full` flag:
 
 ```sh
 uv run --project bench/shellrisk appa-shellrisk run --full
 ```
 
 Each arm makes one model request for each selected command. The command above
-therefore makes 12,582 requests because it selects all three arms by default.
+therefore makes 8,388 requests because it selects both arms by default.
 
 Do not treat a run as a general security score. ShellRisk's labels are derived
 from command sources, so they can contain noise and source-specific artifacts.
-Report aggregate and per-source results. Compare the two model-backed OpenAPPA
-arms with the bare control under the same model profile.
+Report aggregate and per-source results, and identify each arm's instructions
+alongside its scores.
 
-Each ignored `runs/<timestamp>/` directory contains a manifest, incremental
+Each git-ignored `runs/<timestamp>/` directory contains a manifest, incremental
 per-command records, the generated APPA deployment, runtime logs, and summaries.
 `predictions.jsonl` applies ShellRisk's published fallback: no answer counts as
 `not_risky`. `predictions-fail-closed.jsonl` maps no answer to `risky`, matching

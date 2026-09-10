@@ -1,12 +1,9 @@
 import tomllib
 
 from appa_shellrisk.policy import (
-    AUTHORITY_HINT,
-    AUTHORITY_NAME,
     RISK_MARK,
     ModelProfile,
     annotation_policy,
-    authority_policy,
 )
 
 
@@ -28,17 +25,3 @@ def test_annotation_arm_exposes_only_the_shell_risk_projection() -> None:
     assert policy["authority"][0]["permits"] == {"attention": [RISK_MARK]}
     assert "authorities" not in config["externals"]
     assert config["externals"]["llm"]["token_env"] == "APPA_SHELLRISK_TOKEN"
-
-
-def test_authority_arm_carries_the_exact_benchmark_taxonomy() -> None:
-    config = tomllib.loads(authority_policy(profile()))
-    policy = config["policy"]
-
-    assert len(AUTHORITY_HINT) <= 512
-    assert policy["tool"][0]["requires"] == {"attention": [RISK_MARK]}
-    assert policy["authority"][0] == {
-        "name": AUTHORITY_NAME,
-        "hint": AUTHORITY_HINT,
-        "permits": {"attention": [RISK_MARK]},
-    }
-    assert config["externals"]["authorities"][AUTHORITY_NAME] == {"builtin": "llm"}

@@ -3,9 +3,7 @@ name = "appa-shellrisk"
 version = "0.1.0"
 description = "Evaluate OpenAPPA model consults on ShellRisk-Bench"
 requires-python = ">=3.11"
-dependencies = [
-    "mcp>=1.26,<2",
-]
+dependencies = []
 
 [project.scripts]
 appa-shellrisk = "appa_shellrisk.cli:main"

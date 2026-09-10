@@ -2,29 +2,23 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import subprocess
 import sys
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import AsyncExitStack
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
-
 from . import BENCHMARK_VERSION, DATASET_ID, DATASET_REVISION
 from .dataset import CommandRow
-from .policy import ModelProfile, annotation_policy, authority_policy
+from .policy import ModelProfile, annotation_policy
 from .runtime import BARE_PROMPT, BareOpenAiClient, RuntimeProcess
 from .scoring import Outcome, summarize
 
-ARMS = ("annotator", "authority", "bare")
+ARMS = ("annotator", "bare")
 
 
 def _git_state(repo: Path) -> dict[str, Any]:
@@ -83,47 +77,6 @@ def _parallel(
 
     with ThreadPoolExecutor(max_workers=jobs) as executor:
         return list(executor.map(one, enumerate(rows, start=1)))
-
-
-async def _authority_results(
-    runtime: RuntimeProcess,
-    rows: list[CommandRow],
-    sink: RecordSink,
-) -> list[Outcome]:
-    outcomes: list[Outcome] = []
-    async with AsyncExitStack() as stack:
-        read, write, _ = await stack.enter_async_context(
-            streamable_http_client(f"{runtime.base_url}/mcp", terminate_on_close=False)
-        )
-        session = await stack.enter_async_context(ClientSession(read, write))
-        await session.initialize()
-        for index, row in enumerate(rows, start=1):
-            try:
-                offer, failure = runtime.prepare_authority(row)
-                if failure is not None:
-                    outcome = failure
-                else:
-                    assert offer is not None
-                    started = time.perf_counter()
-                    result = await session.call_tool("execute_remedy_plan", {"offer_id": offer.id})
-                    latency = (time.perf_counter() - started) * 1_000
-                    text = "\n".join(
-                        content.text for content in result.content if isinstance(getattr(content, "text", None), str)
-                    )
-                    if getattr(result, "isError", False) or getattr(result, "is_error", False):
-                        outcome = Outcome(row.id, row.source, row.label, None, "remedy_refusal", latency, text)
-                    elif "gave no answer" in text:
-                        outcome = Outcome(row.id, row.source, row.label, None, "no_answer", latency, text)
-                    elif "Authorized." in text:
-                        outcome = Outcome(row.id, row.source, row.label, "not_risky", "approved", latency, text)
-                    else:
-                        outcome = Outcome(row.id, row.source, row.label, "risky", "denied", latency, text)
-            except Exception as error:
-                outcome = Outcome(row.id, row.source, row.label, None, "client_error", 0.0, str(error))
-            sink.add(outcome)
-            outcomes.append(outcome)
-            _progress("authority", index, len(rows), outcome)
-    return outcomes
 
 
 def _write_arm_outputs(directory: Path, outcomes: list[Outcome]) -> dict[str, Any]:
@@ -188,16 +141,6 @@ def run_evaluation(
                 with runtime:
                     sink = RecordSink(directory / "records.jsonl", indexed)
                     outcomes = _parallel(arm, rows, runtime.evaluate_annotation, jobs=jobs, sink=sink)
-            elif arm == "authority":
-                runtime = RuntimeProcess(
-                    appa_bin=appa_bin,
-                    policy=authority_policy(profile),
-                    profile=profile,
-                    directory=directory,
-                )
-                with runtime:
-                    sink = RecordSink(directory / "records.jsonl", indexed)
-                    outcomes = asyncio.run(_authority_results(runtime, rows, sink))
             elif arm == "bare":
                 directory.mkdir(parents=True, exist_ok=False)
                 sink = RecordSink(directory / "records.jsonl", indexed)

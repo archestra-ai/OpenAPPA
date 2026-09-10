@@ -76,7 +76,7 @@ def _rows(args: argparse.Namespace):
 def _preflight(args: argparse.Namespace) -> None:
     rows = _rows(args)
     arms = args.arms or list(ARMS)
-    if any(arm in {"annotator", "authority"} for arm in arms) and not args.appa_bin.is_file():
+    if "annotator" in arms and not args.appa_bin.is_file():
         raise ValueError(f"appa binary not found at {args.appa_bin}; run `cargo build --package appa`")
     profile = _profile(args)
     if profile.provider != "ollama":
