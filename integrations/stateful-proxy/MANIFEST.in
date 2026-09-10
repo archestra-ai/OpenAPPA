@@ -1,0 +1,2 @@
+include fixtures/golden-scenarios.json
+recursive-include fixtures/example *.toml *.txt

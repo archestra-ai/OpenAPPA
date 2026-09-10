@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "appa-stateful-proxy-experiment"
+version = "0.1.0"
+description = "Experimental stateful provider-proxy components for OpenAPPA"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+appa-stateful-proxy = "stateful_proxy.proxy:main"
+appa-stateful-review-relay = "stateful_proxy.review_relay:main"
+appa-stateful-strict-broker = "stateful_proxy.strict_broker:main"
+appa-stateful-fixtures = "stateful_proxy.fixture_tools:main"
+appa-stateful-fixture-runner = "stateful_proxy.fixture_runner:main"
+appa-stateful-client-runner = "stateful_proxy.client_runner:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.data-files]
+"share/appa-stateful-proxy/fixtures" = ["fixtures/golden-scenarios.json"]
+"share/appa-stateful-proxy/fixtures/example" = [
+  "fixtures/example/policy.appa.toml",
+  "fixtures/example/protected.txt",
+  "fixtures/example/public.txt",
+]

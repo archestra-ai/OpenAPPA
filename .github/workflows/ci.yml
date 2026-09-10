@@ -41,6 +41,7 @@ jobs:
       agentthreatbench: ${{ steps.filter.outputs.agentthreatbench }}
       marketplace: ${{ steps.filter.outputs.marketplace }}
       receiver: ${{ steps.filter.outputs.receiver }}
+      stateful_proxy: ${{ steps.filter.outputs.stateful_proxy }}
     steps:
       # A pull request reads its file list from the API and needs no
       # checkout. Every other event diffs with git and needs the history.
@@ -200,6 +201,42 @@ jobs:
               - 'scripts/test_appa_guide_runtime.py'
               # The root ignore file shapes the runtime build context.
               - '.dockerignore'
+            stateful_proxy:
+              - *rust
+              - 'integrations/stateful-proxy/**'
+
+  stateful-proxy-checks:
+    name: Stateful Proxy Checks
+    needs: changes
+    if: needs.changes.outputs.stateful_proxy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: integrations/stateful-proxy
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check Python syntax
+        run: python3 -m compileall -q src tests
+
+      - name: Test the stateful proxy experiment
+        env:
+          PYTHONPATH: src
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Check installed entry points
+        run: |
+          python3 -m venv "$RUNNER_TEMP/appa-stateful-proxy"
+          "$RUNNER_TEMP/appa-stateful-proxy/bin/pip" install --no-deps .
+          "$RUNNER_TEMP/appa-stateful-proxy/bin/appa-stateful-proxy" --help
+          "$RUNNER_TEMP/appa-stateful-proxy/bin/appa-stateful-review-relay" --help
+          "$RUNNER_TEMP/appa-stateful-proxy/bin/appa-stateful-strict-broker" --help
+          "$RUNNER_TEMP/appa-stateful-proxy/bin/appa-stateful-fixture-runner" --help
+          "$RUNNER_TEMP/appa-stateful-proxy/bin/appa-stateful-client-runner" --help
 
   plugin-checks:
     name: Plugin Checks

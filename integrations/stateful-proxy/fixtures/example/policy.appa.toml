@@ -1,0 +1,28 @@
+[policy]
+version = 2
+
+# This policy is synthetic. Load it into the source runtime before running the
+# fixture runner; the runner does not select policy files.
+[[policy.tool]]
+name = "host/kagent/read_fixture(path:public.txt)"
+delta = {}
+
+[[policy.tool]]
+name = "host/kagent/write_file(path:protected.txt)"
+delta = {}
+requires = { attention = ["human-approval"] }
+
+[[policy.authority]]
+name = "authenticated-reviewer"
+hint = "An authenticated reviewer must approve this exact fixture write."
+
+[policy.authority.permits]
+attention = ["human-approval"]
+
+[externals]
+timeout_ms = 600000
+review_timeout_ms = 600000
+max_body_bytes = 262144
+
+[externals.authorities.authenticated-reviewer]
+url = "http://127.0.0.1:18889/approve"
