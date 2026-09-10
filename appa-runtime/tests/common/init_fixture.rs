@@ -93,23 +93,20 @@ impl Fixture {
     /// answering as this deployment's own healthy runtime serving the fixture's
     /// policy. A test overrides the `FAKE_*` variables for the case it reproduces.
     pub fn activate(&self) -> Command {
-        let mut command = Command::new(&self.appa);
-        command
-            .current_dir(&self.root)
-            .arg("activate-claude")
-            .arg("--config")
-            .arg(self.config.join("appa.toml"));
-        self.environment(&mut command);
-        command
+        self.bridge("activate-claude")
     }
 
     /// `appa remove-claude` against this fixture, as `appa plugin remove
     /// claude-code` runs it.
     pub fn remove(&self) -> Command {
+        self.bridge("remove-claude")
+    }
+
+    fn bridge(&self, subcommand: &str) -> Command {
         let mut command = Command::new(&self.appa);
         command
             .current_dir(&self.root)
-            .arg("remove-claude")
+            .arg(subcommand)
             .arg("--config")
             .arg(self.config.join("appa.toml"));
         self.environment(&mut command);

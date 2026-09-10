@@ -1,9 +1,8 @@
 //! The repository paths that make up the batteries archive a generation
 //! carries, and the tree the build digests for its identity.
 //!
-//! This module is also compiled by `build.rs`, which reads only the paths, so
-//! keep its dependencies to `std`. One source drives build-time identity and
-//! the staging of a development build's own archive.
+//! This module is also compiled by `build.rs`. One source drives build-time
+//! identity and the staging of a development build's own archive.
 
 use std::fs;
 use std::io;

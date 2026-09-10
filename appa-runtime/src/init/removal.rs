@@ -15,7 +15,7 @@ pub(super) const REMOVING: &str = "@echo off\r\necho APPA plugin removal is inco
 /// removed. The runtime, configuration, retained artifacts and trajectory data
 /// stay put. The `--config` flag of the bridge stays because the installed
 /// binary invokes it; the profile carries everything removal needs.
-pub fn claude_code_remove(_config: &Path) -> Result<(), InitError> {
+pub fn claude_code_remove() -> Result<(), InitError> {
     let paths = deployment_paths()?;
     let _profile_lock = super::lock_claude_profile(&paths.claude_dir)?;
     let deployed = paths.data_dir.join("bin").join(appa_filename());

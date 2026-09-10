@@ -93,7 +93,7 @@ enum Command {
                             either way.")]
     Yell {
         /// The runtime that builds the report. Loopback only.
-        #[arg(long, env = "APPA_RUNTIME_URL", default_value = "http://127.0.0.1:8787")]
+        #[arg(long, env = "APPA_RUNTIME_URL", default_value = appa_runtime::runtime_url::DEFAULT_RUNTIME_URL)]
         url: String,
 
         /// Answer both questions with yes: pseudonymize the report, and send it.
@@ -210,7 +210,7 @@ fn main() -> ExitCode {
         Command::Plugin {
             command: PluginCommand::Remove(args),
         } => appa_runtime::installation::cli::remove_plugin(args),
-        Command::RemoveClaude { config } => match appa_runtime::init::claude_code_remove(&config) {
+        Command::RemoveClaude { config: _ } => match appa_runtime::init::claude_code_remove() {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("appa: {error}");
