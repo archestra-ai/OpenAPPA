@@ -106,12 +106,9 @@ jobs:
               - 'marketplace/plugins/kagent/fixtures/**'
               - 'website/content/docs/contracts.md'
             plugin:
-              - 'marketplace/plugins/claude-code/plugin/**'
-              - 'marketplace/plugins/claude-code/.claude-plugin/**'
               - 'marketplace/plugins/claude-code/*.py'
               - 'marketplace/plugins/claude-code/README.md'
               - 'marketplace/batteries/**'
-              - 'scripts/appa-stage-plugin-bundle.sh'
               - 'scripts/appa-eval.sh'
               - 'scripts/appa-install.sh'
               - 'scripts/appa-install-test.sh'
@@ -190,8 +187,8 @@ jobs:
               - 'bench/**'
               - 'website-chat-playground/**'
               - 'website/content/docs/contracts.md'
-              # The published image compiles a digest of the plugin
-              # tree into the binary; these are the rest of the roots
+              # The published image compiles the appa-guide skill into
+              # the binary and digests the batteries tree
               # appa-runtime/src/plugin_layout.rs maps.
               - 'marketplace/**'
               - 'integrations/appa-guide/**'
@@ -214,53 +211,17 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Check plugin shell syntax
+      - name: Check shell syntax
         run: |
-          sh -n marketplace/plugins/claude-code/plugin/hooks/ensure-runtime.sh \
-            marketplace/plugins/claude-code/plugin/hooks/hook.sh \
-            marketplace/plugins/claude-code/plugin/hooks/appa-paths.sh \
-            marketplace/plugins/claude-code/plugin/statusline.sh \
-            scripts/appa-stage-plugin-bundle.sh \
-            scripts/appa-eval.sh \
+          sh -n scripts/appa-eval.sh \
             scripts/appa-install.sh \
             scripts/appa-install-test.sh
 
-      - name: Lint plugin shell scripts
+      - name: Lint shell scripts
         run: |
-          shellcheck -x -s sh marketplace/plugins/claude-code/plugin/hooks/ensure-runtime.sh \
-            marketplace/plugins/claude-code/plugin/hooks/hook.sh \
-            marketplace/plugins/claude-code/plugin/hooks/appa-paths.sh \
-            scripts/appa-stage-plugin-bundle.sh \
-            scripts/appa-eval.sh \
+          shellcheck -x -s sh scripts/appa-eval.sh \
             scripts/appa-install.sh \
             scripts/appa-install-test.sh
-
-      # The Windows hook implementation had no check of any kind until a
-      # review found a fail-open bug in it. `pwsh` is preinstalled on the
-      # runner, and its own parser is the authority on what it will run.
-      - name: Lint plugin PowerShell scripts
-        shell: pwsh
-        run: |
-          $failed = $false
-          foreach ($script in @(
-            "marketplace/plugins/claude-code/plugin/hooks/hook.ps1",
-            "marketplace/plugins/claude-code/plugin/hooks/appa-paths.ps1",
-            "marketplace/plugins/claude-code/plugin/statusline.ps1"
-          )) {
-            $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$errors) | Out-Null
-            foreach ($error in $errors) {
-              Write-Output "::error file=$script,line=$($error.Extent.StartLineNumber)::$($error.Message)"
-              $failed = $true
-            }
-          }
-          if ($failed) { exit 1 }
-
-      - name: Validate plugin JSON
-        run: |
-          jq -e .hooks marketplace/plugins/claude-code/plugin/hooks/hooks.json >/dev/null
-          jq -e .hooks marketplace/plugins/claude-code/plugin/hooks/hooks.windows.json >/dev/null
-          jq -e .plugins marketplace/plugins/claude-code/.claude-plugin/marketplace.json >/dev/null
 
       - name: Test release battery refresh
         run: |
@@ -522,17 +483,16 @@ jobs:
 
       # Only what is platform-specific here: the config and data directory
       # rules, the process ownership check init stops a runtime with, and the
-      # hooks a materialized deployment renders. Not a second full workspace
+      # hook entries an activation writes. Not a second full workspace
       # check, clippy and test run.
       - name: Deployment tests
         run: |
           cargo test --locked --package appa --lib init::
-          cargo test --locked --package appa --lib plugin_bundle::
           cargo test --locked --package appa --lib installation::
           cargo test --locked --package appa --test init_cli
           cargo test --locked --package appa --test marketplace_cli
-          cargo test --locked --package appa --test plugin_hooks
-          cargo test --locked --package appa --test rendered_hooks
+          cargo test --locked --package appa --test hook_client
+          cargo test --locked --package appa --test settings_hooks
 
   windows-deployment-checks:
     name: Windows Deployment Checks

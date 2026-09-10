@@ -2,10 +2,10 @@
 """End-to-end check of the Claude Code gate, from outside APPA.
 
 Two headless `claude` sessions run against a real runtime process, the
-shipped plugin, and a policy that states one flow: reading a file narrows
-its content to the session, and writing a file releases content to the
-outside world. So a write of the model's own words has a legal path, and
-a write of read content has none.
+hook entries an install writes, and a policy that states one flow: reading
+a file narrows its content to the session, and writing a file releases
+content to the outside world. So a write of the model's own words has a
+legal path, and a write of read content has none.
 
 Nothing here reads APPA's log. The check is what a user would see: the
 file that lands, the private line that appears in no file at all, and a
@@ -199,7 +199,14 @@ def protected_session(
         if model is not None:
             model.reset()
         with gate(config, root / "appa.db") as port:
-            result = run(work, port, prompt, model)
+            url = f"http://127.0.0.1:{port}"
+            settings = root / "settings.json"
+            settings.write_text(json.dumps(hook_settings(url, config, root / "data")))
+            servers = root / "mcp.json"
+            servers.write_text(
+                json.dumps({"mcpServers": {"appa": {"type": "http", "url": f"{url}/mcp"}}})
+            )
+            result = run(work, settings, servers, prompt, model)
             yield Session(
                 result=result,
                 work=work,
@@ -208,12 +215,52 @@ def protected_session(
             )
 
 
+def hook_settings(url: str, config: Path, data_dir: Path) -> dict[str, Any]:
+    """The hook entries `appa plugin install claude-code` writes, pointed at
+    this check's runtime. `appa-runtime/src/init/settings.rs` is the
+    definition; the timeouts are its."""
+    binary = str(appa_binary())
+
+    def entry(args: list[str], timeout: int) -> dict[str, Any]:
+        return {"type": "command", "command": binary, "args": args, "timeout": timeout}
+
+    post = ["hook", "--deployment-url", url]
+    hooks: dict[str, list[dict[str, Any]]] = {
+        "SessionStart": [
+            {
+                "hooks": [
+                    entry(
+                        [*post, "--ensure-runtime", "--config", str(config), "--data-dir", str(data_dir)],
+                        150,
+                    ),
+                    {"type": "command", "command": binary, "args": ["session-context"]},
+                ]
+            }
+        ]
+    }
+    for event, matcher in (
+        ("UserPromptSubmit", None),
+        ("PreToolUse", "*"),
+        ("PostToolUse", "*"),
+        ("PostToolUseFailure", "*"),
+        ("SubagentStart", None),
+        ("SubagentStop", None),
+    ):
+        group: dict[str, Any] = {"hooks": [entry(post, 130)]}
+        if matcher is not None:
+            group = {"matcher": matcher, **group}
+        hooks[event] = [group]
+    for event in ("Stop", "StopFailure"):
+        hooks[event] = [{"hooks": [entry([*post, "--turn-end"], 40)]}]
+    return {"hooks": hooks}
+
+
 def run(
-    work: Path, port: int, prompt: str, model: ModelFixture | None
+    work: Path, settings: Path, servers: Path, prompt: str, model: ModelFixture | None
 ) -> dict[str, Any]:
-    """`--setting-sources ''` keeps the machine's own settings out: an
-    installed copy of this plugin would otherwise post every hook a
-    second time."""
+    """`--setting-sources ''` and `--strict-mcp-config` keep the machine's
+    own settings and MCP servers out: an installed deployment would
+    otherwise post every hook a second time."""
     command = [
         os.environ.get("CLAUDE_BIN", "claude"),
         "-p",
@@ -222,8 +269,11 @@ def run(
         str(uuid.uuid4()),
         "--setting-sources",
         "",
-        "--plugin-dir",
-        str(adapter_root() / "plugin"),
+        "--settings",
+        str(settings),
+        "--mcp-config",
+        str(servers),
+        "--strict-mcp-config",
         "--tools",
         "Read,Write",
         "--permission-mode",
@@ -234,11 +284,7 @@ def run(
         "json",
         "--no-session-persistence",
     ]
-    environment = os.environ | {
-        "APPA_BIN": str(appa_binary()),
-        "APPA_GATE": "1",
-        "APPA_RUNTIME_URL": f"http://127.0.0.1:{port}",
-    }
+    environment = os.environ | {"APPA_GATE": "1"}
     if model is not None:
         environment |= {
             "ANTHROPIC_BASE_URL": model.url,

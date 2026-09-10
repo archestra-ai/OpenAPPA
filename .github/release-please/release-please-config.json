@@ -83,11 +83,6 @@
           "jsonpath": "$.workspace.package.version"
         },
         {
-          "type": "json",
-          "path": "marketplace/plugins/claude-code/plugin/.claude-plugin/plugin.json",
-          "jsonpath": "$.version"
-        },
-        {
           "type": "generic",
           "path": "charts/appa-runtime/Chart.yaml"
         },

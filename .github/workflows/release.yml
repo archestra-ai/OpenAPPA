@@ -195,8 +195,11 @@ jobs:
           VERSION: ${{ needs.release-please.outputs.version }}
           COPYFILE_DISABLE: "1"
         run: |
-          mkdir -p dist
-          sh scripts/appa-stage-plugin-bundle.sh staged
+          mkdir -p dist staged
+          # The archive's tree, as appa-runtime/src/plugin_layout.rs maps it.
+          cp -R marketplace/batteries staged/batteries
+          find staged -type d -name __pycache__ -prune -exec rm -rf -- {} +
+          find staged -type f \( -name '*.pyc' -o -name '*.pyo' -o -name appa-package.toml \) -delete
           tar -C staged -czf "dist/appa-plugin-${VERSION}.tar.gz" .
           bash scripts/appa-marketplace.sh --check
           tar -C marketplace -czf "dist/appa-marketplace-${VERSION}.tar.gz" .
