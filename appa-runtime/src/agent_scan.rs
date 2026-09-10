@@ -103,10 +103,22 @@ fn declares_max_turns(path: &Path) -> bool {
 }
 
 /// The line carries the key as YAML reads it: `maxTurns` first on the line,
-/// indented or not, then its colon with or without a space before it.
+/// indented or not, bare or in one layer of quotes, then its colon with or
+/// without a space before it.
 fn declares(line: &str) -> bool {
-    line.trim_start()
-        .strip_prefix("maxTurns")
+    let line = line.trim_start();
+    let (quote, line) = match line.strip_prefix('"') {
+        Some(rest) => (Some('"'), rest),
+        None => match line.strip_prefix('\'') {
+            Some(rest) => (Some('\''), rest),
+            None => (None, line),
+        },
+    };
+    line.strip_prefix("maxTurns")
+        .and_then(|rest| match quote {
+            Some(quote) => rest.strip_prefix(quote),
+            None => Some(rest),
+        })
         .is_some_and(|rest| rest.trim_start().starts_with(':'))
 }
 
@@ -148,11 +160,20 @@ mod tests {
             &claude.join("agents/spaced.md"),
             "---\nname: spaced\nmaxTurns : 4\n---\n",
         );
+        write(
+            &claude.join("agents/quoted.md"),
+            "---\nname: quoted\n\"maxTurns\": 4\n---\n",
+        );
+        write(
+            &claude.join("agents/unclosed.md"),
+            "---\nname: unclosed\n\"maxTurns: 4\n---\n",
+        );
 
         assert_eq!(
             declaring_max_turns(Some(&project), Some(&claude)),
             vec![
                 claude.join("agents/indented.md"),
+                claude.join("agents/quoted.md"),
                 claude.join("agents/spaced.md"),
                 claude.join("agents/user-capped.md"),
                 claude.join("plugins/cache/market/tool/1.0/agents/plugin-capped.md"),
