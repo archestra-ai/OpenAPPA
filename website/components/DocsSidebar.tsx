@@ -16,6 +16,12 @@ export interface SidebarCategory {
 
 export const PLAYGROUND_HREF = "/playground";
 
+/* The shell is rendered by the page, not the layout, so every navigation
+   unmounts the rail and mounts a fresh one scrolled to the top. Carry the
+   offset across those mounts in module state — it outlives the component but
+   not the tab, which is exactly the lifetime a reader expects. */
+let railScrollTop = 0;
+
 /** Clicking the playground link while already in it starts a fresh session. */
 export const NEW_CHAT_EVENT = "appa:new-chat";
 
@@ -45,10 +51,23 @@ export function DocsSidebar({
   useEffect(() => registerNav?.(), [registerNav]);
   useDrawerDismissal(open, close, pathname);
 
+  /* A ref callback rather than an effect: it runs in the commit phase, before
+     the browser paints the remounted rail, so the restored offset never shows
+     as a jump back from the top. */
+  const railRef = useCallback((el: HTMLDivElement | null) => {
+    if (!el) return;
+    el.scrollTop = railScrollTop;
+    const remember = () => {
+      railScrollTop = el.scrollTop;
+    };
+    el.addEventListener("scroll", remember, { passive: true });
+    return () => el.removeEventListener("scroll", remember);
+  }, []);
+
   return (
     <aside className={`sidebar${open ? " open" : ""}`}>
       <div className="nav-scrim" onClick={close} aria-hidden="true" />
-      <div className="sidebar-inner" id="docs-nav">
+      <div className="sidebar-inner" id="docs-nav" ref={railRef}>
         {/* Below 1024px the header keeps only the menu button and the
             wordmark; everything else it used to carry lives here. */}
         <div className="sidebar-chrome">
