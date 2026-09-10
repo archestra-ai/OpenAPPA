@@ -10,8 +10,8 @@ use crate::consult::{
     LookupAnswer, MembersAnswer, PrincipalAnswer, SanitizerAnswer,
 };
 use crate::engine::{
-    AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback, ForkStatus,
-    Liveness, Next, OfferNonce, OpenDispatch, Presentation, RemedyArguments, engine_id,
+    AuthorityVerdict, BatchCallDecision, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest,
+    Feedback, ForkStatus, Liveness, Next, OfferNonce, OpenDispatch, Presentation, RemedyArguments, engine_id,
 };
 use crate::external::ConsultOutcome;
 
@@ -131,14 +131,25 @@ const ENDED_CHILD: &str = "[appa] this subagent ended without a return; nothing 
 fn outcome_decision(decision: EngineDecision) -> Result<ToolResultDecision, EventError> {
     match decision.then {
         Next::PresentToModel(Presentation::KeepOutput) => Ok(ToolResultDecision::Keep),
-        Next::PresentToModel(Presentation::ReplaceOutput { placeholder, .. }) => {
-            Ok(ToolResultDecision::Replace { placeholder })
-        }
+        Next::PresentToModel(Presentation::ReplaceOutput { placeholder, .. }) => Ok(ToolResultDecision::Replace {
+            placeholder,
+            offers: Vec::new(),
+        }),
         // An admitted value delivered in place of the raw output.
-        Next::PresentToModel(Presentation::Value { value }) => Ok(ToolResultDecision::Replace { placeholder: value }),
-        Next::PresentToModel(Presentation::Blocked { feedback, .. }) => {
-            Ok(ToolResultDecision::Replace { placeholder: feedback })
-        }
+        Next::PresentToModel(Presentation::Value { value }) => Ok(ToolResultDecision::Replace {
+            placeholder: value,
+            offers: Vec::new(),
+        }),
+        Next::PresentToModel(Presentation::Blocked { feedback, offers }) => Ok(ToolResultDecision::Replace {
+            placeholder: feedback,
+            offers: offers
+                .into_iter()
+                .map(|id| appa_runtime_api::OfferedRemedy {
+                    id: id.0,
+                    returns: None,
+                })
+                .collect(),
+        }),
         _ => Err(EventError::UnexpectedDecision),
     }
 }
@@ -314,6 +325,77 @@ impl Session {
         }
     }
 
+    /// Decide one complete model response in one engine proposal batch. Unlike repeated
+    /// `on_tool_call` calls, every sibling is composed against the same snapshot and may open a
+    /// dispatch concurrently. The returned order is exactly the submitted order.
+    pub async fn on_tool_calls(&self, calls: Vec<(ProposedCall, bool)>) -> Result<Vec<BatchCallDecision>, EventError> {
+        self.on_tool_calls_with_id(None, calls).await
+    }
+
+    /// A proxy-held batch supplies the engine's proposal identity. This makes a retry bind the
+    /// same core `SubjectKey::Call { batch, position }`, rather than opening lookalike offers.
+    pub async fn on_tool_calls_with_id(
+        &self,
+        batch_id: Option<String>,
+        calls: Vec<(ProposedCall, bool)>,
+    ) -> Result<Vec<BatchCallDecision>, EventError> {
+        if calls.is_empty() {
+            return Err(EventError::UnexpectedDecision);
+        }
+        if calls
+            .iter()
+            .any(|(call, _)| self.substituted_release(call).ok().flatten().is_some())
+        {
+            return Err(EventError::CallOutstanding);
+        }
+        let spawns: Vec<usize> = calls
+            .iter()
+            .enumerate()
+            .filter_map(|(position, (_, spawn))| (*spawn).then_some(position))
+            .collect();
+        let [spawn] = spawns.as_slice() else {
+            if spawns.is_empty() {
+                return self.decide_tool_batch(batch_id, calls, None).await;
+            }
+            return Err(EventError::CallOutstanding);
+        };
+        let (spawn_call, _) = &calls[*spawn];
+        if self.inner.spawn_coverage() == super::SpawnCoverage::Declared && !self.names_tool(&spawn_call.tool)? {
+            return Err(EventError::UndeclaredSpawn {
+                tool: spawn_call.tool.clone(),
+            });
+        }
+        self.decide_tool_batch(batch_id, calls, Some(*spawn)).await
+    }
+
+    async fn decide_tool_batch(
+        &self,
+        batch_id: Option<String>,
+        calls: Vec<(ProposedCall, bool)>,
+        spawn: Option<usize>,
+    ) -> Result<Vec<BatchCallDecision>, EventError> {
+        let proposed: Vec<ProposedCall> = calls.into_iter().map(|(call, _)| call).collect();
+        let decision = self
+            .drive_with_evidence(
+                |_, evidence| {
+                    Ok(EngineEvent::ModelResponseBatch {
+                        calls: proposed.clone(),
+                        evidence,
+                        entropy: fresh_entropy(),
+                        batch_id: batch_id.clone(),
+                        spawn,
+                    })
+                },
+                None,
+                None,
+            )
+            .await?;
+        match decision.then {
+            Next::ModelResponseBatch { calls } => Ok(calls),
+            _ => Err(EventError::UnexpectedDecision),
+        }
+    }
+
     /// Whether the serving policy writes a contract for this tool's exact name — the
     /// wildcard does not count. What a spawn needs under [`super::SpawnCoverage::Declared`].
     fn names_tool(&self, tool: &str) -> Result<bool, EventError> {
@@ -398,6 +480,35 @@ impl Session {
     pub async fn on_tool_result(&self, call: ProposedCall, o: ToolOutcome) -> Result<ToolResultDecision, EventError> {
         let o = self.cap_outcome(o);
         outcome_decision(self.report_outcome(&call, &o).await?)
+    }
+
+    /// Report a batch release by the engine-issued dispatch identity. The proxy persists this
+    /// identity with its client call id, so equal tool calls in one parallel batch cannot be
+    /// confused when their outcomes arrive in a different order.
+    pub async fn on_dispatch_result(
+        &self,
+        dispatch: appa_engine::value::DispatchId,
+        outcome: ToolOutcome,
+    ) -> Result<ToolResultDecision, EventError> {
+        if dispatch.trajectory() != &engine_id(&self.trajectory) {
+            return Err(EventError::UnknownDispatch);
+        }
+        let outcome = self.cap_outcome(outcome);
+        let decision = self
+            .drive_with_evidence(
+                |_, evidence| {
+                    Ok(EngineEvent::ToolOutcome {
+                        dispatch: dispatch.clone(),
+                        outcome: outcome.clone(),
+                        evidence,
+                        entropy: fresh_entropy(),
+                    })
+                },
+                None,
+                None,
+            )
+            .await?;
+        outcome_decision(decision)
     }
 
     async fn report_outcome(&self, call: &ProposedCall, o: &ToolOutcome) -> Result<EngineDecision, EventError> {
@@ -801,8 +912,8 @@ impl Session {
                 // consults run concurrently — an annotation consult can take a model call's
                 // seconds, and the batch should cost its slowest member, not their sum. With a
                 // reviewer they stay serial: one staged review on screen at a time.
-                Next::ResolveExternal(requests) => match elicitation {
-                    None => {
+                Next::ResolveExternal(requests) => match (elicitation, ruling) {
+                    (None, None) => {
                         // Batch-terminal: join_all settles every sibling first; any
                         // no-answer then aborts the invocation, discarding the
                         // siblings' answers, before another engine round or any append.
@@ -811,7 +922,7 @@ impl Session {
                             evidence.push(answered?);
                         }
                     }
-                    Some(_) => {
+                    (elicitation, ruling) => {
                         for request in requests {
                             let answered = self.consult(request, elicitation, ruling).await?;
                             evidence.push(answered);
@@ -858,6 +969,7 @@ impl Session {
                 }
             }
             let event = event(&context)?;
+            let permits_parallel_dispatches = matches!(event, EngineEvent::ModelResponseBatch { .. });
             if let EngineEvent::ChildReturn { child, .. } = &event
                 && !policy.engine().open_dispatches(&view, child).is_empty()
             {
@@ -871,7 +983,7 @@ impl Session {
             let Some(facts) = decision.append.as_ref() else {
                 return Ok(decision);
             };
-            if policy.engine().opens_a_second_dispatch(&view, &self.trajectory, facts) {
+            if !permits_parallel_dispatches && policy.engine().opens_a_second_dispatch(&view, &self.trajectory, facts) {
                 return Err(EventError::CallOutstanding);
             }
             match self.inner.store.append(&log, facts) {
@@ -1638,7 +1750,8 @@ name = "execute_remedy_plan"
         assert_eq!(
             replaced,
             ToolResultDecision::Replace {
-                placeholder: "scrubbed".to_string()
+                placeholder: "scrubbed".to_string(),
+                offers: Vec::new(),
             },
         );
         let log = runtime.log_facts(&root());
@@ -3380,7 +3493,8 @@ confined_results = ["leak"]
         assert_eq!(
             decision,
             ToolResultDecision::Replace {
-                placeholder: "scrubbed".to_string()
+                placeholder: "scrubbed".to_string(),
+                offers: Vec::new(),
             },
             "the derivation is admitted and the raw is withheld",
         );
@@ -3430,7 +3544,8 @@ confined_results = ["leak"]
             ToolCallDecision::Deny { .. },
         ));
         let before = runtime.minted_offers(&root(), &root()).len();
-        let ToolResultDecision::Replace { placeholder } = run_sanitize_offer(&runtime, &mut session).await else {
+        let ToolResultDecision::Replace { placeholder, offers } = run_sanitize_offer(&runtime, &mut session).await
+        else {
             panic!("a staged derivation is delivered as a replacement, not kept");
         };
         assert!(
@@ -3441,6 +3556,7 @@ confined_results = ["leak"]
             runtime.minted_offers(&root(), &root()).len() > before,
             "the stage surfaced its own remedy for the narrowing the sanitizer left",
         );
+        assert!(!offers.is_empty(), "the output decision retains its sanitizer offers");
     }
 
     const PARTLY_CLEARED_CHILD: &str = r#"
@@ -3559,7 +3675,7 @@ context_control = true
             ToolCallDecision::Deny { .. },
         ));
         let decision = run_sanitize_offer(&runtime, &mut session).await;
-        let ToolResultDecision::Replace { placeholder } = decision else {
+        let ToolResultDecision::Replace { placeholder, .. } = decision else {
             panic!("the raw must be withheld");
         };
         assert!(!placeholder.contains("pii"), "the raw body never reaches the model");

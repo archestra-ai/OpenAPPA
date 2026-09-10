@@ -11,6 +11,7 @@ pub mod init;
 mod management;
 pub mod mcp;
 pub mod plugin_bundle;
+mod proxy;
 pub mod replay;
 #[path = "main.rs"]
 pub mod runtime_cli;

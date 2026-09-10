@@ -137,6 +137,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "url",

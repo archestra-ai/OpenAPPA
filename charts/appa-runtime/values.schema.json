@@ -41,6 +41,20 @@
         }
       }
     },
+    "proxyTokenSecret": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "key": { "type": "string", "minLength": 1 }
+      }
+    },
+    "proxyApprovalSecret": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "key": { "type": "string", "minLength": 1 }
+      }
+    },
     "appaGuide": {
       "type": "object",
       "properties": {

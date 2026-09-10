@@ -325,6 +325,9 @@ pub enum OutcomeFollowUp {
 /// The runtime never re-derives the identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Released {
+    /// The proposal position that opened this dispatch, when it came from a batch.
+    /// Offer execution can release a replacement outside a proposal batch.
+    pub proposal: Option<usize>,
     pub dispatch: DispatchId,
     pub call: ResolvedCall,
     /// The fork this release prepared, when the batch marked it as the spawn. The
@@ -352,6 +355,8 @@ pub enum SettledOutcome {
 /// rendering them for the model is runtime feedback.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Blocked {
+    /// The proposal position this block answers, when it came from a batch.
+    pub proposal: Option<usize>,
     pub call: ResolvedCall,
     pub block: PlannedBlock,
     pub block_id: crate::value::BlockId,

@@ -12,7 +12,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub use crate::engine::{
-    AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, LabelSpelling, RemedyArguments, TrajectoryStatus,
+    AuditEntry, AuditEvent, AuditLabel, BatchCallDecision, DispatchOutcome, LabelSpelling, RemedyArguments,
+    TrajectoryStatus,
 };
 pub use appa_runtime_api::{
     Actor, OfferedRemedy, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
@@ -159,7 +160,12 @@ pub(crate) enum ToolCallDecision {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ToolResultDecision {
     Keep,
-    Replace { placeholder: String },
+    Replace {
+        placeholder: String,
+        /// Offers that can settle a confined output. They are surfaced with the replacement so
+        /// a proxy does not discard the sanitizer route while withholding the raw result.
+        offers: Vec<appa_runtime_api::OfferedRemedy>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1139,6 +1145,128 @@ impl Runtime {
         let view = policy.engine().rebuild_view(&log).ok()?;
         let pursuer = policy.engine().offer_pursuer(&view, &offer)?;
         policy.engine().offer_kind(&view, &pursuer, &offer)
+    }
+
+    /// Whether an authority name is backed by the real harness-mediated human channel.
+    pub(crate) fn is_hitl_authority(&self, authority: &str) -> bool {
+        self.inner.deployment().externals.is_hitl(authority)
+    }
+
+    /// The proxy protocol's durable request journal. The eventlog owns its SQL schema and
+    /// transaction boundaries; runtime callers only name protocol values.
+    pub(crate) fn begin_proxy_event(
+        &self,
+        root_id: &str,
+        event_id: &str,
+        body_digest: &str,
+        boot_owner: &str,
+    ) -> Result<appa_eventlog::ProxyEventAdmission, appa_eventlog::ProxyStoreError> {
+        self.inner
+            .store
+            .begin_proxy_event(root_id, event_id, body_digest, boot_owner)
+    }
+
+    pub(crate) fn complete_proxy_event(
+        &self,
+        completion: &appa_eventlog::ProxyEventCompletion<'_>,
+    ) -> Result<(), appa_eventlog::ProxyStoreError> {
+        self.inner.store.complete_proxy_event(completion)
+    }
+
+    pub(crate) fn proxy_offer_binding(
+        &self,
+        offer_id: &str,
+    ) -> Result<Option<appa_eventlog::ProxyOfferBinding>, appa_eventlog::ProxyStoreError> {
+        self.inner.store.proxy_offer_binding(offer_id)
+    }
+
+    pub(crate) fn proxy_dispatch_binding(
+        &self,
+        root_id: &str,
+        lane_id: &str,
+        call_id: &str,
+    ) -> Result<Option<appa_eventlog::ProxyDispatchBinding>, appa_eventlog::ProxyStoreError> {
+        self.inner.store.proxy_dispatch_binding(root_id, lane_id, call_id)
+    }
+
+    pub(crate) fn create_proxy_batch(
+        &self,
+        batch: &appa_eventlog::ProxyBatchBinding,
+        positions: &[appa_eventlog::ProxyBatchPosition],
+    ) -> Result<bool, appa_eventlog::ProxyStoreError> {
+        self.inner.store.create_proxy_batch(batch, positions)
+    }
+
+    pub(crate) fn proxy_batch(
+        &self,
+        batch_id: &str,
+    ) -> Result<Option<appa_eventlog::ProxyBatchBinding>, appa_eventlog::ProxyStoreError> {
+        self.inner.store.proxy_batch(batch_id)
+    }
+
+    pub(crate) fn proxy_batch_positions(
+        &self,
+        batch_id: &str,
+    ) -> Result<Vec<appa_eventlog::ProxyBatchPosition>, appa_eventlog::ProxyStoreError> {
+        self.inner.store.proxy_batch_positions(batch_id)
+    }
+
+    pub(crate) fn update_proxy_batch_position(
+        &self,
+        position: &appa_eventlog::ProxyBatchPosition,
+    ) -> Result<(), appa_eventlog::ProxyStoreError> {
+        self.inner.store.update_proxy_batch_position(position)
+    }
+
+    pub(crate) fn advance_proxy_batch_basis(
+        &self,
+        batch_id: &str,
+        expected: u64,
+        next: u64,
+    ) -> Result<bool, appa_eventlog::ProxyStoreError> {
+        self.inner.store.advance_proxy_batch_basis(batch_id, expected, next)
+    }
+
+    pub(crate) fn proxy_basis(&self, root: &TrajectoryId) -> Result<u64, EventError> {
+        Ok(self.inner.log(root)?.basis())
+    }
+
+    /// Rebuild the policy-bound actor before a held batch can use a saved offer or dispatch.
+    /// The returned basis belongs to the family's shared log, while liveness is lane-specific.
+    pub(crate) fn proxy_actor_basis(&self, root: &TrajectoryId, actor: &TrajectoryId) -> Result<u64, EventError> {
+        let log = self.inner.log(root)?;
+        let deployment = self.inner.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
+        let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
+        match policy.engine().liveness(&view, actor) {
+            Liveness::Unopened => Err(EventError::UnknownTrajectory),
+            Liveness::Ended => Err(EventError::TrajectoryEnded),
+            Liveness::Live => Ok(log.basis()),
+        }
+    }
+
+    pub(crate) fn quarantine_proxy_batch(
+        &self,
+        batch_id: &str,
+        reason: &str,
+    ) -> Result<(), appa_eventlog::ProxyStoreError> {
+        self.inner.store.quarantine_proxy_batch(batch_id, reason)
+    }
+
+    pub(crate) fn proxy_batch_quarantined(&self, batch_id: &str) -> Result<bool, appa_eventlog::ProxyStoreError> {
+        self.inner.store.proxy_batch_quarantined(batch_id)
+    }
+
+    pub(crate) fn begin_proxy_approval_grant(
+        &self,
+        approval_id: &str,
+        root_id: &str,
+        event_id: &str,
+        body_digest: &str,
+    ) -> Result<appa_eventlog::ProxyApprovalAdmission, appa_eventlog::ProxyStoreError> {
+        self.inner
+            .store
+            .begin_proxy_approval_grant(approval_id, root_id, event_id, body_digest)
     }
 
     /// The canonical identity a quoted id names in this family, and the

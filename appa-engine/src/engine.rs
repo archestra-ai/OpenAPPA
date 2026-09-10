@@ -369,6 +369,27 @@ impl Engine {
         }
     }
 
+    /// The sanitizer selected by a live offer's remedy plan, including an output sanitizer
+    /// selected before a dispatch opens. `offer_consults` reports that pre-dispatch plan as an
+    /// acceptance because no artifact exists to consult yet; integrations still need its name to
+    /// render an actionable sanitizer offer rather than a generic acceptance.
+    pub fn offer_sanitizer(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        offer: &crate::value::OfferId,
+    ) -> Result<Option<SanitizerName>, TransitionError> {
+        let views = view.projection().view(trajectory);
+        let recorded = views.offer(offer).ok_or(TransitionError::UnknownOffer)?;
+        if recorded.trajectory != *trajectory {
+            return Err(TransitionError::OfferElsewhere);
+        }
+        if recorded.end.is_some() || recorded.basis != views.basis_for(&recorded.subject) {
+            return Ok(None);
+        }
+        Ok(recorded.plan.sanitizer().cloned())
+    }
+
     /// The fork one child was bound to, or `None` for a trajectory that never forked.
     pub fn fork_of(&self, view: &EngineView, child: &TrajectoryId) -> Option<crate::value::ForkId> {
         view.views(child)?.fork_of(child).cloned()
@@ -1332,8 +1353,10 @@ impl Engine {
         let released: Vec<Released> = composed
             .iter()
             .zip(&proposals)
-            .filter_map(|(release, call)| {
+            .enumerate()
+            .filter_map(|(position, (release, call))| {
                 release.as_ref().map(|release| Released {
+                    proposal: Some(position),
                     dispatch: release.dispatch.clone(),
                     call: call.clone(),
                     fork: release.prepares_fork.clone(),
@@ -1396,7 +1419,7 @@ impl Engine {
                 batch: batch.id.clone(),
                 position: position as u32,
             };
-            let (block, opened_offers) = self.surface_call_block(
+            let (mut block, opened_offers) = self.surface_call_block(
                 &final_views,
                 Opening {
                     act: &crate::basis::DecidedAct::Proposals(batch.id.clone()),
@@ -1413,6 +1436,7 @@ impl Engine {
                 },
                 act,
             )?;
+            block.proposal = Some(position);
             facts.extend(opened_offers);
             blocked.push(block);
         }
@@ -1470,6 +1494,7 @@ impl Engine {
             self.open_offers(views, opening, &call.digest(), &Engine::executable(&planned), act);
         Ok((
             Blocked {
+                proposal: None,
                 call: call.clone(),
                 block: planned,
                 block_id,
@@ -1585,6 +1610,7 @@ impl Engine {
             match next.next_if(|dispatch| views.dispatch_call(dispatch) == Some(call)) {
                 // Only a dispatch still awaiting its result may be handed back for invocation.
                 Some(dispatch) if views.is_open(dispatch) && !views.is_succeeded(dispatch) => released.push(Released {
+                    proposal: Some(position),
                     dispatch: dispatch.clone(),
                     call: call.clone(),
                     fork: prepared_fork(views, dispatch),
@@ -1621,6 +1647,7 @@ impl Engine {
                                 (block_id, Vec::new())
                             });
                             blocked.push(Blocked {
+                                proposal: Some(position),
                                 block: plan::plan(
                                     &self.registry,
                                     views,
@@ -1641,6 +1668,7 @@ impl Engine {
                         CheckOutcome::Allow => match views.subject_dispatch(&subject).cloned() {
                             Some(dispatch) if views.is_open(&dispatch) && !views.is_succeeded(&dispatch) => {
                                 released.push(Released {
+                                    proposal: Some(position),
                                     dispatch,
                                     call: candidate,
                                     fork: None,
@@ -2049,6 +2077,7 @@ impl Engine {
                     opened_dispatch(&contract, views, &substituted, recorded.subject.clone(), under);
                 facts.push(opening);
                 OfferFollowUp::Released(Box::new(Released {
+                    proposal: None,
                     dispatch,
                     call: substituted,
                     fork: None,
@@ -2110,6 +2139,7 @@ impl Engine {
         Ok(match views.subject_dispatch(&recorded.subject).cloned() {
             Some(dispatch) if views.is_open(&dispatch) && !views.is_succeeded(&dispatch) => {
                 OfferFollowUp::Released(Box::new(Released {
+                    proposal: None,
                     dispatch,
                     call: candidate,
                     fork: None,
@@ -2253,6 +2283,7 @@ impl Engine {
             .pending_block(&recorded.subject)
             .unwrap_or((offer_block(recorded, execution, &call), Vec::new()));
         Ok(Some(Blocked {
+            proposal: None,
             block: plan::plan(
                 &self.registry,
                 views,

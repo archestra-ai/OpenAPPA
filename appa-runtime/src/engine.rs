@@ -104,6 +104,14 @@ pub struct ReleasedCall {
     pub dispatch: EngineDispatchId,
 }
 
+/// The terminal decision for one position in a proposed batch. Positions are retained so a
+/// harness can associate a dispatch with its own call id even when calls have identical bytes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BatchCallDecision {
+    Allow { release: ReleasedCall },
+    Deny { feedback: Feedback },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Feedback {
     pub text: String,
@@ -253,6 +261,15 @@ pub enum EngineEvent {
         entropy: OfferNonce,
         spawn: bool,
     },
+    ModelResponseBatch {
+        calls: Vec<ProposedCall>,
+        evidence: Vec<ExternalEvidence>,
+        entropy: OfferNonce,
+        /// A proxy-held response owns this stable identity. Normal harness batches retain the
+        /// per-act nonce identity that existing integrations already use.
+        batch_id: Option<String>,
+        spawn: Option<usize>,
+    },
     ToolOutcome {
         dispatch: EngineDispatchId,
         outcome: ToolOutcome,
@@ -275,6 +292,14 @@ pub enum EngineEvent {
         value: Option<String>,
         evidence: Vec<ExternalEvidence>,
     },
+}
+
+struct ModelResponseBatchInput<'a> {
+    calls: &'a [ProposedCall],
+    evidence: &'a [ExternalEvidence],
+    entropy: &'a OfferNonce,
+    batch_id: Option<&'a str>,
+    spawn: Option<usize>,
 }
 
 /// What `execute_remedy_plan` carries beside the offer id: the floor the child's return may
@@ -300,6 +325,9 @@ pub enum Next {
     ModelResponse {
         invocations: Vec<ReleasedCall>,
         feedback: Vec<Feedback>,
+    },
+    ModelResponseBatch {
+        calls: Vec<BatchCallDecision>,
     },
     PresentToModel(Presentation),
     InvokeTool(ReleasedCall),
@@ -868,6 +896,15 @@ impl RuntimeEngine {
         offer: &OfferId,
     ) -> Option<crate::api::OfferKind> {
         let engine_offer = parse_offer(offer)?;
+        if let Some(sanitizer) = self
+            .engine
+            .offer_sanitizer(view, &engine_id(trajectory), &engine_offer)
+            .ok()?
+        {
+            return Some(crate::api::OfferKind::Sanitizer {
+                name: sanitizer.as_str().to_string(),
+            });
+        }
         match self
             .engine
             .offer_consults(view, &engine_id(trajectory), &engine_offer)
@@ -1169,6 +1206,23 @@ impl RuntimeEngine {
                 entropy,
                 spawn,
             } => self.model_response(view, trajectory, &call, &evidence, &entropy, spawn),
+            EngineEvent::ModelResponseBatch {
+                calls,
+                evidence,
+                entropy,
+                batch_id,
+                spawn,
+            } => self.model_response_batch(
+                view,
+                trajectory,
+                ModelResponseBatchInput {
+                    calls: &calls,
+                    evidence: &evidence,
+                    entropy: &entropy,
+                    batch_id: batch_id.as_deref(),
+                    spawn,
+                },
+            ),
             EngineEvent::ToolOutcome {
                 dispatch,
                 outcome,
@@ -1254,6 +1308,82 @@ impl RuntimeEngine {
         Ok(EngineDecision { append, then })
     }
 
+    fn model_response_batch(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        input: ModelResponseBatchInput<'_>,
+    ) -> Result<EngineDecision, EngineRefusal> {
+        if input.calls.is_empty() {
+            return Ok(deny("a proposal batch must contain at least one call".to_string()));
+        }
+        let owner = engine_id(trajectory);
+        let Some(views) = view.views(&owner) else {
+            return Err(EngineRefusal::Invariant {
+                detail: "deciding a proposal for a trajectory the log has not opened".to_string(),
+            });
+        };
+        let mut proposals = Vec::with_capacity(input.calls.len());
+        let mut requests = Vec::new();
+        for call in input.calls {
+            let resolved = match self
+                .engine
+                .resolve_call(ToolName::new(call.tool.clone()), call.arguments.get().as_bytes())
+            {
+                Ok(resolved) => resolved,
+                Err(EngineError::UnknownTool(tool)) => return Err(EngineRefusal::UndeclaredTool { tool }),
+                Err(error) => return Ok(deny(malformed_feedback(&error))),
+            };
+            match self.answers_for(&views, &resolved, input.evidence) {
+                Ok(CallAnswers { annotation }) => proposals.push(CoreProposedCall {
+                    tool: ToolName::new(call.tool.clone()),
+                    arguments: call.arguments.get().as_bytes().to_vec(),
+                    annotation,
+                }),
+                Err(Resolution(needed)) => {
+                    for request in needed {
+                        if !requests.contains(&request) {
+                            requests.push(request);
+                        }
+                    }
+                }
+            }
+        }
+        if !requests.is_empty() {
+            return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
+        }
+        let judged = self.judge_under_audience(
+            input.evidence,
+            UnresolvedAudience::Denied { tool: "proposal batch" },
+            |audience| {
+                self.engine.handle(
+                    view,
+                    CoreEvent::Proposals(ProposalBatch {
+                        id: input
+                            .batch_id
+                            .map(ProposalBatchId::new)
+                            .unwrap_or_else(|| batch_id(input.entropy)),
+                        trajectory: owner.clone(),
+                        provider_results: Vec::new(),
+                        proposals,
+                        spawn: input.spawn.map(SpawnMark::at),
+                        offer_nonce: engine_nonce(input.entropy),
+                        evidence: Vec::new(),
+                        audience: audience.clone(),
+                    }),
+                )
+            },
+        )?;
+        let decision = match judged {
+            AudienceRound::Judged(decision) => decision,
+            AudienceRound::Presented(decision) => return Ok(decision),
+            AudienceRound::Failed(error) => return Err(proposal_refusal(error)),
+        };
+        let append = decision.append.map(ValidatedFactBatch::into_unsealed);
+        let then = self.deliver_proposal_batch(decision.follow_up, input.calls.len(), &self.return_bounds(&views))?;
+        Ok(EngineDecision { append, then })
+    }
+
     fn deliver_proposals(&self, follow_up: FollowUp, bounds: &ReturnBounds) -> Result<Next, EngineRefusal> {
         match follow_up {
             FollowUp::Proposals {
@@ -1290,6 +1420,82 @@ impl RuntimeEngine {
                 detail: format!("a proposal produced a non-proposal follow-up: {other:?}"),
             }),
         }
+    }
+
+    fn deliver_proposal_batch(
+        &self,
+        follow_up: FollowUp,
+        count: usize,
+        bounds: &ReturnBounds,
+    ) -> Result<Next, EngineRefusal> {
+        let FollowUp::Proposals {
+            released,
+            blocked,
+            spent,
+            settled,
+        } = follow_up
+        else {
+            return Err(EngineRefusal::Invariant {
+                detail: "a proposal batch produced a non-proposal follow-up".to_string(),
+            });
+        };
+        if !spent.is_empty() || !settled.is_empty() {
+            return Err(EngineRefusal::Invariant {
+                detail: "a fresh proposal batch returned a spent or settled call".to_string(),
+            });
+        }
+        let mut calls = vec![None; count];
+        for release in released {
+            let Some(position) = release.proposal else {
+                return Err(EngineRefusal::Invariant {
+                    detail: "a proposal batch release has no position".to_string(),
+                });
+            };
+            let Some(slot) = calls.get_mut(position) else {
+                return Err(EngineRefusal::Invariant {
+                    detail: "a proposal batch release has an invalid position".to_string(),
+                });
+            };
+            if slot
+                .replace(BatchCallDecision::Allow {
+                    release: crate::engine::released(&release),
+                })
+                .is_some()
+            {
+                return Err(EngineRefusal::Invariant {
+                    detail: "a proposal batch position was decided twice".to_string(),
+                });
+            }
+        }
+        for block in blocked {
+            let Some(position) = block.proposal else {
+                return Err(EngineRefusal::Invariant {
+                    detail: "a proposal batch block has no position".to_string(),
+                });
+            };
+            let Some(slot) = calls.get_mut(position) else {
+                return Err(EngineRefusal::Invariant {
+                    detail: "a proposal batch block has an invalid position".to_string(),
+                });
+            };
+            if slot
+                .replace(BatchCallDecision::Deny {
+                    feedback: self.block_delivery(&block, bounds),
+                })
+                .is_some()
+            {
+                return Err(EngineRefusal::Invariant {
+                    detail: "a proposal batch position was decided twice".to_string(),
+                });
+            }
+        }
+        let calls = calls
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| EngineRefusal::Invariant {
+                detail: "a proposal batch left a call undecided".to_string(),
+            })?;
+        Ok(Next::ModelResponseBatch { calls })
     }
 
     fn block_delivery(&self, block: &CoreBlocked, bounds: &ReturnBounds) -> Feedback {

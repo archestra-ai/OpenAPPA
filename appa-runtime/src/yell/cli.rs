@@ -147,9 +147,14 @@ async fn build(url: &str, message: &YellMessage, mode: Mode) -> Result<Finished,
         }))
         .send()
         .await
-        .map_err(|error| match error.is_timeout() {
-            true => UnreachableClass::Timeout,
-            false => UnreachableClass::NotListening,
+        .map_err(|error| {
+            if error.is_connect() {
+                UnreachableClass::NotListening
+            } else if error.is_timeout() {
+                UnreachableClass::Timeout
+            } else {
+                UnreachableClass::NotListening
+            }
         })?;
     let status = answer.status();
     if !status.is_success() {
@@ -338,9 +343,14 @@ mod tests {
     #[tokio::test]
     async fn a_runtime_that_is_not_there_is_a_class_and_not_a_panic() {
         let message = YellMessage::new("nobody is home").expect("a message");
-        let refusal = build("http://127.0.0.1:1", &message, Mode::Baseline)
+        // A reserved port can be filtered or redirected by the host environment. Bind and then
+        // release a local ephemeral port so this request is a real connection refusal.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("test listener binds");
+        let endpoint = format!("http://{}", listener.local_addr().expect("listener has an address"));
+        drop(listener);
+        let refusal = build(&endpoint, &message, Mode::Baseline)
             .await
-            .expect_err("nothing is listening on port 1");
+            .expect_err("nothing is listening on the released test port");
         assert_eq!(refusal, UnreachableClass::NotListening);
         assert!(
             local(message, Mode::Baseline, refusal).is_ok(),

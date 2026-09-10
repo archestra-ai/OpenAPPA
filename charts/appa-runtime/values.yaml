@@ -84,6 +84,18 @@ persistence:
 env: {}
 envFrom: []
 
+# Enable the authenticated proxy protocol from an existing Secret. The chart never stores the
+# shared token in values or renders a Secret; an empty name leaves the stock runtime protocol.
+proxyTokenSecret:
+  name: ""
+  key: token
+
+# Optional separate signing key for human approval grants. It never grants event transport or
+# restriction acceptance by itself.
+proxyApprovalSecret:
+  name: ""
+  key: approval-secret
+
 # Optionally install the configuring kagent Agent with this runtime.
 appaGuide:
   enabled: false
