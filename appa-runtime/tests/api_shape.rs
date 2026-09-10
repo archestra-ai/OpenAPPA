@@ -160,7 +160,7 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
 fn the_declared_status(runtime: &Runtime, id: &TrajectoryId) {
     let status: Option<TrajectoryStatus> = runtime.status(id);
     if let Some(status) = status {
-        let _: (String, String, String) = (status.trajectory, status.trust, status.audience);
+        let _: (String, String, String, u64) = (status.trajectory, status.trust, status.audience, status.appa_tokens);
     }
 }
 

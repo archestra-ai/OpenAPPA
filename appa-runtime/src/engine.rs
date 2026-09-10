@@ -561,6 +561,8 @@ pub struct TrajectoryStatus {
     pub trajectory: String,
     pub trust: String,
     pub audience: String,
+    /// Estimated Claude tokens in direct APPA-authored input since the latest session start.
+    pub appa_tokens: u64,
 }
 
 /// One label rendered for a display surface: each dimension as chain
@@ -989,6 +991,7 @@ impl RuntimeEngine {
             trajectory: terminal_safe(&trajectory.0),
             trust: label.trust,
             audience: label.audience,
+            appa_tokens: 0,
         })
     }
 

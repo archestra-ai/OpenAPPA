@@ -21,6 +21,9 @@ successful tool-result admission; WSL runs the POSIX hooks as-is.
 for protected sessions. The install registers the platform script in Claude's
 global statusline setting, so each script exits without printing anything when
 `APPA_GATE=1` is absent. Plain `claude` therefore keeps its normal status area.
+Alongside Trust and Audience, the display shows the estimated raw tokens and
+percentage of Claude's input context occupied by direct APPA-authored
+instructions and block or remedy feedback.
 
 Initialization and every protected session share one starter,
 `hooks/ensure-runtime.sh` (on Windows, `hook.ps1 -EnsureRuntime`): it

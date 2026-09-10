@@ -858,6 +858,16 @@ impl Runtime {
     pub(crate) fn record(&self, root: Option<&TrajectoryId>, event: crate::events::RuntimeEvent) {
         self.inner.record(root, event);
     }
+
+    /// Count direct APPA-authored input shown to a root agent. The count is diagnostic only
+    /// and resets when Claude Code starts or compacts that session.
+    pub(crate) fn count_appa_tokens(&self, root: &TrajectoryId, tokens: u64, reset: bool) {
+        self.inner
+            .events
+            .lock()
+            .expect("the event mutex is never poisoned: no panic runs while it is held")
+            .count_appa_tokens(root, tokens, reset);
+    }
 }
 
 impl Inner {
@@ -1392,7 +1402,14 @@ impl Runtime {
                 return None;
             }
         };
-        policy.engine().trajectory_status(&view, id)
+        let mut status = policy.engine().trajectory_status(&view, id)?;
+        status.appa_tokens = self
+            .inner
+            .events
+            .lock()
+            .expect("the event mutex is never poisoned: no panic runs while it is held")
+            .appa_tokens(id);
+        Some(status)
     }
 
     /// Every decision this family's log recorded, in log order.

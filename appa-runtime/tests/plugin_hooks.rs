@@ -59,6 +59,48 @@ fn an_ungated_session_has_no_appa_statusline() {
     assert_eq!(output.stdout, b"", "plain Claude must have no APPA statusline");
 }
 
+#[cfg(unix)]
+#[test]
+fn the_statusline_shows_raw_appa_tokens_and_their_input_share() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let curl = dir.path().join("curl");
+    std::fs::write(
+        &curl,
+        "#!/bin/sh\nprintf '%s' '{\"trajectory\":\"cc:widget\",\"trust\":\"trusted\",\"audience\":\"self\",\"appa_tokens\":125}'\n",
+    )
+    .expect("the curl fixture writes");
+    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).expect("the curl fixture is executable");
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").expect("the test process has PATH")
+    );
+    let mut child = Command::new("sh")
+        .arg(plugin_file("statusline.sh"))
+        .env("APPA_GATE", "1")
+        .env("PATH", path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("the POSIX statusline starts");
+    child
+        .stdin
+        .take()
+        .expect("the statusline has stdin")
+        .write_all(br#"{"session_id":"widget","context_window":{"total_input_tokens":1000}}"#)
+        .expect("the status input writes");
+    let output = child.wait_with_output().expect("the statusline exits");
+
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("~125 APPA tokens (12.5%)"),
+        "the statusline did not render the narrow APPA token share: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
 /// The two shipped hook maps gate the same events. Nothing else compares
 /// them, so a hook added to one and not the other leaves that platform
 /// on the behaviour the other one fixed.
