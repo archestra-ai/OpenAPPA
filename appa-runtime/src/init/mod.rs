@@ -178,10 +178,17 @@ fn install_claude(
 
     // 4. The launcher an earlier install armed is disarmed while the profile is
     //    between two states. The install that completes re-arms it; so does a
-    //    rollback that put everything back, and nothing else does.
+    //    rollback that put everything back, and nothing else does. A launcher
+    //    under that name that no install wrote is the user's, and refused.
     let launcher = paths.install_dir.join(CLAPPA.0);
     let launcher_before = file_before(&launcher)?;
-    if launcher_before.is_some() {
+    if let Some(bytes) = launcher_before.as_deref() {
+        if !launcher_is_owned(bytes) {
+            return Err(InitError::NativeState {
+                path: launcher,
+                message: "launcher was edited; resolve it before installing the plugin".to_owned(),
+            });
+        }
         install_disabled_clappa(&paths.install_dir)?;
     }
 
@@ -710,18 +717,23 @@ fn install_clappa(install_dir: &Path) -> Result<PathBuf, InitError> {
     Ok(path)
 }
 
+#[cfg(windows)]
+const DISARMED_CLAPPA: &str = "@echo off\r\necho appa plugin install did not complete; rerun appa plugin install claude-code 1>&2\r\nexit /b 1\r\n";
+#[cfg(not(windows))]
+const DISARMED_CLAPPA: &str =
+    "#!/bin/sh\nprintf 'appa plugin install did not complete; rerun appa plugin install claude-code\\n' >&2\nexit 1\n";
+
+/// The launcher is an install's when it holds what an install or a removal
+/// writes: armed, or one of the two stubs either leaves mid-way.
+fn launcher_is_owned(bytes: &[u8]) -> bool {
+    [CLAPPA.1, DISARMED_CLAPPA, removal::REMOVING]
+        .iter()
+        .any(|text| bytes == text.as_bytes())
+}
+
 fn install_disabled_clappa(install_dir: &Path) -> Result<(), InitError> {
-    #[cfg(windows)]
-    let (path, contents) = (
-        install_dir.join("clappa.cmd"),
-        "@echo off\r\necho appa plugin install did not complete; rerun appa plugin install claude-code 1>&2\r\nexit /b 1\r\n",
-    );
-    #[cfg(not(windows))]
-    let (path, contents) = (
-        install_dir.join("clappa"),
-        "#!/bin/sh\nprintf 'appa plugin install did not complete; rerun appa plugin install claude-code\\n' >&2\nexit 1\n",
-    );
-    fs::write(&path, contents).map_err(|source| InitError::WriteFile {
+    let path = install_dir.join(CLAPPA.0);
+    fs::write(&path, DISARMED_CLAPPA).map_err(|source| InitError::WriteFile {
         path: path.clone(),
         source,
     })?;

@@ -7,9 +7,9 @@ use super::{CLAPPA, InitError, appa_filename, deployment_paths, file_before, mcp
 use crate::installation::archive::VerifiedArchive;
 
 #[cfg(unix)]
-const REMOVING: &str = "#!/bin/sh\nprintf 'APPA plugin removal is incomplete; rerun appa plugin remove claude-code with the same config.\\n' >&2\nexit 1\n";
+pub(super) const REMOVING: &str = "#!/bin/sh\nprintf 'APPA plugin removal is incomplete; rerun appa plugin remove claude-code with the same config.\\n' >&2\nexit 1\n";
 #[cfg(windows)]
-const REMOVING: &str = "@echo off\r\necho APPA plugin removal is incomplete; rerun appa plugin remove claude-code with the same config. 1>&2\r\nexit /b 1\r\n";
+pub(super) const REMOVING: &str = "@echo off\r\necho APPA plugin removal is incomplete; rerun appa plugin remove claude-code with the same config. 1>&2\r\nexit /b 1\r\n";
 
 /// The caller holds a durable removal journal. A partial failure is replayable:
 /// absent registrations and files are accepted, changed user state is not
@@ -53,7 +53,7 @@ pub fn claude_code_remove(_config: &Path, archive: &Path) -> Result<(), InitErro
 }
 
 fn verify_launcher(bytes: Option<&[u8]>, path: &Path) -> Result<(), InitError> {
-    if bytes.is_some_and(|bytes| bytes != CLAPPA.1.as_bytes() && bytes != REMOVING.as_bytes()) {
+    if bytes.is_some_and(|bytes| !super::launcher_is_owned(bytes)) {
         return Err(conflict(
             path,
             "launcher was edited; resolve it before removing the plugin",

@@ -559,3 +559,25 @@ fn a_runtime_that_fails_verification_after_the_switch_undoes_it() {
     );
     assert_eq!(Installed::of(&fixture), Installed::nothing());
 }
+
+/// A `clappa` under the install directory that no install wrote is the
+/// user's: the activation refuses before it writes anything, and the file
+/// stays as it was.
+#[test]
+fn a_launcher_of_the_users_own_refuses_the_activation() {
+    let fixture = Fixture::new();
+    let launcher = fixture.launcher();
+    fs::create_dir_all(launcher.parent().unwrap()).expect("the install directory exists");
+    let own = "#!/bin/sh\nexec claude --model opus \"$@\"\n";
+    fs::write(&launcher, own).expect("the user's launcher is written");
+
+    let output = fixture.activate().output().expect("appa activates");
+
+    assert!(
+        !output.status.success(),
+        "a launcher of the user's own must refuse the activation: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(&launcher).unwrap(), own);
+    assert!(!fixture.settings().exists(), "nothing of the profile is written");
+}

@@ -175,34 +175,36 @@ pub(super) fn remove_statusline(paths: &DeploymentPaths, binary: &Path) -> Resul
 /// The status line is a shell string, the one place Claude Code gives no exec
 /// form, so the binary path is quoted for the shell that runs it.
 pub(super) fn statusline_command(binary: &Path, url: &str) -> String {
-    let binary = binary.to_string_lossy();
+    let head = statusline_head(binary);
     if cfg!(windows) {
-        format!(
-            "powershell.exe -NoProfile -Command \"& {} statusline --deployment-url {}\"",
-            ps_literal(&binary),
-            ps_literal(url)
-        )
+        format!("{head} --deployment-url {}\"", ps_literal(url))
     } else {
-        format!(
-            "{} statusline --deployment-url {}",
-            sh_literal(&binary),
-            sh_literal(url)
-        )
+        format!("{head} --deployment-url {}", sh_literal(url))
     }
 }
 
-/// A status line is this deployment's when its command names the deployed
-/// binary the way `statusline_command` spells it.
-fn names_binary(line: &Value, binary: &Path) -> bool {
+/// The command up to its arguments: the deployed binary, run as the status
+/// line and nothing else.
+fn statusline_head(binary: &Path) -> String {
     let binary = binary.to_string_lossy();
-    let literal = if cfg!(windows) {
-        ps_literal(&binary)
+    if cfg!(windows) {
+        format!(
+            "powershell.exe -NoProfile -Command \"& {} statusline",
+            ps_literal(&binary)
+        )
     } else {
-        sh_literal(&binary)
-    };
+        format!("{} statusline", sh_literal(&binary))
+    }
+}
+
+/// A status line is this deployment's when its command is the deployed binary
+/// run as the status line, whatever endpoint an earlier install gave it. A
+/// command of the user's own that runs the binary among other things is theirs.
+fn names_binary(line: &Value, binary: &Path) -> bool {
+    let head = statusline_head(binary);
     line.get("command")
         .and_then(Value::as_str)
-        .is_some_and(|command| command.contains(&literal))
+        .is_some_and(|command| command.starts_with(&head))
 }
 
 /// Total for any UTF-8 path: single-quoted, with embedded `'` closed, escaped
@@ -458,14 +460,22 @@ mod tests {
             config: &paths.config_dir.join("appa.toml"),
             data_dir: &paths.data_dir,
         };
-        let custom = json!({"statusLine": {"type": "command", "command": "my-status", "padding": 0}});
-        let bytes = write(&paths, custom.clone());
         let mut compensation = Compensation::default();
-        install_statusline(&paths, &target, &mut compensation).unwrap();
-        assert!(compensation.done.is_empty());
-        assert_eq!(fs::read(path(&paths)).unwrap(), bytes);
-        remove_statusline(&paths, &binary).unwrap();
-        assert_eq!(fs::read(path(&paths)).unwrap(), bytes);
+        // A command of the user's own, and one of theirs that runs this deployment's
+        // status line among other things: both are left alone.
+        let composed = format!(
+            "input=$(cat); printf '%s' \"$input\" | my-status; printf '%s' \"$input\" | {}",
+            statusline_command(&binary, "http://127.0.0.1:1")
+        );
+        for command in ["my-status", composed.as_str()] {
+            let custom = json!({"statusLine": {"type": "command", "command": command, "padding": 0}});
+            let bytes = write(&paths, custom.clone());
+            install_statusline(&paths, &target, &mut compensation).unwrap();
+            assert!(compensation.done.is_empty(), "{command}");
+            assert_eq!(fs::read(path(&paths)).unwrap(), bytes, "{command}");
+            remove_statusline(&paths, &binary).unwrap();
+            assert_eq!(fs::read(path(&paths)).unwrap(), bytes, "{command}");
+        }
 
         // Absent, then this deployment's under an earlier URL: written, then repaired.
         write(&paths, json!({}));
