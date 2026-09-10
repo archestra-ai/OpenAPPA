@@ -489,6 +489,28 @@ export function BrandAssets() {
         >
           <PixelMark size={96} />
         </AssetPanel>
+        <figure className="brand-panel" data-asset="openappa-alert">
+          <div className="brand-stage" style={stageStyle(palette)}>
+            <img
+              alt="The OpenAPPA alert mark: Appa shouting with soundwave sparks"
+              className="h-[96px] w-[96px] object-contain"
+              src="/brand/appa-yell.png"
+              style={{
+                imageRendering: "pixelated",
+                filter: "drop-shadow(0 2px 12px rgba(253, 196, 6, 0.3))",
+              }}
+            />
+          </div>
+          <figcaption className="brand-panel-foot">
+            <span className="brand-panel-name">The alert mark</span>
+            <span className="brand-panel-note">Appa sounding the alarm · errors &amp; 404s</span>
+            <span className="brand-panel-actions">
+              <a download="openappa-alert.png" href="/brand/appa-yell.png">
+                png
+              </a>
+            </span>
+          </figcaption>
+        </figure>
         <AssetPanel
           file="openappa-wordmark"
           name="The wordmark"
