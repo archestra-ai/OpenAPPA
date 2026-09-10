@@ -35,9 +35,6 @@ export default function NotFound() {
             <Link href="/" className="error-btn-primary">
               Return home
             </Link>
-            <Link href="/how-it-works" className="error-btn-secondary">
-              How it works
-            </Link>
           </div>
         </div>
       </main>
