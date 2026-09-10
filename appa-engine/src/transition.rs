@@ -1138,6 +1138,11 @@ impl<'a> Sequence<'a> {
                 if crate::check::validate_annotation(self.engine.registry(), entry, &call).is_err() {
                     return Err(TransitionRefusal::ForgedEvidence);
                 }
+                let checked = match checked.bound_to(call.arguments()) {
+                    Ok(Some(bound)) => std::borrow::Cow::Owned(bound),
+                    Ok(None) => checked,
+                    Err(_) => return Err(TransitionRefusal::ForgedLabel),
+                };
                 let views = self.projection.view(trajectory);
                 if proposed_effects != &checked.emits {
                     return Err(TransitionRefusal::EffectsMismatch);

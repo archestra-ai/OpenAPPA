@@ -1,7 +1,7 @@
 //! The spec's policy-dialect compiler: the configuration dialect (TOML) → the engine's
 //! [`RegistryConfig`] for the runtime.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -11,8 +11,8 @@ use appa_engine::audience::{
 };
 use appa_engine::authority::{Authority, DeclaredTransition, Hint, Mandate, Sanitizer, SanitizerPoints, Scope};
 use appa_engine::contract::{
-    AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, RecipientSpec, Requires, ToolAnnotation,
-    ToolDeclaration,
+    AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, LabelRequirements, RecipientSpec, Requires,
+    SelectorPlaceholder, ToolAnnotation, ToolDeclaration,
 };
 use appa_engine::engine::Engine;
 use appa_engine::fact::{EffectKind, EffectSet};
@@ -450,8 +450,14 @@ impl Config {
             });
             annotators.insert(name, AnnotatorBinding { hint, builtin, inputs });
         }
-        let mut audience = convert_audience(raw.audience, sources)?;
+        let (mut audience, mut referenced) = convert_audience(raw.audience, sources)?;
         audience.lookup_targets = lookup_targets;
+        referenced.extend(
+            annotator_declarations
+                .iter()
+                .filter_map(|annotator| annotator.audiences.as_ref())
+                .flat_map(AudienceVocabulary::referenced_providers),
+        );
         let mut tools = Vec::new();
         let mut qualified: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
         for t in raw.tool {
@@ -470,8 +476,12 @@ impl Config {
                     .expect("split always yields one entry")
                     .to_string(),
             );
+            if let Some(annotation) = tool.declared() {
+                referenced.extend(annotation.referenced_providers());
+            }
             tools.push(tool);
         }
+        audience.sources.retain(|source| referenced.contains(&source.provider));
         // An input mapping is validated against every tool that routes through its Annotator:
         // a mapped argument must be a required top-level property of that tool's schema, and a
         // description read needs a declared description. A tool naming an unregistered
@@ -799,14 +809,16 @@ struct RawAudienceGroup {
 }
 
 /// Compile `[audience]` into the engine's audience configuration. Each `from` selector must
-/// name a stock collection whose role fits its level; a provider enters the registered
-/// sources — and so the policy identity — exactly when some selector picks from it.
+/// name a stock collection whose role fits its level. Every declared source is carried; the
+/// caller keeps the ones the policy references — here, or by a mention or placeholder in a
+/// tool contract or an annotator mandate — since a provider enters the registered sources,
+/// and so the policy identity, exactly when the policy names it.
 fn convert_audience(
     audience: Option<RawAudience>,
     sources: Vec<SourceRegistration>,
-) -> Result<AudienceConfig, ConfigError> {
+) -> Result<(AudienceConfig, BTreeSet<String>), ConfigError> {
     let mut config = AudienceConfig::default();
-    let mut providers: Vec<String> = Vec::new();
+    let mut providers: BTreeSet<String> = BTreeSet::new();
     let mut selectors = |list: &[String],
                          context: &str,
                          admits: &dyn Fn(TemplateRole) -> bool,
@@ -835,9 +847,7 @@ fn convert_audience(
             if !admits(role) {
                 return Err(refused(entry, format!("cannot feed this audience — {expected}")));
             }
-            if !providers.contains(&spec.provider) {
-                providers.push(spec.provider.clone());
-            }
+            providers.insert(spec.provider.clone());
             specs.push(spec);
         }
         Ok(specs)
@@ -893,11 +903,8 @@ fn convert_audience(
             });
         }
     }
-    config.sources = sources
-        .into_iter()
-        .filter(|source| providers.contains(&source.provider))
-        .collect();
-    Ok(config)
+    config.sources = sources;
+    Ok((config, providers))
 }
 
 #[derive(Deserialize)]
@@ -1043,7 +1050,7 @@ impl RawDelta {
             None => None,
         };
         let audience = match self.audience {
-            Some(a) => Some(parse_declared_audience(&a, &format!("{ctx} delta audience"))?),
+            Some(a) => Some(parse_delta_audience(&a, &format!("{ctx} delta audience"))?),
             None => None,
         };
         Ok(Delta { trust, audience })
@@ -1326,7 +1333,35 @@ fn parse_recipient_spec(list: &[String], context: &str) -> Result<RecipientSpec,
             reason: format!("placeholder {ph:?} must be the sole recipient"),
         });
     }
+    if let Some(placeholder) = selector_placeholder(list, context)? {
+        return Ok(RecipientSpec::Selector(placeholder));
+    }
     Ok(RecipientSpec::Static(parse_declared_audience(list, context)?))
+}
+
+/// A `delta.audience` list: a static declared audience, or one selector placeholder alone.
+fn parse_delta_audience(list: &[String], context: &str) -> Result<DeltaAudience, ConfigError> {
+    match selector_placeholder(list, context)? {
+        Some(placeholder) => Ok(DeltaAudience::Selector(placeholder)),
+        None => Ok(DeltaAudience::Static(parse_declared_audience(list, context)?)),
+    }
+}
+
+/// The selector placeholder a written list spells, which must be its sole entry: a
+/// placeholder names one collection per call, and a union around it would have no single
+/// spelling the check could instantiate. `None` when no entry spells one.
+fn selector_placeholder(list: &[String], context: &str) -> Result<Option<SelectorPlaceholder>, ConfigError> {
+    let placeholder = list
+        .iter()
+        .find_map(|entry| entry.strip_prefix('@').and_then(SelectorPlaceholder::parse));
+    match placeholder {
+        None => Ok(None),
+        Some(placeholder) if list.len() == 1 => Ok(Some(placeholder)),
+        Some(placeholder) => Err(ConfigError::BadAudience {
+            context: context.to_string(),
+            reason: format!("selector placeholder \"@{placeholder}\" must be the sole entry"),
+        }),
+    }
 }
 
 fn parse_points(tokens: &[String], name: &str) -> Result<SanitizerPoints, ConfigError> {
@@ -1377,6 +1412,7 @@ mod tests {
                     DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)),
                     DeclaredTemplate::new("full-members", Some(ChainAudience::Internal)),
                     DeclaredTemplate::named("user-group/<handle>"),
+                    DeclaredTemplate::named("channel/<id>"),
                 ],
             ),
             source(
@@ -2327,7 +2363,10 @@ confined_results = ["read", "send"]
             .expect("read registers")
             .declared()
             .expect("read is declared");
-        assert_eq!(read.delta.audience.as_ref(), Some(&mention("team", &["auditor"])));
+        assert_eq!(
+            read.delta.audience.as_ref(),
+            Some(&DeltaAudience::Static(mention("team", &["auditor"])))
+        );
         let officer = registry
             .authority(&AuthorityName::new("officer"))
             .expect("officer registers");
@@ -2455,6 +2494,198 @@ confined_results = ["read", "send"]
                 ReaderId::new("alice"),
                 ReaderId::new("bob")
             ]))
+        );
+    }
+
+    /// A selector placeholder is a contract over the call: it stands alone in its list, each
+    /// argument it reads is a required string of the tool's schema, and its spelling fits a
+    /// template some declared provider serves. Naming the provider is what registers it.
+    #[test]
+    fn a_selector_placeholder_reads_one_declared_collection_per_call() {
+        let channel =
+            r#"{ type = "object", properties = { channel_id = { type = "string" } }, required = ["channel_id"] }"#;
+        let tool = |parameters: &str, contract: &str| {
+            format!("version = 2\n[[tool]]\nname = \"read_channel\"\nparameters = {parameters}\n{contract}\n")
+        };
+        let delta = "delta = { audience = [\"@slack:channel/$channel_id\"] }";
+        let placeholder = SelectorPlaceholder::parse("slack:channel/$channel_id").expect("a placeholder spelling");
+
+        let config = load(&tool(channel, delta)).expect("a placeholder delta loads");
+        let read = config
+            .registry()
+            .variants(&ToolName::new("read_channel"))
+            .next()
+            .and_then(ToolDeclaration::declared)
+            .expect("read_channel is declared");
+        assert_eq!(read.delta.audience, Some(DeltaAudience::Selector(placeholder.clone())));
+        assert_eq!(
+            config.registry().audience().providers().iter().collect::<Vec<_>>(),
+            ["slack"],
+            "a placeholder names its provider into the policy"
+        );
+        let floor = "requires = { audience = { contains = [\"@slack:channel/$channel_id\"] } }";
+        let send = load(&tool(channel, floor)).expect("a placeholder floor loads");
+        let send = send
+            .registry()
+            .variants(&ToolName::new("read_channel"))
+            .next()
+            .and_then(ToolDeclaration::declared)
+            .expect("read_channel is declared");
+        assert_eq!(
+            send.requires.audience_requirements(),
+            [AudienceRequirement::Includes(RecipientSpec::Selector(placeholder))]
+        );
+
+        let optional = r#"{ type = "object", properties = { channel_id = { type = "string" } } }"#;
+        for (case, policy, expected) in [
+            (
+                "beside another entry",
+                tool(
+                    channel,
+                    "delta = { audience = [\"@slack:channel/$channel_id\", \"alice\"] }",
+                ),
+                "spelling",
+            ),
+            (
+                "beside another entry in a floor",
+                tool(
+                    channel,
+                    "requires = { audience = { contains = [\"alice\", \"@slack:channel/$channel_id\"] } }",
+                ),
+                "spelling",
+            ),
+            (
+                "under within",
+                tool(
+                    channel,
+                    "requires = { audience = { within = [\"@slack:channel/$channel_id\"] } }",
+                ),
+                "spelling",
+            ),
+            (
+                "an argument the schema does not require",
+                tool(optional, delta),
+                "schema",
+            ),
+            (
+                "a template the provider does not declare",
+                tool(channel, "delta = { audience = [\"@slack:room/$channel_id\"] }"),
+                "selector",
+            ),
+            (
+                "a variable where the template is literal",
+                tool(channel, "delta = { audience = [\"@slack:$channel_id\"] }"),
+                "selector",
+            ),
+            (
+                "a provider no source declares",
+                tool(channel, "delta = { audience = [\"@msft:channel/$channel_id\"] }"),
+                "provider",
+            ),
+            (
+                "a provider-run tool",
+                tool(channel, delta) + "[deployment]\nprovider_run_tools = [\"read_channel\"]\n",
+                "provider-run",
+            ),
+        ] {
+            let refusal = load(&policy).expect_err(case);
+            let fits = match expected {
+                "spelling" => matches!(refusal, ConfigError::BadAudience { .. }),
+                "schema" => matches!(
+                    &refusal,
+                    ConfigError::Registry(LoadError::AudienceBindingSchema { argument, .. }) if argument == "channel_id"
+                ),
+                "selector" => matches!(
+                    refusal,
+                    ConfigError::Registry(LoadError::UnroutableAudience {
+                        fault: appa_engine::audience::Unroutable::UnknownSelector { .. },
+                        ..
+                    })
+                ),
+                "provider" => matches!(
+                    refusal,
+                    ConfigError::Registry(LoadError::UnroutableAudience {
+                        fault: appa_engine::audience::Unroutable::UnknownProvider(_),
+                        ..
+                    })
+                ),
+                _ => matches!(refusal, ConfigError::Registry(LoadError::ProviderRunPlaceholder { .. })),
+            };
+            assert!(fits, "{case}: got {refusal:?}");
+        }
+    }
+
+    /// A mandate placeholder is read per call: it admits exactly the collection the routed
+    /// call's arguments spell, so every routed tool must carry the argument, and the wildcard —
+    /// whose calls the policy does not describe — cannot route through it.
+    #[test]
+    fn an_annotator_mandate_placeholder_binds_to_each_routed_tools_arguments() {
+        let policy = |tool: &str| {
+            format!("version = 2\n[[annotator]]\nname = \"acl\"\naudiences = [\"@slack:channel/$channel_id\"]\n{tool}")
+        };
+        let routed = "[[tool]]\nname = \"read_channel\"\nparameters = { type = \"object\", properties = { channel_id = { type = \"string\" } }, required = [\"channel_id\"] }\nannotator = \"acl\"\n";
+        let config = load(&policy(routed)).expect("a mandate placeholder loads");
+        let mandate = config
+            .registry()
+            .annotator_mandate(&AnnotatorName::new("acl"))
+            .expect("acl registers");
+        assert_eq!(
+            mandate.audiences().entries().collect::<Vec<_>>(),
+            ["@slack:channel/$channel_id"]
+        );
+        assert_eq!(
+            mandate
+                .instantiate(&serde_json::json!({ "channel_id": "C1" }))
+                .expect("C1 fills the placeholder")
+                .audiences()
+                .entries()
+                .collect::<Vec<_>>(),
+            ["@slack:channel/C1"]
+        );
+        assert!(config.registry().audience().providers().contains("slack"));
+
+        let unbound = "[[tool]]\nname = \"read_channel\"\nannotator = \"acl\"\n";
+        assert!(matches!(
+            load(&policy(unbound)),
+            Err(ConfigError::Registry(LoadError::AudienceBindingSchema { context, argument, .. }))
+                if context == "tool read_channel annotator acl mandate" && argument == "channel_id"
+        ));
+        let wildcard = "[[tool]]\nname = \"*\"\nannotator = \"acl\"\n";
+        assert!(matches!(
+            load(&policy(wildcard)),
+            Err(ConfigError::Registry(LoadError::WildcardPlaceholderMandate(name))) if name == "acl"
+        ));
+    }
+
+    /// A provider is part of the policy exactly when the policy names it — by an `[audience]`
+    /// selector, a mention in a contract or a mandate, or a placeholder — and no other
+    /// declared source enters the registry or the identity.
+    #[test]
+    fn a_provider_enters_the_policy_when_a_contract_or_mandate_names_it() {
+        let providers = |policy: &str| {
+            load(policy)
+                .expect("the policy loads")
+                .registry()
+                .audience()
+                .providers()
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert!(providers("version = 2\n[[tool]]\nname = \"t\"\n").is_empty());
+        assert_eq!(
+            providers("version = 2\n[[tool]]\nname = \"t\"\ndelta = { audience = [\"@github:org/corp/team/x\"] }\n"),
+            ["github"]
+        );
+        assert_eq!(
+            providers(
+                "version = 2\n[[tool]]\nname = \"t\"\nrequires = { audience = { within = [\"@google-workspace:group/eng@corp.com\"] } }\n"
+            ),
+            ["google-workspace"]
+        );
+        assert_eq!(
+            providers("version = 2\n[[annotator]]\nname = \"acl\"\naudiences = [\"@slack:user-group/eng\"]\n"),
+            ["slack"]
         );
     }
 }

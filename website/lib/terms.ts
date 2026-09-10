@@ -73,7 +73,7 @@ const TERMS = {
   "@finance":
     "A mention of a configured named audience. It stays symbolic in labels and the log; its membership is read from the audience sources per act and pinned.",
   "[policy.audience]":
-    "Maps the built-in audiences to membership sources. self lists selectors of templates declared with feeds = self, the identity OpenAPPA acts for; internal lists selectors of templates declared with feeds = internal, and for GitHub only explicitly selected organizations. A provider exists in the policy when a selector here references it. Multiple sources are unioned.",
+    "Maps the built-in audiences to membership sources. self lists selectors of templates declared with feeds = self, the identity OpenAPPA acts for; internal lists selectors of templates declared with feeds = internal, and for GitHub only explicitly selected organizations. A provider exists in the policy when a selector here, a mention in a contract or mandate, or a selector placeholder names it. Multiple sources are unioned.",
   "[policy.audience.group.<name>]":
     "One configured named audience, mentioned as @name: an optional within assertion into a built-in audience, and the from selectors that supply its members. Multiple sources are unioned.",
   self: "The identity OpenAPPA acts for. This can be a person or a service. The configured viewer sources supply its reader IDs, which are combined into the self audience.",

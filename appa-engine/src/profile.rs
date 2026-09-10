@@ -634,7 +634,7 @@ pub(crate) fn covering_declaration(config: &RegistryConfig) -> ProfileDeclaratio
 mod tests {
     use super::*;
     use crate::authority::{Authority, DeclaredTransition, Hint, Mandate, Sanitizer, SanitizerPoints, Scope};
-    use crate::contract::{Delta, LabelRequirements, Requires};
+    use crate::contract::{Delta, DeltaAudience, LabelRequirements, Requires};
     use crate::engine::Engine;
     use crate::fact::EffectSet;
     use crate::label::DeclaredAudience;
@@ -1041,7 +1041,9 @@ mod tests {
         let mut leak = tool("leak");
         leak.delta = Delta {
             trust: None,
-            audience: Some(DeclaredAudience::restricted([ReaderId::new("insider")])),
+            audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                "insider",
+            )]))),
         };
         let mut cfg = config(vec![leak]);
         cfg.sanitizers = vec![Sanitizer {
@@ -1332,7 +1334,9 @@ mod tests {
         let mut with_reader = omitted.clone();
         with_reader.tools.push(ToolDeclaration::Declared({
             let mut t = tool("read");
-            t.delta.audience = Some(DeclaredAudience::restricted([ReaderId::new("alice")]));
+            t.delta.audience = Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                "alice",
+            )])));
             t
         }));
         assert_eq!(rendered(&with_reader), ["self", "internal", "alice"]);

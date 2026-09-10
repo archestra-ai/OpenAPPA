@@ -724,3 +724,70 @@ async fn a_cap_written_with_a_group_is_read_per_act_from_the_source() {
     );
     assert_eq!(source.requests().len(), 4);
 }
+
+/// `POLICY` with a channel-keyed sink: posting to a channel requires that channel's members
+/// among the current readers, the channel read from the call.
+const CHANNEL_POLICY: &str = r#"
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "read_hr"
+delta = { audience = ["alice@corp.example", "bob@corp.example"] }
+
+[[policy.tool]]
+name = "post"
+parameters = { type = "object", properties = { channel_id = { type = "string" }, text = { type = "string" } }, required = ["channel_id", "text"] }
+requires = { audience = { contains = ["@slack:channel/$channel_id"] } }
+effects = ["egress"]
+delta = {}
+
+[externals]
+timeout_ms = 1000
+max_body_bytes = 4096
+
+[externals.audience.slack]
+url = "AUDIENCE_URL"
+selectors = [{ template = "viewer", feeds = "self" }, { template = "channel/<id>" }]
+"#;
+
+fn post_to(channel_id: &str) -> ProposedCall {
+    ProposedCall {
+        tool: "post".to_string(),
+        arguments: raw(serde_json::json!({ "channel_id": channel_id, "text": "hi" })),
+    }
+}
+
+/// A selector placeholder is instantiated from each call: the source is asked for exactly the
+/// collection the call's argument spells, and its answer is checked as a static mention's is.
+#[tokio::test]
+async fn a_selector_placeholder_asks_the_source_for_the_collection_the_call_spells() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, source) = serve_source().await;
+    let runtime = narrowed_under(&dir, CHANNEL_POLICY, &url).await;
+
+    source.members(Some(vec!["alice@corp.example"]));
+    assert_eq!(
+        propose(&runtime, post_to("C1")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, post_to("C1")).await;
+    let requests = source.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]["declaration"]["templates"],
+        serde_json::json!(["viewer", "channel/<id>"])
+    );
+    assert_eq!(requests[0]["artifact"], serde_json::json!({ "selector": "channel/C1" }));
+
+    // Another channel is another collection, asked for by its own selector.
+    source.members(Some(vec!["alice@corp.example", "slack:U-carol"]));
+    assert!(matches!(
+        propose(&runtime, post_to("C2")).await,
+        HookDecision::DenyCall { .. }
+    ));
+    let requests = source.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1]["artifact"], serde_json::json!({ "selector": "channel/C2" }));
+    assert!(audit_len(&runtime) > 0, "the decided acts read back");
+}

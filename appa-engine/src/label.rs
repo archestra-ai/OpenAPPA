@@ -182,14 +182,19 @@ pub enum GroupRef {
 
 impl GroupRef {
     /// Parse the text after the `@` mark. Empty, a bare provider (`slack:`), or a bare
-    /// selector (`:x`) are malformed and read as nothing.
+    /// selector (`:x`) are malformed and read as nothing. So is a selector with a segment
+    /// starting with `$`: that spelling is a selector placeholder, never a static mention, and
+    /// a collection whose selector begins with `$` cannot be written in a policy.
     pub fn parse(after_at: &str) -> Option<GroupRef> {
         if after_at.is_empty() {
             return None;
         }
         match after_at.split_once(':') {
             Some((provider, selector)) => {
-                if provider.is_empty() || selector.is_empty() {
+                if provider.is_empty()
+                    || selector.is_empty()
+                    || selector.split('/').any(|segment| segment.starts_with('$'))
+                {
                     None
                 } else {
                     Some(GroupRef::Source {
@@ -460,7 +465,9 @@ pub enum DeclaredAudience {
 pub enum AudienceSpelling {
     #[error("empty reader set")]
     Empty,
-    #[error("argument placeholder {0:?} is only valid in a `contains`")]
+    #[error(
+        "placeholder {0:?} is valid only as the sole entry of `contains` or `delta`, or in an annotator's `audiences`"
+    )]
     Placeholder(String),
     #[error("`public` is the whole universe and cannot be combined with other entries")]
     PublicCombined,
@@ -507,6 +514,9 @@ impl DeclaredAudience {
                     None => true,
                 },
                 Some(crate::names::AudienceArgument::Group(group)) => groups.insert(group),
+                Some(crate::names::AudienceArgument::Placeholder(_)) => {
+                    return Err(AudienceSpelling::Placeholder(entry.clone()));
+                }
                 Some(crate::names::AudienceArgument::Reader(reader)) => readers.insert(reader),
                 None => return Err(AudienceSpelling::Unknown(entry.clone())),
             };

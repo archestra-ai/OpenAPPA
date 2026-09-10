@@ -2583,6 +2583,9 @@ fn select_call<'a>(
         .parameters()
         .validate(parsed.value())
         .map_err(EngineError::InvalidCall)?;
+    registry
+        .placeholders_filled(declaration, parsed.value())
+        .map_err(EngineError::InvalidCall)?;
     Ok((ResolvedCall::new_keyed(tool, id, parsed), declaration))
 }
 
@@ -3126,7 +3129,8 @@ mod tests {
     use super::*;
     use crate::check::Gap;
     use crate::contract::{
-        AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, RecipientSpec, Requires, ToolAnnotation,
+        AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, LabelRequirements, RecipientSpec, Requires,
+        ToolAnnotation,
     };
     use crate::fact::{EffectKind, EffectSet, Fact};
     use crate::label::{Audience, Label, ReaderId, Trust};
@@ -3272,7 +3276,9 @@ mod tests {
             "read_internal",
             Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::restricted([ReaderId::new("insider")])),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                    "insider",
+                )]))),
             },
         )
     }
@@ -3292,7 +3298,9 @@ mod tests {
             "read_suspicious_internal",
             Delta {
                 trust: Some(SUSPICIOUS),
-                audience: Some(DeclaredAudience::restricted([ReaderId::new("insider")])),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                    "insider",
+                )]))),
             },
         )
     }
@@ -3592,7 +3600,9 @@ mod tests {
             tags: vec![],
             delta: Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::restricted([ReaderId::new("insider")])),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                    "insider",
+                )]))),
             },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
@@ -3979,7 +3989,9 @@ mod tests {
             tags: vec![],
             delta: Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::restricted([ReaderId::new("a")])),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                    "a",
+                )]))),
             },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
@@ -4062,7 +4074,7 @@ mod tests {
             tags: vec![],
             delta: Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::literal(a_reader.clone())),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(a_reader.clone()))),
             },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
@@ -6982,7 +6994,7 @@ mod tests {
                 let mut produced = classified.clone();
                 produced.delta = Delta {
                     trust: None,
-                    audience: Some(DeclaredAudience::literal(Audience::public())),
+                    audience: Some(DeltaAudience::Static(DeclaredAudience::literal(Audience::public()))),
                 };
                 produced
             },
@@ -10099,7 +10111,9 @@ mod tests {
                     let mut narrowing = plain_tool("insider");
                     narrowing.delta = Delta {
                         trust: None,
-                        audience: Some(DeclaredAudience::restricted([ReaderId::new("insider")])),
+                        audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                            "insider",
+                        )]))),
                     };
                     narrowing
                 },
@@ -10156,7 +10170,9 @@ mod tests {
                 },
                 "insider" => Delta {
                     trust: None,
-                    audience: Some(DeclaredAudience::restricted([ReaderId::new("insider")])),
+                    audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                        "insider",
+                    )]))),
                 },
                 other => panic!("no labeled tool named {other}"),
             };
@@ -11150,7 +11166,7 @@ mod tests {
         );
         let narrowing = {
             let mut produced = notify.clone();
-            produced.delta.audience = Some(internal.clone());
+            produced.delta.audience = Some(DeltaAudience::Static(internal.clone()));
             let unpinned = call("notify", json!({}));
             raw(&unpinned
                 .clone()
@@ -12862,7 +12878,7 @@ mod tests {
             let mut tool = plain_tool(name);
             tool.delta = Delta {
                 trust: None,
-                audience: Some(grouped(&[], &["team"])),
+                audience: Some(DeltaAudience::Static(grouped(&[], &["team"]))),
             };
             tool
         }
@@ -12944,7 +12960,7 @@ mod tests {
             backup.emits = EffectSet::new([EffectKind::new("backup")]).unwrap();
             backup.delta = Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::literal(readers(&["insider"]))),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(readers(&["insider"])))),
             };
             let mut wire = plain_tool("wire");
             wire.requires = Requires {
@@ -13028,7 +13044,7 @@ mod tests {
             let mut seen = plain_tool("seen");
             seen.delta = Delta {
                 trust: None,
-                audience: Some(grouped(&[], &["board"])),
+                audience: Some(DeltaAudience::Static(grouped(&[], &["board"]))),
             };
             let e = grouped_engine(
                 config(vec![capped_send(), seen], vec![]),
@@ -13614,7 +13630,9 @@ mod tests {
                 "read_member",
                 Delta {
                     trust: None,
-                    audience: Some(DeclaredAudience::restricted([ReaderId::new("slack:U1")])),
+                    audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                        "slack:U1",
+                    )]))),
                 },
             )));
             // Confine no result, so the child's own read never asks the
@@ -13696,5 +13714,245 @@ mod tests {
             let log = [log, facts].concat();
             assert_eq!(e.validate_replay(&log), Ok(()));
         }
+    }
+
+    fn channel_source() -> crate::audience::AudienceConfig {
+        crate::audience::AudienceConfig {
+            sources: vec![crate::audience::SourceRegistration {
+                provider: "slack".to_string(),
+                templates: vec![crate::audience::DeclaredTemplate::named("channel/<id>")],
+            }],
+            ..crate::audience::AudienceConfig::default()
+        }
+    }
+
+    fn channel_placeholder() -> crate::contract::SelectorPlaceholder {
+        crate::contract::SelectorPlaceholder::parse("slack:channel/$channel").expect("a placeholder spelling")
+    }
+
+    fn channel_group(id: &str) -> DeclaredAudience {
+        DeclaredAudience::Union(
+            crate::label::Clause::new(
+                [],
+                [crate::label::GroupRef::Source {
+                    provider: "slack".to_string(),
+                    selector: format!("channel/{id}"),
+                }],
+                [],
+            )
+            .expect("a group clause names no reader"),
+        )
+    }
+
+    /// A delta placeholder labels the result with the one collection the call spells — folded
+    /// symbolically, so no membership is read: on a trajectory already at that collection the
+    /// call releases under it, on any other it narrows to it. Minting refuses a call whose
+    /// argument cannot spell a selector segment.
+    #[test]
+    fn a_delta_placeholder_labels_the_result_with_the_collection_the_call_spells() {
+        let mut read = plain_tool("read");
+        read.parameters = crate::params::test_string_argument_schema("channel");
+        read.delta = Delta {
+            trust: None,
+            audience: Some(DeltaAudience::Selector(channel_placeholder())),
+        };
+        let mut cfg = test_config(vec![read]);
+        cfg.audience = channel_source();
+        let at_channel = |id: &str| known(TRUSTED, Audience::of_declared(&channel_group(id)));
+        let e = open_engine_at(cfg, at_channel("C1"));
+        let log = vec![opened(&e)];
+        let to_channel = |id: &str| {
+            e.resolve_call(ToolName::new("read"), format!(r#"{{"channel":"{id}"}}"#).as_bytes())
+                .expect("the call fills the placeholder")
+        };
+
+        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), to_channel("C1")).expect("the batch decides"));
+        let label = facts
+            .iter()
+            .find_map(|fact| match fact {
+                Fact::DispatchOpened { proposed_label, .. } => Some(proposed_label.clone()),
+                _ => None,
+            })
+            .expect("a call to the channel the trajectory is at releases");
+        assert_eq!(label, at_channel("C1"));
+        assert_eq!(e.validate_replay(&[log.clone(), facts.clone()].concat()), Ok(()));
+
+        // A recorded opening whose arguments fill no placeholder was never minted here.
+        let forged: Vec<Fact> = facts
+            .iter()
+            .cloned()
+            .map(|fact| match fact {
+                Fact::DispatchOpened {
+                    trajectory,
+                    dispatch,
+                    tool,
+                    declaration,
+                    arguments: _,
+                    proposed_label,
+                    receiving,
+                    proposed_effects,
+                    annotation,
+                    subject,
+                    evidence,
+                } => Fact::DispatchOpened {
+                    trajectory,
+                    dispatch,
+                    tool,
+                    declaration,
+                    arguments: crate::params::test_arguments(&json!({ "channel": "a/b" })),
+                    proposed_label,
+                    receiving,
+                    proposed_effects,
+                    annotation,
+                    subject,
+                    evidence,
+                },
+                other => other,
+            })
+            .collect();
+        assert!(e.validate_replay(&[log.clone(), forged].concat()).is_err());
+
+        match check(&e, &log, &to_channel("C2")) {
+            CheckOutcome::Block(block) => {
+                assert!(block.requirement_gaps.is_empty());
+                assert_eq!(
+                    block.narrowing.map(|narrowing| narrowing.to),
+                    Some(at_channel("C1").combine(&at_channel("C2"))),
+                    "another channel is another collection"
+                );
+            }
+            other => panic!("a call to another channel narrows, got {other:?}"),
+        }
+
+        for unwritable in [br#"{"channel":"a/b"}"#.as_slice(), br#"{"channel":"$x"}"#.as_slice()] {
+            assert!(matches!(
+                e.resolve_call(ToolName::new("read"), unwritable),
+                Err(EngineError::InvalidCall(ArgumentError::UnfilledPlaceholder(unfilled))) if unfilled.argument == "channel"
+            ));
+        }
+    }
+
+    /// A `contains` placeholder asks for the collection the call spells and requires every
+    /// member of it among the current readers.
+    #[test]
+    fn a_contains_placeholder_requires_the_collection_the_call_spells() {
+        let mut send = plain_tool("send");
+        send.parameters = crate::params::test_string_argument_schema("channel");
+        send.requires = Requires {
+            label: LabelRequirements {
+                trust_floor: None,
+                audience: vec![AudienceRequirement::Includes(RecipientSpec::Selector(
+                    channel_placeholder(),
+                ))],
+            },
+            ..Requires::default()
+        };
+        let mut cfg = test_config(vec![send]);
+        cfg.audience = channel_source();
+        let e = open_engine_at(cfg, known(TRUSTED, Audience::restricted([corp_reader("alice")])));
+        let log = vec![opened(&e)];
+        let to_channel = |id: &str| raw(&call("send", json!({ "channel": id })));
+        let atom = SymbolicAtom::Group(crate::label::GroupRef::Source {
+            provider: "slack".to_string(),
+            selector: "channel/C1".to_string(),
+        });
+        assert_eq!(
+            e.handle(&viewing(&e, &log), batch("b1", Vec::new(), vec![to_channel("C1")])),
+            Err(TransitionError::MembershipNeeded { needed: vec![atom] })
+        );
+        let members = |readers: Vec<ReaderId>| {
+            source_evidence(vec![crate::audience::SourceClaims {
+                provider: "slack".to_string(),
+                selector: "channel/C1".to_string(),
+                members: readers,
+            }])
+        };
+        let decision = e
+            .handle(
+                &viewing(&e, &log),
+                evidenced_batch("b2", vec![to_channel("C1")], members(vec![corp_reader("alice")])),
+            )
+            .expect("the batch decides");
+        assert_eq!(
+            answered(&decision).0.len(),
+            1,
+            "every member of the channel already reads"
+        );
+        let decision = e
+            .handle(
+                &viewing(&e, &log),
+                evidenced_batch(
+                    "b3",
+                    vec![to_channel("C1")],
+                    members(vec![corp_reader("alice"), corp_reader("bob")]),
+                ),
+            )
+            .expect("the batch decides");
+        let (released, blocked) = answered(&decision);
+        assert!(released.is_empty());
+        assert_eq!(
+            blocked[0].block.raw.requirement_gaps,
+            vec![Gap::Includes {
+                recipients: channel_group("C1")
+            }]
+        );
+    }
+
+    /// A mandate placeholder admits, per call, exactly the collection the call's arguments
+    /// spell. The policy refuses to route a tool without the argument, or the wildcard, through
+    /// such a mandate.
+    #[test]
+    fn a_mandate_placeholder_admits_the_collection_each_call_spells() {
+        let acl = crate::registry::AnnotatorDeclaration {
+            name: crate::names::AnnotatorName::new("acl"),
+            trust: None,
+            audiences: Some(
+                crate::registry::AudienceVocabulary::parse_entries(&["@slack:channel/$channel".to_string()])
+                    .expect("a placeholder mandate parses"),
+            ),
+            marks: None,
+            effects: None,
+        };
+        let mut lookup = plain_tool("lookup");
+        lookup.parameters = crate::params::test_string_argument_schema("channel");
+        let mut cfg = test_config(vec![]);
+        cfg.annotators = vec![acl];
+        cfg.tools = vec![annotated(lookup, "acl")];
+        cfg.audience = channel_source();
+        let e = open_engine_at(cfg.clone(), known(TRUSTED, Audience::public()));
+        let declaration = e.registry().tool(&ToolName::new("lookup")).expect("lookup registers");
+        let unpinned = call("lookup", json!({ "channel": "C1" }));
+        let pinned = |id: &str| {
+            let mut produced = plain_tool("lookup");
+            produced.delta = Delta {
+                trust: None,
+                audience: Some(DeltaAudience::Static(channel_group(id))),
+            };
+            unpinned
+                .clone()
+                .with_annotation(Some(pinned_for(produced, "acl", &unpinned)))
+        };
+        assert_eq!(
+            crate::check::validate_annotation(e.registry(), declaration, &pinned("C1")),
+            Ok(())
+        );
+        assert!(matches!(
+            crate::check::validate_annotation(e.registry(), declaration, &pinned("C2")),
+            Err(crate::check::AnnotationRefusal::OutsidePolicy(_))
+        ));
+
+        let mut through_wildcard = cfg.clone();
+        through_wildcard.tools = vec![wildcard("acl")];
+        assert!(matches!(
+            crate::registry::Registry::build_covered(through_wildcard),
+            Err(crate::registry::LoadError::WildcardPlaceholderMandate(name)) if name == "acl"
+        ));
+        let mut unbound = cfg;
+        unbound.tools = vec![annotated(plain_tool("lookup"), "acl")];
+        assert!(matches!(
+            crate::registry::Registry::build_covered(unbound),
+            Err(crate::registry::LoadError::AudienceBindingSchema { context, argument, .. })
+                if context == "tool lookup annotator acl mandate" && argument == "channel"
+        ));
     }
 }

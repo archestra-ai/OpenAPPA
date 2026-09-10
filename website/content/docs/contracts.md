@@ -315,6 +315,11 @@ delta = { audience = ["@slack:channel/$channel_id"] }
 name = "mcp/claude_ai_Slack/slack_send_message"
 parameters = { type = "object", properties = { channel_id = { type = "string" }, message = { type = "string" } }, required = ["channel_id", "message"] }
 requires = { trust = "trusted", audience = { contains = ["@slack:channel/$channel_id"] } }
+
+# The service that reads Slack membership declares the channel template.
+[externals.audience.slack]
+url = "https://audience.corp/slack"
+selectors = [{ template = "viewer", feeds = "self" }, { template = "channel/<id>" }]
 ```
 
 A selector placeholder MAY be the only entry of `delta.audience` or of `requires.audience.contains`. It MAY also be an entry of an annotator's `audiences` mandate; see [Permits and hint](#permits-and-hint). It MUST NOT appear under `within`, beside other entries in one list, or in an annotator's answer.
@@ -369,7 +374,7 @@ Configuring a provider does not connect OpenAPPA directly to Google Workspace, S
 | `template` | One selector format: literal segments and `<variable>` segments separated by `/`, such as `viewer`, `full-members`, `group/<group-address>`, or `channel/<id>`. A `<variable>` segment matches one non-empty segment. |
 | `feeds` | `self` or `internal`: the built-in audience this template may supply. Omit it for a template that supplies only named groups and `@provider:selector` mentions. |
 
-A provider exists in a policy when a `[policy.audience]` selector references it. Every selector the policy writes MUST match one declared template of its provider, with the role its position needs:
+A provider exists in a policy when the policy names it: by a `[policy.audience]` selector, by a `@provider:selector` mention in a tool contract or an annotator mandate, or by a selector placeholder. Every selector the policy writes MUST match one declared template of its provider, with the role its position needs:
 
 | Audience key | Templates you can use |
 |---|---|
@@ -405,7 +410,7 @@ selectors = [
 ]
 ```
 
-OpenAPPA rejects policy references to undeclared named audiences, providers that no `[policy.audience]` selector references, or selectors that match no declared template.
+OpenAPPA rejects policy references to undeclared named audiences, providers that no `[externals.audience.<provider>]` entry declares, or selectors that match no declared template.
 
 ##### Reader IDs
 

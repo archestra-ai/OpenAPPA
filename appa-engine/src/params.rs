@@ -103,6 +103,8 @@ pub enum ArgumentError {
     UnsafeInteger,
     #[error("arguments do not satisfy the tool's registered schema: {0}")]
     Schema(String),
+    #[error("arguments do not fill the contract's selector placeholder: {0}")]
+    UnfilledPlaceholder(#[from] crate::contract::UnfilledPlaceholder),
     #[error("arguments match no registered contract")]
     NoMatchingContract,
     #[error("persisted argument payload is not in canonical form")]
