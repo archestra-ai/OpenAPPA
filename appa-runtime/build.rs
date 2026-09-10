@@ -13,9 +13,10 @@ fn main() {
 
     let crate_root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo sets CARGO_MANIFEST_DIR"));
     let repository = crate_root.parent().expect("appa-runtime is inside the repository");
-    for (source, _) in batteries_layout::REPOSITORY_MAPPINGS {
-        println!("cargo:rerun-if-changed={}", repository.join(source).display());
-    }
+    println!(
+        "cargo:rerun-if-changed={}",
+        repository.join(batteries_layout::SOURCE).display()
+    );
     watch_git_identity(repository);
 
     let release = env::var("APPA_RELEASE_REF").ok();
@@ -39,7 +40,7 @@ fn main() {
     }
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR"));
-    let staged = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR")).join("batteries-build-source");
+    let staged = out_dir.join("batteries-build-source");
     if staged.exists() {
         fs::remove_dir_all(&staged).expect("remove the previous staged batteries identity");
     }
@@ -140,8 +141,13 @@ fn release_yell_endpoint() -> String {
 }
 
 fn batteries_are_dirty(repository: &Path) -> bool {
-    let mut arguments = vec!["status", "--porcelain=v1", "--untracked-files=all", "--"];
-    arguments.extend(batteries_layout::REPOSITORY_MAPPINGS.iter().map(|(source, _)| *source));
+    let arguments = [
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--",
+        batteries_layout::SOURCE,
+    ];
     git(repository, &arguments).is_none_or(|output| !output.trim().is_empty())
 }
 
@@ -150,10 +156,7 @@ fn export_committed_repository(repository: &Path, destination: &Path) -> std::io
     command
         .arg("-C")
         .arg(repository)
-        .args(["archive", "--format=tar", "HEAD", "--"]);
-    for (source, _) in batteries_layout::REPOSITORY_MAPPINGS {
-        command.arg(source);
-    }
+        .args(["archive", "--format=tar", "HEAD", "--", batteries_layout::SOURCE]);
     let output = command.output()?;
     if !output.status.success() {
         return Err(std::io::Error::other(
