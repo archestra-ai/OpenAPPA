@@ -26,8 +26,9 @@ pub(super) struct HookTarget<'a> {
 /// Claude Code kills a hook that outruns its timeout and lets the action
 /// proceed without reading the exit code, so every timeout sits above the
 /// deadline the entry's own client gives up at. SessionStart's covers the
-/// runtime start it chains in front of its post, and cannot block anyway.
-const SESSION_START_TIMEOUT: Duration = Duration::from_secs(150);
+/// runtime start it chains in front of its post, with room for the stdin
+/// read and the spawn that run outside those budgets.
+const SESSION_START_TIMEOUT: Duration = Duration::from_secs(160);
 const AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(130);
 const TURN_END_TIMEOUT: Duration = Duration::from_secs(40);
 
@@ -197,14 +198,33 @@ fn statusline_head(binary: &Path) -> String {
     }
 }
 
-/// A status line is this deployment's when its command is the deployed binary
-/// run as the status line, whatever endpoint an earlier install gave it. A
-/// command of the user's own that runs the binary among other things is theirs.
+/// A status line is this deployment's when its command is exactly the deployed
+/// binary run as the status line against one endpoint, whatever endpoint an
+/// earlier install gave it. A command of the user's own that runs the binary
+/// among other things, before or after it, is theirs.
 fn names_binary(line: &Value, binary: &Path) -> bool {
     let head = statusline_head(binary);
     line.get("command")
         .and_then(Value::as_str)
-        .is_some_and(|command| command.starts_with(&head))
+        .and_then(|command| command.strip_prefix(&head))
+        .and_then(|rest| rest.strip_prefix(" --deployment-url "))
+        .is_some_and(is_one_literal)
+}
+
+/// One quoted argument and nothing after it: the endpoint as
+/// `statusline_command` spells it, closed by the PowerShell quote on Windows.
+fn is_one_literal(argument: &str) -> bool {
+    let argument = match cfg!(windows) {
+        true => match argument.strip_suffix('"') {
+            Some(inner) => inner,
+            None => return false,
+        },
+        false => argument,
+    };
+    argument
+        .strip_prefix('\'')
+        .and_then(|rest| rest.strip_suffix('\''))
+        .is_some_and(|inner| !inner.contains('\''))
 }
 
 /// Total for any UTF-8 path: single-quoted, with embedded `'` closed, escaped
@@ -467,7 +487,8 @@ mod tests {
             "input=$(cat); printf '%s' \"$input\" | my-status; printf '%s' \"$input\" | {}",
             statusline_command(&binary, "http://127.0.0.1:1")
         );
-        for command in ["my-status", composed.as_str()] {
+        let filtered = format!("{} | my-filter", statusline_command(&binary, "http://127.0.0.1:1"));
+        for command in ["my-status", composed.as_str(), filtered.as_str()] {
             let custom = json!({"statusLine": {"type": "command", "command": command, "padding": 0}});
             let bytes = write(&paths, custom.clone());
             install_statusline(&paths, &target, &mut compensation).unwrap();
@@ -517,7 +538,7 @@ mod tests {
     fn timeouts_outlast_every_client_deadline() {
         use crate::hook_client::{AUTHORIZATION_BUDGET, TURN_END_BUDGET};
         use crate::runtime_start::{START_BUDGET, STOP_BUDGET};
-        assert!(SESSION_START_TIMEOUT >= STOP_BUDGET + START_BUDGET + AUTHORIZATION_BUDGET);
+        assert!(SESSION_START_TIMEOUT > STOP_BUDGET + START_BUDGET + AUTHORIZATION_BUDGET);
         assert!(AUTHORIZATION_TIMEOUT > AUTHORIZATION_BUDGET);
         assert!(TURN_END_TIMEOUT > TURN_END_BUDGET);
     }

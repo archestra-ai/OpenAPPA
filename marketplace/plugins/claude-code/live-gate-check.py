@@ -231,7 +231,7 @@ def hook_settings(url: str, config: Path, data_dir: Path) -> dict[str, Any]:
                 "hooks": [
                     entry(
                         [*post, "--ensure-runtime", "--config", str(config), "--data-dir", str(data_dir)],
-                        150,
+                        160,
                     ),
                     {"type": "command", "command": binary, "args": ["session-context"]},
                 ]
