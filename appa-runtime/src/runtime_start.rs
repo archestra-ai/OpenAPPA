@@ -41,8 +41,8 @@ pub enum StartError {
     Endpoint { url: String, reason: String },
     #[error("the installed deployment's paths cannot be resolved: {0}")]
     Paths(String),
-    #[error("{url}/health names no process to stop: {answer:?}")]
-    NoStalePid { url: String, answer: String },
+    #[error("nothing answers {url}, and a runtime at a URL the session named is the user's own to start")]
+    UserOwnedUnreachable { url: String },
     #[error("pid {pid} is not this user's appa runtime; not stopping it")]
     NotOwned { pid: i32 },
     #[error("cannot tell whether pid {pid} is this user's appa runtime: {detail}")]
@@ -86,18 +86,14 @@ fn probe(endpoint: &Endpoint) -> Health {
     let body = String::from_utf8_lossy(&answer.body).trim().to_owned();
     match body.as_str() {
         "ok" => Health::Ok,
-        _ => match body.strip_prefix("stale ").and_then(positive_pid) {
+        _ => match body
+            .strip_prefix("stale ")
+            .and_then(crate::init::endpoint::positive_pid)
+        {
             Some(pid) => Health::Stale(pid),
             None => Health::Other(body),
         },
     }
-}
-
-fn positive_pid(text: &str) -> Option<i32> {
-    if text.is_empty() || text.starts_with('0') || !text.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    text.parse().ok()
 }
 
 /// Where the runtime this start brings up reads and writes.
@@ -124,11 +120,12 @@ impl Deployment {
 
 /// Make a healthy runtime answer `target`, starting `executable` when none does.
 ///
-/// A runtime the user runs at a URL of their own is theirs to restart: it is
-/// healthy while it answers, stale or not. Only the deployment's own endpoint
-/// has its stale runtime replaced, and only when the process answering is this
-/// user's own appa process: the pid arrives in an HTTP body from whoever holds
-/// the port, so it is checked before it is signalled.
+/// A runtime the user runs at a URL of their own is theirs to start and restart:
+/// it is healthy while it answers, stale or not, and nothing is started there
+/// when nothing answers. Only the deployment's own endpoint has its runtime
+/// started or its stale one replaced, and only when the process answering is
+/// this user's own appa process: the pid arrives in an HTTP body from whoever
+/// holds the port, so it is checked before it is signalled.
 pub fn ensure(target: &RuntimeTarget, deployment: &Deployment, executable: &Path) -> Result<(), StartError> {
     let endpoint = Endpoint::parse(&target.url).map_err(|reason| StartError::Endpoint {
         url: target.url.clone(),
@@ -146,6 +143,11 @@ pub fn ensure(target: &RuntimeTarget, deployment: &Deployment, executable: &Path
             return Err(StartError::Unexpected {
                 url: target.url.clone(),
                 answer,
+            });
+        }
+        Health::Unreachable if target.user_owned => {
+            return Err(StartError::UserOwnedUnreachable {
+                url: target.url.clone(),
             });
         }
         Health::Unreachable => {}
@@ -282,14 +284,6 @@ fn detach(command: &mut Command) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn only_a_canonical_stale_answer_names_a_pid() {
-        assert_eq!(positive_pid("42"), Some(42));
-        for text in ["", "0", "042", "4x2", "-1", " 42"] {
-            assert_eq!(positive_pid(text), None, "{text:?}");
-        }
-    }
-
     /// A runtime the session named is healthy while it answers at all: a stale
     /// answer there is the user's to act on, and the start returns at once
     /// without signalling anything.
@@ -310,6 +304,26 @@ mod tests {
             data_dir: PathBuf::from("unused"),
         };
         ensure(&target, &deployment, Path::new("unused")).expect("the session's own runtime is left as it is");
+    }
+
+    /// Nothing answering at a URL the session named is the user's to start:
+    /// the deployment's binary is never bound to their port, and nothing of
+    /// the deployment is written.
+    #[test]
+    fn nothing_is_started_at_a_url_the_session_owns() {
+        let vacated = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port binds");
+        let url = format!("http://{}", vacated.local_addr().expect("the bound address"));
+        drop(vacated);
+        let root = tempfile::tempdir().expect("temporary directory");
+        let deployment = Deployment {
+            config: root.path().join("config/appa.toml"),
+            data_dir: root.path().join("data"),
+        };
+        let target = RuntimeTarget { url, user_owned: true };
+        let error = ensure(&target, &deployment, &root.path().join("absent/appa")).expect_err("nothing is started");
+        assert!(matches!(error, StartError::UserOwnedUnreachable { .. }), "{error}");
+        assert!(!root.path().join("config").exists());
+        assert!(!root.path().join("data").exists());
     }
 
     /// Nothing listening and no executable to start: the start fails with the

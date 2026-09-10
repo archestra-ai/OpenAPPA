@@ -194,7 +194,8 @@ appa-runtime --force && appa plugin install claude-code`), or run
 `live-gate-check.py`, which launches the harness with `--settings` entries
 naming the built binary.
 
-The start leaves a runtime at a URL of your own alone, stale or not:
+The start leaves a runtime at a URL of your own alone, stale or not, and
+starts nothing there when nothing answers:
 after a rebuild, restart it yourself. The last command is interactive and belongs to the user: a Claude
 session performing this setup runs the first two and prints the third.
 

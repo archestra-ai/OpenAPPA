@@ -130,7 +130,7 @@ enum Command {
         turn_end: bool,
 
         /// Bring the deployed runtime up before posting, as the SessionStart entry does.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "turn_end")]
         ensure_runtime: bool,
 
         /// The config the started runtime serves; the installed one when absent.

@@ -149,7 +149,7 @@ pub(super) fn endpoint_health(endpoint: &Endpoint) -> Result<Option<String>, Ini
     Ok(Some(String::from_utf8_lossy(&output.stdout).trim().to_owned()))
 }
 
-fn positive_pid(pid: &str) -> Option<i32> {
+pub(crate) fn positive_pid(pid: &str) -> Option<i32> {
     if pid.is_empty() || pid.starts_with('0') || !pid.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }

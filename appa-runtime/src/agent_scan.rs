@@ -8,7 +8,13 @@
 //! command line (`--agents`, `--plugin-dir`) are not scanned.
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+
+/// How much of a definition is read for the declaration. `maxTurns` is
+/// frontmatter, at the top; the rest of a file under a project directory is
+/// whatever size the project made it, and the hook must not follow it there.
+const DEFINITION_HEAD_BYTES: u64 = 64 * 1024;
 
 /// The refusal a prompt gets while a definition in reach declares `maxTurns`,
 /// naming each file, or `None` when the session can be protected.
@@ -84,7 +90,16 @@ fn plugin_definitions_under(cache: &Path) -> Vec<PathBuf> {
 }
 
 fn declares_max_turns(path: &Path) -> bool {
-    fs::read_to_string(path).is_ok_and(|text| text.lines().any(|line| line.starts_with("maxTurns:")))
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut head = Vec::new();
+    if file.take(DEFINITION_HEAD_BYTES).read_to_end(&mut head).is_err() {
+        return false;
+    }
+    String::from_utf8_lossy(&head)
+        .lines()
+        .any(|line| line.starts_with("maxTurns:"))
 }
 
 #[cfg(test)]
@@ -131,5 +146,27 @@ mod tests {
         );
         assert!(declaring_max_turns(None, None).is_empty());
         assert!(declaring_max_turns(Some(&root.path().join("absent")), Some(&root.path().join("absent"))).is_empty());
+    }
+
+    /// Only the head of a definition is read: a declaration in the frontmatter
+    /// of a large file is found, and the size of what follows it is the
+    /// project's business, not the hook's.
+    #[test]
+    fn a_definition_is_read_only_as_far_as_its_frontmatter_reaches() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let project = root.path().join("project");
+        let prose = "a line of prose that declares nothing\n".repeat(20_000);
+        write(
+            &project.join(".claude/agents/large.md"),
+            &format!("---\nname: large\nmaxTurns: 3\n---\n{prose}"),
+        );
+        write(
+            &project.join(".claude/agents/buried.md"),
+            &format!("---\nname: buried\n---\n{prose}maxTurns: 3\n"),
+        );
+        assert_eq!(
+            declaring_max_turns(Some(&project), None),
+            vec![project.join(".claude/agents/large.md")]
+        );
     }
 }

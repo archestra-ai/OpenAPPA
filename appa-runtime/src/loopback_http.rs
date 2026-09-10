@@ -1,10 +1,11 @@
 //! One plain HTTP request to the runtime on loopback, bounded by a deadline.
 //!
 //! Every client this binary runs as — the hook poster, the statusline, the
-//! starter — reaches the runtime through here. Only `http` is spoken: the
-//! runtime refuses to listen anywhere but loopback, so there is no transport
-//! to secure, and a socket is cheaper than an HTTP client on a path the
-//! harness pays for on every tool call.
+//! starter — reaches the runtime through here. Only `http` to a loopback
+//! address is spoken: the runtime refuses to listen anywhere else, so there is
+//! no transport to secure, and a socket is cheaper than an HTTP client on a
+//! path the harness pays for on every tool call. A URL that resolves off this
+//! machine is refused before anything is posted to it.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -50,10 +51,16 @@ impl Endpoint {
             .to_socket_addrs()
             .map_err(|error| format!("{} does not resolve: {error}", self.authority))?
             .collect();
-        match addresses.is_empty() {
-            true => Err(format!("{} resolves to no address", self.authority)),
-            false => Ok(addresses),
+        if addresses.is_empty() {
+            return Err(format!("{} resolves to no address", self.authority));
         }
+        if let Some(outside) = addresses.iter().find(|address| !address.ip().is_loopback()) {
+            return Err(format!(
+                "{} resolves to {outside}, which is not loopback; the runtime is reached on this machine only",
+                self.authority
+            ));
+        }
+        Ok(addresses)
     }
 
     fn request_head(&self, method: &str, path: &str, length: usize) -> String {
@@ -311,6 +318,30 @@ mod tests {
                 .addresses()
                 .expect("a literal address resolves"),
             vec![SocketAddr::from(([127, 0, 0, 1], 8787))]
+        );
+    }
+
+    /// An address off this machine is refused at resolution, before a socket
+    /// opens: hook bodies carry prompts and tool output, and the runtime never
+    /// listens anywhere but loopback.
+    #[test]
+    fn an_authority_off_this_machine_is_refused_before_it_is_reached() {
+        for url in [
+            "http://192.168.1.5:8787",
+            "http://[2001:db8::1]:8787",
+            "http://0.0.0.0:8787",
+        ] {
+            let error = Endpoint::parse(url)
+                .expect("the authority parses")
+                .addresses()
+                .expect_err("an address off this machine is refused");
+            assert!(error.contains("not loopback"), "{url}: {error}");
+        }
+        assert!(
+            Endpoint::parse("http://[::1]:8787")
+                .expect("the authority parses")
+                .addresses()
+                .is_ok()
         );
     }
 
