@@ -29,10 +29,10 @@ use crate::runtime_url::RuntimeTarget;
 /// networking), where this deadline is what the probe actually costs.
 const PROBE_BUDGET: Duration = Duration::from_secs(1);
 /// How long a stale runtime gets to leave the port after being signalled.
-const STOP_BUDGET: Duration = Duration::from_secs(10);
+pub(crate) const STOP_BUDGET: Duration = Duration::from_secs(10);
 /// How long a started runtime gets to answer healthy. The whole start must
 /// finish inside the timeout the SessionStart hook entry declares.
-const START_BUDGET: Duration = Duration::from_secs(20);
+pub(crate) const START_BUDGET: Duration = Duration::from_secs(20);
 const POLL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Error)]

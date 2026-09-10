@@ -50,8 +50,8 @@ impl Decides {
     /// matters: a hook the harness kills has its exit code ignored and fails open.
     fn budget(self) -> Duration {
         match self {
-            Self::Authorization => Duration::from_secs(120),
-            Self::Nothing => Duration::from_secs(30),
+            Self::Authorization => AUTHORIZATION_BUDGET,
+            Self::Nothing => TURN_END_BUDGET,
         }
     }
 }
@@ -92,6 +92,10 @@ fn refusal(answer: &Answer) -> String {
 /// The host whose hook bytes this client translates. It is not a choice: the kagent plugin
 /// posts the canonical wire itself, so this bridge is Claude Code's alone.
 const HOST: AdapterName = AdapterName::ClaudeCode;
+
+/// The round-trip budgets the hook entries' timeouts are declared above.
+pub(crate) const AUTHORIZATION_BUDGET: Duration = Duration::from_secs(120);
+pub(crate) const TURN_END_BUDGET: Duration = Duration::from_secs(30);
 
 /// The runtime's answer, read off the wire. A body that is not a wire decision is
 /// not guessed at: the hook fails closed on it.

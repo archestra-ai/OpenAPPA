@@ -199,7 +199,7 @@ fn main() -> ExitCode {
             Ok(_) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("appa: {error}");
-                if matches!(error, appa_runtime::init::InitError::PluginRecovery { .. }) {
+                if matches!(error, appa_runtime::init::InitError::Recovery { .. }) {
                     ExitCode::from(3)
                 } else {
                     ExitCode::FAILURE

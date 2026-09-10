@@ -17,6 +17,7 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::init::settings::{ps_literal, sh_literal};
 pub use crate::plugin_layout::stage_repository;
 use appa_package::tree::{
     EntryKind, MAX_ENTRIES, MAX_UNCOMPRESSED_BYTES, TreeDigestError, absorb_field, canonical_tree_digest, walk,
@@ -79,8 +80,6 @@ enum TreeShape {
 
 #[derive(Debug, Error)]
 pub enum PluginBundleError {
-    #[error("this appa build has no usable plugin source identity; rebuild it from a Git checkout or a release tag")]
-    MissingBuildIdentity,
     #[error("this appa build carries a release plugin digest but no release tag")]
     MissingReleaseRef,
     #[error("this appa build carries an invalid plugin tree digest: {value}")]
@@ -178,7 +177,6 @@ struct BuildIdentity<'a> {
     release_digest: Option<PluginDigest>,
     release_ref: Option<&'a str>,
     commit: Option<&'a str>,
-    tree_digest: PluginDigest,
 }
 
 impl BuildIdentity<'static> {
@@ -191,15 +189,10 @@ impl BuildIdentity<'static> {
             .map_err(|_| PluginBundleError::MalformedBuildDigest {
                 value: option_env!("APPA_PLUGIN_SHA256").unwrap_or_default().to_owned(),
             })?;
-        let raw_tree = option_env!("APPA_PLUGIN_TREE_SHA256").ok_or(PluginBundleError::MissingBuildIdentity)?;
-        let tree_digest = PluginDigest::parse(raw_tree).map_err(|_| PluginBundleError::MalformedBuildDigest {
-            value: raw_tree.to_owned(),
-        })?;
         Ok(Self {
             release_digest,
             release_ref: option_env!("APPA_RELEASE_REF"),
             commit: option_env!("APPA_BUILD_COMMIT"),
-            tree_digest,
         })
     }
 }
@@ -213,9 +206,7 @@ impl BuildIdentity<'static> {
 /// environment variable, working directory or mutable ref takes part.
 #[derive(Debug, Clone)]
 pub(crate) struct VerifiedArchive {
-    path: PathBuf,
     reference: String,
-    tree_digest: PluginDigest,
 }
 
 impl VerifiedArchive {
@@ -244,18 +235,7 @@ impl VerifiedArchive {
                     .unwrap_or("unknown")
             ),
         };
-        Ok(Self {
-            path: path.to_owned(),
-            reference,
-            tree_digest: identity.tree_digest,
-        })
-    }
-
-    pub(crate) fn population(&self) -> Population<'_> {
-        Population::VerifiedArchive {
-            path: &self.path,
-            expected: self.tree_digest,
-        }
+        Ok(Self { reference })
     }
 
     /// The origin as a receipt names it: the release tag, or the build's commit.
@@ -915,18 +895,6 @@ fn paths_ps1(plan: &DeploymentPlan) -> String {
         ps_literal(&plan.endpoint.listen().to_string())
     ));
     rendered
-}
-
-/// Total for any UTF-8 path: single-quoted, with embedded `'` closed, escaped
-/// and reopened. Spaces, `$`, backticks, quotes and newlines are all
-/// representable, so rendering never refuses a path that got this far.
-fn sh_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r"'\''"))
-}
-
-/// Total for any UTF-8 path: single-quoted, with embedded `'` doubled.
-fn ps_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
 }
 
 // ---------------------------------------------------------------------------
