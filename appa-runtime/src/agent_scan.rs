@@ -67,7 +67,9 @@ fn definitions_in(directory: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Every `agents/*.md` at any depth under the plugin cache.
+/// Every `agents/*.md` at any depth under the plugin cache. A symlinked
+/// directory is not entered: the cache holds unpacked plugins, and a link back
+/// up the tree would otherwise keep the hook walking.
 fn plugin_definitions_under(cache: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut pending = vec![cache.to_path_buf()];
@@ -77,7 +79,7 @@ fn plugin_definitions_under(cache: &Path) -> Vec<PathBuf> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
                 pending.push(path);
             } else if directory.file_name().is_some_and(|name| name == "agents")
                 && path.extension().is_some_and(|extension| extension == "md")
@@ -146,6 +148,22 @@ mod tests {
         );
         assert!(declaring_max_turns(None, None).is_empty());
         assert!(declaring_max_turns(Some(&root.path().join("absent")), Some(&root.path().join("absent"))).is_empty());
+    }
+
+    /// A link in the plugin cache that points back up the tree is not entered,
+    /// so the walk ends; the definitions reachable without it are still found.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_cycle_in_the_plugin_cache_does_not_keep_the_walk_going() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let claude = root.path().join("claude");
+        let plugin = claude.join("plugins/cache/market/tool/1.0");
+        write(&plugin.join("agents/capped.md"), "maxTurns: 2\n");
+        std::os::unix::fs::symlink(&claude, plugin.join("back")).expect("the cycle is linked");
+        assert_eq!(
+            declaring_max_turns(None, Some(&claude)),
+            vec![plugin.join("agents/capped.md")]
+        );
     }
 
     /// Only the head of a definition is read: a declaration in the frontmatter
