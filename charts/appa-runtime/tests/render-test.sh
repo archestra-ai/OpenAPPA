@@ -108,6 +108,31 @@ must_contain 'fieldPath: metadata.namespace'
 expect 1 '^          readinessProbe:$'
 expect 1 '^          livenessProbe:$'
 expect 1 '^          startupProbe:$'
+expect 1 '^        - name: runtime$'
+
+# Sidecars are opt-in, can mount the chart's existing volumes, and inherit the
+# runtime container security context unless they provide one explicitly.
+sidecar='[{"name":"review-broker","image":"example.com/review-broker:1.0.0","command":["python","-m","review_broker"],"volumeMounts":[{"name":"policy","mountPath":"/etc/appa","readOnly":true}]}]'
+must_render --set-json "sidecars=$sidecar"
+expect 1 '^        - name: runtime$'
+expect 1 '^        -$'
+must_contain 'name: review-broker'
+must_contain 'image: example.com/review-broker:1.0.0'
+must_contain 'mountPath: /etc/appa'
+expect 2 '^            runAsUser: 65532$'
+expect 2 '^            readOnlyRootFilesystem: true$'
+
+must_render --set-json 'sidecars=[{"name":"review-broker","image":"example.com/review-broker:1.0.0","securityContext":{"runAsUser":1000}}]'
+expect 1 '^            runAsUser: 65532$'
+expect 1 '^            runAsUser: 1000$'
+expect 1 '^            readOnlyRootFilesystem: true$'
+must_refuse 'sidecars[0].name "runtime" is reserved' \
+  --set-json 'sidecars=[{"name":"runtime","image":"example.com/runtime:1.0.0"}]'
+must_refuse 'sidecars[1].name "review-broker" duplicates sidecars[0]' \
+  --set-json 'sidecars=[{"name":"review-broker","image":"example.com/review-broker:1.0.0"},{"name":"review-broker","image":"example.com/review-broker:2.0.0"}]'
+# Helm's schema rejects a non-list and incomplete Container values.
+must_refuse '' --set-json 'sidecars={"name":"review-broker","image":"example.com/review-broker:1.0.0"}'
+must_refuse '' --set-json 'sidecars=[{"name":"review-broker"}]'
 
 must_render --set appaGuide.enabled=true
 expect 1 '^kind: Agent$'

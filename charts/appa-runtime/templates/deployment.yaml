@@ -2,6 +2,26 @@
 {{- fail "env.APPA_BATTERIES_DIR, env.APPA_CONFIG, env.APPA_GUIDE_RUNTIME_URL, env.APPA_PERSISTENCE_ENABLED, env.APPA_POLICY_CONFIGMAP_NAME, env.APPA_POLICY_CONFIGMAP_KEY, and env.APPA_RUNTIME_RELEASE_NAME are reserved; the chart derives them" }}
 {{- end }}
 {{- include "appa-runtime.validateConfig" . }}
+{{- if not (kindIs "slice" .Values.sidecars) }}
+{{- fail "sidecars must be a list of Kubernetes Container objects" }}
+{{- end }}
+{{- $sidecarNames := dict }}
+{{- range $index, $sidecar := .Values.sidecars }}
+{{- if not (kindIs "map" $sidecar) }}
+{{- fail (printf "sidecars[%d] must be a Kubernetes Container object" $index) }}
+{{- end }}
+{{- if not (hasKey $sidecar "name") }}
+{{- fail (printf "sidecars[%d].name is required" $index) }}
+{{- end }}
+{{- $name := get $sidecar "name" | toString }}
+{{- if eq $name "runtime" }}
+{{- fail (printf "sidecars[%d].name %q is reserved; runtime is chart-managed" $index $name) }}
+{{- end }}
+{{- if hasKey $sidecarNames $name }}
+{{- fail (printf "sidecars[%d].name %q duplicates sidecars[%d]" $index $name (get $sidecarNames $name)) }}
+{{- end }}
+{{- $_ := set $sidecarNames $name $index }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -175,6 +195,13 @@ spec:
             - name: runtime-identity
               mountPath: /var/run/appa/identity
               readOnly: true
+        {{- range $sidecar := .Values.sidecars }}
+        {{- $container := deepCopy $sidecar }}
+        {{- if not (hasKey $container "securityContext") }}
+        {{- $_ := set $container "securityContext" $.Values.securityContext }}
+        {{- end }}
+        - {{- toYaml $container | nindent 10 }}
+        {{- end }}
       volumes:
         - name: policy
           {{- if .Values.config.existingClaim }}

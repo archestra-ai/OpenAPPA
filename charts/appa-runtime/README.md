@@ -59,6 +59,31 @@ The runtime binds the pod network directly. Point agents at:
 http://appa-runtime.appa.svc.cluster.local:18787
 ```
 
+## Sidecars
+
+`sidecars` appends Kubernetes `Container` specifications to the runtime pod.
+Use it for same-pod services, such as a review broker reached through loopback.
+
+```yaml
+sidecars:
+  - name: review-broker
+    image: example.com/review-broker:1.0.0
+    command: ["python", "-m", "review_broker"]
+    volumeMounts:
+      - name: policy
+        mountPath: /etc/appa
+        readOnly: true
+```
+
+The chart adds no volumes or mounts for sidecars. They can mount the existing
+`policy`, `data`, and `tmp` volumes when needed. A sidecar without its own
+`securityContext` inherits the runtime container security context. An explicit
+`securityContext` replaces that default. Sidecar names must be unique and cannot
+use the reserved name `runtime`.
+
+Loopback placement does not authenticate a reviewer. A review broker must check
+reviewer identity and bind each decision to the intended authority request.
+
 ## Demo fixtures
 
 `appa-kagent-demo` is a separate fixture-only chart. It points its Agents

@@ -89,6 +89,10 @@ persistence:
 env: {}
 envFrom: []
 
+# Additional Kubernetes Containers in the runtime pod. A sidecar without a
+# securityContext inherits the runtime container's securityContext.
+sidecars: []
+
 # Optionally install the configuring kagent Agent with this runtime.
 appaGuide:
   enabled: false

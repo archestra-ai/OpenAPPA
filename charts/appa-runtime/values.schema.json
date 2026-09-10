@@ -64,6 +64,18 @@
         }
       }
     },
+    "sidecars": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "image"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "image": { "type": "string", "minLength": 1 },
+          "securityContext": { "type": "object" }
+        }
+      }
+    },
     "appaGuide": {
       "type": "object",
       "properties": {
