@@ -13,8 +13,8 @@ use thiserror::Error;
 
 mod claude;
 mod config;
-mod endpoint;
-mod paths;
+pub(crate) mod endpoint;
+pub(crate) mod paths;
 mod receipt;
 mod removal;
 #[cfg(test)]

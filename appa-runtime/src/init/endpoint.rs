@@ -192,12 +192,12 @@ pub(super) fn stop_owned_appa_runtime(pid: i32, endpoint: &Endpoint) -> Result<(
 }
 
 #[cfg(unix)]
-fn process_exists(pid: i32) -> bool {
+pub(crate) fn process_exists(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
 #[cfg(windows)]
-fn process_exists(pid: i32) -> bool {
+pub(crate) fn process_exists(pid: i32) -> bool {
     powershell(
         "if (Get-Process -Id $env:APPA_STALE_PID -ErrorAction SilentlyContinue) { 'alive' }",
         [("APPA_STALE_PID", pid.to_string())],
@@ -206,7 +206,7 @@ fn process_exists(pid: i32) -> bool {
 }
 
 #[cfg(unix)]
-fn is_owned_appa_runtime(pid: i32) -> Result<bool, InitError> {
+pub(crate) fn is_owned_appa_runtime(pid: i32) -> Result<bool, InitError> {
     if pid == std::process::id() as i32 {
         return Ok(false);
     }
@@ -236,7 +236,7 @@ fn is_owned_appa_runtime(pid: i32) -> Result<bool, InitError> {
 }
 
 #[cfg(unix)]
-fn terminate_appa_pid(pid: i32) -> Result<(), InitError> {
+pub(crate) fn terminate_appa_pid(pid: i32) -> Result<(), InitError> {
     if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
         return Ok(());
     }
@@ -274,14 +274,14 @@ if ($null -ne $appaProcess) {
 "#;
 
 #[cfg(windows)]
-fn is_owned_appa_runtime(pid: i32) -> Result<bool, InitError> {
+pub(crate) fn is_owned_appa_runtime(pid: i32) -> Result<bool, InitError> {
     let command = format!("{WINDOWS_APPA_IDENTITY_SCRIPT}\n$appaState");
     let answer = powershell(&command, [("APPA_STALE_PID", pid.to_string())])?;
     Ok(answer.trim() == "owned")
 }
 
 #[cfg(windows)]
-fn terminate_appa_pid(pid: i32) -> Result<(), InitError> {
+pub(crate) fn terminate_appa_pid(pid: i32) -> Result<(), InitError> {
     // Resolve the process object first and stop that object, not a freshly
     // looked-up PID. The SID/name checks are repeated in this same PowerShell
     // invocation so an elevated init never turns a forged health answer into

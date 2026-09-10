@@ -108,15 +108,38 @@ enum Command {
         message: Vec<String>,
     },
 
+    /// Render the protected session's label for Claude Code's status line.
+    #[command(hide = true)]
+    Statusline {
+        #[command(flatten)]
+        target: appa_runtime::runtime_url::RuntimeUrl,
+    },
+
+    /// Print the advice a protected session starts with.
+    #[command(hide = true)]
+    SessionContext,
+
     /// Post one harness hook event to the running runtime.
     #[command(hide = true)]
     Hook {
-        #[arg(long, env = "APPA_RUNTIME_URL", default_value = "http://127.0.0.1:8787")]
-        url: String,
+        #[command(flatten)]
+        target: appa_runtime::runtime_url::RuntimeUrl,
 
         /// Report a finished turn, whose answer never blocks the harness.
         #[arg(long)]
         turn_end: bool,
+
+        /// Bring the deployed runtime up before posting, as the SessionStart entry does.
+        #[arg(long)]
+        ensure_runtime: bool,
+
+        /// The config the started runtime serves; the installed one when absent.
+        #[arg(long, requires = "ensure_runtime")]
+        config: Option<PathBuf>,
+
+        /// Where the started runtime keeps its database and logs; the installed data directory when absent.
+        #[arg(long, requires = "ensure_runtime")]
+        data_dir: Option<PathBuf>,
     },
 }
 
@@ -209,7 +232,27 @@ fn main() -> ExitCode {
             command: PackageCommand::Remove(args),
         } => appa_runtime::installation::cli::remove_battery(args),
         Command::Bundle(args) => appa_runtime::installation::cli::bundle(args),
-        Command::Hook { url, turn_end } => appa_runtime::hook_client::run(&url, turn_end),
+        Command::Hook {
+            target,
+            turn_end,
+            ensure_runtime,
+            config,
+            data_dir,
+        } => {
+            let deployment = match ensure_runtime {
+                true => match appa_runtime::runtime_start::Deployment::installed(config, data_dir) {
+                    Ok(deployment) => Some(deployment),
+                    Err(error) => {
+                        eprintln!("OpenAPPA hook blocked: {error}");
+                        return ExitCode::from(2);
+                    }
+                },
+                false => None,
+            };
+            appa_runtime::hook_client::run(&target.resolve(), turn_end, deployment.as_ref())
+        }
+        Command::Statusline { target } => appa_runtime::statusline::run(&target.resolve()),
+        Command::SessionContext => appa_runtime::session_context::run(),
         Command::Yell { url, yes, message } => appa_runtime::yell::cli::run(&url, yes, message),
         Command::Replay {
             config,

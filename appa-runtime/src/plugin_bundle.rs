@@ -316,7 +316,7 @@ pub struct Endpoint {
 
 /// The spelling every consumer carries today, and the one the regression scan
 /// looks for in a materialized tree.
-pub const DEFAULT_ENDPOINT_URL: &str = "http://127.0.0.1:8787";
+pub const DEFAULT_ENDPOINT_URL: &str = crate::runtime_url::DEFAULT_RUNTIME_URL;
 
 impl Endpoint {
     pub fn resolve() -> Result<Self, PluginBundleError> {

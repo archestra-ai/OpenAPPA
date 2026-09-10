@@ -48,16 +48,22 @@ pub(super) fn deployment_paths() -> Result<DeploymentPaths, InitError> {
     } else {
         home.as_ref().ok_or(InitError::MissingHome)?.join(".local/bin")
     };
-    let claude_dir = match env::var_os("CLAUDE_CONFIG_DIR") {
-        Some(path) => absolute_directory(PathBuf::from(path))?,
-        None => home.ok_or(InitError::MissingHome)?.join(".claude"),
-    };
+    let claude_dir = claude_config_dir()?.ok_or(InitError::MissingHome)?;
     Ok(DeploymentPaths {
         install_dir,
         config_dir,
         data_dir,
         claude_dir,
     })
+}
+
+/// Where Claude Code keeps this user's settings, agents, and plugins:
+/// `CLAUDE_CONFIG_DIR`, or `.claude` under the home directory.
+pub(crate) fn claude_config_dir() -> Result<Option<PathBuf>, InitError> {
+    match env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(path) => absolute_directory(PathBuf::from(path)).map(Some),
+        None => Ok(user_home().map(|home| home.join(".claude"))),
+    }
 }
 
 pub(super) fn user_home() -> Option<PathBuf> {
@@ -94,7 +100,7 @@ fn installed_config_dir() -> Result<Option<PathBuf>, InitError> {
         }))
 }
 
-fn installed_data_dir() -> Result<Option<PathBuf>, InitError> {
+pub(crate) fn installed_data_dir() -> Result<Option<PathBuf>, InitError> {
     if let Some(path) = env::var_os("APPA_DATA_DIR") {
         return absolute_directory(PathBuf::from(path)).map(Some);
     }
