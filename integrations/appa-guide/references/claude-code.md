@@ -1,8 +1,10 @@
 # Claude Code
 
-You run in a Claude Code session protected by the appa plugin. This
-reference carries the Claude Code mechanics; the router skill you came
-from carries the mode and the shared rules.
+You run in a Claude Code session protected by APPA: the installed `appa`
+binary is registered in the user's Claude Code settings as the session's
+hooks, and its runtime serves the `appa` MCP server. This reference
+carries the Claude Code mechanics; the router skill you came from carries
+the mode and the shared rules.
 
 ## Read sources
 
@@ -11,25 +13,16 @@ For OpenAPPA configuration, read only:
 - the output of `appa describe --config <live-path>`;
 - the live root config and included files relevant to the request;
 - a matched battery's `appa.toml` and README;
-- the relevant section of the installed guide at
-  `<marketplace-root>/website/content/docs/contracts.md`.
+- the relevant section of the policy-review guide the install wrote beside
+  this skill, at `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/appa-guide/references/contracts.md`.
 
-If the installed marketplace content is missing or these sources do not
-establish the syntax or behavior, stop and report an incomplete
+If the installed guide or battery files are missing or these sources do
+not establish the syntax or behavior, stop and report an incomplete
 installation. Do not fetch a different OpenAPPA version or search the
-repository for an answer. The marketplace's `installLocation` may be a
-local checkout; read only its installed battery files and contract
-guide. Never search that checkout, inspect source code, tests, Git
-history, or implementation details.
+repository for an answer. Never search a checkout, inspect source code,
+tests, Git history, or implementation details.
 
 ## Find the live config
-
-Read `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/known_marketplaces.json` and
-take the `installLocation` for the `appa` marketplace as
-`<marketplace-root>`. Local checkout installs use
-the checkout itself; packaged and remote installs may use a Claude-managed
-clone. If the entry or directory is missing, stop and report an incomplete
-installation. Do not assume a fixed marketplace path.
 
 Run `appa describe` first. Use the complete path on its `Config:` line, including
 spaces. This is the installed deployment path and follows `APPA_CONFIG` and
@@ -85,19 +78,25 @@ mail, messages, or files merely to infer an identity.
 
 ### Find useful batteries
 
-Look under:
+Run `appa battery list --json --config <live-path>`. It names every battery
+of the installed version, whether the deployment includes it, and the
+version's commit as `catalog.commit`. The batteries themselves are retained
+beside the config:
 
 ```sh
-<marketplace-root>/batteries/
+<config-dir>/.appa/<config-name>/generations/<commit>/marketplace/batteries/
 ```
 
-Match a battery by the tool names in its `appa.toml`, not by its directory
-name. For a matched battery, read only its `appa.toml` and README. Do not run
-its scripts while inspecting it.
+where `<config-dir>/<config-name>` is the live config path. A battery the
+root config already includes is named there by the same path, relative to
+the config.
 
-If that marketplace clone or its `batteries/` directory is missing, stop and
-report an incomplete installation. Never configure one APPA build with
-batteries fetched from another version.
+Match a battery by the tool names in its `appa.toml`, not by its name or
+description. For a matched battery, read only its `appa.toml` and README.
+Do not run its scripts while inspecting it.
+
+If that directory is missing, stop and report an incomplete installation.
+Never configure one APPA build with batteries fetched from another version.
 
 When proposing a battery, give it exactly one short sentence that says what it
 covers, what protection it adds, and any important assumption. Keep it under
@@ -240,8 +239,8 @@ not guess.
 2. Read the root config and only the included files relevant to the requested
    changes.
 3. For policy syntax or behavior that the current config does not demonstrate,
-   first consult the relevant section of
-   `<marketplace-root>/website/content/docs/contracts.md`.
+   first consult the relevant section of the policy-review guide at
+   `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/appa-guide/references/contracts.md`.
    If it is unavailable or does not answer the question, stop and report an
    incomplete installation. Do not guess syntax, fetch another version, search
    for an OpenAPPA checkout, or inspect source code.

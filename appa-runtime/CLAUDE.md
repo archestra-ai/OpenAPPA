@@ -31,7 +31,11 @@ one at the repository root:
   in `examples/tests/` at the repository root). It keeps no durable
   state of its own beside the log.
 
-The Claude Code plugin, the marketplace manifest, and the example
-policies are not code and live in `marketplace/plugins/claude-code/` at the
-repository root. The tests here still run those shipped files
-(`tests/plugin_hooks.rs`, `tests/examples_load.rs`).
+The Claude Code host side is this binary: `hook_client.rs` (what the
+hook entries run), `statusline.rs`, `session_context.rs`,
+`runtime_start.rs`, and `init/`, which writes the hook entries, the MCP
+registration and the `appa-guide` skill into the user's Claude profile
+(`tests/hook_client.rs`, `tests/settings_hooks.rs`, `tests/init_cli.rs`).
+The package manifest and the example policies are not code and live in
+`marketplace/plugins/claude-code/` at the repository root; the tests here
+still run those shipped files (`tests/examples_load.rs`).

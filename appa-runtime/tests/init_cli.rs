@@ -272,6 +272,10 @@ fn a_first_activation_writes_the_profile_and_arms_the_launcher() {
             fs::read_to_string(guide.join("references/claude-code.md")).unwrap()
         )
     );
+    assert_eq!(
+        fs::read_to_string(fixture.contracts_guide()).expect("the policy-review guide is written"),
+        fs::read_to_string(repo_root().join("website/content/docs/contracts.md")).unwrap()
+    );
     // The runtime reports serving the key the fixture computed for the shipped
     // default, and activation found nothing to reconcile: that key is the real one.
     assert!(
@@ -438,7 +442,10 @@ fn foreign_settings_survive_activation_and_removal() {
     assert!(removed.status.success(), "{}", String::from_utf8_lossy(&removed.stderr));
     assert_eq!(fixture.settings_value(), original);
     assert_eq!(fixture.mcp_registration(), None);
-    assert!(!fixture.skill().exists());
+    assert!(
+        !fixture.skill().parent().unwrap().exists(),
+        "the skill directory goes with its files"
+    );
     assert!(!fixture.launcher().exists());
     assert!(
         fixture.deployed_binary().is_file(),

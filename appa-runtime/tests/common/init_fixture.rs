@@ -183,6 +183,10 @@ impl Fixture {
         self.claude.join("skills/appa-guide/SKILL.md")
     }
 
+    pub fn contracts_guide(&self) -> PathBuf {
+        self.claude.join("skills/appa-guide/references/contracts.md")
+    }
+
     pub fn launcher(&self) -> PathBuf {
         self.bin.join("clappa")
     }
