@@ -1,4 +1,4 @@
-//! Executables are selected with their native plugin, never independently.
+//! Executables are selected with their batteries archive, never independently.
 
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -29,9 +29,9 @@ struct BinaryIdentity {
     protocol: u32,
     commit: Option<String>,
     release: Option<String>,
-    plugin_sha256: Option<String>,
+    batteries_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    plugin_tree_sha256: Option<String>,
+    batteries_tree_sha256: Option<String>,
 }
 
 pub fn build_info() -> ExitCode {
@@ -40,8 +40,8 @@ pub fn build_info() -> ExitCode {
         protocol: appa_package::PROTOCOL,
         commit: option_env!("APPA_BUILD_COMMIT").map(str::to_owned),
         release: option_env!("APPA_RELEASE_REF").map(str::to_owned),
-        plugin_sha256: option_env!("APPA_PLUGIN_SHA256").map(str::to_owned),
-        plugin_tree_sha256: option_env!("APPA_PLUGIN_TREE_SHA256").map(str::to_owned),
+        batteries_sha256: option_env!("APPA_BATTERIES_SHA256").map(str::to_owned),
+        batteries_tree_sha256: option_env!("APPA_BATTERIES_TREE_SHA256").map(str::to_owned),
     };
     let mut output = std::io::stdout().lock();
     match serde_json::to_writer(&mut output, &identity)
@@ -56,12 +56,11 @@ pub fn build_info() -> ExitCode {
 
 pub struct ClaudeArtifacts {
     binary: PathBuf,
-    archive: PathBuf,
 }
 
 impl ClaudeArtifacts {
-    /// Uses only retained, rehashed archives. It does not register a plugin,
-    /// start a runtime, or change the active config.
+    /// Uses only retained, rehashed archives. It does not write the Claude
+    /// profile, start a runtime, or change the active config.
     pub fn prepare(
         installation: &Installation,
         generation: &Generation,
@@ -76,11 +75,11 @@ impl ClaudeArtifacts {
         let binary_digest = archives
             .get(platform.archive())
             .ok_or_else(|| InstallError::Invalid("the installed version has no executable for this platform".into()))?;
-        let plugin_digest = &archives[&generation.plugin_archive()];
+        let batteries_digest = &archives[&generation.batteries_archive()];
         let binary_archive = installation.state.join("artifacts").join(binary_digest.hex());
-        let archive = installation.state.join("artifacts").join(plugin_digest.hex());
+        let batteries_archive = installation.state.join("artifacts").join(batteries_digest.hex());
         acquisition::verify_artifact(&binary_archive, binary_digest)?;
-        acquisition::verify_artifact(&archive, plugin_digest)?;
+        acquisition::verify_artifact(&batteries_archive, batteries_digest)?;
         let directory = installation.state.join("native");
         require_directory_or_absent(&directory)?;
         fs::create_dir_all(&directory).map_err(|error| io("create native cache", &directory, error))?;
@@ -121,12 +120,12 @@ impl ClaudeArtifacts {
         let same_artifacts = match generation.artifacts() {
             Artifacts::Published(published) => {
                 identity.release.as_deref() == Some(published.release())
-                    && identity.plugin_sha256.as_deref() == Some(plugin_digest.hex())
+                    && identity.batteries_sha256.as_deref() == Some(batteries_digest.hex())
             }
             Artifacts::Build(build) => {
                 identity.release.is_none()
-                    && identity.plugin_sha256.is_none()
-                    && identity.plugin_tree_sha256.as_deref() == Some(build.plugin_tree())
+                    && identity.batteries_sha256.is_none()
+                    && identity.batteries_tree_sha256.as_deref() == Some(build.batteries_tree())
             }
         };
         if identity.schema != 1
@@ -135,7 +134,7 @@ impl ClaudeArtifacts {
             || !same_artifacts
         {
             return Err(InstallError::Invalid(
-                "the selected runtime and native plugin do not belong to the same version".into(),
+                "the selected runtime and batteries archive do not belong to the same version".into(),
             ));
         }
         let destination = directory.join(binary_digest.hex());
@@ -153,19 +152,12 @@ impl ClaudeArtifacts {
         }
         Ok(Self {
             binary: destination.join(binary_name),
-            archive,
         })
     }
 
     /// Caller holds the installation lock and durable activation journal.
     pub fn activate(&self, config: &Path, previous: Option<&Self>) -> Result<(), InstallError> {
-        let mut arguments = vec![
-            "activate-claude".as_ref(),
-            "--config".as_ref(),
-            config.as_os_str(),
-            "--archive".as_ref(),
-            self.archive.as_os_str(),
-        ];
+        let mut arguments = vec!["activate-claude".as_ref(), "--config".as_ref(), config.as_os_str()];
         if let Some(previous) = previous {
             arguments.extend(["--previous-binary".as_ref(), previous.binary.as_os_str()]);
         }
@@ -176,13 +168,7 @@ impl ClaudeArtifacts {
     pub fn remove(&self, config: &Path) -> Result<(), InstallError> {
         invoke(
             &self.binary,
-            &[
-                "remove-claude".as_ref(),
-                "--config".as_ref(),
-                config.as_os_str(),
-                "--archive".as_ref(),
-                self.archive.as_os_str(),
-            ],
+            &["remove-claude".as_ref(), "--config".as_ref(), config.as_os_str()],
             Duration::from_secs(120),
         )?;
         Ok(())

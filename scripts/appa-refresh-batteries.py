@@ -85,7 +85,7 @@ def release_assets(repository: str, tag: str | None = None, opener: Callable = u
         for asset in assets
         if isinstance(asset, dict)
     }
-    archive_name = f"appa-plugin-{version}.tar.gz"
+    archive_name = f"appa-batteries-{version}.tar.gz"
     checksums_url = names.get("SHA256SUMS")
     archive_url = names.get(archive_name)
     if not isinstance(checksums_url, str) or not isinstance(archive_url, str):
@@ -126,13 +126,13 @@ def extract_batteries(archive: bytes, destination: Path) -> None:
     try:
         package = tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz")
     except tarfile.TarError as error:
-        raise RefreshError(f"plugin archive is not a readable tarball: {error}") from error
+        raise RefreshError(f"batteries archive is not a readable tarball: {error}") from error
     with package:
         for member in package:
             path = PurePosixPath(member.name)
             parts = tuple(part for part in path.parts if part != ".")
             if path.is_absolute() or ".." in parts:
-                raise RefreshError(f"plugin archive has an unsafe path: {member.name}")
+                raise RefreshError(f"batteries archive has an unsafe path: {member.name}")
             if not parts or parts[0] != "batteries":
                 continue
             relative = parts[1:]
@@ -140,22 +140,22 @@ def extract_batteries(archive: bytes, destination: Path) -> None:
                 continue
             count += 1
             if count > MAX_FILES:
-                raise RefreshError(f"plugin archive has more than {MAX_FILES} battery entries")
+                raise RefreshError(f"batteries archive has more than {MAX_FILES} battery entries")
             if relative in seen:
-                raise RefreshError(f"plugin archive repeats batteries/{'/'.join(relative)}")
+                raise RefreshError(f"batteries archive repeats batteries/{'/'.join(relative)}")
             seen.add(relative)
             target = destination.joinpath(*relative)
             if member.isdir():
                 target.mkdir(parents=True, exist_ok=True)
                 continue
             if not member.isfile():
-                raise RefreshError(f"plugin archive battery entry is not a regular file: {member.name}")
+                raise RefreshError(f"batteries archive battery entry is not a regular file: {member.name}")
             extracted_bytes += member.size
             if extracted_bytes > MAX_EXTRACTED_BYTES:
                 raise RefreshError(f"battery files exceed {MAX_EXTRACTED_BYTES} extracted bytes")
             source = package.extractfile(member)
             if source is None:
-                raise RefreshError(f"plugin archive cannot read {member.name}")
+                raise RefreshError(f"batteries archive cannot read {member.name}")
             target.parent.mkdir(parents=True, exist_ok=True)
             with source, target.open("xb") as output:
                 shutil.copyfileobj(source, output, length=1024 * 1024)
@@ -163,7 +163,7 @@ def extract_batteries(archive: bytes, destination: Path) -> None:
             if len(relative) == 2 and relative[1] == "appa.toml":
                 battery_configs += 1
     if battery_configs == 0:
-        raise RefreshError("plugin archive carries no battery appa.toml files")
+        raise RefreshError("batteries archive carries no battery appa.toml files")
 
 
 def previous_path(target: Path) -> Path:
@@ -279,7 +279,7 @@ def refresh(
     opener: Callable = urlopen,
 ) -> str:
     tag, checksums_url, archive_url = release_assets(repository, tag, opener)
-    archive_name = f"appa-plugin-{tag.removeprefix('v')}.tar.gz"
+    archive_name = f"appa-batteries-{tag.removeprefix('v')}.tar.gz"
     checksums = download(checksums_url, MAX_CHECKSUM_BYTES, opener)
     archive = download(archive_url, MAX_ARCHIVE_BYTES, opener)
     verify_archive(archive, checksums, archive_name)

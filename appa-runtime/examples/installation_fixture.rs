@@ -15,11 +15,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.len() != 3 {
         return Err(
-            "usage: installation_fixture <release-identity-binary> <native-plugin-archive> <new-bundle-path>".into(),
+            "usage: installation_fixture <release-identity-binary> <batteries-archive> <new-bundle-path>".into(),
         );
     }
     let binary = Path::new(&args[0]);
-    let plugin = Path::new(&args[1]);
+    let batteries = Path::new(&args[1]);
     let output = Path::new(&args[2]);
     let identity = std::process::Command::new(binary).arg("build-info").output()?;
     if !identity.status.success() {
@@ -29,9 +29,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let release = identity["release"]
         .as_str()
         .ok_or("fixture binary has no release identity")?;
-    let plugin_digest = digest(plugin)?;
-    if identity["plugin_sha256"].as_str() != Some(plugin_digest.hex()) {
-        return Err("fixture native plugin is not this binary's compiled twin".into());
+    let batteries_digest = digest(batteries)?;
+    if identity["batteries_sha256"].as_str() != Some(batteries_digest.hex()) {
+        return Err("fixture batteries archive is not this binary's compiled twin".into());
     }
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let marketplace = repository.join("marketplace");
@@ -61,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let marketplace_digest = digest(marketplace_archive.path())?;
     let placeholder = ArtifactDigest::of_bytes(b"unused fixture artifact");
     let descriptor = serde_json::json!({"schema":1,"repository":REPOSITORY,"commit":identity["commit"],"release":release,"protocol":appa_package::PROTOCOL,
-        "catalog":digest(&marketplace.join("marketplace.toml"))?,"marketplace":marketplace_digest,"claude_plugin":plugin_digest,"runtime_chart":placeholder,
+        "catalog":digest(&marketplace.join("marketplace.toml"))?,"marketplace":marketplace_digest,"batteries":batteries_digest,"runtime_chart":placeholder,
         "binaries":Platform::ALL.into_iter().map(|p|(p,if p == platform { binary_digest.clone() } else { placeholder.clone() })).collect::<BTreeMap<_,_>>(),
         "images":Image::ALL.into_iter().map(|image|(image,serde_json::json!({"digest":placeholder,"platforms":{"linux/amd64":placeholder}}))).collect::<BTreeMap<_,_>>()});
     let generation = Generation::parse(&serde_json::to_vec(&descriptor)?)?;
@@ -78,7 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     tar.append_dir_all("marketplace", &marketplace)?;
     tar.append_path_with_name(binary_archive.path(), format!("artifacts/{}", platform.archive()))?;
-    tar.append_path_with_name(plugin, format!("artifacts/appa-plugin-{}.tar.gz", &release[1..]))?;
+    tar.append_path_with_name(batteries, format!("artifacts/appa-batteries-{}.tar.gz", &release[1..]))?;
     tar.append_path_with_name(
         marketplace_archive.path(),
         format!("artifacts/appa-marketplace-{}.tar.gz", &release[1..]),

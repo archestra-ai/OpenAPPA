@@ -65,7 +65,7 @@ fn render(dist: &Path, marketplace: &Path, images: &Path, commit: &str, release:
         "schema": 1, "repository": REPOSITORY, "commit": commit, "release": release,
         "protocol": appa_package::PROTOCOL, "catalog": digest(&catalog)?,
         "marketplace": digest(&dist.join(format!("appa-marketplace-{version}.tar.gz")))?,
-        "claude_plugin": digest(&dist.join(format!("appa-plugin-{version}.tar.gz")))?,
+        "batteries": digest(&dist.join(format!("appa-batteries-{version}.tar.gz")))?,
         "runtime_chart": digest(&dist.join(format!("appa-runtime-{version}.tgz")))?,
         "binaries": binaries, "images": image_digests,
     });
@@ -114,7 +114,7 @@ mod tests {
         }
         for artifact in [
             "appa-marketplace-1.0.0.tar.gz",
-            "appa-plugin-1.0.0.tar.gz",
+            "appa-batteries-1.0.0.tar.gz",
             "appa-runtime-1.0.0.tgz",
         ] {
             fs::write(dist.join(artifact), b"archive").unwrap();

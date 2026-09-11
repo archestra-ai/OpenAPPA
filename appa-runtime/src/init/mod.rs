@@ -7,7 +7,7 @@
 //! the appa-guide skill is written from bytes compiled into the binary.
 
 use crate::config::ConfigError;
-use crate::installation::archive::{self, ArchiveError, VerifiedArchive};
+use crate::installation::archive;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -84,8 +84,6 @@ pub enum InitError {
         path: PathBuf,
         message: String,
     },
-    #[error(transparent)]
-    Archive(#[from] ArchiveError),
     #[error("{operation}; restoring the previous installation also failed: {recovery}")]
     Recovery {
         operation: Box<InitError>,
@@ -103,11 +101,7 @@ pub enum InitError {
 /// before the profile is switched over. Directories and the deployed binary's
 /// parent are written before that settling; both are additive and neither is
 /// what Claude reads.
-pub fn activate_claude_code(
-    config: &Path,
-    archive: &Path,
-    previous_binary: Option<&Path>,
-) -> Result<String, InitError> {
+pub fn activate_claude_code(config: &Path, previous_binary: Option<&Path>) -> Result<String, InitError> {
     // The endpoint is settled before anything is read: a release build ignores
     // the environment here, and the release check proves it on this refusal.
     let endpoint = Endpoint::resolve()?;
@@ -119,8 +113,21 @@ pub fn activate_claude_code(
         path: config.clone(),
         source: Box::new(source),
     })?;
-    let source = VerifiedArchive::of(archive)?;
-    install_claude(&source.label(), endpoint, config, previous_binary)
+    install_claude(&build_label(), endpoint, config, previous_binary)
+}
+
+/// The origin as a receipt names it: this binary's release tag, or the commit
+/// it was built from.
+fn build_label() -> String {
+    match option_env!("APPA_RELEASE_REF") {
+        Some(release) => format!("appa {release}"),
+        None => format!(
+            "appa build {}",
+            option_env!("APPA_BUILD_COMMIT")
+                .map(|commit| &commit[..commit.len().min(12)])
+                .unwrap_or("unknown")
+        ),
+    }
 }
 
 fn install_claude(

@@ -327,7 +327,7 @@ fn deployment_for(root: &Path, kagent: Option<&[&str]>) -> std::path::PathBuf {
     let archive = archive.into_inner().unwrap().finish().unwrap();
     let digest = ArtifactDigest::of_bytes(&archive);
     let descriptor = serde_json::json!({"schema":1,"repository":REPOSITORY,"commit":"a".repeat(40),"release":"v1.0.0","protocol":appa_package::PROTOCOL,
-        "catalog":ArtifactDigest::of_bytes(catalog.as_bytes()),"marketplace":digest,"claude_plugin":digest,"runtime_chart":digest,
+        "catalog":ArtifactDigest::of_bytes(catalog.as_bytes()),"marketplace":digest,"batteries":digest,"runtime_chart":digest,
         "binaries":Platform::ALL.into_iter().map(|platform|(platform,digest.clone())).collect::<BTreeMap<_,_>>(),
         "images":Image::ALL.into_iter().map(|image|(image,serde_json::json!({"digest":digest,"platforms":{"linux/amd64":digest}}))).collect::<BTreeMap<_,_>>()});
     let generation = Generation::parse(&serde_json::to_vec(&descriptor).unwrap()).unwrap();

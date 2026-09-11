@@ -248,10 +248,10 @@ pub struct Generation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Artifacts {
     /// The release workflow's assets for one version tag: every platform's
-    /// executable, the plugin and marketplace archives, the chart, the images.
+    /// executable, the batteries and marketplace archives, the chart, the images.
     Published(Published),
     /// One development build installing itself on the machine that built it:
-    /// its own executable and the plugin tree stamped into it at compilation.
+    /// its own executable and the batteries tree stamped into it at compilation.
     Build(Build),
 }
 
@@ -259,7 +259,7 @@ pub enum Artifacts {
 pub struct Published {
     release: String,
     marketplace: ArtifactDigest,
-    claude_plugin: ArtifactDigest,
+    batteries: ArtifactDigest,
     runtime_chart: ArtifactDigest,
     binaries: BTreeMap<Platform, ArtifactDigest>,
     images: BTreeMap<Image, ImageDigests>,
@@ -278,8 +278,8 @@ impl Published {
     fn version(&self) -> &str {
         &self.release[1..]
     }
-    fn plugin_archive(&self) -> String {
-        format!("appa-plugin-{}.tar.gz", self.version())
+    fn batteries_archive(&self) -> String {
+        format!("appa-batteries-{}.tar.gz", self.version())
     }
     fn marketplace_archive(&self) -> String {
         format!("appa-marketplace-{}.tar.gz", self.version())
@@ -292,22 +292,22 @@ impl Published {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Build {
     platform: Platform,
-    plugin_tree: String,
+    batteries_tree: String,
     binary: ArtifactDigest,
-    claude_plugin: ArtifactDigest,
+    batteries: ArtifactDigest,
 }
 
 impl Build {
     pub fn platform(&self) -> Platform {
         self.platform
     }
-    /// The canonical digest of the staged plugin tree, as the build stamps it.
-    pub fn plugin_tree(&self) -> &str {
-        &self.plugin_tree
+    /// The canonical digest of the staged batteries tree, as the build stamps it.
+    pub fn batteries_tree(&self) -> &str {
+        &self.batteries_tree
     }
 }
 
-pub const BUILD_PLUGIN_ARCHIVE: &str = "appa-plugin-build.tar.gz";
+pub const BUILD_BATTERIES_ARCHIVE: &str = "appa-batteries-build.tar.gz";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -319,7 +319,7 @@ struct RawPublished {
     protocol: u32,
     catalog: ArtifactDigest,
     marketplace: ArtifactDigest,
-    claude_plugin: ArtifactDigest,
+    batteries: ArtifactDigest,
     runtime_chart: ArtifactDigest,
     binaries: BTreeMap<Platform, ArtifactDigest>,
     images: BTreeMap<Image, ImageDigests>,
@@ -341,9 +341,9 @@ struct RawBuild {
     catalog: ArtifactDigest,
     source: BuildMarker,
     platform: Platform,
-    plugin_tree: String,
+    batteries_tree: String,
     binary: ArtifactDigest,
-    claude_plugin: ArtifactDigest,
+    batteries: ArtifactDigest,
 }
 
 /// The published shape is the release workflow's, unchanged. A build
@@ -396,9 +396,12 @@ fn validate_release(release: &str) -> Result<(), GenerationError> {
     Ok(())
 }
 
-fn validate_plugin_tree(digest: &str) -> Result<(), GenerationError> {
+fn validate_batteries_tree(digest: &str) -> Result<(), GenerationError> {
     if digest.len() != 64 || !digest.bytes().all(lower_hex) {
-        return Err(invalid("plugin_tree", "expected 64 lowercase hexadecimal characters"));
+        return Err(invalid(
+            "batteries_tree",
+            "expected 64 lowercase hexadecimal characters",
+        ));
     }
     Ok(())
 }
@@ -428,7 +431,7 @@ impl TryFrom<RawGeneration> for Generation {
                     artifacts: Artifacts::Published(Published {
                         release: raw.release,
                         marketplace: raw.marketplace,
-                        claude_plugin: raw.claude_plugin,
+                        batteries: raw.batteries,
                         runtime_chart: raw.runtime_chart,
                         binaries: raw.binaries,
                         images: raw.images,
@@ -437,15 +440,15 @@ impl TryFrom<RawGeneration> for Generation {
             }
             RawGeneration::Build(raw) => {
                 validate_identity(raw.schema, &raw.repository, raw.protocol)?;
-                validate_plugin_tree(&raw.plugin_tree)?;
+                validate_batteries_tree(&raw.batteries_tree)?;
                 Ok(Self {
                     commit: raw.commit,
                     catalog: raw.catalog,
                     artifacts: Artifacts::Build(Build {
                         platform: raw.platform,
-                        plugin_tree: raw.plugin_tree,
+                        batteries_tree: raw.batteries_tree,
                         binary: raw.binary,
-                        claude_plugin: raw.claude_plugin,
+                        batteries: raw.batteries,
                     }),
                 })
             }
@@ -464,7 +467,7 @@ impl From<Generation> for RawGeneration {
                 protocol: crate::PROTOCOL,
                 catalog: generation.catalog,
                 marketplace: published.marketplace,
-                claude_plugin: published.claude_plugin,
+                batteries: published.batteries,
                 runtime_chart: published.runtime_chart,
                 binaries: published.binaries,
                 images: published.images,
@@ -477,9 +480,9 @@ impl From<Generation> for RawGeneration {
                 catalog: generation.catalog,
                 source: BuildMarker::Build,
                 platform: build.platform,
-                plugin_tree: build.plugin_tree,
+                batteries_tree: build.batteries_tree,
                 binary: build.binary,
-                claude_plugin: build.claude_plugin,
+                batteries: build.batteries,
             }),
         }
     }
@@ -498,19 +501,19 @@ impl Generation {
         commit: Commit,
         catalog: ArtifactDigest,
         platform: Platform,
-        plugin_tree: &str,
+        batteries_tree: &str,
         binary: ArtifactDigest,
-        claude_plugin: ArtifactDigest,
+        batteries: ArtifactDigest,
     ) -> Result<Self, GenerationError> {
-        validate_plugin_tree(plugin_tree)?;
+        validate_batteries_tree(batteries_tree)?;
         Ok(Self {
             commit,
             catalog,
             artifacts: Artifacts::Build(Build {
                 platform,
-                plugin_tree: plugin_tree.to_owned(),
+                batteries_tree: batteries_tree.to_owned(),
                 binary,
-                claude_plugin,
+                batteries,
             }),
         })
     }
@@ -545,11 +548,11 @@ impl Generation {
         }
     }
 
-    /// The archive that carries the Claude Code plugin tree.
-    pub fn plugin_archive(&self) -> String {
+    /// The archive that carries the batteries tree.
+    pub fn batteries_archive(&self) -> String {
         match &self.artifacts {
-            Artifacts::Published(published) => published.plugin_archive(),
-            Artifacts::Build(_) => BUILD_PLUGIN_ARCHIVE.to_owned(),
+            Artifacts::Published(published) => published.batteries_archive(),
+            Artifacts::Build(_) => BUILD_BATTERIES_ARCHIVE.to_owned(),
         }
     }
 
@@ -573,13 +576,13 @@ impl Generation {
                     .map(|(platform, digest)| (platform.archive().to_owned(), digest.clone()))
                     .collect();
                 files.insert(published.marketplace_archive(), published.marketplace.clone());
-                files.insert(published.plugin_archive(), published.claude_plugin.clone());
+                files.insert(published.batteries_archive(), published.batteries.clone());
                 files.insert(published.runtime_chart_archive(), published.runtime_chart.clone());
                 files
             }
             Artifacts::Build(build) => BTreeMap::from([
                 (build.platform.archive().to_owned(), build.binary.clone()),
-                (BUILD_PLUGIN_ARCHIVE.to_owned(), build.claude_plugin.clone()),
+                (BUILD_BATTERIES_ARCHIVE.to_owned(), build.batteries.clone()),
             ]),
         }
     }
@@ -594,7 +597,7 @@ mod tests {
         let digest = ArtifactDigest::of_bytes(b"fixture");
         json!({"schema": 1, "repository": REPOSITORY, "commit": "a".repeat(40),
             "release": "v0.14.1", "protocol": crate::PROTOCOL, "catalog": digest,
-            "marketplace": digest, "claude_plugin": digest, "runtime_chart": digest,
+            "marketplace": digest, "batteries": digest, "runtime_chart": digest,
             "binaries": Platform::ALL.into_iter().map(|p| (p, digest.clone())).collect::<BTreeMap<_, _>>(),
             "images": Image::ALL.into_iter().map(|i| (i, json!({"digest": digest,
                 "platforms": {"linux/amd64": digest}}))).collect::<BTreeMap<_, _>>()})
@@ -609,7 +612,7 @@ mod tests {
             generation
         );
         assert_eq!(generation.archives().len(), 9);
-        assert!(generation.archives().contains_key("appa-plugin-0.14.1.tar.gz"));
+        assert!(generation.archives().contains_key("appa-batteries-0.14.1.tar.gz"));
         assert_eq!(generation.commit().as_str(), "a".repeat(40));
         assert_eq!(generation.published().unwrap().release(), "v0.14.1");
         assert!(generation.build_artifacts().is_none());
@@ -637,7 +640,7 @@ mod tests {
         assert!(parsed.published().is_none());
         assert_eq!(parsed.build_artifacts().unwrap().platform(), Platform::MacArm64);
         assert_eq!(parsed.archives().len(), 2);
-        assert_eq!(parsed.plugin_archive(), BUILD_PLUGIN_ARCHIVE);
+        assert_eq!(parsed.batteries_archive(), BUILD_BATTERIES_ARCHIVE);
         assert!(parsed.marketplace_archive().is_none());
         assert!(parsed.runtime_chart_archive().is_none());
         assert!(
