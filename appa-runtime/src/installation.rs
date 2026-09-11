@@ -1245,7 +1245,12 @@ mod tests {
         let base = "# authored deployment\n[policy]\nversion=2\n[externals]\ntimeout_ms=100\nmax_body_bytes=1024\n";
         let store = crate::batteries::store_dir(install.config_path());
         let with_include = includes::add(base, &includes::battery_include(&github)).unwrap();
-        let with_alias = includes::bind_server(&with_include, "github", "work-github").unwrap();
+        let with_alias = includes::bind_server(
+            &with_include,
+            &appa_package::Namespace::parse("github").unwrap(),
+            "work-github",
+        )
+        .unwrap();
         let stray = includes::add(&with_alias, "batteries/stray/appa.toml").unwrap();
         assert!(install.commit_config(None, stray.as_bytes(), &selected).is_err());
         assert!(!store.exists(), "a refused commit leaves the store alone");

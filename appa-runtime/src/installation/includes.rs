@@ -37,11 +37,16 @@ fn include_list(document: &mut DocumentMut) -> Result<&mut toml_edit::Array, Ins
     Ok(includes)
 }
 
-/// The text with `include` in its include list once: unchanged when it is there.
+/// The text with `include` in its include list once: unchanged when it is
+/// there, under any spelling that names the same battery.
 pub(crate) fn add(text: &str, include: &str) -> Result<String, InstallError> {
     let mut document = document(text)?;
     let includes = include_list(&mut document)?;
-    if includes.iter().any(|value| value.as_str() == Some(include)) {
+    let battery = crate::batteries::name_from_include(Path::new(include));
+    let present = includes.iter().filter_map(toml_edit::Value::as_str).any(|entry| {
+        entry == include || (battery.is_some() && crate::batteries::name_from_include(Path::new(entry)) == battery)
+    });
+    if present {
         return Ok(text.to_owned());
     }
     includes.push(include);
@@ -68,7 +73,7 @@ pub(crate) fn remove(text: &str, include: &str) -> Result<String, InstallError> 
 }
 
 /// The text with `server_aliases.<namespace>` naming `server`.
-pub(crate) fn bind_server(text: &str, namespace: &str, server: &str) -> Result<String, InstallError> {
+pub(crate) fn bind_server(text: &str, namespace: &Namespace, server: &str) -> Result<String, InstallError> {
     let mut document = document(text)?;
     if document.get("server_aliases").is_none() {
         document["server_aliases"] = toml_edit::table();
@@ -76,10 +81,10 @@ pub(crate) fn bind_server(text: &str, namespace: &str, server: &str) -> Result<S
     let aliases = document["server_aliases"]
         .as_table_like_mut()
         .ok_or_else(|| InstallError::Invalid("server_aliases must be a table".into()))?;
-    if aliases.get(namespace).and_then(Item::as_str) == Some(server) {
+    if aliases.get(namespace.as_str()).and_then(Item::as_str) == Some(server) {
         return Ok(text.to_owned());
     }
-    aliases.insert(namespace, toml_edit::value(server));
+    aliases.insert(namespace.as_str(), toml_edit::value(server));
     Ok(document.to_string())
 }
 
@@ -130,6 +135,8 @@ mod tests {
         let added = add(AUTHORED, &include).unwrap();
         assert!(added.contains(AUTHORED));
         assert_eq!(add(&added, &include).unwrap(), added);
+        let spelled = "include = ['./batteries/github/appa.toml']\n";
+        assert_eq!(add(spelled, &include).unwrap(), spelled);
         assert_eq!(included(&added).unwrap(), BTreeSet::from(["github".to_owned()]));
         assert_eq!(remove(&added, &include).unwrap(), AUTHORED);
     }
@@ -154,20 +161,20 @@ mod tests {
 
     #[test]
     fn a_server_binding_replaces_the_namespaces_alias_and_unbinding_takes_only_the_named_ones() {
-        let bound = bind_server(AUTHORED, "github", "work-github").unwrap();
-        assert!(bound.contains(AUTHORED));
-        assert_eq!(bind_server(&bound, "github", "work-github").unwrap(), bound);
-        let rebound = bind_server(&bound, "github", "home-github").unwrap();
-        assert!(rebound.contains("home-github") && !rebound.contains("work-github"));
-        let with_slack = bind_server(&rebound, "slack", "team-slack").unwrap();
         let github = Namespace::parse("github").unwrap();
+        let bound = bind_server(AUTHORED, &github, "work-github").unwrap();
+        assert!(bound.contains(AUTHORED));
+        assert_eq!(bind_server(&bound, &github, "work-github").unwrap(), bound);
+        let rebound = bind_server(&bound, &github, "home-github").unwrap();
+        assert!(rebound.contains("home-github") && !rebound.contains("work-github"));
+        let slack = Namespace::parse("slack").unwrap();
+        let with_slack = bind_server(&rebound, &slack, "team-slack").unwrap();
         let unbound = unbind_servers(&with_slack, std::slice::from_ref(&github)).unwrap();
         assert!(!unbound.contains("home-github") && unbound.contains("team-slack"));
         assert_eq!(
             unbind_servers(&unbound, std::slice::from_ref(&github)).unwrap(),
             unbound
         );
-        let slack = Namespace::parse("slack").unwrap();
         assert_eq!(
             unbind_servers(&unbound, std::slice::from_ref(&slack)).unwrap(),
             AUTHORED

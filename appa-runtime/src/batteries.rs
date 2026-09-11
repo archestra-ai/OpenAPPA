@@ -28,10 +28,11 @@ pub fn default_search_path(config: &Path) -> Vec<PathBuf> {
     vec![store_dir(config)]
 }
 
-/// Replace the store with a version's batteries tree: the whole directory
-/// by one rename, so a reader sees the earlier store or the new one, and
-/// nothing else stays in it. A tree without batteries leaves no store.
-/// The names stocked, sorted.
+/// Replace the store with a version's batteries tree, whole: the earlier
+/// store is renamed away and the staged one renamed in, so a reader sees
+/// one of them complete, or for the moment between the two renames no
+/// store at all, and nothing else stays in it. A tree without batteries
+/// leaves no store. The names stocked, sorted.
 pub fn stock(tree: &Path, store: &Path) -> io::Result<Vec<String>> {
     let mut names = match names_in(tree) {
         Ok(names) => names,
