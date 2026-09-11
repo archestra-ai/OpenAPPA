@@ -185,7 +185,7 @@ jobs:
           # one: this probe used to pass on an empty answer, which is how it
           # stayed inert for four releases.
           hostile=$(APPA_ENDPOINT=http://127.0.0.1:0 "./${EXECUTABLE}" activate-claude \
-            --config ./no-such-dir/appa.toml --archive ./no-such-archive.tar.gz 2>&1 || true)
+            --config ./no-such-dir/appa.toml 2>&1 || true)
           case "$hostile" in
             *"is not a usable runtime endpoint"*)
               echo "::error::the released binary honoured APPA_ENDPOINT: ${hostile}"
@@ -305,7 +305,7 @@ jobs:
             # classified, the unrecognised one included: this probe used to pass
             # on an empty answer, which is how it stayed inert for four releases.
             $env:APPA_ENDPOINT = "http://127.0.0.1:0"
-            $hostile = (& $cli activate-claude --config .\no-such-dir\appa.toml --archive .\no-such-archive.tar.gz 2>&1 | Out-String)
+            $hostile = (& $cli activate-claude --config .\no-such-dir\appa.toml 2>&1 | Out-String)
             $env:APPA_ENDPOINT = $null
             if ($hostile -match "is not a usable runtime endpoint") {
               throw "the released binary honoured APPA_ENDPOINT: $hostile"
