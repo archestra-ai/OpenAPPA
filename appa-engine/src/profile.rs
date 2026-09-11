@@ -634,7 +634,7 @@ pub(crate) fn covering_declaration(config: &RegistryConfig) -> ProfileDeclaratio
 mod tests {
     use super::*;
     use crate::authority::{Authority, DeclaredTransition, Hint, Mandate, Sanitizer, SanitizerPoints, Scope};
-    use crate::contract::{Delta, LabelRequirements, Requires};
+    use crate::contract::{Delta, DeltaAudience, LabelRequirements, Requires};
     use crate::engine::Engine;
     use crate::fact::EffectSet;
     use crate::label::DeclaredAudience;
@@ -1041,7 +1041,9 @@ mod tests {
         let mut leak = tool("leak");
         leak.delta = Delta {
             trust: None,
-            audience: Some(DeclaredAudience::restricted([ReaderId::new("insider")])),
+            audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                "insider",
+            )]))),
         };
         let mut cfg = config(vec![leak]);
         cfg.sanitizers = vec![Sanitizer {
@@ -1332,7 +1334,9 @@ mod tests {
         let mut with_reader = omitted.clone();
         with_reader.tools.push(ToolDeclaration::Declared({
             let mut t = tool("read");
-            t.delta.audience = Some(DeclaredAudience::restricted([ReaderId::new("alice")]));
+            t.delta.audience = Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                "alice",
+            )])));
             t
         }));
         assert_eq!(rendered(&with_reader), ["self", "internal", "alice"]);
@@ -1341,7 +1345,7 @@ mod tests {
         with_group.audience = crate::audience::AudienceConfig {
             sources: vec![crate::audience::SourceRegistration {
                 provider: "slack".to_string(),
-                templates: vec![crate::audience::SelectorTemplate::new("user-group/<handle>")],
+                templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
             }],
             groups: vec![crate::audience::NamedAudience {
                 name: crate::names::GroupName::new("team"),
@@ -1408,5 +1412,49 @@ mod tests {
             .insert(ToolName::new("fetch"), ExecutorClass::Assumed);
         let weaker = DeploymentProfile::declare(weaker).unwrap();
         assert_ne!(identity(&cfg, &weaker), base);
+    }
+
+    /// Which collections a source declares, and what each may feed, is part of what the
+    /// policy means: the identity document renders every declared template with its role,
+    /// and a declaration edit moves the identity as a delta edit does.
+    #[test]
+    fn a_sources_declared_templates_render_in_the_identity_and_move_it() {
+        use crate::audience::{AudienceConfig, DeclaredTemplate, SelectorSpec, SourceRegistration};
+        use crate::label::ChainAudience;
+
+        let with_templates = |templates: Vec<DeclaredTemplate>| {
+            let mut cfg = config(vec![tool("fetch")]);
+            cfg.audience = AudienceConfig {
+                sources: vec![SourceRegistration {
+                    provider: "slack".to_string(),
+                    templates,
+                }],
+                self_from: vec![SelectorSpec {
+                    provider: "slack".to_string(),
+                    selector: "viewer".to_string(),
+                }],
+                ..AudienceConfig::default()
+            };
+            cfg
+        };
+        let viewer_only = with_templates(vec![DeclaredTemplate::new("viewer", Some(ChainAudience::Self_))]);
+        let profile = covering_profile(&viewer_only);
+        let base = identity(&viewer_only, &profile);
+
+        let engine = open(viewer_only.clone(), covering_declaration(&viewer_only)).expect("the fixture opens");
+        let document = identity_document_from_registry(engine.registry());
+        assert_eq!(
+            document["audience"]["sources"],
+            serde_json::json!([{ "provider": "slack", "templates": [{ "template": "viewer", "feeds": "self" }] }])
+        );
+
+        let with_group = with_templates(vec![
+            DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)),
+            DeclaredTemplate::named("user-group/<handle>"),
+        ]);
+        assert_ne!(identity(&with_group, &profile), base, "a declared template is policy");
+
+        let refed = with_templates(vec![DeclaredTemplate::new("viewer", Some(ChainAudience::Internal))]);
+        assert_ne!(identity(&refed, &profile), base, "what a template feeds is policy");
     }
 }

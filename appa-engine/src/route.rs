@@ -885,7 +885,9 @@ fn disclosure_cmp(a: &[Audience], b: &[Audience], within: &WithinAssertions) -> 
 mod tests {
     use super::*;
     use crate::authority::{Authority, Mandate, Sanitizer, SanitizerPoints, Scope};
-    use crate::contract::{AudienceRequirement, Delta, HistoryRequirement, RecipientSpec, Requires, ToolAnnotation};
+    use crate::contract::{
+        AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, RecipientSpec, Requires, ToolAnnotation,
+    };
     use crate::fact::{CloseOutcome, EffectSet, Fact};
     use crate::label::DeclaredAudience;
     use crate::label::{Label, ReaderId, Trust};
@@ -972,7 +974,7 @@ mod tests {
     fn narrowing_to(mut contract: ToolAnnotation, trust: Option<Trust>, audience: Option<Audience>) -> ToolAnnotation {
         contract.delta = Delta {
             trust,
-            audience: audience.map(DeclaredAudience::literal),
+            audience: audience.map(|audience| DeltaAudience::Static(DeclaredAudience::literal(audience))),
         };
         contract
     }

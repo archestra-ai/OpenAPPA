@@ -21,12 +21,21 @@
 #   requires = { trust = "trusted" }
 #   delta = {}
 #
-# The battery also ships `audience-source.py`, the `slack` audience
-# source. Audience mappings are root-only, so the binding sits beside
-# them in the root config, not here — the README shows the wiring.
+# The battery also binds `audience-source.py`, the `slack` audience
+# source, and declares the selectors it serves. The root config maps
+# `self` and `internal` onto them — the README shows the wiring.
 
 [policy]
 version = 2
+
+[externals.audience.slack]
+command = ["python3", "audience-source.py"]
+token_env = "APPA_PROVIDER_SLACK_TOKEN"
+selectors = [
+  { template = "viewer", feeds = "self" },
+  { template = "full-members", feeds = "internal" },
+  { template = "user-group/<handle>" },
+]
 
 # --- reads: internal ---
 

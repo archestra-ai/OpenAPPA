@@ -83,6 +83,7 @@ mod tests {
     use super::*;
 
     use appa_engine::authority::DeclaredTransition;
+    use appa_engine::contract::DeltaAudience;
     use appa_engine::label::DeclaredAudience;
     use appa_engine::label::ReaderId;
     use appa_engine::value::ToolName;
@@ -111,10 +112,10 @@ mod tests {
         };
         assert_eq!(
             invoices.delta.audience.as_ref(),
-            Some(&DeclaredAudience::restricted([
+            Some(&DeltaAudience::Static(DeclaredAudience::restricted([
                 ReaderId::new("cfo@corp.example"),
                 ReaderId::new("ap-lead@corp.example"),
-            ]))
+            ])))
         );
         let email = checked
             .config

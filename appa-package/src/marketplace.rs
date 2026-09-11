@@ -11,7 +11,7 @@ use thiserror::Error;
 use crate::digest::TreeDigest;
 use crate::manifest::{ManifestError, SCHEMA};
 use crate::names::{CredentialPrefix, Host, Namespace, PackageKind, PackageName, RelativePath};
-use crate::package::{Package, Role};
+use crate::package::{Battery, Package, Role};
 
 /// One listed package: where it lives and what its tree must digest to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +117,12 @@ pub enum OwnershipError {
         second: PackageName,
         namespace: Namespace,
     },
+    #[error("`{first}` and `{second}` both bind the audience source `{provider}`")]
+    SharedAudienceProvider {
+        first: PackageName,
+        second: PackageName,
+        provider: String,
+    },
     #[error("`{first}` reads every credential `{second}` reads, under `{prefix}`")]
     NestedCredentials {
         first: PackageName,
@@ -148,10 +154,10 @@ pub enum OwnershipError {
 /// this marketplace written for the plugin's host, so a first install never
 /// selects a package the catalog cannot supply.
 pub fn check_ownership(packages: &[Package]) -> Result<(), OwnershipError> {
-    let batteries: Vec<(&PackageName, &[Namespace])> = packages
+    let batteries: Vec<(&PackageName, &Battery)> = packages
         .iter()
         .filter_map(|package| match &package.role {
-            Role::Battery(battery) => Some((&package.name, battery.namespaces.as_slice())),
+            Role::Battery(battery) => Some((&package.name, battery)),
             Role::Plugin(_) => None,
         })
         .collect();
@@ -167,13 +173,29 @@ pub fn check_ownership(packages: &[Package]) -> Result<(), OwnershipError> {
     }
 
     let mut owner: BTreeMap<&Namespace, &PackageName> = BTreeMap::new();
-    for (name, namespaces) in &batteries {
-        for namespace in *namespaces {
+    for (name, battery) in &batteries {
+        for namespace in &battery.namespaces {
             if let Some(first) = owner.insert(namespace, name) {
                 return Err(OwnershipError::SharedNamespace {
                     first: first.clone(),
                     second: (*name).clone(),
                     namespace: namespace.clone(),
+                });
+            }
+        }
+    }
+
+    // An audience source answers who may read what, so one provider name has
+    // one battery answering for it — flat and exact, as a namespace is owned.
+    // The providers a battery binds are read from its validated policy.
+    let mut source_owner: BTreeMap<&str, &PackageName> = BTreeMap::new();
+    for (name, battery) in &batteries {
+        for provider in &battery.audiences {
+            if let Some(first) = source_owner.insert(provider.as_str(), name) {
+                return Err(OwnershipError::SharedAudienceProvider {
+                    first: first.clone(),
+                    second: (*name).clone(),
+                    provider: provider.clone(),
                 });
             }
         }
@@ -335,19 +357,29 @@ mod tests {
     }
 
     fn battery(name: &str, namespaces: &[&str]) -> Package {
+        battery_with_audiences(name, namespaces, &[])
+    }
+
+    /// A battery as `validate_package` returns it: the audience providers its policy binds
+    /// are read from the policy, not the manifest.
+    fn battery_with_audiences(name: &str, namespaces: &[&str], audiences: &[&str]) -> Package {
         let namespaces = namespaces
             .iter()
-            .map(|namespace| format!("\"{namespace}\""))
+            .map(|item| format!("\"{item}\""))
             .collect::<Vec<_>>()
             .join(", ");
-        Package::parse(
+        let mut package = Package::parse(
             &format!(
                 "schema = 1\nname = \"{name}\"\ndescription = \"a battery\"\n\n\
                  [battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nnamespaces = [{namespaces}]\n"
             ),
             Path::new("appa-package.toml"),
         )
-        .expect("the manifest parses")
+        .expect("the manifest parses");
+        if let Role::Battery(battery) = &mut package.role {
+            battery.audiences = audiences.iter().map(|item| item.to_string()).collect();
+        }
+        package
     }
 
     fn plugin(name: &str) -> Package {
@@ -413,6 +445,25 @@ mod tests {
         assert!(matches!(
             check_ownership(&[slack, battery("other", &["slack"])]),
             Err(OwnershipError::SharedNamespace { .. })
+        ));
+    }
+
+    /// An audience source answers who may read what, so one provider name has
+    /// one battery behind it — a flat, exact match, as a namespace is owned.
+    #[test]
+    fn two_batteries_may_not_bind_one_audience_source() {
+        let slack = battery_with_audiences("slack", &["claude_ai_Slack"], &["slack"]);
+
+        assert!(
+            check_ownership(&[
+                slack.clone(),
+                battery_with_audiences("github", &["github"], &["github"])
+            ])
+            .is_ok()
+        );
+        assert!(matches!(
+            check_ownership(&[slack, battery_with_audiences("other", &["other"], &["slack"])]),
+            Err(OwnershipError::SharedAudienceProvider { .. })
         ));
     }
 

@@ -1,6 +1,6 @@
 """The slack audience source: one consult in, one answer out.
 
-Serves the stock `slack` selector catalog over the Slack Web API:
+Serves these selector templates over the Slack Web API:
 
   viewer               the token's own reader
   full-members         every full workspace member — no guests, no
@@ -31,6 +31,8 @@ import urllib.request
 
 API_ROOT = "https://slack.com/api/"
 TOKEN_VAR = "APPA_PROVIDER_SLACK_TOKEN"
+SOURCE_NAME = "slack"
+SERVED_TEMPLATES = ["viewer", "full-members", "user-group/<handle>"]
 TIMEOUT_SECONDS = 30
 
 
@@ -171,6 +173,23 @@ def answer(call, artifact):
             raise ValueError("the artifact must carry exactly a selector or a member")
 
 
+def check_declaration(request):
+    """The policy's declared templates against the ones this script serves.
+
+    The binding beside this script declares them to the policy, and the
+    runtime sends that declaration with every consult. A mismatch is a
+    version skew between policy and script, refused before any credential
+    is read; the exit status 2 tells it apart from a provider failure.
+    """
+    declared = request.get("declaration", {}).get("templates")
+    if declared != SERVED_TEMPLATES:
+        print(
+            f"{SOURCE_NAME} audience source: the policy declares {declared!r}, this script serves {SERVED_TEMPLATES!r}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+
 def main():
     request = json.load(sys.stdin)
 
@@ -178,8 +197,9 @@ def main():
         raise ValueError("unsupported request version")
     if request.get("kind") != "audience":
         raise ValueError("unexpected consult kind")
-    if request.get("name") != "slack":
+    if request.get("name") != SOURCE_NAME:
         raise ValueError("unexpected source name")
+    check_declaration(request)
 
     token = os.environ.get(TOKEN_VAR)
     if not token:

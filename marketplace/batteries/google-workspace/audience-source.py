@@ -1,7 +1,7 @@
 """The google-workspace audience source: one consult in, one answer out.
 
-Serves the stock `google-workspace` selector catalog over Google's
-OpenID userinfo and Admin SDK Directory APIs:
+Serves these selector templates over Google's OpenID userinfo and
+Admin SDK Directory APIs:
 
   viewer                   the token's own reader
   full-members             every active Workspace user — no suspended,
@@ -40,6 +40,8 @@ import urllib.request
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
 DIRECTORY_ROOT = "https://admin.googleapis.com/admin/directory/v1"
 TOKEN_VAR = "APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN"
+SOURCE_NAME = "google-workspace"
+SERVED_TEMPLATES = ["viewer", "full-members", "group/<group-address>"]
 TIMEOUT_SECONDS = 30
 
 
@@ -149,6 +151,23 @@ def answer(call, artifact):
             raise ValueError("the artifact must carry exactly a selector or a member")
 
 
+def check_declaration(request):
+    """The policy's declared templates against the ones this script serves.
+
+    The binding beside this script declares them to the policy, and the
+    runtime sends that declaration with every consult. A mismatch is a
+    version skew between policy and script, refused before any credential
+    is read; the exit status 2 tells it apart from a provider failure.
+    """
+    declared = request.get("declaration", {}).get("templates")
+    if declared != SERVED_TEMPLATES:
+        print(
+            f"{SOURCE_NAME} audience source: the policy declares {declared!r}, this script serves {SERVED_TEMPLATES!r}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+
 def main():
     request = json.load(sys.stdin)
 
@@ -156,8 +175,9 @@ def main():
         raise ValueError("unsupported request version")
     if request.get("kind") != "audience":
         raise ValueError("unexpected consult kind")
-    if request.get("name") != "google-workspace":
+    if request.get("name") != SOURCE_NAME:
         raise ValueError("unexpected source name")
+    check_declaration(request)
 
     token = os.environ.get(TOKEN_VAR)
     if not token:

@@ -945,6 +945,7 @@ url = "{annotator_url}"
 
 [externals.audience.slack]
 url = "{audience_url}"
+selectors = [{{ template = "user-group/<handle>" }}]
 "#
     )
 }
@@ -1115,4 +1116,93 @@ async fn a_produced_chain_word_narrows_the_trajectory_without_a_directory_read()
         HookDecision::AllowCall { spawn: None }
     );
     assert!(source.reads().is_empty());
+}
+
+/// An annotator whose mandate reads the call's channel: bound to a tool that carries the
+/// argument, served by `url`; the slack source is declared so the placeholder routes.
+fn placeholder_mandate_policy(url: &str) -> String {
+    format!(
+        r#"
+[policy]
+version = 2
+
+[[policy.annotator]]
+name = "acl"
+audiences = ["@slack:channel/$channel_id"]
+
+[[policy.tool]]
+name = "read_channel"
+parameters = {{ type = "object", properties = {{ channel_id = {{ type = "string" }} }}, required = ["channel_id"] }}
+annotator = "acl"
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+
+[externals.annotators.acl]
+url = "{url}"
+
+[externals.audience.slack]
+url = "{url}"
+selectors = [{{ template = "viewer", feeds = "self" }}, {{ template = "channel/<id>" }}]
+"#
+    )
+}
+
+fn read_channel(channel_id: &str) -> ProposedCall {
+    ProposedCall {
+        tool: "read_channel".to_string(),
+        arguments: raw(serde_json::json!({ "channel_id": channel_id })),
+    }
+}
+
+/// A mandate placeholder is instantiated per call: the consult declares the one collection
+/// the call's argument spells, and an answer naming any other collection is outside the
+/// mandate.
+#[tokio::test]
+async fn a_mandate_placeholder_declares_the_collection_each_call_spells() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, annotator) = serve_annotator().await;
+    annotator.set(
+        "acl",
+        Answer::Wire(serde_json::json!({
+            "version": 1,
+            "answer": {
+                "delta": { "audience": ["@slack:channel/C1"] },
+                "requires": { "history": [], "attention": [] },
+                "emits": [],
+            }
+        })),
+    );
+    let runtime = open_runtime(&dir, &placeholder_mandate_policy(&url)).await;
+
+    // The answer names the channel the call reads: the produced delta narrows to it, which
+    // is offered for acceptance like any narrowing.
+    assert!(matches!(
+        propose(&runtime, read_channel("C1")).await,
+        HookDecision::DenyCall { .. }
+    ));
+    let requests = annotator.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]["declaration"]["audiences"],
+        serde_json::json!(["@slack:channel/C1"])
+    );
+
+    // The same answer for another channel names a collection the call did not spell: no
+    // answer at all, which refuses the hook.
+    let baseline = audit_len(&runtime);
+    let second = propose(&runtime, read_channel("C2")).await;
+    assert!(matches!(second, HookDecision::Refuse { .. }), "got {second:?}");
+    let requests = annotator.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1]["declaration"]["audiences"],
+        serde_json::json!(["@slack:channel/C2"])
+    );
+    assert_eq!(
+        audit_len(&runtime),
+        baseline,
+        "an answer outside the mandate appends nothing"
+    );
 }

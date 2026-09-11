@@ -1,9 +1,18 @@
 # Google Workspace battery.
 #
-# This battery ships `audience-source.py`, the `google-workspace`
-# audience source; it carries no tool rules yet. Audience mappings are
-# root-only, so the binding sits beside them in the root config, not
-# here — the README shows the wiring.
+# This battery binds `audience-source.py`, the `google-workspace`
+# audience source, and declares the selectors it serves; it carries no
+# tool rules yet. The root config maps `self` and `internal` onto the
+# selectors — the README shows the wiring.
 
 [policy]
 version = 2
+
+[externals.audience.google-workspace]
+command = ["python3", "audience-source.py"]
+token_env = "APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN"
+selectors = [
+  { template = "viewer", feeds = "self" },
+  { template = "full-members", feeds = "internal" },
+  { template = "group/<group-address>" },
+]

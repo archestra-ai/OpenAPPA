@@ -280,6 +280,8 @@ fn declared_tools(document: &Value) -> std::collections::BTreeSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use appa_engine::audience::{DeclaredTemplate, SourceRegistration};
+    use appa_engine::label::ChainAudience;
 
     /// Strip a fixture that the policy compiler accepts.
     ///
@@ -289,7 +291,35 @@ mod tests {
     /// fixture a policy a deployment could actually run, so "every section is classified"
     /// means what it says.
     fn stripped(text: &str, mode: Mode) -> Stripped {
-        appa_policy::Config::from_toml_str(text).expect("the fixture is a policy the loader accepts");
+        // The fixtures read the selectors the shipped slack and google-workspace batteries
+        // declare; a bare policy carries no bindings, so the declarations come from here.
+        let declared = |provider: &str, templates: &[(&str, Option<ChainAudience>)]| SourceRegistration {
+            provider: provider.to_string(),
+            templates: templates
+                .iter()
+                .map(|(template, feeds)| DeclaredTemplate::new(*template, *feeds))
+                .collect(),
+        };
+        let sources = vec![
+            declared(
+                "slack",
+                &[
+                    ("viewer", Some(ChainAudience::Self_)),
+                    ("full-members", Some(ChainAudience::Internal)),
+                    ("user-group/<handle>", None),
+                ],
+            ),
+            declared(
+                "google-workspace",
+                &[
+                    ("viewer", Some(ChainAudience::Self_)),
+                    ("full-members", Some(ChainAudience::Internal)),
+                    ("group/<group-address>", None),
+                ],
+            ),
+        ];
+        appa_policy::Config::from_toml_str_routed(text, std::collections::BTreeMap::new(), sources)
+            .expect("the fixture is a policy the loader accepts");
         let document: toml::Value = toml::from_str(text).expect("the fixture parses");
         let mut tokens = Tokens::default();
         strip_policy(&document, &mut tokens, mode)

@@ -38,8 +38,8 @@
 
 use appa_engine::audience::{AudienceEvidence, MemberLookup, SelectorSpec, SourceClaims};
 use appa_engine::contract::{
-    AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, PinnedAnnotation, ProducedAnnotation,
-    RecipientSpec, Requires, ToolDeclaration,
+    AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, LabelRequirements, PinnedAnnotation,
+    ProducedAnnotation, RecipientSpec, Requires, ToolDeclaration,
 };
 pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
@@ -1689,10 +1689,17 @@ impl RuntimeEngine {
         .map_err(|error| format!("`label` is not a label this policy spells: {error}"))?;
         let floor = Label {
             trust: delta.trust.unwrap_or(current.trust),
-            audience: delta
-                .audience
-                .map(|declared| Audience::of_declared(&declared))
-                .unwrap_or(current.audience),
+            audience: match delta.audience {
+                Some(DeltaAudience::Static(declared)) => Audience::of_declared(&declared),
+                // A floor is a label, not a contract: there is no call whose argument a
+                // placeholder could read.
+                Some(DeltaAudience::Selector(placeholder)) => {
+                    return Err(format!(
+                        "`label` spells the selector placeholder \"@{placeholder}\", which reads a call argument; a return floor names its audience outright"
+                    ));
+                }
+                None => current.audience,
+            },
         };
         let sanitizer = match step {
             Some(name) if name.is_attest_schema() => {
@@ -1948,7 +1955,7 @@ impl RuntimeEngine {
             return Err(Resolution(vec![ExternalRequest::Annotation {
                 annotator: annotator.as_str().to_string(),
                 call: digest,
-                declaration: self.annotation_declaration(annotator, binding),
+                declaration: self.annotation_declaration(annotator, binding, resolved),
                 args: annotation_args(&binding.inputs, declaration, resolved),
             }]));
         };
@@ -1959,18 +1966,22 @@ impl RuntimeEngine {
         ))
     }
 
-    /// What one annotation consult declares: the Annotator's trusted hint, resolved mandate
-    /// vocabulary, and the input names its artifact carries.
+    /// What one annotation consult declares: the Annotator's trusted hint, the mandate
+    /// vocabulary bound to this call — a selector placeholder in it names the collection the
+    /// call's arguments spell — and the input names its artifact carries.
     fn annotation_declaration(
         &self,
         annotator: &appa_engine::names::AnnotatorName,
         binding: &appa_policy::AnnotatorBinding,
+        resolved: &ResolvedCall,
     ) -> AnnotationDeclaration {
         let registry = self.engine.registry();
         let chain = registry.trust_chain();
         let mandate = registry
             .annotator_mandate(annotator)
-            .expect("declarations name only registered annotators");
+            .expect("declarations name only registered annotators")
+            .instantiate(resolved.arguments())
+            .expect("a minted call fills every selector placeholder of its annotator's mandate");
         AnnotationDeclaration {
             hint: binding.hint.as_ref().map(|hint| hint.as_str().to_string()),
             inputs: binding.inputs.keys().cloned().collect(),
@@ -2007,7 +2018,7 @@ impl RuntimeEngine {
         ProducedAnnotation {
             delta: Delta {
                 trust: answer.delta_trust.as_deref().map(rank),
-                audience: answer.delta_audience.clone(),
+                audience: answer.delta_audience.clone().map(DeltaAudience::Static),
             },
             emits: EffectSet::new(answer.emits.iter().map(|kind| EffectKind::new(kind.as_str())))
                 .expect("a decoded annotation answer holds no duplicate effect"),
@@ -2199,7 +2210,7 @@ impl RuntimeEngine {
                 } => {
                     let routable = audience
                         .templates(provider)
-                        .is_some_and(|templates| templates.iter().any(|template| template.matches(selector)));
+                        .is_some_and(|templates| templates.iter().any(|declared| declared.template.matches(selector)));
                     if !routable {
                         continue;
                     }
@@ -2522,9 +2533,12 @@ pub(crate) fn selector_templates(
     audience: &appa_engine::audience::AudienceRegistry,
     provider: &str,
 ) -> Option<Vec<String>> {
-    audience
-        .templates(provider)
-        .map(|templates| templates.iter().map(|template| template.as_str().to_string()).collect())
+    audience.templates(provider).map(|templates| {
+        templates
+            .iter()
+            .map(|declared| declared.template.as_str().to_string())
+            .collect()
+    })
 }
 
 #[derive(Debug, Default)]
@@ -3339,7 +3353,7 @@ mod tests {
     use crate::api::ToolNaming;
     use crate::consult::{AnnotationAnswer, HistoryEntry, RequiredAudienceAnswer, SanitizerPoint};
     use appa_engine::check::{Gap, RawBlock};
-    use appa_engine::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec};
+    use appa_engine::contract::{AudienceRequirement, DeltaAudience, HistoryRequirement, RecipientSpec};
     use appa_engine::fact::{EffectKind, EffectSet};
     use appa_engine::label::{Audience, DeclaredAudience, ReaderId, Trust};
     use appa_engine::names::{AnnotatorName, MarkName};
@@ -3646,7 +3660,10 @@ mod tests {
         assert_eq!(pin.call(), &call.digest(), "the pin binds the exact call it answered");
         let produced = pin.produced();
         assert_eq!(produced.delta.trust, Some(Trust::new(0)));
-        assert_eq!(produced.delta.audience, Some(DeclaredAudience::Public));
+        assert_eq!(
+            produced.delta.audience,
+            Some(DeltaAudience::Static(DeclaredAudience::Public))
+        );
         assert_eq!(produced.requires.label.trust_floor, Some(Trust::new(1)));
         assert_eq!(
             produced.requires.label.audience,

@@ -381,11 +381,29 @@ impl Walk<'_> {
             // An empty half either side is malformed: the rule cannot know what it holds.
             Some((provider, selector)) if !provider.is_empty() && !selector.is_empty() => {
                 let provider = self.tokens.token(self.mode, Class::Source, provider);
-                let selector = self.tokens.token(self.mode, Class::Selector, selector);
+                let selector = self.selector(selector);
                 Value::String(format!("{provider}:{selector}"))
             }
             _ => self.unclassify(path),
         }
+    }
+
+    /// A selector is one token — unless a segment spells a `$argument`, which makes it a
+    /// selector placeholder: then each literal segment is a selector token of its own and each
+    /// argument keeps its `$` mark over an argument token, so the report shows a placeholder
+    /// as a placeholder, reading a named argument, without spelling the collection.
+    fn selector(&mut self, selector: &str) -> String {
+        if !selector.split('/').any(|segment| segment.starts_with('$')) {
+            return self.tokens.token(self.mode, Class::Selector, selector);
+        }
+        selector
+            .split('/')
+            .map(|segment| match segment.strip_prefix('$') {
+                Some(argument) => format!("${}", self.tokens.token(self.mode, Class::Argument, argument)),
+                None => self.tokens.token(self.mode, Class::Selector, segment),
+            })
+            .collect::<Vec<_>>()
+            .join("/")
     }
 
     /// One authored literal from a return contract, as a token of its own spelling.
@@ -963,5 +981,30 @@ mod tests {
         );
         assert_eq!(first.value["tool"], "tool-2");
         assert_eq!(first.value, second.value, "insertion order does not matter");
+    }
+
+    /// A selector placeholder reads a tool argument: its argument segment keeps the `$` mark
+    /// and correlates with the argument's own key token, while the provider and the literal
+    /// segments are tokens like any selector's.
+    #[test]
+    fn a_selector_placeholder_keeps_its_argument_mark_and_correlates_with_the_argument() {
+        let stripped = run(serde_json::json!({
+            "group": "@slack:channel/$channel_id",
+            "arguments": { "channel_id": "C1" }
+        }));
+        let group = stripped.value["group"].as_str().expect("a placeholder stays a string");
+        let (mention, argument) = group
+            .split_once("/$")
+            .unwrap_or_else(|| panic!("the argument lost its `$` mark: {group}"));
+        assert!(mention.starts_with('@') && mention.contains(':'), "{group}");
+        assert_eq!(
+            stripped.value["argument_keys"],
+            serde_json::json!([argument]),
+            "the placeholder reads the argument the call spells"
+        );
+        assert!(
+            !group.contains("channel"),
+            "the collection's spelling survived: {group}"
+        );
     }
 }
