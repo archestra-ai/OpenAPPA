@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.20.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.19.1...v0.20.0) (2026-09-11)
+
+
+### Features
+
+* **batteries:** one store beside the config, and one include spelling ([#305](https://github.com/archestra-ai/OpenAPPA/issues/305)) ([80c468d](https://github.com/archestra-ai/OpenAPPA/commit/80c468df8adbd31a392fa39a877c7f93a6e07e1a))
+
+
+### Bug Fixes
+
+* **ci:** let a retried release keep its already-published images ([#312](https://github.com/archestra-ai/OpenAPPA/issues/312)) ([90d4fd0](https://github.com/archestra-ai/OpenAPPA/commit/90d4fd092b307fdc7a2dd0c5be7e78b85b9ac5c8))
+
+
+### Code Refactoring
+
+* **examples:** batteries live in the marketplace only ([#311](https://github.com/archestra-ai/OpenAPPA/issues/311)) ([688fa8c](https://github.com/archestra-ai/OpenAPPA/commit/688fa8c98a77b142edf087edbe18ddda37b0f4ab))
+
 ## [0.19.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.19.0...v0.19.1) (2026-09-11)
 
 
