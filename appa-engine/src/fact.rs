@@ -141,6 +141,68 @@ pub struct ForkSnapshot {
     seed: Label,
 }
 
+/// A durable root checkpoint. It contains only the state that affects later flow
+/// decisions: the branch label, completed effects, and authority denials. Pending
+/// dispatches and approvals deliberately have no representation here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointSnapshot {
+    label: Label,
+    effects: EffectSet,
+    denials: std::collections::BTreeMap<CanonicalDigest, std::collections::BTreeSet<AuthorityName>>,
+}
+
+impl CheckpointSnapshot {
+    pub(crate) fn of(
+        label: Label,
+        effects: EffectSet,
+        denials: std::collections::BTreeMap<CanonicalDigest, std::collections::BTreeSet<AuthorityName>>,
+    ) -> Self {
+        Self {
+            label,
+            effects,
+            denials,
+        }
+    }
+
+    pub(crate) fn label(&self) -> &Label {
+        &self.label
+    }
+
+    pub(crate) fn effects(&self) -> &EffectSet {
+        &self.effects
+    }
+
+    pub(crate) fn denials(
+        &self,
+    ) -> &std::collections::BTreeMap<CanonicalDigest, std::collections::BTreeSet<AuthorityName>> {
+        &self.denials
+    }
+}
+
+/// Opaque identity issued by the runtime for a durable checkpoint.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CheckpointId(String);
+
+impl CheckpointId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The checkpoint a detached root opened from. The event log verifies the
+/// opaque id and snapshot against its durable source record before it stores
+/// the opening.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointOpening {
+    pub id: CheckpointId,
+    pub snapshot: CheckpointSnapshot,
+}
+
 impl ForkSnapshot {
     /// Freeze a basis: the base plus every contributing source with its label at this
     /// moment. Nested preparations pass their own flattened basis, so a snapshot never has to
@@ -225,6 +287,8 @@ pub enum Fact {
         policy_digest: PolicyIdentityV1,
         policy_file_key: PolicyFileKey,
         open_vectors: Vec<OpenVector>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checkpoint: Option<CheckpointOpening>,
     },
     ValueAdmitted {
         trajectory: TrajectoryId,

@@ -77,6 +77,10 @@ impl ValidationReport {
     }
 }
 
+pub(crate) fn valid_host_trajectory_id(id: &str) -> bool {
+    !id.is_empty() && !id.chars().any(char::is_control)
+}
+
 /// Read-only host preflight on the same boundary as /hook. A successful request
 /// returns a report even when its tools are invalid; only malformed requests or
 /// unavailable pinned policies are HTTP failures. Hook admission checks again.
@@ -96,7 +100,7 @@ pub fn answer(runtime: &crate::api::Runtime, adapter: Adapter, body: &[u8]) -> (
     if [&request.root_id, &request.child_id]
         .into_iter()
         .flatten()
-        .any(|id| id.is_empty() || id.chars().any(char::is_control))
+        .any(|id| !valid_host_trajectory_id(id))
         || (request.child_id.is_some() && request.root_id.is_none())
     {
         return error(400, "root_id must be a nonempty host trajectory ID");
