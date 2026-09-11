@@ -50,8 +50,9 @@ This flow needs the `claude` command, `curl`, and Cargo when building from a che
 binary belonging to it. It selects the version, verifies every artifact
 against that version's descriptor before anything outside a temporary file
 changes, retains them under the deployment's `.appa/` state so a later
-install needs no network, fills the deployment's battery store (`batteries/`
-beside the config) with that version's batteries, and activates Claude Code
+install needs no network, replaces the deployment's battery store
+(`batteries/` beside the config) with that version's batteries, and activates
+Claude Code
 support with that version's own binary. The result does not depend on the
 working directory.
 

@@ -103,8 +103,8 @@ pub(crate) fn unbind_servers(text: &str, namespaces: &[Namespace]) -> Result<Str
     Ok(document.to_string())
 }
 
-/// The batteries the include list names, by the tail `batteries/<name>/appa.toml`
-/// of each entry: the store spelling, and a path into a retained version alike.
+/// The batteries the include list names: the entries spelled
+/// `batteries/<name>/appa.toml`.
 pub(crate) fn included(text: &str) -> Result<BTreeSet<String>, InstallError> {
     let document = document(text)?;
     Ok(document
@@ -113,7 +113,7 @@ pub(crate) fn included(text: &str) -> Result<BTreeSet<String>, InstallError> {
         .into_iter()
         .flatten()
         .filter_map(toml_edit::Value::as_str)
-        .filter_map(|entry| crate::batteries::name_from_path(Path::new(entry)))
+        .filter_map(|entry| crate::batteries::name_from_include(Path::new(entry)))
         .collect())
 }
 
@@ -147,9 +147,9 @@ mod tests {
     }
 
     #[test]
-    fn a_retained_versions_path_names_its_battery_too() {
-        let text = "include = ['.appa/appa.toml/generations/abc/marketplace/batteries/slack/appa.toml', 'shared/policy.toml']\n";
-        assert_eq!(included(text).unwrap(), BTreeSet::from(["slack".to_owned()]));
+    fn only_the_store_spelling_names_a_battery() {
+        let text = "include = ['.appa/appa.toml/generations/abc/marketplace/batteries/slack/appa.toml', 'shared/policy.toml', './batteries/github/appa.toml']\n";
+        assert_eq!(included(text).unwrap(), BTreeSet::from(["github".to_owned()]));
     }
 
     #[test]

@@ -50,7 +50,7 @@ installed from the network. Subsequent installs retain the installed version;
 nothing updates automatically.
 
 Claude installation registers the runtime's hooks, MCP server and skill in
-the user's Claude Code profile, fills the deployment's battery store
+the user's Claude Code profile, replaces the deployment's battery store
 (`batteries/` beside the config) with the version's batteries, includes
 every battery written for Claude Code on a first install, and verifies the
 running APPA runtime. A battery is one line of the root config's include

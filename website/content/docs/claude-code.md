@@ -47,7 +47,8 @@ It preserves an existing policy and custom statusline. It does not replace
 `claude` or change how ordinary sessions start.
 
 The install keeps a copy of every battery of its version beside the
-config, in `batteries/`, and a first install includes each battery written
+config, in `batteries/`, a directory each install replaces, and a first
+install includes each battery written
 for Claude Code as one line of the config's include list,
 `batteries/<name>/appa.toml`. `appa battery list` shows what is included;
 `appa battery install <name>` and `appa battery remove <name>` add and

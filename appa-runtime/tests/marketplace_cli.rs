@@ -320,12 +320,7 @@ fn deployment_for(root: &Path, kagent: bool) -> std::path::PathBuf {
     let generation = Generation::parse(&serde_json::to_vec(&descriptor).unwrap()).unwrap();
     let config = root.join("config/appa.toml");
     let installation = Installation::open(&config).unwrap();
-    let published = installation.publish_packages(&source, &generation).unwrap();
-    appa_runtime::batteries::stock(
-        &published.join("marketplace/batteries"),
-        &appa_runtime::batteries::store_dir(&config),
-    )
-    .unwrap();
+    installation.publish_packages(&source, &generation).unwrap();
     std::fs::create_dir_all(installation.state_path().join("artifacts")).unwrap();
     std::fs::write(installation.state_path().join("artifacts").join(digest.hex()), archive).unwrap();
     let selection = Selection::empty(generation, Platform::current().unwrap());

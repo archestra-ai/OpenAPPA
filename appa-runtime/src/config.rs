@@ -788,7 +788,7 @@ impl Config {
             if !seen.insert(include_path.clone()) {
                 return Err(ConfigError::DuplicateInclude { path: authored.clone() });
             }
-            if let Some(name) = crate::batteries::name_from_resolved(&include_path, battery_dirs) {
+            if let Some(name) = crate::batteries::name_from_include(include) {
                 included_batteries.insert(name);
             }
             let included_text = std::fs::read_to_string(&include_path).map_err(|source| ConfigError::Unreadable {
@@ -2414,7 +2414,7 @@ mod tests {
     }
 
     #[test]
-    fn a_relative_battery_include_reports_its_resolved_name() {
+    fn another_spelling_of_a_battery_file_is_not_a_battery_include() {
         let dir = tempfile::tempdir().expect("temp directory");
         let config_dir = dir.path().join("deploy/config");
         let battery_dir = dir.path().join("batteries/github");
@@ -2432,7 +2432,7 @@ mod tests {
         .expect("root config");
 
         let config = Config::load(&config_dir.join("appa.toml")).expect("relative battery include loads");
-        assert_eq!(config.included_batteries(), ["github"]);
+        assert!(config.included_batteries().is_empty());
     }
 
     #[test]

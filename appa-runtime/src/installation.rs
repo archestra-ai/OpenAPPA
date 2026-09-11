@@ -305,14 +305,10 @@ impl Installation {
         &self.state
     }
 
-    /// Cache acquired archives by digest, and fill the store with the version's
-    /// batteries. A failed copy cannot replace an existing artifact or make a
-    /// partially written one visible.
+    /// Cache acquired archives by digest. A failed copy cannot replace an
+    /// existing artifact or make a partially written one visible.
     pub fn retain(&self, acquired: &Acquired) -> Result<PathBuf, InstallError> {
         let tree = self.publish_packages(acquired.marketplace(), acquired.generation())?;
-        let store = crate::batteries::store_dir(&self.config);
-        crate::batteries::stock(&tree.join("marketplace/batteries"), &store)
-            .map_err(|error| io("fill the battery store", &store, error))?;
         let directory = self.state.join("artifacts");
         require_directory_or_absent(&directory)?;
         fs::create_dir_all(&directory).map_err(|error| io("create artifact cache", &directory, error))?;
@@ -487,9 +483,41 @@ impl Installation {
         Ok(destination)
     }
 
-    /// A journal covers only the non-atomic config/selection switch. Immutable
-    /// tree publication needs no journal. Host activation extends this same
-    /// record before it performs any external mutation.
+    /// The retained batteries tree of a selection's version.
+    fn version_batteries(&self, selection: &Selection) -> PathBuf {
+        self.state
+            .join("generations")
+            .join(selection.commit().as_str())
+            .join("marketplace/batteries")
+    }
+
+    /// Every include spelled `batteries/<name>/appa.toml` names a battery the
+    /// version carries: the store holds nothing else once the commit fills it.
+    fn require_version_batteries(&self, selection: &Selection, text: &str) -> Result<(), InstallError> {
+        let tree = self.version_batteries(selection);
+        for name in includes::included(text)? {
+            if !tree.join(&name).join("appa.toml").is_file() {
+                return Err(InstallError::Invalid(format!(
+                    "the config includes batteries/{name}/appa.toml, and version {} has no battery {name}",
+                    selection.commit().as_str()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Replace the store with the selection's batteries.
+    fn stock_store(&self, selection: &Selection) -> Result<(), InstallError> {
+        let store = crate::batteries::store_dir(&self.config);
+        crate::batteries::stock(&self.version_batteries(selection), &store)
+            .map(|_| ())
+            .map_err(|error| io("fill the battery store", &store, error))
+    }
+
+    /// A journal covers only the non-atomic config/selection switch and the
+    /// store that switch fills. Immutable tree publication needs no journal.
+    /// Host activation extends this same record before it performs any
+    /// external mutation.
     pub fn commit_config(
         &self,
         before: Option<&[u8]>,
@@ -569,14 +597,18 @@ impl Installation {
             return Err(InstallError::Changed(self.config.clone()));
         }
         // Validate beside the real config, so relative user includes and
-        // package helper origins have exactly the activation-time meaning.
+        // package helper origins have exactly the activation-time meaning;
+        // battery includes read the version's tree, which the store will be.
         let parent = self.config.parent().expect("open resolves a config parent");
         let mut candidate =
             tempfile::NamedTempFile::new_in(parent).map_err(|error| io("stage config", parent, error))?;
         candidate
             .write_all(after)
             .map_err(|error| io("write candidate config", candidate.path(), error))?;
-        crate::config::Config::load(candidate.path()).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let text = std::str::from_utf8(after).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        self.require_version_batteries(selection, text)?;
+        crate::config::Config::load_from(candidate.path(), &[self.version_batteries(selection)])
+            .map_err(|error| InstallError::Invalid(error.to_string()))?;
         let previous = self.selection()?;
         if activation == Activation::Claude {
             // Missing or mismatched executables fail before the config changes.
@@ -655,6 +687,7 @@ impl Installation {
         let current = optional_bytes(&self.config)?;
         if current.as_deref() == Some(&transaction.after) {
             let validate = || {
+                self.stock_store(&transaction.selection)?;
                 kagent::verify(self, &transaction.selection)?;
                 self.verify_selected_files(
                     &transaction.selection,
@@ -1210,14 +1243,14 @@ mod tests {
         assert!(install.selection().unwrap().is_none());
         let github = PackageName::parse("github").unwrap();
         let base = "# authored deployment\n[policy]\nversion=2\n[externals]\ntimeout_ms=100\nmax_body_bytes=1024\n";
-        crate::batteries::stock(
-            &published.join("marketplace/batteries"),
-            &crate::batteries::store_dir(install.config_path()),
-        )
-        .unwrap();
+        let store = crate::batteries::store_dir(install.config_path());
         let with_include = includes::add(base, &includes::battery_include(&github)).unwrap();
         let with_alias = includes::bind_server(&with_include, "github", "work-github").unwrap();
+        let stray = includes::add(&with_alias, "batteries/stray/appa.toml").unwrap();
+        assert!(install.commit_config(None, stray.as_bytes(), &selected).is_err());
+        assert!(!store.exists(), "a refused commit leaves the store alone");
         install.commit_config(None, with_alias.as_bytes(), &selected).unwrap();
+        assert!(store.join("github/appa.toml").is_file(), "the commit fills the store");
         let effective = crate::config::Config::load(install.config_path()).unwrap();
         assert_eq!(effective.server_aliases["github"], "work-github");
         assert_eq!(

@@ -4,9 +4,10 @@
 //! `batteries/<name>/appa.toml`.
 //!
 //! The store is a deployment's copy of every battery of the installed
-//! version: `batteries/` beside its config, filled by the install. An
-//! include spelled `batteries/<name>/appa.toml` resolves there without any
-//! directory being named, as a relative include beside the config.
+//! version: `batteries/` beside its config, replaced whole by the install.
+//! An include spelled `batteries/<name>/appa.toml` resolves there without
+//! any directory being named, as a relative include beside the config, and
+//! that spelling names a battery wherever the installer reads the config.
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -27,41 +28,49 @@ pub fn default_search_path(config: &Path) -> Vec<PathBuf> {
     vec![store_dir(config)]
 }
 
-/// Fill the store from a version's batteries tree. Every battery there
-/// replaces the store's copy of the same name by one rename, so a reader
-/// sees the old battery or the new one; batteries the tree does not carry
-/// stay. The names stocked, sorted.
+/// Replace the store with a version's batteries tree: the whole directory
+/// by one rename, so a reader sees the earlier store or the new one, and
+/// nothing else stays in it. A tree without batteries leaves no store.
+/// The names stocked, sorted.
 pub fn stock(tree: &Path, store: &Path) -> io::Result<Vec<String>> {
     let mut names = match names_in(tree) {
         Ok(names) => names,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(error),
     };
     names.sort();
-    fs::create_dir_all(store)?;
+    let beside = store.parent().unwrap_or(Path::new(""));
+    fs::create_dir_all(beside)?;
+    if names.is_empty() {
+        if store.exists() {
+            let retired = tempfile::Builder::new().prefix(".batteries-").tempdir_in(beside)?;
+            fs::rename(store, retired.path().join("batteries"))?;
+        }
+        return Ok(names);
+    }
+    let stage = tempfile::Builder::new().prefix(".batteries-").tempdir_in(beside)?;
+    let staged = stage.path().join("batteries");
+    fs::create_dir(&staged)?;
     for name in &names {
-        let stage = tempfile::Builder::new().prefix(".stage-").tempdir_in(store)?;
-        let staged = stage.path().join(name);
-        crate::batteries_layout::copy_entry(&tree.join(name), &staged)?;
-        let target = store.join(name);
-        if !target.exists() {
-            fs::rename(&staged, &target)?;
-            continue;
-        }
-        let retired = tempfile::Builder::new().prefix(".retired-").tempdir_in(store)?;
-        let parked = retired.path().join(name);
-        fs::rename(&target, &parked)?;
-        if let Err(error) = fs::rename(&staged, &target) {
-            // The store keeps the earlier copy when the new one cannot take
-            // its place; both temporary directories go with the return.
-            return Err(match fs::rename(&parked, &target) {
-                Ok(()) => error,
-                Err(restore) => io::Error::new(
-                    error.kind(),
-                    format!("{error}; and the earlier copy of {name} was not restored: {restore}"),
-                ),
-            });
-        }
+        crate::batteries_layout::copy_entry(&tree.join(name), &staged.join(name))?;
+    }
+    if !store.exists() {
+        fs::rename(&staged, store)?;
+        return Ok(names);
+    }
+    let retired = tempfile::Builder::new().prefix(".batteries-").tempdir_in(beside)?;
+    let parked = retired.path().join("batteries");
+    fs::rename(store, &parked)?;
+    if let Err(error) = fs::rename(&staged, store) {
+        // The earlier store comes back when the new one cannot take its
+        // place; both temporary directories go with the return.
+        return Err(match fs::rename(&parked, store) {
+            Ok(()) => error,
+            Err(restore) => io::Error::new(
+                error.kind(),
+                format!("{error}; and the earlier store was not restored: {restore}"),
+            ),
+        });
     }
     Ok(names)
 }
@@ -172,40 +181,6 @@ pub fn name_from_include(path: &Path) -> Option<String> {
     name.to_str().map(str::to_owned)
 }
 
-/// A resolved battery file has the tail `batteries/<name>/appa.toml`,
-/// regardless of how the root config spelled the relative include.
-pub fn name_from_resolved(path: &Path, battery_dirs: &[PathBuf]) -> Option<String> {
-    for directory in battery_dirs {
-        // `path` arrives canonical; a search-path entry may not be (a symlink, or
-        // `/var` for `/private/var` on macOS), and the prefix test needs both alike.
-        let directory = fs::canonicalize(directory).unwrap_or_else(|_| directory.clone());
-        let Ok(relative) = path.strip_prefix(&directory) else {
-            continue;
-        };
-        let parts: Vec<_> = relative.components().collect();
-        if let [Component::Normal(name), Component::Normal(file)] = parts.as_slice()
-            && *file == OsStr::new("appa.toml")
-        {
-            return name.to_str().map(str::to_owned);
-        }
-    }
-    name_from_path(path)
-}
-
-/// The battery a path names by its tail `batteries/<name>/appa.toml`,
-/// however the root config spelled it: the search-path form, or a path
-/// into a retained version.
-pub fn name_from_path(path: &Path) -> Option<String> {
-    if path.file_name()? != OsStr::new("appa.toml") {
-        return None;
-    }
-    let directory = path.parent()?;
-    if directory.parent()?.file_name()? != OsStr::new("batteries") {
-        return None;
-    }
-    directory.file_name()?.to_str().map(str::to_owned)
-}
-
 fn names_in(dir: &Path) -> io::Result<Vec<String>> {
     let mut names = Vec::new();
     for entry in fs::read_dir(dir)? {
@@ -278,43 +253,6 @@ mod tests {
                 "{other:?} is not a battery include"
             );
         }
-    }
-
-    #[test]
-    fn resolved_battery_name_uses_the_path_tail() {
-        assert_eq!(
-            name_from_resolved(Path::new("/deployment/vendor/batteries/slack/appa.toml"), &[]).as_deref(),
-            Some("slack")
-        );
-        for other in [
-            "/deployment/vendor/slack/appa.toml",
-            "/deployment/batteries/slack/other.toml",
-            "/deployment/batteries/appa.toml",
-        ] {
-            assert_eq!(name_from_resolved(Path::new(other), &[]), None);
-        }
-        assert_eq!(
-            name_from_resolved(
-                Path::new("/deployment/image/slack/appa.toml"),
-                &[PathBuf::from("/deployment/image")],
-            )
-            .as_deref(),
-            Some("slack")
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_battery_directory_reached_through_a_link_keeps_its_name() {
-        let root = tempfile::tempdir().expect("temporary directory");
-        let real = root.path().join("real");
-        let link = root.path().join("link");
-        write_battery(&real, "slack", &["send"]);
-        std::os::unix::fs::symlink(&real, &link).expect("link to the batteries directory");
-
-        // The include arrives canonical, as `resolve_include` leaves it.
-        let include = fs::canonicalize(real.join("slack/appa.toml")).expect("canonical include");
-        assert_eq!(name_from_resolved(&include, &[link]).as_deref(), Some("slack"));
     }
 
     #[test]
@@ -393,7 +331,7 @@ mod tests {
     /// The store takes every battery of a version's tree, replaces its own copy
     /// of a battery the tree carries again, and keeps one it does not.
     #[test]
-    fn stocking_replaces_the_versions_batteries_and_keeps_the_rest() {
+    fn stocking_replaces_the_store_with_the_versions_batteries() {
         let tree = tempfile::tempdir().expect("tree");
         let config_dir = tempfile::tempdir().expect("config dir");
         let store = store_dir(&config_dir.path().join("appa.toml"));
@@ -415,19 +353,21 @@ mod tests {
         assert!(!store.join("slack/helper.py").exists());
         assert_eq!(tools_in(&store.join("github/appa.toml")), vec!["added"]);
         assert!(!store.join("github/appa-package.toml").exists());
-        assert_eq!(tools_in(&store.join("mine/appa.toml")), vec!["kept"]);
+        assert!(!store.join("mine").exists());
         assert_eq!(
             snapshot(std::slice::from_ref(&store))
                 .batteries
                 .iter()
                 .map(|b| b.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["github", "mine", "slack"]
+            vec!["github", "slack"]
         );
         assert_eq!(
             stock(&tree.path().join("absent"), &store).expect("nothing to stock"),
             Vec::<String>::new()
         );
+        assert!(!store.exists(), "a version without batteries leaves no store");
+        assert_eq!(fs::read_dir(config_dir.path()).unwrap().count(), 0);
     }
 
     fn write_battery(root: &Path, name: &str, tools: &[&str]) {

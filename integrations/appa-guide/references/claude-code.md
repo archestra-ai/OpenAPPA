@@ -215,7 +215,8 @@ After approval:
    another identity. The command adds the battery's `appa.toml` to the root
    `include` list as `batteries/<name>/appa.toml`, validates the result, and
    reloads the runtime. Never copy a battery directory: the store beside the
-   config already holds every battery of the installed version.
+   config already holds every battery of the installed version, and an
+   install replaces the directory.
 3. Add any root support the battery requires, such as its human-approval
    Authority. If an existing `builtin hitl` Authority handles the relevant
    attention mark but cannot review public audiences, expand its permits
