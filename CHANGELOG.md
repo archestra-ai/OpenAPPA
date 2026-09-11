@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.19.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.18.0...v0.19.0) (2026-09-11)
+
+
+### Features
+
+* **runtime:** add OpenTelemetry observability ([#168](https://github.com/archestra-ai/OpenAPPA/issues/168)) ([b47d59a](https://github.com/archestra-ai/OpenAPPA/commit/b47d59a6758c5b8259ca8ffdef6404e6fa9c13f7))
+
+
+### Bug Fixes
+
+* **ci:** drop the removed --archive flag from the release verify probes ([#307](https://github.com/archestra-ai/OpenAPPA/issues/307)) ([4de1d12](https://github.com/archestra-ai/OpenAPPA/commit/4de1d12a0ea5d11acb0fd41867efebae32215679))
+
 ## [0.18.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.17.1...v0.18.0) (2026-09-11)
 
 
