@@ -34,7 +34,8 @@ pub enum PurgedRuntime {
     Stopped {
         pid: i32,
     },
-    /// A process there that is not this user's appa runtime, left as it is.
+    /// A process there that is not this user's appa runtime, or does not
+    /// answer as one, left as it is.
     Left {
         reason: String,
     },
@@ -64,9 +65,11 @@ pub fn claude_code_purge() -> Result<Purge, InitError> {
     let runtime = match crate::runtime_start::stop(&target) {
         Ok(Stopped::Nothing) => PurgedRuntime::Nothing,
         Ok(Stopped::Runtime { pid }) => PurgedRuntime::Stopped { pid },
-        Err(left @ (StopError::Unidentified { .. } | StopError::NotOwned { .. })) => PurgedRuntime::Left {
-            reason: left.to_string(),
-        },
+        Err(left @ (StopError::Unidentified { .. } | StopError::NotOwned { .. } | StopError::Unexpected { .. })) => {
+            PurgedRuntime::Left {
+                reason: left.to_string(),
+            }
+        }
         Err(error) => return Err(error.into()),
     };
     let mut removed = Vec::new();

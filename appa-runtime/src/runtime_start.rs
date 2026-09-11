@@ -46,8 +46,6 @@ pub enum StartError {
     UserOwnedUnreachable { url: String },
     #[error(transparent)]
     Stop(#[from] StopError),
-    #[error("{url} answers neither ok nor the stale runtime being stopped: {answer:?}")]
-    Unexpected { url: String, answer: String },
     #[error("cannot create {path}: {source}")]
     Directory {
         path: PathBuf,
@@ -165,10 +163,11 @@ pub fn ensure(target: &RuntimeTarget, deployment: &Deployment, executable: &Path
             }
         }
         Health::Other(answer) => {
-            return Err(StartError::Unexpected {
+            return Err(StopError::Unexpected {
                 url: target.url.clone(),
                 answer,
-            });
+            }
+            .into());
         }
         Health::Unreachable if target.user_owned => {
             return Err(StartError::UserOwnedUnreachable {
@@ -211,20 +210,27 @@ pub fn stop(target: &RuntimeTarget) -> Result<Stopped, StopError> {
             });
         }
     };
+    stop_pid(&endpoint, &target.url, pid)?;
+    Ok(Stopped::Runtime { pid })
+}
+
+/// Stop the process answering `endpoint` as `pid`, once it proves to be this
+/// user's appa runtime, and wait until the endpoint no longer answers from
+/// it. Gone means that: a process its parent has not reaped yet still
+/// exists, and holds nothing.
+pub(crate) fn stop_pid(endpoint: &Endpoint, url: &str, pid: i32) -> Result<(), StopError> {
     terminate_owned(pid)?;
     let deadline = Instant::now() + STOP_BUDGET;
-    // Gone means the endpoint no longer answers from that process: one its
-    // parent has not reaped yet still exists, and holds nothing.
-    while process_exists(pid) && answering_pid(&endpoint) == Some(pid) {
+    while process_exists(pid) && answering_pid(endpoint) == Some(pid) {
         if Instant::now() >= deadline {
             return Err(StopError::DidNotStop {
-                url: target.url.clone(),
+                url: url.to_owned(),
                 pid,
             });
         }
         std::thread::sleep(POLL);
     }
-    Ok(Stopped::Runtime { pid })
+    Ok(())
 }
 
 /// The pid the endpoint answers from, healthy or stale.
@@ -284,16 +290,18 @@ fn stop_stale(endpoint: &Endpoint, url: &str, pid: i32) -> Result<bool, StartErr
             Health::Ok => return Ok(true),
             Health::Stale(still) if still == pid => {}
             Health::Stale(other) => {
-                return Err(StartError::Unexpected {
+                return Err(StopError::Unexpected {
                     url: url.to_owned(),
                     answer: format!("stale {other}"),
-                });
+                }
+                .into());
             }
             Health::Other(answer) => {
-                return Err(StartError::Unexpected {
+                return Err(StopError::Unexpected {
                     url: url.to_owned(),
                     answer,
-                });
+                }
+                .into());
             }
         }
         if Instant::now() >= deadline {

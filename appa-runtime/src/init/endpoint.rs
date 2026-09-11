@@ -231,20 +231,16 @@ fn terminate_owned_appa_runtime(pid: i32, endpoint: &Endpoint) -> Result<(), Ini
     terminate_appa_pid(pid)
 }
 
-/// Stop a runtime this init started, and wait for its process to go.
+/// Stop the appa runtime answering the endpoint as `pid`, this deployment's
+/// or an earlier one's, and wait until the endpoint no longer answers from it.
 pub(super) fn stop_owned_appa_runtime(pid: i32, endpoint: &Endpoint) -> Result<(), InitError> {
-    terminate_owned_appa_runtime(pid, endpoint)?;
-    let deadline = std::time::Instant::now() + STOP_DEADLINE;
-    while std::time::Instant::now() < deadline {
-        if !process_exists(pid) {
-            return Ok(());
+    let loopback = crate::loopback_http::Endpoint::parse(endpoint.url()).map_err(|reason| {
+        crate::runtime_start::StopError::Endpoint {
+            url: endpoint.url().to_owned(),
+            reason,
         }
-        std::thread::sleep(STOP_POLL);
-    }
-    Err(InitError::RuntimeSurvived {
-        pid,
-        endpoint: endpoint.url().to_owned(),
-    })
+    })?;
+    Ok(crate::runtime_start::stop_pid(&loopback, endpoint.url(), pid)?)
 }
 
 #[cfg(unix)]
