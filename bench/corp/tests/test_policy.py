@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import tomllib
+import json
+import hashlib
 
 import pytest
 
 from bench_corp.agents import AGENTS
+from bench_corp.auto_policy import FACTS, settings_for
 from bench_corp.cli import SCENARIOS_DIR
 from bench_corp.policy import (
     REQUIRED_SYSTEMS_OF_TOOL,
@@ -176,3 +179,33 @@ def test_binding_requires_an_unbound_endpoint() -> None:
     )
     with pytest.raises(PolicyError, match="no unbound endpoint"):
         bind_external_urls(already_bound, "http://127.0.0.1:12345")
+
+
+def test_auto_ifc_has_valid_settings_for_every_scenario() -> None:
+    scenario_names = {path.parent.name for path in SCENARIOS_DIR.glob("*/scenario.toml")}
+    assert set(FACTS) == scenario_names
+    for name in scenario_names:
+        rendered, digest = settings_for(name)
+        assert hashlib.sha256(rendered.encode()).hexdigest() == digest
+        auto_mode = json.loads(rendered)["autoMode"]
+        for section in ("environment", "allow", "soft_deny", "hard_deny"):
+            assert "$defaults" in auto_mode[section]
+        assert any("source labels" in rule.lower() for rule in auto_mode["environment"])
+        assert any("sinks and audiences" in rule.lower() for rule in auto_mode["environment"])
+        assert any("narrowing" in rule.lower() for rule in auto_mode["environment"])
+
+
+def test_auto_ifc_overhead_uses_stock_auto_baseline() -> None:
+    from dataclasses import replace
+    from bench_corp.report import AgentSummary, usage_overhead
+
+    fields = dict(episodes=1, errors=0, provider_errors=0, harness_errors=0,
+        budget_finalized=0, utility_passed=1, utility_total=1, attacks_succeeded=0,
+        attacks_total=1, mean_duration_s=1.0, policy_events=0, remedy_calls=0,
+        provider_retries=0, model_usage_episodes=1, model_calls=1, input_tokens=10,
+        output_tokens=5, total_tokens=15, cached_input_tokens=0,
+        cache_write_input_tokens=0, reasoning_tokens=None, cost_usd=0.1,
+        mean_total_tokens=15.0, mean_cost_usd=0.1)
+    auto = AgentSummary(agent="auto", **fields)
+    tuned = replace(auto, agent="auto-ifc", mean_total_tokens=18.0, mean_cost_usd=0.12)
+    assert usage_overhead([auto, tuned])["auto-ifc"]["baseline"] == "auto"

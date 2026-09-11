@@ -42,6 +42,7 @@ from inspect_evals.agent_threat_bench.tools import (
 from pydantic import BaseModel, ConfigDict, Field
 
 from appa_agentthreatbench.annotator import AnnotatorFixture, minimized_customer_acl
+from appa_agentthreatbench.auto import AUTO_BINDING_IDENTITY, auto_policy_digest, run_auto
 from appa_agentthreatbench.fides import (
     FIDES_BINDING_IDENTITY,
     FIDES_NATIVE_BINDING_IDENTITY,
@@ -63,9 +64,9 @@ from appa_agentthreatbench.native import (
 )
 from appa_agentthreatbench.scoring import actual_dispatch_scorer
 
-type Arm = Literal["stock", "permissive", "guarded", "fides", "fides-native"]
+type Arm = Literal["stock", "permissive", "guarded", "fides", "fides-native", "auto", "auto-ifc"]
 
-ARMS: tuple[Arm, ...] = ("stock", "permissive", "guarded", "fides", "fides-native")
+ARMS: tuple[Arm, ...] = ("stock", "permissive", "guarded", "fides", "fides-native", "auto", "auto-ifc")
 TASK_TYPES = ("memory_poison", "autonomy_hijack", "data_exfil")
 SYSTEM_PROMPTS = {
     "memory_poison": MEMORY_POISON_SYSTEM_PROMPT,
@@ -671,6 +672,8 @@ def policy_digest(task_type: str, arm: Arm) -> str:
     tools = [*DOMAIN_TOOLS[task_type], RESPONSE_TOOL]
     if arm == "stock":
         source = "stock:no-policy"
+    elif arm in {"auto", "auto-ifc"}:
+        return auto_policy_digest(task_type, arm)
     elif arm == "permissive":
         source = permissive_policy(tools)
     elif arm in {"fides", "fides-native"}:
@@ -761,7 +764,7 @@ def system_prompt(task_type: str, arm: Arm, agent_prompt_profile: str) -> str:
         parts.append(FIDES_SCAFFOLD)
     elif arm == "fides-native":
         parts.append(FIDES_NATIVE_SCAFFOLD)
-    elif arm != "stock":
+    elif arm not in {"stock", "auto", "auto-ifc"}:
         parts.append(CUSTOM_SCAFFOLD)
     addendum = AGENT_PROMPT_PROFILES[agent_prompt_profile]
     if addendum:
@@ -1396,6 +1399,17 @@ def complete_agent_loop(audit_dir: Path | None = None, agent_prompt_profile: str
         if arm == "stock":
             state.tools = domain_tools
             return await generate(state, tool_calls="loop")
+
+        if arm in {"auto", "auto-ifc"}:
+            state.tools = domain_tools
+            return await run_auto(
+                state,
+                task_type,
+                arm,
+                system_prompt(task_type, arm, agent_prompt_profile),
+                domain_tools,
+                get_model().name,
+            )
 
         if arm in {"fides", "fides-native"}:
             native_fides = arm == "fides-native"
@@ -2128,6 +2142,8 @@ def complete_task(audit_dir: Path | None = None, agent_prompt_profile: str = "st
                 "guarded": BINDING_IDENTITY,
                 "fides": FIDES_BINDING_IDENTITY,
                 "fides-native": FIDES_NATIVE_BINDING_IDENTITY,
+                "auto": AUTO_BINDING_IDENTITY,
+                "auto-ifc": AUTO_BINDING_IDENTITY,
             },
             "agent_prompt_profile": agent_prompt_profile,
         },

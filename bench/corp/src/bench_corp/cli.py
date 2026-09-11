@@ -36,6 +36,20 @@ SCENARIOS_DIR = BENCH_DIR / "scenarios"
 AGENT_ALIASES = {"fides": "fides-native"}
 
 
+def _agent_provenance(agents: list[Agent]) -> dict[str, dict[str, object]]:
+    provenance: dict[str, dict[str, object]] = {}
+    for agent in agents:
+        if agent.name in {"auto", "auto-ifc"}:
+            provenance[agent.name] = {
+                "claude_agent_sdk": "0.2.152",
+                "bundled_claude_code": "2.1.259",
+                "permission_mode": "auto",
+                "classifier_accounting": "excluded by ResultMessage.model_usage",
+                "scenario_policy_digests_recorded_per_episode": agent.name == "auto-ifc",
+            }
+    return provenance
+
+
 def resolve_agent_names(names: list[str] | None) -> list[str]:
     """Resolve compatibility names without adding duplicate benchmark arms."""
     requested = sorted(AGENTS) if names is None else names
@@ -225,7 +239,14 @@ def _run_canary(args: argparse.Namespace) -> int:
 
 def _add_execution_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--reps", type=int, default=1, help="Repetitions per cell (default 1).")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Shared OpenRouter model (default {DEFAULT_MODEL}).")
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help=(
+            f"Model identifier (default {DEFAULT_MODEL}). Auto arms require a supported "
+            "Anthropic Claude model and authentication."
+        ),
+    )
     parser.add_argument("--timeout", type=float, default=300.0, help="Per-episode timeout in seconds (default 300).")
     parser.add_argument(
         "-j", "--jobs", type=int, default=-1, help="Concurrent episodes (default -1: all CPUs; 1: sequential)."
@@ -321,6 +342,7 @@ def main(argv: list[str] | None = None) -> int:
                 "agents": [s.name for s in agents],
                 "scenarios": [s.name for s in scenarios],
                 "agent_prompt_profile": args.agent_prompt_profile,
+                "agent_provenance": _agent_provenance(agents),
                 **_git_state(),
             },
             indent=2,

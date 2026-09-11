@@ -6,6 +6,7 @@ import pytest
 from inspect_ai.model import ModelUsage
 from inspect_ai.tool import ToolDef
 
+from appa_agentthreatbench.auto import auto_mode_config
 from appa_agentthreatbench.fides import (
     FIDES_BINDING_IDENTITY,
     FIDES_MAX_CONCURRENT_TRAJECTORIES,
@@ -14,6 +15,7 @@ from appa_agentthreatbench.fides import (
 from appa_agentthreatbench.runner import (
     EXPECTED_BINDING_IDENTITY,
     EXPECTED_TOTAL_SAMPLES,
+    USAGE_BASELINES,
     _aggregate_usage,
     _audit_diagnostics,
     _scoreable_limit_termination,
@@ -60,7 +62,6 @@ def _usage_sample(*, input_tokens: int, output_tokens: int, cost_usd: float):
     event_usage = {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
-        "total_tokens": usage.total_tokens,
     }
     event = SimpleNamespace(
         event="model",
@@ -95,13 +96,28 @@ def test_usage_overhead_reports_absolute_and_relative_deltas() -> None:
         "mean_cost_usd_delta": pytest.approx(0.01),
         "cost_ratio": 1.5,
     }
+    assert USAGE_BASELINES["guarded"] == "permissive"
+    assert USAGE_BASELINES["auto-ifc"] == "auto"
 
 
 def test_complete_inventory_has_all_tasks_arms_and_controls() -> None:
     ids = validate_inventory()
-    assert len(ids) == EXPECTED_TOTAL_SAMPLES == 130
+    assert len(ids) == EXPECTED_TOTAL_SAMPLES == 182
     dataset = complete_dataset()
-    assert sum(bool(sample.metadata.get("control")) for sample in dataset) == 10
+    assert sum(bool(sample.metadata.get("control")) for sample in dataset) == 14
+
+
+def test_auto_arms_share_actor_prompt_and_ifc_config_uses_acl_facts() -> None:
+    metadata = {"authorized_recipients": ["CX-1", "alice@example.test"]}
+    config = auto_mode_config("data_exfil", metadata)
+
+    assert system_prompt("data_exfil", "auto", "standard") == system_prompt("data_exfil", "auto-ifc", "standard")
+    assert "OpenAPPA" not in system_prompt("data_exfil", "auto", "standard")
+    assert all(values[0] == "$defaults" for values in config.values())
+    rendered = json.dumps(config)
+    assert "alice@example.test" in rendered
+    assert "attack_marker" not in rendered
+    assert "sensitive_fields" not in rendered
 
 
 def test_fides_native_tools_have_provider_portable_strict_schemas() -> None:
@@ -113,7 +129,7 @@ def test_fides_native_tools_have_provider_portable_strict_schemas() -> None:
 
 def test_preflight_checks_pins_without_requiring_a_credential() -> None:
     result = preflight("openrouter/openai/gpt-5.6-terra", require_credential=False)
-    assert result["total_samples"] == 130
+    assert result["total_samples"] == 182
     assert result["binding_identity"] == EXPECTED_BINDING_IDENTITY
     assert result["fides_binding_identity"] == "agent-framework-fides-agentthreatbench-v1"
     assert result["fides_native_binding_identity"] == FIDES_NATIVE_BINDING_IDENTITY

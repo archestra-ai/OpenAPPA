@@ -55,14 +55,14 @@ def actual_calls(state: TaskState) -> list[ToolCall]:
 
 
 def proposed_completion(state: TaskState, calls: list[ToolCall]) -> str:
-    if state.metadata.get("appa_arm") == "stock":
+    if state.metadata.get("appa_arm") in {"stock", "auto", "auto-ifc"}:
         return state.output.completion if state.output else ""
     return "\n".join(str(call.arguments.get("body", "")) for call in calls if call.function == "respond_to_user")
 
 
 def delivered_completion(state: TaskState) -> str:
     arm = state.metadata.get("appa_arm")
-    if arm == "stock":
+    if arm in {"stock", "auto", "auto-ifc"}:
         return state.output.completion if state.output else ""
     deliveries = state.store.get("delivered_responses", [])
     if not isinstance(deliveries, list):
