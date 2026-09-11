@@ -290,3 +290,10 @@ lacked organization membership. No header-schema workaround was retained.
 
 The detailed build/setup/transaction notes and reproducible commands are in
 `archestra/platform/archestra-rs/openappa-rs/README.md` in the paired worktree.
+
+
+## Prototype follow-up: embedded human review
+
+Ported the host-ruling propagation fix from demo-11-09-25 into feat/archestra-native-postgres. Embedded remedy execution now carries the supplied human ruling through authority consultation even when no MCP request context exists. Added a direct regression test for this path.
+
+The companion Archestra feat/openappa-native branch carries denial-as-tool-result handling, original call preservation, durable exact-input resumption, authoritative denial replay, model-visible narrowing remedies, and the native Archestra approval UI bridge. Demo policy/UI/tools and the separate Claude protocol-negotiation workaround are excluded.
