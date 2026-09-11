@@ -44,11 +44,24 @@ pub fn stock(tree: &Path, store: &Path) -> io::Result<Vec<String>> {
         let staged = stage.path().join(name);
         crate::batteries_layout::copy_entry(&tree.join(name), &staged)?;
         let target = store.join(name);
-        let retired = tempfile::Builder::new().prefix(".retired-").tempdir_in(store)?;
-        if target.exists() {
-            fs::rename(&target, retired.path().join(name))?;
+        if !target.exists() {
+            fs::rename(&staged, &target)?;
+            continue;
         }
-        fs::rename(&staged, &target)?;
+        let retired = tempfile::Builder::new().prefix(".retired-").tempdir_in(store)?;
+        let parked = retired.path().join(name);
+        fs::rename(&target, &parked)?;
+        if let Err(error) = fs::rename(&staged, &target) {
+            // The store keeps the earlier copy when the new one cannot take
+            // its place; both temporary directories go with the return.
+            return Err(match fs::rename(&parked, &target) {
+                Ok(()) => error,
+                Err(restore) => io::Error::new(
+                    error.kind(),
+                    format!("{error}; and the earlier copy of {name} was not restored: {restore}"),
+                ),
+            });
+        }
     }
     Ok(names)
 }
