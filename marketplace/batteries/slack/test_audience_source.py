@@ -70,6 +70,23 @@ class SelectorTests(unittest.TestCase):
         )
         self.assertEqual(AUDIENCE_SOURCE.answer(call, {"selector": "viewer"}), {"members": ["slack:U1"]})
 
+    def test_a_directory_over_the_bound_is_refused(self):
+        pages = [
+            (
+                "users.list",
+                {"limit": 200, **({"cursor": f"page-{page}"} if page else {})},
+                {
+                    "ok": True,
+                    "members": [user(f"U{page}-{i}", f"u{page}-{i}@corp.com") for i in range(200)],
+                    "response_metadata": {"next_cursor": f"page-{page + 1}"},
+                },
+            )
+            for page in range(27)
+        ]
+        call = fixture_api([("auth.test", {}, {"ok": True, "user_id": "U1", "team_id": "T1"}), *pages])
+        with self.assertRaises(RuntimeError):
+            AUDIENCE_SOURCE.answer(call, {"selector": "full-members"})
+
     def test_a_page_without_members_is_a_failure_not_a_partial_answer(self):
         call = fixture_api(
             [
@@ -152,9 +169,82 @@ class SelectorTests(unittest.TestCase):
 
     def test_an_unserved_selector_is_refused(self):
         call = fixture_api([])
-        for selector in ["members", "user-group/", "viewer/extra", ""]:
+        for selector in ["members", "user-group/", "viewer/extra", "", "channel/", "channel/C1/extra"]:
             with self.assertRaises(ValueError):
                 AUDIENCE_SOURCE.answer(call, {"selector": selector})
+
+    def test_a_channel_id_names_a_conversation_and_a_user_id_names_a_dm(self):
+        for channel_id in ["C0ABC123", "G0ABC123", "D0ABC123"]:
+            self.assertEqual(AUDIENCE_SOURCE.conversation_kind(channel_id), "conversation")
+        for channel_id in ["U0ABC123", "W0ABC123"]:
+            self.assertEqual(AUDIENCE_SOURCE.conversation_kind(channel_id), "user")
+
+    def test_a_public_channel_is_read_by_every_full_member_and_whoever_is_in_it(self):
+        call = fixture_api(
+            [
+                ("conversations.info", {"channel": "C1"}, {"ok": True, "channel": {"id": "C1", "is_private": False}}),
+                ("conversations.members", {"channel": "C1", "limit": 200}, {"ok": True, "members": ["U1", "U3"]}),
+                ("auth.test", {}, {"ok": True, "user_id": "U1", "team_id": "T1"}),
+                (
+                    "users.list",
+                    {"limit": 200},
+                    {
+                        "ok": True,
+                        "members": [
+                            user("U1", "alice@corp.com"),
+                            user("U2", "bob@corp.com"),
+                            user("U3", "guest@other.com", is_restricted=True),
+                            user("U4", "other-guest@other.com", is_restricted=True),
+                        ],
+                    },
+                ),
+            ]
+        )
+        self.assertEqual(
+            AUDIENCE_SOURCE.answer(call, {"selector": "channel/C1"}),
+            {"members": ["alice@corp.com", "bob@corp.com", "guest@other.com"]},
+        )
+
+    def test_a_private_conversation_is_read_by_its_members_looked_up_one_by_one(self):
+        for conversation in [{"is_private": True}, {"is_im": True}, {"is_mpim": True}]:
+            call = fixture_api(
+                [
+                    ("conversations.info", {"channel": "G1"}, {"ok": True, "channel": {"id": "G1", **conversation}}),
+                    ("conversations.members", {"channel": "G1", "limit": 200}, {"ok": True, "members": ["U1", "U7"]}),
+                    ("users.info", {"user": "U1"}, {"ok": True, "user": user("U1", "alice@corp.com")}),
+                    ("users.info", {"user": "U7"}, {"ok": True, "user": user("U7", "gone@corp.com", deleted=True)}),
+                ]
+            )
+            self.assertEqual(AUDIENCE_SOURCE.answer(call, {"selector": "channel/G1"}), {"members": ["alice@corp.com"]})
+
+    def test_a_conversation_without_visibility_flags_is_refused_not_read_as_public(self):
+        for channel in [{"id": "C1"}, {"id": "C1", "is_private": "no"}]:
+            call = fixture_api(
+                [
+                    ("conversations.info", {"channel": "C1"}, {"ok": True, "channel": channel}),
+                    ("conversations.members", {"channel": "C1", "limit": 200}, {"ok": True, "members": ["U1"]}),
+                ]
+            )
+            with self.assertRaises(RuntimeError):
+                AUDIENCE_SOURCE.answer(call, {"selector": "channel/C1"})
+
+    def test_a_member_the_directory_does_not_report_is_a_failure(self):
+        call = fixture_api(
+            [
+                ("conversations.info", {"channel": "C1"}, {"ok": True, "channel": {"id": "C1", "is_private": False}}),
+                ("conversations.members", {"channel": "C1", "limit": 200}, {"ok": True, "members": ["U1", "U9"]}),
+                ("auth.test", {}, {"ok": True, "user_id": "U1", "team_id": "T1"}),
+                ("users.list", {"limit": 200}, {"ok": True, "members": [user("U1", "alice@corp.com")]}),
+            ]
+        )
+        with self.assertRaises(RuntimeError):
+            AUDIENCE_SOURCE.answer(call, {"selector": "channel/C1"})
+
+    def test_anything_but_a_conversation_or_user_id_is_refused_before_slack_is_asked(self):
+        call = fixture_api([])
+        for channel_id in ["general", "#general", "C", "U", "B0ABC123", "T0ABC123", "https://x.slack.com/archives/C1"]:
+            with self.assertRaises(ValueError):
+                AUDIENCE_SOURCE.answer(call, {"selector": f"channel/{channel_id}"})
 
     def test_a_slack_error_is_a_failure(self):
         call = fixture_api([("auth.test", {}, {"ok": False, "error": "invalid_auth"})])
@@ -207,7 +297,7 @@ class EnvelopeTests(unittest.TestCase):
             "version": 1,
             "kind": "audience",
             "name": "slack",
-            "declaration": {"templates": ["viewer", "full-members", "user-group/<handle>"]},
+            "declaration": {"templates": ["viewer", "full-members", "user-group/<handle>", "channel/<id>"]},
             "artifact": {"selector": "viewer"},
             **overrides,
         }
@@ -230,7 +320,7 @@ class EnvelopeTests(unittest.TestCase):
 
     def test_a_foreign_declaration_is_refused_before_the_token_is_read(self):
         declared = self.envelope()["declaration"]["templates"]
-        for templates in [declared + ["channel/<id>"], declared[1:], [], list(reversed(declared))]:
+        for templates in [declared + ["foreign/<x>"], declared[1:], [], list(reversed(declared))]:
             result = self.run_script(self.envelope(declaration={"templates": templates}), {"PATH": "/usr/bin:/bin"})
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertEqual(result.stdout, "")

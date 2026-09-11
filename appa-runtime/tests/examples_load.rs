@@ -64,7 +64,7 @@ fn the_kagent_policies_open() {
 #[test]
 fn the_complete_battery_examples_open() {
     opens(&repo_root().join("examples/claude-code-battery/appa.toml"));
-    opens(&repo_root().join("examples/test-github-battery/github-battery-test.toml"));
+    opens(&repo_root().join("examples/github-battery/appa.toml"));
 }
 
 /// The initialized default with the Claude Code battery included, as `appa plugin install claude-code` composes
