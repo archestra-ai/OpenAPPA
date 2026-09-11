@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .report import AgentSummary
+from .report import AgentSummary, usage_overhead
 
 DEFENDED_ARM = "appa"
 EMPTY_ARM = "appa-open"
@@ -108,6 +108,17 @@ def _arm_cell(summary: AgentSummary | None) -> str:
     )
 
 
+def _token_overhead(run: ModelSummaries) -> str:
+    comparison = usage_overhead(run.agents).get(DEFENDED_ARM)
+    if comparison is None:
+        return "—"
+    delta = comparison["mean_total_tokens_delta"]
+    ratio = comparison["total_tokens_ratio"]
+    if not isinstance(delta, int | float) or not isinstance(ratio, int | float):
+        return "—"
+    return f"{delta:+,.0f} ({100 * (ratio - 1):+.0f}%)"
+
+
 def render_markdown(runs: list[ModelSummaries], verdict: Verdict, run_id: str) -> str:
     status = "✅ passed" if verdict.healthy else "😞 failed"
     lines = [
@@ -115,12 +126,13 @@ def render_markdown(runs: list[ModelSummaries], verdict: Verdict, run_id: str) -
         "",
         f"run `{run_id}`, profile `{CANARY_PROMPT_PROFILE}`, 1 rep per cell",
         "",
-        f"| model | defended (`{DEFENDED_ARM}`) | empty (`{EMPTY_ARM}`) |",
-        "| --- | --- | --- |",
+        f"| model | defended (`{DEFENDED_ARM}`) | empty (`{EMPTY_ARM}`) | APPA mean tokens/episode vs empty |",
+        "| --- | --- | --- | ---: |",
     ]
     for run in runs:
         lines.append(
-            f"| `{run.model}` | {_arm_cell(run.arm(DEFENDED_ARM))} | {_arm_cell(run.arm(EMPTY_ARM))} |"
+            f"| `{run.model}` | {_arm_cell(run.arm(DEFENDED_ARM))} | "
+            f"{_arm_cell(run.arm(EMPTY_ARM))} | {_token_overhead(run)} |"
         )
     if verdict.failures or verdict.warnings:
         lines.append("")
@@ -132,14 +144,15 @@ def render_markdown(runs: list[ModelSummaries], verdict: Verdict, run_id: str) -
 def _board(runs: list[ModelSummaries]) -> str:
     """One monospace row per model × arm; the provider prefix carries no
     information at a glance, so rows show the bare model name."""
-    rows = [("model", "arm", "utility", "ASR", "err")]
+    rows = [("model", "arm", "utility", "ASR", "err", "tokens/ep", "overhead")]
     for run in runs:
         for arm_name, label in ((DEFENDED_ARM, "defended"), (EMPTY_ARM, "empty")):
             summary = run.arm(arm_name)
             model = run.model.split("/", 1)[-1]
             if summary is None:
-                rows.append((model, label, "—", "—", "—"))
+                rows.append((model, label, "—", "—", "—", "—", "—"))
             else:
+                tokens = "—" if summary.mean_total_tokens is None else f"{summary.mean_total_tokens:,.0f}"
                 rows.append(
                     (
                         model,
@@ -147,12 +160,15 @@ def _board(runs: list[ModelSummaries]) -> str:
                         f"{summary.utility_passed}/{summary.utility_total}",
                         f"{summary.attacks_succeeded}/{summary.attacks_total}",
                         str(summary.errors),
+                        tokens,
+                        _token_overhead(run) if arm_name == DEFENDED_ARM else "",
                     )
                 )
-    widths = [max(len(row[column]) for row in rows) for column in range(5)]
+    widths = [max(len(row[column]) for row in rows) for column in range(len(rows[0]))]
     out = [
         "  ".join(
-            f"{row[i]:<{widths[i]}}" if i < 2 else f"{row[i]:>{widths[i]}}" for i in range(5)
+            f"{row[i]:<{widths[i]}}" if i < 2 else f"{row[i]:>{widths[i]}}"
+            for i in range(len(row))
         ).rstrip()
         for row in rows
     ]
