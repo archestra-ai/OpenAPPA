@@ -189,7 +189,7 @@ jobs:
               - 'website/content/docs/contracts.md'
               # The published image compiles the appa-guide skill into
               # the binary and digests the batteries tree
-              # appa-runtime/src/plugin_layout.rs maps.
+              # appa-runtime/src/batteries_layout.rs maps.
               - 'marketplace/**'
               - 'integrations/appa-guide/**'
               - 'scripts/appa-refresh-batteries.py'

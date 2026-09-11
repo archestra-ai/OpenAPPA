@@ -1355,7 +1355,7 @@ mod tests {
         let document = serde_json::json!({"schema": 1, "repository": REPOSITORY,
             "commit": "a".repeat(40), "release": "v1.0.0", "protocol": appa_package::PROTOCOL,
             "catalog": ArtifactDigest::of_bytes(catalog), "marketplace": digest,
-            "claude_plugin": digest, "runtime_chart": digest,
+            "batteries": digest, "runtime_chart": digest,
             "binaries": Platform::ALL.into_iter().map(|p| (p, digest.clone())).collect::<BTreeMap<_, _>>(),
             "images": Image::ALL.into_iter().map(|i| (i, serde_json::json!({"digest": digest,
                 "platforms": {"linux/amd64": digest}}))).collect::<BTreeMap<_, _>>()});

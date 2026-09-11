@@ -163,8 +163,8 @@ jobs:
             -c 'credential.helper=!f() { test "$1" = get && printf "%s\n" "username=x-access-token" "password=$RELEASE_PUSH_TOKEN"; }; f' \
             push origin "HEAD:${release_branch}"
 
-  plugin-artifact:
-    name: Build the plugin artifact
+  batteries-artifact:
+    name: Build the batteries artifact
     if: >-
       needs.release-please.outputs.should_publish == 'true' &&
       needs.release-please.outputs.registry_only != 'true'
@@ -189,28 +189,28 @@ jobs:
           release_ref: ${{ needs.release-please.outputs.tag_name }}
           source_commit: ${{ needs.release-please.outputs.source_commit }}
 
-      - name: Package the plugin
+      - name: Package the batteries
         id: package
         env:
           VERSION: ${{ needs.release-please.outputs.version }}
           COPYFILE_DISABLE: "1"
         run: |
           mkdir -p dist staged
-          # The archive's tree, as appa-runtime/src/plugin_layout.rs maps it.
+          # The archive's tree, as appa-runtime/src/batteries_layout.rs maps it.
           cp -R marketplace/batteries staged/batteries
           find staged -type d -name __pycache__ -prune -exec rm -rf -- {} +
           find staged -type f \( -name '*.pyc' -o -name '*.pyo' -o -name appa-package.toml \) -delete
-          tar -C staged -czf "dist/appa-plugin-${VERSION}.tar.gz" .
+          tar -C staged -czf "dist/appa-batteries-${VERSION}.tar.gz" .
           bash scripts/appa-marketplace.sh --check
           tar -C marketplace -czf "dist/appa-marketplace-${VERSION}.tar.gz" .
-          digest=$(sha256sum "dist/appa-plugin-${VERSION}.tar.gz" | cut -d' ' -f1)
+          digest=$(sha256sum "dist/appa-batteries-${VERSION}.tar.gz" | cut -d' ' -f1)
           echo "sha256=${digest}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload the plugin artifact
+      - name: Upload the batteries artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: appa-plugin
-          path: dist/appa-plugin-${{ needs.release-please.outputs.version }}.tar.gz
+          name: appa-batteries
+          path: dist/appa-batteries-${{ needs.release-please.outputs.version }}.tar.gz
           archive: false
           overwrite: true
           if-no-files-found: error
@@ -233,7 +233,7 @@ jobs:
       needs.release-please.outputs.registry_only != 'true'
     needs:
       - release-please
-      - plugin-artifact
+      - batteries-artifact
     permissions:
       contents: read # Required to verify and check out the release tag.
     uses: ./.github/workflows/build-appa-runtime-binaries.yml
@@ -241,7 +241,7 @@ jobs:
       release_ref: ${{ needs.release-please.outputs.tag_name }}
       source_commit: ${{ needs.release-please.outputs.source_commit }}
       expected_version: ${{ needs.release-please.outputs.version }}
-      plugin_sha256: ${{ needs.plugin-artifact.outputs.sha256 }}
+      batteries_sha256: ${{ needs.batteries-artifact.outputs.sha256 }}
 
   oci-tags:
     name: Resolve release image tags
@@ -385,7 +385,7 @@ jobs:
       needs.release-please.outputs.registry_only != 'true'
     needs:
       - release-please
-      - plugin-artifact
+      - batteries-artifact
       - build-binaries
       - publish-oci-images
       - publish-chart
@@ -441,11 +441,11 @@ jobs:
         working-directory: dist
         env:
           EXPECTED_VERSION: ${{ needs.release-please.outputs.version }}
-          PLUGIN_SHA256: ${{ needs.plugin-artifact.outputs.sha256 }}
+          BATTERIES_SHA256: ${{ needs.batteries-artifact.outputs.sha256 }}
           TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
         run: |
           test "$TAG_NAME" = "v${EXPECTED_VERSION}"
-          # Six binaries, the native plugin, the package catalog/trees and both charts.
+          # Six binaries, the batteries archive, the package catalog/trees and both charts.
           expected_archives=(
             appa-x86_64-unknown-linux-gnu.tar.gz
             appa-aarch64-unknown-linux-gnu.tar.gz
@@ -453,7 +453,7 @@ jobs:
             appa-aarch64-apple-darwin.tar.gz
             appa-x86_64-pc-windows-msvc.zip
             appa-aarch64-pc-windows-msvc.zip
-            "appa-plugin-${EXPECTED_VERSION}.tar.gz"
+            "appa-batteries-${EXPECTED_VERSION}.tar.gz"
             "appa-marketplace-${EXPECTED_VERSION}.tar.gz"
             "appa-runtime-${EXPECTED_VERSION}.tgz"
             "appa-kagent-demo-${EXPECTED_VERSION}.tgz"
@@ -471,10 +471,10 @@ jobs:
             exit 1
           fi
           # The binaries were built with this digest compiled in; a mismatch
-          # here would ship a release whose binaries refuse their own plugin.
-          published=$(sha256sum "appa-plugin-${EXPECTED_VERSION}.tar.gz" | cut -d' ' -f1)
-          if [ "$published" != "$PLUGIN_SHA256" ]; then
-            echo "::error::the published plugin artifact is not the one the binaries accept"
+          # here would ship a release whose binaries refuse their own batteries archive.
+          published=$(sha256sum "appa-batteries-${EXPECTED_VERSION}.tar.gz" | cut -d' ' -f1)
+          if [ "$published" != "$BATTERIES_SHA256" ]; then
+            echo "::error::the published batteries artifact is not the one the binaries accept"
             exit 1
           fi
           sh -n appa-install.sh

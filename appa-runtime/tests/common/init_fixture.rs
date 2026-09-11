@@ -14,7 +14,7 @@ use appa_engine::profile::PolicyFileKey;
 use appa_runtime::config::Config;
 use sha2::{Digest, Sha256};
 
-use crate::common::{repo_root, stage_bundle};
+use crate::common::repo_root;
 
 /// The key of the policy the fixture's config carries: the shipped default,
 /// which composes to the same bytes wherever it is loaded from.
@@ -39,21 +39,6 @@ pub fn executable(path: &Path) {
     fs::set_permissions(path, permissions).expect("fixture is executable");
 }
 
-/// The staged plugin tree of this checkout, packed as the archive a development
-/// build's generation carries and its activation verifies.
-fn pack_bundle(root: &Path) -> PathBuf {
-    let staged = stage_bundle(root);
-    let archive = root.join("plugin-source.tar.gz");
-    let file = fs::File::create(&archive).expect("the archive is created");
-    let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(file, flate2::Compression::fast()));
-    builder.append_dir_all(".", &staged).expect("the staged tree packs");
-    builder
-        .into_inner()
-        .and_then(flate2::write::GzEncoder::finish)
-        .expect("the archive is finished");
-    archive
-}
-
 pub fn runtime_fingerprint(deployed: &Path) -> String {
     let digest = Sha256::digest(fs::read(deployed).expect("runtime bytes"));
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -67,7 +52,6 @@ pub struct Fixture {
     pub data: PathBuf,
     pub claude: PathBuf,
     pub appa: PathBuf,
-    pub archive: PathBuf,
 }
 
 impl Fixture {
@@ -93,7 +77,6 @@ impl Fixture {
         let config = root.join("config");
         fs::create_dir_all(&config).expect("config directory");
         fs::write(config.join("appa.toml"), shipped_default_config()).expect("the config is written");
-        let archive = pack_bundle(&root);
         Self {
             _directory: directory,
             config,
@@ -102,7 +85,6 @@ impl Fixture {
             bin,
             claude,
             appa,
-            archive,
         }
     }
 
@@ -111,29 +93,22 @@ impl Fixture {
     /// answering as this deployment's own healthy runtime serving the fixture's
     /// policy. A test overrides the `FAKE_*` variables for the case it reproduces.
     pub fn activate(&self) -> Command {
-        let mut command = Command::new(&self.appa);
-        command
-            .current_dir(&self.root)
-            .arg("activate-claude")
-            .arg("--config")
-            .arg(self.config.join("appa.toml"))
-            .arg("--archive")
-            .arg(&self.archive);
-        self.environment(&mut command);
-        command
+        self.bridge("activate-claude")
     }
 
     /// `appa remove-claude` against this fixture, as `appa plugin remove
     /// claude-code` runs it.
     pub fn remove(&self) -> Command {
+        self.bridge("remove-claude")
+    }
+
+    fn bridge(&self, subcommand: &str) -> Command {
         let mut command = Command::new(&self.appa);
         command
             .current_dir(&self.root)
-            .arg("remove-claude")
+            .arg(subcommand)
             .arg("--config")
-            .arg(self.config.join("appa.toml"))
-            .arg("--archive")
-            .arg(&self.archive);
+            .arg(self.config.join("appa.toml"));
         self.environment(&mut command);
         command
     }

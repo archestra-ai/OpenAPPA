@@ -1,5 +1,5 @@
-#[path = "src/plugin_layout.rs"]
-mod plugin_layout;
+#[path = "src/batteries_layout.rs"]
+mod batteries_layout;
 
 use std::env;
 use std::fs;
@@ -7,22 +7,23 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-env-changed=APPA_PLUGIN_SHA256");
+    println!("cargo:rerun-if-env-changed=APPA_BATTERIES_SHA256");
     println!("cargo:rerun-if-env-changed=APPA_RELEASE_REF");
     println!("cargo:rerun-if-env-changed=APPA_YELL_ENDPOINT");
 
     let crate_root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo sets CARGO_MANIFEST_DIR"));
     let repository = crate_root.parent().expect("appa-runtime is inside the repository");
-    for (source, _) in plugin_layout::REPOSITORY_MAPPINGS {
-        println!("cargo:rerun-if-changed={}", repository.join(source).display());
-    }
+    println!(
+        "cargo:rerun-if-changed={}",
+        repository.join(batteries_layout::SOURCE).display()
+    );
     watch_git_identity(repository);
 
     let release = env::var("APPA_RELEASE_REF").ok();
     let commit = git(repository, &["rev-parse", "HEAD"]);
-    let dirty = plugin_is_dirty(repository);
+    let dirty = batteries_are_dirty(repository);
     if release.is_some() {
-        // Release identity covers runtime code as well as plugin mappings.
+        // Release identity covers runtime code as well as batteries mappings.
         // Recheck on incremental release builds too, including newly added files.
         println!("cargo:rerun-if-changed={}", repository.display());
         assert!(
@@ -39,30 +40,31 @@ fn main() {
     }
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR"));
-    let staged = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR")).join("plugin-build-source");
+    let staged = out_dir.join("batteries-build-source");
     if staged.exists() {
-        fs::remove_dir_all(&staged).expect("remove the previous staged plugin identity");
+        fs::remove_dir_all(&staged).expect("remove the previous staged batteries identity");
     }
-    let committed = out_dir.join("plugin-build-repository");
+    let committed = out_dir.join("batteries-build-repository");
     if committed.exists() {
-        fs::remove_dir_all(&committed).expect("remove the previous committed plugin source");
+        fs::remove_dir_all(&committed).expect("remove the previous committed batteries source");
     }
     let identity_source = if commit.is_some() && !dirty {
-        export_committed_repository(repository, &committed).expect("export the committed plugin source");
+        export_committed_repository(repository, &committed).expect("export the committed batteries source");
         committed.as_path()
     } else {
         repository
     };
-    plugin_layout::stage_repository(identity_source, &staged).expect("stage the plugin source for build identity");
-    let digest = appa_package::tree::canonical_tree_digest(&staged).expect("digest the staged plugin source");
-    println!("cargo:rustc-env=APPA_PLUGIN_TREE_SHA256={}", hex(&digest));
+    batteries_layout::stage_repository(identity_source, &staged)
+        .expect("stage the batteries source for build identity");
+    let digest = appa_package::tree::canonical_tree_digest(&staged).expect("digest the staged batteries source");
+    println!("cargo:rustc-env=APPA_BATTERIES_TREE_SHA256={}", hex(&digest));
 
     if let Some(reference) = release {
         assert!(!reference.trim().is_empty(), "APPA_RELEASE_REF must not be empty");
-        let digest = release_plugin_digest();
+        let digest = release_batteries_digest();
         let endpoint = release_yell_endpoint();
         println!("cargo:rustc-env=APPA_RELEASE_REF={reference}");
-        println!("cargo:rustc-env=APPA_PLUGIN_SHA256={digest}");
+        println!("cargo:rustc-env=APPA_BATTERIES_SHA256={digest}");
         println!("cargo:rustc-env=APPA_YELL_COMPILED_ENDPOINT={endpoint}");
         return;
     }
@@ -80,20 +82,20 @@ fn main() {
     println!("cargo:rustc-env=APPA_BUILD_REPOSITORY={}", repository.display());
 }
 
-/// The SHA-256 of the release plugin archive this build accepts, as 64 hex
-/// characters. A release binary resolves its plugin from nothing else, so a
+/// The SHA-256 of the release batteries archive this build accepts, as 64 hex
+/// characters. A release binary resolves its batteries from nothing else, so a
 /// release build without it is refused here rather than at someone's install.
-fn release_plugin_digest() -> String {
-    let Some(digest) = env::var("APPA_PLUGIN_SHA256").ok() else {
+fn release_batteries_digest() -> String {
+    let Some(digest) = env::var("APPA_BATTERIES_SHA256").ok() else {
         panic!(
-            "a release build (APPA_RELEASE_REF is set) requires APPA_PLUGIN_SHA256, \
-             the SHA-256 of the release plugin archive"
+            "a release build (APPA_RELEASE_REF is set) requires APPA_BATTERIES_SHA256, \
+             the SHA-256 of the release batteries archive"
         );
     };
     let digest = digest.trim().to_owned();
     assert!(
         digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "APPA_PLUGIN_SHA256 must be 64 hexadecimal characters, got {digest:?}"
+        "APPA_BATTERIES_SHA256 must be 64 hexadecimal characters, got {digest:?}"
     );
     digest
 }
@@ -138,9 +140,14 @@ fn release_yell_endpoint() -> String {
     endpoint
 }
 
-fn plugin_is_dirty(repository: &Path) -> bool {
-    let mut arguments = vec!["status", "--porcelain=v1", "--untracked-files=all", "--"];
-    arguments.extend(plugin_layout::REPOSITORY_MAPPINGS.iter().map(|(source, _)| *source));
+fn batteries_are_dirty(repository: &Path) -> bool {
+    let arguments = [
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--",
+        batteries_layout::SOURCE,
+    ];
     git(repository, &arguments).is_none_or(|output| !output.trim().is_empty())
 }
 
@@ -149,10 +156,7 @@ fn export_committed_repository(repository: &Path, destination: &Path) -> std::io
     command
         .arg("-C")
         .arg(repository)
-        .args(["archive", "--format=tar", "HEAD", "--"]);
-    for (source, _) in plugin_layout::REPOSITORY_MAPPINGS {
-        command.arg(source);
-    }
+        .args(["archive", "--format=tar", "HEAD", "--", batteries_layout::SOURCE]);
     let output = command.output()?;
     if !output.status.success() {
         return Err(std::io::Error::other(

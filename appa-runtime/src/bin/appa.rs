@@ -23,8 +23,6 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
         #[arg(long)]
-        archive: PathBuf,
-        #[arg(long)]
         previous_binary: Option<PathBuf>,
     },
     /// Internal journalled removal using the selected release executable.
@@ -32,8 +30,6 @@ enum Command {
     RemoveClaude {
         #[arg(long)]
         config: PathBuf,
-        #[arg(long)]
-        archive: PathBuf,
     },
     /// Inspect host plugin packages for a deployment.
     Plugin {
@@ -97,7 +93,7 @@ enum Command {
                             either way.")]
     Yell {
         /// The runtime that builds the report. Loopback only.
-        #[arg(long, env = "APPA_RUNTIME_URL", default_value = "http://127.0.0.1:8787")]
+        #[arg(long, env = "APPA_RUNTIME_URL", default_value = appa_runtime::runtime_url::DEFAULT_RUNTIME_URL)]
         url: String,
 
         /// Answer both questions with yes: pseudonymize the report, and send it.
@@ -193,9 +189,8 @@ fn main() -> ExitCode {
         Command::BuildInfo => appa_runtime::installation::native::build_info(),
         Command::ActivateClaude {
             config,
-            archive,
             previous_binary,
-        } => match appa_runtime::init::activate_claude_code(&config, &archive, previous_binary.as_deref()) {
+        } => match appa_runtime::init::activate_claude_code(&config, previous_binary.as_deref()) {
             Ok(_) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("appa: {error}");
@@ -215,7 +210,7 @@ fn main() -> ExitCode {
         Command::Plugin {
             command: PluginCommand::Remove(args),
         } => appa_runtime::installation::cli::remove_plugin(args),
-        Command::RemoveClaude { config, archive } => match appa_runtime::init::claude_code_remove(&config, &archive) {
+        Command::RemoveClaude { config: _ } => match appa_runtime::init::claude_code_remove() {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("appa: {error}");

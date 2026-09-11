@@ -1,20 +1,12 @@
-//! Archives an install reads bytes through: the plugin archive a build accepts
-//! as its own, the bounded fetch of a release asset or source archive, and the
-//! bounded extraction of either.
-//!
-//! A release binary is built knowing its release tag and the SHA-256 of that
-//! tag's plugin artifact. A source build knows its Git commit and the canonical
-//! digest of the tree staged beside it. Neither identity can be redirected by
-//! the environment, the working directory or a mutable ref.
+//! Archives an install reads bytes through: the bounded fetch of a release
+//! asset or source archive, and the bounded extraction of either.
 
 use std::env;
-use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use appa_package::tree::{MAX_ENTRIES, MAX_UNCOMPRESSED_BYTES};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// The one place a debug-only seam reads the environment.
@@ -35,12 +27,6 @@ pub(crate) fn debug_override(name: &str) -> Option<String> {
 
 #[derive(Debug, Error)]
 pub enum ArchiveError {
-    #[error("this appa build carries a release plugin digest but no release tag")]
-    MissingReleaseRef,
-    #[error("this appa build carries an invalid plugin digest: {value}")]
-    MalformedBuildDigest { value: String },
-    #[error("{value} is not a SHA-256 digest")]
-    MalformedDigest { value: String },
     #[error("cannot read {path}: {source}")]
     Read { path: PathBuf, source: std::io::Error },
     #[error("cannot write {path}: {source}")]
@@ -49,132 +35,6 @@ pub enum ArchiveError {
     Malformed { path: PathBuf, reason: String },
     #[error("cannot fetch {url}: {reason}")]
     Fetch { url: String, reason: String },
-    #[error("the plugin archive at {path} is not the one this build accepts: expected {expected}, got {actual}")]
-    DigestMismatch {
-        path: PathBuf,
-        expected: PluginDigest,
-        actual: PluginDigest,
-    },
-}
-
-/// The SHA-256 of a plugin artifact: what a binary was built with, and what a
-/// fetched or cached archive must hash to.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct PluginDigest([u8; 32]);
-
-impl PluginDigest {
-    fn parse(value: &str) -> Result<Self, ArchiveError> {
-        let trimmed = value.trim();
-        let malformed = || ArchiveError::MalformedDigest {
-            value: trimmed.to_owned(),
-        };
-        if trimmed.len() != 64 {
-            return Err(malformed());
-        }
-        let mut bytes = [0u8; 32];
-        // The length is already 64, so the remainder is empty by construction.
-        let (pairs, _) = trimmed.as_bytes().as_chunks::<2>();
-        for (slot, pair) in bytes.iter_mut().zip(pairs) {
-            let hex = std::str::from_utf8(pair).map_err(|_| malformed())?;
-            *slot = u8::from_str_radix(hex, 16).map_err(|_| malformed())?;
-        }
-        Ok(Self(bytes))
-    }
-
-    #[cfg(test)]
-    fn of(bytes: &[u8]) -> Self {
-        let mut digest = Sha256::new();
-        digest.update(bytes);
-        Self(digest.finalize().into())
-    }
-
-    fn from_hasher(hasher: Sha256) -> Self {
-        Self(hasher.finalize().into())
-    }
-}
-
-impl fmt::Display for PluginDigest {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(formatter, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
-
-impl fmt::Debug for PluginDigest {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "PluginDigest({self})")
-    }
-}
-
-/// What `build.rs` stamped into this binary about the plugin archive it
-/// belongs with.
-#[derive(Debug, Clone, Copy)]
-struct BuildIdentity<'a> {
-    release_digest: Option<PluginDigest>,
-    release_ref: Option<&'a str>,
-    commit: Option<&'a str>,
-}
-
-impl BuildIdentity<'static> {
-    fn compiled() -> Result<Self, ArchiveError> {
-        // The digest is a compile-time constant. Runtime environment changes
-        // cannot redirect a shipped binary to different plugin bytes.
-        let release_digest = option_env!("APPA_PLUGIN_SHA256")
-            .map(PluginDigest::parse)
-            .transpose()
-            .map_err(|_| ArchiveError::MalformedBuildDigest {
-                value: option_env!("APPA_PLUGIN_SHA256").unwrap_or_default().to_owned(),
-            })?;
-        Ok(Self {
-            release_digest,
-            release_ref: option_env!("APPA_RELEASE_REF"),
-            commit: option_env!("APPA_BUILD_COMMIT"),
-        })
-    }
-}
-
-/// A local plugin archive this binary accepts as its own.
-///
-/// A release build accepts only its release archive, by file digest. A
-/// development build accepts the archive its own generation packed, which the
-/// install already verified against the generation descriptor.
-#[derive(Debug, Clone)]
-pub(crate) struct VerifiedArchive {
-    reference: String,
-}
-
-impl VerifiedArchive {
-    pub(crate) fn of(path: &Path) -> Result<Self, ArchiveError> {
-        let identity = BuildIdentity::compiled()?;
-        let reference = match identity.release_digest {
-            Some(expected) => {
-                let actual = digest_of_file(path)?;
-                if actual != expected {
-                    return Err(ArchiveError::DigestMismatch {
-                        path: path.to_path_buf(),
-                        expected,
-                        actual,
-                    });
-                }
-                identity.release_ref.ok_or(ArchiveError::MissingReleaseRef)?.to_owned()
-            }
-            None => format!(
-                "build {}",
-                identity
-                    .commit
-                    .map(|commit| &commit[..commit.len().min(12)])
-                    .unwrap_or("unknown")
-            ),
-        };
-        Ok(Self { reference })
-    }
-
-    /// The origin as a receipt names it: the release tag, or the build's commit.
-    pub(crate) fn label(&self) -> String {
-        format!("appa {} plugin", self.reference)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -224,26 +84,6 @@ pub(crate) fn single_directory(container: &Path) -> Result<PathBuf, ArchiveError
         });
     }
     Ok(first.path())
-}
-
-fn digest_of_file(path: &Path) -> Result<PluginDigest, ArchiveError> {
-    let mut file = fs::File::open(path).map_err(|source| ArchiveError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = std::io::Read::read(&mut file, &mut buffer).map_err(|source| ArchiveError::Read {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(PluginDigest::from_hasher(hasher))
 }
 
 /// Stream the artifact to `destination`, enforcing the size cap as it goes.
@@ -461,21 +301,6 @@ fn safe_relative(path: &Path) -> EntryPath {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn digest_round_trips_through_hex() {
-        let digest = PluginDigest::of(b"appa");
-        let text = digest.to_string();
-        assert_eq!(text.len(), 64);
-        assert_eq!(PluginDigest::parse(&text).unwrap(), digest);
-    }
-
-    #[test]
-    fn digest_rejects_malformed_hex() {
-        for value in ["", "abc", &"z".repeat(64), &"a".repeat(63), &"a".repeat(65)] {
-            assert!(PluginDigest::parse(value).is_err(), "accepted {value:?}");
-        }
-    }
 
     #[test]
     fn deployment_bundles_have_room_for_metadata_beyond_the_package_entry_limit() {

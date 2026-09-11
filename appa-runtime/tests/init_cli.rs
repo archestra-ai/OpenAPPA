@@ -24,9 +24,7 @@ fn release_override_probe_reaches_endpoint_before_deployment_paths() {
             .current_dir(&fixture.root)
             .arg("activate-claude")
             .arg("--config")
-            .arg("./no-such-dir/appa.toml")
-            .arg("--archive")
-            .arg("./no-such-archive.tar.gz");
+            .arg("./no-such-dir/appa.toml");
         for variable in [
             "HOME",
             "USERPROFILE",

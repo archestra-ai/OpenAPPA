@@ -53,16 +53,16 @@ class RefreshBatteriesTests(unittest.TestCase):
                 "assets": [
                     {"name": "SHA256SUMS", "browser_download_url": f"{release_root}/SHA256SUMS"},
                     {
-                        "name": "appa-plugin-1.2.3.tar.gz",
-                        "browser_download_url": f"{release_root}/appa-plugin-1.2.3.tar.gz",
+                        "name": "appa-batteries-1.2.3.tar.gz",
+                        "browser_download_url": f"{release_root}/appa-batteries-1.2.3.tar.gz",
                     },
                 ],
             }
         ).encode()
         responses = {
             "https://api.github.com/repos/archestra-ai/OpenAPPA/releases/latest": release,
-            f"{release_root}/SHA256SUMS": f"{digest}  appa-plugin-1.2.3.tar.gz\n".encode(),
-            f"{release_root}/appa-plugin-1.2.3.tar.gz": package,
+            f"{release_root}/SHA256SUMS": f"{digest}  appa-batteries-1.2.3.tar.gz\n".encode(),
+            f"{release_root}/appa-batteries-1.2.3.tar.gz": package,
         }
 
         def opener(request, timeout):
@@ -144,8 +144,8 @@ class RefreshBatteriesTests(unittest.TestCase):
         with self.assertRaisesRegex(refresh_batteries.RefreshError, "checksum mismatch"):
             refresh_batteries.verify_archive(
                 b"archive",
-                f"{'0' * 64}  appa-plugin-1.2.3.tar.gz\n".encode(),
-                "appa-plugin-1.2.3.tar.gz",
+                f"{'0' * 64}  appa-batteries-1.2.3.tar.gz\n".encode(),
+                "appa-batteries-1.2.3.tar.gz",
             )
 
     def test_staged_validation_substitutes_the_target_and_clears_its_env(self):
