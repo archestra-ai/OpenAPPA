@@ -278,19 +278,34 @@ impl Session {
         let view = policy.engine().rebuild_view(&log)?;
         let expected = policy.engine().file_dispatch(&view, &self.trajectory, &call)?;
         let key = super::files::key(&expected)?;
-        let pin = files
-            .store
-            .prepare(&self.trajectory.0, &key, operation, &path)
-            .map_err(super::files::refused)?;
+        let pin = match operation {
+            appa_eventlog::files::FileOperation::Copy | appa_eventlog::files::FileOperation::Move => {
+                let args: super::files::FileTransferArgs =
+                    serde_json::from_str(call.arguments.get()).map_err(super::files::refused)?;
+                files
+                    .store
+                    .prepare_transfer(&self.trajectory.0, &key, operation, &args.source_path, &path)
+            }
+            _ => files.store.prepare(&self.trajectory.0, &key, operation, &path),
+        }
+        .map_err(super::files::refused)?;
         // Managed writes must not reconfigure Claude Code, Git hooks, or MCP execution.
         // Claude loads instruction files implicitly, outside the file-tool observation path.
         if operation != appa_eventlog::files::FileOperation::Read
-            && pin.path.split('/').any(|part| {
-                matches!(
-                    part,
-                    ".claude" | ".git" | ".mcp.json" | ".appa" | "CLAUDE.md" | "CLAUDE.local.md"
+            && std::iter::once(pin.path.as_str())
+                .chain(
+                    pin.source
+                        .as_ref()
+                        .filter(|_| operation == appa_eventlog::files::FileOperation::Move)
+                        .map(|source| source.path.as_str()),
                 )
-            })
+                .flat_map(|path| path.split('/'))
+                .any(|part| {
+                    matches!(
+                        part,
+                        ".claude" | ".git" | ".mcp.json" | ".appa" | "CLAUDE.md" | "CLAUDE.local.md"
+                    )
+                })
         {
             files
                 .store

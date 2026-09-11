@@ -122,7 +122,7 @@ fn command(binary: &Path, deployment: &Deployment, cwd: &Path, args: &Args) -> R
         .args(["--bare", "--print", "--tools", "", "--strict-mcp-config", "--mcp-config"])
         .arg(mcp.to_string())
         .args(["--settings", "{\"autoMemoryEnabled\":false}"])
-        .args(["--allowedTools", "mcp__plugin_appa-runtime_appa__appa_read_file,mcp__plugin_appa-runtime_appa__appa_write_file,mcp__plugin_appa-runtime_appa__appa_edit_file,mcp__plugin_appa-runtime_appa__execute_remedy_plan"])
+        .args(["--allowedTools", "mcp__plugin_appa-runtime_appa__appa_read_file,mcp__plugin_appa-runtime_appa__appa_write_file,mcp__plugin_appa-runtime_appa__appa_edit_file,mcp__plugin_appa-runtime_appa__appa_copy_file,mcp__plugin_appa-runtime_appa__appa_move_file,mcp__plugin_appa-runtime_appa__execute_remedy_plan"])
         .args(["--no-session-persistence", "--output-format", "stream-json", "--verbose", "--session-id"])
         .arg(trajectory)
         .env("ENABLE_TOOL_SEARCH", "false")

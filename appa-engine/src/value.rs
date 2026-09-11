@@ -21,6 +21,14 @@ pub enum FileBasis {
     Read(FileSource),
     Replace(Option<FileSource>),
     Edit(FileSource),
+    Copy {
+        source: FileSource,
+        replaced: Option<FileSource>,
+    },
+    Move {
+        source: FileSource,
+        replaced: Option<FileSource>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -543,6 +551,7 @@ impl ResolvedCall {
                 |source| receiving.combine(&source.label).combine(&declared),
             ),
             Some(FileBasis::Edit(source)) => receiving.combine(&source.label).combine(&declared),
+            Some(FileBasis::Copy { .. } | FileBasis::Move { .. }) => receiving.combine(&declared),
         }
     }
 
@@ -553,6 +562,9 @@ impl ResolvedCall {
             None | Some(FileBasis::Read(_)) => None,
             Some(FileBasis::Replace(_)) => Some(receiving.combine(&declared)),
             Some(FileBasis::Edit(source)) => Some(receiving.combine(&source.label).combine(&declared)),
+            Some(FileBasis::Copy { source, .. } | FileBasis::Move { source, .. }) => {
+                Some(receiving.combine(&source.label).combine(&declared))
+            }
         }
     }
 
@@ -653,6 +665,40 @@ mod tests {
             replace.file_output_label(&contract, &receiving),
             Some(replace.output_label(&contract, &receiving))
         );
+    }
+
+    #[test]
+    fn copy_and_move_keep_source_only_in_file_content_label() {
+        let contract = file_contract();
+        let receiving = Label::new(Trust::new(1), Audience::public());
+        let replaced = FileSource {
+            label: Label::new(Trust::new(0), Audience::restricted([ReaderId::new("destination")])),
+            ..source()
+        };
+        let expected_ack = receiving.combine(&contract.output_label());
+        let expected_file = receiving.combine(&source().label).combine(&expected_ack);
+
+        for basis in [
+            FileBasis::Copy {
+                source: source(),
+                replaced: Some(replaced.clone()),
+            },
+            FileBasis::Move {
+                source: source(),
+                replaced: Some(replaced.clone()),
+            },
+        ] {
+            let operation = call("file", json!({})).with_file_basis(Some(basis));
+            assert_eq!(operation.output_label(&contract, &receiving), expected_ack);
+            assert_eq!(
+                operation.file_output_label(&contract, &receiving),
+                Some(expected_file.clone())
+            );
+            assert_ne!(
+                operation.file_output_label(&contract, &receiving),
+                Some(expected_file.combine(&replaced.label))
+            );
+        }
     }
 
     #[test]
