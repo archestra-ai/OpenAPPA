@@ -25,7 +25,7 @@ use super::{Mode, Selection};
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct YellArgs {
-    /// What you were trying to do, what APPA did or demanded, and why the feedback is confusing or impossible to satisfy.
+    /// What you were trying to do, what APPA did or demanded, and what got in your way or bothered you.
     pub(crate) message: String,
     /// Whether the report carries this session's decisions as well as the policy.
     pub(crate) with_trajectory: bool,

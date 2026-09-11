@@ -96,7 +96,7 @@
                   "id": "call_le34DPLYDFxlLXiksvgZWFX5",
                   "name": "read_secret",
                   "response": {
-                    "result": "[appa] Blocked: this call cannot run yet.\n\nWhy:\n  - allowed readers would narrow: public -> 1 reader\n\nContinue:\n  - Accept this change for the rest of this session:\n    execute_remedy_plan(offer_id: \"f051f6ad6dde2423\")\n  - Use sanitizer strip-secret-values's result:\n    execute_remedy_plan(offer_id: \"0fc75aaa65700783\")\n\nKeep this session unchanged:\n  If a child-session or subagent tool is available, delegate this call and all work that uses its result there.\n  Finish there by returning nothing, or return only a sanitized derivation. Returning the raw value applies the same change to this session.",
+                    "result": "[appa] Blocked: this call cannot run yet.\n\nWhy:\n  - its result comes with a restriction this session does not have yet. If you take the result in, the restriction applies to everything this session produces afterwards, and tools that send or publish check it:\n      readers: only 1 named person may see what you produce (now: anyone)\n\nContinue, one of:\n  - If the rest of the task can still be delivered under this restriction, accept it and call again:\n    execute_remedy_plan(offer_id: \"f051f6ad6dde2423\")\n  - Use sanitizer strip-secret-values's result:\n    execute_remedy_plan(offer_id: \"0fc75aaa65700783\")\n  - If later work must still reach a destination that would refuse it, keep this session as it is: run this call and all work that uses its result in a child session or subagent, if one is available.\n    Return nothing from it, or only a sanitized derivation; anything else returned brings the restriction with it.",
                     "appa": "denied"
                   }
                 },
@@ -391,7 +391,7 @@
                   "id": "call_AMvjGLvguUqGOceM5fcjlDTU",
                   "name": "get_pod_logs",
                   "response": {
-                    "result": "[appa] Blocked: this call cannot run yet.\n\nWhy:\n  - session trust would fall: trusted -> suspicious\n\nContinue:\n  - Accept this change for the rest of this session:\n    execute_remedy_plan(offer_id: \"69447080e88ad8cb\")\n  - Use sanitizer strip-instructions's result:\n    execute_remedy_plan(offer_id: \"02572c784436cd1e\")\n\nKeep this session unchanged:\n  If a child-session or subagent tool is available, delegate this call and all work that uses its result there.\n  Finish there by returning nothing, or return only a sanitized derivation. Returning the raw value applies the same change to this session.",
+                    "result": "[appa] Blocked: this call cannot run yet.\n\nWhy:\n  - its result comes with a restriction this session does not have yet. If you take the result in, the restriction applies to everything this session produces afterwards, and tools that send or publish check it:\n      trust: what you produce is treated as suspicious (now: trusted)\n\nContinue, one of:\n  - If the rest of the task can still be delivered under this restriction, accept it and call again:\n    execute_remedy_plan(offer_id: \"69447080e88ad8cb\")\n  - Use sanitizer strip-instructions's result:\n    execute_remedy_plan(offer_id: \"02572c784436cd1e\")\n  - If later work must still reach a destination that would refuse it, keep this session as it is: run this call and all work that uses its result in a child session or subagent, if one is available.\n    Return nothing from it, or only a sanitized derivation; anything else returned brings the restriction with it.",
                     "appa": "denied"
                   }
                 },
@@ -1486,7 +1486,7 @@
                   "id": "call_auN6PJ2jbmYAEV2xDULauErQ",
                   "name": "lookup_runbook",
                   "response": {
-                    "result": "[appa] Blocked: this call cannot run yet.\n\nWhy:\n  - allowed readers would narrow: public -> 1 reader\n\nContinue:\n  - Accept this change for the rest of this session:\n    execute_remedy_plan(offer_id: \"953d1c0d2db25d06\")\n\nKeep this session unchanged:\n  If a child-session or subagent tool is available, delegate this call and all work that uses its result there.\n  Finish there by returning nothing, or return only a sanitized derivation. Returning the raw value applies the same change to this session.",
+                    "result": "[appa] Blocked: this call cannot run yet.\n\nWhy:\n  - its result comes with a restriction this session does not have yet. If you take the result in, the restriction applies to everything this session produces afterwards, and tools that send or publish check it:\n      readers: only 1 named person may see what you produce (now: anyone)\n\nContinue, one of:\n  - If the rest of the task can still be delivered under this restriction, accept it and call again:\n    execute_remedy_plan(offer_id: \"953d1c0d2db25d06\")\n  - If later work must still reach a destination that would refuse it, keep this session as it is: run this call and all work that uses its result in a child session or subagent, if one is available.\n    Return nothing from it, or only a sanitized derivation; anything else returned brings the restriction with it.",
                     "appa": "denied"
                   }
                 },

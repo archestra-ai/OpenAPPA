@@ -13,13 +13,17 @@ When a tool call is blocked, OpenAPPA returns structured feedback with a remedy 
 ```text
 [appa] Blocked: this call cannot run yet.
 Why:
-  - session trust would fall: trusted -> suspicious
-Continue:
-  - Accept this change for the rest of this session:
+  - its result comes with a restriction this session does not have yet. If you take the result in,
+    the restriction applies to everything this session produces afterwards, and tools that send or
+    publish check it:
+      trust: what you produce is treated as suspicious (now: trusted)
+Continue, one of:
+  - If the rest of the task can still be delivered under this restriction, accept it and call again:
     execute_remedy_plan(offer_id: "…")
+  - If later work must still reach a destination that would refuse it, keep this session as it is: ...
 ```
 
-The agent can accept the label change or execute an alternative remedy plan.
+The agent judges by the task: accept the restriction, use an offered sanitizer, or delegate.
 
 ## Scenario 1: Confidential read and sanitization
 

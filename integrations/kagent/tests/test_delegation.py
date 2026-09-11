@@ -73,7 +73,7 @@ VOID_CROSSED = "the void return crossed"
 # The two offers a narrowing can settle with, as the feedback renders
 # them (`appa-runtime/src/engine.rs`, `remedy_instruction`). Which of
 # them the child is offered is the whole point of the second case.
-ACCEPT = "Accept this change"
+ACCEPT = "accept it and call again"
 SANITIZE = "Use sanitizer strip-instructions"
 
 
