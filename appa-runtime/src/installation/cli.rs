@@ -884,6 +884,7 @@ fn finish(
                 InstallError::Changed(_) => ("concurrent_edit", false),
                 InstallError::Invalid(_) => ("invalid_input", false),
                 InstallError::Io { .. } => ("io", false),
+                InstallError::State { .. } => ("unreadable_state", false),
             };
             (
                 Receipt {
