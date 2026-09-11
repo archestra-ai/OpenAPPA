@@ -54,13 +54,11 @@ requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/linear/get_document"
-parameters = { type = "object", properties = { id = { type = "string" } }, required = ["id"], additionalProperties = true }
 delta = { trust = "suspicious", audience = ["@linear:document/$id/readers"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/linear/get_issue"
-parameters = { type = "object", properties = { id = { type = "string" } }, required = ["id"], additionalProperties = true }
 delta = { trust = "suspicious", audience = ["@linear:issue/$id/readers"] }
 requires = { audience = { contains = ["internal"] } }
 
@@ -131,13 +129,11 @@ requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/linear/list_comments(issueId:*)"
-parameters = { type = "object", properties = { issueId = { type = "string" } }, required = ["issueId"], additionalProperties = true }
 delta = { trust = "suspicious", audience = ["@linear:issue/$issueId/readers"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/linear/list_cycles"
-parameters = { type = "object", properties = { teamId = { type = "string" } }, required = ["teamId"], additionalProperties = true }
 delta = { trust = "suspicious", audience = ["@linear:team/$teamId/readers"] }
 requires = { audience = { contains = ["internal"] } }
 
@@ -153,7 +149,6 @@ requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/linear/list_documents(teamId:*)"
-parameters = { type = "object", properties = { teamId = { type = "string" } }, required = ["teamId"], additionalProperties = true }
 delta = { trust = "suspicious", audience = ["@linear:team/$teamId/readers"] }
 requires = { audience = { contains = ["internal"] } }
 
@@ -174,7 +169,6 @@ requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/linear/list_issues(team:*)"
-parameters = { type = "object", properties = { team = { type = "string" } }, required = ["team"], additionalProperties = true }
 delta = { trust = "suspicious", audience = ["@linear:team/$team/readers"] }
 requires = { audience = { contains = ["internal"] } }
 
@@ -238,7 +232,6 @@ effects = ["linear.changed"]
 
 [[policy.tool]]
 name = "mcp/linear/save_comment(issueId:*)"
-parameters = { type = "object", properties = { issueId = { type = "string" } }, required = ["issueId"], additionalProperties = true }
 delta = { trust = "suspicious", audience = ["@linear:issue/$issueId/readers"] }
 requires = { trust = "trusted", audience = { contains = ["@linear:issue/$issueId/readers"] }, attention = ["linear-review"] }
 effects = ["linear.changed"]
@@ -258,14 +251,12 @@ effects = ["linear.changed"]
 # Moving an issue: the team it lands in decides who reads it from then on.
 [[policy.tool]]
 name = "mcp/linear/save_issue(id:*,team:*)"
-parameters = { type = "object", properties = { id = { type = "string" }, team = { type = "string" } }, required = ["id", "team"], additionalProperties = true }
 delta = { trust = "suspicious", audience = ["@linear:team/$team/readers"] }
 requires = { trust = "trusted", audience = { contains = ["@linear:team/$team/readers"] }, attention = ["linear-review"] }
 effects = ["linear.changed"]
 
 [[policy.tool]]
 name = "mcp/linear/save_issue(id:*)"
-parameters = { type = "object", properties = { id = { type = "string" } }, required = ["id"], additionalProperties = true }
 delta = { trust = "suspicious", audience = ["@linear:issue/$id/readers"] }
 requires = { trust = "trusted", audience = { contains = ["@linear:issue/$id/readers"] }, attention = ["linear-review"] }
 effects = ["linear.changed"]
@@ -273,7 +264,6 @@ effects = ["linear.changed"]
 # Creating an issue: the team it lands in decides who reads it.
 [[policy.tool]]
 name = "mcp/linear/save_issue"
-parameters = { type = "object", properties = { team = { type = "string" } }, required = ["team"], additionalProperties = true }
 delta = { trust = "suspicious", audience = ["@linear:team/$team/readers"] }
 requires = { trust = "trusted", audience = { contains = ["@linear:team/$team/readers"] }, attention = ["linear-review"] }
 effects = ["linear.changed"]
@@ -288,14 +278,12 @@ effects = ["linear.changed"]
 
 [[policy.tool]]
 name = "mcp/linear/create_attachment"
-parameters = { type = "object", properties = { issue = { type = "string" } }, required = ["issue"], additionalProperties = true }
 delta = { trust = "suspicious", audience = ["@linear:issue/$issue/readers"] }
 requires = { trust = "trusted", audience = { contains = ["@linear:issue/$issue/readers"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
 name = "mcp/linear/create_attachment_from_upload"
-parameters = { type = "object", properties = { issue = { type = "string" } }, required = ["issue"], additionalProperties = true }
 delta = { trust = "suspicious", audience = ["@linear:issue/$issue/readers"] }
 requires = { trust = "trusted", audience = { contains = ["@linear:issue/$issue/readers"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]

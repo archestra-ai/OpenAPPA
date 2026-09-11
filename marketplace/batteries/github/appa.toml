@@ -84,77 +84,62 @@ delta = { trust = "suspicious", audience = ["self"] }
 
 [[policy.tool]]
 name = "mcp/github/get_file_contents"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/list_branches"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/list_commits"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/get_commit"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/list_tags"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/get_tag"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/list_releases"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/get_latest_release"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/get_release_by_tag"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/list_repository_collaborators"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/list_issues"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/issue_read"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/get_label"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/list_pull_requests"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/pull_request_read"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-visibility"
 
 # --- reads across repositories: content other people wrote, from every repository the token sees ---
@@ -195,82 +180,66 @@ delta = { trust = "suspicious", audience = ["self"] }
 
 [[policy.tool]]
 name = "mcp/github/fork_repository"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/create_branch"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/create_or_update_file"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/push_files"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/delete_file"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/issue_write"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/sub_issue_write"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/add_issue_comment"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/create_pull_request"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/update_pull_request"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/update_pull_request_branch"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/merge_pull_request"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/pull_request_review_write"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/add_comment_to_pending_review"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/add_reply_to_pull_request_comment"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/request_copilot_review"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-readers"
 
 # --- writes that name no existing repository: only public data may go in ---

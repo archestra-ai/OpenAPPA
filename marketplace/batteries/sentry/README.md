@@ -20,24 +20,13 @@ bare `execute_sentry_tool` rule and needs a person.
 
 ## Rules
 
-*Reads* — issues, events, stack traces, breadcrumbs, user reports,
-replays, profiles, traces, releases, monitors, alert rules, dashboards,
-DSNs, agent conversations. What Sentry returns was produced by the
-monitored applications and their users, so it enters `suspicious`,
-restricted to `internal`. A query's input must be sharable with
-`internal` too; `whoami` returns the token owner's identity, an
-`internal` read like the rest. `get_sentry_mcp_info` and
-`search_sentry_tools` return no outside content.
-
-*Documentation* — `search_docs` and `get_doc` fetch public pages from
-docs.sentry.io and a hosted search endpoint, so their input must be
-public; the pages are untrusted.
-
-*Writes* — `update_issue`, `add_issue_note`, `analyze_issue_with_seer`
-(it starts a Seer run on Sentry's side), and `onboarding_status_update`
-need trusted data that `internal` may see and the `sentry-review` mark,
-and record `sentry.changed`. Creating or changing a team, project, DSN,
-or uptime monitor records `sentry.sensitive` instead.
+Reads return what the monitored applications and their users produced,
+so they enter `suspicious`, restricted to `internal`, and a query's
+input must be sharable with `internal`. `search_docs` and `get_doc`
+fetch public pages, so their input must be public. Writes need trusted
+data that `internal` may see and the `sentry-review` mark, and record
+`sentry.changed`; creating or changing a team, project, DSN, or uptime
+monitor records `sentry.sensitive` instead.
 
 Your root config must define an authority permitting `sentry-review`:
 

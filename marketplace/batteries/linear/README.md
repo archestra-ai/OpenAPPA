@@ -7,29 +7,16 @@ itself. The manifest registers the battery with the marketplace.
 ## Files
 
 **`appa.toml`** — the rules. Reads and mutation responses enter as
-`suspicious`. A tool that names a resource by id is labelled with that
-resource's readers through a selector placeholder:
-
-- `get_issue`, `list_comments(issueId:*)`, `save_comment(issueId:*)`,
-  `save_issue(id:*)`, `create_attachment`, and
-  `create_attachment_from_upload` read or write
-  `@linear:issue/$<argument>/readers`;
-- `get_document` reads `@linear:document/$id/readers`;
-- `list_cycles`, `list_issues(team:*)`, `list_documents(teamId:*)`, a
-  bare `save_issue` (creating, so `team` is required), and
-  `save_issue(id:*,team:*)` (moving: the destination team decides) read
-  or write `@linear:team/$<argument>/readers`.
-
-A write into a resource needs trusted data its readers may see, the
-`linear-review` mark, and records `linear.changed` or `linear.sensitive`.
-A summary of a private team's issue can be commented back onto that issue
-and not onto a public team's. Tools that name no resource, or name one by
-a free-text query (`get_project`, `list_milestones`, `save_project`, …),
+`suspicious`. A tool that names an issue, team, or document by id is
+labelled with that resource's readers through a selector placeholder
+such as `@linear:issue/$issueId/readers`; a write into it needs trusted
+data those readers may see, the `linear-review` mark, and records
+`linear.changed` or `linear.sensitive`. A summary of a private team's
+issue can be commented back onto that issue and not onto a public
+team's. Tools that name no resource, or name one by a free-text query,
 keep the `internal` audience: map it in the root config to readers
-authorized for everything this connection can list. Upload preparation
-answers an `internal` signed URL, so the upload can then be attached to
-any issue the workspace reads; image extraction can fetch
-external URLs, so its input must be public and reviewed.
+authorized for everything this connection can list. Image extraction can
+fetch external URLs, so its input must be public and reviewed.
 
 **`audience-source.py`** — the `linear` audience source, over the
 GraphQL API. It answers these selectors:
@@ -83,10 +70,8 @@ from = ["linear:team/PLT/members"]
 ```
 
 Every consult carries the declared templates, and the script refuses
-one whose declaration differs from what it serves (exit status 2)
-before it reads a token: a policy and a script of different versions
-never answer each other. The runtime probes `viewer` and
-`full-members` at startup, so the skew surfaces before a decision.
+one whose declaration differs from what it serves (exit status 2), so a
+policy and a script of different versions never answer each other.
 
 The script reads its token from `APPA_PROVIDER_LINEAR_TOKEN`, which the
 binding's `token_env` forwards: a personal API key, or an OAuth access

@@ -43,22 +43,18 @@ selectors = [
 
 [[policy.tool]]
 name = "mcp/claude_ai_Slack/slack_read_channel"
-parameters = { type = "object", properties = { channel_id = { type = "string" } }, required = ["channel_id"], additionalProperties = true }
 delta = { audience = ["@slack:channel/$channel_id"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Slack/slack_read_thread"
-parameters = { type = "object", properties = { channel_id = { type = "string" } }, required = ["channel_id"], additionalProperties = true }
 delta = { audience = ["@slack:channel/$channel_id"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Slack/slack_list_channel_members"
-parameters = { type = "object", properties = { channel_id = { type = "string" } }, required = ["channel_id"], additionalProperties = true }
 delta = { audience = ["@slack:channel/$channel_id"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Slack/slack_get_reactions"
-parameters = { type = "object", properties = { channel_id = { type = "string" } }, required = ["channel_id"], additionalProperties = true }
 delta = { audience = ["@slack:channel/$channel_id"] }
 
 # --- reads without a conversation: internal ---
@@ -129,7 +125,6 @@ delta = {}
 
 [[policy.tool]]
 name = "mcp/claude_ai_Slack/slack_send_message"
-parameters = { type = "object", properties = { channel_id = { type = "string" } }, required = ["channel_id"], additionalProperties = true }
 delta = {}
 
 [policy.tool.requires]
@@ -138,7 +133,6 @@ audience = { contains = ["@slack:channel/$channel_id"] }
 
 [[policy.tool]]
 name = "mcp/claude_ai_Slack/slack_schedule_message"
-parameters = { type = "object", properties = { channel_id = { type = "string" } }, required = ["channel_id"], additionalProperties = true }
 delta = {}
 
 [policy.tool.requires]

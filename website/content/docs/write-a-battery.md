@@ -97,7 +97,7 @@ In this example, the marketplace GitHub battery uses a `github.repository-visibi
 - A public repository gives the result `suspicious` trust and a `public` audience.
 - A private repository gives the result `suspicious` trust and limits the audience to the repository's collaborators, the collection `@github:repo/<owner>/<repo>/collaborators` that the battery's audience source resolves.
 
-The battery declares the annotator with a selector placeholder in its mandate, so each call's consult admits exactly the repository that call names, and binds the tools that carry `owner` and `repo`:
+The battery declares the annotator with a selector placeholder in its mandate, so each call's consult admits exactly the repository that call names; `owner` and `repo` become required string arguments of every tool that uses it:
 
 ```toml
 # marketplace/batteries/github/appa.toml
@@ -112,7 +112,6 @@ marks = []
 
 [[policy.tool]]
 name = "mcp/github/get_file_contents"
-parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
 annotator = "github.repository-visibility"
 
 [externals.annotators."github.repository-visibility"]
