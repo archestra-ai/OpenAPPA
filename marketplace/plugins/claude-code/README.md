@@ -8,12 +8,12 @@ instructions below. The process itself is the `appa-runtime` crate;
 its [README](../../appa-runtime/README.md) covers build,
 configuration, and start.
 
-How it works, in one paragraph: the plugin registers hooks on every
-session event — prompt, tool call, tool result, subagent start and
-finish. Each hook posts the event to the runtime process and blocks the
-action unless the process answers yes. The hooks fail closed: while the
-process is down, every action in a protected session is blocked —
-silence never means yes. A subagent started with the `Agent` tool runs
+The plugin registers hooks for prompts, tool calls, tool results, and
+subagent start and finish. Blocking hooks post their events to the runtime
+and refuse the hooked action if the runtime is unavailable. This covers
+actions at those hook boundaries, not every observation or emission inside
+Claude Code. Root Stop events report turn completion; they do not gate
+already-visible output. A subagent started with the `Agent` tool runs
 as a child of the session. The spawn is held until the session declares
 what the subagent's final message may carry: as it is, floored at a
 label, or through a sanitizer such as the schema attestation. The
@@ -26,6 +26,81 @@ A subagent definition that declares `maxTurns` blocks the session's
 prompts: Claude Code ends such a subagent without the return check. The
 project and user agent directories and the installed plugins are
 scanned; agents passed on the command line are not.
+
+## Security scope: plugin first, proxy next
+
+The goal is to enforce the guarantees available through a Claude Code plugin
+and its bundled APPA runtime. An inference proxy is a possible extension,
+not a prerequisite for installing the plugin. Guarantees requiring an OS
+sandbox, filesystem interception, or a modified Claude Code are non-goals.
+Assume no process outside Claude Code edits workspace files. This does not
+exclude subprocesses launched by Claude Code itself.
+
+### Plugin and bundled runtime
+
+- Check proposals that reach `PreToolUse` before releasing the hooked call.
+  Admit reported observations and execute remedies against the host-bound
+  trajectory. Coverage depends on Claude invoking the corresponding hooks.
+- Keep policy evaluation, Label combination, and durable state in the shared
+  runtime. The plugin translates harness events; it does not define a separate
+  file-Label algebra or persistence format.
+- Runtime-owned file tools can check before content-dependent validation and
+  admit results before returning them over MCP. The draft implements this path;
+  normal plugin installation does not establish exclusive use of these tools.
+- Refuse unsupported calls where a blocking hook is available. Such refusal
+  does not cover work performed before the hook. Report missing coverage rather
+  than claiming complete provenance for a partially observed trajectory.
+
+Native Edit is a known boundary gap: a Claude Code 2.1.268 probe returned a
+content-dependent match error before `PreToolUse`, with no APPA proposal.
+The plugin cannot prevent that observation by denying the later hook. Native
+Read/Write prevalidation coverage is not established. The constrained
+`appa claude-files` launcher is an experimental test path, not proof that a
+plugin installation disables native tools or implicit reads.
+
+The next plugin work is to integrate and test the runtime-owned file tools
+through the installed bundle, verify failure and interruption handling, and
+record which native paths remain unmediated. Tests must inspect actual file
+versions and observed results, not just hook responses. Incomplete operations
+currently retain a durable reservation and stop file calls; automatic recovery
+is not implemented. Recovery for runtime-owned operations remains in scope.
+
+### Capabilities deferred to an inference proxy
+
+For requests actually routed through it, a proxy could:
+
+- Check context against the configured provider's permitted audience before
+  forwarding a request, including retries and helper requests.
+- Bind requests to the same trajectory as plugin events and account for
+  resumed context, attachments, and compaction without resetting their Labels.
+  Unclassified context must be refused or conservatively classified; an HTTP
+  payload alone does not establish its provenance.
+- Restrict provider-run features and admit their observations.
+- Gate provider-generated text before forwarding response bytes to Claude,
+  using the intended recipient and trajectory Label. This includes streaming,
+  not only completed responses.
+
+These capabilities are not implemented. A proxy does not undo a local
+pre-hook observation or gate locally generated tool output, diagnostics, or
+arbitrary subprocess traffic. Proxy coverage requires requests to use it;
+preventing all bypass connections would require enforcement beyond this scope.
+
+### Non-goals for a plugin plus inference proxy
+
+- Complete native filesystem mediation, including pre-hook validation,
+  implicit harness reads, and local output that neither layer can intercept.
+- Precise dependencies or confinement for arbitrary Bash, child processes,
+  background jobs, and other tools' hidden filesystem or network effects.
+  Supported contracts may conservatively bound flows; shell parsing or a
+  before/after directory diff cannot prove which inputs a process read.
+- Protection against a process that can disable the plugin, modify policy or
+  ledger files, or bypass the proxy. Execution controls remain trusted host
+  state; a private directory alone is not an OS access boundary.
+- Metadata and timing-flow guarantees, or protection against outside writers.
+
+Disabling or refusing a capability is a supported restriction, not evidence
+that its internal flows are tracked. The plugin's guarantees must remain
+explicit about the checked boundary and its unobserved inputs.
 
 ## What is here
 
@@ -150,7 +225,7 @@ A protected session starts the installed runtime at SessionStart when
 nothing healthy answers `/health` — normally a no-op, because the install
 left it running — or replaces a runtime that answers `stale <pid>`,
 which a running process does once an install replaced its binary on
-disk. It then blocks every action while the runtime is unavailable. The starter
+disk. Blocking hooks refuse their actions while the runtime is unavailable. The starter
 never installs software; rerun `appa plugin install claude-code` when the
 binary or plugin is missing. There is no login service: a runtime
 that dies mid-session blocks the session until the next session start

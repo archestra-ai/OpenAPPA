@@ -1,10 +1,18 @@
 # appa-runtime plugin
 
 Protects a Claude Code session through the appa-runtime process:
-the hooks send every event to it, and the `execute_remedy_plan` MCP
-server lets the model pursue an offered remedy. Hooks fail closed —
-while the process is down, every action in a protected session is
-blocked.
+the registered hooks send events to it, and the `execute_remedy_plan` MCP
+server lets the model pursue an offered remedy. Blocking hooks refuse
+their actions while the process is down. They do not intercept every
+observation or emission inside Claude Code; root Stop reports completion
+rather than gating visible output.
+
+The [security scope](../README.md#security-scope-plugin-first-proxy-next)
+separates plugin guarantees, potential inference-proxy capabilities, and
+non-goals. Native pre-hook file validation is a known gap. Runtime-owned
+file tools are experimental; installing the plugin does not establish
+exclusive use of those tools. The constrained `appa claude-files` launcher
+is a separate test path, not the plugin's deployment requirement.
 
 The plugin protects only sessions launched with `APPA_GATE=1` (the
 `clappa` command). The hooks read the variable from the Claude Code
