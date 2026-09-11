@@ -172,6 +172,13 @@ def test_actual_streamable_http_mcp_calls_update_shared_invocation_counters():
 
     with running_fixture(with_mcp=True) as (base, mcp_url):
         asyncio.run(asyncio.wait_for(invoke(mcp_url), timeout=15))
+        repository = mcp_url.removesuffix("/mcp") + "/repos/acme/docs"
+        with pytest.raises(urllib.error.HTTPError) as refused:
+            urllib.request.urlopen(repository, timeout=5)
+        assert refused.value.code == 401
+        with urllib.request.urlopen(urllib.request.Request(repository, headers={"Authorization": "Bearer fixture"}), timeout=5) as response:
+            assert json.load(response)["visibility"] == "public"
         state = json.loads(http(base, "/state")[1])
         assert state["counts"] == {"get_file_contents": 1, "issue_write": 1}
         assert state["invocations"][1]["args"]["body"] == "Operator-authored"
+        assert state["lookups"] == [{"owner": "acme", "repo": "docs"}]

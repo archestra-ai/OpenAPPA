@@ -146,6 +146,8 @@ helm upgrade --install appa-runtime "$runtime_chart" -n "$runtime_namespace" \
   --set-string image.tag="$tag" \
   --set image.pullPolicy=Never \
   --set-file config.contents="$policy" \
+  --set-string env.GITHUB_API_URL="http://demo-tools.${namespace}.svc.cluster.local:3000" \
+  --set-string env.APPA_PROVIDER_GITHUB_TOKEN=demo \
   --wait --timeout 10m
 
 echo "== helm install fixture-only appa-kagent-demo, model $model at $base_url"

@@ -26,7 +26,9 @@ provider's reader.
 Credentials come from APPA_PROVIDER_GITHUB_TOKEN (read:org and user:email
 scopes; listing a repository's collaborators needs push access to it,
 which the repo scope grants for repositories the token's owner may push
-to). Any GitHub error or missing answer exits nonzero: the runtime
+to); the API root is GITHUB_API_URL when set (a GitHub Enterprise
+Server's /api/v3), else api.github.com. Any GitHub error or missing
+answer exits nonzero: the runtime
 treats that as no answer and refuses the operation, so an API hiccup
 never becomes a policy decision.
 """
@@ -40,7 +42,7 @@ import urllib.parse
 import urllib.request
 
 
-API_ROOT = "https://api.github.com"
+API_ROOT = (os.environ.get("GITHUB_API_URL") or "https://api.github.com").rstrip("/")
 TOKEN_VAR = "APPA_PROVIDER_GITHUB_TOKEN"
 SOURCE_NAME = "github"
 SERVED_TEMPLATES = [

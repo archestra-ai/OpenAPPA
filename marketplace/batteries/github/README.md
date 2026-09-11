@@ -121,7 +121,9 @@ one whose declaration differs from what it serves (exit status 2), so a
 policy and a script of different versions never answer each other.
 
 Both scripts read their token from `APPA_PROVIDER_GITHUB_TOKEN`, which
-each binding's `token_env` forwards. The token needs the `read:org` and
+each binding's `token_env` forwards, and call `https://api.github.com`
+unless `GITHUB_API_URL` names another root, as it does for a GitHub
+Enterprise Server (`https://<host>/api/v3`). The token needs the `read:org` and
 `user:email` scopes, and `repo` for the private repositories it reads
 and lists collaborators of. A command inherits none of the runtime's
 `APPA_*` namespace — not its wiring, not a bearer token it sends, not

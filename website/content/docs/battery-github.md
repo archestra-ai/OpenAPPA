@@ -23,6 +23,6 @@ The battery does not include optional GitHub tools. Add rules to the root config
 
 ## Audience source
 
-The audience source can build `self`, organization member, organization team, and repository collaborator audiences. The battery binds it and its two annotators; map `self` and `internal` onto it in the root config and pass the token through `APPA_PROVIDER_GITHUB_TOKEN`.
+The audience source can build `self`, organization member, organization team, and repository collaborator audiences. The battery binds it and its two annotators; map `self` and `internal` onto it in the root config and pass the token through `APPA_PROVIDER_GITHUB_TOKEN`. The scripts call `https://api.github.com`; set `GITHUB_API_URL` to a GitHub Enterprise Server's `/api/v3` root instead.
 
 The unit tests use saved GitHub API responses and do not call GitHub. [`examples/github-battery`](https://github.com/archestra-ai/OpenAPPA/tree/main/examples/github-battery) replays the battery against real repositories with a token.

@@ -8,7 +8,7 @@ digest = "sha256:6856d2b668f484385ed3078f27e3fbbf89092941147b2708a9e9c32c871e41a
 
 [packages.battery.github]
 path = "batteries/github"
-digest = "sha256:c359e0e7d7aa84c08bfc069bf713df44074ae977c1313b7b1c5a18d27682a39c"
+digest = "sha256:205fb0ac86a56a78892a3dd1b8042ea7df50a5391ec4e711dfde3319d93fc17d"
 
 [packages.battery.google-workspace]
 path = "batteries/google-workspace"

@@ -26,9 +26,11 @@ source resolves. The policy's mandate for each call names exactly that
 spelling; the script refuses a consult whose mandate does not (exit
 status 2) before it reads a token.
 
-Credentials come from APPA_PROVIDER_GITHUB_TOKEN. A repository the token
-cannot see, or any GitHub error, exits nonzero: the runtime treats that
-as no answer and refuses the operation, so nothing is guessed public.
+Credentials come from APPA_PROVIDER_GITHUB_TOKEN; the API root is
+GITHUB_API_URL when set (a GitHub Enterprise Server's /api/v3), else
+api.github.com. A repository the token cannot see, or any GitHub error,
+exits nonzero: the runtime treats that as no answer and refuses the
+operation, so nothing is guessed public.
 """
 
 import json
@@ -39,7 +41,7 @@ import urllib.parse
 import urllib.request
 
 
-API_ROOT = "https://api.github.com"
+API_ROOT = (os.environ.get("GITHUB_API_URL") or "https://api.github.com").rstrip("/")
 TOKEN_VAR = "APPA_PROVIDER_GITHUB_TOKEN"
 CONTENT = "github.repository-visibility"
 READERS = "github.repository-readers"
