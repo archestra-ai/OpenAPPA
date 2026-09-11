@@ -41,6 +41,8 @@ pub enum EngineError {
     NotProviderRun(String),
     #[error("invalid call: {0}")]
     InvalidCall(ArgumentError),
+    #[error("invalid file basis evidence: {0}")]
+    InvalidFileEvidence(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -313,6 +315,24 @@ impl Engine {
         let views = view.projection().view(trajectory);
         let context = crate::route::BlockContext::reconstruct(self, &views, subject, answers)?;
         crate::route::search(&self.registry, &views, &context, depth)
+    }
+
+    /// Publication label for a file mutation released by this validated dispatch.
+    pub fn file_output_label(
+        &self,
+        view: &EngineView,
+        dispatch: &DispatchId,
+    ) -> Result<Option<crate::label::Label>, TransitionError> {
+        if view.policy() != self.identity {
+            return Err(TransitionError::ForeignView);
+        }
+        let views = view.projection().view(dispatch.trajectory());
+        let call = views.dispatch_call(dispatch).ok_or(TransitionError::UnknownDispatch)?;
+        let receiving = views
+            .receiving_bound(dispatch)
+            .ok_or(TransitionError::UnknownDispatch)?;
+        let contract = self.validated_contract(call)?;
+        Ok(call.file_output_label(&contract, receiving))
     }
 
     /// What the runtime must resolve before it can execute one live offer.
@@ -746,7 +766,24 @@ impl Engine {
                 body: OutcomeBody::Unavailable,
             } => Some(ObservedResult::Unavailable),
             ToolOutcome::Failure | ToolOutcome::Indeterminate => None,
+            ToolOutcome::FailureWithBody { body } => {
+                Some(ObservedResult::Available(RawResultDigest::of(body.as_str().as_bytes())))
+            }
         };
+        if let ToolOutcome::FailureWithBody { body } = &report.outcome
+            && views.failed_with_body(dispatch)
+        {
+            let digest = RawResultDigest::of(body.as_str().as_bytes());
+            if views.failure_body_digest(dispatch) != Some(digest) {
+                return Err(TransitionError::ObservationMismatch);
+            }
+            return Ok(EngineDecision {
+                append: None,
+                follow_up: FollowUp::Outcome(OutcomeFollowUp::Closed {
+                    admitted: views.admitted_body(dispatch).cloned(),
+                }),
+            });
+        }
         if !views.is_open(dispatch) {
             match (views.closed_successfully(dispatch), &observed) {
                 (true, None) => return Err(TransitionError::ContradictedSuccess),
@@ -786,6 +823,7 @@ impl Engine {
 
         let admission = match &report.outcome {
             ToolOutcome::Failure => ResultAdmission::Failure,
+            ToolOutcome::FailureWithBody { body } => ResultAdmission::FailureWithBody { body: body.clone() },
             ToolOutcome::Indeterminate => ResultAdmission::Indeterminate,
             ToolOutcome::Success {
                 body: OutcomeBody::Unavailable,
@@ -809,7 +847,7 @@ impl Engine {
                                 source,
                                 derived,
                             } if named == &sanitizer && source == &raw_digest => Some(derived.clone()),
-                            Evidence::Sanitizer { .. } | Evidence::Rewrite { .. } => None,
+                            Evidence::Sanitizer { .. } | Evidence::Rewrite { .. } | Evidence::File { .. } => None,
                         });
                         let Some(derived) = derived else {
                             let append = self.checkpoint_batch(view, &views, dispatch, &call, raw_digest)?;
@@ -1431,13 +1469,30 @@ impl Engine {
     }
 
     fn resolve_proposals(&self, batch: &ProposalBatch) -> Result<Vec<ResolvedCall>, (usize, EngineError)> {
+        let mut file_bases = vec![None; batch.proposals.len()];
+        for evidence in &batch.evidence {
+            if let Evidence::File { position, basis } = evidence {
+                let Some(slot) = file_bases.get_mut(*position) else {
+                    return Err((
+                        *position,
+                        EngineError::InvalidFileEvidence("position is outside the proposal batch".into()),
+                    ));
+                };
+                if slot.replace(basis.clone()).is_some() {
+                    return Err((*position, EngineError::InvalidFileEvidence("duplicate position".into())));
+                }
+            }
+        }
         let proposals: Vec<ResolvedCall> = batch
             .proposals
             .iter()
             .enumerate()
             .map(|(position, proposed)| {
                 self.resolve_call(proposed.tool.clone(), &proposed.arguments)
-                    .map(|call| call.with_annotation(proposed.annotation.clone()))
+                    .map(|call| {
+                        call.with_annotation(proposed.annotation.clone())
+                            .with_file_basis(file_bases[position].clone())
+                    })
                     .map_err(|error| (position, error))
             })
             .collect::<Result<_, _>>()?;
@@ -2798,10 +2853,11 @@ pub(crate) fn opened_dispatch(
         tool: call.tool().clone(),
         declaration: call.declaration_id(),
         arguments: call.canonical_arguments().clone(),
-        proposed_label: check::committed_label(contract, &current),
+        proposed_label: current.combine(&call.output_label(contract, &current)),
         receiving: current.clone(),
         proposed_effects: contract.emits.clone(),
         annotation: call.annotation().cloned(),
+        file_basis: call.file_basis().cloned(),
         evidence: act.pinned().clone(),
         subject,
     };
@@ -3864,6 +3920,7 @@ mod tests {
                 receiving: Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
                 proposed_effects: crate::fact::EffectSet::default(),
                 annotation: None,
+                file_basis: None,
                 subject: crate::basis::fixture_subject(&traj()),
                 evidence: crate::audience::AudienceEvidence::default(),
             },
@@ -7877,6 +7934,7 @@ mod tests {
                 receiving: Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
                 proposed_effects: EffectSet::default(),
                 annotation: None,
+                file_basis: None,
                 subject: crate::basis::fixture_subject(&child),
                 evidence: crate::audience::AudienceEvidence::default(),
             }],
@@ -9171,6 +9229,7 @@ mod tests {
                     receiving: established(TRUSTED, Audience::public()),
                     proposed_effects: EffectSet::default(),
                     annotation: None,
+                    file_basis: None,
                     subject: crate::basis::fixture_subject(&traj()),
                     evidence: crate::audience::AudienceEvidence::default(),
                 },
@@ -9400,6 +9459,7 @@ mod tests {
                     receiving: established(TRUSTED, Audience::public()),
                     proposed_effects: EffectSet::default(),
                     annotation: None,
+                    file_basis: None,
                     subject: crate::basis::fixture_subject(&traj()),
                     evidence: crate::audience::AudienceEvidence::default(),
                 },

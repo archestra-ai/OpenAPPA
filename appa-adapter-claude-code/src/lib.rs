@@ -376,6 +376,8 @@ struct WireEvent {
     #[serde(default)]
     tool_response: Option<serde_json::Value>,
     #[serde(default)]
+    error: Option<serde_json::Value>,
+    #[serde(default)]
     agent_type: Option<String>,
     #[serde(default)]
     last_assistant_message: Option<String>,
@@ -526,7 +528,14 @@ fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
                 actor: event.actor(),
                 call,
                 outcome: ToolOutcome::Failure {
-                    message: "the tool run failed".to_string(),
+                    message: event
+                        .error
+                        .as_ref()
+                        .map(|error| match error {
+                            serde_json::Value::String(text) => text.clone(),
+                            other => other.to_string(),
+                        })
+                        .unwrap_or_else(|| "the tool run failed".to_string()),
                 },
             })),
             None => Err(malformed("a tool outcome without its tool call")),
@@ -1627,6 +1636,20 @@ mod tests {
                 other => panic!("expected a ToolResult event for {tool}, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_failed_edit_preserves_the_native_error_observation() {
+        let event = serde_json::json!({
+            "hook_event_name": "PostToolUseFailure",
+            "session_id": "s1",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "/work/secret.txt"},
+            "error": "old_string matched private content twice",
+        });
+        assert!(matches!(parse_value(&event), Ok(Some(HookEvent::ToolResult {
+            outcome: ToolOutcome::Failure { message }, ..
+        })) if message == "old_string matched private content twice"));
     }
 
     #[test]

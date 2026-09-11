@@ -14,6 +14,9 @@ use crate::value::{DispatchId, LabeledValue, Provenance, RawResultDigest, Resolv
 
 pub enum ResultAdmission {
     Failure,
+    FailureWithBody {
+        body: ValueBody,
+    },
     Indeterminate,
     SuccessNoValue,
     SuccessRaw {
@@ -173,6 +176,7 @@ pub(crate) fn admit_result(
         | ResultAdmission::CandidateAdmissible
         | ResultAdmission::SuccessNoValue
         | ResultAdmission::Failure
+        | ResultAdmission::FailureWithBody { .. }
         | ResultAdmission::Indeterminate => None,
     };
     if let (Some(reported), Some(observed)) = (reported, views.observed_result(dispatch))
@@ -182,7 +186,8 @@ pub(crate) fn admit_result(
     }
 
     let trajectory = views.trajectory().clone();
-    let output_label = || contract.output_label();
+    let receiving = views.receiving_bound(dispatch).ok_or(AdmitError::NotOpen)?;
+    let output_label = || call.output_label(&contract, receiving);
     let close_success = || Fact::DispatchClosed {
         trajectory: trajectory.clone(),
         dispatch: dispatch.clone(),
@@ -214,6 +219,20 @@ pub(crate) fn admit_result(
             dispatch: dispatch.clone(),
             outcome: CloseOutcome::Failure,
         }],
+        ResultAdmission::FailureWithBody { body } => {
+            if call.file_basis().is_none() {
+                return Err(AdmitError::ObservationMismatch);
+            }
+            let observed = RawResultDigest::of(body.as_str().as_bytes());
+            vec![
+                Fact::DispatchClosed {
+                    trajectory: trajectory.clone(),
+                    dispatch: dispatch.clone(),
+                    outcome: CloseOutcome::FailureWithBody { observed },
+                },
+                admit_value(output_label(), body),
+            ]
+        }
         ResultAdmission::Indeterminate => vec![Fact::DispatchClosed {
             trajectory: trajectory.clone(),
             dispatch: dispatch.clone(),
@@ -449,6 +468,7 @@ mod tests {
             receiving: Label::top(),
             proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
             annotation: call.annotation().cloned(),
+            file_basis: call.file_basis().cloned(),
             subject: crate::basis::fixture_subject(&traj()),
             evidence: crate::audience::AudienceEvidence::default(),
         };
@@ -524,6 +544,49 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn file_failure_body_is_admitted_at_the_result_label_without_success_effects() {
+        let reg = registry();
+        let predecessor = crate::value::FileSource {
+            version: "v1".into(),
+            digest: "old".into(),
+            label: Label::new(SUSPICIOUS, internal()),
+        };
+        let call = get_call().with_file_basis(Some(crate::value::FileBasis::Replace(Some(predecessor))));
+        let (log, dispatch) = open_log(&call);
+        let p = views_of(&log);
+        let batch = admit(
+            &reg,
+            &p.view(&traj()),
+            &dispatch,
+            &call,
+            ResultAdmission::FailureWithBody {
+                body: ValueBody::new("native error containing old content"),
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            &batch[0],
+            Fact::DispatchClosed {
+                outcome: CloseOutcome::FailureWithBody { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            &batch[1],
+            Fact::ValueAdmitted { value, .. }
+                if value.label == Label::new(SUSPICIOUS, internal())
+        ));
+        let projection = views_of(&[log, batch].concat());
+        assert_eq!(
+            projection.view(&traj()).dispatch_call(&dispatch).unwrap().file_basis(),
+            call.file_basis(),
+            "the persisted opening rebuilds the pinned file basis"
+        );
+        assert!(!projection.view(&traj()).has_effect(&EffectKind::new("read")));
     }
 
     #[test]

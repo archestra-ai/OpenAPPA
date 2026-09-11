@@ -145,7 +145,10 @@ pub(crate) fn evaluate_state(
     stage: &CallStage,
     context: &MembershipContext<'_>,
 ) -> Result<RawBlock, MembershipNeeded> {
-    let committed = committed_label(annotation, current);
+    let committed = match reads {
+        CallReads::Resolved(call) => current.combine(&call.output_label(annotation, current)),
+        CallReads::Static => committed_label(annotation, current),
+    };
 
     let narrowing = (&committed != current).then(|| Narrowing {
         from: current.clone(),

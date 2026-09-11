@@ -1,6 +1,7 @@
 //! The runtime API: `Runtime` and `Session` — the harness-agnostic
 //! event model this crate declares.
 
+mod files;
 mod session;
 
 /// The fixture-only `Value` → raw-bytes helper, shared with the other
@@ -708,6 +709,10 @@ impl Prepared {
     }
 
     fn assemble(self, backend: Backend) -> Result<Runtime, OpenError> {
+        let state_path = match &backend {
+            Backend::Sqlite { path } => Some(path.clone()),
+            Backend::Memory => None,
+        };
         let store = LogStore::open(backend).map_err(|error| match error {
             appa_eventlog::OpenError::Damaged { path, detail } => OpenError::Damaged(format!("{path}: {detail}")),
             error @ appa_eventlog::OpenError::ForeignSchema { .. } => OpenError::Damaged(error.to_string()),
@@ -725,12 +730,16 @@ impl Prepared {
                 events: std::sync::Mutex::new(crate::events::EventLog::default()),
                 gates: self.gates,
                 naming: self.naming,
+                files: None,
+                state_path,
             }),
         })
     }
 }
 
 struct Inner {
+    files: Option<files::FileTracking>,
+    state_path: Option<PathBuf>,
     deployment: std::sync::RwLock<Arc<Deployment>>,
     retired: std::sync::Mutex<std::collections::BTreeMap<String, Arc<RuntimeEngine>>>,
     store: LogStore,
@@ -993,6 +1002,91 @@ impl Inner {
 }
 
 impl Runtime {
+    pub(crate) fn file_initial_label(
+        &self,
+        trust: &str,
+        audience: appa_engine::label::DeclaredAudience,
+    ) -> Result<appa_engine::label::Label, OpenError> {
+        let deployment = self.inner.deployment();
+        let rank = deployment
+            .resident
+            .registry()
+            .trust_chain()
+            .rank_of(trust)
+            .ok_or_else(|| OpenError::UnsupportedPolicy(format!("unknown initial file trust rank: {trust}")))?;
+        Ok(appa_engine::label::Label::new(
+            rank,
+            appa_engine::label::Audience::of_declared(&audience),
+        ))
+    }
+
+    /// Enable experimental Read/Write/Edit tracking, not a supported security boundary.
+    /// Claude Code can inspect file content during validation before invoking hooks, so
+    /// unreported observations can escape Label propagation. Use disposable fixtures only.
+    /// Configure this before sharing the runtime. `Some(initial)`
+    /// explicitly initializes all existing files with the operator's source Label; `None`
+    /// requires an existing ledger. Never initialize again to recover a lost ledger.
+    /// Only exclusively owned Unix workspaces are supported. The host must also keep its
+    /// configuration, plugins, credentials and other execution-control files outside the root.
+    pub fn with_file_tracking(
+        mut self,
+        workspace: PathBuf,
+        ledger: PathBuf,
+        initial: Option<appa_engine::label::Label>,
+    ) -> Result<Self, OpenError> {
+        let inner = Arc::get_mut(&mut self.inner)
+            .ok_or_else(|| OpenError::Storage("enable file tracking before sharing the runtime".into()))?;
+        if !matches!(inner.naming, ToolNaming::Canonical { adapter } if adapter.name == AdapterName::ClaudeCode) {
+            return Err(OpenError::Storage(
+                "file tracking requires the Claude Code adapter".into(),
+            ));
+        }
+        let workspace = std::fs::canonicalize(workspace).map_err(|error| OpenError::Storage(error.to_string()))?;
+        if let Some(path) = &inner.state_path
+            && std::fs::canonicalize(path)
+                .map_err(|error| OpenError::Storage(error.to_string()))?
+                .starts_with(&workspace)
+        {
+            return Err(OpenError::Storage(
+                "the runtime database must be outside the tracked workspace".into(),
+            ));
+        }
+        let deployment = inner.deployment();
+        if deployment.resident.registry().sanitizers().next().is_some() {
+            return Err(OpenError::Storage(
+                "file tracking does not support sanitizer or rewrite routes".into(),
+            ));
+        }
+        let policy_key = crate::engine::policy_file_key(deployment.config.policy_file().bytes());
+        if let Some(label) = &initial
+            && deployment
+                .resident
+                .registry()
+                .trust_chain()
+                .name_of(label.trust)
+                .is_none()
+        {
+            return Err(OpenError::Storage(
+                "initial file trust must be a configured policy rank".into(),
+            ));
+        }
+        let store = match initial {
+            Some(label) => appa_eventlog::files::FileStore::initialize(&ledger, &workspace, &policy_key, &label),
+            None => appa_eventlog::files::FileStore::open(
+                &ledger,
+                &workspace,
+                &policy_key,
+                &appa_engine::label::Label::top(),
+            ),
+        }
+        .map_err(|error| OpenError::Storage(error.to_string()))?;
+        inner.files = Some(files::FileTracking { store, policy_key });
+        tracing::warn!(
+            "experimental file tracking is not a security boundary: native Claude Code validation can inspect content before hooks; use disposable fixtures only"
+        );
+        Ok(self)
+    }
+
     /// Opens the modules, the engine, and the store. The `[policy]`
     /// table compiles through the documented dialect into the engine's
     /// registry — every surface and algebraic load lint runs here, and

@@ -9,6 +9,7 @@ pub mod hook_client;
 pub mod hooks;
 pub mod init;
 pub mod installation;
+pub mod managed_files;
 mod management;
 pub mod mcp;
 pub mod plugin_bundle;

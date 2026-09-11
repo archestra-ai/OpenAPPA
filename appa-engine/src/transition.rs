@@ -17,7 +17,7 @@ use crate::plan::PlannedBlock;
 use crate::profile::{DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentityV1};
 use crate::projection::{Projection, Views};
 use crate::value::{
-    ChildReturnId, DispatchId, ForkId, Provenance, RawResultDigest, ResolvedCall, TrajectoryId, ValueBody,
+    ChildReturnId, DispatchId, FileBasis, ForkId, Provenance, RawResultDigest, ResolvedCall, TrajectoryId, ValueBody,
 };
 
 /// The identity of one complete policy-content payload for one trajectory. Runtime
@@ -268,6 +268,7 @@ pub struct ToolReport {
 pub enum ToolOutcome {
     Success { body: OutcomeBody },
     Failure,
+    FailureWithBody { body: ValueBody },
     Indeterminate,
 }
 
@@ -284,6 +285,8 @@ pub enum OutcomeBody {
 /// engine event.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Evidence {
+    /// Trusted host pin for the file operation at `position` in a proposal batch.
+    File { position: usize, basis: FileBasis },
     /// An output sanitizer's derivation of a withheld value.
     Sanitizer {
         sanitizer: SanitizerName,
@@ -1111,11 +1114,13 @@ impl<'a> Sequence<'a> {
                 receiving,
                 proposed_effects,
                 annotation,
+                file_basis,
                 subject,
                 evidence,
             } => {
                 let call = ResolvedCall::new_keyed(tool.clone(), *declaration, arguments.clone())
-                    .with_annotation(annotation.clone());
+                    .with_annotation(annotation.clone())
+                    .with_file_basis(file_basis.clone());
                 self.opened(trajectory, dispatch, &call, subject, released, evidence)?;
                 let entry = self
                     .engine
@@ -1143,7 +1148,7 @@ impl<'a> Sequence<'a> {
                     return Err(TransitionRefusal::EffectsMismatch);
                 }
                 let current = views.current_label();
-                if proposed_label != &crate::check::committed_label(&checked, &current) || receiving != &current {
+                if proposed_label != &current.combine(&call.output_label(&checked, &current)) || receiving != &current {
                     return Err(TransitionRefusal::ForgedLabel);
                 }
             }
@@ -1169,10 +1174,21 @@ impl<'a> Sequence<'a> {
             } => {
                 self.closing_act(dispatch)?;
                 let contract = self.open_dispatch_contract(trajectory, dispatch)?;
-                let checkpointed = self.projection.view(trajectory).is_succeeded(dispatch);
+                let views = self.projection.view(trajectory);
+                let checkpointed = views.is_succeeded(dispatch);
                 match (outcome, checkpointed) {
-                    (CloseOutcome::Failure | CloseOutcome::Indeterminate, true) => {
+                    (
+                        CloseOutcome::Failure | CloseOutcome::FailureWithBody { .. } | CloseOutcome::Indeterminate,
+                        true,
+                    ) => {
                         return Err(TransitionRefusal::ContradictedSuccess);
+                    }
+                    (CloseOutcome::FailureWithBody { .. }, false)
+                        if views
+                            .dispatch_call(dispatch)
+                            .is_none_or(|call| call.file_basis().is_none()) =>
+                    {
+                        return Err(TransitionRefusal::ForgedEvidence);
                     }
                     (CloseOutcome::Success { effects }, true) if effects != &EffectSet::default() => {
                         return Err(TransitionRefusal::EffectsMismatch);
@@ -1845,7 +1861,9 @@ impl<'a> Sequence<'a> {
                 outcome,
             } => match outcome {
                 CloseOutcome::Success { effects } => self.effect_advance(!effects.is_empty()),
-                CloseOutcome::Failure => self.effect_advance(self.projection.view(trajectory).reserves(dispatch)),
+                CloseOutcome::Failure | CloseOutcome::FailureWithBody { .. } => {
+                    self.effect_advance(self.projection.view(trajectory).reserves(dispatch))
+                }
                 CloseOutcome::Indeterminate => crate::basis::BasisAdvance::default(),
             },
             // An admission moves the flow only when it moves the trajectory's label. A block and
@@ -1911,6 +1929,14 @@ impl<'a> Sequence<'a> {
             .view(dispatch.trajectory())
             .bound_sanitizer(dispatch)
             .is_some()
+        {
+            return true;
+        }
+        if self
+            .projection
+            .view(dispatch.trajectory())
+            .dispatch_call(dispatch)
+            .is_some_and(|call| call.file_basis().is_some())
         {
             return true;
         }
@@ -2001,11 +2027,13 @@ impl<'a> Sequence<'a> {
                     annotation,
                     subject,
                     evidence,
+                    file_basis,
                     ..
                 },
             ) if dispatch == &next.dispatch => {
                 let opened = ResolvedCall::new_keyed(tool.clone(), *declaration, arguments.clone())
-                    .with_annotation(annotation.clone());
+                    .with_annotation(annotation.clone())
+                    .with_file_basis(file_basis.clone());
                 if opened != next.call || subject != &next.subject {
                     return Err(TransitionRefusal::UnbackedDecision);
                 }
@@ -2437,7 +2465,7 @@ impl<'a> Sequence<'a> {
                     .ok_or_else(|| TransitionRefusal::UnknownTool(call.tool().as_str().to_string()))?;
                 let views = self.projection.view(trajectory);
                 // Admission lands with the close, and only a success admits anything.
-                if !views.closed_successfully(dispatch) {
+                if !views.closed_successfully(dispatch) && !views.failed_with_body(dispatch) {
                     return Err(TransitionRefusal::DispatchNotOpen);
                 }
                 if !self.admitted.insert(dispatch.clone()) {
@@ -2471,12 +2499,18 @@ impl<'a> Sequence<'a> {
                             if views.bound_sanitizer(dispatch).is_some() {
                                 return Err(TransitionRefusal::ForgedLabel);
                             }
-                            self.observed_as(
-                                trajectory,
-                                dispatch,
-                                &RawResultDigest::of(value.body.as_str().as_bytes()),
-                            )?;
-                            contract.output_label()
+                            let digest = RawResultDigest::of(value.body.as_str().as_bytes());
+                            if views.failed_with_body(dispatch) {
+                                if views.failure_body_digest(dispatch) != Some(digest) {
+                                    return Err(TransitionRefusal::ForgedLabel);
+                                }
+                            } else {
+                                self.observed_as(trajectory, dispatch, &digest)?;
+                            }
+                            let receiving = views
+                                .receiving_bound(dispatch)
+                                .ok_or(TransitionRefusal::UnknownDispatch)?;
+                            call.output_label(&contract, receiving)
                         }
                     },
                 };
@@ -3237,7 +3271,8 @@ fn belongs_to(sequence: &Sequence<'_>, act: &crate::basis::DecidedAct, fact: &Fa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::label::{Audience, Trust};
+    use crate::contract::{LabelRequirements, Requires};
+    use crate::label::{Audience, ReaderId, Trust};
     use crate::profile::PolicyFileKey;
     use crate::value::{LabeledValue, OfferNonce, ToolName, ValueBody, ValueId};
 
@@ -3253,7 +3288,13 @@ mod tests {
             delta: crate::contract::Delta::NONE,
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
-            requires: crate::contract::Requires::default(),
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(Trust::new(1)),
+                    audience: vec![],
+                },
+                ..Requires::default()
+            },
         }
     }
 
@@ -3359,6 +3400,43 @@ mod tests {
         assert_eq!(views.current_label(), starting());
 
         assert_eq!(held.advance(&closed), Err(ViewMismatch::Stale { view: 3, batch: 2 }));
+    }
+
+    #[test]
+    fn pinned_file_basis_changes_batch_authorization() {
+        let engine = engine();
+        let first = vec![opening(&engine, &traj())];
+        let call = engine.resolve_call(ToolName::new("note"), b"{}").unwrap();
+        let proposal = ProposedCall {
+            tool: call.tool().clone(),
+            arguments: call.canonical_arguments().canonical_bytes().to_vec(),
+            annotation: None,
+        };
+        let basis = FileBasis::Read(crate::value::FileSource {
+            version: "v1".into(),
+            digest: "content".into(),
+            label: Label::new(Trust::new(0), Audience::restricted([ReaderId::new("insider")])),
+        });
+        let event = EngineEvent::Proposals(ProposalBatch {
+            id: ProposalBatchId::new("file-read"),
+            trajectory: traj(),
+            provider_results: Vec::new(),
+            proposals: vec![proposal],
+            spawn: None,
+            offer_nonce: nonce(),
+            evidence: vec![Evidence::File {
+                position: 0,
+                basis: basis.clone(),
+            }],
+            audience: crate::audience::AudienceEvidence::default(),
+        });
+        let decision = engine
+            .handle(&engine.view(&traj(), first.clone(), 1).unwrap(), event)
+            .unwrap();
+        assert!(matches!(
+            &decision.follow_up,
+            FollowUp::Proposals { released, blocked, .. } if released.is_empty() && blocked.len() == 1
+        ));
     }
 
     #[test]

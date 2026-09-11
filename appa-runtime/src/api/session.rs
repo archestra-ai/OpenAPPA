@@ -262,6 +262,72 @@ impl Session {
     }
 
     pub async fn on_tool_call(&self, call: ProposedCall, spawn: bool) -> Result<ToolCallDecision, EventError> {
+        let Some(files) = &self.inner.files else {
+            return self.propose_tool_call(call, spawn, None).await;
+        };
+        let (operation, path) = super::files::operation(&call)?;
+        let log = self.inner.log(&self.root)?;
+        if crate::engine::policy_file_key(log.policy_file()) != files.policy_key
+            || crate::engine::policy_file_key(self.deployment.config.policy_file().bytes()) != files.policy_key
+        {
+            return Err(super::files::refused(
+                "the workspace ledger and trajectory must use the same policy",
+            ));
+        }
+        let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+        let view = policy.engine().rebuild_view(&log)?;
+        let expected = policy.engine().file_dispatch(&view, &self.trajectory, &call)?;
+        let key = super::files::key(&expected)?;
+        let pin = files
+            .store
+            .prepare(&self.trajectory.0, &key, operation, &path)
+            .map_err(super::files::refused)?;
+        // Native writes must not reconfigure Claude Code, Git hooks, or MCP execution.
+        if operation != appa_eventlog::files::FileOperation::Read
+            && pin
+                .path
+                .split('/')
+                .any(|part| matches!(part, ".claude" | ".git" | ".mcp.json" | ".appa"))
+        {
+            files
+                .store
+                .cancel(&self.trajectory.0, &key)
+                .map_err(super::files::refused)?;
+            return Err(super::files::refused(
+                "execution-control files are not writable in file-tracking mode",
+            ));
+        }
+        let basis = super::files::basis(pin)?;
+        let decision = self.propose_tool_call(call, spawn, Some(basis)).await;
+        match &decision {
+            Ok(ToolCallDecision::Allow { dispatch, .. }) => {
+                if dispatch != &expected {
+                    return Err(super::files::refused("dispatch changed while reserving the file"));
+                }
+                let log = self.inner.log(&self.root)?;
+                let view = policy.engine().rebuild_view(&log)?;
+                let label = policy.engine().file_output_label(&view, dispatch)?;
+                files
+                    .store
+                    .bind(&self.trajectory.0, &key, &key, &label)
+                    .map_err(super::files::refused)?;
+            }
+            _ => {
+                files
+                    .store
+                    .cancel(&self.trajectory.0, &key)
+                    .map_err(super::files::refused)?;
+            }
+        }
+        decision
+    }
+
+    async fn propose_tool_call(
+        &self,
+        call: ProposedCall,
+        spawn: bool,
+        file_basis: Option<appa_engine::value::FileBasis>,
+    ) -> Result<ToolCallDecision, EventError> {
         if let Some(open) = self.substituted_release(&call)? {
             return self.claim_or_abandon(call, open).await;
         }
@@ -276,7 +342,10 @@ impl Session {
         }
         let decision = self
             .drive_with_evidence(
-                |_, evidence| {
+                |_, mut evidence| {
+                    if let Some(basis) = &file_basis {
+                        evidence.push(ExternalEvidence::File { basis: basis.clone() });
+                    }
                     Ok(EngineEvent::ModelResponse {
                         call: call.clone(),
                         evidence,
@@ -399,6 +468,51 @@ impl Session {
     }
 
     pub async fn on_tool_result(&self, call: ProposedCall, o: ToolOutcome) -> Result<ToolResultDecision, EventError> {
+        if let Some(files) = &self.inner.files {
+            super::files::operation(&call)?;
+            let open = self.carried_call()?.ok_or(EventError::UnknownDispatch)?;
+            let log = self.inner.log(&self.root)?;
+            let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+            if !is_open_call(&call, || policy.engine().canonical_bytes(&call), &open) {
+                return Err(EventError::OutcomeMismatch);
+            }
+            let key = super::files::key(&open.id)?;
+            // Preserve actual failure text: the native failure hook cannot reliably replace it.
+            // A missing observation keeps the reservation; no later file call may proceed.
+            let o = match o {
+                ToolOutcome::Success {
+                    body: OutcomeBody::Unavailable,
+                } => ToolOutcome::Success {
+                    body: OutcomeBody::Available(String::new()),
+                },
+                other => other,
+            };
+            if matches!(o, ToolOutcome::Success { .. }) {
+                // Verify the physical version before admitting a successful result. The
+                // dispatch was durably released; an append failure afterward cannot erase
+                // this already-published file's Label.
+                files
+                    .store
+                    .finish(&self.trajectory.0, &key, true)
+                    .map_err(super::files::refused)?;
+            }
+            let decision = self.report_outcome(&call, &o).await?;
+            match &o {
+                ToolOutcome::Indeterminate => {
+                    return Err(super::files::refused(
+                        "missing outcome; workspace requires operator reconciliation",
+                    ));
+                }
+                ToolOutcome::Failure { .. } => {
+                    files
+                        .store
+                        .finish(&self.trajectory.0, &key, false)
+                        .map_err(super::files::refused)?;
+                }
+                ToolOutcome::Success { .. } => {}
+            }
+            return outcome_decision(decision);
+        }
         let o = self.cap_outcome(o);
         outcome_decision(self.report_outcome(&call, &o).await?)
     }

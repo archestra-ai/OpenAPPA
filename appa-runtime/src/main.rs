@@ -53,6 +53,23 @@ struct Args {
     #[arg(long, env = "APPA_DB", default_value = "appa.db")]
     db: PathBuf,
 
+    /// Experimental Read/Write/Edit tracking for disposable fixtures, not a security boundary.
+    /// Native Claude Code validation can read content before hooks run.
+    #[arg(long, env = "APPA_FILE_WORKSPACE", requires = "file_ledger")]
+    file_workspace: Option<PathBuf>,
+
+    /// Initialized file ledger outside the workspace. Missing ledgers fail closed.
+    #[arg(long, env = "APPA_FILE_LEDGER", requires = "file_workspace")]
+    file_ledger: Option<PathBuf>,
+
+    /// First start only: classify all existing files with this policy trust name.
+    #[arg(long, requires = "file_workspace")]
+    initialize_file_trust: Option<String>,
+
+    /// Initial audience for every existing file. Required with initialization.
+    #[arg(long, requires = "initialize_file_trust", value_parser = ["self", "internal", "public"])]
+    initialize_file_audience: Option<String>,
+
     #[arg(long, env = "APPA_MODULES_DIR")]
     modules_dir: Option<PathBuf>,
 
@@ -410,12 +427,57 @@ async fn serve(args: Args) -> ExitCode {
         serving_tools: config.tool_names().into_iter().collect(),
     }));
     let runtime = match Runtime::open_served(config, args.db, args.modules_dir, adapter) {
-        Ok(runtime) => Arc::new(runtime),
+        Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("appa runtime: {error}");
             return ExitCode::FAILURE;
         }
     };
+    let runtime = if let Some(workspace) = args.file_workspace {
+        let configure = || -> Result<Runtime, String> {
+            let workspace = fs::canonicalize(workspace).map_err(|error| error.to_string())?;
+            if fs::canonicalize(&config_path)
+                .map_err(|error| error.to_string())?
+                .starts_with(&workspace)
+            {
+                return Err("file tracking requires configuration outside the workspace".into());
+            }
+            let initial = match args.initialize_file_trust {
+                Some(trust) => {
+                    use appa_engine::label::{ChainAudience, Clause, DeclaredAudience};
+                    let audience = match args.initialize_file_audience.as_deref() {
+                        Some("public") => DeclaredAudience::Public,
+                        Some("internal") => DeclaredAudience::Union(
+                            Clause::new([ChainAudience::Internal], [], []).map_err(|e| e.to_string())?,
+                        ),
+                        Some("self") => DeclaredAudience::Union(
+                            Clause::new([ChainAudience::Self_], [], []).map_err(|e| e.to_string())?,
+                        ),
+                        _ => return Err("initialization requires --initialize-file-audience".into()),
+                    };
+                    Some(
+                        runtime
+                            .file_initial_label(&trust, audience)
+                            .map_err(|error| error.to_string())?,
+                    )
+                }
+                None => None,
+            };
+            runtime
+                .with_file_tracking(workspace, args.file_ledger.expect("clap requires a ledger"), initial)
+                .map_err(|error| error.to_string())
+        };
+        match configure() {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                eprintln!("appa runtime: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        runtime
+    };
+    let runtime = Arc::new(runtime);
     // Every audience source the policy references answers once before the runtime serves:
     // a source that is down or reports a malformed reader stops the start here.
     if let Err(error) = runtime.probe_sources().await {
