@@ -289,6 +289,7 @@ jobs:
       - name: Merge and tag image manifests
         env:
           IMMUTABLE: ${{ inputs.immutable }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
           TAGS: ${{ inputs.tags }}
         run: |
           test "$(python3 scripts/appa-oci-tags.py registry)" = "$REGISTRY"
@@ -310,12 +311,23 @@ jobs:
             for tag in "${tags[@]}"; do
               ref="${REGISTRY}/${image}:${tag}"
               if [ "$IMMUTABLE" = "true" ] && [[ "$tag" == v* ]] && docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then
-                echo "::error::${ref} already exists"
-                exit 1
+                # A release tag never moves. A retried release keeps the image it
+                # names when that image was built from this release's commit.
+                revision=$(docker buildx imagetools inspect \
+                  --format '{{ index (index .Image "linux/amd64").Config.Labels "org.opencontainers.image.revision" }}' "$ref")
+                if [ "$revision" != "$SOURCE_COMMIT" ]; then
+                  echo "::error::${ref} already exists from ${revision:-an unlabelled build}, not ${SOURCE_COMMIT}"
+                  exit 1
+                fi
+                echo "::notice::${ref} already exists from ${SOURCE_COMMIT}; keeping it"
+                sources=("$ref")
+                continue
               fi
               tag_args+=(--tag "$ref")
             done
-            docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
+            if [ "${#tag_args[@]}" -gt 0 ]; then
+              docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
+            fi
             docker buildx imagetools inspect "${REGISTRY}/${image}:${tags[0]}"
             docker buildx imagetools inspect --raw \
               "${REGISTRY}/${image}:${tags[0]}" \
@@ -389,6 +401,7 @@ jobs:
         id: tags
         env:
           IMMUTABLE: ${{ inputs.immutable }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
           TAGS: ${{ inputs.tags }}
         run: |
           mapfile -t tags < <(printf '%s\n' "$TAGS" | awk 'NF')
@@ -396,18 +409,34 @@ jobs:
             echo "::error::no image tags to publish"
             exit 1
           fi
+          # A release tag never moves. A retried release keeps the Go image it
+          # names when that image was built from this release's commit.
+          published=""
           if [ "$IMMUTABLE" = "true" ]; then
-            for image in appa-kagent-adk-go golang-adk; do
-              for tag in "${tags[@]}"; do
-                [[ "$tag" == v* ]] || continue
-                ref="${REGISTRY}/${image}:${tag}"
-                if docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then
-                  echo "::error::${ref} already exists"
+            for tag in "${tags[@]}"; do
+              [[ "$tag" == v* ]] || continue
+              ref="${REGISTRY}/appa-kagent-adk-go:${tag}"
+              if docker buildx imagetools inspect "$ref" >/dev/null 2>&1; then
+                revision=$(docker buildx imagetools inspect \
+                  --format '{{ index .Image.Config.Labels "org.opencontainers.image.revision" }}' "$ref")
+                if [ "$revision" != "$SOURCE_COMMIT" ]; then
+                  echo "::error::${ref} already exists from ${revision:-an unlabelled build}, not ${SOURCE_COMMIT}"
                   exit 1
                 fi
-              done
+                echo "::notice::${ref} already exists from ${SOURCE_COMMIT}; keeping it"
+                published=$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$ref" | jq -r .digest)
+              fi
+              alias_ref="${REGISTRY}/golang-adk:${tag}"
+              if docker buildx imagetools inspect "$alias_ref" >/dev/null 2>&1; then
+                alias_digest=$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$alias_ref" | jq -r .digest)
+                if [ -z "$published" ] || [ "$alias_digest" != "$published" ]; then
+                  echo "::error::${alias_ref} already exists and names ${alias_digest}, not ${published:-a published Go image}"
+                  exit 1
+                fi
+              fi
             done
           fi
+          echo "published_digest=${published}" >> "$GITHUB_OUTPUT"
           {
             echo "adk_go<<EOF"
             for tag in "${tags[@]}"; do printf '%s\n' "${REGISTRY}/appa-kagent-adk-go:${tag}"; done
@@ -416,6 +445,7 @@ jobs:
 
       - name: Build and push appa-kagent-adk-go
         id: adk-go
+        if: steps.tags.outputs.published_digest == ''
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: integrations/kagent/appa-kagent-adk-go
@@ -431,7 +461,8 @@ jobs:
 
       - name: Alias the Go image to the name kagent derives
         env:
-          GO_DIGEST: ${{ steps.adk-go.outputs.digest }}
+          GO_DIGEST: ${{ steps.tags.outputs.published_digest || steps.adk-go.outputs.digest }}
+          PUBLISHED: ${{ steps.tags.outputs.published_digest }}
           TAGS: ${{ inputs.tags }}
         run: |
           if [[ ! "$GO_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
@@ -442,6 +473,10 @@ jobs:
           extra_alias=()
           for tag in "${tags[@]}"; do
             extra_alias+=(--tag "${REGISTRY}/golang-adk:${tag}")
+            # A kept image skipped the build, which would have set its other tags.
+            if [ -n "$PUBLISHED" ]; then
+              extra_alias+=(--tag "${REGISTRY}/appa-kagent-adk-go:${tag}")
+            fi
           done
           docker buildx imagetools create \
             "${extra_alias[@]}" \
