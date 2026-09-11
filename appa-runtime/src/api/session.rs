@@ -467,6 +467,45 @@ impl Session {
         .await
     }
 
+    /// Execute only the exact released runtime-owned call. Content-dependent checks happen
+    /// here, never during proposal parsing or in Claude Code's native validation.
+    pub(super) async fn execute_file(&self, call: ProposedCall) -> Result<super::files::FileReply, EventError> {
+        let files = self
+            .inner
+            .files
+            .as_ref()
+            .ok_or_else(|| super::files::refused("file tools are not enabled"))?;
+        let open = self.carried_call()?.ok_or(EventError::UnknownDispatch)?;
+        let log = self.inner.log(&self.root)?;
+        let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+        if !is_open_call(&call, || policy.engine().canonical_bytes(&call), &open) {
+            return Err(EventError::OutcomeMismatch);
+        }
+        let result = super::files::perform(&files.workspace, &call);
+        let outcome = match &result {
+            Ok(value) => ToolOutcome::Success {
+                body: OutcomeBody::Available(value.clone()),
+            },
+            Err(message) => ToolOutcome::Failure {
+                message: message.clone(),
+            },
+        };
+        // No bytes reach the MCP caller until the engine admits the observation and the
+        // ledger reconciles the mutation. A failed commit returns no file-derived detail.
+        let decision = self.on_tool_result(call, outcome).await?;
+        let succeeded = result.is_ok();
+        let value = match decision {
+            ToolResultDecision::Keep => result.unwrap_or_else(|error| error),
+            ToolResultDecision::Deliver { value } => value,
+            ToolResultDecision::Replace { placeholder } => return Ok(super::files::FileReply::Failure(placeholder)),
+        };
+        Ok(if succeeded {
+            super::files::FileReply::Value(value)
+        } else {
+            super::files::FileReply::Failure(value)
+        })
+    }
+
     pub async fn on_tool_result(&self, call: ProposedCall, o: ToolOutcome) -> Result<ToolResultDecision, EventError> {
         if let Some(files) = &self.inner.files {
             super::files::operation(&call)?;

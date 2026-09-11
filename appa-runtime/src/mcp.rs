@@ -9,6 +9,10 @@
 //! or terminal id is refused. `appa_match_batteries` is read-only: it intersects
 //! host-observed names with the runtime's current catalog.
 //!
+//! The constrained file launcher instead serves file tools and remedy execution over
+//! private stdio. That server receives its trajectory from host process arguments, not
+//! hooks or model tool arguments. It checks and admits file calls before returning results.
+//!
 //! `yell` is advertised only where the deployment turned agent reporting on. A build that
 //! does not advertise it does not route it either, so a client holding a stale tool list
 //! gets the same answer as a client that invented the name.
@@ -44,6 +48,7 @@ pub struct RuntimeTools {
     runtime: Arc<Runtime>,
     harness: Adapter,
     tool_router: ToolRouter<Self>,
+    file_actor: Option<appa_runtime_api::Actor>,
 }
 
 #[derive(Debug, Clone)]
@@ -191,11 +196,16 @@ async fn execute_remedy(
     runtime: &Runtime,
     args: ExecuteRemedyPlanArgs,
     request: RequestContext<RoleServer>,
+    bound_actor: Option<&appa_runtime_api::Actor>,
 ) -> CallToolResult {
     let quoted = OfferId(args.offer_id.clone());
     let arguments = RemedyArguments::from(args);
     // Requires the vouched trajectory from the preceding hook.
-    let Ok((acting, ruling)) = runtime.take_vouched(&PermitKey::offer(&quoted)) else {
+    let standing = match bound_actor {
+        Some(actor) => Ok((actor.clone(), None)),
+        None => runtime.take_vouched(&PermitKey::offer(&quoted)),
+    };
+    let Ok((acting, ruling)) = standing else {
         return render(
             runtime,
             RemedyOutcome::Refused {
@@ -236,10 +246,16 @@ impl RuntimeTools {
         if !runtime.agent_yell() {
             tool_router.remove_route(YELL);
         }
+        if !runtime.file_tracking_enabled() {
+            for tool in crate::api::files::TOOLS {
+                tool_router.remove_route(tool);
+            }
+        }
         RuntimeTools {
             runtime,
             harness,
             tool_router,
+            file_actor: None,
         }
     }
 
@@ -254,7 +270,46 @@ impl RuntimeTools {
         Parameters(args): Parameters<ExecuteRemedyPlanArgs>,
         request: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        execute_remedy(&self.runtime, args, request).await
+        execute_remedy(&self.runtime, args, request, self.file_actor.as_ref()).await
+    }
+
+    #[tool(
+        description = "Read a UTF-8 file in the tracked workspace. APPA checks its source Label before reading content."
+    )]
+    pub async fn appa_read_file(&self, Parameters(args): Parameters<crate::api::files::ReadArgs>) -> CallToolResult {
+        file_result(
+            &self.runtime,
+            self.file_actor.as_ref(),
+            "appa_read_file",
+            serde_json::to_value(args).expect("file arguments serialize"),
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Atomically replace a UTF-8 file in the tracked workspace with content derived from this trajectory."
+    )]
+    pub async fn appa_write_file(&self, Parameters(args): Parameters<crate::api::files::WriteArgs>) -> CallToolResult {
+        file_result(
+            &self.runtime,
+            self.file_actor.as_ref(),
+            "appa_write_file",
+            serde_json::to_value(args).expect("file arguments serialize"),
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Replace exactly one occurrence of old_string in a UTF-8 file. APPA checks the file Label before matching, including failed matches."
+    )]
+    pub async fn appa_edit_file(&self, Parameters(args): Parameters<crate::api::files::EditArgs>) -> CallToolResult {
+        file_result(
+            &self.runtime,
+            self.file_actor.as_ref(),
+            "appa_edit_file",
+            serde_json::to_value(args).expect("file arguments serialize"),
+        )
+        .await
     }
 
     #[tool(description = "Report to the OpenAPPA developers when APPA is malfunctioning, \
@@ -337,7 +392,7 @@ impl RuntimeToolService {
         Parameters(args): Parameters<ExecuteRemedyPlanArgs>,
         request: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        execute_remedy(&self.runtime, args, request).await
+        execute_remedy(&self.runtime, args, request, None).await
     }
 
     #[tool(
@@ -424,6 +479,28 @@ impl RuntimeToolService {
             return management_refused();
         }
         management_result(crate::management::run("appa-guide-refresh-batteries", Some(&args)).await)
+    }
+}
+
+async fn file_result(
+    runtime: &Runtime,
+    actor: Option<&appa_runtime_api::Actor>,
+    tool: &str,
+    arguments: serde_json::Value,
+) -> CallToolResult {
+    let result = match actor {
+        Some(actor) => runtime.execute_bound_file(actor, tool, arguments).await,
+        None => runtime.execute_file(tool, arguments).await,
+    };
+    match result {
+        Ok(crate::api::files::FileReply::Value(value)) => CallToolResult::success(vec![ContentBlock::text(value)]),
+        Ok(crate::api::files::FileReply::Failure(message)) => CallToolResult::error(vec![ContentBlock::text(message)]),
+        Err(error) => {
+            tracing::warn!(%error, "runtime-owned file operation could not admit an observation");
+            CallToolResult::error(vec![ContentBlock::text(
+                "file operation was not admitted; no file observation is returned",
+            )])
+        }
     }
 }
 
@@ -669,6 +746,20 @@ impl ServerHandler for RuntimeTools {
 const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const SESSION_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Private stdio transport. The actor comes from the host's process arguments, never MCP.
+pub(crate) async fn serve_files(runtime: Arc<Runtime>, actor: appa_runtime_api::Actor) -> Result<(), String> {
+    use rmcp::ServiceExt;
+    let mut tools = RuntimeTools::new(runtime, Adapter::ClaudeCode);
+    tools.file_actor = Some(actor);
+    tools.tool_router.remove_route(YELL);
+    let service = tools
+        .serve(rmcp::transport::stdio())
+        .await
+        .map_err(|error| error.to_string())?;
+    service.waiting().await.map_err(|error| error.to_string())?;
+    Ok(())
+}
 
 /// MCP service served at `/mcp`.
 pub fn service(runtime: Arc<Runtime>, harness: Adapter) -> StreamableHttpService<RuntimeTools, LocalSessionManager> {

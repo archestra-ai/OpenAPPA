@@ -356,6 +356,11 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
                 tracing::debug!(trajectory = %actor.root.0, "control tool outcome absorbed");
                 return HookDecision::Ack;
             }
+            if runtime.file_tracking_enabled() && crate::api::files::owns(&call) {
+                // The runtime-owned tool admitted its observation before returning via MCP.
+                // A transport/argument failure before execution leaves its reservation intact.
+                return HookDecision::Ack;
+            }
             match on_actor(runtime, &actor, MissingStart::Refuse, |session| {
                 let (call, outcome) = (call.clone(), outcome.clone());
                 async move { session.on_tool_result(call, outcome).await }
