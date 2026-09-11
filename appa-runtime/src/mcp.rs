@@ -190,7 +190,8 @@ impl From<ExecuteRemedyPlanArgs> for RemedyArguments {
 async fn execute_remedy(
     runtime: &Runtime,
     args: ExecuteRemedyPlanArgs,
-    request: RequestContext<RoleServer>,
+    request: Option<RequestContext<RoleServer>>,
+    expected_actor: Option<&appa_runtime_api::Actor>,
 ) -> CallToolResult {
     let quoted = OfferId(args.offer_id.clone());
     let arguments = RemedyArguments::from(args);
@@ -203,10 +204,18 @@ async fn execute_remedy(
             },
         );
     };
-    let elicitation = Elicitation::new(request, runtime.review_timeout());
+    if expected_actor.is_some_and(|expected| expected != &acting) {
+        return render(
+            runtime,
+            RemedyOutcome::Refused {
+                detail: "offer belongs to a different session".into(),
+            },
+        );
+    }
+    let elicitation = request.map(|request| Elicitation::new(request, runtime.review_timeout()));
     let started = std::time::Instant::now();
     let outcome = runtime
-        .remedy(&acting, quoted.clone(), arguments, Some(&elicitation), ruling)
+        .remedy(&acting, quoted.clone(), arguments, elicitation.as_ref(), ruling)
         .await;
     // Recorded from the typed outcome, before `render` turns it into the text the model
     // reads: a remedy that takes a minute and then declines is the shape of "APPA is in
@@ -224,6 +233,18 @@ async fn execute_remedy(
         },
     );
     render(runtime, outcome)
+}
+
+/// The existing MCP remedy implementation for an in-process gateway. The host
+/// first dispatches ToolCall and supplies its authenticated actor. Authorities
+/// bound in the policy still work; an interactive MCP elicitation without a
+/// request context returns NoAnswer through the existing consult mechanism.
+pub async fn execute_embedded_remedy(
+    runtime: &Runtime,
+    actor: &appa_runtime_api::Actor,
+    args: ExecuteRemedyPlanArgs,
+) -> CallToolResult {
+    execute_remedy(runtime, args, None, Some(actor)).await
 }
 
 #[tool_router]
@@ -254,7 +275,7 @@ impl RuntimeTools {
         Parameters(args): Parameters<ExecuteRemedyPlanArgs>,
         request: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        execute_remedy(&self.runtime, args, request).await
+        execute_remedy(&self.runtime, args, Some(request), None).await
     }
 
     #[tool(description = "Report to the OpenAPPA developers when APPA is malfunctioning, \
@@ -337,7 +358,7 @@ impl RuntimeToolService {
         Parameters(args): Parameters<ExecuteRemedyPlanArgs>,
         request: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        execute_remedy(&self.runtime, args, request).await
+        execute_remedy(&self.runtime, args, Some(request), None).await
     }
 
     #[tool(
