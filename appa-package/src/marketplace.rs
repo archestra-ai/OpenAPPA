@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::digest::TreeDigest;
 use crate::manifest::{ManifestError, SCHEMA};
-use crate::names::{CredentialPrefix, Host, Namespace, PackageKind, PackageName, RelativePath};
+use crate::names::{CredentialPrefix, Namespace, PackageKind, PackageName, RelativePath};
 use crate::package::{Package, Role};
 
 /// One listed package: where it lives and what its tree must digest to.
@@ -123,14 +123,6 @@ pub enum OwnershipError {
         second: PackageName,
         prefix: CredentialPrefix,
     },
-    #[error("plugin `{plugin}` includes the battery `{battery}`, which this marketplace does not carry")]
-    UnknownBattery { plugin: PackageName, battery: PackageName },
-    #[error("plugin `{plugin}` includes the battery `{battery}`, which is not written for the host `{host}`")]
-    BatteryHost {
-        plugin: PackageName,
-        battery: PackageName,
-        host: Host,
-    },
 }
 
 /// Every namespace and every credential in a marketplace has one owner.
@@ -143,10 +135,6 @@ pub enum OwnershipError {
 /// through its own Annotator; and nothing stops a second package from naming a
 /// credential the first's prefix covers and receiving it at spawn. Both are
 /// refused here, where the whole set is visible.
-///
-/// A plugin's included batteries are checked here too: each is a battery of
-/// this marketplace written for the plugin's host, so a first install never
-/// selects a package the catalog cannot supply.
 pub fn check_ownership(packages: &[Package]) -> Result<(), OwnershipError> {
     let batteries: Vec<(&PackageName, &[Namespace])> = packages
         .iter()
@@ -195,33 +183,6 @@ pub fn check_ownership(packages: &[Package]) -> Result<(), OwnershipError> {
         }
     }
 
-    for package in packages {
-        let Role::Plugin(plugin) = &package.role else {
-            continue;
-        };
-        for battery in plugin.batteries() {
-            let included = packages.iter().find_map(|candidate| match &candidate.role {
-                Role::Battery(included) if candidate.name == *battery => Some(included),
-                _ => None,
-            });
-            match included {
-                None => {
-                    return Err(OwnershipError::UnknownBattery {
-                        plugin: package.name.clone(),
-                        battery: battery.clone(),
-                    });
-                }
-                Some(included) if !included.hosts.contains(&plugin.host()) => {
-                    return Err(OwnershipError::BatteryHost {
-                        plugin: package.name.clone(),
-                        battery: battery.clone(),
-                        host: plugin.host(),
-                    });
-                }
-                Some(_) => {}
-            }
-        }
-    }
     Ok(())
 }
 
@@ -351,46 +312,14 @@ mod tests {
     }
 
     fn plugin(name: &str) -> Package {
-        plugin_including(name, &[])
-    }
-
-    fn plugin_including(name: &str, batteries: &[&str]) -> Package {
-        let batteries = batteries
-            .iter()
-            .map(|battery| format!("\"{battery}\""))
-            .collect::<Vec<_>>()
-            .join(", ");
         Package::parse(
             &format!(
                 "schema = 1\nname = \"{name}\"\ndescription = \"an plugin\"\n\n\
-                 [plugin]\nhost = \"claude-code\"\nprotocol = 1\ndefault_policy = \"d.toml\"\n\
-                 batteries = [{batteries}]\n"
+                 [plugin]\nhost = \"claude-code\"\nprotocol = 1\ndefault_policy = \"d.toml\"\n"
             ),
             Path::new("appa-package.toml"),
         )
         .expect("the manifest parses")
-    }
-
-    /// A first install selects the batteries a plugin includes, so each must be
-    /// a battery of this marketplace written for the plugin's host.
-    #[test]
-    fn a_plugin_includes_only_batteries_this_marketplace_carries_for_its_host() {
-        let plugin = plugin_including("claude-code", &["claude-code"]);
-        assert!(check_ownership(&[plugin.clone(), battery("claude-code", &["claude-code"])]).is_ok());
-        assert!(matches!(
-            check_ownership(std::slice::from_ref(&plugin)),
-            Err(OwnershipError::UnknownBattery { .. })
-        ));
-        let kagent_only = Package::parse(
-            "schema = 1\nname = \"claude-code\"\ndescription = \"a battery\"\n\n\
-             [battery]\npolicy = \"appa.toml\"\nhosts = [\"kagent\"]\n",
-            Path::new("appa-package.toml"),
-        )
-        .expect("the manifest parses");
-        assert!(matches!(
-            check_ownership(&[plugin, kagent_only]),
-            Err(OwnershipError::BatteryHost { .. })
-        ));
     }
 
     #[test]

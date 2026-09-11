@@ -260,6 +260,11 @@ fn main() -> ExitCode {
             check,
         } => {
             let config = config.unwrap_or_else(appa_runtime::init::installed_config_path);
+            let batteries_dir = if batteries_dir.is_empty() {
+                appa_runtime::batteries::default_search_path(&config)
+            } else {
+                batteries_dir
+            };
             let description = appa_runtime::describe::render(&config, &batteries_dir, adapter.as_str());
             print!("{}", description.text);
             if check && !description.valid {

@@ -30,8 +30,7 @@ scanned; agents passed on the command line are not.
 
 ## What is here
 
-- `appa-package.toml` — the package manifest: the starting policy and the
-  batteries a first install includes.
+- `appa-package.toml` — the package manifest: the starting policy.
 - `default.appa.toml` — a complete starting policy: every built-in Claude
   Code tool released with the neutral annotation, web tool results marked
   suspicious, and subagents run as children of the session.
@@ -51,8 +50,16 @@ This flow needs the `claude` command, `curl`, and Cargo when building from a che
 binary belonging to it. It selects the version, verifies every artifact
 against that version's descriptor before anything outside a temporary file
 changes, retains them under the deployment's `.appa/` state so a later
-install needs no network, and activates Claude Code support with that
-version's own binary. The result does not depend on the working directory.
+install needs no network, fills the deployment's battery store (`batteries/`
+beside the config) with that version's batteries, and activates Claude Code
+support with that version's own binary. The result does not depend on the
+working directory.
+
+A first install includes every battery written for Claude Code, one line of
+the config's include list each (`batteries/<name>/appa.toml`). A later
+install leaves the include list alone and warns when the claude-code battery
+is not among it. `appa battery list` shows what is included; `appa battery
+install <name>` and `appa battery remove <name>` add and remove one line.
 
 A release binary installs the version published for its tag. The installer
 verifies the checksum of the binary for Linux or macOS and places it in

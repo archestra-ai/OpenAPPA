@@ -6,4 +6,3 @@ description = "Gates a Claude Code session's flows through the appa-runtime proc
 host = "claude-code"
 protocol = 1
 default_policy = "default.appa.toml"
-batteries = ["claude-code"]

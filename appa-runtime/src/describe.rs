@@ -357,7 +357,7 @@ fn describe_policy_value(policy_value: &toml::Value, bindings: Bindings<'_>, out
 }
 
 fn battery_name(path: &Path) -> Option<String> {
-    crate::batteries::name_from_include(path)
+    crate::batteries::name_from_path(path)
 }
 
 pub struct Description {

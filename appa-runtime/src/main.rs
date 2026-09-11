@@ -61,7 +61,8 @@ struct Args {
 
     /// Directories of bundled batteries, in lookup order. First directory
     /// that contains `batteries/<name>/appa.toml`'s `<name>` wins. Colon
-    /// separated when set through `APPA_BATTERIES_DIR`.
+    /// separated when set through `APPA_BATTERIES_DIR`. None named: the
+    /// deployment's store, `batteries/` beside the config.
     #[arg(
         long = "batteries-dir",
         env = "APPA_BATTERIES_DIR",
@@ -450,7 +451,12 @@ async fn serve(args: Args) -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    let battery_dirs = match crate::batteries::prepare(&args.batteries_dir) {
+    let battery_dirs = if args.batteries_dir.is_empty() {
+        Ok(crate::batteries::default_search_path(&config_path))
+    } else {
+        crate::batteries::prepare(&args.batteries_dir)
+    };
+    let battery_dirs = match battery_dirs {
         Ok(dirs) => dirs,
         Err(error) => {
             eprintln!("appa runtime: {error}");

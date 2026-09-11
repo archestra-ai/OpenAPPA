@@ -10,9 +10,9 @@ The smaller protocol-translation components remain **adapters** in the runtime
 API. They are implementation components of the host plugins, not package kinds.
 
 Each directory under `plugins/` or `batteries/` has an `appa-package.toml`. A
-plugin's `batteries` list names the batteries a first install includes with it;
-each must be a battery of this catalog written for the plugin's host.
-The directory name must match the manifest's package name. The package manifest
+battery's `hosts` names the hosts it is written for; a first
+`appa plugin install claude-code` includes every battery written for Claude
+Code. The directory name must match the manifest's package name. The package manifest
 is the authored source; `marketplace.toml` is generated from these manifests and
 the package contents.
 
@@ -50,10 +50,12 @@ installed from the network. Subsequent installs retain the installed version;
 nothing updates automatically.
 
 Claude installation registers the runtime's hooks, MCP server and skill in
-the user's Claude Code profile, includes the batteries the plugin's manifest
-names (`claude-code`) on a first install, and verifies the running APPA
-runtime. Battery installation adds and activates its policy in the
-same operation.
+the user's Claude Code profile, fills the deployment's battery store
+(`batteries/` beside the config) with the version's batteries, includes
+every battery written for Claude Code on a first install, and verifies the
+running APPA runtime. A battery is one line of the root config's include
+list, `batteries/<name>/appa.toml`, whoever wrote it. Battery installation
+adds that line and activates the policy in the same operation.
 It does not register an MCP server or obtain credentials. A connection with a
 different identity can be associated using `--server <connection-id>`; use the
 identity reported by the host's discovery/validation, not a guessed provider URL.
@@ -62,10 +64,10 @@ Use `--config <path>` to select another deployment. An explicit
 `appa plugin install claude-code --revision <tag-or-full-commit>` moves the
 whole deployment to that version. A previously retained version can be restored
 the same way.
-`appa battery remove github` removes unchanged installer-owned configuration;
-`appa plugin remove claude-code` unregisters owned Claude support. Removal keeps
-authored configuration, retained artifacts, trajectory data and the runtime.
-Changed owned files are preserved and reported for recovery, not overwritten.
+`appa battery remove github` removes the battery's include line and its
+server aliases; `appa plugin remove claude-code` unregisters owned Claude
+support. Removal keeps authored configuration, the store, retained
+artifacts, trajectory data and the runtime.
 
 Commands never prompt. `--json` emits one result or error on stdout, while
 progress goes to stderr. Exit codes are 0 for success, 1 for failure, 2 for

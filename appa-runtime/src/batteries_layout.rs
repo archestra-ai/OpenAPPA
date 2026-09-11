@@ -20,7 +20,7 @@ pub fn stage_repository(repository: &Path, destination: &Path) -> io::Result<()>
     copy_entry(&repository.join(SOURCE), &destination.join(TARGET))
 }
 
-fn copy_entry(source: &Path, destination: &Path) -> io::Result<()> {
+pub(crate) fn copy_entry(source: &Path, destination: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(source)?;
     if metadata.file_type().is_symlink() {
         return Err(io::Error::new(
