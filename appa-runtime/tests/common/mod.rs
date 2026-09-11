@@ -145,14 +145,6 @@ pub fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// This checkout's plugin archive tree, staged into `into` by the same mapping
-/// the build and the install use.
-pub fn stage_bundle(into: &Path) -> PathBuf {
-    let staged = into.join("plugin-source");
-    appa_runtime::plugin_layout::stage_repository(&repo_root(), &staged).expect("the checkout stages");
-    staged
-}
-
 /// Every offer a feedback body names, in the order the feedback lists
 /// them. Which end a suite takes is its own assertion: a remedy plan
 /// that stages several offers surfaces one line each.

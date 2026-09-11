@@ -92,7 +92,7 @@ With persistence on, the runtime uses this lookup order:
 3. `/opt/appa/batteries` for the batteries built into the running image.
 
 The appa-guide skill can refresh the second directory from the latest
-published semver release after approval. It verifies the plugin archive
+published semver release after approval. It verifies the batteries archive
 against that release's `SHA256SUMS` and validates the serving root
 config. It retains the previous layer until policy reload succeeds, then
 commits the refresh. A refused reload rolls the layer back. The operator

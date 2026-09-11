@@ -158,7 +158,7 @@ class Acceptance:
         platforms = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
         descriptor = {"schema": 1, "repository": "archestra-ai/OpenAPPA", "commit": commit,
                       "release": release, "protocol": 1, "catalog": placeholder, "marketplace": placeholder,
-                      "claude_plugin": placeholder, "runtime_chart": "sha256:" + hashlib.sha256(chart.read_bytes()).hexdigest(),
+                      "batteries": placeholder, "runtime_chart": "sha256:" + hashlib.sha256(chart.read_bytes()).hexdigest(),
                       "binaries": {p: placeholder for p in platforms}, "images": images}
         source = self.work / "descriptor.json"
         source.write_text(json.dumps(descriptor))
