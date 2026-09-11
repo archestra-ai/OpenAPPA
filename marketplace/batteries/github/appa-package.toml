@@ -7,4 +7,3 @@ policy = "appa.toml"
 hosts = ["claude-code", "kagent"]
 namespaces = ["github"]
 helpers = ["audience-source.py"]
-audiences = ["github"]

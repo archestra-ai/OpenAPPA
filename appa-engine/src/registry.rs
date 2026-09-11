@@ -650,7 +650,7 @@ pub enum LoadError {
         construct: crate::profile::ProviderRunConstruct,
     },
     #[error(
-        "{context} binds audience argument {argument:?}, which {fault}: a placeholder names a required top-level string property of the tool's `parameters`"
+        "{context} binds audience argument {argument:?}, which {fault}: an audience argument is a required top-level string, so `parameters` may not declare it as another type"
     )]
     AudienceBindingSchema {
         context: String,
@@ -1076,6 +1076,26 @@ impl Registry {
         let mut wildcard: Option<ToolDeclaration> = None;
         for mut declaration in config.tools {
             let (contract, matcher) = parse_tool_selector(declaration.name().as_str())?;
+            // An audience argument binding implies its schema: the argument is a required
+            // top-level string, so a minted call always carries a value the binding can read.
+            let bound_arguments = audience_arguments(&declaration, &annotator_declarations);
+            if !bound_arguments.is_empty() {
+                let tool_name = declaration.name().as_str().to_string();
+                let parameters = match &mut declaration {
+                    ToolDeclaration::Declared(tool) => &mut tool.parameters,
+                    ToolDeclaration::Annotated { parameters, .. } => parameters,
+                };
+                for argument in bound_arguments {
+                    *parameters =
+                        parameters
+                            .require_string(&argument)
+                            .map_err(|fault| LoadError::AudienceBindingSchema {
+                                context: format!("tool {tool_name}"),
+                                argument,
+                                fault,
+                            })?;
+                }
+            }
             let base_name = match contract {
                 ContractName::Named(name) => name,
                 ContractName::Wildcard => {
@@ -1127,30 +1147,12 @@ impl Registry {
                         }
                     }
                 }
-                ToolDeclaration::Annotated {
-                    name,
-                    annotator,
-                    parameters,
-                    ..
-                } => {
-                    let Some(declared) = annotator_declarations.get(annotator) else {
+                ToolDeclaration::Annotated { name, annotator, .. } => {
+                    if !annotator_declarations.contains_key(annotator) {
                         return Err(LoadError::UnknownAnnotator {
                             tool: name.as_str().to_string(),
                             annotator: annotator.as_str().to_string(),
                         });
-                    };
-                    // The mandate's placeholders are instantiated from this tool's arguments,
-                    // so each argument they read is a required string of its schema.
-                    for placeholder in declared.audiences.iter().flat_map(AudienceVocabulary::placeholders) {
-                        for argument in placeholder.arguments() {
-                            parameters.required_string_property(argument).map_err(|fault| {
-                                LoadError::AudienceBindingSchema {
-                                    context: format!("tool {} annotator {} mandate", name.as_str(), annotator.as_str()),
-                                    argument: argument.to_string(),
-                                    fault,
-                                }
-                            })?;
-                        }
                     }
                 }
             }
@@ -1205,10 +1207,6 @@ impl Registry {
             if seen_authorities.insert(authority.name.clone(), ()).is_some() {
                 return Err(LoadError::DuplicateAuthority(authority.name.as_str().to_string()));
             }
-        }
-
-        for tool in tools.values().flatten().filter_map(|(_, d)| d.declared()) {
-            check_audience_bindings(tool)?;
         }
 
         // The planner-cap lint runs the same cover evaluation planning runs, against the
@@ -1663,36 +1661,37 @@ impl Registry {
     }
 }
 
-fn check_audience_bindings(tool: &ToolAnnotation) -> Result<(), LoadError> {
-    let check = |argument: &str, site: &str| {
-        tool.parameters
-            .required_string_property(argument)
-            .map_err(|fault| LoadError::AudienceBindingSchema {
-                context: format!("tool {} {site}", tool.name.as_str()),
-                argument: argument.to_string(),
-                fault,
-            })
-    };
-    for requirement in tool.requires.audience_requirements() {
-        match requirement {
-            AudienceRequirement::Includes(RecipientSpec::Placeholder(argument)) => check(argument, "contains")?,
-            AudienceRequirement::Includes(RecipientSpec::Selector(placeholder)) => {
-                for argument in placeholder.arguments() {
-                    check(argument, "contains")?;
-                }
-            }
-            AudienceRequirement::Includes(RecipientSpec::Static(_)) | AudienceRequirement::Cap(_) => {}
+/// The call arguments a tool's audience bindings read: each `$argument` recipient and each
+/// argument of a selector placeholder in its delta, its `contains`, or — for an
+/// Annotator-routed tool — its annotator's mandate.
+fn audience_arguments(
+    declaration: &ToolDeclaration,
+    annotators: &BTreeMap<AnnotatorName, AnnotatorDeclaration>,
+) -> Vec<String> {
+    match declaration {
+        ToolDeclaration::Declared(tool) => {
+            let recipients = tool
+                .requires
+                .audience_requirements()
+                .iter()
+                .filter_map(|requirement| match requirement {
+                    AudienceRequirement::Includes(RecipientSpec::Placeholder(argument)) => Some(argument.clone()),
+                    AudienceRequirement::Includes(_) | AudienceRequirement::Cap(_) => None,
+                });
+            recipients
+                .chain(
+                    tool.selector_placeholders()
+                        .flat_map(|placeholder| placeholder.arguments().map(str::to_string)),
+                )
+                .collect()
         }
+        ToolDeclaration::Annotated { annotator, .. } => annotators
+            .get(annotator)
+            .into_iter()
+            .flat_map(|declared| declared.audiences.iter().flat_map(AudienceVocabulary::placeholders))
+            .flat_map(|placeholder| placeholder.arguments().map(str::to_string))
+            .collect(),
     }
-    for argument in tool
-        .delta
-        .selector_placeholder()
-        .into_iter()
-        .flat_map(SelectorPlaceholder::arguments)
-    {
-        check(argument, "delta")?;
-    }
-    Ok(())
 }
 
 /// A selector placeholder resolves at load as far as it can: its provider is registered and
@@ -2953,87 +2952,84 @@ mod tests {
     }
 
     #[test]
-    fn every_audience_argument_binding_names_a_required_top_level_string() {
+    fn an_audience_argument_binding_implies_a_required_top_level_string() {
         use crate::params::{PropertyFault, ToolParameters};
         let schema = |value: serde_json::Value| ToolParameters::compile(&value).unwrap();
-        let refused = [
-            (ToolParameters::open(), PropertyFault::Undeclared),
+        let required_string = |extra: serde_json::Value| {
+            let mut object = serde_json::json!({
+                "type": "object",
+                "properties": { "to": { "type": "string" } },
+                "required": ["to"],
+            });
+            object
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            schema(object)
+        };
+        let implied = [
             (
-                schema(serde_json::json!({
-                    "type": "object",
-                    "properties": { "cc": { "type": "string" } },
-                    "required": ["cc"],
-                })),
-                PropertyFault::Undeclared,
-            ),
-            (
-                schema(serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "envelope": {
-                            "type": "object",
-                            "properties": { "to": { "type": "string" } },
-                            "required": ["to"],
-                        }
-                    },
-                    "required": ["envelope"],
-                })),
-                PropertyFault::Undeclared,
+                ToolParameters::open(),
+                required_string(serde_json::json!({"additionalProperties": true})),
             ),
             (
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": { "to": { "type": "string" } },
                 })),
-                PropertyFault::Optional,
+                required_string(serde_json::json!({})),
             ),
             (
                 schema(serde_json::json!({
                     "type": "object",
-                    "properties": { "to": { "type": "array", "items": { "type": "string" } } },
+                    "properties": { "body": { "type": "string" } },
+                    "required": ["body"],
+                })),
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": { "body": { "type": "string" }, "to": { "type": "string" } },
+                    "required": ["body", "to"],
+                })),
+            ),
+            (
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": { "to": { "type": "string", "enum": ["ops", "dev"] } },
                     "required": ["to"],
                 })),
-                PropertyFault::NotString,
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": { "to": { "type": "string", "enum": ["ops", "dev"] } },
+                    "required": ["to"],
+                })),
             ),
         ];
-        for (parameters, expected) in refused {
-            for (expected_context, cfg) in binding_sites(&parameters) {
-                match Registry::build_covered(cfg) {
-                    Err(LoadError::AudienceBindingSchema {
-                        context,
-                        argument,
-                        fault,
-                    }) => {
-                        assert_eq!(context, expected_context);
-                        assert_eq!(argument, "to");
-                        assert_eq!(fault, expected, "at {expected_context}");
-                    }
-                    other => {
-                        panic!("{expected_context} under {parameters:?} must refuse with {expected:?}, got {other:?}")
-                    }
-                }
+        for (parameters, expected) in implied {
+            for (context, cfg) in binding_sites(&parameters) {
+                let registry = Registry::build_covered(cfg)
+                    .unwrap_or_else(|error| panic!("{context} under {parameters:?} must load: {error}"));
+                let loaded = registry.tool(&ToolName::new("emit")).unwrap().declared().unwrap();
+                assert_eq!(loaded.parameters.normalized(), expected.normalized(), "{context}");
             }
         }
 
-        let accepted = [
-            schema(serde_json::json!({
-                "type": "object",
-                "properties": { "to": { "type": "string" }, "body": { "type": "string" } },
-                "required": ["to"],
-                "additionalProperties": true,
-            })),
-            schema(serde_json::json!({
-                "type": "object",
-                "properties": { "to": { "type": "string", "enum": ["ops", "dev"] } },
-                "required": ["to"],
-            })),
-        ];
-        for parameters in accepted {
-            for (context, cfg) in binding_sites(&parameters) {
-                assert!(
-                    Registry::build_covered(cfg).is_ok(),
-                    "{context} under {parameters:?} must load"
-                );
+        let array = schema(serde_json::json!({
+            "type": "object",
+            "properties": { "to": { "type": "array", "items": { "type": "string" } } },
+            "required": ["to"],
+        }));
+        for (context, cfg) in binding_sites(&array) {
+            match Registry::build_covered(cfg) {
+                Err(LoadError::AudienceBindingSchema {
+                    context: found,
+                    argument,
+                    fault,
+                }) => {
+                    assert_eq!(found, "tool emit");
+                    assert_eq!(argument, "to");
+                    assert_eq!(fault, PropertyFault::NotString, "at {context}");
+                }
+                other => panic!("{context} must refuse a non-string argument, got {other:?}"),
             }
         }
 

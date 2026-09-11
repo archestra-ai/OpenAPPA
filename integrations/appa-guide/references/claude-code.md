@@ -141,9 +141,10 @@ matched battery covers.
   placeholder instead of `internal`: `delta = { audience = ["@slack:channel/$channel_id"] }`
   for a read, `requires = { audience = { contains = ["@slack:channel/$channel_id"] } }`
   for a write. The spelling must match a template the provider declares under
-  `selectors` on its `[externals.audience.<provider>]` binding, and every
-  `$argument` must be a required string in the contract's `parameters`. Use it
-  whenever the matched battery declares such a template.
+  `selectors` on its `[externals.audience.<provider>]` binding; each
+  `$argument` becomes a required string argument of the contract, so no
+  `parameters` schema is needed for it. Use it whenever the matched battery
+  declares such a template.
 - An annotator's answer writes an audience as a static contract does: `self`,
   `internal`, an `@` mention, or a literal reader, inside its mandate's
   `audiences`. Omitted, the mandate admits every audience the policy writes.

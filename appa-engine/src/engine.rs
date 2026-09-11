@@ -13947,12 +13947,18 @@ mod tests {
             crate::registry::Registry::build_covered(through_wildcard),
             Err(crate::registry::LoadError::WildcardPlaceholderMandate(name)) if name == "acl"
         ));
+        // A tool that declares no `parameters` still binds the mandate's argument: the
+        // registry makes `channel` a required string of its schema.
         let mut unbound = cfg;
         unbound.tools = vec![annotated(plain_tool("lookup"), "acl")];
-        assert!(matches!(
-            crate::registry::Registry::build_covered(unbound),
-            Err(crate::registry::LoadError::AudienceBindingSchema { context, argument, .. })
-                if context == "tool lookup annotator acl mandate" && argument == "channel"
-        ));
+        let registry = crate::registry::Registry::build_covered(unbound).expect("the argument implies its schema");
+        let Some(crate::contract::ToolDeclaration::Annotated { parameters, .. }) =
+            registry.tool(&ToolName::new("lookup"))
+        else {
+            panic!("lookup is Annotator-routed");
+        };
+        assert!(parameters.validate(&serde_json::json!({ "channel": "C1" })).is_ok());
+        assert!(parameters.validate(&serde_json::json!({})).is_err());
+        assert!(parameters.validate(&serde_json::json!({ "channel": 1 })).is_err());
     }
 }

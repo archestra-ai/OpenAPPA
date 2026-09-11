@@ -291,11 +291,10 @@ Under `contains`, use `$<argument_name>` to read an audience from a tool argumen
 ```toml
 [[policy.tool]]
 name = "send_email"
-parameters = { type = "object", properties = { recipient = { type = "string" } }, required = ["recipient"] }
 requires = { audience = { contains = ["$recipient"] } }
 ```
 
-OpenAPPA reads the proposed call's `recipient` argument and checks that the current audience includes its readers. The tool's `parameters` schema must declare the argument as a required top-level string. A whole-entry argument placeholder is allowed only under `contains`.
+OpenAPPA reads the proposed call's `recipient` argument and checks that the current audience includes its readers. The binding makes `recipient` a required top-level string of the tool's `parameters`: OpenAPPA adds the property when the schema omits it, makes a declared string property required, and rejects a schema that declares it with another type. A whole-entry argument placeholder is allowed only under `contains`.
 
 The argument can contain a literal reader, `public`, `self`, `internal`, or an `@` mention. An unresolved dynamic mention stops the call with an operational error.
 
@@ -324,7 +323,7 @@ selectors = [{ template = "viewer", feeds = "self" }, { template = "channel/<id>
 
 A selector placeholder MAY be the only entry of `delta.audience` or of `requires.audience.contains`. It MAY also be an entry of an annotator's `audiences` mandate; see [Permits and hint](#permits-and-hint). It MUST NOT appear under `within`, beside other entries in one list, or in an annotator's answer.
 
-Each `$<argument_name>` MUST name a required top-level string argument of the tool's `parameters`. The spelling, with each `$<argument_name>` read as a variable segment, MUST match one template the provider declares under `selectors`; see [Declare selector templates](#declare-selector-templates). A `$<argument_name>` segment matches only a `<variable>` segment of the template.
+Each `$<argument_name>` becomes a required top-level string argument of the tool, as under `contains`; see [Read an audience from a tool argument](#read-an-audience-from-a-tool-argument). The spelling, with each `$<argument_name>` read as a variable segment, MUST match one template the provider declares under `selectors`; see [Declare selector templates](#declare-selector-templates). A `$<argument_name>` segment matches only a `<variable>` segment of the template.
 
 At check time OpenAPPA replaces each `$<argument_name>` with the call's argument value. The result is an ordinary `@provider:selector` mention: OpenAPPA reads its members from the provider's service, records the answer with the decision, and checks the call exactly as for a static mention. In the example above, reading channel `C0123` restricts the result to the members of `C0123`, and posting to `C0123` requires that every member of `C0123` is already a reader.
 
@@ -489,7 +488,7 @@ readers = { "github:alice" = "alice@corp.com" }
 
 For a provider with `lookup`, OpenAPPA also looks up every group member that is not an email address. With the configuration above, the member `github:alice` reported for `org/acme/members` becomes the reader `alice@corp.com`. A `null` answer, or a member absent from a `readers` table, leaves the member as written. OpenAPPA records lookup answers with the decision like other membership responses.
 
-A battery binds the membership service it ships in its own `appa.toml`, with the service's `selectors`. The root config keeps the `[policy.audience]` mappings. To route such a provider's member lookups, the root MAY add `[externals.audience.<provider>]` with `lookup` as its only key; OpenAPPA attaches that routing to the battery's binding. A root entry with any other key beside a battery's binding is a duplicate binding, and OpenAPPA rejects the configuration.
+A battery binds the membership service it ships in its own `appa.toml`, with the service's `selectors`. The root config keeps the `[policy.audience]` mappings. A root entry for a provider that a battery binds is a duplicate binding, and OpenAPPA rejects the configuration.
 
 ##### Source probe at start and reload
 
@@ -670,7 +669,7 @@ An annotator's permits limit the values it can use in its answers. The following
 
 `public` is always allowed in an answer, so it is not listed in `audiences`. Setting `audiences = []` allows only public answers.
 
-A selector placeholder in `audiences`, such as `@github:repo/$owner/$repo/collaborators`, is instantiated for each call. Every `$<argument_name>` in it MUST name a required top-level string argument of every tool that uses the annotator, so the wildcard `*` tool cannot use such an annotator. The consult request and the answer schema list the concrete spelling for that call, such as `@github:repo/acme/api/collaborators`, and the answer MAY use only that spelling. The annotator can answer about the resource the call names and about no other. See [Read a source collection from a tool argument](#read-a-source-collection-from-a-tool-argument) for the placeholder rules.
+A selector placeholder in `audiences`, such as `@github:repo/$owner/$repo/collaborators`, is instantiated for each call. Every `$<argument_name>` in it becomes a required top-level string argument of every tool that uses the annotator, so the wildcard `*` tool, whose arguments the policy does not describe, cannot use such an annotator. The consult request and the answer schema list the concrete spelling for that call, such as `@github:repo/acme/api/collaborators`, and the answer MAY use only that spelling. The annotator can answer about the resource the call names and about no other. See [Read a source collection from a tool argument](#read-a-source-collection-from-a-tool-argument) for the placeholder rules.
 
 An empty list and an omitted field have different meanings. For example, `marks = []` prevents the annotator from requiring attention. Omitting `marks` allows it to use any mark declared in an authority's `permits.attention`.
 
@@ -1185,7 +1184,7 @@ The available settings depend on the component's role:
 | `authorities` | Exactly one of `url`, `command`, or `builtin`. | Optional. Without a binding, the authority returns no answer. |
 | `sanitizers` | Exactly one of `url`, `command`, or `builtin`. | Required, except for `attest-schema`. |
 | `annotators` | Exactly one of `url` or `command`. | Required unless the declaration specifies a builtin. |
-| `audience` | Exactly one of `url`, `command`, or `readers`; `selectors` on a `url` or `command` entry; optional `lookup`. | Required for each referenced provider and each `lookup` target. `readers` is allowed only on a `lookup` target. A root entry whose only key is `lookup` routes a provider that an included file binds. |
+| `audience` | Exactly one of `url`, `command`, or `readers`; `selectors` on a `url` or `command` entry; optional `lookup`. | Required for each referenced provider and each `lookup` target. `readers` is allowed only on a `lookup` target. |
 
 OpenAPPA rejects an external component name that the policy does not declare, or a component that is missing its required implementation. For annotators, `builtin` belongs on `[[policy.annotator]]`, not under `[externals]`.
 

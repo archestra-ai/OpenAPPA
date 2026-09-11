@@ -78,7 +78,7 @@ const TERMS = {
     "One configured named audience, mentioned as @name: an optional within assertion into a built-in audience, and the from selectors that supply its members. Multiple sources are unioned.",
   self: "The identity OpenAPPA acts for. This can be a person or a service. The configured viewer sources supply its reader IDs, which are combined into the self audience.",
   lookup:
-    "On [externals.audience.<provider>]: the name of another [externals.audience.<name>] entry that answers this provider's member lookups. OpenAPPA then also looks up every group member of that provider that is not an email address. A root entry whose only key is lookup routes a provider that an included battery binds.",
+    "On [externals.audience.<provider>]: the name of another [externals.audience.<name>] entry that answers this provider's member lookups. OpenAPPA then also looks up every group member of that provider that is not an email address.",
   selectors:
     "On [externals.audience.<provider>]: the selector templates the service understands, each with an optional feeds role, self or internal. Every selector or mention the policy writes must match one; a selector placeholder must match one with $argument only on <variable> segments. The declaration enters the policy identity, and every consult carries it as declaration.templates for the service to check.",
   readers:

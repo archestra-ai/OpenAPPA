@@ -466,15 +466,9 @@ fn a_battery_that_validates_loads() {
 
     for (what, validates_expected, loads_expected, fragment) in fragments {
         let package = tempfile::tempdir().expect("a temp dir is creatable");
-        // The manifest declares the audience source a row binds: which sources a
-        // battery binds is a separate rule, tested in `appa-package`.
-        let audiences = match fragment.contains("[externals.audience.probe]") {
-            true => "audiences = [\"probe\"]\n",
-            false => "",
-        };
         std::fs::write(
             package.path().join("appa-package.toml"),
-            format!("schema = 1\nname = \"probe\"\ndescription = \"a fragment on a rule's edge\"\n\n[battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n{audiences}"),
+            "schema = 1\nname = \"probe\"\ndescription = \"a fragment on a rule's edge\"\n\n[battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n",
         )
         .expect("the manifest is writable");
         std::fs::write(package.path().join("appa.toml"), &fragment).expect("the policy is writable");

@@ -187,6 +187,7 @@ pub fn check_ownership(packages: &[Package]) -> Result<(), OwnershipError> {
 
     // An audience source answers who may read what, so one provider name has
     // one battery answering for it — flat and exact, as a namespace is owned.
+    // The providers a battery binds are read from its validated policy.
     let mut source_owner: BTreeMap<&str, &PackageName> = BTreeMap::new();
     for (name, battery) in &batteries {
         for provider in &battery.audiences {
@@ -359,24 +360,26 @@ mod tests {
         battery_with_audiences(name, namespaces, &[])
     }
 
+    /// A battery as `validate_package` returns it: the audience providers its policy binds
+    /// are read from the policy, not the manifest.
     fn battery_with_audiences(name: &str, namespaces: &[&str], audiences: &[&str]) -> Package {
-        let quoted = |items: &[&str]| {
-            items
-                .iter()
-                .map(|item| format!("\"{item}\""))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let (namespaces, audiences) = (quoted(namespaces), quoted(audiences));
-        Package::parse(
+        let namespaces = namespaces
+            .iter()
+            .map(|item| format!("\"{item}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut package = Package::parse(
             &format!(
                 "schema = 1\nname = \"{name}\"\ndescription = \"a battery\"\n\n\
-                 [battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nnamespaces = [{namespaces}]\n\
-                 audiences = [{audiences}]\n"
+                 [battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nnamespaces = [{namespaces}]\n"
             ),
             Path::new("appa-package.toml"),
         )
-        .expect("the manifest parses")
+        .expect("the manifest parses");
+        if let Role::Battery(battery) = &mut package.role {
+            battery.audiences = audiences.iter().map(|item| item.to_string()).collect();
+        }
+        package
     }
 
     fn plugin(name: &str) -> Package {

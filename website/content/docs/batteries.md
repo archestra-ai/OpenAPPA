@@ -43,7 +43,7 @@ OpenAPPA combines these files into one config.
 | Version | Every file uses the same version. |
 | Annotators | Each annotator name must be unique. |
 | Script path | A script path is relative to the config file that names it. |
-| Audience sources | A battery binds the membership service it ships and declares its selector templates. A root entry for the same provider may carry only `lookup`. |
+| Audience sources | A battery binds the membership service it ships and declares its selector templates. A root entry for the same provider is a duplicate. |
 
 OpenAPPA checks the combined config before using it. If a reload fails, the current config keeps running.
 
@@ -172,7 +172,7 @@ selectors = [
 ]
 ```
 
-The root config decides what the built-in audiences mean and supplies the credential. It maps `self` and `internal` under `[policy.audience]`, which only the root can carry, and exports the token variable the battery names. To route the provider's member lookups elsewhere, the root adds an entry for the same provider whose only key is `lookup`; any other key beside the battery's binding is a duplicate and fails to load.
+The root config decides what the built-in audiences mean and supplies the credential. It maps `self` and `internal` under `[policy.audience]`, which only the root can carry, and exports the token variable the battery names. A root entry for the same provider is a duplicate binding and fails to load.
 
 ```toml
 # root config

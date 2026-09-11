@@ -131,7 +131,7 @@ impl AudienceRequirement {
 /// One segment of a selector placeholder: text written as is, or the name of the call argument
 /// whose value fills it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Segment {
+enum Segment {
     Literal(String),
     Argument(String),
 }
@@ -184,12 +184,12 @@ impl SelectorPlaceholder {
         })
     }
 
-    pub fn provider(&self) -> &str {
+    pub(crate) fn provider(&self) -> &str {
         &self.provider
     }
 
     /// The call arguments this placeholder reads, in written order.
-    pub fn arguments(&self) -> impl Iterator<Item = &str> {
+    pub(crate) fn arguments(&self) -> impl Iterator<Item = &str> {
         self.segments.iter().filter_map(|segment| match segment {
             Segment::Argument(argument) => Some(argument.as_str()),
             Segment::Literal(_) => None,
@@ -199,7 +199,7 @@ impl SelectorPlaceholder {
     /// Whether every instantiation of this placeholder matches the template: the same number
     /// of segments, a literal equal to the template's literal or filling a `<variable>`, and
     /// an argument only on a `<variable>`, since its value is unknown until the call.
-    pub fn fits(&self, template: &crate::audience::SelectorTemplate) -> bool {
+    pub(crate) fn fits(&self, template: &crate::audience::SelectorTemplate) -> bool {
         let pattern: Vec<&str> = template.as_str().split('/').collect();
         pattern.len() == self.segments.len()
             && pattern.iter().zip(&self.segments).all(|(pattern, segment)| {
@@ -212,10 +212,10 @@ impl SelectorPlaceholder {
     }
 
     /// The collection one call's arguments name: each argument segment replaced by the
-    /// argument's value. Every argument is a required string of the tool's schema (checked at
-    /// load) and every value one writable segment (checked when the call is minted), so a
-    /// minted call always instantiates into a mention the log can carry; anything else is
-    /// refused rather than read as another collection.
+    /// argument's value. Every argument is a required string of the tool's schema (the
+    /// registry makes it one) and every value one writable segment (checked when the call is
+    /// minted), so a minted call always instantiates into a mention the log can carry;
+    /// anything else is refused rather than read as another collection.
     pub fn instantiate(&self, arguments: &serde_json::Value) -> Result<GroupRef, UnfilledPlaceholder> {
         let mut selector = Vec::with_capacity(self.segments.len());
         for segment in &self.segments {

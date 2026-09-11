@@ -256,23 +256,6 @@ impl DeclaredTemplate {
     pub fn named(template: impl Into<String>) -> DeclaredTemplate {
         DeclaredTemplate::new(template, None)
     }
-
-    pub fn role(&self) -> TemplateRole {
-        match self.feeds {
-            Some(ChainAudience::Self_) => TemplateRole::Viewer,
-            Some(ChainAudience::Internal) => TemplateRole::Members,
-            None => TemplateRole::Named,
-        }
-    }
-}
-
-/// What one declared collection may feed: `self` (the requesting principal), `internal`
-/// (a full membership), or only named audiences and direct mentions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TemplateRole {
-    Viewer,
-    Members,
-    Named,
 }
 
 /// One registered audience source: a provider name and the selector templates it declares
@@ -281,23 +264,6 @@ pub enum TemplateRole {
 pub struct SourceRegistration {
     pub provider: String,
     pub templates: Vec<DeclaredTemplate>,
-}
-
-impl SourceRegistration {
-    /// The template a selector of this source matches, if any.
-    pub fn template_of(&self, selector: &str) -> Option<&DeclaredTemplate> {
-        self.templates
-            .iter()
-            .find(|declared| declared.template.matches(selector))
-    }
-
-    /// The declared template spellings, as a consult's declaration carries them.
-    pub fn template_spellings(&self) -> Vec<String> {
-        self.templates
-            .iter()
-            .map(|declared| declared.template.as_str().to_string())
-            .collect()
-    }
 }
 
 /// One configured named audience: `[audience.group.<name>] within / from`.

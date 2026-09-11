@@ -7,4 +7,3 @@ policy = "appa.toml"
 hosts = ["claude-code"]
 namespaces = ["claude_ai_Slack"]
 helpers = ["audience-source.py"]
-audiences = ["slack"]

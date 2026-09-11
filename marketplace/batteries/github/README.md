@@ -69,10 +69,8 @@ from = ["github:org/archestra-ai/team/finance"]
 ```
 
 Every consult carries the declared templates, and the script refuses
-one whose declaration differs from what it serves (exit status 2)
-before it reads a token: a policy and a script of different versions
-never answer each other. The runtime probes `viewer` and the mapped
-`org/<org>/members` at startup, so the skew surfaces before a decision.
+one whose declaration differs from what it serves (exit status 2), so a
+policy and a script of different versions never answer each other.
 
 The script reads its token from `APPA_PROVIDER_GITHUB_TOKEN`, which the
 binding's `token_env` forwards. The token needs the `read:org` and

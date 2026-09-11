@@ -6,9 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 use thiserror::Error;
 
-use appa_engine::audience::{
-    AudienceConfig, DeclaredTemplate, NamedAudience, SelectorSpec, SourceRegistration, TemplateRole,
-};
+use appa_engine::audience::{AudienceConfig, DeclaredTemplate, NamedAudience, SelectorSpec, SourceRegistration};
 use appa_engine::authority::{Authority, DeclaredTransition, Hint, Mandate, Sanitizer, SanitizerPoints, Scope};
 use appa_engine::contract::{
     AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, LabelRequirements, RecipientSpec, Requires,
@@ -131,52 +129,72 @@ pub enum ConfigError {
     Registry(#[from] LoadError),
 }
 
-/// One `selectors` entry of an `[externals.audience.<provider>]` binding: the template the
-/// source serves, and what its collections may feed (`self`, `internal`, or nothing beyond
-/// named audiences and direct mentions). A template is `/`-separated non-empty segments,
-/// each a literal or a `<variable>`; a segment may not start with `$`, which marks an
-/// argument placeholder in a policy's spelling of a selector.
-pub fn parse_declared_template(
+/// One `selectors` entry of an `[externals.audience.<provider>]` binding, as written: the
+/// template the source serves and what its collections may feed.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectorDeclaration {
+    pub template: String,
+    pub feeds: Option<String>,
+}
+
+/// The templates one source declares under `selectors`. A template is `/`-separated
+/// non-empty segments, each a literal or a `<variable>`; a segment may not start with `$`,
+/// which marks an argument placeholder in a policy's spelling of a selector. `feeds` names
+/// what the collections may feed beyond named audiences and direct mentions: `self` or
+/// `internal`. A source declares at least one template and none twice.
+pub fn declare_templates(
     provider: &str,
-    template: &str,
-    feeds: Option<&str>,
-) -> Result<DeclaredTemplate, ConfigError> {
-    let refused = |reason: &str| ConfigError::BadSelectorDeclaration {
+    selectors: &[SelectorDeclaration],
+) -> Result<Vec<DeclaredTemplate>, ConfigError> {
+    let refused = |template: &str, reason: &str| ConfigError::BadSelectorDeclaration {
         provider: provider.to_string(),
         template: template.to_string(),
         reason: reason.to_string(),
     };
-    if template.is_empty() {
-        return Err(refused("is empty"));
+    let mut templates: Vec<DeclaredTemplate> = Vec::new();
+    for selector in selectors {
+        let template = selector.template.as_str();
+        if template.is_empty() {
+            return Err(refused(template, "is empty"));
+        }
+        for segment in template.split('/') {
+            if segment.is_empty() {
+                return Err(refused(template, "has an empty segment"));
+            }
+            if segment.starts_with('$') {
+                return Err(refused(
+                    template,
+                    "has a segment starting with `$`, which marks an argument placeholder",
+                ));
+            }
+            let bracketed = segment.starts_with('<') || segment.ends_with('>');
+            if bracketed && !(segment.starts_with('<') && segment.ends_with('>') && segment.len() > 2) {
+                return Err(refused(template, "has a malformed `<variable>` segment"));
+            }
+        }
+        let feeds = match &selector.feeds {
+            None => None,
+            Some(level) => Some(
+                ChainAudience::parse(level)
+                    .ok_or_else(|| refused(template, "`feeds` names a built-in audience: `self` or `internal`"))?,
+            ),
+        };
+        if templates.iter().any(|known| known.template.as_str() == template) {
+            return Err(refused(template, "is declared twice"));
+        }
+        templates.push(DeclaredTemplate::new(template, feeds));
     }
-    for segment in template.split('/') {
-        if segment.is_empty() {
-            return Err(refused("has an empty segment"));
-        }
-        if segment.starts_with('$') {
-            return Err(refused(
-                "has a segment starting with `$`, which marks an argument placeholder",
-            ));
-        }
-        let bracketed = segment.starts_with('<') || segment.ends_with('>');
-        if bracketed && !(segment.starts_with('<') && segment.ends_with('>') && segment.len() > 2) {
-            return Err(refused("has a malformed `<variable>` segment"));
-        }
+    if templates.is_empty() {
+        return Err(refused("", "`selectors` declares no template"));
     }
-    let feeds = match feeds {
-        None => None,
-        Some(level) => Some(
-            ChainAudience::parse(level)
-                .ok_or_else(|| refused("`feeds` names a built-in audience: `self` or `internal`"))?,
-        ),
-    };
-    Ok(DeclaredTemplate::new(template, feeds))
+    Ok(templates)
 }
 
 /// The audience sources a configuration document declares: every `[externals.audience.<p>]`
 /// entry with a `selectors` list, as [`Config::from_toml_str_routed`] takes them. An entry
-/// without `selectors` — a roster, or a root entry that only routes lookups — declares no
-/// source. The list's shape is validated here; how the entry answers is the deployment's.
+/// without `selectors` — a roster — declares no source. The list's shape is validated here;
+/// how the entry answers is the deployment's.
 pub fn declared_sources(document: &toml::Value) -> Result<Vec<SourceRegistration>, ConfigError> {
     let Some(entries) = document
         .get("externals")
@@ -190,59 +208,21 @@ pub fn declared_sources(document: &toml::Value) -> Result<Vec<SourceRegistration
         let Some(selectors) = entry.get("selectors") else {
             continue;
         };
-        let refused = |reason: &str| ConfigError::BadSelectorDeclaration {
-            provider: provider.clone(),
-            template: String::new(),
-            reason: reason.to_string(),
-        };
-        let selectors = selectors
-            .as_array()
-            .ok_or_else(|| refused("`selectors` is a list of `{ template, feeds }` tables"))?;
-        let mut templates: Vec<DeclaredTemplate> = Vec::new();
-        for selector in selectors {
-            let table = selector
-                .as_table()
-                .ok_or_else(|| refused("`selectors` is a list of `{ template, feeds }` tables"))?;
-            if let Some(key) = table.keys().find(|key| !matches!(key.as_str(), "template" | "feeds")) {
-                return Err(refused(&format!("a selector entry has no field `{key}`")));
-            }
-            let template = table
-                .get("template")
-                .and_then(toml::Value::as_str)
-                .ok_or_else(|| refused("a selector entry names its `template` as a string"))?;
-            let feeds = match table.get("feeds") {
-                None => None,
-                Some(feeds) => Some(feeds.as_str().ok_or_else(|| refused("`feeds` is a string"))?),
-            };
-            let declared = parse_declared_template(provider, template, feeds)?;
-            if templates.iter().any(|known| known.template == declared.template) {
-                return Err(ConfigError::BadSelectorDeclaration {
+        let selectors: Vec<SelectorDeclaration> =
+            selectors
+                .clone()
+                .try_into()
+                .map_err(|error: toml::de::Error| ConfigError::BadSelectorDeclaration {
                     provider: provider.clone(),
-                    template: template.to_string(),
-                    reason: "is declared twice".to_string(),
-                });
-            }
-            templates.push(declared);
-        }
-        if templates.is_empty() {
-            return Err(refused("`selectors` declares no template"));
-        }
+                    template: String::new(),
+                    reason: format!("`selectors` is a list of `{{ template, feeds }}` tables: {error}"),
+                })?;
         sources.push(SourceRegistration {
             provider: provider.clone(),
-            templates,
+            templates: declare_templates(provider, &selectors)?,
         });
     }
     Ok(sources)
-}
-
-/// Why a selector names nothing its provider serves: the templates the source declares, spelled
-/// out so the writer need not guess them.
-fn undeclared_selector(source: &SourceRegistration) -> String {
-    format!(
-        "names no collection {} serves; it serves {}",
-        source.provider,
-        source.template_spellings().join(", ")
-    )
 }
 
 /// The stock model transports an `[[annotator]]` may name on its declaration with `builtin`.
@@ -821,7 +801,7 @@ fn convert_audience(
     let mut providers: BTreeSet<String> = BTreeSet::new();
     let mut selectors = |list: &[String],
                          context: &str,
-                         admits: &dyn Fn(TemplateRole) -> bool,
+                         admits: fn(Option<ChainAudience>) -> bool,
                          expected: &str|
      -> Result<Vec<SelectorSpec>, ConfigError> {
         let refused = |selector: &str, reason: String| ConfigError::BadAudienceSource {
@@ -840,11 +820,26 @@ fn convert_audience(
                     context: context.to_string(),
                     provider: spec.provider.clone(),
                 })?;
-            let role = source
-                .template_of(&spec.selector)
-                .ok_or_else(|| refused(entry, undeclared_selector(source)))?
-                .role();
-            if !admits(role) {
+            let declared = source
+                .templates
+                .iter()
+                .find(|declared| declared.template.matches(&spec.selector))
+                .ok_or_else(|| {
+                    let served: Vec<&str> = source
+                        .templates
+                        .iter()
+                        .map(|declared| declared.template.as_str())
+                        .collect();
+                    refused(
+                        entry,
+                        format!(
+                            "names no collection {} serves; it serves {}",
+                            source.provider,
+                            served.join(", ")
+                        ),
+                    )
+                })?;
+            if !admits(declared.feeds) {
                 return Err(refused(entry, format!("cannot feed this audience — {expected}")));
             }
             providers.insert(spec.provider.clone());
@@ -857,7 +852,7 @@ fn convert_audience(
             config.self_from = selectors(
                 &from,
                 "[audience] self",
-                &|role| role == TemplateRole::Viewer,
+                |feeds| feeds == Some(ChainAudience::Self_),
                 "`self` reads only collections declared to feed it",
             )?;
         }
@@ -865,7 +860,7 @@ fn convert_audience(
             config.internal_from = selectors(
                 &from,
                 "[audience] internal",
-                &|role| role == TemplateRole::Members,
+                |feeds| feeds == Some(ChainAudience::Internal),
                 "`internal` reads only collections declared to feed it",
             )?;
         }
@@ -893,7 +888,7 @@ fn convert_audience(
             let from = selectors(
                 &group.from,
                 &format!("[audience.group.{name}]"),
-                &|role| role != TemplateRole::Viewer,
+                |feeds| feeds != Some(ChainAudience::Self_),
                 "a named audience reads collections, and `viewer` names the requesting principal",
             )?;
             config.groups.push(NamedAudience {
@@ -2130,48 +2125,45 @@ annotator = "acl"
     }
 
     #[test]
-    fn every_audience_argument_binding_needs_a_required_top_level_string_in_parameters() {
+    fn an_audience_argument_binding_implies_a_required_string_in_parameters() {
         use appa_engine::params::PropertyFault;
-        let refused = |policy: &str, expected: PropertyFault| match load(policy) {
-            Err(ConfigError::Registry(LoadError::AudienceBindingSchema { argument, fault, .. })) => {
-                assert_eq!(argument, "to");
-                assert_eq!(fault, expected, "policy:\n{policy}");
-            }
-            other => panic!("expected an audience-binding refusal with {expected:?}, got {other:?} for:\n{policy}"),
+        let policy = |parameters: &str| {
+            format!(
+                "version = 2\n[[tool]]\nname = \"send\"\n{parameters}\nrequires = {{ audience = {{ contains = [\"$to\"] }} }}\ndelta = {{}}\n"
+            )
         };
-        let bindings = ["requires = { audience = { contains = [\"$to\"] } }\ndelta = {}"];
-        let parameters = [
-            ("", PropertyFault::Undeclared),
-            (
-                "parameters = { type = \"object\", properties = { cc = { type = \"string\" } }, required = [\"cc\"] }",
-                PropertyFault::Undeclared,
-            ),
-            (
-                "parameters = { type = \"object\", properties = { envelope = { type = \"object\", properties = { to = { type = \"string\" } }, required = [\"to\"] } }, required = [\"envelope\"] }",
-                PropertyFault::Undeclared,
-            ),
-            (
-                "parameters = { type = \"object\", properties = { to = { type = \"string\" } } }",
-                PropertyFault::Optional,
-            ),
-            (
-                "parameters = { type = \"object\", properties = { to = { type = \"integer\" } }, required = [\"to\"] }",
-                PropertyFault::NotString,
-            ),
-        ];
-        let policy = |binding: &str, parameters: &str| {
-            format!("version = 2\n[[tool]]\nname = \"send\"\n{parameters}\n{binding}\n")
-        };
-        for binding in bindings {
-            for (parameters, expected) in parameters {
-                refused(&policy(binding, parameters), expected);
-            }
-            let ok = policy(
-                binding,
-                "parameters = { type = \"object\", properties = { to = { type = \"string\" }, body = { type = \"string\" } }, required = [\"to\"] }",
+        for parameters in [
+            "",
+            "parameters = { type = \"object\", properties = { cc = { type = \"string\" } }, required = [\"cc\"] }",
+            "parameters = { type = \"object\", properties = { envelope = { type = \"object\", properties = { to = { type = \"string\" } }, required = [\"to\"] } }, required = [\"envelope\"] }",
+            "parameters = { type = \"object\", properties = { to = { type = \"string\" } } }",
+            "parameters = { type = \"object\", properties = { to = { type = \"string\", enum = [\"ops\"] }, body = { type = \"string\" } }, required = [\"to\"] }",
+        ] {
+            let config = load(&policy(parameters)).unwrap_or_else(|error| panic!("must load: {error}\n{parameters}"));
+            let schema = config
+                .registry()
+                .variants(&ToolName::new("send"))
+                .next()
+                .and_then(ToolDeclaration::declared)
+                .expect("send is declared")
+                .parameters
+                .normalized();
+            assert_eq!(schema["properties"]["to"]["type"], "string", "{parameters}");
+            assert!(
+                schema["required"]
+                    .as_array()
+                    .is_some_and(|required| required.contains(&serde_json::json!("to"))),
+                "{parameters}"
             );
-            assert!(load(&ok).is_ok(), "must load:\n{ok}");
         }
+        let integer = policy(
+            "parameters = { type = \"object\", properties = { to = { type = \"integer\" } }, required = [\"to\"] }",
+        );
+        assert!(matches!(
+            load(&integer),
+            Err(ConfigError::Registry(LoadError::AudienceBindingSchema { argument, fault, .. }))
+                if argument == "to" && fault == PropertyFault::NotString
+        ));
         let static_recipients = "version = 2\n[[tool]]\nname = \"send\"\nrequires = { audience = { contains = [\"finance\"] } }\ndelta = {}\n";
         assert!(load(static_recipients).is_ok());
     }
@@ -2536,7 +2528,8 @@ confined_results = ["read", "send"]
             [AudienceRequirement::Includes(RecipientSpec::Selector(placeholder))]
         );
 
-        let optional = r#"{ type = "object", properties = { channel_id = { type = "string" } } }"#;
+        let integer =
+            r#"{ type = "object", properties = { channel_id = { type = "integer" } }, required = ["channel_id"] }"#;
         for (case, policy, expected) in [
             (
                 "beside another entry",
@@ -2563,8 +2556,8 @@ confined_results = ["read", "send"]
                 "spelling",
             ),
             (
-                "an argument the schema does not require",
-                tool(optional, delta),
+                "an argument the schema declares as another type",
+                tool(integer, delta),
                 "schema",
             ),
             (
@@ -2616,7 +2609,7 @@ confined_results = ["read", "send"]
     }
 
     /// A mandate placeholder is read per call: it admits exactly the collection the routed
-    /// call's arguments spell, so every routed tool must carry the argument, and the wildcard —
+    /// call's arguments spell, so every routed tool carries the argument as a required string, and the wildcard —
     /// whose calls the policy does not describe — cannot route through it.
     #[test]
     fn an_annotator_mandate_placeholder_binds_to_each_routed_tools_arguments() {
@@ -2645,11 +2638,15 @@ confined_results = ["read", "send"]
         assert!(config.registry().audience().providers().contains("slack"));
 
         let unbound = "[[tool]]\nname = \"read_channel\"\nannotator = \"acl\"\n";
-        assert!(matches!(
-            load(&policy(unbound)),
-            Err(ConfigError::Registry(LoadError::AudienceBindingSchema { context, argument, .. }))
-                if context == "tool read_channel annotator acl mandate" && argument == "channel_id"
-        ));
+        let implied = load(&policy(unbound)).expect("the mandate's argument implies its schema");
+        let Some(ToolDeclaration::Annotated { parameters, .. }) =
+            implied.registry().variants(&ToolName::new("read_channel")).next()
+        else {
+            panic!("read_channel is Annotator-routed");
+        };
+        let schema = parameters.normalized();
+        assert_eq!(schema["properties"]["channel_id"]["type"], "string");
+        assert_eq!(schema["required"], serde_json::json!(["channel_id"]));
         let wildcard = "[[tool]]\nname = \"*\"\nannotator = \"acl\"\n";
         assert!(matches!(
             load(&policy(wildcard)),

@@ -1,7 +1,6 @@
 //! The one coarse operation over a package directory: parse its manifest and
 //! refuse everything a marketplace package may not be.
 
-use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -86,12 +85,6 @@ pub enum PackageError {
         contract: String,
         namespaces: String,
     },
-    #[error("{policy} binds the audience sources [{bound}] but the manifest declares [{declared}]")]
-    PolicyAudienceMismatch {
-        policy: PathBuf,
-        bound: String,
-        declared: String,
-    },
 }
 
 /// Read `<dir>/appa-package.toml` and refuse a package that is not
@@ -100,7 +93,7 @@ pub enum PackageError {
 /// own package.
 pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
     let manifest_path = dir.join(MANIFEST_FILE);
-    let package = Package::read(&manifest_path)?;
+    let mut package = Package::read(&manifest_path)?;
 
     // Symlinks and the source caps are refused by the same walk the digest
     // uses, so a package that validates can be digested and shipped.
@@ -110,13 +103,13 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
     })?;
 
     let contained = Contained::new(dir, &manifest_path);
-    match &package.role {
+    match &mut package.role {
         Role::Battery(battery) => {
             let policy = contained.resolve(&battery.policy, "battery.policy", EntryKind::File)?;
             for helper in &battery.helpers {
                 contained.resolve(helper, "battery.helpers", EntryKind::File)?;
             }
-            check_policy(&policy, &package.name, battery)?;
+            battery.audiences = check_policy(&policy, &package.name, battery)?;
         }
         Role::Plugin(plugin) => {
             contained.resolve(plugin.default_policy(), "plugin.default_policy", EntryKind::File)?;
@@ -193,9 +186,10 @@ const DECLARATION_ARRAYS: [&str; 4] = ["tool", "annotator", "authority", "saniti
 
 /// A battery is a fragment a deployment includes, not a deployment: it neither
 /// includes further files nor sets the root-only externals, it runs only its own
-/// declared helpers, it names only contracts in the namespaces it declares, and
-/// it binds exactly the audience sources it declares.
-fn check_policy(policy: &Path, name: &PackageName, battery: &Battery) -> Result<(), PackageError> {
+/// declared helpers, and it names only contracts in the namespaces it declares.
+/// Returns the audience source providers it binds, which a marketplace gives one
+/// owner each.
+fn check_policy(policy: &Path, name: &PackageName, battery: &Battery) -> Result<Vec<String>, PackageError> {
     let namespaces = &battery.namespaces;
     let helpers = &battery.helpers;
     let text = std::fs::read_to_string(policy).map_err(|source| PackageError::PolicyRead {
@@ -261,22 +255,12 @@ fn check_policy(policy: &Path, name: &PackageName, battery: &Battery) -> Result<
     if let Some(externals) = document.get("externals") {
         check_externals(policy, externals, name, helpers)?;
     }
-    // A marketplace gives each audience provider one owner by the manifest
-    // alone, so the manifest lists exactly the providers the policy binds.
-    let bound: BTreeSet<&str> = document
+    let audiences: Vec<String> = document
         .get("externals")
         .and_then(|externals| externals.get("audience"))
         .and_then(Value::as_table)
-        .map(|bindings| bindings.keys().map(String::as_str).collect())
+        .map(|bindings| bindings.keys().cloned().collect())
         .unwrap_or_default();
-    let declared: BTreeSet<&str> = battery.audiences.iter().map(String::as_str).collect();
-    if bound != declared {
-        return Err(PackageError::PolicyAudienceMismatch {
-            policy: policy.to_path_buf(),
-            bound: bound.into_iter().collect::<Vec<_>>().join(", "),
-            declared: declared.into_iter().collect::<Vec<_>>().join(", "),
-        });
-    }
 
     // A contract may carry an argument filter — `mcp/ns/send(channel:C1)` — so
     // the check is on the family and namespace it opens with, not on the whole
@@ -299,7 +283,7 @@ fn check_policy(policy: &Path, name: &PackageName, battery: &Battery) -> Result<
             });
         }
     }
-    Ok(())
+    Ok(audiences)
 }
 
 fn check_externals(
@@ -502,8 +486,7 @@ mod tests {
     use crate::package::Plugin;
 
     const BATTERY_MANIFEST: &str = "schema = 1\nname = \"github\"\ndescription = \"GitHub MCP server\"\n\n\
-         [battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n\
-         audiences = [\"github\"]\n";
+         [battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n";
 
     const BATTERY_POLICY: &str = "[policy]\nversion = 2\n\n\
          [[policy.tool]]\nname = \"mcp/github/get_me\"\ndelta = {}\n\n\
@@ -583,6 +566,8 @@ mod tests {
 
         assert_eq!(package.name.as_str(), "github");
         assert_eq!(package.battery().unwrap().hosts, vec![Host::ClaudeCode]);
+        // The providers the policy binds are read from it, for the marketplace's ownership check.
+        assert_eq!(package.battery().unwrap().audiences, vec!["github"]);
     }
 
     #[test]
@@ -739,31 +724,6 @@ mod tests {
                     Err(PackageError::PolicyForeignCredential { .. })
                 ),
                 "accepted token_env {var:?}"
-            );
-        }
-    }
-
-    /// The manifest lists exactly the audience sources the policy binds: a
-    /// marketplace assigns each provider one owner by reading manifests alone.
-    #[test]
-    fn a_battery_binds_exactly_the_audience_sources_it_declares() {
-        let bound_but_undeclared = battery(BATTERY_POLICY);
-        fs::write(
-            bound_but_undeclared.path().join("appa-package.toml"),
-            BATTERY_MANIFEST.replace("audiences = [\"github\"]\n", ""),
-        )
-        .unwrap();
-        let declared_but_unbound = battery(&BATTERY_POLICY[..BATTERY_POLICY.find("[externals").unwrap()]);
-        for (directory, case) in [
-            (bound_but_undeclared, "bound but undeclared"),
-            (declared_but_unbound, "declared but unbound"),
-        ] {
-            assert!(
-                matches!(
-                    validate_package(directory.path()),
-                    Err(PackageError::PolicyAudienceMismatch { .. })
-                ),
-                "accepted a battery {case}"
             );
         }
     }

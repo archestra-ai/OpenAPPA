@@ -315,17 +315,6 @@ builtin = "hitl"
 #   [policy.audience]
 #   self = ["github:viewer"]
 #   internal = ["github:org/<your-org>/members"]
-#
-# Members without a published GitHub email are readers such as `github:<login>`.
-# To map them to addresses, route the battery's lookups to a `readers` table:
-# a root entry for the provider carrying only `lookup` attaches to the
-# battery's binding.
-#
-#   [externals.audience.github]
-#   lookup = "people"
-#
-#   [externals.audience.people]
-#   readers = { "github:<login>" = "<login>@<your-domain>" }
 
 # Whether the agent may report on its own through the `yell` tool. Off leaves it
 # unadvertised and unroutable; a person can always report with `appa yell`.

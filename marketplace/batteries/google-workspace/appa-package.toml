@@ -7,4 +7,3 @@ policy = "appa.toml"
 hosts = ["claude-code"]
 namespaces = ["google-workspace"]
 helpers = ["audience-source.py"]
-audiences = ["google-workspace"]
