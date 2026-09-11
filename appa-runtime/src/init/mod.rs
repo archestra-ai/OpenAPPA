@@ -1,48 +1,41 @@
 //! Native deployment activation. The marketplace installs machine state through
 //! this module; harness skills only author policy.
+//!
+//! The only host-side code of a protected session is the deployed binary: the
+//! user's Claude Code settings name it in every hook entry and in the status
+//! line, the runtime's MCP server is registered through the `claude` CLI, and
+//! the appa-guide skill is written from bytes compiled into the binary.
 
 use crate::config::ConfigError;
-use crate::plugin_bundle::{self, Endpoint, PluginBundleError, Population, VerifiedArchive};
+use crate::installation::archive::{self, ArchiveError, VerifiedArchive};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-// Only the PowerShell helpers below spawn a process; nothing else in this module does.
-#[cfg(windows)]
-use std::process::Command;
+use std::process::{Command, Stdio};
 use thiserror::Error;
 
-mod claude;
 mod config;
-mod endpoint;
-mod paths;
+pub(crate) mod endpoint;
+mod mcp;
+pub(crate) mod paths;
 mod receipt;
 mod removal;
-#[cfg(test)]
-mod reuse_tests;
+pub(crate) mod settings;
+mod skill;
 
 pub use self::paths::installed_config_path;
 pub use self::removal::claude_code_remove;
 
-use self::claude::{
-    cleanup_plugin_recovery, install_statusline, installed_plugin_installations, installed_plugin_root,
-    prepare_plugin_recovery, registered_deployment_matches, replace_plugin, run_claude, start_runtime,
-    undo_plugin_switch,
-};
 use self::config::{ComposedPolicy, discard_file, verify_config};
 use self::endpoint::{
-    RuntimeOutcome, clear_stale_endpoint, endpoint_health, reconcile_policy, stop_owned_appa_runtime,
+    Endpoint, RuntimeOutcome, clear_stale_endpoint, endpoint_health, reconcile_policy, stop_owned_appa_runtime,
     verify_runtime_deployment,
 };
 #[cfg(windows)]
 use self::paths::windows_identity;
-use self::paths::{DeploymentPaths, appa_filename, deployment_paths, friendly_path, same_file};
+use self::paths::{DeploymentPaths, appa_filename, deployment_paths, same_file};
 use self::receipt::{Receipt, Style};
-
-const MARKETPLACE: &str = "appa";
-
-const PLUGIN: &str = "appa-runtime@appa";
-
-const RECOVERY_PREFIX: &str = ".appa-init-recovery-";
+use self::settings::HookTarget;
 
 #[derive(Debug, Error)]
 pub enum InitError {
@@ -52,6 +45,8 @@ pub enum InitError {
     MissingHome,
     #[error("cannot make the directory override {path} absolute: {source}")]
     AbsolutePath { path: PathBuf, source: std::io::Error },
+    #[error("{path} must be valid UTF-8 to be named in a Claude Code hook entry")]
+    UnportablePath { path: PathBuf },
     #[error("the `claude` command is unavailable: {0}")]
     ClaudeUnavailable(std::io::Error),
     #[error("`claude {command}` failed: {message}")]
@@ -62,21 +57,18 @@ pub enum InitError {
     WriteFile { path: PathBuf, source: std::io::Error },
     #[error("the deployment config {path} does not load: {source}")]
     UnloadableConfig { path: PathBuf, source: Box<ConfigError> },
-    #[error("Claude's plugin registry at {path} is invalid: {message}")]
-    PluginRegistry { path: PathBuf, message: String },
     #[error("cannot change APPA integration state at {path}: {message}")]
     NativeState { path: PathBuf, message: String },
-    #[error("Claude installed {PLUGIN}, but its installed plugin directory is unavailable")]
-    MissingPlugin,
-    #[error("Claude reports {count} installed copies of {PLUGIN}; initialization requires exactly one user copy")]
-    PluginMultiplicity { count: usize },
     #[error(
-        "Claude reports {PLUGIN} in {scope} scope for missing project {path}; remove that stale plugin entry first"
+        "Claude Code has an MCP server named `{}` at {url} that no APPA install wrote; remove or rename it, then rerun the install",
+        mcp::SERVER
     )]
-    MissingPluginProject { scope: String, path: PathBuf },
-    #[error("the installed Claude plugin is missing {0}")]
-    MissingPluginFile(PathBuf),
-    #[error("the installed Claude plugin could not start `appa runtime`: {0}")]
+    McpConflict { url: String },
+    #[error("{path} is not the appa-guide skill an APPA install writes; move it aside, then rerun the install")]
+    SkillConflict { path: PathBuf },
+    #[error("{value} is not a usable runtime endpoint: {reason}")]
+    MalformedEndpoint { value: String, reason: String },
+    #[error("the deployed binary could not bring `appa runtime` up: {0}")]
     Starter(String),
     #[error("the runtime endpoint {endpoint} is taken: {message}")]
     RuntimeIdentity { endpoint: String, message: String },
@@ -93,23 +85,24 @@ pub enum InitError {
         message: String,
     },
     #[error(transparent)]
-    PluginBundle(#[from] PluginBundleError),
+    Archive(#[from] ArchiveError),
     #[error("{operation}; restoring the previous installation also failed: {recovery}")]
-    PluginRecovery {
+    Recovery {
         operation: Box<InitError>,
         recovery: Box<InitError>,
     },
 }
 
-/// Activate a validated deployment: this binary, its matching native plugin
-/// archive, and the config the marketplace wrote, as one bundle.
+/// Activate a validated deployment: this binary, the config the marketplace
+/// wrote, and the Claude Code profile that binds a protected session to them.
 ///
 /// `appa plugin install claude-code` runs this after the generation is
 /// retained. Nothing here asks a question or fetches a package. The sequence is
-/// ordered so that nothing outside a temporary file changes until the archive
-/// has been verified, and so that the endpoint is settled before Claude is
-/// switched over. Directories and the deployment are written before that
-/// settling; both are additive and neither is what Claude reads.
+/// ordered so that the profile is refused before anything is written when it
+/// holds foreign state under APPA's names, and so that the endpoint is settled
+/// before the profile is switched over. Directories and the deployed binary's
+/// parent are written before that settling; both are additive and neither is
+/// what Claude reads.
 pub fn activate_claude_code(
     config: &Path,
     archive: &Path,
@@ -127,11 +120,10 @@ pub fn activate_claude_code(
         source: Box::new(source),
     })?;
     let source = VerifiedArchive::of(archive)?;
-    install_claude(source.population(), &source.label(), endpoint, config, previous_binary)
+    install_claude(&source.label(), endpoint, config, previous_binary)
 }
 
 fn install_claude(
-    population: Population<'_>,
     origin: &str,
     endpoint: Endpoint,
     config: PathBuf,
@@ -140,10 +132,8 @@ fn install_claude(
     let appa = env::current_exe().map_err(InitError::CurrentExecutable)?;
     let paths = deployment_paths()?;
     let _profile_lock = lock_claude_profile(&paths.claude_dir)?;
-    let installations = installed_plugin_installations(&paths.claude_dir)?;
-    let marketplaces = run_claude(["plugin", "marketplace", "list"], None)?;
 
-    // 2. Directories, and the config that survives every upgrade.
+    // 1. Directories, and the config that survives every upgrade.
     for directory in [&paths.install_dir, &paths.config_dir, &paths.data_dir] {
         fs::create_dir_all(directory).map_err(|source| InitError::WriteFile {
             path: directory.clone(),
@@ -159,20 +149,15 @@ fn install_claude(
     })?;
     let composed_policy = verify_config(&config)?;
 
-    // 3. Materialize the deployment, or validate and reuse an existing one.
-    progress("preparing the plugin bundle");
-    let deployment = plugin_bundle::materialize(
-        population,
-        &paths.data_dir.join("deployments"),
-        &deployed_appa,
-        &config,
-        &paths.data_dir,
-        &endpoint,
-    )?;
-    let reuse_registration = registered_deployment_matches(&paths.claude_dir, &deployment.root)?;
+    // 2. What the profile holds under APPA's names. A server or a skill that
+    //    no install wrote is refused here, with the profile untouched.
+    progress("reading the Claude Code profile");
+    let registered = mcp::current()?;
+    skill::verify(&paths.claude_dir)?;
+    settings::verify(&paths)?;
 
-    // 4. Settle the endpoint before Claude is switched over. A runtime that will
-    //    not stop aborts here, rather than leaving a new plugin registered
+    // 3. Settle the endpoint before the profile is switched over. A runtime
+    //    that will not stop aborts here, rather than leaving hooks registered
     //    against an old runtime that a rerun cannot dislodge.
     progress("checking the runtime endpoint");
     //    A runtime whose binary an install replaced on disk still owns the
@@ -191,67 +176,73 @@ fn install_claude(
         }
     }
 
-    // Reusing a verified registration leaves its hooks in place. Only a
-    // registration replacement needs a native snapshot and launcher disarming.
-    let launcher_dir = &paths.install_dir;
-    let recovery = if reuse_registration {
-        None
-    } else {
-        prepare_plugin_recovery(&installations, &paths.data_dir)?
-    };
-    if recovery.is_some() {
-        install_disabled_clappa(launcher_dir)?;
+    // 4. The launcher an earlier install armed is disarmed while the profile is
+    //    between two states. The install that completes re-arms it; so does a
+    //    rollback that put everything back, and nothing else does. A launcher
+    //    under that name that no install wrote is the user's, and refused.
+    let launcher = paths.install_dir.join(CLAPPA.0);
+    let launcher_before = file_before(&launcher)?;
+    if let Some(bytes) = launcher_before.as_deref() {
+        if !launcher_is_owned(bytes) {
+            return Err(InitError::NativeState {
+                path: launcher,
+                message: "launcher was edited; resolve it before installing the plugin".to_owned(),
+            });
+        }
+        install_disabled_clappa(&paths.install_dir)?;
     }
 
-    // 6. The Claude switch, the binary, and the runtime this plugin is being
-    //    bound to: one transaction. Verification is inside it, because a plugin
-    //    left registered against a runtime that failed verification is exactly
-    //    the skew this bundle exists to prevent. Every step records what it
-    //    changed, and a failure unwinds those changes in reverse before the
-    //    plugin switch itself is undone.
-    progress(if reuse_registration {
-        "verified the registered Claude Code plugin"
-    } else {
-        "updating the Claude Code plugin"
-    });
-    let mut compensation = Compensation::default();
-    let registration = if reuse_registration {
-        Ok(())
-    } else {
-        replace_plugin(&deployment.root, &marketplaces, &installations)
+    // 5. The binary, the profile, and the runtime the profile is being bound
+    //    to: one transaction. Verification is inside it, because hooks left
+    //    registered against a runtime that failed verification is exactly the
+    //    skew this sequence exists to prevent. Every step records what it
+    //    changed, and a failure unwinds those changes in reverse.
+    progress("updating the Claude Code profile");
+    let target = HookTarget {
+        binary: &deployed_appa,
+        url: endpoint.url(),
+        config: &config,
+        data_dir: &paths.data_dir,
     };
-    let switch =
-        registration.and_then(|()| switch_over(&appa, &config, &composed_policy, &endpoint, &paths, &mut compensation));
+    let mut compensation = Compensation::default();
+    let switch = switch_over(
+        &appa,
+        &target,
+        &composed_policy,
+        &endpoint,
+        &paths,
+        &registered,
+        &mut compensation,
+    );
     let runtime_outcome = match switch {
         Ok(outcome) => {
             compensation.commit();
             outcome
         }
         Err(operation) => {
-            // Both recoveries are attempted; the first failure is the one reported.
-            let unwound = compensation.unwind();
-            let restored = if reuse_registration {
-                Ok(())
-            } else {
-                undo_plugin_switch(recovery.as_ref(), launcher_dir)
-            };
-            if let Err(recovery_error) = unwound.and(restored) {
-                return Err(InitError::PluginRecovery {
+            let restored = compensation.unwind().and_then(|()| match &launcher_before {
+                Some(bytes) => fs::write(&launcher, bytes).map_err(|source| InitError::WriteFile {
+                    path: launcher.clone(),
+                    source,
+                }),
+                None => Ok(()),
+            });
+            if let Err(recovery) = restored {
+                return Err(InitError::Recovery {
                     operation: Box::new(operation),
-                    recovery: Box::new(recovery_error),
+                    recovery: Box::new(recovery),
                 });
             }
             return Err(operation);
         }
     };
 
-    // Arm new/replaced installations only after verification. A reused
-    // registration keeps its existing launcher and enforcing hooks throughout.
-    install_clappa(launcher_dir)?;
-    cleanup_plugin_recovery(recovery.as_ref());
+    // Arm the launcher only after verification.
+    install_clappa(&paths.install_dir)?;
 
     Ok(Receipt {
-        adapter: format!("{origin} -> {}", friendly_path(&deployment.root)),
+        adapter: origin.to_owned(),
+        hooks: settings::path(&paths),
         config,
         runtime_outcome,
     }
@@ -297,43 +288,83 @@ fn lock_claude_profile(directory: &Path) -> Result<fs::File, InitError> {
     Ok(file)
 }
 
-/// The steps after the Claude switch, each recording what it changed.
+/// The steps of the switch, each recording what it changed.
 ///
-/// The runtime this plugin is bound to must also be serving this deployment's
+/// The runtime the profile is bound to must also be serving this deployment's
 /// policy, so the reconcile is inside the transaction: a refusal there means the
-/// endpoint belongs to someone else, and a plugin left registered against it is
-/// the same skew as a plugin left registered against a runtime that failed
+/// endpoint belongs to someone else, and hooks left registered against it are
+/// the same skew as hooks left registered against a runtime that failed
 /// verification.
 fn switch_over(
     appa: &Path,
-    config: &Path,
+    target: &HookTarget<'_>,
     composed_policy: &ComposedPolicy,
     endpoint: &Endpoint,
     paths: &DeploymentPaths,
+    registered: &mcp::Registered,
     compensation: &mut Compensation,
 ) -> Result<RuntimeOutcome, InitError> {
-    let deployed_appa = paths.data_dir.join("bin").join(appa_filename());
-    install_runtime(appa, &deployed_appa, compensation)?;
-    let plugin_root = installed_plugin_root(&paths.claude_dir)?;
-    install_statusline(&plugin_root, paths, compensation)?;
+    install_runtime(appa, target.binary, compensation)?;
+    settings::install_hooks(paths, target, compensation)?;
+    mcp::register(registered, target.url, compensation)?;
+    skill::install(&paths.claude_dir, compensation)?;
+    settings::install_statusline(paths, target, compensation)?;
     progress("starting the runtime");
-    // A runtime answering `ok` here was running before this init and stays the
-    // user's; anything the starter brings up after silence is init's to stop.
+    // A runtime answering `ok` here was running before this install and stays
+    // the user's; anything the start brings up after silence is ours to stop.
     let running_before = endpoint_health(endpoint)?.is_some_and(|answer| answer == "ok");
-    start_runtime(&plugin_root)?;
-    let pid = verify_runtime_deployment(&deployed_appa, config, endpoint)?;
+    start_runtime(target)?;
+    let pid = verify_runtime_deployment(target.binary, target.config, endpoint)?;
     if !running_before {
         compensation.record(Undo::Runtime {
             pid,
             endpoint: endpoint.clone(),
         });
     }
-    reconcile_policy(endpoint, config, composed_policy)
+    reconcile_policy(endpoint, target.config, composed_policy)
 }
 
-/// What the switch has changed on disk and in process state, so a failure can
-/// put each change back in reverse order. The plugin registration itself is
-/// undone separately by [`undo_plugin_switch`].
+/// Bring the deployed runtime up through the deployed binary itself, the start
+/// every protected SessionStart performs; a healthy runtime is left as it is.
+fn start_runtime(target: &HookTarget<'_>) -> Result<(), InitError> {
+    let mut command = match archive::debug_override("APPA_RUNTIME_STARTER") {
+        Some(starter) => {
+            let mut command = Command::new("sh");
+            command.arg(starter);
+            command
+        }
+        None => {
+            let mut command = Command::new(target.binary);
+            command
+                .args(["runtime", "ensure", "--deployment-url", target.url])
+                .arg("--config")
+                .arg(target.config)
+                .arg("--data-dir")
+                .arg(target.data_dir);
+            command
+        }
+    };
+    // APPA_RUNTIME_URL is removed rather than set: to the start it means "the
+    // user runs their own runtime here", and setting it would suppress managed
+    // replacement permanently.
+    let output = command
+        .env_remove("APPA_RUNTIME_URL")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| InitError::Starter(error.to_string()))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    Err(InitError::Starter(if stderr.is_empty() {
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    } else {
+        stderr
+    }))
+}
+
+/// What the switch has changed on disk, in Claude's profile and in process
+/// state, so a failure can put each change back in reverse order.
 #[derive(Default)]
 struct Compensation {
     done: Vec<Undo>,
@@ -343,10 +374,13 @@ enum Undo {
     /// The deployed binary's bytes before install_runtime replaced them, copied
     /// aside to `previous`; `None` when no binary was deployed.
     Binary { target: PathBuf, previous: Option<PathBuf> },
-    /// A file the statusline install rewrote, with its bytes from before; `None`
-    /// when it did not exist.
+    /// A file the switch rewrote, with its bytes from before; `None` when it
+    /// did not exist.
     File { path: PathBuf, before: Option<Vec<u8>> },
-    /// A runtime this init started and verified as this deployment's.
+    /// The MCP registration the switch replaced: an earlier install's template
+    /// URL, or `None` when there was none.
+    Mcp { previous: Option<String> },
+    /// A runtime this install started and verified as this deployment's.
     Runtime { pid: i32, endpoint: Endpoint },
 }
 
@@ -403,16 +437,11 @@ impl Undo {
                     None => remove_if_present(&target).map_err(install),
                 }
             }
-            Undo::File { path, before } => {
-                let write = |source| InitError::WriteFile {
-                    path: path.clone(),
-                    source,
-                };
-                match before {
-                    Some(bytes) => fs::write(&path, bytes).map_err(write),
-                    None => remove_if_present(&path).map_err(write),
-                }
-            }
+            Undo::File { path, before } => match before {
+                Some(bytes) => write_state(&path, &bytes),
+                None => remove_if_present(&path).map_err(|source| InitError::WriteFile { path, source }),
+            },
+            Undo::Mcp { previous } => mcp::restore(previous),
             Undo::Runtime { pid, endpoint } => stop_owned_appa_runtime(pid, &endpoint),
         }
     }
@@ -427,15 +456,26 @@ fn remove_if_present(path: &Path) -> std::io::Result<()> {
 }
 
 /// The bytes at `path` before init rewrites it, or `None` when it is absent.
+/// Anything but a regular file or nothing is refused.
 fn file_before(path: &Path) -> Result<Option<Vec<u8>>, InitError> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(InitError::WriteFile {
-            path: path.to_path_buf(),
+    crate::installation::optional_bytes(path).map_err(|error| InitError::NativeState {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })
+}
+
+/// Replace `path` atomically, creating its directory.
+fn write_state(path: &Path, bytes: &[u8]) -> Result<(), InitError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| InitError::WriteFile {
+            path: parent.to_path_buf(),
             source,
-        }),
+        })?;
     }
+    crate::installation::atomic_write(path, bytes).map_err(|error| InitError::NativeState {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })
 }
 
 fn progress(message: &str) {
@@ -677,18 +717,23 @@ fn install_clappa(install_dir: &Path) -> Result<PathBuf, InitError> {
     Ok(path)
 }
 
+#[cfg(windows)]
+const DISARMED_CLAPPA: &str = "@echo off\r\necho appa plugin install did not complete; rerun appa plugin install claude-code 1>&2\r\nexit /b 1\r\n";
+#[cfg(not(windows))]
+const DISARMED_CLAPPA: &str =
+    "#!/bin/sh\nprintf 'appa plugin install did not complete; rerun appa plugin install claude-code\\n' >&2\nexit 1\n";
+
+/// The launcher is an install's when it holds what an install or a removal
+/// writes: armed, or one of the two stubs either leaves mid-way.
+fn launcher_is_owned(bytes: &[u8]) -> bool {
+    [CLAPPA.1, DISARMED_CLAPPA, removal::REMOVING]
+        .iter()
+        .any(|text| bytes == text.as_bytes())
+}
+
 fn install_disabled_clappa(install_dir: &Path) -> Result<(), InitError> {
-    #[cfg(windows)]
-    let (path, contents) = (
-        install_dir.join("clappa.cmd"),
-        "@echo off\r\necho appa plugin install did not complete; rerun appa plugin install claude-code 1>&2\r\nexit /b 1\r\n",
-    );
-    #[cfg(not(windows))]
-    let (path, contents) = (
-        install_dir.join("clappa"),
-        "#!/bin/sh\nprintf 'appa plugin install did not complete; rerun appa plugin install claude-code\\n' >&2\nexit 1\n",
-    );
-    fs::write(&path, contents).map_err(|source| InitError::WriteFile {
+    let path = install_dir.join(CLAPPA.0);
+    fs::write(&path, DISARMED_CLAPPA).map_err(|source| InitError::WriteFile {
         path: path.clone(),
         source,
     })?;

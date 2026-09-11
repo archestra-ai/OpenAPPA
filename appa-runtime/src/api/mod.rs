@@ -125,9 +125,7 @@ pub(crate) fn call_key(call: &ProposedCall) -> Option<PermitKey> {
 /// server as.
 fn bare_runtime_tool(tool: &str) -> &str {
     tool.strip_prefix("mcp__appa__")
-        .or_else(|| tool.strip_prefix("mcp__plugin_appa-runtime_appa__"))
         .or_else(|| tool.strip_prefix("mcp/appa/"))
-        .or_else(|| tool.strip_prefix("mcp/plugin_appa-runtime_appa/"))
         .or_else(|| tool.strip_prefix("mcp/appa-guide/"))
         .unwrap_or(tool)
 }
@@ -2209,7 +2207,7 @@ mod deployment_tests {
             (
                 claude_code,
                 appa_runtime_api::CONTROL_TOOL,
-                "mcp__plugin_appa-runtime_appa__execute_remedy_plan",
+                "mcp__appa__execute_remedy_plan",
             ),
             (claude_code, "agent/kagent/log-analyst", "agent/kagent/log-analyst"),
             (claude_code, "*", "*"),

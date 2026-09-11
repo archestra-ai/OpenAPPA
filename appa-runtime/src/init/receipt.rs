@@ -4,7 +4,6 @@ use std::env;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use super::PLUGIN;
 use super::endpoint::RuntimeOutcome;
 use super::paths::friendly_path;
 
@@ -33,8 +32,10 @@ impl Style {
 /// leave it out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Receipt {
-    /// Where the plugin came from, as the user would name it.
+    /// Where the deployment came from, as the user would name it.
     pub(super) adapter: String,
+    /// The settings file the session's hook entries were written to.
+    pub(super) hooks: PathBuf,
     pub(super) config: PathBuf,
     pub(super) runtime_outcome: RuntimeOutcome,
 }
@@ -55,10 +56,11 @@ impl Receipt {
             }
         };
         let mut receipt = format!(
-            "{title}\n\n  {} {}\n  {} {PLUGIN}\n  {} {}\n  {} {}\n  {} clappa\n",
+            "{title}\n\n  {} {}\n  {} {}\n  {} {}\n  {} {}\n  {} clappa\n",
             label("Adapter"),
             self.adapter,
-            label("Plugin"),
+            label("Hooks"),
+            friendly_path(&self.hooks),
             label("Runtime"),
             self.runtime_outcome.as_str(),
             label("Config"),
@@ -84,6 +86,7 @@ mod tests {
     fn only_a_colored_style_puts_escapes_in_a_receipt() {
         let receipt = Receipt {
             adapter: "current checkout".to_owned(),
+            hooks: PathBuf::from("/home/me/.claude/settings.json"),
             config: PathBuf::from("/etc/appa/appa.toml"),
             runtime_outcome: RuntimeOutcome::Healthy,
         };
@@ -100,6 +103,7 @@ mod tests {
         for runtime_outcome in [RuntimeOutcome::Healthy, RuntimeOutcome::Reloaded] {
             let receipt = Receipt {
                 adapter: "current checkout".to_owned(),
+                hooks: PathBuf::from("/home/me/.claude/settings.json"),
                 config: PathBuf::from("/etc/appa/appa.toml"),
                 runtime_outcome,
             };

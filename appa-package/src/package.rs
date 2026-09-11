@@ -87,8 +87,6 @@ pub enum Plugin {
         default_policy: RelativePath,
         /// Batteries a first install of this plugin includes with it.
         batteries: Vec<PackageName>,
-        plugin_dir: RelativePath,
-        plugin: PackageName,
     },
     Kagent {
         default_policy: RelativePath,
@@ -281,8 +279,6 @@ struct RawPlugin {
     default_policy: String,
     #[serde(default)]
     batteries: Vec<String>,
-    plugin_dir: Option<String>,
-    plugin: Option<String>,
     images: Option<BTreeMap<String, String>>,
 }
 
@@ -331,22 +327,12 @@ impl RawPlugin {
         match host {
             Host::ClaudeCode => {
                 absent(self.images.is_some(), "images")?;
-                let plugin_dir = self.plugin_dir.ok_or_else(|| missing("plugin_dir"))?;
-                let plugin = self.plugin.ok_or_else(|| missing("plugin"))?;
                 Ok(Plugin::ClaudeCode {
                     default_policy,
                     batteries,
-                    plugin_dir: relative(&plugin_dir, "plugin.plugin_dir", path)?,
-                    plugin: PackageName::parse(&plugin).map_err(|source| ManifestError::Name {
-                        path: path.to_path_buf(),
-                        field: "plugin.plugin".to_owned(),
-                        source,
-                    })?,
                 })
             }
             Host::Kagent => {
-                absent(self.plugin_dir.is_some(), "plugin_dir")?;
-                absent(self.plugin.is_some(), "plugin")?;
                 let declared = self.images.ok_or_else(|| missing("images"))?;
                 let mut images = BTreeMap::new();
                 for (name, reference) in declared {
@@ -387,8 +373,7 @@ mod tests {
          [battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n";
 
     const CLAUDE_CODE: &str = "schema = 1\nname = \"claude-code\"\ndescription = \"Claude Code plugin\"\n\n\
-         [plugin]\nhost = \"claude-code\"\nprotocol = 1\ndefault_policy = \"default.appa.toml\"\n\
-         plugin_dir = \"plugin\"\nplugin = \"appa-runtime\"\n";
+         [plugin]\nhost = \"claude-code\"\nprotocol = 1\ndefault_policy = \"default.appa.toml\"\n";
 
     const KAGENT: &str = "schema = 1\nname = \"kagent\"\ndescription = \"kagent plugin\"\n\n\
          [plugin]\nhost = \"kagent\"\nprotocol = 1\ndefault_policy = \"default.appa.toml\"\n\
@@ -462,8 +447,6 @@ mod tests {
             &Plugin::ClaudeCode {
                 default_policy: RelativePath::parse("default.appa.toml").unwrap(),
                 batteries: Vec::new(),
-                plugin_dir: RelativePath::parse("plugin").unwrap(),
-                plugin: PackageName::parse("appa-runtime").unwrap(),
             }
         );
     }
@@ -526,16 +509,6 @@ mod tests {
 
     #[test]
     fn a_field_of_the_other_host_is_refused() {
-        let kagent_with_plugin_dir = format!("{KAGENT}plugin_dir = \"plugin\"\n");
-        assert!(matches!(
-            manifest(&kagent_with_plugin_dir),
-            Err(ManifestError::FieldNotForHost {
-                host: Host::Kagent,
-                field: "plugin_dir",
-                ..
-            })
-        ));
-
         let claude_code_with_images = format!("{CLAUDE_CODE}images = {{ adk = \"ghcr.io/x/adk@sha256:aa\" }}\n");
         assert!(matches!(
             manifest(&claude_code_with_images),
@@ -549,13 +522,6 @@ mod tests {
 
     #[test]
     fn a_host_field_that_is_absent_is_refused() {
-        assert!(matches!(
-            manifest(&CLAUDE_CODE.replace("plugin_dir = \"plugin\"\n", "")),
-            Err(ManifestError::MissingField {
-                field: "plugin_dir",
-                ..
-            })
-        ));
         assert!(matches!(
             manifest(
                 &KAGENT
@@ -579,7 +545,7 @@ mod tests {
             Err(ManifestError::Path { .. })
         ));
         assert!(matches!(
-            manifest(&CLAUDE_CODE.replace("\"plugin\"", "\"../plugin\"")),
+            manifest(&CLAUDE_CODE.replace("\"default.appa.toml\"", "\"../default.appa.toml\"")),
             Err(ManifestError::Path { .. })
         ));
     }

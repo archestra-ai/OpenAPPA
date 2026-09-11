@@ -60,7 +60,7 @@ Full methodology, ablations, and paper: [Benchmarks](https://openappa.com/evalua
 
 ## Try it: Claude Code
 
-The Claude Code plugin is a playground for the model, not the product. It is the
+The Claude Code integration is a playground for the model, not the product. It is the
 fastest way to watch a policy make a decision on real work:
 
 ```sh
@@ -72,16 +72,15 @@ The installer verifies the checksum of the release binary for Linux or macOS
 and places it in `~/.local/bin`. Windows users unpack the zip from the
 [releases page](https://github.com/archestra-ai/OpenAPPA/releases). From a
 checkout, `cargo install --path appa-runtime --force` builds the binary
-instead, and the same install command installs that build's own plugin tree.
+instead, and the same install command installs that build's own version.
 
-A release binary resolves the plugin from its baked release tag and digest. A
-clean checkout build resolves the plugin from its baked Git commit and verifies
-the canonical plugin-tree digest; a dirty plugin build uses that exact checkout
-only while its bytes still match the build.
+A release binary installs the version published for its tag; a checkout build
+installs the commit it was built from.
 
-The native `appa` command installs the plugin, the runtime deployment,
-statusline, and `clappa` launcher. It replaces an existing APPA plugin instead
-of stacking a second copy and preserves an existing policy or custom
+The native `appa` command deploys the runtime and registers it in your Claude
+Code user settings as the session's hooks and status line, together with the
+runtime's MCP server, the `appa-guide` skill, and the `clappa` launcher. Rerunning
+it rewrites only what it wrote and preserves an existing policy or custom
 statusline. Fresh policies use a fail-closed Claude annotator as a compatibility
 net for MCP tools they do not yet name. Start `clappa`, then run
 `/appa-guide init` to replace that fallback with exact connector contracts.

@@ -232,13 +232,6 @@ delta = { trust = "suspicious" }
 # that leaves it on and wants a person in the loop can add
 # `requires = { attention = ["hitl"] }` here instead.
 [[policy.tool]]
-name = "mcp/plugin_appa-runtime_appa/yell"
-requires = { audience = { contains = ["public"] } }
-delta = {}
-
-# The same tool where the runtime's MCP server is registered directly rather
-# than through the plugin. One deployment reaches only one of these names.
-[[policy.tool]]
 name = "mcp/appa/yell"
 requires = { audience = { contains = ["public"] } }
 delta = {}

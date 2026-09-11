@@ -130,7 +130,7 @@ impl Acquired {
         verify_artifact(snapshot.path(), digest)?;
         let unpacked = stage.path().join("unpacked");
         fs::create_dir(&unpacked).map_err(|error| io("stage bundle contents", &unpacked, error))?;
-        crate::plugin_bundle::extract_bundle_archive(snapshot.path(), &unpacked)
+        super::archive::extract_bundle_archive(snapshot.path(), &unpacked)
             .map_err(|error| InstallError::Invalid(error.to_string()))?;
         let generation = Generation::parse(&super::required_bytes(&unpacked.join(DESCRIPTOR_FILE))?)
             .map_err(|error| InstallError::Invalid(error.to_string()))?;
@@ -245,10 +245,8 @@ impl Acquired {
             tempfile::tempdir().map_err(|error| io("stage acquisition", Path::new("temporary directory"), error))?;
         let repository = source_at_commit(&commit, stage.path())?;
         let staged = stage.path().join("plugin");
-        crate::plugin_bundle::stage_repository(&repository, &staged)
+        crate::plugin_layout::stage_repository(&repository, &staged)
             .map_err(|error| InstallError::Invalid(format!("cannot stage the plugin tree: {error}")))?;
-        crate::plugin_bundle::validate_source_tree(&staged)
-            .map_err(|error| InstallError::Invalid(error.to_string()))?;
         let actual = appa_package::canonical_tree_digest(&staged)
             .map_err(|error| InstallError::Invalid(error.to_string()))?
             .iter()
@@ -310,9 +308,9 @@ impl Acquired {
         } else {
             None
         };
-        let api = crate::plugin_bundle::debug_override("APPA_MARKETPLACE_API_URL")
+        let api = super::archive::debug_override("APPA_MARKETPLACE_API_URL")
             .unwrap_or_else(|| format!("https://api.github.com/repos/{REPOSITORY}"));
-        let releases = crate::plugin_bundle::release_base_url();
+        let releases = super::archive::release_base_url();
         Self::fetch_from(requested, expected_commit.as_ref(), requirements, &api, &releases)
     }
 
@@ -370,7 +368,7 @@ impl Acquired {
         }
         let marketplace = stage.path().join("marketplace");
         fs::create_dir(&marketplace).map_err(|error| io("stage marketplace", &marketplace, error))?;
-        crate::plugin_bundle::extract_archive(&archives[&marketplace_archive], &marketplace)
+        super::archive::extract_archive(&archives[&marketplace_archive], &marketplace)
             .map_err(|error| InstallError::Invalid(error.to_string()))?;
         verify_packages(&marketplace, &generation)?;
         Ok(Self {
@@ -437,19 +435,18 @@ fn source_at_commit(commit: &Commit, stage: &Path) -> Result<PathBuf, InstallErr
         export_commit(root, &repository)?;
         return Ok(repository);
     }
-    let url = format!("{}/{commit}.tar.gz", crate::plugin_bundle::source_archive_base_url());
+    let url = format!("{}/{commit}.tar.gz", super::archive::source_archive_base_url());
     eprintln!(
         "appa: fetching the source archive for commit {}...",
         &commit.as_str()[..12]
     );
     let archive = stage.join("source.tar.gz");
-    crate::plugin_bundle::download_bounded(&url, &archive, MAX_ARTIFACT_BYTES)
+    super::archive::download_bounded(&url, &archive, MAX_ARTIFACT_BYTES)
         .map_err(|error| InstallError::Invalid(format!("cannot fetch this build's source: {error}")))?;
     let container = stage.join("source");
     fs::create_dir(&container).map_err(|error| io("stage source", &container, error))?;
-    crate::plugin_bundle::extract_archive(&archive, &container)
-        .map_err(|error| InstallError::Invalid(error.to_string()))?;
-    crate::plugin_bundle::single_directory(&container).map_err(|error| InstallError::Invalid(error.to_string()))
+    super::archive::extract_archive(&archive, &container).map_err(|error| InstallError::Invalid(error.to_string()))?;
+    super::archive::single_directory(&container).map_err(|error| InstallError::Invalid(error.to_string()))
 }
 
 fn git_head(root: &Path) -> Option<String> {
@@ -465,19 +462,13 @@ fn git_head(root: &Path) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-/// Committed content only, so a dirty checkout exports exactly its HEAD.
+/// Committed content only, so a dirty checkout exports exactly its HEAD. The
+/// marketplace tree holds every source `plugin_layout` maps.
 fn export_commit(root: &Path, destination: &Path) -> Result<(), InstallError> {
-    let mut command = Command::new("git");
-    command
+    let output = Command::new("git")
         .arg("-C")
         .arg(root)
-        .args(["archive", "--format=tar", "HEAD", "marketplace"]);
-    for (source, _) in crate::plugin_layout::REPOSITORY_MAPPINGS {
-        if !source.starts_with("marketplace/") {
-            command.arg(source);
-        }
-    }
-    let output = command
+        .args(["archive", "--format=tar", "HEAD", "marketplace"])
         .output()
         .map_err(|error| io("export the build's commit", root, error))?;
     if !output.status.success() {
@@ -645,7 +636,7 @@ fn asset_url(base: &str, release: &str, file: &str) -> Result<String, InstallErr
 }
 
 fn fetch(url: &str, path: &Path, limit: u64) -> Result<(), InstallError> {
-    crate::plugin_bundle::download_bounded(url, path, limit).map_err(|error| {
+    super::archive::download_bounded(url, path, limit).map_err(|error| {
         InstallError::Invalid(format!(
             "cannot fetch a published version: {error}; a commit without a release is not installable"
         ))
@@ -744,7 +735,7 @@ mod tests {
         pack_tree(source.path(), &second).unwrap();
         assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
         let unpacked = tempfile::tempdir().unwrap();
-        crate::plugin_bundle::extract_archive(&first, unpacked.path()).unwrap();
+        crate::installation::archive::extract_archive(&first, unpacked.path()).unwrap();
         assert_eq!(fs::read(unpacked.path().join("nested/file")).unwrap(), b"bytes");
     }
 

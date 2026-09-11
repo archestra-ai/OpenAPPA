@@ -47,6 +47,9 @@ fn ensure_default_config(path: &Path) -> io::Result<bool> {
 #[derive(Parser)]
 #[command(name = "appa runtime", version)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<RuntimeCommand>,
+
     #[arg(long, env = "APPA_CONFIG", global = true)]
     config: Option<PathBuf>,
 
@@ -89,6 +92,38 @@ struct Args {
 
     #[arg(short, action = clap::ArgAction::Count)]
     verbose: u8,
+}
+
+#[derive(clap::Subcommand)]
+enum RuntimeCommand {
+    /// Bring the deployed runtime up when nothing healthy answers its endpoint.
+    #[command(hide = true)]
+    Ensure {
+        #[command(flatten)]
+        target: crate::runtime_url::RuntimeUrl,
+
+        /// Where the started runtime keeps its database and logs; the installed data directory when absent.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+}
+
+/// `appa runtime ensure`: the start every protected SessionStart performs, run
+/// on its own by the install as its last step, from the deployed binary.
+fn ensure(target: &crate::runtime_url::RuntimeUrl, config: Option<PathBuf>, data_dir: Option<PathBuf>) -> ExitCode {
+    let started = crate::runtime_start::Deployment::installed(config, data_dir).and_then(|deployment| {
+        let executable = std::env::current_exe().map_err(|error| {
+            crate::runtime_start::StartError::Paths(format!("this executable has no path to start from: {error}"))
+        })?;
+        crate::runtime_start::ensure(&target.resolve(), &deployment, &executable)
+    });
+    match started {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("appa runtime ensure: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// The derivation the runtime applies to every call of the host it serves. The one
@@ -358,6 +393,9 @@ where
     T: Into<OsString> + Clone,
 {
     let args = Args::parse_from(args);
+    if let Some(RuntimeCommand::Ensure { target, data_dir }) = args.command {
+        return ensure(&target, args.config, data_dir);
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => {

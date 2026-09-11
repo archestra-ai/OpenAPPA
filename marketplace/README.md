@@ -44,14 +44,15 @@ appa battery list
 
 The first install uses that binary's own version: the release published for
 its tag, or, for a checkout build, the tree of the commit it was built from. A
-version binds the catalog, packages, runtime, native plugin and image
-descriptors to one commit. Commits without a published release cannot be
+version binds the catalog, packages, runtime and image descriptors to one
+commit. Commits without a published release cannot be
 installed from the network. Subsequent installs retain the installed version;
 nothing updates automatically.
 
-Claude installation registers its native plugin, includes the batteries the
-plugin's manifest names (`claude-code`) on a first install, and verifies the
-running APPA runtime. Battery installation adds and activates its policy in the
+Claude installation registers the runtime's hooks, MCP server and skill in
+the user's Claude Code profile, includes the batteries the plugin's manifest
+names (`claude-code`) on a first install, and verifies the running APPA
+runtime. Battery installation adds and activates its policy in the
 same operation.
 It does not register an MCP server or obtain credentials. A connection with a
 different identity can be associated using `--server <connection-id>`; use the

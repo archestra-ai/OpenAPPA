@@ -11,62 +11,14 @@
 //! rest itself, so nothing this client says about a call is trusted.
 
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use appa_runtime_api::{AdapterName, Codec, HookDecision, HookEvent, ParseRefusal, WireDecision, WireEvent};
 
-/// Where the runtime answers hooks: an authority to connect to and the prefix the
-/// runtime's routes hang under. Only `http` is spoken: the runtime refuses to
-/// listen anywhere but loopback, so there is no transport to secure.
-struct Endpoint {
-    authority: String,
-    prefix: String,
-}
-
-impl Endpoint {
-    fn parse(url: &str) -> Result<Self, String> {
-        let rest = url
-            .strip_prefix("http://")
-            .ok_or_else(|| format!("{url} is not an http:// URL; the runtime serves plain HTTP on loopback"))?;
-        let (authority, prefix) = match rest.find('/') {
-            Some(slash) => (&rest[..slash], rest[slash..].trim_end_matches('/')),
-            None => (rest, ""),
-        };
-        if authority.is_empty() {
-            return Err(format!("{url} names no host to post to"));
-        }
-        Ok(Self {
-            authority: authority.to_owned(),
-            prefix: prefix.to_owned(),
-        })
-    }
-
-    /// Every address this authority resolves to, in the order the resolver
-    /// gives them. `localhost` resolves to both loopback families and the
-    /// runtime listens on one of them, so the first address is a candidate
-    /// and not the answer.
-    fn addresses(&self) -> Result<Vec<SocketAddr>, String> {
-        let addresses: Vec<SocketAddr> = self
-            .authority
-            .to_socket_addrs()
-            .map_err(|error| format!("{} does not resolve: {error}", self.authority))?
-            .collect();
-        match addresses.is_empty() {
-            true => Err(format!("{} resolves to no address", self.authority)),
-            false => Ok(addresses),
-        }
-    }
-
-    fn request_head(&self, length: usize) -> String {
-        format!(
-            "POST {}/hook HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
-             Content-Length: {length}\r\nConnection: close\r\n\r\n",
-            self.prefix, self.authority
-        )
-    }
-}
+use crate::loopback_http::{Answer, Deadline, Endpoint, request};
+use crate::runtime_start::{self, Deployment};
+use crate::runtime_url::RuntimeTarget;
 
 /// What the answer to this hook decides. A turn end reports a turn the actor has
 /// already finished, so it decides nothing: it discards the answer and never
@@ -98,145 +50,14 @@ impl Decides {
     /// matters: a hook the harness kills has its exit code ignored and fails open.
     fn budget(self) -> Duration {
         match self {
-            Self::Authorization => Duration::from_secs(120),
-            Self::Nothing => Duration::from_secs(30),
+            Self::Authorization => AUTHORIZATION_BUDGET,
+            Self::Nothing => TURN_END_BUDGET,
         }
     }
-}
-
-/// The wall clock the whole round trip runs against. Every socket operation takes
-/// what is left of it, so a trickle of bytes cannot outlast the budget the way a
-/// per-operation timeout allows.
-struct Deadline(Instant);
-
-impl Deadline {
-    fn spanning(budget: Duration) -> Self {
-        Self(Instant::now() + budget)
-    }
-
-    /// A socket reads a zero timeout as "no timeout", so a spent budget must fail
-    /// here rather than reach one.
-    fn left(&self) -> Result<Duration, String> {
-        self.0
-            .checked_duration_since(Instant::now())
-            .filter(|left| !left.is_zero())
-            .ok_or_else(|| "the runtime did not answer in time".to_owned())
-    }
-}
-
-struct Answer {
-    status: u16,
-    body: Vec<u8>,
-}
-
-impl Answer {
-    fn is_success(&self) -> bool {
-        (200..=299).contains(&self.status)
-    }
-}
-
-/// The first of these addresses that accepts, with the address it reached. Each
-/// attempt takes what is left of the deadline rather than a share of it: a
-/// refused address answers at once, and the budget the whole round trip runs
-/// against — never the number of addresses — is what bounds the walk.
-fn connect(addresses: &[SocketAddr], deadline: &Deadline) -> Result<(TcpStream, SocketAddr), String> {
-    let mut refusals = Vec::new();
-    for address in addresses {
-        match TcpStream::connect_timeout(address, deadline.left()?) {
-            Ok(socket) => return Ok((socket, *address)),
-            Err(error) => refusals.push(format!("cannot reach {address}: {error}")),
-        }
-    }
-    Err(refusals.join("; "))
 }
 
 fn post(endpoint: &Endpoint, event: &[u8], deadline: &Deadline) -> Result<Answer, String> {
-    let (mut socket, address) = connect(&endpoint.addresses()?, deadline)?;
-    socket.set_nodelay(true).ok();
-
-    for part in [endpoint.request_head(event.len()).as_bytes(), event] {
-        socket
-            .set_write_timeout(Some(deadline.left()?))
-            .map_err(|error| format!("cannot bound the write to {address}: {error}"))?;
-        socket
-            .write_all(part)
-            .map_err(|error| format!("cannot post to {address}: {error}"))?;
-    }
-
-    let mut answer = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        socket
-            .set_read_timeout(Some(deadline.left()?))
-            .map_err(|error| format!("cannot bound the read from {address}: {error}"))?;
-        match socket.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(read) => {
-                answer.extend_from_slice(&chunk[..read]);
-                if declared_answer_len(&answer)?.is_some_and(|length| answer.len() >= length) {
-                    break;
-                }
-            }
-            Err(error) => return Err(format!("cannot read the answer from {address}: {error}")),
-        }
-    }
-    parse(&answer)
-}
-
-fn declared_answer_len(answer: &[u8]) -> Result<Option<usize>, String> {
-    let Some(end_of_head) = answer.windows(4).position(|window| window == b"\r\n\r\n") else {
-        return Ok(None);
-    };
-    let head =
-        std::str::from_utf8(&answer[..end_of_head]).map_err(|_| "the answer's headers are not text".to_owned())?;
-    let mut declared = None;
-    for line in head.lines().skip(1) {
-        let Some((name, value)) = line.split_once(':') else {
-            continue;
-        };
-        if name.eq_ignore_ascii_case("content-length") {
-            if declared.is_some() {
-                return Err("the answer carries more than one content-length".to_owned());
-            }
-            declared = Some(
-                value
-                    .trim()
-                    .parse::<usize>()
-                    .map_err(|_| "the answer carries an invalid content-length".to_owned())?,
-            );
-        }
-    }
-    declared
-        .map(|length| {
-            end_of_head
-                .checked_add(4)
-                .and_then(|head_length| head_length.checked_add(length))
-                .ok_or_else(|| "the answer's content-length overflows this platform".to_owned())
-        })
-        .transpose()
-}
-
-fn parse(answer: &[u8]) -> Result<Answer, String> {
-    let end_of_head = answer
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(|| "the answer ended before its headers did".to_owned())?;
-    let head =
-        std::str::from_utf8(&answer[..end_of_head]).map_err(|_| "the answer's headers are not text".to_owned())?;
-    let status = head
-        .split_whitespace()
-        .nth(1)
-        .and_then(|code| code.parse().ok())
-        .ok_or_else(|| format!("the answer carries no status code: {head}"))?;
-    if let Some(length) = declared_answer_len(answer)?
-        && answer.len() != length
-    {
-        return Err("the answer body does not match its content-length".to_owned());
-    }
-    Ok(Answer {
-        status,
-        body: answer[end_of_head + 4..].to_vec(),
-    })
+    request(endpoint, "POST", "/hook", event, deadline)
 }
 
 /// The blocking hook outcome. Claude Code reads stderr as the reason it blocked.
@@ -271,6 +92,10 @@ fn refusal(answer: &Answer) -> String {
 /// The host whose hook bytes this client translates. It is not a choice: the kagent plugin
 /// posts the canonical wire itself, so this bridge is Claude Code's alone.
 const HOST: AdapterName = AdapterName::ClaudeCode;
+
+/// The round-trip budgets the hook entries' timeouts are declared above.
+pub(crate) const AUTHORIZATION_BUDGET: Duration = Duration::from_secs(120);
+pub(crate) const TURN_END_BUDGET: Duration = Duration::from_secs(30);
 
 /// The runtime's answer, read off the wire. A body that is not a wire decision is
 /// not guessed at: the hook fails closed on it.
@@ -320,12 +145,41 @@ fn wire_body(event: &HookEvent) -> Result<Vec<u8>, String> {
     serde_json::to_vec(&wire).map_err(|error| format!("the wire event does not serialize: {error}"))
 }
 
-pub fn run(url: &str, turn_end: bool) -> ExitCode {
+/// Whether this process runs inside a session APPA protects. Only a session launched
+/// with `APPA_GATE=1` is: the variable is read from the process environment the harness
+/// fixed at its own launch, so a session cannot turn the protection off. Outside one,
+/// every client this binary runs as says nothing and exits 0.
+pub(crate) fn session_is_gated() -> bool {
+    std::env::var_os("APPA_GATE").is_some_and(|value| value == "1")
+}
+
+/// Post the hook event on stdin to `target`. With `ensure` the deployed runtime
+/// is brought up first: the harness runs an event's hooks in parallel, so the
+/// SessionStart entry that starts the runtime is the one that posts to it, and a
+/// start that fails blocks like an unanswered hook rather than posting into
+/// nothing.
+pub fn run(target: &RuntimeTarget, turn_end: bool, ensure: Option<&Deployment>) -> ExitCode {
+    if !session_is_gated() {
+        return ExitCode::SUCCESS;
+    }
     let decides = Decides::of_a_turn_end(turn_end);
     let codec = appa_adapter_claude_code::codec();
     let mut host_event = Vec::new();
     if let Err(error) = std::io::stdin().read_to_end(&mut host_event) {
         return block(&format!("the hook event could not be read: {error}"));
+    }
+    if let Some(deployment) = ensure {
+        let executable = match std::env::current_exe() {
+            Ok(executable) => executable,
+            Err(error) => {
+                return block(&format!(
+                    "this executable has no path to start the runtime from: {error}"
+                ));
+            }
+        };
+        if let Err(error) = runtime_start::ensure(target, deployment, &executable) {
+            return block(&format!("the runtime could not be started: {error}"));
+        }
     }
     let event = match parse_host_event(&codec, &host_event) {
         // A hook the adapter does not gate is the empty opinion, with no round trip.
@@ -341,6 +195,15 @@ pub fn run(url: &str, turn_end: bool) -> ExitCode {
         // the output the tool produced does not stay in front of the model.
         Err(failure) => return unanswered(&codec, Unanswered::Unparsed(&host_event), &failure, decides),
     };
+    // A prompt is refused while a subagent definition in reach declares `maxTurns`:
+    // Claude Code ends such a subagent at its cap with no SubagentStop, so its
+    // partial output would reach the parent unchecked.
+    if let HookEvent::Prompt { .. } = &event
+        && let Some(refusal) = crate::agent_scan::refusal()
+    {
+        eprintln!("{refusal}");
+        return ExitCode::from(2);
+    }
     // A parsed event that cannot cross the wire is still an event to answer: it is handed
     // to the withholding path rather than dropped, so a result that already ran is taken
     // out of the model's attention instead of staying in front of it.
@@ -349,7 +212,7 @@ pub fn run(url: &str, turn_end: bool) -> ExitCode {
         Err(failure) => return unanswered(&codec, Unanswered::Event(&event), &failure, decides),
     };
     let answered =
-        Endpoint::parse(url).and_then(|endpoint| post(&endpoint, &body, &Deadline::spanning(decides.budget())));
+        Endpoint::parse(&target.url).and_then(|endpoint| post(&endpoint, &body, &Deadline::spanning(decides.budget())));
     let answer = match answered {
         Ok(answer) => answer,
         Err(failure) => return unanswered(&codec, Unanswered::Event(&event), &failure, decides),
@@ -504,64 +367,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_endpoint_is_an_authority_and_the_prefix_its_routes_hang_under() {
-        let plain = Endpoint::parse("http://127.0.0.1:8787").expect("a bare authority parses");
-        assert_eq!(plain.authority, "127.0.0.1:8787");
-        assert_eq!(
-            plain.request_head(3),
-            "POST /hook HTTP/1.1\r\nHost: 127.0.0.1:8787\r\nContent-Type: application/json\r\n\
-             Content-Length: 3\r\nConnection: close\r\n\r\n"
-        );
-
-        let nested = Endpoint::parse("http://127.0.0.1:8787/appa/").expect("a prefix parses");
-        assert!(nested.request_head(0).starts_with("POST /appa/hook HTTP/1.1\r\n"));
-
-        assert!(Endpoint::parse("https://127.0.0.1:8787").is_err());
-        assert!(Endpoint::parse("127.0.0.1:8787").is_err());
-        assert!(Endpoint::parse("http:///hook").is_err());
-    }
-
-    #[test]
     fn a_turn_end_waits_on_less_than_an_authorization_does() {
         assert!(Decides::of_a_turn_end(true) == Decides::Nothing);
         assert!(Decides::of_a_turn_end(false) == Decides::Authorization);
         assert!(Decides::Nothing.budget() < Decides::Authorization.budget());
-    }
-
-    #[test]
-    fn an_answer_is_its_status_and_the_body_after_the_headers() {
-        let answered = parse(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}").expect("a well formed answer parses");
-        assert_eq!(answered.status, 200);
-        assert_eq!(answered.body, b"{}");
-        assert!(answered.is_success());
-
-        let refused = parse(b"HTTP/1.1 422 Unprocessable Entity\r\n\r\nwhy").expect("a refusal parses");
-        assert_eq!(refused.status, 422);
-        assert_eq!(refused.body, b"why");
-        assert!(!refused.is_success());
-
-        assert!(parse(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n").is_err());
-        assert!(parse(b"HTTP/1.1 200 OK\r\ncontent-length: 3\r\n\r\n{}").is_err());
-        assert!(parse(b"HTTP/1.1 200 OK\r\ncontent-length: 1\r\n\r\n{}").is_err());
-        assert!(parse(b"garbage\r\n\r\n").is_err());
-    }
-
-    #[test]
-    fn a_complete_declared_body_does_not_wait_for_the_server_to_close() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port binds");
-        let address = listener.local_addr().expect("the listener has an address");
-        let server = std::thread::spawn(move || {
-            let (mut socket, _) = listener.accept().expect("the client connects");
-            socket
-                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}")
-                .expect("the server answers");
-            std::thread::sleep(Duration::from_secs(1));
-        });
-        let endpoint = Endpoint::parse(&format!("http://{address}")).expect("the endpoint parses");
-        let answer = post(&endpoint, b"{}", &Deadline::spanning(Duration::from_millis(250)))
-            .expect("the complete body answers before the connection closes");
-        assert_eq!(answer.body, b"{}");
-        server.join().expect("the server exits");
     }
 
     #[test]
@@ -601,47 +410,6 @@ mod tests {
             }),
             "status=500"
         );
-    }
-
-    /// A hook URL naming a host that resolves to more than one address — the
-    /// `localhost` of every default install, which resolves to both loopback
-    /// families — reaches the runtime on whichever of them it listens on. The
-    /// first address is tried first and a refusal there is not the answer.
-    #[test]
-    fn a_refused_address_falls_through_to_the_next_the_authority_resolves_to() {
-        let listening = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port binds");
-        let live = listening.local_addr().expect("the listener has an address");
-        let vacated = std::net::TcpListener::bind("127.0.0.1:0").expect("a second loopback port binds");
-        let closed = vacated.local_addr().expect("the listener has an address");
-        drop(vacated);
-
-        let deadline = Deadline::spanning(Duration::from_secs(5));
-        let (socket, reached) = connect(&[closed, live], &deadline).expect("the second address answers");
-        assert_eq!(reached, live, "the refused address is not the one it posts to");
-        assert_eq!(socket.peer_addr().expect("the socket is connected"), live);
-
-        assert!(
-            connect(&[closed], &deadline).is_err(),
-            "an authority whose every address refuses is unreachable"
-        );
-        assert!(
-            connect(&[closed, live], &Deadline::spanning(Duration::ZERO)).is_err(),
-            "the walk stays inside the deadline the round trip runs against"
-        );
-
-        assert_eq!(
-            Endpoint::parse("http://127.0.0.1:8787")
-                .expect("the authority parses")
-                .addresses()
-                .expect("a literal address resolves"),
-            vec![SocketAddr::from(([127, 0, 0, 1], 8787))]
-        );
-    }
-
-    #[test]
-    fn a_spent_deadline_refuses_rather_than_bounding_a_socket_by_zero() {
-        assert!(Deadline::spanning(Duration::from_secs(5)).left().expect("time is left") > Duration::ZERO);
-        assert!(Deadline::spanning(Duration::ZERO).left().is_err());
     }
 
     /// A hook this codec cannot read at all is still answered where its bytes report a

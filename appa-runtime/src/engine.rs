@@ -2766,7 +2766,7 @@ const BARE_CONTROL_TOOL: &str = appa_runtime_api::ADVERTISED_CONTROL_TOOL;
 /// How this deployment's model dispatches the runtime's own control tool. Feedback that
 /// tells a model to take a remedy names a call it has to make, so a served deployment
 /// spells the control tool the way that host dispatches it — Claude Code reaches the
-/// runtime's MCP server as `mcp__plugin_appa-runtime_appa__execute_remedy_plan`. A host
+/// runtime's MCP server as `mcp__appa__execute_remedy_plan`. A host
 /// that embeds the runtime names its own tools, and there the tool's bare name is what the
 /// model has to go on.
 fn control_spelling(naming: ToolNaming) -> String {
@@ -3780,7 +3780,7 @@ mod tests {
         let claude_code = ToolNaming::Canonical {
             adapter: appa_adapter_claude_code::adapter(),
         };
-        let dispatched = "mcp__plugin_appa-runtime_appa__execute_remedy_plan";
+        let dispatched = "mcp__appa__execute_remedy_plan";
         let served_spelling = |embedded: String| embedded.replace(BARE_CONTROL_TOOL, dispatched);
 
         let plan = ExecutableRemedyPlan {

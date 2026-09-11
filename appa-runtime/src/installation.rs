@@ -14,6 +14,7 @@ use thiserror::Error;
 const MAX_STATE_BYTES: u64 = 4 * 1024 * 1024;
 
 mod acquisition;
+pub(crate) mod archive;
 mod battery;
 pub mod cli;
 mod files;
@@ -673,7 +674,7 @@ impl Installation {
         // payload budget even when the compressed export is small. Check the
         // actual archive with the same extractor before publishing it.
         let preflight = tempfile::tempdir_in(parent).map_err(|error| io("stage export validation", output, error))?;
-        crate::plugin_bundle::extract_bundle_archive(stage.path(), preflight.path())
+        archive::extract_bundle_archive(stage.path(), preflight.path())
             .map_err(|error| InstallError::Invalid(error.to_string()))?;
         preflight
             .close()

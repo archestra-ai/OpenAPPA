@@ -60,7 +60,7 @@ fn the_router_routes_by_host_and_carries_the_shared_rules() {
         );
     }
     // Host mechanics stay out of the router.
-    for host_only in ["claude mcp list", "status.discoveredTools", "known_marketplaces.json"] {
+    for host_only in ["claude mcp list", "status.discoveredTools", "references/contracts.md"] {
         assert!(!router.contains(host_only), "{host_only:?} belongs to a reference file");
     }
 }
@@ -70,11 +70,11 @@ fn the_claude_code_reference_carries_the_full_flow() {
     let reference = read("references/claude-code.md");
     for marker in [
         "appa describe --config",
-        "known_marketplaces.json",
+        "appa battery list --json --config <live-path>",
         "claude mcp list",
         "mcp__<server>__<tool>",
         "appa battery install <name> --config <live-path>",
-        "website/content/docs/contracts.md",
+        "references/contracts.md",
         "http://127.0.0.1:8787",
         "clappa",
         "Approve, or tell me what to change.",
@@ -155,7 +155,7 @@ fn the_kagent_reference_carries_the_full_flow() {
     for stale in ["APPA_CONFIG_CONTENTS", "Bundled mode", "127.0.0.1:8787"] {
         assert!(!reference.contains(stale), "{stale:?} is not a supported kagent mode");
     }
-    for claude_only in ["claude mcp list", "clappa", "marketplace-root", "APPA_GATE"] {
+    for claude_only in ["claude mcp list", "clappa", ".appa/", "APPA_GATE"] {
         assert!(
             !reference.contains(claude_only),
             "{claude_only:?} is claude-code machinery"
@@ -289,14 +289,4 @@ fn kagent_runtime_management_is_typed_vouched_and_least_privilege() {
     }
     assert!(reference.contains("generic Kubernetes commands"));
     assert!(reference.contains("one-shot APPA"));
-}
-
-#[test]
-fn the_claude_plugin_has_no_second_source_copy() {
-    assert!(
-        !repo_root()
-            .join("marketplace/plugins/claude-code/plugin/skills/appa-guide")
-            .exists(),
-        "the Claude plugin materializes the canonical skill at staging time; a source copy would drift"
-    );
 }

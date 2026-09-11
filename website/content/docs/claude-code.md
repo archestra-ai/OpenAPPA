@@ -5,7 +5,7 @@ order: 5
 description: Start with one protected Claude Code session, then carry the same policy boundary across your agents.
 ---
 
-OpenAPPA is designed for multiple agent surfaces. **Claude Code is simply the first demo:** the plugin makes the policy visible in a familiar terminal and gives you a fast way to try it.
+OpenAPPA is designed for multiple agent surfaces. **Claude Code is simply the first demo:** the integration makes the policy visible in a familiar terminal and gives you a fast way to try it.
 
 ## Install the Claude Code demo
 
@@ -27,20 +27,24 @@ one.
 
 The install prints progress while it selects the version, updates Claude Code,
 and starts the runtime, and it never prompts. A release binary installs the
-version published for its tag; a checkout build installs its own plugin tree,
+version published for its tag; a checkout build installs its own version,
 exported from the commit it was built from. If a different APPA
 deployment already owns the runtime endpoint, the install refuses and names the
 process to stop. An unidentified listener is never stopped automatically.
 
 Initialization installs `clappa` beside `appa` so the short command works below.
 
-The native `appa` command installs the runtime, the matching Claude Code
-plugin, the statusline, and `clappa`, a protected way to start Claude Code. A
-release binary resolves its plugin from its baked tag and artifact digest; a
-checkout build resolves it from its baked commit and plugin-tree digest. Init
-replaces an existing APPA installation instead of stacking another hook set. It
-preserves an existing policy and custom statusline. It does not replace `claude`
-or change how ordinary sessions start.
+The installed binary is the only host-side code. The install deploys it under
+APPA's data directory and registers it in your user-level Claude Code
+settings: one hook entry per session event, each naming that binary by its
+absolute path, and the status line. It registers the runtime's `appa` MCP
+server in Claude Code's user scope, writes the `appa-guide` skill to your
+user skills directory, and installs `clappa`, a protected way to start Claude
+Code. Rerunning it rewrites only what it wrote: hook entries, an MCP server
+or a skill of your own are left alone, and an `appa` MCP server or
+`appa-guide` skill that no install wrote stops it before it touches anything.
+It preserves an existing policy and custom statusline. It does not replace
+`claude` or change how ordinary sessions start.
 
 ## 1. Teach OpenAPPA about your tools
 
@@ -76,13 +80,13 @@ The policy names a tool by its canonical tool id, not by Claude Code's own spell
 |---|---|
 | `mcp__<server>__<tool>`, split at the first `__` after `mcp__` | `mcp/<server>/<tool>` — `mcp__github__create_issue` is `mcp/github/create_issue` |
 | A built-in tool: `Bash`, `Read`, `Edit`, `Agent`, … | `host/claude-code/<name>` — `host/claude-code/Bash` |
-| The remedy tool of the APPA plugin | `appa/execute_remedy_plan`, which no policy declares |
+| `mcp__appa__execute_remedy_plan`, the remedy tool of the runtime's own `appa` MCP server | `appa/execute_remedy_plan`, which no policy declares |
 
 Argument selectors keep their shape: `host/claude-code/Read(file_path:*)`. `Agent` and `Task` start a child trajectory; the runtime derives that from the adapter, so the policy does not declare it. The [Policy reference](/contracts#tool-names) has the grammar.
 
 ### How a session reaches the runtime
 
-The plugin's hooks run `appa hook` on every event. The command translates Claude Code's hook JSON into the hook protocol's wire envelope (`protocol: 1`), posts it to the runtime's `/hook` endpoint, and translates the decision back into the hook answer Claude Code reads. The envelope carries the raw tool spelling and the session's own ids; the runtime derives the canonical tool id and prefixes the trajectory id with `cc:`. A hook that gets no answer blocks the action.
+The hook entries the install wrote run `appa hook` on every event. The command translates Claude Code's hook JSON into the hook protocol's wire envelope (`protocol: 1`), posts it to the runtime's `/hook` endpoint, and translates the decision back into the hook answer Claude Code reads. The envelope carries the raw tool spelling and the session's own ids; the runtime derives the canonical tool id and prefixes the trajectory id with `cc:`. A hook that gets no answer blocks the action.
 
 ## 2. Try a flow that should be blocked
 
@@ -106,7 +110,9 @@ The refusal is not a generic warning. It names the policy conflict and can offer
 
 ## Choose protection per session
 
-Installing the plugin does not force every Claude Code session through OpenAPPA. Use `clappa` when you want the policy boundary. Use `claude` when you do not.
+Installing OpenAPPA does not force every Claude Code session through it. Use `clappa` when you want the policy boundary. Use `claude` when you do not.
+
+The hook entries live in your user settings. A project whose settings set `disableAllHooks` turns every hook off for its sessions, so `clappa` cannot protect a session in such a project.
 
 :::claude-session-choice:::
 
@@ -170,20 +176,14 @@ max_concurrent = 4
 
 ## Uninstall
 
-To uninstall OpenAPPA from Claude Code, remove the plugin, stop the local runtime, and remove its binaries:
+To uninstall OpenAPPA from Claude Code, take its entries out of your Claude Code profile, stop the local runtime, and remove its binaries:
 
 ```sh
-claude plugin uninstall appa-runtime
-claude plugin marketplace remove appa
+appa plugin remove claude-code
 pkill -f 'appa runtime'
-rm -rf ~/.local/share/appa/bin ~/.local/share/appa/deployments ~/.local/share/appa/cache
-rm -f ~/.local/bin/appa ~/.local/bin/clappa ~/.local/bin/appa-statusline.sh
-rm -f ~/.cargo/bin/clappa && cargo uninstall appa   # checkout builds only
-
-# drop the statusline entry the install wrote, and keep one of your own:
-jq 'if (.statusLine.command? // "") | test("appa-statusline") then del(.statusLine) else . end' \
-  ~/.claude/settings.json > ~/.claude/settings.json.new &&
-  mv ~/.claude/settings.json.new ~/.claude/settings.json
+rm -rf ~/.local/share/appa/bin ~/.local/share/appa/cache
+rm -f ~/.local/bin/appa
+cargo uninstall appa   # checkout builds only
 
 # optional — also remove the policy, database, and alias:
 rm -rf ~/.config/appa ~/.local/share/appa      # Linux

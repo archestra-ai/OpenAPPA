@@ -1,5 +1,6 @@
 //! appa-runtime — the process that gates a harness's flows.
 
+mod agent_scan;
 pub mod api;
 pub mod batteries;
 pub mod config;
@@ -9,12 +10,16 @@ pub mod hook_client;
 pub mod hooks;
 pub mod init;
 pub mod installation;
+mod loopback_http;
 mod management;
 pub mod mcp;
-pub mod plugin_bundle;
 pub mod replay;
 #[path = "main.rs"]
 pub mod runtime_cli;
+pub mod runtime_start;
+pub mod runtime_url;
+pub mod session_context;
+pub mod statusline;
 pub mod tls;
 pub mod tool_validation;
 
@@ -25,5 +30,5 @@ mod engine;
 mod events;
 mod external;
 mod llm;
-mod plugin_layout;
+pub mod plugin_layout;
 pub mod yell;

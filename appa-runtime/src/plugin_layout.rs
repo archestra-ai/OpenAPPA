@@ -1,41 +1,19 @@
-//! The repository paths that make up the distributable Claude Code plugin,
-//! and the canonical identity of a staged plugin tree.
+//! The repository paths that make up the plugin archive a generation carries,
+//! and the tree the build digests for its identity.
 //!
-//! This module is also compiled by `build.rs`, which reads only the mappings
-//! and the digest, so keep its dependencies to `std` and `appa-package`. One
-//! mapping drives build-time identity and runtime staging from a GitHub source
-//! archive, and one digest names both.
+//! This module is also compiled by `build.rs`, which reads only the mappings,
+//! so keep its dependencies to `std`. One mapping drives build-time identity
+//! and the staging of a development build's own archive.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::Path;
 
-pub const REPOSITORY_MAPPINGS: [(&str, &str); 10] = [
-    ("marketplace/plugins/claude-code/.claude-plugin", ".claude-plugin"),
-    ("marketplace/plugins/claude-code/plugin", "plugin"),
-    ("integrations/appa-guide", "plugin/skills/appa-guide"),
-    (
-        "marketplace/plugins/claude-code/default.appa.toml",
-        "examples/claude-code.appa.toml",
-    ),
-    (
-        "marketplace/plugins/claude-code/hitl.appa.toml",
-        "examples/claude-code-hitl.appa.toml",
-    ),
-    ("marketplace/batteries", "batteries"),
-    ("marketplace/plugins/claude-code/README.md", "README.md"),
-    (
-        "marketplace/plugins/claude-code/live-gate-check.py",
-        "live-gate-check.py",
-    ),
-    (
-        "marketplace/plugins/claude-code/claude_model_fixture.py",
-        "claude_model_fixture.py",
-    ),
-    ("website/content/docs/contracts.md", "website/content/docs/contracts.md"),
-];
+/// The host-side code of a protected session is the deployed binary, so the
+/// archive carries only the batteries a policy may include.
+pub const REPOSITORY_MAPPINGS: [(&str, &str); 1] = [("marketplace/batteries", "batteries")];
 
-/// Stage the plugin marketplace tree from an OpenAPPA repository checkout.
+/// Stage the plugin archive's tree from an OpenAPPA repository checkout.
 pub fn stage_repository(repository: &Path, destination: &Path) -> io::Result<()> {
     fs::create_dir_all(destination)?;
     for (source, target) in REPOSITORY_MAPPINGS {
@@ -43,20 +21,7 @@ pub fn stage_repository(repository: &Path, destination: &Path) -> io::Result<()>
         let target = destination.join(target);
         copy_entry(&source, &target)?;
     }
-    materialize_claude_guide(destination)?;
     Ok(())
-}
-
-/// Claude Code loads only SKILL.md when a slash command starts. Reading a
-/// reference would itself be a gated `Read` call, so materialize this host's
-/// reference into that file. The canonical package stays decomposed for hosts
-/// such as kagent that load their own reference through their native file tool.
-fn materialize_claude_guide(destination: &Path) -> io::Result<()> {
-    let guide = destination.join("plugin/skills/appa-guide");
-    let reference = fs::read(guide.join("references/claude-code.md"))?;
-    let mut skill = fs::OpenOptions::new().append(true).open(guide.join("SKILL.md"))?;
-    skill.write_all(b"\n\n")?;
-    skill.write_all(&reference)
 }
 
 fn copy_entry(source: &Path, destination: &Path) -> io::Result<()> {
@@ -95,36 +60,15 @@ fn copy_entry(source: &Path, destination: &Path) -> io::Result<()> {
 /// The per-package marketplace manifest, by the one name every package uses.
 const PACKAGE_MANIFEST: &str = "appa-package.toml";
 
-/// What a mapped directory carries that the deployment does not.
+/// What a mapped directory carries that the archive does not.
 ///
-/// Generated Python caches are not plugin source: a developer's checkout has
-/// them while a GitHub source archive and a clean release runner never do, so
-/// excluding them keeps all three staging paths byte-identical.
+/// Generated Python caches are not source: a developer's checkout has them
+/// while a GitHub source archive and a clean release runner never do, so
+/// excluding them keeps every staging path byte-identical.
 /// `appa-package.toml` is marketplace metadata — it describes the package to
-/// the marketplace, and the deployment reads the policy beside it, never the
+/// the marketplace, and a deployment reads the policy beside it, never the
 /// manifest.
 fn excluded_from_staging(name: &std::ffi::OsStr) -> bool {
     let name = name.to_string_lossy();
     name == "__pycache__" || name.ends_with(".pyc") || name.ends_with(".pyo") || name == PACKAGE_MANIFEST
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn claude_staging_inlines_its_reference_after_the_router() {
-        let directory = tempfile::tempdir().unwrap();
-        let guide = directory.path().join("plugin/skills/appa-guide");
-        fs::create_dir_all(guide.join("references")).unwrap();
-        fs::write(guide.join("SKILL.md"), "router\n").unwrap();
-        fs::write(guide.join("references/claude-code.md"), "# Claude Code\nflow\n").unwrap();
-
-        materialize_claude_guide(directory.path()).unwrap();
-
-        assert_eq!(
-            fs::read_to_string(guide.join("SKILL.md")).unwrap(),
-            "router\n\n\n# Claude Code\nflow\n"
-        );
-    }
 }

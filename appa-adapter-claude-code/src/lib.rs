@@ -23,7 +23,7 @@
 //!
 //! | raw spelling | canonical |
 //! |---|---|
-//! | `mcp__plugin_appa-runtime_appa__execute_remedy_plan` | `appa/execute_remedy_plan`, the runtime's control tool |
+//! | `mcp__appa__execute_remedy_plan` | `appa/execute_remedy_plan`, the runtime's control tool |
 //! | `mcp__<server>__<tool>`, split at the first `__` after the prefix | `mcp/<server>/<tool>` |
 //! | any other `[A-Za-z0-9_.-]+` | `host/claude-code/<name>` |
 //!
@@ -36,10 +36,10 @@
 //!
 //! Read right to left the table is partial. The control spelling
 //! occupies a cell the `mcp` row would otherwise own, so
-//! `mcp/plugin_appa-runtime_appa/execute_remedy_plan` — an ordinary tool
-//! a policy may declare — has no Claude Code spelling. Where the runtime
-//! would name that tool it says the canonical id, never a spelling that
-//! dispatches the control tool instead.
+//! `mcp/appa/execute_remedy_plan` — an ordinary tool a policy may
+//! declare on the runtime's own server — has no Claude Code spelling.
+//! Where the runtime would name that tool it says the canonical id, never
+//! a spelling that dispatches the control tool instead.
 //!
 //! Hook mapping:
 //!
@@ -178,10 +178,10 @@ pub fn adapter() -> Adapter {
     }
 }
 
-/// The registered spelling of the runtime's own control tool: the `appa` MCP server
-/// inside the `appa-runtime` plugin. Only this spelling is the control tool; a
-/// lookalike on another server is an ordinary checked call.
-const CONTROL_TOOL_RAW: &str = "mcp__plugin_appa-runtime_appa__execute_remedy_plan";
+/// The registered spelling of the runtime's own control tool: `execute_remedy_plan`
+/// on the `appa` MCP server the install registers. Only this spelling is the control
+/// tool; a lookalike on another server is an ordinary checked call.
+const CONTROL_TOOL_RAW: &str = "mcp__appa__execute_remedy_plan";
 
 const MCP_PREFIX: &str = "mcp__";
 
@@ -214,10 +214,9 @@ fn canonical(raw: &str) -> Result<CanonicalTool, ParseRefusal> {
 ///
 /// Three families of id have no Claude Code spelling. The `agent` family and another
 /// host's namespace render nothing. `host/claude-code/<name>` whose name is itself an
-/// `mcp__` spelling, and `mcp/plugin_appa-runtime_appa/execute_remedy_plan` — an ordinary
-/// tool named `execute_remedy_plan` on a server named like the runtime's own plugin —
-/// render a spelling Claude Code dispatches to a different identity, so neither is a
-/// spelling of the id it came from.
+/// `mcp__` spelling, and `mcp/appa/execute_remedy_plan` — an ordinary tool named
+/// `execute_remedy_plan` on the runtime's own server — render a spelling Claude Code
+/// dispatches to a different identity, so neither is a spelling of the id it came from.
 fn spell(tool: &CanonicalTool) -> Option<String> {
     if tool.is_control() {
         return Some(CONTROL_TOOL_RAW.to_string());
@@ -947,11 +946,11 @@ mod tests {
             ("Task", "host/claude-code/Task"),
             ("mcp__github__create_issue", "mcp/github/create_issue"),
             ("mcp__github__a__b", "mcp/github/a__b"),
+            ("mcp__appa__other", "mcp/appa/other"),
             (
-                "mcp__plugin_appa-runtime_appa__other",
-                "mcp/plugin_appa-runtime_appa/other",
+                "mcp__appa-guide__execute_remedy_plan",
+                "mcp/appa-guide/execute_remedy_plan",
             ),
-            ("mcp__appa__execute_remedy_plan", "mcp/appa/execute_remedy_plan"),
             ("mcp__a.b-c__T.o-o_l", "mcp/a.b-c/T.o-o_l"),
             ("mcp_x", "host/claude-code/mcp_x"),
             (CONTROL_TOOL_RAW, appa_runtime_api::CONTROL_TOOL),
@@ -968,9 +967,9 @@ mod tests {
     }
 
     /// A canonical id no Claude Code spelling derives to has no Claude Code spelling.
-    /// `mcp/plugin_appa-runtime_appa/execute_remedy_plan` is the ordinary tool a policy
-    /// may declare on a server named like the runtime's own plugin: its rendering is the
-    /// reserved control spelling, which names another tool, so it has none.
+    /// `mcp/appa/execute_remedy_plan` is the ordinary tool a policy may declare on the
+    /// runtime's own server: its rendering is the reserved control spelling, which names
+    /// another tool, so it has none.
     #[test]
     fn a_canonical_id_outside_the_range_has_no_host_spelling() {
         for name in [
@@ -978,7 +977,7 @@ mod tests {
             "host/kagent/memory_persist",
             "host/kagent-gate/outer",
             "host/claude-code/mcp__github__x",
-            "mcp/plugin_appa-runtime_appa/execute_remedy_plan",
+            "mcp/appa/execute_remedy_plan",
         ] {
             let canonical = CanonicalTool::parse(name).expect("the fixture is canonical");
             assert_eq!((adapter().spell)(&canonical), None, "{name}");
@@ -1125,7 +1124,7 @@ mod tests {
         fn canonical_id() -> impl Strategy<Value = CanonicalTool> {
             let family = prop_oneof![Just("mcp"), Just("host"), Just("agent")];
             let namespace = prop_oneof![
-                Just("plugin_appa-runtime_appa".to_string()),
+                Just("appa".to_string()),
                 Just("claude-code".to_string()),
                 Just("kagent".to_string()),
                 segment_chars(),

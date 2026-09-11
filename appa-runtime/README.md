@@ -15,8 +15,8 @@ re-validates its persisted log before it is trusted.
 
 The Claude Code adapter requires the `claude` command, `curl`, and Cargo when building from a checkout.
 
-Every `appa` build knows the SHA-256 of the plugin artifact belonging to its own
-release and accepts no other bytes. On Linux and macOS the installer fetches
+Every `appa` build knows the version it belongs to and installs no other. On
+Linux and macOS the installer fetches
 the release archive, verifies its checksum, and places `appa` in
 `~/.local/bin`; the install then fetches the version published for that
 release, verifies it, and retains it:
@@ -26,16 +26,17 @@ curl -fsSL https://openappa.com/install.sh | sh
 ~/.local/bin/appa plugin install claude-code
 ```
 
-A build from a checkout carries its exact Git commit and plugin-tree digest, so
-the same command installs that build's own plugin tree, without the network:
+A build from a checkout carries its exact Git commit, so the same command
+installs that build's own version, without the network:
 
 ```sh
 cargo install --path appa-runtime --force
 appa plugin install claude-code
 ```
 
-The result does not depend on the working directory. It replaces an existing APPA plugin instead of stacking
-another copy, deploys the same `appa` build for its internal `runtime` command, creates `clappa`, installs the
+The result does not depend on the working directory. It deploys the same `appa` build for its internal
+`runtime` command and registers it in the user's Claude Code settings as every session hook, rewriting the
+entries an earlier install wrote instead of stacking another set; it creates `clappa`, installs the
 statusline unless Claude already has a custom one, preserves an existing policy,
 and starts the runtime. The [Claude Code integration guide](../marketplace/plugins/claude-code/README.md)
 covers the complete flow.
@@ -123,7 +124,7 @@ inside the session — the session's own commands are blocked too.
 
 ### 4. Protect a session
 
-The Claude Code integration — the plugin, the statusline, the example
+The Claude Code integration — the hook entries, the statusline, the example
 policies, and the install and uninstall instructions — lives in
 [`marketplace/plugins/claude-code/`](../marketplace/plugins/claude-code/README.md).
 
@@ -151,7 +152,7 @@ statusline reads.
   running under the policy they opened with — the runtime recompiles it
   from the copy stored in their log. The same `--db` path serves both.
 - **Stopping the process blocks protected sessions.** That is the design,
-  not a fault. Uninstall the plugin if you want unprotected sessions back.
+  not a fault. Start a plain `claude` session if you want an unprotected one.
 - **This crate's `CLAUDE.md`** describes the layout: the process
   (`appa-runtime/`), the shared vocabulary (`appa-runtime-api/`), and
   the Claude Code adapter (`appa-adapter-claude-code/`).
