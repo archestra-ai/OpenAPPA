@@ -92,22 +92,23 @@ This test detects invalid battery config and conflicts with other included batte
 
 Use [`appa replay` validation](/validation) to test the battery end to end. Replay proposes tool calls and checks the decisions from OpenAPPA. It does not run the tools.
 
-In this example, a GitHub MCP battery uses a `github.repository-visibility` annotator. The annotator reads the repository owner and name, calls the GitHub API, and returns a complete contract for the call:
+In this example, the marketplace GitHub battery uses a `github.repository-visibility` annotator for reads. The annotator reads the repository owner and name from the call, asks the GitHub API whether the repository is private, and returns a complete contract for the call:
 
 - A public repository gives the result `suspicious` trust and a `public` audience.
-- A private repository gives the result `suspicious` trust and limits the audience to `internal`.
+- A private repository gives the result `suspicious` trust and limits the audience to the repository's collaborators, the collection `@github:repo/<owner>/<repo>/collaborators` that the battery's audience source resolves.
 
-The battery defines the GitHub tool contracts and the Python annotator that resolves repository visibility:
+The battery declares the annotator with a selector placeholder in its mandate, so each call's consult admits exactly the repository that call names; `owner` and `repo` become required string arguments of every tool that uses it:
 
 ```toml
-# examples/test-github-battery/github-battery.toml
+# marketplace/batteries/github/appa.toml
 [policy]
 version = 2
 
 [[policy.annotator]]
 name = "github.repository-visibility"
 ranks = ["suspicious"]
-audiences = ["github:internal"]
+audiences = ["@github:repo/$owner/$repo/collaborators"]
+marks = []
 
 [[policy.tool]]
 name = "mcp/github/get_file_contents"
@@ -116,14 +117,22 @@ annotator = "github.repository-visibility"
 [externals.annotators."github.repository-visibility"]
 command = ["python3", "repository-visibility.py"]
 token_env = "APPA_PROVIDER_GITHUB_TOKEN"
+
+[externals.audience.github]
+command = ["python3", "audience-source.py"]
+token_env = "APPA_PROVIDER_GITHUB_TOKEN"
+selectors = [
+  { template = "viewer", feeds = "self" },
+  { template = "repo/<owner>/<repo>/collaborators" },
+]
 ```
 
-The battery implementation and the complete replay example are available in [`examples/test-github-battery`](https://github.com/archestra-ai/OpenAPPA/tree/main/examples/test-github-battery).
+The battery implementation is in [`marketplace/batteries/github`](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/github) and the complete replay example in [`examples/github-battery`](https://github.com/archestra-ai/OpenAPPA/tree/main/examples/github-battery).
 
-The complete `github-battery-test.toml` config includes the battery and adds two tools that are not part of it. These tools make the trust and audience changes observable.
+The example's `appa.toml` includes the battery and adds two tools that are not part of it. These tools make the trust and audience changes observable.
 
 ```toml
-include = ["github-battery.toml"]
+include = ["../../marketplace/batteries/github/appa.toml"]
 
 [policy]
 version = 2
@@ -146,7 +155,7 @@ timeout_ms = 30000
 max_body_bytes = 65536
 ```
 
-The `github-repository-visibility.appa` trace uses one public repository and one private repository that the GitHub token can read:
+The `github-battery.appa` trace uses one public repository and one private repository that the GitHub token can read:
 
 ```appa
 # Public repository content is suspicious, but it can remain public.
@@ -183,19 +192,19 @@ mcp/mail/send {
 }
 expect deny
 
-# The configured private-repository audience can receive the content.
+# The repository's collaborators can receive the content.
 mcp/mail/send {
-  to: "github:internal"
+  to: "@github:repo/your-org/your-private-repo/collaborators"
 }
 expect allow
 ```
 
-Run the replay with a GitHub token that can read both repositories:
+Run the replay with a GitHub token that can read both repositories and list the private one's collaborators:
 
 ```sh
 APPA_PROVIDER_GITHUB_TOKEN=... appa replay \
-  --config examples/test-github-battery/github-battery-test.toml \
-  examples/test-github-battery/github-repository-visibility.appa
+  --config examples/github-battery/appa.toml \
+  examples/github-battery/github-battery.appa
 ```
 
 Replay calls the configured annotator for each GitHub tool call. The annotator can call the GitHub API. The GitHub MCP tool and the other tools do not run.
