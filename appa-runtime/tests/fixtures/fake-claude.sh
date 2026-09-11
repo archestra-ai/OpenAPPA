@@ -3,6 +3,9 @@
 # registration under APPA's name, kept in $FAKE_CLAUDE_HOME/mcp-appa as the
 # JSON `add-json` was given. Every invocation is logged, one line each.
 #
+# FAKE_CLAUDE_RENDERS_TEMPLATE reports a template URL the way Claude does:
+# without its default.
+#
 # FAKE_CLAUDE_FAIL_ONCE=mcp-add fails the first `add-json` of this fixture;
 # `mcp-add-always` fails every one, which is what a rollback that cannot put
 # the earlier registration back looks like.
@@ -34,6 +37,11 @@ case "$*" in
       exit 1
     fi
     url=$(sed 's/.*"url":"\([^"]*\)".*/\1/' "$store")
+    if [ -n "${FAKE_CLAUDE_RENDERS_TEMPLATE:-}" ]; then
+      case "$url" in
+        '${APPA_RUNTIME_URL:-'*'}/mcp') url='${APPA_RUNTIME_URL}/mcp' ;;
+      esac
+    fi
     printf 'appa:\n  Scope: User config (available in all your projects)\n  Status: ✔ Connected\n  Type: http\n  URL: %s\n\nTo remove this server, run: claude mcp remove appa -s user\n' "$url"
     ;;
   "mcp remove appa --scope user")

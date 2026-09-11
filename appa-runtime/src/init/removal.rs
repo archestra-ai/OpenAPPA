@@ -21,9 +21,10 @@ pub(super) const REMOVING: &str = "@echo off\r\necho APPA plugin removal is inco
 /// stay put. The `--config` flag of the bridge stays because the installed
 /// binary invokes it; the profile carries everything removal needs.
 pub fn claude_code_remove() -> Result<(), InitError> {
+    let endpoint = Endpoint::resolve()?;
     let paths = deployment_paths()?;
     let _profile_lock = super::lock_claude_profile(&paths.claude_dir)?;
-    remove_profile(&paths)
+    remove_profile(&paths, &endpoint)
 }
 
 /// What a purge did about the runtime at the deployment's endpoint.
@@ -52,10 +53,10 @@ pub struct Purge {
 /// at the endpoint that is not this user's appa runtime is left and named,
 /// never a reason to keep the rest.
 pub fn claude_code_purge() -> Result<Purge, InitError> {
+    let endpoint = Endpoint::resolve()?;
     let paths = deployment_paths()?;
     let _profile_lock = super::lock_claude_profile(&paths.claude_dir)?;
-    remove_profile(&paths)?;
-    let endpoint = Endpoint::resolve()?;
+    remove_profile(&paths, &endpoint)?;
     let target = RuntimeTarget {
         url: endpoint.url().to_owned(),
         user_owned: false,
@@ -86,13 +87,13 @@ pub fn claude_code_purge() -> Result<Purge, InitError> {
     Ok(Purge { runtime, removed })
 }
 
-fn remove_profile(paths: &DeploymentPaths) -> Result<(), InitError> {
+fn remove_profile(paths: &DeploymentPaths, endpoint: &Endpoint) -> Result<(), InitError> {
     let deployed = paths.data_dir.join("bin").join(appa_filename());
     let launcher = paths.install_dir.join(CLAPPA.0);
     let launcher_before = file_before(&launcher)?;
     verify_launcher(launcher_before.as_deref(), &launcher)?;
     // Everything foreign is refused before anything is removed.
-    let registered = mcp::current()?;
+    let registered = mcp::current(endpoint.url())?;
     skill::verify(&paths.claude_dir)?;
     settings::verify(paths)?;
 

@@ -161,7 +161,7 @@ fn install_claude(origin: &str, endpoint: Endpoint, config: PathBuf) -> Result<S
     // 2. What the profile holds under APPA's names. A server or a skill that
     //    no install wrote is refused here, with the profile untouched.
     progress("reading the Claude Code profile");
-    let registered = mcp::current()?;
+    let registered = mcp::current(endpoint.url())?;
     skill::verify(&paths.claude_dir)?;
     settings::verify(&paths)?;
 

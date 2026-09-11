@@ -304,6 +304,33 @@ fn a_rerun_keeps_the_config_and_rewrites_nothing_it_already_wrote() {
     assert_eq!(calls.matches("mcp remove").count(), 0);
 }
 
+/// `claude mcp get` reports a template without its default. The registration
+/// an install wrote comes back that way and is still the install's own: a
+/// rerun rewrites nothing, and a removal takes it back.
+#[test]
+fn a_registration_reported_without_its_default_is_the_installs_own() {
+    let fixture = Fixture::new();
+    fixture.successful_activation();
+    let written = Installed::of(&fixture);
+
+    let rerun = fixture
+        .activate()
+        .env("FAKE_CLAUDE_RENDERS_TEMPLATE", "1")
+        .output()
+        .expect("appa activates");
+    assert!(rerun.status.success(), "{}", String::from_utf8_lossy(&rerun.stderr));
+    assert_eq!(Installed::of(&fixture), written);
+    assert_eq!(fixture.claude_calls().matches("mcp add-json").count(), 1);
+
+    let removed = fixture
+        .remove()
+        .env("FAKE_CLAUDE_RENDERS_TEMPLATE", "1")
+        .output()
+        .expect("appa removes");
+    assert!(removed.status.success(), "{}", String::from_utf8_lossy(&removed.stderr));
+    assert_eq!(fixture.mcp_registration(), None);
+}
+
 /// A foreign runtime owning the endpoint from a process that is not this
 /// user's appa is refused before the profile is touched at all, so the
 /// installation it would have replaced is still the one that is registered

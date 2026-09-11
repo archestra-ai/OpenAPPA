@@ -16,6 +16,9 @@ pub(super) const SERVER: &str = "appa";
 
 const TEMPLATE_PREFIX: &str = "${APPA_RUNTIME_URL:-";
 const TEMPLATE_SUFFIX: &str = "}/mcp";
+/// The template as `claude mcp get` reports it: without its default. What
+/// Claude stores keeps the default and expands it; only the report drops it.
+const REPORTED_TEMPLATE: &str = "${APPA_RUNTIME_URL}/mcp";
 
 /// What Claude Code reports under APPA's server name.
 pub(super) enum Registered {
@@ -29,7 +32,11 @@ pub(super) enum Registered {
 /// The registration Claude Code reports, whichever scope it comes from: a
 /// project-scoped server of the same name shadows the user scope one, so it is
 /// as much a conflict as a foreign user-scoped one.
-pub(super) fn current() -> Result<Registered, InitError> {
+///
+/// The report drops a template's default, and the production endpoint is the
+/// only default an install writes, so a template reported without one is read
+/// as the template of `endpoint`, this deployment's.
+pub(super) fn current(endpoint: &str) -> Result<Registered, InitError> {
     let output = Command::new("claude")
         .args(["mcp", "get", SERVER])
         .output()
@@ -49,6 +56,11 @@ pub(super) fn current() -> Result<Registered, InitError> {
         command: format!("mcp get {SERVER}"),
         message: "the answer names no URL".to_owned(),
     })?;
+    if url == REPORTED_TEMPLATE {
+        return Ok(Registered::Ours {
+            url: template(endpoint),
+        });
+    }
     if !is_ours(url) {
         return Err(InitError::McpConflict { url: url.to_owned() });
     }
