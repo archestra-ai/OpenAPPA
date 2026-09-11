@@ -158,7 +158,6 @@ A battery that covers a provider with its own directory ships a membership servi
 # batteries/slack/appa.toml
 [[policy.tool]]
 name = "mcp/claude_ai_Slack/slack_read_channel"
-parameters = { type = "object", properties = { channel_id = { type = "string" } }, required = ["channel_id"] }
 delta = { audience = ["@slack:channel/$channel_id"] }
 
 [externals.audience.slack]

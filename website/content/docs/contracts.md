@@ -306,13 +306,11 @@ A selector placeholder names a source collection whose selector takes one or mor
 # Reading a channel restricts the result to that channel's members.
 [[policy.tool]]
 name = "mcp/claude_ai_Slack/slack_read_channel"
-parameters = { type = "object", properties = { channel_id = { type = "string" } }, required = ["channel_id"] }
 delta = { audience = ["@slack:channel/$channel_id"] }
 
 # Posting to a channel requires that its members can already read the data.
 [[policy.tool]]
 name = "mcp/claude_ai_Slack/slack_send_message"
-parameters = { type = "object", properties = { channel_id = { type = "string" }, message = { type = "string" } }, required = ["channel_id", "message"] }
 requires = { trust = "trusted", audience = { contains = ["@slack:channel/$channel_id"] } }
 
 # The service that reads Slack membership declares the channel template.
