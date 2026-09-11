@@ -92,6 +92,29 @@ needed by either execution backend. Actual shell-command coverage still
 depends on enforcing that commands use the isolated backend; recognizing a
 command name does not establish mediation.
 
+### Implemented file-to-file contract
+
+The opt-in file runtime exposes `appa_copy_file(source_path, destination_path)`
+and `appa_move_file(source_path, destination_path)` alongside Read/Write/Edit.
+Both paths must be regular files or an absent destination within the managed
+workspace. Move requires one filesystem. Both tools replace existing destination
+content; its prior version remains in history but does not taint the new bytes.
+
+The destination Label combines the source, receiving trajectory, and tool delta.
+Policy requirements check that combined Label. Constant acknowledgements do not
+carry the payload into the trajectory; reading the destination does. The ledger
+pins both paths under one durable reservation and records the source version as
+a content dependency. Move also records source-path absence. An incomplete or
+inconsistent outcome keeps the reservation and stops further file calls.
+
+Live Claude Code exercises through the installed plugin verified Copy → Move →
+acknowledgement-only Write without narrowing, then Read with narrowing and a
+tainted summary. A second exercise verified overwrite and refusal of same-path
+copy, missing-source move, and a move into `CLAUDE.md`. Unit tests cover raw bytes,
+distinct Labels on identical bytes, source-path reuse, destination requirements,
+and incomplete transfers across ledger reopen. These tests establish the mediated
+tool contract, not native-tool or arbitrary subprocess confinement.
+
 ### Capabilities deferred to an inference proxy
 
 For requests actually routed through it, a proxy could:

@@ -257,7 +257,8 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
             Ok(_) => match runtime.live(&root, &root) {
                 Ok(()) if runtime.file_tracking_enabled() => HookDecision::Context {
                     text: "APPA file-only mode: use appa_read_file(file_path), appa_write_file(file_path, content), \
-                           and appa_edit_file(file_path, old_string, new_string) from this plugin's MCP server. \
+                           appa_edit_file(file_path, old_string, new_string), and \
+                           appa_copy_file/appa_move_file(source_path, destination_path) from this plugin's MCP server. \
                            Paths resolve within the host-configured workspace. ToolSearch and native tools are \
                            not supported in this mode. Native pre-hook observations are not tracked."
                         .into(),

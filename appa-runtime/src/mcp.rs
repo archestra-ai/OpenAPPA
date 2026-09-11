@@ -312,6 +312,38 @@ impl RuntimeTools {
         .await
     }
 
+    #[tool(
+        description = "Copy a tracked regular file without returning its contents. The destination retains the source Label. Replaces an existing destination."
+    )]
+    pub async fn appa_copy_file(
+        &self,
+        Parameters(args): Parameters<crate::api::files::FileTransferArgs>,
+    ) -> CallToolResult {
+        file_result(
+            &self.runtime,
+            self.file_actor.as_ref(),
+            "appa_copy_file",
+            serde_json::to_value(args).expect("file arguments serialize"),
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Move a tracked regular file within the workspace without returning its contents. The destination retains the source Label. Replaces an existing destination."
+    )]
+    pub async fn appa_move_file(
+        &self,
+        Parameters(args): Parameters<crate::api::files::FileTransferArgs>,
+    ) -> CallToolResult {
+        file_result(
+            &self.runtime,
+            self.file_actor.as_ref(),
+            "appa_move_file",
+            serde_json::to_value(args).expect("file arguments serialize"),
+        )
+        .await
+    }
+
     #[tool(description = "Report to the OpenAPPA developers when APPA is malfunctioning, \
                        contradictory, or its blocking feedback or remedies are \
                        confusing and leave no clear way forward. Say in `message` what you were \

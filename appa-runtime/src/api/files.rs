@@ -1,4 +1,4 @@
-//! Opt-in runtime-owned Read/Write/Edit mediation. The host owns trajectory identity.
+//! Opt-in runtime-owned Read/Write/Edit/Copy/Move mediation. The host owns trajectory identity.
 //!
 //! # Experimental: not a supported security boundary
 //!
@@ -19,7 +19,11 @@
 //! pinned call, including any narrowing acceptance, and persists its basis on the dispatch.
 //! Read results combine the source Label with the tool delta. Write publishes the receiving
 //! trajectory Label combined with delta. Edit additionally combines the predecessor Label.
-//! Reported acknowledgements and errors include the predecessor even for Write.
+//! Read/Write/Edit acknowledgements and errors include the predecessor even for Write.
+//! Copy/Move publish the source Label combined with the receiving trajectory and delta.
+//! Their constant acknowledgements and generic errors combine only the trajectory and delta:
+//! the source payload does not enter model context. Destination requirements still check the
+//! copied content Label. Replaced content contributes history, not replacement content taint.
 //! The runtime does not let the model select a clean trajectory or supply a source Label.
 //!
 //! The runtime stages replacement bytes beside the target and atomically replaces it.
@@ -28,6 +32,9 @@
 //! its error text but publishes no version. A changed failure, missing outcome,
 //! or unmatched digest leaves the durable reservation in place, including across restarts.
 //! Further file calls stop. Recovery requires operator reconciliation; there is no reset API.
+//! Copy/Move pin both paths under one reservation. Copy stages raw bytes; Move uses same-filesystem
+//! rename. Success verifies both paths and atomically publishes destination metadata and Move's
+//! source absence in the ledger. Failure must leave both files unchanged or remain quarantined.
 //!
 //! # Enabling the draft
 //!
@@ -42,13 +49,14 @@
 //! are already admitted when the post-tool hook arrives. Native tools remain available
 //! in Claude, but calls reaching APPA are refused in this mode.
 //! `appa claude-files` is a separate constrained test launcher, not required by the plugin.
-//! The policy must declare the three `mcp/plugin_appa-runtime_appa/appa_*_file` tools.
+//! The policy must declare the enabled `mcp/plugin_appa-runtime_appa/appa_*_file` tools.
 //! This option does not enforce OS isolation. Use disposable test fixtures only.
 //!
 //! # Limitations
 //!
 //! The constrained launcher exposes only file tools and the remedy control tool. Bash, other
-//! MCP tools, subagents, rename/delete, links and known execution-control paths are unsupported.
+//! MCP tools, subagents, general rename/delete, links and known execution-control writes are unsupported.
+//! Copy/Move support regular files only; same-path and cross-filesystem moves are refused.
 //! Sanitizer/rewrite policies are unsupported. The two databases are not one atomic transaction:
 //! crash gaps stop progress conservatively and have no automatic recovery. Historical bytes are not retained.
 //! No subprocess, unmediated filesystem, metadata or timing-flow guarantee is made.
@@ -67,7 +75,13 @@ pub(super) struct FileTracking {
     pub ledger: PathBuf,
 }
 
-pub(crate) const TOOLS: [&str; 3] = ["appa_read_file", "appa_write_file", "appa_edit_file"];
+pub(crate) const TOOLS: [&str; 5] = [
+    "appa_read_file",
+    "appa_write_file",
+    "appa_edit_file",
+    "appa_copy_file",
+    "appa_move_file",
+];
 const PREFIX: &str = "mcp/plugin_appa-runtime_appa/";
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -91,6 +105,13 @@ pub(crate) struct EditArgs {
     pub new_string: String,
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FileTransferArgs {
+    pub source_path: String,
+    pub destination_path: String,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum FileReply {
     Value(String),
@@ -106,10 +127,10 @@ pub(super) fn operation(call: &ProposedCall) -> Result<(FileOperation, String), 
         "mcp/plugin_appa-runtime_appa/appa_read_file" => FileOperation::Read,
         "mcp/plugin_appa-runtime_appa/appa_write_file" => FileOperation::Replace,
         "mcp/plugin_appa-runtime_appa/appa_edit_file" => FileOperation::Edit,
+        "mcp/plugin_appa-runtime_appa/appa_copy_file" => FileOperation::Copy,
+        "mcp/plugin_appa-runtime_appa/appa_move_file" => FileOperation::Move,
         _ => {
-            return Err(refused(
-                "file tracking permits only runtime-owned appa_read_file, appa_write_file and appa_edit_file",
-            ));
+            return Err(refused("file tracking permits only runtime-owned file tools"));
         }
     };
     // Validate only argument shape here. In particular, never search old_string before
@@ -118,6 +139,9 @@ pub(super) fn operation(call: &ProposedCall) -> Result<(FileOperation, String), 
         FileOperation::Read => serde_json::from_str::<ReadArgs>(call.arguments.get()).map(|args| args.file_path),
         FileOperation::Replace => serde_json::from_str::<WriteArgs>(call.arguments.get()).map(|args| args.file_path),
         FileOperation::Edit => serde_json::from_str::<EditArgs>(call.arguments.get()).map(|args| args.file_path),
+        FileOperation::Copy | FileOperation::Move => {
+            serde_json::from_str::<FileTransferArgs>(call.arguments.get()).map(|args| args.destination_path)
+        }
     }
     .map_err(refused)?;
     Ok((operation, path))
@@ -147,6 +171,29 @@ pub(super) fn perform(workspace: &Path, call: &ProposedCall) -> Result<String, S
             replace(&path, &content.replacen(&args.old_string, &args.new_string, 1))
                 .map(|()| "file edited".into())
                 .map_err(|error| error.to_string())
+        }
+        FileOperation::Copy | FileOperation::Move => {
+            let args: FileTransferArgs =
+                serde_json::from_str(call.arguments.get()).map_err(|error| error.to_string())?;
+            let result = (|| -> std::io::Result<()> {
+                let parent = path.parent().ok_or_else(|| std::io::Error::other("missing parent"))?;
+                std::fs::create_dir_all(parent)?;
+                let source = workspace.join(args.source_path);
+                if operation == FileOperation::Move {
+                    std::fs::rename(source, &path)?;
+                } else {
+                    let mut input = std::fs::File::open(source)?;
+                    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+                    std::io::copy(&mut input, &mut staged)?;
+                    staged.as_file().sync_all()?;
+                    staged.persist(&path).map_err(|error| error.error)?;
+                }
+                Ok(())
+            })();
+            // No source-derived error body is admitted at the acknowledgement Label.
+            result
+                .map(|()| "file transfer completed".into())
+                .map_err(|_| "file transfer failed".into())
         }
     }
 }
@@ -223,6 +270,24 @@ pub(super) fn basis(pin: FilePin) -> Result<FileBasis, EventError> {
         FileOperation::Read => FileBasis::Read(source.ok_or_else(|| refused("missing read source"))?),
         FileOperation::Edit => FileBasis::Edit(source.ok_or_else(|| refused("missing edit source"))?),
         FileOperation::Replace => FileBasis::Replace(source),
+        FileOperation::Copy | FileOperation::Move => {
+            let input = pin.source.ok_or_else(|| refused("missing transfer source"))?;
+            let input = FileSource {
+                version: input.version.to_string(),
+                digest: input.digest,
+                label: input.label,
+            };
+            match pin.operation {
+                FileOperation::Copy => FileBasis::Copy {
+                    source: input,
+                    replaced: source,
+                },
+                _ => FileBasis::Move {
+                    source: input,
+                    replaced: source,
+                },
+            }
+        }
     })
 }
 
@@ -260,6 +325,12 @@ name = "mcp/plugin_appa-runtime_appa/appa_write_file"
 delta = {}
 [[policy.tool]]
 name = "mcp/plugin_appa-runtime_appa/appa_edit_file"
+delta = {}
+[[policy.tool]]
+name = "mcp/plugin_appa-runtime_appa/appa_copy_file"
+delta = {}
+[[policy.tool]]
+name = "mcp/plugin_appa-runtime_appa/appa_move_file"
 delta = {}
 [externals]
 timeout_ms = 2000
@@ -617,6 +688,104 @@ max_body_bytes = 65536
     }
 
     #[tokio::test]
+    async fn managed_files_copy_move_bypass_payload_admission_but_preserve_labels() {
+        let dir = fixture();
+        std::fs::write(dir.path().join("work/CLAUDE.md"), "host instructions").unwrap();
+        let runtime = open(dir.path(), true);
+        let actor = appa_runtime_api::Actor {
+            root: TrajectoryId("file-transfer-test".into()),
+            child: None,
+        };
+        runtime.create_session(actor.root.clone()).unwrap();
+        for (tool, source, destination) in [
+            ("appa_copy_file", "source.txt", "copied.txt"),
+            ("appa_move_file", "copied.txt", "moved.txt"),
+        ] {
+            assert_eq!(
+                runtime
+                    .execute_bound_file(
+                        &actor,
+                        tool,
+                        serde_json::json!({
+                            "source_path":source, "destination_path":destination
+                        })
+                    )
+                    .await
+                    .unwrap(),
+                FileReply::Value("file transfer completed".into())
+            );
+            assert_eq!(label(&runtime, destination).trust, Trust::new(0));
+            assert_eq!(
+                std::fs::read(dir.path().join("work").join(destination)).unwrap(),
+                b"outside information"
+            );
+        }
+        assert!(!dir.path().join("work/copied.txt").exists());
+        assert!(
+            runtime
+                .inner
+                .files
+                .as_ref()
+                .unwrap()
+                .store
+                .current("copied.txt")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            runtime
+                .execute_bound_file(
+                    &actor,
+                    "appa_write_file",
+                    serde_json::json!({
+                        "file_path":"ack-only.txt", "content":"only observed acknowledgements"
+                    })
+                )
+                .await
+                .unwrap(),
+            FileReply::Value("file written".into())
+        );
+        assert_eq!(label(&runtime, "ack-only.txt").trust, Trust::new(1));
+        drop(runtime);
+        let runtime = open(dir.path(), false);
+        assert!(
+            matches!(runtime.execute_bound_file(&actor, "appa_read_file", serde_json::json!({
+            "file_path":"moved.txt"
+        })).await.unwrap(), FileReply::Failure(message) if message.contains("trusted -> suspicious"))
+        );
+        assert!(
+            runtime
+                .execute_bound_file(
+                    &actor,
+                    "appa_move_file",
+                    serde_json::json!({
+                        "source_path":"moved.txt", "destination_path":"CLAUDE.md"
+                    })
+                )
+                .await
+                .is_err()
+        );
+        assert!(dir.path().join("work/moved.txt").exists());
+        assert!(
+            runtime
+                .execute_bound_file(
+                    &actor,
+                    "appa_move_file",
+                    serde_json::json!({
+                        "source_path":"CLAUDE.md", "destination_path":"stolen-instructions.txt"
+                    })
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("work/CLAUDE.md")).unwrap(),
+            "host instructions"
+        );
+        assert!(!dir.path().join("work/stolen-instructions.txt").exists());
+    }
+
+    #[tokio::test]
     async fn managed_files_read_write_edit_and_restart_use_engine_labels() {
         let dir = fixture();
         let runtime = open(dir.path(), true);
@@ -653,8 +822,8 @@ max_body_bytes = 65536
             .current("clean.txt")
             .unwrap()
             .unwrap();
-        assert_eq!(version.previous, version.edit_dependency);
-        assert!(version.edit_dependency.is_some());
+        assert_eq!(version.previous, version.content_dependency);
+        assert!(version.content_dependency.is_some());
     }
 
     #[tokio::test]
