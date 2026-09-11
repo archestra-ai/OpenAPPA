@@ -483,12 +483,17 @@ impl Installation {
         Ok(destination)
     }
 
-    /// The retained batteries tree of a selection's version.
-    fn version_batteries(&self, selection: &Selection) -> PathBuf {
+    /// The retained marketplace tree of a selection's version.
+    fn version_marketplace(&self, selection: &Selection) -> PathBuf {
         self.state
             .join("generations")
             .join(selection.commit().as_str())
-            .join("marketplace/batteries")
+            .join("marketplace")
+    }
+
+    /// The retained batteries tree of a selection's version.
+    fn version_batteries(&self, selection: &Selection) -> PathBuf {
+        self.version_marketplace(selection).join("batteries")
     }
 
     /// Every include spelled `batteries/<name>/appa.toml` names a battery the
@@ -585,13 +590,7 @@ impl Installation {
             std::str::from_utf8(after).map_err(|error| InstallError::Invalid(error.to_string()))?,
         )?;
         if !selection.plugins.is_empty() || !selection.batteries.is_empty() {
-            selection.validate_packages(
-                &self
-                    .state
-                    .join("generations")
-                    .join(selection.commit().as_str())
-                    .join("marketplace"),
-            )?;
+            selection.validate_packages(&self.version_marketplace(selection))?;
         }
         if optional_bytes(&self.config)?.as_deref() != before {
             return Err(InstallError::Changed(self.config.clone()));
@@ -695,13 +694,9 @@ impl Installation {
                         .map_err(|error| InstallError::Invalid(error.to_string()))?,
                 )?;
                 if !transaction.selection.plugins.is_empty() || !transaction.selection.batteries.is_empty() {
-                    transaction.selection.validate_packages(
-                        &self
-                            .state
-                            .join("generations")
-                            .join(transaction.selection.commit().as_str())
-                            .join("marketplace"),
-                    )?;
+                    transaction
+                        .selection
+                        .validate_packages(&self.version_marketplace(&transaction.selection))?;
                 }
                 crate::config::Config::load(&self.config).map_err(|error| InstallError::Invalid(error.to_string()))?;
                 Ok::<_, InstallError>(())

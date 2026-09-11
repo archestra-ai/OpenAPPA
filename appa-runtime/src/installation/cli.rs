@@ -692,11 +692,11 @@ fn listing(kind: PackageKind, target: &Target) -> Result<(Option<Version>, serde
         .unwrap_or_default();
     // A battery is included by the config's own include list, whoever wrote
     // the line, and stored when the store beside the config holds it.
-    let included = match super::optional_bytes(&path)? {
-        Some(bytes) => {
+    let included = match (kind, super::optional_bytes(&path)?) {
+        (PackageKind::Battery, Some(bytes)) => {
             includes::included(std::str::from_utf8(&bytes).map_err(|error| InstallError::Invalid(error.to_string()))?)?
         }
-        None => Default::default(),
+        _ => Default::default(),
     };
     let store = crate::batteries::store_dir(&path);
     let deployment = match (&selection, path.exists()) {
