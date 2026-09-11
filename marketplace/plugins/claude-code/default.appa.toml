@@ -223,17 +223,14 @@ requires = { audience = { contains = ["public"] } }
 delta = { trust = "suspicious" }
 
 # Reporting to the OpenAPPA team that APPA is in the way. Served by the runtime
-# itself, and gated by the same algebra as any other sink that leaves this
-# machine: the report carries this session's APPA decisions, so a session
-# narrowed by a battery's reads reaches a human review instead of sending. The
-# report never carries a prompt, a tool argument or a tool output — what it may
-# carry is decided by the runtime, not by this rule. Turn the tool off entirely
-# with `[reporting] agent_yell = false` at the end of this file; a deployment
-# that leaves it on and wants a person in the loop can add
-# `requires = { attention = ["hitl"] }` here instead.
+# itself. The rule requires nothing on purpose: a report is wanted from every
+# session, narrowed or not, and the runtime decides what it may carry — this
+# session's APPA decisions and the agent's own words, never a prompt, a tool
+# argument or a tool output. Turn the tool off entirely with
+# `[reporting] agent_yell = false` at the end of this file; a deployment that
+# wants a person in the loop can add `requires = { attention = ["hitl"] }` here.
 [[policy.tool]]
 name = "mcp/appa/yell"
-requires = { audience = { contains = ["public"] } }
 delta = {}
 
 # Compatibility net for tools installed after this policy was generated. Exact

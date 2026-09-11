@@ -47,7 +47,7 @@ use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
 use appa_engine::fact::{
     BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ReturnDerivation, ReturnPolicy, ReturnSanitizer,
 };
-use appa_engine::label::{Audience, Clause, DeclaredAudience, Label, ReaderId, SymbolicAtom, Trust};
+use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, Label, ReaderId, SymbolicAtom, Trust};
 use appa_engine::names::MarkName;
 use appa_engine::plan::{
     ExecutableRemedyPlan, FloorStanding, ForkAdvice, PlanId, PlannedBlock, RemedyPlan, RequiredRuling,
@@ -2798,15 +2798,11 @@ fn stage_feedback(
     naming: ToolNaming,
 ) -> String {
     let mut lines = vec![headline.to_string()];
-    lines.extend(
-        narrowing_feedback(residual, chain)
-            .into_iter()
-            .map(|change| format!("  - {change}")),
-    );
+    lines.push(format!("  - {}", narrowing_feedback(residual, chain)));
     if !offers.is_empty() {
         let control = control_spelling(naming);
         lines.push(String::new());
-        lines.push("To accept this change and receive the output:".to_string());
+        lines.push("To accept this restriction and receive the output:".to_string());
         for offer in offers {
             lines.push(format!("  - {control}(offer_id: \"{}\")", terminal_safe(&offer.0)));
         }
@@ -2933,17 +2929,12 @@ fn gap_text(gap: &appa_engine::check::Gap, chain: &TrustChain) -> String {
                 trust_feedback(*required, chain),
             )
         }
-        Gap::Includes { recipients } => match recipients {
-            DeclaredAudience::Public => "the readers are not the public audience".to_string(),
-            DeclaredAudience::Union(clause) => {
-                format!(
-                    "the readers do not include {} required recipient(s)",
-                    clause_size(clause)
-                )
-            }
-        },
+        Gap::Includes { recipients } => format!(
+            "this destination requires that what you produce may go to {}, and this session's outputs may not",
+            declared_words(recipients)
+        ),
         // Count only: a cap may read a directory group's members.
-        Gap::Cap { cap } => format!("the committed readers exceed the cap of {}", declared_count(cap)),
+        Gap::Cap { cap } => format!("the committed readers exceed the cap of {}", declared_words(cap)),
         Gap::Prior(effect) => format!("requires a prior {} effect", effect.as_str()),
         Gap::NoPrior(effect) => format!("forbidden after a {} effect", effect.as_str()),
         Gap::Attention(mark) => format!("requires attention: {}", mark.as_str()),
@@ -2963,57 +2954,72 @@ fn trust_feedback(trust: Trust, chain: &TrustChain) -> String {
     )
 }
 
-fn narrowing_feedback(narrowing: &appa_engine::check::Narrowing, chain: &TrustChain) -> Vec<String> {
-    let mut changes = Vec::new();
-    if narrowing.from.trust != narrowing.to.trust {
-        changes.push(format!(
-            "session trust would fall: {} -> {}",
-            trust_feedback(narrowing.from.trust, chain),
-            trust_feedback(narrowing.to.trust, chain),
-        ));
-    }
+/// The narrowing as the agent experiences it: a restriction on what the session produces
+/// from now on, spelled per dimension that changes.
+fn narrowing_feedback(narrowing: &appa_engine::check::Narrowing, chain: &TrustChain) -> String {
+    let mut text = String::from(
+        "its result comes with a restriction this session does not have yet. If you take the result in, the \
+         restriction applies to everything this session produces afterwards, and tools that send or publish \
+         check it:",
+    );
     if narrowing.from.audience != narrowing.to.audience {
-        changes.push(format!(
-            "allowed readers would narrow: {} -> {}",
-            audience_count(&narrowing.from.audience),
-            audience_count(&narrowing.to.audience),
+        text.push_str(&format!(
+            "\n      readers: what you produce may go to {} only (now: {})",
+            audience_words(&narrowing.to.audience),
+            audience_words(&narrowing.from.audience),
         ));
     }
-    changes
+    if narrowing.from.trust != narrowing.to.trust {
+        text.push_str(&format!(
+            "\n      trust: what you produce is treated as {} (now: {})",
+            trust_feedback(narrowing.to.trust, chain),
+            trust_feedback(narrowing.from.trust, chain),
+        ));
+    }
+    text
 }
 
-fn audience_count(audience: &Audience) -> String {
+fn audience_words(audience: &Audience) -> String {
     if audience.is_public() {
-        return "public".to_string();
+        return "anyone".to_string();
     }
-    let clauses = audience.clauses().count();
-    if clauses > 1 {
-        return format!("an intersection of {clauses} audiences");
-    }
-    let clause = audience.clauses().next().expect("a non-public audience holds a clause");
-    clause_count(clause)
-}
-
-/// Summarizes a clause as atom counts only.
-fn clause_count(clause: &Clause) -> String {
-    let symbolic = clause.groups().count() + usize::from(clause.chain().is_some());
-    match (clause.readers().len(), symbolic) {
-        (0, 0) => "nobody".to_string(),
-        (1, 0) => "1 reader".to_string(),
-        (count, 0) => format!("{count} readers"),
-        (0, _) => "a symbolic audience".to_string(),
-        (count, _) => format!("a symbolic audience and {count} reader(s)"),
+    let clauses: Vec<String> = audience.clauses().map(clause_words).collect();
+    match clauses.as_slice() {
+        [one] => one.clone(),
+        many => format!("people in each of these {} audiences: {}", many.len(), many.join("; ")),
     }
 }
 
-fn clause_size(clause: &Clause) -> usize {
-    clause.readers().len() + clause.groups().count() + usize::from(clause.chain().is_some())
+/// Spells a clause for the agent. The built-in levels are fixed vocabulary and are named; the
+/// deployment's groups and people are counted, because their identities are the policy's to keep.
+fn clause_words(clause: &Clause) -> String {
+    let mut parts = Vec::new();
+    match clause.chain() {
+        Some(ChainAudience::Internal) => parts.push("people inside the organization".to_string()),
+        Some(ChainAudience::Self_) => parts.push("the operator of this session".to_string()),
+        None => {}
+    }
+    parts.extend(counted(clause.groups().count(), "named group", "named groups"));
+    parts.extend(counted(clause.readers().len(), "named person", "named people"));
+    match parts.as_slice() {
+        [] => "nobody".to_string(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    }
 }
 
-fn declared_count(audience: &DeclaredAudience) -> String {
+fn counted(count: usize, singular: &str, plural: &str) -> Option<String> {
+    match count {
+        0 => None,
+        1 => Some(format!("1 {singular}")),
+        _ => Some(format!("{count} {plural}")),
+    }
+}
+
+fn declared_words(audience: &DeclaredAudience) -> String {
     match audience {
-        DeclaredAudience::Public => "public".to_string(),
-        DeclaredAudience::Union(clause) => clause_count(clause),
+        DeclaredAudience::Public => "anyone".to_string(),
+        DeclaredAudience::Union(clause) => clause_words(clause),
     }
 }
 
@@ -3141,8 +3147,14 @@ fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId, spelling: &Retu
         (false, _, Some(sanitizer)) => {
             format!("Use sanitizer {}'s result", terminal_safe(sanitizer.as_str()))
         }
-        (true, true, None) => "Submit for approval and accept this change for the rest of this session".to_string(),
-        (false, true, None) => "Accept this change for the rest of this session".to_string(),
+        (true, true, None) => {
+            "If the rest of the task can still be delivered under this restriction, submit for approval and accept \
+             it, then call again"
+                .to_string()
+        }
+        (false, true, None) => {
+            "If the rest of the task can still be delivered under this restriction, accept it and call again".to_string()
+        }
         (true, false, None) => "Submit for approval".to_string(),
         (false, false, None) => "Apply the offered remedy".to_string(),
     };
@@ -3230,7 +3242,7 @@ fn block_feedback(
         );
     }
     if let Some(narrowing) = &planned.raw.narrowing {
-        reasons.extend(narrowing_feedback(narrowing, chain));
+        reasons.push(narrowing_feedback(narrowing, chain));
     }
     if planned.plans.iter().any(|plan| match plan {
         RemedyPlan::Executable(plan) => plan.return_step().is_some(),
@@ -3243,27 +3255,42 @@ fn block_feedback(
         ));
     }
 
+    let remedies = remedy_lines(planned, offers, &ReturnSpelling::of(chain, bounds), chain, naming);
+    // Without a remedy the call does not run in this session; "yet" would promise otherwise.
+    let yet = if remedies.is_empty() { "" } else { " yet" };
     let mut lines = vec![
-        "[appa] Blocked: this call cannot run yet.".to_string(),
+        format!("[appa] Blocked: this call cannot run{yet}."),
         String::new(),
         "Why:".to_string(),
     ];
     lines.extend(reasons.into_iter().map(|reason| format!("  - {reason}")));
 
-    let remedies = remedy_lines(planned, offers, &ReturnSpelling::of(chain, bounds), chain, naming);
+    // Delegating to keep this session as it is stands beside accepting the restriction as one
+    // choice of two, so it is listed under the same heading rather than as an afterthought.
+    let delegate_is_a_choice = !remedies.is_empty()
+        && matches!(
+            planned.fork_advice,
+            Some(ForkAdvice::Narrowing {
+                standing: FloorStanding::Unbound,
+                ..
+            })
+        );
     if !remedies.is_empty() {
         lines.push(String::new());
-        lines.push("Continue:".to_string());
+        let heading = if delegate_is_a_choice { "Continue, one of:" } else { "Continue:" };
+        lines.push(heading.to_string());
         lines.extend(remedies);
     }
     if let Some(advice) = planned.fork_advice {
         let remedies_required = !planned.raw.requirement_gaps.is_empty();
-        lines.push(String::new());
-        lines.push(fork_heading(advice).to_string());
-        lines.push(format!(
-            "  {}",
-            fork_advice_text(advice, remedies_required).replace('\n', "\n  ")
-        ));
+        let text = fork_advice_text(advice, remedies_required);
+        if delegate_is_a_choice {
+            lines.push(format!("  - {}", text.replace('\n', "\n    ")));
+        } else {
+            lines.push(String::new());
+            lines.push(fork_heading(advice).to_string());
+            lines.push(format!("  {}", text.replace('\n', "\n  ")));
+        }
     }
     lines.join("\n")
 }
@@ -3304,14 +3331,14 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
     };
     match (standing, sanitized_return) {
         (FloorStanding::Unbound, true) => format!(
-            "If a child-session or subagent tool is available, delegate {delegated} there.\nFinish there \
-             by returning nothing, or return only a sanitized derivation. Returning the raw value applies the same \
-             change to this session."
+            "If later work must still reach a destination that would refuse it, keep this session as it is: run \
+             {delegated} in a child session or subagent, if one is available.\nReturn nothing from it, or only a \
+             sanitized derivation; anything else returned brings the restriction with it."
         ),
         (FloorStanding::Unbound, false) => format!(
-            "If a child-session or subagent tool is available, delegate {delegated} there.\nNo \
-             registered return sanitizer carries this change back without applying it here, so finish there by \
-             returning nothing: a returned value applies the same change to this session."
+            "If later work must still reach a destination that would refuse it, keep this session as it is: run \
+             {delegated} in a child session or subagent, if one is available, and return nothing from it.\nAnything \
+             returned brings the restriction with it."
         ),
         (FloorStanding::Within, true) => format!(
             "This session is a subagent, and the floor its parent declared allows this change: accept it here.\nTo \
