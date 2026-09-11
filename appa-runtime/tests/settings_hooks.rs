@@ -185,14 +185,18 @@ fn activation_starts_the_deployed_runtime_through_its_own_binary() {
         fixture.config.join("appa.toml").to_str(),
         "the runtime serves the deployment's config"
     );
-    let executable = Command::new("ps")
-        .args(["-o", "comm=", "-p", &pid.to_string()])
+    // The argument line carries the path the process was started from on
+    // Linux and macOS alike; `comm` is the basename on Linux.
+    let arguments = Command::new("ps")
+        .args(["-o", "args=", "-p", &pid.to_string()])
         .output()
         .expect("ps runs");
-    assert_eq!(
-        String::from_utf8_lossy(&executable.stdout).trim(),
-        fixture.deployed_binary().to_str().unwrap(),
-        "the runtime runs from the deployed binary"
+    let arguments = String::from_utf8_lossy(&arguments.stdout);
+    assert!(
+        arguments
+            .trim_start()
+            .starts_with(fixture.deployed_binary().to_str().unwrap()),
+        "the runtime runs from the deployed binary: {arguments:?}"
     );
     assert!(fixture.data.join("appa.db").is_file());
 
