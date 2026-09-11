@@ -42,7 +42,7 @@ export OPENAI_API_KEY="your-api-key"
 Deploy the demo:
 
 ```sh
-APPA_VERSION=0.17.1 # x-release-please-version
+APPA_VERSION=0.19.0 # x-release-please-version
 KAGENT_VERSION=0.9.12
 KAGENT_NAMESPACE=kagent
 
@@ -106,6 +106,8 @@ helm upgrade --install appa-runtime \
   --version "$APPA_VERSION" -n "$KAGENT_NAMESPACE" \
   --set persistence.enabled=false \
   --set-file config.contents="$DEMO_POLICY" \
+  --set-string env.GITHUB_API_URL="http://demo-tools.$KAGENT_NAMESPACE.svc.cluster.local:3000" \
+  --set-string env.APPA_PROVIDER_GITHUB_TOKEN=demo \
   --force-conflicts --wait --timeout 10m
 
 kubectl rollout status deployment/appa-runtime -n "$KAGENT_NAMESPACE" --timeout=5m
@@ -192,7 +194,7 @@ If you already run kagent with your own agents, use `appa-guide` to configure po
 Update the controller with the `appa-kagent-adk` plugin image and deploy `appa-runtime`:
 
 ```sh
-APPA_VERSION=0.17.1 # x-release-please-version
+APPA_VERSION=0.19.0 # x-release-please-version
 KAGENT_VERSION=0.9.12
 KAGENT_NAMESPACE=kagent
 RUNTIME_NAMESPACE=appa

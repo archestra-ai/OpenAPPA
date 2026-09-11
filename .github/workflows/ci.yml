@@ -394,6 +394,12 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace --locked
 
+      - name: Setup uv for OTLP verification
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+
+      - name: Verify runtime OTLP export and shutdown
+        run: uv run scripts/verify-runtime-telemetry.py target/debug/appa
+
   # Stable-named gate so a required check named "Rust Checks" still
   # covers the split jobs. Both jobs skipped is success: their paths
   # did not change.

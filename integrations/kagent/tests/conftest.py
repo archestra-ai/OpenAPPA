@@ -561,7 +561,7 @@ def _wait_tcp(host: str, port: int, timeout: float = 60.0) -> None:
 
 
 @contextlib.contextmanager
-def _process(command: list[str], log: Path) -> Iterator[subprocess.Popen]:
+def _process(command: list[str], log: Path, env: dict[str, str] | None = None) -> Iterator[subprocess.Popen]:
     """Run one component for the session, with its output on disk.
 
     A failing suite is read from these logs — the runtime's decision
@@ -569,7 +569,7 @@ def _process(command: list[str], log: Path) -> Iterator[subprocess.Popen]:
     when every case passes.
     """
     with log.open("w") as handle:
-        process = subprocess.Popen(command, stdout=handle, stderr=subprocess.STDOUT)
+        process = subprocess.Popen(command, stdout=handle, stderr=subprocess.STDOUT, env=env)
         try:
             yield process
         finally:
@@ -696,7 +696,9 @@ def runtime_url(workdir, mock_port, demo_tools_url) -> Iterator[str]:
         f"127.0.0.1:{port}",
         "-v",
     ]
-    with _process(command, workdir / "runtime.log"):
+    # The GitHub battery's annotators ask the demo toolset, not GitHub, for visibility.
+    env = dict(os.environ, GITHUB_API_URL=demo_tools_url.removesuffix("/mcp"), APPA_PROVIDER_GITHUB_TOKEN="integration")
+    with _process(command, workdir / "runtime.log", env):
         url = f"http://127.0.0.1:{port}"
         _wait_http(f"{url}/health")
         yield url

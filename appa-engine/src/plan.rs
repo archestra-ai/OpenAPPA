@@ -1216,7 +1216,9 @@ pub(crate) fn block_atoms(
     }
     if has(|gap| matches!(gap, Gap::Cap { .. })) {
         for tool in registry.tools().filter_map(crate::contract::ToolDeclaration::declared) {
-            if let Some(audience) = &tool.delta.audience {
+            // A placeholder delta names its collection only per call; a cap comparison against
+            // it waits for that call.
+            if let Some(crate::contract::DeltaAudience::Static(audience)) = &tool.delta.audience {
                 atoms.extend(audience.needed_atoms(providers));
             }
         }
@@ -1313,7 +1315,9 @@ pub(crate) fn direct_clears(
     needs: &mut NeededAtoms,
 ) -> Vec<Gap> {
     let has_cap = gaps.iter().any(|gap| matches!(gap, Gap::Cap { .. }));
-    let committed = has_cap.then(|| check::committed_label(tool, current));
+    // No call is at hand here, so a placeholder delta commits no label and clears no cap.
+    let committed =
+        (has_cap && tool.delta.selector_placeholder().is_none()).then(|| check::committed_label(tool, current));
     gaps.iter()
         .filter(|gap| match (gap, &committed) {
             (Gap::Prior(kind), _) => tool.emits.contains(kind),
@@ -1339,8 +1343,8 @@ mod tests {
     use crate::authority::{Hint, Mandate, Sanitizer, SanitizerPoints, Scope};
     use crate::check::CheckOutcome;
     use crate::contract::{
-        AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, PinnedAnnotation, ProducedAnnotation,
-        RecipientSpec, Requires, ToolAnnotation, ToolDeclaration,
+        AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, LabelRequirements, PinnedAnnotation,
+        ProducedAnnotation, RecipientSpec, Requires, ToolAnnotation, ToolDeclaration,
     };
     use crate::fact::{EffectSet, Fact};
     use crate::label::DeclaredAudience;
@@ -1621,14 +1625,14 @@ mod tests {
             "crm",
             Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::literal(internal())),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(internal()))),
             },
         );
         let tracker = reader(
             "tracker",
             Delta {
                 trust: Some(SUSPICIOUS),
-                audience: Some(DeclaredAudience::literal(internal())),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(internal()))),
             },
         );
         let registry = build(RegistryConfig {
@@ -1682,7 +1686,7 @@ mod tests {
             "lookup",
             Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::literal(internal())),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(internal()))),
             },
         );
         pinned.parameters = crate::params::test_string_argument_schema("room");
@@ -1748,7 +1752,7 @@ mod tests {
             "publish",
             Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::literal(internal())),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(internal()))),
             },
         );
         publish.requires.attention = vec![MarkName::new("signoff")];
@@ -1890,7 +1894,7 @@ mod tests {
             tags: vec![],
             delta: Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::literal(to)),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(to))),
             },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
@@ -2023,7 +2027,7 @@ mod tests {
             tags: vec![],
             delta: Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::literal(a.clone())),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(a.clone()))),
             },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("backup.done"), EffectKind::new("receipt")]).unwrap(),
@@ -2319,7 +2323,7 @@ mod tests {
             audience: crate::audience::AudienceConfig {
                 sources: vec![crate::audience::SourceRegistration {
                     provider: "slack".to_string(),
-                    templates: vec![crate::audience::SelectorTemplate::new("user-group/<handle>")],
+                    templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
                 }],
                 groups: vec![crate::audience::NamedAudience {
                     name: crate::names::GroupName::new("team"),
@@ -2438,7 +2442,7 @@ mod tests {
                         &[],
                         Delta {
                             trust: None,
-                            audience: Some(group("press")),
+                            audience: Some(DeltaAudience::Static(group("press"))),
                         },
                     ),
                 ]),
@@ -2454,7 +2458,7 @@ mod tests {
                 audience: crate::audience::AudienceConfig {
                     sources: vec![crate::audience::SourceRegistration {
                         provider: "slack".to_string(),
-                        templates: vec![crate::audience::SelectorTemplate::new("user-group/<handle>")],
+                        templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
                     }],
                     groups: vec![named("team"), named("legal"), named("press")],
                     ..crate::audience::AudienceConfig::default()
@@ -2661,7 +2665,7 @@ mod tests {
             audience: crate::audience::AudienceConfig {
                 sources: vec![crate::audience::SourceRegistration {
                     provider: "slack".to_string(),
-                    templates: vec![crate::audience::SelectorTemplate::new("user-group/<handle>")],
+                    templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
                 }],
                 groups: vec![crate::audience::NamedAudience {
                     name: crate::names::GroupName::new("team"),
@@ -3403,7 +3407,9 @@ mod tests {
             tags: vec![],
             delta: Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::restricted([ReaderId::new("insider")])),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                    "insider",
+                )]))),
             },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
@@ -3816,7 +3822,8 @@ mod tests {
             for tool in registry.tools().filter_map(crate::contract::ToolDeclaration::declared) {
                 let narrowed = match &tool.delta {
                     Delta {
-                        audience: Some(delta), ..
+                        audience: Some(DeltaAudience::Static(delta)),
+                        ..
                     } => Some(intersect(&current.audience, &Audience::of_declared(delta))),
                     _ => None,
                 };
@@ -3889,7 +3896,10 @@ mod tests {
             prop::option::of((0u8..2).prop_map(Trust::new)),
             prop::option::of(small_audience().prop_map(DeclaredAudience::literal)),
         )
-            .prop_map(|(trust, audience)| Delta { trust, audience })
+            .prop_map(|(trust, audience)| Delta {
+                trust,
+                audience: audience.map(DeltaAudience::Static),
+            })
     }
 
     fn an_includes() -> impl Strategy<Value = Option<AudienceRequirement>> {
@@ -4252,7 +4262,10 @@ mod tests {
                 .filter(|candidate| {
                     candidate.emits.iter().any(|kind| priors.contains(kind))
                         || (has_cap
-                            && matches!(candidate.delta.audience.as_ref(), Some(DeclaredAudience::Union(_))))
+                            && matches!(
+                                candidate.delta.audience.as_ref(),
+                                Some(DeltaAudience::Static(DeclaredAudience::Union(_)) | DeltaAudience::Selector(_))
+                            ))
                 })
                 .count() as u128;
             bound = bound.saturating_add(redispatches);

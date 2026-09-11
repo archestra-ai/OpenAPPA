@@ -78,6 +78,11 @@ pub struct Battery {
     /// product names each of them.
     pub namespaces: Vec<Namespace>,
     pub helpers: Vec<RelativePath>,
+    /// The audience source providers the policy binds under
+    /// `[externals.audience.<provider>]`, read from the policy by
+    /// `validate_package` and empty from the manifest alone. A marketplace
+    /// gives each provider one owner, as it does each namespace.
+    pub audiences: Vec<String>,
 }
 
 /// A plugin package, with installation fields specific to its host.
@@ -254,6 +259,7 @@ impl RawBattery {
             hosts,
             namespaces,
             helpers,
+            audiences: Vec::new(),
         })
     }
 }
@@ -359,6 +365,7 @@ mod tests {
                 policy: RelativePath::parse("appa.toml").unwrap(),
                 hosts: vec![Host::ClaudeCode],
                 namespaces: vec![Namespace::parse("github").unwrap()],
+                audiences: vec![],
                 helpers: vec![RelativePath::parse("audience-source.py").unwrap()],
             }
         );

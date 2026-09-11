@@ -295,7 +295,7 @@ mod tests {
 
     use super::*;
     use crate::authority::{DeclaredTransition, Sanitizer, SanitizerPoints, Scope};
-    use crate::contract::{Delta, ToolAnnotation, ToolDeclaration};
+    use crate::contract::{Delta, DeltaAudience, ToolAnnotation, ToolDeclaration};
     use crate::fact::EffectKind;
     use crate::label::DeclaredAudience;
     use crate::label::{Audience, ReaderId, Trust};
@@ -344,7 +344,7 @@ mod tests {
             tags: vec![],
             delta: Delta {
                 trust: Some(SUSPICIOUS),
-                audience: Some(DeclaredAudience::literal(internal())),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(internal()))),
             },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
@@ -382,7 +382,7 @@ mod tests {
             tags: vec![],
             delta: Delta {
                 trust: Some(SUSPICIOUS),
-                audience: Some(DeclaredAudience::literal(internal())),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(internal()))),
             },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
@@ -394,7 +394,7 @@ mod tests {
             tags: vec![],
             delta: Delta {
                 trust: Some(SUSPICIOUS),
-                audience: Some(DeclaredAudience::literal(internal())),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(internal()))),
             },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
@@ -778,7 +778,7 @@ mod tests {
             tags: vec![],
             delta: Delta {
                 trust: Some(SUSPICIOUS),
-                audience: Some(DeclaredAudience::literal(internal())),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(internal()))),
             },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("read")]).unwrap(),
@@ -807,7 +807,7 @@ mod tests {
             audience: crate::audience::AudienceConfig {
                 sources: vec![crate::audience::SourceRegistration {
                     provider: "slack".to_string(),
-                    templates: vec![crate::audience::SelectorTemplate::new("user-group/<handle>")],
+                    templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
                 }],
                 groups: vec![crate::audience::NamedAudience {
                     name: crate::names::GroupName::new("team"),

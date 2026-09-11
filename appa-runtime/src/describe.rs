@@ -228,6 +228,14 @@ impl Bindings<'_> {
             Bindings::Raw(root) => crate::config::lookup_targets_of(root),
         }
     }
+
+    /// The audience sources the bindings declare, from the loaded configuration or the raw table.
+    fn source_registrations(self) -> Result<Vec<appa_engine::audience::SourceRegistration>, String> {
+        match self {
+            Bindings::Loaded(externals) => Ok(externals.source_registrations()),
+            Bindings::Raw(root) => crate::config::source_registrations_of(root).map_err(|error| error.to_string()),
+        }
+    }
 }
 
 /// The declared audience configuration, with each source's binding status.
@@ -344,7 +352,8 @@ fn describe_policy_value(policy_value: &toml::Value, bindings: Bindings<'_>, out
     let compiled = toml::to_string(policy_value)
         .map_err(|error| error.to_string())
         .and_then(|source| {
-            appa_policy::Config::from_toml_str_routed(&source, bindings.lookup_targets())
+            let sources = bindings.source_registrations()?;
+            appa_policy::Config::from_toml_str_routed(&source, bindings.lookup_targets(), sources)
                 .map_err(|error| error.to_string())
         });
     out.audience = match compiled {
@@ -598,7 +607,7 @@ mod tests {
         let root = directory.path().join("appa.toml");
         std::fs::write(
             &root,
-            "include = [\"batteries/mail/appa.toml\"]\n[policy]\nversion = 2\n[policy.audience]\nself = [\"slack:viewer\"]\n[policy.audience.group.finance]\nwithin = \"internal\"\nfrom = [\"slack:user-group/finance\"]\n[[policy.authority]]\nname = \"operator\"\n[policy.authority.permits]\ntrust_below = \"trusted\"\naudience_missing = [\"public\"]\neffects_containing = [\"mail.sent\"]\nattention = [\"hitl\"]\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n[externals.authorities.operator]\nbuiltin = \"hitl\"\n[externals.audience.slack]\ncommand = [\"true\"]\nlookup = \"people\"\n[externals.audience.people]\nreaders = { \"slack:U1\" = \"alice@corp.example\" }\n",
+            "include = [\"batteries/mail/appa.toml\"]\n[policy]\nversion = 2\n[policy.audience]\nself = [\"slack:viewer\"]\n[policy.audience.group.finance]\nwithin = \"internal\"\nfrom = [\"slack:user-group/finance\"]\n[[policy.authority]]\nname = \"operator\"\n[policy.authority.permits]\ntrust_below = \"trusted\"\naudience_missing = [\"public\"]\neffects_containing = [\"mail.sent\"]\nattention = [\"hitl\"]\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n[externals.authorities.operator]\nbuiltin = \"hitl\"\n[externals.audience.slack]\ncommand = [\"true\"]\nlookup = \"people\"\nselectors = [{ template = \"viewer\", feeds = \"self\" }, { template = \"full-members\", feeds = \"internal\" }, { template = \"user-group/<handle>\" }]\n[externals.audience.people]\nreaders = { \"slack:U1\" = \"alice@corp.example\" }\n",
         )
         .expect("root config");
 

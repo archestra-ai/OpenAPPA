@@ -1,0 +1,611 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "OpenAPPA runtime hook decisions with trace-correlated logs, bounded metrics, and per-Agent-run drill-down.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 0
+      },
+      "id": 7,
+      "options": {
+        "code": {
+          "language": "plaintext",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        },
+        "content": "<a href=\"https://www.openappa.com\" target=\"_blank\" rel=\"noreferrer\" aria-label=\"OpenAPPA\" style=\"display:flex;align-items:center;justify-content:center;height:100%;padding:14px;background:#faf9f7;border:1px solid #dedbd5;border-radius:8px;text-decoration:none\"><img src=\"data:image/png;base64,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\" alt=\"OpenAPPA\" width=\"320\" height=\"55\" style=\"display:block;width:min(100%,320px);height:auto;image-rendering:pixelated\"></a>",
+        "mode": "html"
+      },
+      "transparent": true,
+      "type": "text"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${traces}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 4,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["sum"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "limit": 20,
+          "query": "{ resource.service.name = \"appa-runtime\" && resource.archestra.agent_run.id =~ \"$agentRun\" && span.appa.decision =~ \"$decision\" } | count_over_time()",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Hook decisions",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${traces}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 9,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["sum"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "limit": 20,
+          "query": "{ resource.service.name = \"appa-runtime\" && resource.archestra.agent_run.id =~ \"$agentRun\" && span.appa.decision =~ \"deny|block\" } | count_over_time()",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Policy stops",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${traces}"
+      },
+      "description": "Hook requests OpenAPPA could not parse or safely evaluate. Any non-zero value needs investigation.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 14,
+        "y": 0
+      },
+      "id": 8,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["sum"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "limit": 20,
+          "query": "{ resource.service.name = \"appa-runtime\" && resource.archestra.agent_run.id =~ \"$agentRun\" && span.appa.decision = \"refuse\" } | count_over_time()",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Runtime refusals",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${metrics}"
+      },
+      "description": "Seconds since the newest reporting runtime started. No signal means telemetry has gone stale or no runtime is exporting.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "mappings": [
+            {
+              "options": {
+                "-1": {
+                  "color": "red",
+                  "text": "No signal"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 19,
+        "y": 0
+      },
+      "id": 10,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "max(appa_runtime_uptime_seconds) or vector(-1)",
+          "instant": true,
+          "legendFormat": "Runtime uptime",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Runtime uptime",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${traces}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "decisions / interval",
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "calcs": ["sum"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "limit": 20,
+          "query": "{ resource.service.name = \"appa-runtime\" && resource.archestra.agent_run.id =~ \"$agentRun\" && span.appa.decision =~ \"$decision\" } | count_over_time() by (span.appa.decision)",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Decision rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${traces}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "seconds",
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 12,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "calcs": ["lastNotNull", "max"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "limit": 20,
+          "query": "{ resource.service.name = \"appa-runtime\" && resource.archestra.agent_run.id =~ \"$agentRun\" && span.appa.decision =~ \"$decision\" } | quantile_over_time(span:duration, .95) by (span.appa.decision)",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Hook latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${traces}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(Trace ID|traceID)$"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "targetBlank": false,
+                    "title": "Inspect this trace",
+                    "url": "/d/openappa-runtime/openappa-runtime?var-traceId=${__value.raw}&var-agentRun=${agentRun}&var-decision=${decision}&var-trajectory=${trajectory}&var-metrics=${metrics}&var-traces=${traces}&var-logs=${logs}&${__url_time_range}"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "id": 5,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "limit": 100,
+          "query": "{ resource.service.name = \"appa-runtime\" && resource.archestra.agent_run.id =~ \"$agentRun\" && span.appa.decision =~ \"$decision\" && span.appa.trajectory.id =~ \"$trajectory\" } | select(resource.archestra.agent_run.id, span.appa.trajectory.id, span.appa.hook.event, span.appa.decision, span.gen_ai.tool.name)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "traces"
+        }
+      ],
+      "title": "Decision traces — select a trace for its spans and correlated logs",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "${logs}"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "id": 6,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "direction": "backward",
+          "editorMode": "code",
+          "expr": "{service_name=\"appa-runtime\"} | trace_id=~`$traceId` | appa_decision=~`$decision` | appa_trajectory_id=~`$trajectory`",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Correlated decision logs — trace $traceId",
+      "type": "logs"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${traces}"
+      },
+      "description": "Trace waterfall for the selected decision. Click a Trace ID above to load it here and filter the correlated logs. Expand the appa.hook span to inspect gen_ai.tool.call.arguments when sensitive-content capture is enabled.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 20,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "id": 9,
+      "options": {},
+      "targets": [
+        {
+          "query": "${traceId}",
+          "queryType": "traceql",
+          "refId": "A"
+        }
+      ],
+      "title": "Selected trace — $traceId",
+      "type": "traces"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 41,
+  "tags": ["openappa", "security", "opentelemetry"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "label": "Metrics",
+        "name": "metrics",
+        "query": "prometheus",
+        "refresh": 1,
+        "type": "datasource"
+      },
+      {
+        "current": {},
+        "label": "Traces",
+        "name": "traces",
+        "query": "tempo",
+        "refresh": 1,
+        "type": "datasource"
+      },
+      {
+        "current": {},
+        "label": "Logs",
+        "name": "logs",
+        "query": "loki",
+        "refresh": 1,
+        "type": "datasource"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "includeAll": true,
+        "label": "Decision",
+        "multi": true,
+        "name": "decision",
+        "options": [],
+        "query": "ack,allow,deny,block,refuse,pass_control,replace_output,replace_child_return",
+        "type": "custom"
+      },
+      {
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "description": "Platform Agent run UUID from /chat/runs/:id. This filters traces and their correlated logs without adding an unbounded metrics label.",
+        "label": "Agent run",
+        "name": "agentRun",
+        "query": ".*",
+        "type": "textbox"
+      },
+      {
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "label": "Trajectory regex",
+        "name": "trajectory",
+        "query": ".*",
+        "type": "textbox"
+      },
+      {
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "description": "Click a Trace ID in the decision table to load its waterfall and correlated logs.",
+        "label": "Trace ID",
+        "name": "traceId",
+        "query": ".*",
+        "type": "textbox"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "OpenAPPA Runtime",
+  "uid": "openappa-runtime",
+  "version": 1,
+  "weekStart": ""
+}

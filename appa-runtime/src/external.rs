@@ -913,6 +913,8 @@ mod tests {
         AuthorityArtifact, AuthorityDeclaration, DeclaredPermits, DeclaredSanitizerTransition, MembersAnswer,
         SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
     };
+    use appa_engine::audience::DeclaredTemplate;
+    use appa_engine::label::ChainAudience;
 
     #[cfg(unix)]
     fn process_environment() -> &'static tokio::sync::Mutex<()> {
@@ -971,6 +973,10 @@ mod tests {
                 let binding = AudienceBinding {
                     implementation: AudienceImplementation::Resolver(Endpoint::new(url.to_string(), None)),
                     lookup: None,
+                    templates: vec![
+                        DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)),
+                        DeclaredTemplate::new("full-members", Some(ChainAudience::Internal)),
+                    ],
                 };
                 ("slack".to_string(), binding)
             })
@@ -1802,6 +1808,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                         .collect(),
                 ),
                 lookup: None,
+                templates: vec![],
             },
         );
         let services = services_over(config);

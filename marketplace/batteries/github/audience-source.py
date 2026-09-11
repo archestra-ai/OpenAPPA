@@ -1,10 +1,15 @@
 """The github audience source: one consult in, one answer out.
 
-Serves the stock `github` selector catalog over the GitHub REST API:
+Serves these selector templates over the GitHub REST API:
 
   viewer                  the token's own reader
   org/<org>/members       one explicitly selected organization's members
   org/<org>/team/<team>   one organization team, by slug
+  repo/<owner>/<repo>/collaborators
+                          one repository's collaborators: direct and
+                          outside collaborators, and for an organization
+                          repository the members who reach it through a
+                          team or the organization's base permission
 
 and the member lookup that resolves one `github:<login>` member to its
 reader.
@@ -19,7 +24,11 @@ publishes none stays `github:<login>` and merges with no other
 provider's reader.
 
 Credentials come from APPA_PROVIDER_GITHUB_TOKEN (read:org and user:email
-scopes). Any GitHub error or missing answer exits nonzero: the runtime
+scopes; listing a repository's collaborators needs push access to it,
+which the repo scope grants for repositories the token's owner may push
+to); the API root is GITHUB_API_URL when set (a GitHub Enterprise
+Server's /api/v3), else api.github.com. Any GitHub error or missing
+answer exits nonzero: the runtime
 treats that as no answer and refuses the operation, so an API hiccup
 never becomes a policy decision.
 """
@@ -33,10 +42,21 @@ import urllib.parse
 import urllib.request
 
 
-API_ROOT = "https://api.github.com"
+API_ROOT = (os.environ.get("GITHUB_API_URL") or "https://api.github.com").rstrip("/")
 TOKEN_VAR = "APPA_PROVIDER_GITHUB_TOKEN"
+SOURCE_NAME = "github"
+SERVED_TEMPLATES = [
+    "viewer",
+    "org/<org>/members",
+    "org/<org>/team/<team>",
+    "repo/<owner>/<repo>/collaborators",
+]
 TIMEOUT_SECONDS = 30
 PAGE_SIZE = 100
+# Accounts a collection may hold: each costs one profile read, and a larger
+# roster cannot answer inside the runtime's consult budget, so it is refused
+# instead of timing out halfway.
+MAX_MEMBERS = 1000
 
 
 class NotFound(Exception):
@@ -120,7 +140,13 @@ PROFILE_READS = 8
 
 
 def collection_members(call, path):
-    logins = [user["login"] for user in paginated(call, path) if user.get("type") == "User"]
+    logins = []
+    for user in paginated(call, path):
+        if user.get("type") != "User":
+            continue
+        logins.append(user["login"])
+        if len(logins) > MAX_MEMBERS:
+            raise RuntimeError(f"{path} lists more than {MAX_MEMBERS} accounts; map that audience from a bulk source")
     with concurrent.futures.ThreadPoolExecutor(max_workers=PROFILE_READS) as pool:
         return list(pool.map(lambda login: profile_reader(call, login), logins))
 
@@ -153,6 +179,9 @@ def answer(call, artifact):
                         case ["org", org, "team", team] if org and team:
                             org = urllib.parse.quote(org, safe="")
                             path = f"/orgs/{org}/teams/{urllib.parse.quote(team, safe='')}/members"
+                        case ["repo", owner, repo, "collaborators"] if owner and repo:
+                            owner = urllib.parse.quote(owner, safe="")
+                            path = f"/repos/{owner}/{urllib.parse.quote(repo, safe='')}/collaborators"
                         case _:
                             raise ValueError(f"{selector!r} names no collection this source serves")
                     members = collection_members(call, path)
@@ -165,6 +194,23 @@ def answer(call, artifact):
             raise ValueError("the artifact must carry exactly a selector or a member")
 
 
+def check_declaration(request):
+    """The policy's declared templates against the ones this script serves.
+
+    The binding beside this script declares them to the policy, and the
+    runtime sends that declaration with every consult. A mismatch is a
+    version skew between policy and script, refused before any credential
+    is read; the exit status 2 tells it apart from a provider failure.
+    """
+    declared = request.get("declaration", {}).get("templates")
+    if declared != SERVED_TEMPLATES:
+        print(
+            f"{SOURCE_NAME} audience source: the policy declares {declared!r}, this script serves {SERVED_TEMPLATES!r}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+
 def main():
     request = json.load(sys.stdin)
 
@@ -172,8 +218,9 @@ def main():
         raise ValueError("unsupported request version")
     if request.get("kind") != "audience":
         raise ValueError("unexpected consult kind")
-    if request.get("name") != "github":
+    if request.get("name") != SOURCE_NAME:
         raise ValueError("unexpected source name")
+    check_declaration(request)
 
     token = os.environ.get(TOKEN_VAR)
     if not token:

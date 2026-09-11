@@ -27,7 +27,7 @@ OpenAPPA operates with three concepts:
 
    Audience and Trust make up the security label. OpenAPPA also tracks Effects and checks Attention requirements:
 
-   1. **Audience:** Who is authorized to access data in this agent session. Reading data for a smaller audience restricts where the agent can send data later. For example, after reading an internal customer record, the agent cannot send session data to a public destination.
+   1. **Audience:** Who is authorized to access data in this agent session. Reading data for a smaller audience restricts where the agent can send data later. For example, after reading an internal customer record, the agent cannot send session data to a public destination. An audience can be as specific as the members of one Slack channel: the contract spells the channel from the call's own argument, so reading channel `C0123` is for its members, and posting to it requires that they can already read the data.
    2. **Trust:** How much the data in the session can be trusted. Reading an untrusted web page can lower the session's trust, and tools that require trusted input will no longer be allowed to run.
    3. **Effect:** What the agent has already done, such as sending an email or changing a system. Effects accumulate in the session history. A policy can require an effect to have happened, or prevent an action after an effect has happened.
    4. **Attention:** Approval or review required for a specific action. Unlike effects, attention does not accumulate. An approval clears the attention requirement for that action only, and later calls must request attention again.

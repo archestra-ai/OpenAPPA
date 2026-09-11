@@ -36,6 +36,9 @@ def http(url, body=None):
     return json.loads(data)
 
 
+FIXTURES = "http://marketplace-fixtures.kagent.svc.cluster.local:3000"
+
+
 def denial_count(value):
     if isinstance(value, str):
         try:
@@ -50,8 +53,9 @@ def denial_count(value):
     return 0
 
 
-def assert_evidence(state, steps, reads, writes, denials):
+def assert_evidence(state, steps, reads, writes, denials, lookups):
     requests = state["requests"]
+    require(len(state["lookups"]) == lookups, "the battery's annotators did not ask the fixture for each repository's visibility")
     require([request["index"] for request in requests] == list(range(steps)), "model did not execute the complete test script")
     calls = state["invocations"]
     require(sum(call["tool"] == "get_file_contents" for call in calls) == reads, "wrong real MCP read count")
@@ -170,7 +174,7 @@ class Acceptance:
         appa = REPO / "target/debug/appa"
         deployed = self.work / "deployment/appa.toml"
         self.command([appa, "plugin", "install", "kagent", "--config", deployed, "--from", bundle, "--sha256", fixture["sha256"], "--json"])
-        endpoint = "http://marketplace-fixtures.kagent.svc.cluster.local:3000/mcp"
+        endpoint = FIXTURES + "/mcp"
         server = "server-" + hashlib.sha256(endpoint.encode()).hexdigest()
         battery = json.loads(self.command([appa, "battery", "install", "github", "--config", deployed, "--server", server, "--json"]).splitlines()[-1])
         prepared = Path(battery["result"]["directory"])
@@ -242,7 +246,9 @@ class Acceptance:
         (self.work / "result.json").write_text(json.dumps({"status": "passed", "generation": commit, "languages": ["python", "go"], "offline_registry_stopped": True}))
 
     def deploy_runtime(self, prepared, chart, mirror):
-        self.helm("upgrade", "--install", "appa-runtime", prepared / chart, "-n", "appa", "--create-namespace", "-f", prepared / "runtime-values.json", "--set-string", "image.repository=" + mirror + "/appa-runtime", "--wait", "--timeout", "5m")
+        # The battery's annotators ask the fixture, not GitHub, for repository visibility.
+        self.helm("upgrade", "--install", "appa-runtime", prepared / chart, "-n", "appa", "--create-namespace", "-f", prepared / "runtime-values.json", "--set-string", "image.repository=" + mirror + "/appa-runtime",
+                  "--set-string", "env.GITHUB_API_URL=" + FIXTURES, "--set-string", "env.APPA_PROVIDER_GITHUB_TOKEN=fixture", "--wait", "--timeout", "5m")
 
     def resources(self, prepared, mirror, release, endpoint):
         def resource(kind, name, spec, api="v1"):
@@ -266,10 +272,12 @@ class Acceptance:
         # Assertions below are completed against actual fixture invocation state.
         read = {"tool": "get_file_contents", "args": {"owner": "acme", "repo": "public", "path": "README.md"}}
         write = {"tool": "issue_write", "args": {"owner": "acme", "repo": "public", "title": "test", "body": "operator text"}}
-        for case, script, expected_reads, expected_writes, denials in (
-            ("read-refused", [read, {"text": "done"}], 0, 0, 1),
-            ("tainted-write-refused", [read, {"remedy": "accept this change"}, read, write, {"text": "done"}], 1, 0, 2),
-            ("trusted-write", [write, {"text": "done"}], 0, 1, 0),
+        # Each proposed GitHub call is one visibility lookup; a re-proposal after
+        # `accept this change` stands on the annotation pinned to the open offer.
+        for case, script, expected_reads, expected_writes, denials, lookups in (
+            ("read-refused", [read, {"text": "done"}], 0, 0, 1, 1),
+            ("tainted-write-refused", [read, {"remedy": "accept this change"}, read, write, {"text": "done"}], 1, 0, 2, 2),
+            ("trusted-write", [write, {"text": "done"}], 0, 1, 0, 1),
         ):
             http(fixture_url + "/state", {})
             prompt = json.dumps({"case": label + "-" + case, "appa_script": script})
@@ -283,7 +291,7 @@ class Acceptance:
             require(result["result"].get("status", {}).get("state") == "completed", f"task did not complete: {result}")
             state = http(fixture_url + "/state")
             (self.work / f"{label}-{case}.json").write_text(json.dumps({"task": result, "fixture": state}, indent=2))
-            assert_evidence(state, len(script), expected_reads, expected_writes, denials)
+            assert_evidence(state, len(script), expected_reads, expected_writes, denials, lookups)
 
     def approval_scenarios(self, agent_name, fixture_url):
         # Native kagent confirmation resumes before Go ADK request processors.

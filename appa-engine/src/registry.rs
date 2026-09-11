@@ -7,7 +7,10 @@ use thiserror::Error;
 
 use crate::audience::{AudienceConfig, AudienceRegistry, SelectorSpec, Unroutable};
 use crate::authority::{Authority, DeclaredTransition, Hint, Sanitizer};
-use crate::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec, ToolAnnotation, ToolDeclaration};
+use crate::contract::{
+    AudienceRequirement, DeltaAudience, HistoryRequirement, RecipientSpec, SelectorPlaceholder, ToolAnnotation,
+    ToolDeclaration,
+};
 use crate::fact::EffectKind;
 use crate::label::{
     Audience, AudienceSpelling, ChainAudience, Clause, DeclaredAudience, Evaluation, Expansions, GroupRef,
@@ -279,6 +282,9 @@ pub struct AudienceVocabulary {
     chain: BTreeSet<ChainAudience>,
     groups: BTreeSet<GroupRef>,
     readers: BTreeSet<ReaderId>,
+    /// Collections keyed by the call: each is instantiated into a group per call, so the
+    /// mandate admits the one collection the call's arguments spell and no other.
+    placeholders: BTreeSet<SelectorPlaceholder>,
 }
 
 impl TryFrom<Vec<String>> for AudienceVocabulary {
@@ -297,8 +303,9 @@ impl From<AudienceVocabulary> for Vec<String> {
 
 impl AudienceVocabulary {
     /// One written vocabulary list, entry by entry. `public` is refused — always admissible,
-    /// never listed — and so are a placeholder, which belongs to a call argument, and a
-    /// repeated entry. An empty list is the vocabulary that admits `public` alone.
+    /// never listed — and so are an argument placeholder, which belongs to a call argument, and
+    /// a repeated entry. A selector placeholder is admitted: it names, per call, the collection
+    /// the call's arguments spell. An empty list is the vocabulary that admits `public` alone.
     pub fn parse_entries(list: &[String]) -> Result<AudienceVocabulary, AudienceSpelling> {
         let mut vocabulary = AudienceVocabulary::default();
         for entry in list {
@@ -314,6 +321,11 @@ impl AudienceVocabulary {
                 }
                 Some(crate::names::AudienceArgument::Group(group)) => {
                     if !vocabulary.groups.insert(group) {
+                        return Err(AudienceSpelling::Duplicate(entry.clone()));
+                    }
+                }
+                Some(crate::names::AudienceArgument::Placeholder(placeholder)) => {
+                    if !vocabulary.placeholders.insert(placeholder) {
                         return Err(AudienceSpelling::Duplicate(entry.clone()));
                     }
                 }
@@ -337,18 +349,58 @@ impl AudienceVocabulary {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.chain.is_empty() && self.groups.is_empty() && self.readers.is_empty()
+        self.chain.is_empty() && self.groups.is_empty() && self.readers.is_empty() && self.placeholders.is_empty()
     }
 
     /// The canonical spellings, as a policy writes them: the chain words in chain order, then
-    /// the group references (named, then source-qualified), then the readers. The one
-    /// rendering the consult declaration, the policy identity, and a description all use.
+    /// the group references (named, then source-qualified), then the selector placeholders,
+    /// then the readers. The one rendering the consult declaration, the policy identity, and a
+    /// description all use.
     pub fn entries(&self) -> impl Iterator<Item = String> + '_ {
         self.chain
             .iter()
             .map(|level| level.as_str().to_string())
             .chain(self.groups.iter().map(ToString::to_string))
+            .chain(self.placeholders.iter().map(ToString::to_string))
             .chain(self.readers.iter().map(|reader| reader.as_str().to_string()))
+    }
+
+    pub fn placeholders(&self) -> impl Iterator<Item = &SelectorPlaceholder> {
+        self.placeholders.iter()
+    }
+
+    /// Every audience-source provider this vocabulary names, by a `@provider:selector` mention
+    /// or a selector placeholder.
+    pub fn referenced_providers(&self) -> BTreeSet<String> {
+        self.groups
+            .iter()
+            .filter_map(|group| match group {
+                GroupRef::Source { provider, .. } => Some(provider.clone()),
+                GroupRef::Named(_) => None,
+            })
+            .chain(
+                self.placeholders
+                    .iter()
+                    .map(|placeholder| placeholder.provider().to_string()),
+            )
+            .collect()
+    }
+
+    /// The vocabulary for one call: each selector placeholder becomes the group the call's
+    /// arguments spell. A vocabulary without placeholders is its own instantiation; a call
+    /// that fills no placeholder — never a minted one — has no vocabulary.
+    pub fn instantiate(
+        &self,
+        arguments: &serde_json::Value,
+    ) -> Result<AudienceVocabulary, crate::contract::UnfilledPlaceholder> {
+        let mut instantiated = AudienceVocabulary {
+            placeholders: BTreeSet::new(),
+            ..self.clone()
+        };
+        for placeholder in &self.placeholders {
+            instantiated.groups.insert(placeholder.instantiate(arguments)?);
+        }
+        Ok(instantiated)
     }
 
     pub(crate) fn group_atoms(&self) -> impl Iterator<Item = SymbolicAtom> + '_ {
@@ -385,6 +437,7 @@ impl AudienceVocabulary {
         self.chain.extend(other.chain.iter().copied());
         self.groups.extend(other.groups.iter().cloned());
         self.readers.extend(other.readers.iter().cloned());
+        self.placeholders.extend(other.placeholders.iter().cloned());
     }
 }
 
@@ -434,6 +487,18 @@ impl AnnotatorMandate {
 
     pub fn effects(&self) -> impl Iterator<Item = &EffectKind> {
         self.effects.iter()
+    }
+
+    /// The mandate for one call: its audience vocabulary with every selector placeholder
+    /// instantiated from the call's arguments.
+    pub fn instantiate(
+        &self,
+        arguments: &serde_json::Value,
+    ) -> Result<AnnotatorMandate, crate::contract::UnfilledPlaceholder> {
+        Ok(AnnotatorMandate {
+            audiences: self.audiences.instantiate(arguments)?,
+            ..self.clone()
+        })
     }
 
     pub(crate) fn permits_trust(&self, trust: Trust) -> bool {
@@ -488,6 +553,10 @@ pub enum LoadError {
     WildcardMetadata,
     #[error("the policy writes more than one wildcard tool \"*\"")]
     DuplicateWildcard,
+    #[error(
+        "the wildcard tool \"*\" routes through annotator {0}, whose mandate reads call arguments through a selector placeholder — a wildcard covers calls whose arguments the policy does not describe"
+    )]
+    WildcardPlaceholderMandate(String),
     #[error("duplicate tool contract: {0}")]
     DuplicateTool(String),
     #[error("malformed tool selector {0:?}")]
@@ -552,6 +621,10 @@ pub enum LoadError {
     )]
     ConfinedProviderRun { tool: String },
     #[error(
+        "tool {tool} is provider-run and its delta reads a selector placeholder: a provider-run result arrives with no call to read the placeholder from"
+    )]
+    ProviderRunPlaceholder { tool: String },
+    #[error(
         "sanitizer {sanitizer} registers on tool_output but the deployment confines no application point — neither a result point nor, under context control, a child's return"
     )]
     OutputSanitizerUncovered { sanitizer: String },
@@ -577,7 +650,7 @@ pub enum LoadError {
         construct: crate::profile::ProviderRunConstruct,
     },
     #[error(
-        "{context} binds audience argument {argument:?}, which {fault}: a placeholder names a required top-level string property of the tool's `parameters`"
+        "{context} binds audience argument {argument:?}, which {fault}: an audience argument is a required top-level string, so `parameters` may not declare it as another type"
     )]
     AudienceBindingSchema {
         context: String,
@@ -710,7 +783,9 @@ fn worst_case_plan_alternatives(
                             RecipientSpec::Static(recipients) => multiply(includes_competent(recipients)),
                             // A placeholder's recipients come from the call, so nothing about
                             // the gap is known here.
-                            RecipientSpec::Placeholder(_) => multiply(reader_cap_competent()),
+                            RecipientSpec::Placeholder(_) | RecipientSpec::Selector(_) => {
+                                multiply(reader_cap_competent())
+                            }
                         }
                     }
                     AudienceRequirement::Includes(_) | AudienceRequirement::Cap(_) => {}
@@ -758,11 +833,15 @@ fn worst_case_plan_alternatives(
             .filter(|sanitizer| !sanitizer.name.is_attest_schema())
             .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(tags))
             .count(),
-        ToolDeclaration::Declared(tool) if tool.delta.symbolic_atoms().next().is_some() => sanitizers
-            .iter()
-            .filter(|sanitizer| !sanitizer.name.is_attest_schema())
-            .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(tags))
-            .count(),
+        ToolDeclaration::Declared(tool)
+            if tool.delta.symbolic_atoms().next().is_some() || tool.delta.selector_placeholder().is_some() =>
+        {
+            sanitizers
+                .iter()
+                .filter(|sanitizer| !sanitizer.name.is_attest_schema())
+                .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(tags))
+                .count()
+        }
         ToolDeclaration::Declared(tool) => {
             let output = tool.output_label();
             sanitizers
@@ -809,7 +888,11 @@ fn worst_case_plan_alternatives(
             ToolDeclaration::Declared(tool) => {
                 tool.emits.iter().any(|kind| priors.contains(&kind))
                     || (any_prior && !tool.emits.is_empty())
-                    || (has_cap && matches!(tool.delta.audience.as_ref(), Some(DeclaredAudience::Union(_))))
+                    || (has_cap
+                        && matches!(
+                            tool.delta.audience.as_ref(),
+                            Some(DeltaAudience::Static(DeclaredAudience::Union(_)) | DeltaAudience::Selector(_))
+                        ))
             }
             // An Annotated candidate's emits and delta are unknown at load; the cap is the only
             // bound, so it stays counted wherever a prior or a cap could match it.
@@ -977,6 +1060,9 @@ impl Registry {
             }
             if let Some(audiences) = &annotator.audiences {
                 direct.extend(check_routable(&audience, audiences.group_atoms(), context)?);
+                for placeholder in audiences.placeholders() {
+                    check_placeholder(&audience, placeholder, context)?;
+                }
             }
             let name = annotator.name.clone();
             if annotator_declarations.insert(name.clone(), annotator).is_some() {
@@ -990,6 +1076,26 @@ impl Registry {
         let mut wildcard: Option<ToolDeclaration> = None;
         for mut declaration in config.tools {
             let (contract, matcher) = parse_tool_selector(declaration.name().as_str())?;
+            // An audience argument binding implies its schema: the argument is a required
+            // top-level string, so a minted call always carries a value the binding can read.
+            let bound_arguments = audience_arguments(&declaration, &annotator_declarations);
+            if !bound_arguments.is_empty() {
+                let tool_name = declaration.name().as_str().to_string();
+                let parameters = match &mut declaration {
+                    ToolDeclaration::Declared(tool) => &mut tool.parameters,
+                    ToolDeclaration::Annotated { parameters, .. } => parameters,
+                };
+                for argument in bound_arguments {
+                    *parameters =
+                        parameters
+                            .require_string(&argument)
+                            .map_err(|fault| LoadError::AudienceBindingSchema {
+                                context: format!("tool {tool_name}"),
+                                argument,
+                                fault,
+                            })?;
+                }
+            }
             let base_name = match contract {
                 ContractName::Named(name) => name,
                 ContractName::Wildcard => {
@@ -1009,10 +1115,16 @@ impl Registry {
                     check_rank(&config.trust_chain, tool.requires.trust_floor(), || {
                         format!("tool {} trust floor", tool.name.as_str())
                     })?;
-                    if let Some(declared) = tool.delta.audience.as_ref() {
-                        direct.extend(check_declared(&audience, declared, || {
-                            format!("tool {} delta", tool.name.as_str())
-                        })?);
+                    match tool.delta.audience.as_ref() {
+                        Some(DeltaAudience::Static(declared)) => {
+                            direct.extend(check_declared(&audience, declared, || {
+                                format!("tool {} delta", tool.name.as_str())
+                            })?);
+                        }
+                        Some(DeltaAudience::Selector(placeholder)) => {
+                            check_placeholder(&audience, placeholder, || format!("tool {} delta", tool.name.as_str()))?;
+                        }
+                        None => {}
                     }
                     for requirement in tool.requires.audience_requirements() {
                         match requirement {
@@ -1025,6 +1137,11 @@ impl Registry {
                                 direct.extend(check_declared(&audience, cap, || {
                                     format!("tool {} within", tool.name.as_str())
                                 })?);
+                            }
+                            AudienceRequirement::Includes(RecipientSpec::Selector(placeholder)) => {
+                                check_placeholder(&audience, placeholder, || {
+                                    format!("tool {} contains", tool.name.as_str())
+                                })?;
                             }
                             AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => {}
                         }
@@ -1046,6 +1163,11 @@ impl Registry {
                 let ToolDeclaration::Declared(tool) = declaration else {
                     return Err(LoadError::ProviderRunAnnotated(declaration.name().as_str().to_string()));
                 };
+                if tool.delta.selector_placeholder().is_some() {
+                    return Err(LoadError::ProviderRunPlaceholder {
+                        tool: tool.name.as_str().to_string(),
+                    });
+                }
                 let name = tool.name.clone();
                 if provider_run
                     .keys()
@@ -1085,10 +1207,6 @@ impl Registry {
             if seen_authorities.insert(authority.name.clone(), ()).is_some() {
                 return Err(LoadError::DuplicateAuthority(authority.name.as_str().to_string()));
             }
-        }
-
-        for tool in tools.values().flatten().filter_map(|(_, d)| d.declared()) {
-            check_audience_bindings(tool)?;
         }
 
         // The planner-cap lint runs the same cover evaluation planning runs, against the
@@ -1245,11 +1363,18 @@ impl Registry {
         else {
             return Err(LoadError::WildcardStatic);
         };
-        if !annotators.contains_key(annotator) {
+        let Some(declared) = annotators.get(annotator) else {
             return Err(LoadError::UnknownAnnotator {
                 tool: WILDCARD_SPELLING.to_string(),
                 annotator: annotator.as_str().to_string(),
             });
+        };
+        if declared
+            .audiences
+            .as_ref()
+            .is_some_and(|audiences| audiences.placeholders().next().is_some())
+        {
+            return Err(LoadError::WildcardPlaceholderMandate(annotator.as_str().to_string()));
         }
         if *matcher != ToolMatcher::Bare
             || !tags.is_empty()
@@ -1352,11 +1477,10 @@ impl Registry {
         call: &'a crate::value::ResolvedCall,
     ) -> Option<std::borrow::Cow<'a, ToolAnnotation>> {
         let declaration = self.declaration(call)?;
-        match call.annotation() {
-            Some(pinned) => Some(std::borrow::Cow::Owned(
-                pinned.tool_annotation(declaration, call.tool()),
-            )),
-            None => declaration.declared().map(|annotation| {
+        let annotation = match call.annotation() {
+            Some(pinned) => std::borrow::Cow::Owned(pinned.tool_annotation(declaration, call.tool())),
+            None => {
+                let annotation = declaration.declared()?;
                 if annotation.name == *call.tool() {
                     std::borrow::Cow::Borrowed(annotation)
                 } else {
@@ -1364,7 +1488,14 @@ impl Registry {
                     annotation.name = call.tool().clone();
                     std::borrow::Cow::Owned(annotation)
                 }
-            }),
+            }
+        };
+        // The one place a call meets its contract: a delta placeholder is bound here, so every
+        // label read from the annotation downstream is static. A minted call fills it; a
+        // recorded call that does not was never minted here and has no annotation.
+        match annotation.bound_to(call.arguments()).ok()? {
+            Some(bound) => Some(std::borrow::Cow::Owned(bound)),
+            None => Some(annotation),
         }
     }
 
@@ -1459,6 +1590,29 @@ impl Registry {
 
     /// One registered Annotator's compiled mandate, with every omitted bound already resolved
     /// to the policy vocabulary.
+    /// Whether a call's arguments fill every selector placeholder its declaration reads: a
+    /// static contract's own, or the mandate's of the Annotator an annotated tool routes
+    /// through. Part of minting a call, so the check and the annotation consult only ever meet
+    /// a filled placeholder.
+    pub(crate) fn placeholders_filled(
+        &self,
+        declaration: &ToolDeclaration,
+        arguments: &serde_json::Value,
+    ) -> Result<(), crate::params::ArgumentError> {
+        let placeholders: Vec<&SelectorPlaceholder> = match declaration {
+            ToolDeclaration::Declared(tool) => tool.selector_placeholders().collect(),
+            ToolDeclaration::Annotated { annotator, .. } => self
+                .annotator_mandate(annotator)
+                .into_iter()
+                .flat_map(|mandate| mandate.audiences().placeholders())
+                .collect(),
+        };
+        for placeholder in placeholders {
+            placeholder.instantiate(arguments)?;
+        }
+        Ok(())
+    }
+
     pub fn annotator_mandate(&self, name: &AnnotatorName) -> Option<&AnnotatorMandate> {
         self.annotators.get(name)
     }
@@ -1507,23 +1661,58 @@ impl Registry {
     }
 }
 
-fn check_audience_bindings(tool: &ToolAnnotation) -> Result<(), LoadError> {
-    let check = |argument: &str, site: &str| {
-        tool.parameters
-            .required_string_property(argument)
-            .map_err(|fault| LoadError::AudienceBindingSchema {
-                context: format!("tool {} {site}", tool.name.as_str()),
-                argument: argument.to_string(),
-                fault,
-            })
-    };
-    for requirement in tool.requires.audience_requirements() {
-        match requirement {
-            AudienceRequirement::Includes(RecipientSpec::Placeholder(argument)) => check(argument, "contains")?,
-            AudienceRequirement::Includes(RecipientSpec::Static(_)) | AudienceRequirement::Cap(_) => {}
+/// The call arguments a tool's audience bindings read: each `$argument` recipient and each
+/// argument of a selector placeholder in its delta, its `contains`, or — for an
+/// Annotator-routed tool — its annotator's mandate.
+fn audience_arguments(
+    declaration: &ToolDeclaration,
+    annotators: &BTreeMap<AnnotatorName, AnnotatorDeclaration>,
+) -> Vec<String> {
+    match declaration {
+        ToolDeclaration::Declared(tool) => {
+            let recipients = tool
+                .requires
+                .audience_requirements()
+                .iter()
+                .filter_map(|requirement| match requirement {
+                    AudienceRequirement::Includes(RecipientSpec::Placeholder(argument)) => Some(argument.clone()),
+                    AudienceRequirement::Includes(_) | AudienceRequirement::Cap(_) => None,
+                });
+            recipients
+                .chain(
+                    tool.selector_placeholders()
+                        .flat_map(|placeholder| placeholder.arguments().map(str::to_string)),
+                )
+                .collect()
         }
+        ToolDeclaration::Annotated { annotator, .. } => annotators
+            .get(annotator)
+            .into_iter()
+            .flat_map(|declared| declared.audiences.iter().flat_map(AudienceVocabulary::placeholders))
+            .flat_map(|placeholder| placeholder.arguments().map(str::to_string))
+            .collect(),
     }
-    Ok(())
+}
+
+/// A selector placeholder resolves at load as far as it can: its provider is registered and
+/// some declared template fits every collection it may instantiate into.
+fn check_placeholder(
+    registry: &AudienceRegistry,
+    placeholder: &SelectorPlaceholder,
+    context: impl Fn() -> String,
+) -> Result<(), LoadError> {
+    let fault = match registry.templates(placeholder.provider()) {
+        None => Unroutable::UnknownProvider(placeholder.provider().to_string()),
+        Some(templates) if templates.iter().any(|declared| placeholder.fits(&declared.template)) => return Ok(()),
+        Some(_) => Unroutable::UnknownSelector {
+            provider: placeholder.provider().to_string(),
+            selector: placeholder.to_string(),
+        },
+    };
+    Err(LoadError::UnroutableAudience {
+        context: context(),
+        fault,
+    })
 }
 
 pub(crate) fn check_rank(
@@ -1698,7 +1887,8 @@ fn configured_audience_vocabulary(
         let Some(tool) = declaration.declared() else {
             continue;
         };
-        if let Some(audience) = &tool.delta.audience {
+        // A placeholder names no audience until a call does; the omitted bound stays static.
+        if let Some(DeltaAudience::Static(audience)) = &tool.delta.audience {
             vocabulary.add_declared(audience);
         }
         for requirement in &tool.requires.label.audience {
@@ -1706,7 +1896,7 @@ fn configured_audience_vocabulary(
                 AudienceRequirement::Includes(RecipientSpec::Static(audience)) | AudienceRequirement::Cap(audience) => {
                     vocabulary.add_declared(audience)
                 }
-                AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => {}
+                AudienceRequirement::Includes(RecipientSpec::Placeholder(_) | RecipientSpec::Selector(_)) => {}
             }
         }
     }
@@ -1792,7 +1982,7 @@ mod tests {
         crate::audience::AudienceConfig {
             sources: vec![crate::audience::SourceRegistration {
                 provider: "slack".to_string(),
-                templates: vec![crate::audience::SelectorTemplate::new("user-group/<handle>")],
+                templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
             }],
             groups: handles
                 .iter()
@@ -1851,7 +2041,9 @@ mod tests {
         let mut classified = tool("classified");
         classified.delta = Delta {
             trust: None,
-            audience: Some(DeclaredAudience::restricted([ReaderId::new("private")])),
+            audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                "private",
+            )]))),
         };
         classified.requires.label.audience =
             vec![AudienceRequirement::Cap(DeclaredAudience::restricted([ReaderId::new(
@@ -1876,7 +2068,7 @@ mod tests {
         let mut delta_tool = tool("emit");
         delta_tool.delta = Delta {
             trust: None,
-            audience: Some(DeclaredAudience::literal(named.clone())),
+            audience: Some(DeltaAudience::Static(DeclaredAudience::literal(named.clone()))),
         };
         delta.tools = declared(vec![delta_tool]);
 
@@ -1939,7 +2131,10 @@ mod tests {
         use crate::audience::{NamedAudience, SourceRegistration};
         let source = |provider: &str| SourceRegistration {
             provider: provider.to_string(),
-            templates: vec![crate::audience::SelectorTemplate::new("viewer")],
+            templates: vec![crate::audience::DeclaredTemplate::new(
+                "viewer",
+                Some(ChainAudience::Self_),
+            )],
         };
         // A `:` makes one member id qualified under two providers, `@` makes members
         // non-literal, and an empty name owns no namespace.
@@ -2204,7 +2399,9 @@ mod tests {
     #[test]
     fn an_omitted_audience_bound_admits_every_surface_the_policy_writes() {
         let mut reads = tool("read");
-        reads.delta.audience = Some(DeclaredAudience::restricted([ReaderId::new("insider")]));
+        reads.delta.audience = Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+            "insider",
+        )])));
         let mut sends = tool("send");
         sends.requires.label.audience = vec![
             AudienceRequirement::Includes(RecipientSpec::Static(DeclaredAudience::Union(
@@ -2300,7 +2497,9 @@ mod tests {
     #[test]
     fn an_omitted_mandate_bound_resolves_to_the_whole_policy_vocabulary() {
         let mut catalogued = tool("send");
-        catalogued.delta.audience = Some(DeclaredAudience::restricted([ReaderId::new("insider")]));
+        catalogued.delta.audience = Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+            "insider",
+        )])));
         catalogued.emits = EffectSet::new([EffectKind::new("mail.sent")]).unwrap();
         catalogued.requires.attention = vec![MarkName::new("signoff")];
         let mut cfg = base();
@@ -2753,87 +2952,84 @@ mod tests {
     }
 
     #[test]
-    fn every_audience_argument_binding_names_a_required_top_level_string() {
+    fn an_audience_argument_binding_implies_a_required_top_level_string() {
         use crate::params::{PropertyFault, ToolParameters};
         let schema = |value: serde_json::Value| ToolParameters::compile(&value).unwrap();
-        let refused = [
-            (ToolParameters::open(), PropertyFault::Undeclared),
+        let required_string = |extra: serde_json::Value| {
+            let mut object = serde_json::json!({
+                "type": "object",
+                "properties": { "to": { "type": "string" } },
+                "required": ["to"],
+            });
+            object
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            schema(object)
+        };
+        let implied = [
             (
-                schema(serde_json::json!({
-                    "type": "object",
-                    "properties": { "cc": { "type": "string" } },
-                    "required": ["cc"],
-                })),
-                PropertyFault::Undeclared,
-            ),
-            (
-                schema(serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "envelope": {
-                            "type": "object",
-                            "properties": { "to": { "type": "string" } },
-                            "required": ["to"],
-                        }
-                    },
-                    "required": ["envelope"],
-                })),
-                PropertyFault::Undeclared,
+                ToolParameters::open(),
+                required_string(serde_json::json!({"additionalProperties": true})),
             ),
             (
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": { "to": { "type": "string" } },
                 })),
-                PropertyFault::Optional,
+                required_string(serde_json::json!({})),
             ),
             (
                 schema(serde_json::json!({
                     "type": "object",
-                    "properties": { "to": { "type": "array", "items": { "type": "string" } } },
+                    "properties": { "body": { "type": "string" } },
+                    "required": ["body"],
+                })),
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": { "body": { "type": "string" }, "to": { "type": "string" } },
+                    "required": ["body", "to"],
+                })),
+            ),
+            (
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": { "to": { "type": "string", "enum": ["ops", "dev"] } },
                     "required": ["to"],
                 })),
-                PropertyFault::NotString,
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": { "to": { "type": "string", "enum": ["ops", "dev"] } },
+                    "required": ["to"],
+                })),
             ),
         ];
-        for (parameters, expected) in refused {
-            for (expected_context, cfg) in binding_sites(&parameters) {
-                match Registry::build_covered(cfg) {
-                    Err(LoadError::AudienceBindingSchema {
-                        context,
-                        argument,
-                        fault,
-                    }) => {
-                        assert_eq!(context, expected_context);
-                        assert_eq!(argument, "to");
-                        assert_eq!(fault, expected, "at {expected_context}");
-                    }
-                    other => {
-                        panic!("{expected_context} under {parameters:?} must refuse with {expected:?}, got {other:?}")
-                    }
-                }
+        for (parameters, expected) in implied {
+            for (context, cfg) in binding_sites(&parameters) {
+                let registry = Registry::build_covered(cfg)
+                    .unwrap_or_else(|error| panic!("{context} under {parameters:?} must load: {error}"));
+                let loaded = registry.tool(&ToolName::new("emit")).unwrap().declared().unwrap();
+                assert_eq!(loaded.parameters.normalized(), expected.normalized(), "{context}");
             }
         }
 
-        let accepted = [
-            schema(serde_json::json!({
-                "type": "object",
-                "properties": { "to": { "type": "string" }, "body": { "type": "string" } },
-                "required": ["to"],
-                "additionalProperties": true,
-            })),
-            schema(serde_json::json!({
-                "type": "object",
-                "properties": { "to": { "type": "string", "enum": ["ops", "dev"] } },
-                "required": ["to"],
-            })),
-        ];
-        for parameters in accepted {
-            for (context, cfg) in binding_sites(&parameters) {
-                assert!(
-                    Registry::build_covered(cfg).is_ok(),
-                    "{context} under {parameters:?} must load"
-                );
+        let array = schema(serde_json::json!({
+            "type": "object",
+            "properties": { "to": { "type": "array", "items": { "type": "string" } } },
+            "required": ["to"],
+        }));
+        for (context, cfg) in binding_sites(&array) {
+            match Registry::build_covered(cfg) {
+                Err(LoadError::AudienceBindingSchema {
+                    context: found,
+                    argument,
+                    fault,
+                }) => {
+                    assert_eq!(found, "tool emit");
+                    assert_eq!(argument, "to");
+                    assert_eq!(fault, PropertyFault::NotString, "at {context}");
+                }
+                other => panic!("{context} must refuse a non-string argument, got {other:?}"),
             }
         }
 
@@ -3001,7 +3197,7 @@ mod tests {
         grouped.audience = crate::audience::AudienceConfig {
             sources: vec![crate::audience::SourceRegistration {
                 provider: "slack".to_string(),
-                templates: vec![crate::audience::SelectorTemplate::new("user-group/<handle>")],
+                templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
             }],
             groups: vec![crate::audience::NamedAudience {
                 name: crate::names::GroupName::new("desk"),
@@ -3148,11 +3344,14 @@ mod tests {
         let mut tools = vec![target];
         for i in 0..narrowers {
             let mut narrower = tool(&format!("narrow{i}"));
-            narrower.delta.audience = Some(DeclaredAudience::restricted([ReaderId::new("a"), ReaderId::new("c")]));
+            narrower.delta.audience = Some(DeltaAudience::Static(DeclaredAudience::restricted([
+                ReaderId::new("a"),
+                ReaderId::new("c"),
+            ])));
             tools.push(narrower);
         }
         let mut public = tool("public-delta");
-        public.delta.audience = Some(DeclaredAudience::literal(Audience::public()));
+        public.delta.audience = Some(DeltaAudience::Static(DeclaredAudience::literal(Audience::public())));
         let neutral = tool("neutral");
         let mut unannotated = tool("unannotated");
         unannotated.delta = Delta::NONE;
@@ -3220,7 +3419,9 @@ mod tests {
         };
         let mut fixer = tool("fixer");
         fixer.emits = EffectSet::new([EffectKind::new("k")]).unwrap();
-        fixer.delta.audience = Some(DeclaredAudience::restricted([ReaderId::new("a")]));
+        fixer.delta.audience = Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+            "a",
+        )])));
         let mut cfg = base();
         cfg.tools = declared(vec![target, fixer]);
         assert!(Registry::build_covered_with_cap(cfg, PlannerCap::new(2).expect("nonzero")).is_ok());
@@ -3445,7 +3646,9 @@ mod tests {
     #[test]
     fn sanitizer_chains_do_not_multiply_either_stage_bound() {
         let mut narrowing = tool("fetch");
-        narrowing.delta.audience = Some(DeclaredAudience::restricted([ReaderId::new("a")]));
+        narrowing.delta.audience = Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+            "a",
+        )])));
         let mut cfg = base();
         cfg.tools = declared(vec![narrowing]);
         cfg.sanitizers = (0..5).map(output_sanitizer).collect();

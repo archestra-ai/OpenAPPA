@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::candidate::CallStage;
 use crate::contract::{
-    AudienceRequirement, HistoryRequirement, RecipientSpec, StaticAnnotation, ToolAnnotation, ToolDeclaration,
+    AudienceRequirement, DeltaAudience, HistoryRequirement, RecipientSpec, StaticAnnotation, ToolAnnotation,
+    ToolDeclaration,
 };
 use crate::fact::EffectKind;
 use crate::label::{
@@ -224,6 +225,11 @@ fn label_gaps(
                             recipients: unresolved_recipient(key),
                         });
                     }
+                    RecipientSpec::Selector(placeholder) => {
+                        gaps.push(Gap::Includes {
+                            recipients: unresolved_recipient(&placeholder.to_string()),
+                        });
+                    }
                     RecipientSpec::Static(_) => {
                         unreachable!("a static includes spec always resolves to its declared audience")
                     }
@@ -267,19 +273,26 @@ fn history_gaps(
 fn resolve_recipients(spec: &RecipientSpec, reads: CallReads<'_>) -> Option<DeclaredAudience> {
     match (spec, reads) {
         (RecipientSpec::Static(declared), _) => Some(declared.clone()),
-        (RecipientSpec::Placeholder(_), CallReads::Static) => {
+        (RecipientSpec::Placeholder(_) | RecipientSpec::Selector(_), CallReads::Static) => {
             unreachable!("`StaticAnnotation::of` refuses a placeholder, so a static read never meets one")
         }
         (RecipientSpec::Placeholder(key), CallReads::Resolved(call)) => {
-            placeholder_argument(key, call).map(|argument| match argument {
-                AudienceArgument::Public => DeclaredAudience::Public,
-                AudienceArgument::Chain(chain) => {
-                    DeclaredAudience::Union(Clause::new([chain], [], []).expect("a chain clause names no reader"))
-                }
-                AudienceArgument::Group(group) => {
-                    DeclaredAudience::Union(Clause::new([], [group], []).expect("a group clause names no reader"))
-                }
-                AudienceArgument::Reader(reader) => DeclaredAudience::restricted([reader]),
+            placeholder_argument(key, call).and_then(|argument| match argument {
+                AudienceArgument::Public => Some(DeclaredAudience::Public),
+                AudienceArgument::Chain(chain) => Some(DeclaredAudience::Union(
+                    Clause::new([chain], [], []).expect("a chain clause names no reader"),
+                )),
+                AudienceArgument::Group(group) => Some(DeclaredAudience::Union(
+                    Clause::new([], [group], []).expect("a group clause names no reader"),
+                )),
+                // An actual that spells a placeholder names no collection.
+                AudienceArgument::Placeholder(_) => None,
+                AudienceArgument::Reader(reader) => Some(DeclaredAudience::restricted([reader])),
+            })
+        }
+        (RecipientSpec::Selector(placeholder), CallReads::Resolved(call)) => {
+            placeholder.instantiate(call.arguments()).ok().map(|group| {
+                DeclaredAudience::Union(Clause::new([], [group], []).expect("a group clause names no reader"))
             })
         }
     }
@@ -331,9 +344,13 @@ pub(crate) fn validate_annotation(
     }
     let annotation = pinned.produced();
     let outside = |what: &str| AnnotationRefusal::OutsidePolicy(what.to_string());
+    // The mandate is read per call: a selector placeholder in it admits exactly the collection
+    // this call's arguments spell.
     let mandate = registry
         .annotator_mandate(annotator)
-        .expect("declarations name only registered annotators");
+        .expect("declarations name only registered annotators")
+        .instantiate(call.arguments())
+        .map_err(|unfilled| outside(&format!("the call does not fill the mandate's placeholder: {unfilled}")))?;
     let permits_declared = |declared: &DeclaredAudience| match declared {
         DeclaredAudience::Public => true,
         DeclaredAudience::Union(clause) => mandate.permits_clause(clause),
@@ -343,13 +360,12 @@ pub(crate) fn validate_annotation(
     {
         return Err(outside("the produced delta trust is outside the mandate"));
     }
-    if annotation
-        .delta
-        .audience
-        .as_ref()
-        .is_some_and(|audience| !permits_declared(audience))
-    {
-        return Err(outside("the produced delta audience is outside the mandate"));
+    match annotation.delta.audience.as_ref() {
+        Some(DeltaAudience::Static(audience)) if !permits_declared(audience) => {
+            return Err(outside("the produced delta audience is outside the mandate"));
+        }
+        Some(DeltaAudience::Selector(_)) => return Err(outside("a produced annotation reads a placeholder")),
+        Some(DeltaAudience::Static(_)) | None => {}
     }
     if annotation
         .requires
@@ -365,7 +381,7 @@ pub(crate) fn validate_annotation(
             // A produced annotation never reads a call argument: a placeholder belongs to a
             // static declaration, which resolves it per call; an annotation already is the
             // judgment of one exact call.
-            AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => {
+            AudienceRequirement::Includes(RecipientSpec::Placeholder(_) | RecipientSpec::Selector(_)) => {
                 return Err(outside("a produced annotation reads a placeholder"));
             }
         };
@@ -456,7 +472,9 @@ mod tests {
                     description: Some("Reads one file.".to_string()),
                     delta: Delta {
                         trust: Some(Trust::new(1)),
-                        audience: Some(DeclaredAudience::restricted([ReaderId::new("support")])),
+                        audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                            "support",
+                        )]))),
                     },
                     emits: EffectSet::new([EffectKind::new("mail.sent")]).unwrap(),
                     requires: Requires {
@@ -479,7 +497,7 @@ mod tests {
             audience: crate::audience::AudienceConfig {
                 sources: vec![crate::audience::SourceRegistration {
                     provider: "slack".to_string(),
-                    templates: vec![crate::audience::SelectorTemplate::new("user-group/<handle>")],
+                    templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
                 }],
                 groups: vec![crate::audience::NamedAudience {
                     name: GroupName::new("team"),
@@ -619,7 +637,7 @@ mod tests {
         let with_delta = |audience: DeclaredAudience| ToolAnnotation {
             delta: Delta {
                 trust: None,
-                audience: Some(audience),
+                audience: Some(DeltaAudience::Static(audience)),
             },
             ..annotation("lookup")
         };
@@ -714,7 +732,9 @@ mod tests {
         let within = ToolAnnotation {
             delta: Delta {
                 trust: Some(Trust::new(0)),
-                audience: Some(DeclaredAudience::restricted([ReaderId::new("support")])),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                    "support",
+                )]))),
             },
             emits: EffectSet::new([EffectKind::new("mail.sent")]).unwrap(),
             requires: Requires {
@@ -745,7 +765,9 @@ mod tests {
             ToolAnnotation {
                 delta: Delta {
                     trust: None,
-                    audience: Some(DeclaredAudience::restricted([ReaderId::new("stranger")])),
+                    audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                        "stranger",
+                    )]))),
                 },
                 ..annotation("lookup")
             },
@@ -811,7 +833,7 @@ mod tests {
         let produced = ToolAnnotation {
             delta: Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::Public),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::Public)),
             },
             ..annotation("lookup")
         };
@@ -822,7 +844,9 @@ mod tests {
         let restricted = ToolAnnotation {
             delta: Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::restricted([ReaderId::new("support")])),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                    "support",
+                )]))),
             },
             ..annotation("lookup")
         };
