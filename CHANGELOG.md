@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.19.0...v0.19.1) (2026-09-11)
+
+
+### Bug Fixes
+
+* **runtime:** revert observability release changes ([#314](https://github.com/archestra-ai/OpenAPPA/issues/314)) ([ecb5250](https://github.com/archestra-ai/OpenAPPA/commit/ecb52507e7fa54ac20ee744c3759058b0a7a115d))
+
 ## [0.19.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.18.0...v0.19.0) (2026-09-11)
 
 
