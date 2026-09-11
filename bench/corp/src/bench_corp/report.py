@@ -25,7 +25,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-from .runner import EpisodeResult, episode_record
+from .runner import EpisodeResult, ModelUsage, episode_record
 
 
 @dataclass(frozen=True)
@@ -44,6 +44,22 @@ class AgentSummary:
     policy_events: int
     remedy_calls: int
     provider_retries: int
+    model_usage_episodes: int
+    model_calls: int
+    input_tokens: int | None
+    output_tokens: int | None
+    total_tokens: int | None
+    cached_input_tokens: int | None
+    cache_write_input_tokens: int | None
+    reasoning_tokens: int | None
+    cost_usd: float | None
+    mean_total_tokens: float | None
+    mean_cost_usd: float | None
+
+
+def _usage_total(usages: list[ModelUsage], field: str, complete: bool) -> int | float | None:
+    values = [getattr(usage, field) for usage in usages]
+    return sum(values) if complete and all(value is not None for value in values) else None
 
 
 def summarize(results: list[EpisodeResult]) -> list[AgentSummary]:
@@ -54,6 +70,12 @@ def summarize(results: list[EpisodeResult]) -> list[AgentSummary]:
     for agent, episodes in sorted(by_agent.items()):
         utility = [r.utility for r in episodes if r.utility is not None]
         security = [r.security for r in episodes if r.security is not None]
+        usages = [r.model_usage for r in episodes if r.model_usage is not None]
+        complete_tokens = len(usages) == len(episodes) and all(
+            usage.usage_reported_calls == usage.model_calls for usage in usages
+        )
+        total_tokens = _usage_total(usages, "total_tokens", complete_tokens)
+        cost_usd = _usage_total(usages, "cost_usd", len(usages) == len(episodes))
         summaries.append(
             AgentSummary(
                 agent=agent,
@@ -70,6 +92,17 @@ def summarize(results: list[EpisodeResult]) -> list[AgentSummary]:
                 policy_events=sum(r.policy_events for r in episodes),
                 remedy_calls=sum(r.remedy_calls for r in episodes),
                 provider_retries=sum(r.provider_retries for r in episodes),
+                model_usage_episodes=len(usages),
+                model_calls=sum(usage.model_calls for usage in usages),
+                input_tokens=_usage_total(usages, "input_tokens", complete_tokens),
+                output_tokens=_usage_total(usages, "output_tokens", complete_tokens),
+                total_tokens=total_tokens,
+                cached_input_tokens=_usage_total(usages, "cached_input_tokens", complete_tokens),
+                cache_write_input_tokens=_usage_total(usages, "cache_write_input_tokens", complete_tokens),
+                reasoning_tokens=_usage_total(usages, "reasoning_tokens", complete_tokens),
+                cost_usd=cost_usd,
+                mean_total_tokens=None if total_tokens is None else round(total_tokens / len(episodes), 1),
+                mean_cost_usd=None if cost_usd is None else cost_usd / len(episodes),
             )
         )
     return summaries
@@ -131,6 +164,49 @@ def print_table(summaries: list[AgentSummary]) -> None:
             f"{s.budget_finalized:>7} {s.provider_retries:>7} "
             f"{s.mean_duration_s:>7} {s.policy_events:>8} {s.remedy_calls:>9}"
         )
+    print()
+    print("provider usage (mean per episode; — means incomplete provider reporting)")
+    print(f"{'agent':<{agent_width}} {'calls':>7} {'tokens':>12} {'cost USD':>12}")
+    for s in summaries:
+        tokens = "—" if s.mean_total_tokens is None else f"{s.mean_total_tokens:.1f}"
+        cost = "—" if s.mean_cost_usd is None else f"{s.mean_cost_usd:.6f}"
+        print(f"{s.agent:<{agent_width}} {s.model_calls:>7} {tokens:>12} {cost:>12}")
+
+
+def _compare_usage(
+    measured: AgentSummary, baseline: AgentSummary, field: str
+) -> tuple[float | None, float | None]:
+    value = getattr(measured, field)
+    base = getattr(baseline, field)
+    if value is None or base is None:
+        return None, None
+    return value - base, None if base == 0 else value / base
+
+
+def usage_overhead(summaries: list[AgentSummary]) -> dict[str, dict[str, float | str | None]]:
+    by_agent = {summary.agent: summary for summary in summaries}
+    baselines = {
+        "appa": "appa-open",
+        "appa-nofork": "appa-open",
+        "fides-middleware": "fides-open",
+        "fides-native": "fides-open",
+    }
+    comparisons = {}
+    for agent, baseline_name in baselines.items():
+        measured = by_agent.get(agent)
+        baseline = by_agent.get(baseline_name)
+        if measured is None or baseline is None:
+            continue
+        token_delta, token_ratio = _compare_usage(measured, baseline, "mean_total_tokens")
+        cost_delta, cost_ratio = _compare_usage(measured, baseline, "mean_cost_usd")
+        comparisons[agent] = {
+            "baseline": baseline_name,
+            "mean_total_tokens_delta": token_delta,
+            "total_tokens_ratio": token_ratio,
+            "mean_cost_usd_delta": cost_delta,
+            "cost_ratio": cost_ratio,
+        }
+    return comparisons
 
 
 def write_summary(run_dir: Path, summaries: list[AgentSummary], results: list[EpisodeResult]) -> None:
@@ -138,6 +214,7 @@ def write_summary(run_dir: Path, summaries: list[AgentSummary], results: list[Ep
         json.dumps(
             {
                 "agents": [s.__dict__ for s in summaries],
+                "usage_overhead_vs_baseline": usage_overhead(summaries),
                 "episodes": [episode_record(r) for r in results],
             },
             indent=2,

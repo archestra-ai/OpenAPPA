@@ -40,6 +40,16 @@ from actual store mutations and checked deliveries. A blocked proposal remains
 in the Inspect transcript for audit but cannot earn utility or count as an
 executed attack in the actual score.
 
+Accounting uses Inspect's sample-scoped provider usage. The summary records
+model calls, total input tokens, cache reads and writes, output and reasoning
+tokens, total tokens, and USD cost. It includes calls from the parent, isolated
+children, and quarantine clients. An unavailable field remains `null`; the
+benchmark never converts unknown usage to zero.
+
+`usage_overhead_vs_stock` compares each defended arm with `stock`. Each entry
+reports the difference between mean usage per sample (one benchmark episode)
+and the stock mean. It also reports the defended-to-stock ratio.
+
 ## Setup and preflight
 
 ```sh

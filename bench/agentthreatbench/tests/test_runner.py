@@ -3,6 +3,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from inspect_ai.model import ModelUsage
 from inspect_ai.tool import ToolDef
 
 from appa_agentthreatbench.fides import (
@@ -13,8 +14,10 @@ from appa_agentthreatbench.fides import (
 from appa_agentthreatbench.runner import (
     EXPECTED_BINDING_IDENTITY,
     EXPECTED_TOTAL_SAMPLES,
+    _aggregate_usage,
     _audit_diagnostics,
     _scoreable_limit_termination,
+    _usage_overhead,
     preflight,
     run_manifest,
     validate_inventory,
@@ -42,6 +45,56 @@ from appa_agentthreatbench.tasks import (
     policy_digest,
     system_prompt,
 )
+
+
+def _usage_sample(*, input_tokens: int, output_tokens: int, cost_usd: float):
+    usage = ModelUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=input_tokens + 25 + output_tokens,
+        input_tokens_cache_read=20,
+        input_tokens_cache_write=5,
+        reasoning_tokens=7,
+        total_cost=cost_usd,
+    )
+    event_usage = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": usage.total_tokens,
+    }
+    event = SimpleNamespace(
+        event="model",
+        call=SimpleNamespace(model_dump=lambda **_: {"response": {"usage": event_usage}}),
+    )
+    return SimpleNamespace(events=[event], model_usage={"openrouter/model": usage})
+
+
+def test_usage_aggregation_includes_cache_tokens_and_provider_cost() -> None:
+    summary = _aggregate_usage(
+        [
+            _usage_sample(input_tokens=100, output_tokens=30, cost_usd=0.01),
+            _usage_sample(input_tokens=200, output_tokens=40, cost_usd=0.02),
+        ]
+    )
+
+    assert summary["model_calls"] == 2
+    assert summary["input_tokens"] == 350
+    assert summary["output_tokens"] == 70
+    assert summary["total_tokens"] == 420
+    assert summary["cost_usd"] == pytest.approx(0.03)
+    assert summary["mean_total_tokens"] == pytest.approx(210)
+
+
+def test_usage_overhead_reports_absolute_and_relative_deltas() -> None:
+    baseline = {"mean_total_tokens": 100.0, "mean_cost_usd": 0.02}
+    measured = {"mean_total_tokens": 135.0, "mean_cost_usd": 0.03}
+
+    assert _usage_overhead(measured, baseline) == {
+        "mean_total_tokens_delta": 35.0,
+        "total_tokens_ratio": 1.35,
+        "mean_cost_usd_delta": pytest.approx(0.01),
+        "cost_ratio": 1.5,
+    }
 
 
 def test_complete_inventory_has_all_tasks_arms_and_controls() -> None:

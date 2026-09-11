@@ -353,6 +353,89 @@ def _sample_cost(sample: EvalSample) -> float | None:
     return sum(provider_costs) if model_calls and len(provider_costs) == model_calls else None
 
 
+def _sample_usage(sample: EvalSample) -> dict[str, int | float | None]:
+    model_calls = []
+    usage_reported_calls = 0
+    for event in sample.events:
+        if event.event != "model" or event.call is None:
+            continue
+        model_calls.append(event)
+        call = event.call.model_dump(mode="json")
+        response = call.get("response")
+        usage = response.get("usage") if isinstance(response, dict) else None
+        required_fields = ("input_tokens", "output_tokens", "total_tokens")
+        if isinstance(usage, dict) and all(isinstance(usage.get(field), int) for field in required_fields):
+            usage_reported_calls += 1
+
+    usages = list(sample.model_usage.values())
+
+    def optional_sum(field: str) -> int | None:
+        values = [getattr(usage, field) for usage in usages]
+        return sum(values) if values and all(value is not None for value in values) else None
+
+    cache_read = optional_sum("input_tokens_cache_read")
+    cache_write = optional_sum("input_tokens_cache_write")
+    return {
+        "model_calls": len(model_calls),
+        "usage_reported_calls": usage_reported_calls,
+        # Inspect separates cache reads and writes from input_tokens. Report
+        # total provider input volume so this agrees with CorpBench/OpenAI.
+        "input_tokens": sum(usage.input_tokens for usage in usages)
+        + sum(usage.input_tokens_cache_read or 0 for usage in usages)
+        + sum(usage.input_tokens_cache_write or 0 for usage in usages),
+        "output_tokens": sum(usage.output_tokens for usage in usages),
+        "total_tokens": sum(usage.total_tokens for usage in usages),
+        "cached_input_tokens": cache_read,
+        "cache_write_input_tokens": cache_write,
+        "reasoning_tokens": optional_sum("reasoning_tokens"),
+        "cost_usd": _sample_cost(sample),
+    }
+
+
+def _aggregate_usage(samples: list[EvalSample]) -> dict[str, int | float | None]:
+    records = [_sample_usage(sample) for sample in samples]
+    complete_tokens = all(record["usage_reported_calls"] == record["model_calls"] for record in records)
+
+    def total(field: str, *, complete: bool = complete_tokens) -> int | float | None:
+        values = [record[field] for record in records]
+        return sum(values) if complete and all(value is not None for value in values) else None
+
+    total_tokens = total("total_tokens")
+    cost_usd = total("cost_usd", complete=True)
+    return {
+        "samples": len(samples),
+        "model_calls": sum(int(record["model_calls"]) for record in records),
+        "usage_reported_calls": sum(int(record["usage_reported_calls"]) for record in records),
+        "input_tokens": total("input_tokens"),
+        "output_tokens": total("output_tokens"),
+        "total_tokens": total_tokens,
+        "cached_input_tokens": total("cached_input_tokens"),
+        "cache_write_input_tokens": total("cache_write_input_tokens"),
+        "reasoning_tokens": total("reasoning_tokens"),
+        "cost_usd": cost_usd,
+        "mean_total_tokens": None if total_tokens is None else total_tokens / len(samples),
+        "mean_cost_usd": None if cost_usd is None else cost_usd / len(samples),
+    }
+
+
+def _usage_overhead(measured: dict[str, object], baseline: dict[str, object]) -> dict[str, float | None]:
+    def compare(field: str) -> tuple[float | None, float | None]:
+        value = measured.get(field)
+        base = baseline.get(field)
+        if not isinstance(value, int | float) or not isinstance(base, int | float):
+            return None, None
+        return float(value - base), None if base == 0 else float(value / base)
+
+    token_delta, token_ratio = compare("mean_total_tokens")
+    cost_delta, cost_ratio = compare("mean_cost_usd")
+    return {
+        "mean_total_tokens_delta": token_delta,
+        "total_tokens_ratio": token_ratio,
+        "mean_cost_usd_delta": cost_delta,
+        "cost_ratio": cost_ratio,
+    }
+
+
 def _transcript_digest(sample: EvalSample) -> str:
     transcript = [message.model_dump(mode="json") for message in sample.messages]
     encoded = json.dumps(transcript, sort_keys=True, separators=(",", ":")).encode()
@@ -514,7 +597,10 @@ def build_summary(logs: list[EvalLog], audit_dir: Path, manifest: dict[str, obje
     if stock_parity_failures:
         raise ValueError(f"stock proposal/dispatch scoring parity failed: {stock_parity_failures}")
 
-    sample_costs = [_sample_cost(sample) for sample in samples]
+    samples_by_arm = {
+        arm: [sample for sample in samples if str(sample.metadata.get("appa_arm")) == arm] for arm in ARMS
+    }
+    usage_by_arm = {arm: _aggregate_usage(grouped) for arm, grouped in samples_by_arm.items() if grouped}
     grouped_summary: dict[str, dict[str, dict[str, object]]] = {arm: {} for arm in ARMS}
     for (arm, task_type, kind), grouped in sorted(groups.items()):
         values = [_score(sample, "actual_dispatch_scorer") for sample in grouped]
@@ -526,6 +612,7 @@ def build_summary(logs: list[EvalLog], audit_dir: Path, manifest: dict[str, obje
             "proposal_utility": sum(_correct(value["proposal_utility"]) for value in values) / len(values),
             "proposal_security": sum(_correct(value["proposal_security"]) for value in values) / len(values),
             "dispatch_parity": sum(_correct(value["dispatch_parity"]) for value in values) / len(values),
+            "model_usage": _aggregate_usage(grouped),
             "sample_results": {
                 str(sample.metadata.get("original_sample_id")): _score(sample, "actual_dispatch_scorer")
                 for sample in grouped
@@ -537,9 +624,13 @@ def build_summary(logs: list[EvalLog], audit_dir: Path, manifest: dict[str, obje
         "run_digest": manifest["run_digest"],
         "completed_at": datetime.now(UTC).isoformat(),
         "sample_count": len(samples),
-        "cost_usd": sum(cost for cost in sample_costs if cost is not None)
-        if all(cost is not None for cost in sample_costs)
-        else None,
+        "model_usage": _aggregate_usage(samples),
+        "model_usage_by_arm": usage_by_arm,
+        "usage_overhead_vs_stock": {
+            arm: _usage_overhead(usage, usage_by_arm["stock"])
+            for arm, usage in usage_by_arm.items()
+            if arm != "stock" and "stock" in usage_by_arm
+        },
         "stock_actual_dispatch_parity": True,
         "groups": grouped_summary,
         "mediation_audit": _audit_diagnostics(audit_dir, samples, manifest),
@@ -626,5 +717,5 @@ def run_complete(
     temporary = summary_path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     temporary.replace(summary_path)
-    print(json.dumps({"summary": str(summary_path), "cost_usd": summary["cost_usd"]}, indent=2))
+    print(json.dumps({"summary": str(summary_path), "model_usage": summary["model_usage"]}, indent=2))
     return output_dir

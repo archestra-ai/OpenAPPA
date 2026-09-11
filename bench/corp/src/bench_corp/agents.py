@@ -160,6 +160,8 @@ def command_for(
         str(episode_dir / "data"),
         "--sink-root",
         str(episode_dir / "sink"),
+        "--usage-file",
+        str((episode_dir / "model-usage.json").resolve()),
     ]
     if agent.mcp_server is not None:
         command += ["--server-bin", str(agent.mcp_server)]
