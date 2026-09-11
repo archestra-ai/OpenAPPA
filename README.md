@@ -97,10 +97,22 @@ and kagent deployment preparation: [marketplace guide](marketplace/README.md).
 
 ## Testing
 
+Install [mise](https://mise.jdx.dev/) and prepare the repository:
+
+```sh
+mise install
+mise run setup
+```
+
+Mise supplies the locked Rust, Python, Go, and Node toolchains plus `uv`,
+`pnpm`, and the Claude Code CLI used by the harness tests. The setup task
+delegates package installation to Cargo, uv, Go, and pnpm, using their
+committed manifests and lockfiles.
+
 Run the repository-wide evaluation before handing off a change:
 
 ```sh
-scripts/appa-eval.sh
+mise exec -- scripts/appa-eval.sh
 ```
 
 It runs the Rust, Python, and Go suites, the deterministic kagent integration,

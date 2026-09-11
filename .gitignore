@@ -26,3 +26,6 @@ __pycache__/
 .DS_Store
 /tmp/
 /appa-mcp*
+
+# Local Amp portal metadata.
+.amp/portals/*
