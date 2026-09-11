@@ -1,8 +1,9 @@
 schema = 1
 name = "linear"
-description = "Policy for 65 Linear MCP tools: internal audiences, reviewed writes, and recorded effects."
+description = "Policy for 65 Linear MCP tools: per-issue, per-team, per-project and per-document audiences from Linear's own access model, reviewed writes, and recorded effects, plus the linear audience source."
 
 [battery]
 policy = "appa.toml"
 hosts = ["claude-code", "kagent"]
 namespaces = ["linear"]
+helpers = ["audience-source.py"]

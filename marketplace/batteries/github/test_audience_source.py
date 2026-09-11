@@ -132,9 +132,43 @@ class SelectorTests(unittest.TestCase):
         with self.assertRaises(AUDIENCE_SOURCE.NotFound):
             AUDIENCE_SOURCE.answer(call, {"selector": "org/typo-org/members"})
 
+    def test_a_repositorys_collaborators_are_its_own_membership(self):
+        call = fixture_api(
+            [
+                (
+                    "/repos/archestra-ai/OpenAPPA/collaborators",
+                    {"per_page": 100, "page": 1},
+                    [user("alice"), user("bob"), user("ci-robot", type="Bot")],
+                ),
+                profile("alice", "alice@corp.com"),
+                profile("bob"),
+            ]
+        )
+        self.assertEqual(
+            AUDIENCE_SOURCE.answer(call, {"selector": "repo/archestra-ai/OpenAPPA/collaborators"}),
+            {"members": ["alice@corp.com", "github:bob"]},
+        )
+
+    def test_a_collection_over_the_bound_is_refused_before_any_profile_is_read(self):
+        pages = [
+            ("/orgs/acme/members", {"per_page": 100, "page": page}, [user(f"u{page}-{i}") for i in range(100)])
+            for page in range(1, 12)
+        ]
+        with self.assertRaises(RuntimeError):
+            AUDIENCE_SOURCE.answer(fixture_api(pages), {"selector": "org/acme/members"})
+
     def test_an_unserved_selector_is_refused(self):
         call = fixture_api([])
-        for selector in ["full-members", "org//members", "org/a/team/", "org/a/repos", ""]:
+        for selector in [
+            "full-members",
+            "org//members",
+            "org/a/team/",
+            "org/a/repos",
+            "",
+            "repo/a/collaborators",
+            "repo//b/collaborators",
+            "repo/a/b/members",
+        ]:
             with self.assertRaises(ValueError):
                 AUDIENCE_SOURCE.answer(call, {"selector": selector})
 
@@ -177,7 +211,9 @@ class EnvelopeTests(unittest.TestCase):
             "version": 1,
             "kind": "audience",
             "name": "github",
-            "declaration": {"templates": ["viewer", "org/<org>/members", "org/<org>/team/<team>"]},
+            "declaration": {
+                "templates": ["viewer", "org/<org>/members", "org/<org>/team/<team>", "repo/<owner>/<repo>/collaborators"]
+            },
             "artifact": {"selector": "viewer"},
             **overrides,
         }

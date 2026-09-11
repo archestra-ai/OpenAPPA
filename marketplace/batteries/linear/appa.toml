@@ -1,11 +1,30 @@
-# Linear MCP policy. Internal must name readers authorized for all resources
-# available through this connection. Override individual resources in the root policy.
-# Every mutation requires review; no provider credentials or helper processes.
+# Linear MCP policy. A tool that names an issue, a team, a project, or a
+# document by id is labelled with that resource's readers as Linear reports
+# them: every full member for a public team, the team's members for a
+# private one, plus the people an issue is shared with. The `linear`
+# audience source bound below answers who is in each collection. Tools
+# that name no resource, or name one by a free-text query, stay `internal`:
+# map it in the root config to readers authorized for everything this
+# connection can list. Every mutation requires review.
 
 [policy]
 version = 2
 
-# Reads: outside content, restricted to internal readers.
+[externals.audience.linear]
+command = ["python3", "audience-source.py"]
+token_env = "APPA_PROVIDER_LINEAR_TOKEN"
+selectors = [
+  { template = "viewer", feeds = "self" },
+  { template = "full-members", feeds = "internal" },
+  { template = "team/<key>/members" },
+  { template = "team/<key>/readers" },
+  { template = "issue/<id>/readers" },
+  { template = "project/<id>/readers" },
+  { template = "document/<id>/readers" },
+]
+
+# Reads of one resource: outside content, read by that resource's readers.
+# Reads without a resource id: outside content, restricted to internal readers.
 
 [[policy.tool]]
 name = "mcp/linear/extract_images"
@@ -35,12 +54,14 @@ requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/linear/get_document"
-delta = { trust = "suspicious", audience = ["internal"] }
+parameters = { type = "object", properties = { id = { type = "string" } }, required = ["id"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["@linear:document/$id/readers"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/linear/get_issue"
-delta = { trust = "suspicious", audience = ["internal"] }
+parameters = { type = "object", properties = { id = { type = "string" } }, required = ["id"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["@linear:issue/$id/readers"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
@@ -109,8 +130,15 @@ delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
+name = "mcp/linear/list_comments(issueId:*)"
+parameters = { type = "object", properties = { issueId = { type = "string" } }, required = ["issueId"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["@linear:issue/$issueId/readers"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
 name = "mcp/linear/list_cycles"
-delta = { trust = "suspicious", audience = ["internal"] }
+parameters = { type = "object", properties = { teamId = { type = "string" } }, required = ["teamId"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["@linear:team/$teamId/readers"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
@@ -121,6 +149,12 @@ requires = { audience = { contains = ["internal"] } }
 [[policy.tool]]
 name = "mcp/linear/list_documents"
 delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_documents(teamId:*)"
+parameters = { type = "object", properties = { teamId = { type = "string" } }, required = ["teamId"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["@linear:team/$teamId/readers"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
@@ -136,6 +170,12 @@ requires = { audience = { contains = ["internal"] } }
 [[policy.tool]]
 name = "mcp/linear/list_issues"
 delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/linear/list_issues(team:*)"
+parameters = { type = "object", properties = { team = { type = "string" } }, required = ["team"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["@linear:team/$team/readers"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
@@ -197,6 +237,13 @@ requires = { trust = "trusted", audience = { contains = ["internal"] }, attentio
 effects = ["linear.changed"]
 
 [[policy.tool]]
+name = "mcp/linear/save_comment(issueId:*)"
+parameters = { type = "object", properties = { issueId = { type = "string" } }, required = ["issueId"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["@linear:issue/$issueId/readers"] }
+requires = { trust = "trusted", audience = { contains = ["@linear:issue/$issueId/readers"] }, attention = ["linear-review"] }
+effects = ["linear.changed"]
+
+[[policy.tool]]
 name = "mcp/linear/save_comment"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
@@ -208,10 +255,27 @@ delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.changed"]
 
+# Moving an issue: the team it lands in decides who reads it from then on.
+[[policy.tool]]
+name = "mcp/linear/save_issue(id:*,team:*)"
+parameters = { type = "object", properties = { id = { type = "string" }, team = { type = "string" } }, required = ["id", "team"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["@linear:team/$team/readers"] }
+requires = { trust = "trusted", audience = { contains = ["@linear:team/$team/readers"] }, attention = ["linear-review"] }
+effects = ["linear.changed"]
+
+[[policy.tool]]
+name = "mcp/linear/save_issue(id:*)"
+parameters = { type = "object", properties = { id = { type = "string" } }, required = ["id"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["@linear:issue/$id/readers"] }
+requires = { trust = "trusted", audience = { contains = ["@linear:issue/$id/readers"] }, attention = ["linear-review"] }
+effects = ["linear.changed"]
+
+# Creating an issue: the team it lands in decides who reads it.
 [[policy.tool]]
 name = "mcp/linear/save_issue"
-delta = { trust = "suspicious", audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+parameters = { type = "object", properties = { team = { type = "string" } }, required = ["team"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["@linear:team/$team/readers"] }
+requires = { trust = "trusted", audience = { contains = ["@linear:team/$team/readers"] }, attention = ["linear-review"] }
 effects = ["linear.changed"]
 
 [[policy.tool]]
@@ -224,14 +288,16 @@ effects = ["linear.changed"]
 
 [[policy.tool]]
 name = "mcp/linear/create_attachment"
-delta = { trust = "suspicious", audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+parameters = { type = "object", properties = { issue = { type = "string" } }, required = ["issue"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["@linear:issue/$issue/readers"] }
+requires = { trust = "trusted", audience = { contains = ["@linear:issue/$issue/readers"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
 name = "mcp/linear/create_attachment_from_upload"
-delta = { trust = "suspicious", audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+parameters = { type = "object", properties = { issue = { type = "string" } }, required = ["issue"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["@linear:issue/$issue/readers"] }
+requires = { trust = "trusted", audience = { contains = ["@linear:issue/$issue/readers"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
@@ -271,8 +337,10 @@ requires = { trust = "trusted", audience = { contains = ["internal"] }, attentio
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
+# The signed upload URL is short-lived and named nowhere else; `internal`
+# keeps the prepared upload attachable to any issue the workspace reads.
 name = "mcp/linear/prepare_attachment_upload"
-delta = { trust = "suspicious", audience = ["self"] }
+delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 

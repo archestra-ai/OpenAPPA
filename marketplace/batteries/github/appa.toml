@@ -1,29 +1,25 @@
 # GitHub battery: the GitHub MCP server's default toolsets.
 #
-# The default assumes public repositories. Issue, pull-request, and file
-# text is written by whoever pushed it, so every read enters at the low
-# rank of the trust chain, like a fetched web page. Every write publishes
-# to a place anyone can read, so it needs trusted data that may be seen
-# by everyone (audience contains `public`).
+# Issue, pull-request, and file text is written by whoever pushed it, so
+# every read enters at the low rank of the trust chain, like a fetched
+# web page. Who may see it, and who must be allowed to see what a write
+# puts there, is the repository's own visibility: for a tool that names a
+# repository (`owner`, `repo`), the two annotators bound below ask GitHub
+# whether it is private. A public repository's content is `public` and
+# its writes need trusted data everyone may see; a private repository's
+# content is read by `@github:repo/<owner>/<repo>/collaborators`, the
+# collection the `github` audience source resolves, and its writes need
+# trusted data those collaborators may see. A repository the token cannot
+# see gets no answer, and the call is refused.
 #
-# For a private repository, add root rules that name it; root rules run
-# first. Its reads become `internal`, and its writes accept `internal` data.
-# A rule names one tool and matches one argument, so add one rule per
-# tool you use against that repository — here the issue tools:
+# Searches and org-level listings name no single repository and reach
+# every private repository the token sees, so their results stay with the
+# viewer (`self`). A root rule can treat a search of public repositories
+# as public by its query. Root rules run first:
 #
 #   [[policy.tool]]
-#   name = "mcp/github/issue_read(repo:my-private-repo)"
-#   delta = { trust = "suspicious", audience = ["internal"] }
-#
-#   [[policy.tool]]
-#   name = "mcp/github/issue_write(repo:my-private-repo)"
-#   delta = {}
-#
-#   [policy.tool.requires]
-#   trust = "trusted"
-#   audience = { contains = ["internal"] }
-#   #
-# To cover a whole organisation instead, match `owner:my-org`.
+#   name = "mcp/github/search_code(query:*repo\:acme/website*)"
+#   delta = { trust = "suspicious" }
 #
 # The battery also binds `audience-source.py`, the `github` audience
 # source, and declares the selectors it serves. The root config maps
@@ -32,6 +28,28 @@
 [policy]
 version = 2
 
+# What a read of one repository returns.
+[[policy.annotator]]
+name = "github.repository-visibility"
+ranks = ["suspicious"]
+audiences = ["@github:repo/$owner/$repo/collaborators"]
+marks = []
+
+# What a write into one repository needs.
+[[policy.annotator]]
+name = "github.repository-readers"
+ranks = ["trusted"]
+audiences = ["@github:repo/$owner/$repo/collaborators"]
+marks = []
+
+[externals.annotators."github.repository-visibility"]
+command = ["python3", "repository-visibility.py"]
+token_env = "APPA_PROVIDER_GITHUB_TOKEN"
+
+[externals.annotators."github.repository-readers"]
+command = ["python3", "repository-visibility.py"]
+token_env = "APPA_PROVIDER_GITHUB_TOKEN"
+
 [externals.audience.github]
 command = ["python3", "audience-source.py"]
 token_env = "APPA_PROVIDER_GITHUB_TOKEN"
@@ -39,252 +57,226 @@ selectors = [
   { template = "viewer", feeds = "self" },
   { template = "org/<org>/members", feeds = "internal" },
   { template = "org/<org>/team/<team>" },
+  { template = "repo/<owner>/<repo>/collaborators" },
 ]
 
-# --- who am I: no outside content, nothing sent ---
+# --- who am I: the viewer's own profile, nothing a stranger wrote ---
 
 [[policy.tool]]
 name = "mcp/github/get_me"
 delta = {}
 
+# --- rosters and user search: profiles other people wrote, from every organization the token sees ---
+
 [[policy.tool]]
 name = "mcp/github/get_teams"
-delta = {}
+delta = { trust = "suspicious", audience = ["self"] }
 
 [[policy.tool]]
 name = "mcp/github/get_team_members"
-delta = {}
+delta = { trust = "suspicious", audience = ["self"] }
 
 [[policy.tool]]
 name = "mcp/github/search_users"
-delta = {}
+delta = { trust = "suspicious", audience = ["self"] }
 
-# --- reads: content other people wrote ---
-
-[[policy.tool]]
-name = "mcp/github/search_repositories"
-delta = { trust = "suspicious" }
+# --- reads of one repository: its visibility decides who may see the content ---
 
 [[policy.tool]]
 name = "mcp/github/get_file_contents"
-delta = { trust = "suspicious" }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/list_branches"
-delta = { trust = "suspicious" }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/list_commits"
-delta = { trust = "suspicious" }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/get_commit"
-delta = { trust = "suspicious" }
-
-[[policy.tool]]
-name = "mcp/github/search_code"
-delta = { trust = "suspicious" }
-
-[[policy.tool]]
-name = "mcp/github/search_commits"
-delta = { trust = "suspicious" }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/list_tags"
-delta = { trust = "suspicious" }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/get_tag"
-delta = { trust = "suspicious" }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/list_releases"
-delta = { trust = "suspicious" }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/get_latest_release"
-delta = { trust = "suspicious" }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/get_release_by_tag"
-delta = { trust = "suspicious" }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/list_repository_collaborators"
-delta = { trust = "suspicious" }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/list_issues"
-delta = { trust = "suspicious" }
-
-[[policy.tool]]
-name = "mcp/github/run_secret_scanning"
-delta = { trust = "suspicious" }
-
-[[policy.tool]]
-name = "mcp/github/search_issues"
-delta = { trust = "suspicious" }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/issue_read"
-delta = { trust = "suspicious" }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/get_label"
-delta = { trust = "suspicious" }
-
-[[policy.tool]]
-name = "mcp/github/list_issue_fields"
-delta = { trust = "suspicious" }
-
-[[policy.tool]]
-name = "mcp/github/list_issue_types"
-delta = { trust = "suspicious" }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/list_pull_requests"
-delta = { trust = "suspicious" }
-
-[[policy.tool]]
-name = "mcp/github/search_pull_requests"
-delta = { trust = "suspicious" }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-visibility"
 
 [[policy.tool]]
 name = "mcp/github/pull_request_read"
-delta = { trust = "suspicious" }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-visibility"
 
-# --- writes: the repository is assumed public, so only public data may go in ---
+# --- reads across repositories: content other people wrote, from every repository the token sees ---
 
 [[policy.tool]]
-name = "mcp/github/create_repository"
-delta = {}
+name = "mcp/github/search_repositories"
+delta = { trust = "suspicious", audience = ["self"] }
 
-[policy.tool.requires]
-trust = "trusted"
-audience = { contains = ["public"] }
+[[policy.tool]]
+name = "mcp/github/search_code"
+delta = { trust = "suspicious", audience = ["self"] }
+
+[[policy.tool]]
+name = "mcp/github/search_commits"
+delta = { trust = "suspicious", audience = ["self"] }
+
+[[policy.tool]]
+name = "mcp/github/run_secret_scanning"
+delta = { trust = "suspicious", audience = ["self"] }
+
+[[policy.tool]]
+name = "mcp/github/search_issues"
+delta = { trust = "suspicious", audience = ["self"] }
+
+[[policy.tool]]
+name = "mcp/github/list_issue_fields"
+delta = { trust = "suspicious", audience = ["self"] }
+
+[[policy.tool]]
+name = "mcp/github/list_issue_types"
+delta = { trust = "suspicious", audience = ["self"] }
+
+[[policy.tool]]
+name = "mcp/github/search_pull_requests"
+delta = { trust = "suspicious", audience = ["self"] }
+
+# --- writes into one repository: its visibility decides who must be allowed to see the data ---
 
 [[policy.tool]]
 name = "mcp/github/fork_repository"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-audience = { contains = ["public"] }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/create_branch"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-audience = { contains = ["public"] }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/create_or_update_file"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-audience = { contains = ["public"] }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/push_files"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-audience = { contains = ["public"] }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/delete_file"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-audience = { contains = ["public"] }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/issue_write"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-audience = { contains = ["public"] }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/sub_issue_write"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-audience = { contains = ["public"] }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/add_issue_comment"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-audience = { contains = ["public"] }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/create_pull_request"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-audience = { contains = ["public"] }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/update_pull_request"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-audience = { contains = ["public"] }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/update_pull_request_branch"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-audience = { contains = ["public"] }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/merge_pull_request"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-audience = { contains = ["public"] }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/pull_request_review_write"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-audience = { contains = ["public"] }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/add_comment_to_pending_review"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-audience = { contains = ["public"] }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/add_reply_to_pull_request_comment"
-delta = {}
-
-[policy.tool.requires]
-trust = "trusted"
-audience = { contains = ["public"] }
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/request_copilot_review"
+parameters = { type = "object", properties = { owner = { type = "string" }, repo = { type = "string" } }, required = ["owner", "repo"], additionalProperties = true }
+annotator = "github.repository-readers"
+
+# --- writes that name no existing repository: only public data may go in ---
+
+[[policy.tool]]
+name = "mcp/github/create_repository"
 delta = {}
 
 [policy.tool.requires]

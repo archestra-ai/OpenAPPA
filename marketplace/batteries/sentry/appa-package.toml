@@ -1,0 +1,9 @@
+schema = 1
+name = "sentry"
+description = "Rules for the Sentry MCP server: its 9 listed tools and the 55 catalog tools behind execute_sentry_tool, with internal reads and reviewed writes."
+
+[battery]
+policy = "appa.toml"
+hosts = ["claude-code", "kagent"]
+namespaces = ["sentry"]
+helpers = []

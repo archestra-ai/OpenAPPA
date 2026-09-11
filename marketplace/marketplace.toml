@@ -8,7 +8,7 @@ digest = "sha256:6856d2b668f484385ed3078f27e3fbbf89092941147b2708a9e9c32c871e41a
 
 [packages.battery.github]
 path = "batteries/github"
-digest = "sha256:e8001ba0c26d1a39fffbed8af1011026bea4b6319801aee3ff6b9344d2089d94"
+digest = "sha256:f4db428fe440d5c71ee9c82e953b4e6f33c6f9ca1a4bb01bfb967b1a6e1df039"
 
 [packages.battery.google-workspace]
 path = "batteries/google-workspace"
@@ -20,11 +20,19 @@ digest = "sha256:1d72dcd5bd5ac7e5920044079f8129017734793108f002872085788dd1a8f21
 
 [packages.battery.linear]
 path = "batteries/linear"
-digest = "sha256:ae234d868a848766fb0bfeb14cbf5ed229aeef8e0448c25dac923d1479308b40"
+digest = "sha256:274d843c761615cfa212c894855ff013609581ae71bbe2894fb47089b158a07a"
+
+[packages.battery.notion]
+path = "batteries/notion"
+digest = "sha256:dea7e48a6f9d07705c6784f3fdcfc6aacc74883bc8c669fb98282ca0ceda0024"
+
+[packages.battery.sentry]
+path = "batteries/sentry"
+digest = "sha256:f0c7f9d1aeaf11e1a584499e4c669c410572fc6a889d7d718cad012d362307e7"
 
 [packages.battery.slack]
 path = "batteries/slack"
-digest = "sha256:c22d304c6299ce34436a57401be1333b9201909df04700a7e262ee629a27ff00"
+digest = "sha256:03923d886e39871f78c36b7281eab04cdd397f451ddd4601455ab049714ca614"
 
 [packages.plugin.claude-code]
 path = "plugins/claude-code"

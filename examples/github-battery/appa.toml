@@ -1,0 +1,35 @@
+# Replay the GitHub battery against real repositories. The battery's two
+# annotators ask GitHub for each repository's visibility; two tools
+# outside the battery make the resulting trust and audience observable.
+include = ["../../marketplace/batteries/github/appa.toml"]
+
+[policy]
+version = 2
+trust_chain = ["suspicious", "trusted"]
+
+# Cross-repository searches stay with the viewer: the token's own reader.
+[policy.audience]
+self = ["github:viewer"]
+
+# Runs only with trusted data: repository content cannot steer it.
+[[policy.tool]]
+name = "mcp/shell/run_command"
+requires = { trust = "trusted" }
+delta = {}
+
+# Sends to whoever `to` names: the audience the content reached decides.
+[[policy.tool]]
+name = "mcp/mail/send"
+requires = { trust = "suspicious", audience = { contains = ["$to"] } }
+delta = {}
+
+[policy.tool.parameters]
+type = "object"
+required = ["to"]
+
+[policy.tool.parameters.properties.to]
+type = "string"
+
+[externals]
+timeout_ms = 30000
+max_body_bytes = 1048576

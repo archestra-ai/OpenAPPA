@@ -1,0 +1,426 @@
+# Sentry battery: the Sentry MCP server (`@sentry/mcp-server`, hosted at
+# mcp.sentry.dev or run locally).
+#
+# The server lists nine tools. Seven read or change Sentry directly; the
+# other two are a catalog: `search_sentry_tools` finds a tool by name, and
+# `execute_sentry_tool` runs any of the 55 catalog tools by its `name`
+# argument. The rules below name each catalog tool through that argument,
+# `execute_sentry_tool(name:<tool>)`, so the inner tool decides what the
+# call is; a `name` outside the catalog needs a person.
+#
+# What Sentry returns — issues, events, stack traces, breadcrumbs, user
+# reports, replays, comments — was produced by the monitored applications
+# and their users, so every read enters `suspicious`, restricted to the
+# organization's members (`internal`). Every write needs trusted data that
+# `internal` may see and the `sentry-review` mark; changing a project,
+# team, DSN, or monitor records `sentry.sensitive`, the rest
+# `sentry.changed`. The root config supplies an authority permitting
+# `sentry-review`. Sentry exposes no per-project readers to a policy, so
+# map `internal` to the people who may see everything this token can list.
+#
+# Documentation tools fetch public pages from docs.sentry.io, so their
+# input must be public. `search_events`, `search_issues`,
+# `search_issue_events`, and `get_trace_details` may send their free-text
+# query to the LLM provider the server is configured with; that provider
+# is the deployment's own. `analyze_issue_with_seer` starts a Seer run on
+# Sentry's side and is a write.
+
+[policy]
+version = 2
+
+# --- the nine listed tools ---
+
+[[policy.tool]]
+name = "mcp/sentry/find_organizations"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/find_projects"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/update_issue"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+effects = ["sentry.changed"]
+
+[[policy.tool]]
+name = "mcp/sentry/search_events"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/analyze_issue_with_seer"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+effects = ["sentry.changed"]
+
+[[policy.tool]]
+name = "mcp/sentry/search_issues"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/get_sentry_resource"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/search_sentry_tools"
+delta = {}
+
+# --- the catalog, one contract per inner tool ---
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:whoami)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_sentry_mcp_info)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = {}
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:search_docs)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious" }
+requires = { audience = { contains = ["public"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_doc)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious" }
+requires = { audience = { contains = ["public"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:find_organizations)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:find_teams)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:find_projects)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:find_releases)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_release_details)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:find_dashboards)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_dashboard_details)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:find_monitors)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_monitor_details)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:find_uptime_monitors)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_uptime_monitor_details)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:find_alert_rules)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_alert_rule)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_issue_details)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_event_stacktrace)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_issue_activity)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_issue_breadcrumbs)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_issue_user_reports)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_issue_tag_values)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_trace_details)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_span_details)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_replay_details)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_event_attachment)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:search_events)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:search_issues)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:search_issue_events)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:find_dsns)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_profile)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_profile_details)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_sentry_resource)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_snapshot)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_snapshot_image)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_latest_base_snapshot)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_agent_conversation_details)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:get_ai_conversation_details)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:search_agent_conversations)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:search_ai_conversations)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:update_issue)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+effects = ["sentry.changed"]
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:add_issue_note)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+effects = ["sentry.changed"]
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:analyze_issue_with_seer)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+effects = ["sentry.changed"]
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:onboarding_status_update)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+effects = ["sentry.changed"]
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:create_team)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+effects = ["sentry.sensitive"]
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:create_project)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+effects = ["sentry.sensitive"]
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:update_project)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+effects = ["sentry.sensitive"]
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:add_team_to_project)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+effects = ["sentry.sensitive"]
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:remove_team_from_project)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+effects = ["sentry.sensitive"]
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:create_dsn)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+effects = ["sentry.sensitive"]
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:update_dsn)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+effects = ["sentry.sensitive"]
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:create_uptime_monitor)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+effects = ["sentry.sensitive"]
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:update_uptime_monitor)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+effects = ["sentry.sensitive"]
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool(name:delete_uptime_monitor)"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+effects = ["sentry.sensitive"]
+
+# --- a name outside the catalog: a person decides ---
+
+[[policy.tool]]
+name = "mcp/sentry/execute_sentry_tool"
+parameters = { type = "object", properties = { name = { type = "string" } }, required = ["name"], additionalProperties = true }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+effects = ["sentry.sensitive"]
