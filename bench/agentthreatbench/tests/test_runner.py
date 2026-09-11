@@ -15,6 +15,7 @@ from appa_agentthreatbench.fides import (
 from appa_agentthreatbench.runner import (
     EXPECTED_BINDING_IDENTITY,
     EXPECTED_TOTAL_SAMPLES,
+    USAGE_BASELINES,
     _aggregate_usage,
     _audit_diagnostics,
     _scoreable_limit_termination,
@@ -95,6 +96,8 @@ def test_usage_overhead_reports_absolute_and_relative_deltas() -> None:
         "mean_cost_usd_delta": pytest.approx(0.01),
         "cost_ratio": 1.5,
     }
+    assert USAGE_BASELINES["guarded"] == "permissive"
+    assert USAGE_BASELINES["auto-ifc"] == "auto"
 
 
 def test_complete_inventory_has_all_tasks_arms_and_controls() -> None:

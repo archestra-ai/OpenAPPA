@@ -63,9 +63,13 @@ suspicious provenance and the lack of an equivalent APPA attestation channel.
 Runs that include an Auto arm require an `anthropic/<model>` Inspect model and
 use that same Claude model in every arm, including Auto's Agent SDK loop.
 
-`usage_overhead_vs_stock` compares each defended arm with `stock`. Each entry
-reports the difference between mean usage per sample (one benchmark episode)
-and the stock mean. It also reports the defended-to-stock ratio.
+`usage_overhead_vs_baseline` compares each policy-bearing arm with its matching
+empty or default-policy arm: `guarded` with `permissive`, `fides-native` with
+`fides`, and `auto-ifc` with `auto`. Each entry reports the difference between
+mean provider-reported usage per sample and the baseline mean, plus their
+ratio. This is a crude policy overhead measure. It includes every reported
+model call in an episode, but not local runtime, tool, MCP, or network work.
+Missing or partial usage produces `null`, never an invented zero.
 
 ## Setup and preflight
 

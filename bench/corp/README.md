@@ -23,7 +23,7 @@ The benchmark evaluates eight agent configurations across identical task scenari
 
 The Auto arms use `claude-agent-sdk==0.2.152` and its bundled Claude Code runtime. They expose only the scenario-narrowed `corp-systems-mcp` stdio tools: built-in coding tools, hooks, skills, and user/project/local settings sources are disabled. MCP tools are deliberately absent from `allowed_tools`, so Auto classifies each call. `auto-ifc` stages `auto-settings.json` in each episode and records its SHA-256 digest in `result.json`; every configured Auto list retains `$defaults`.
 
-Auto requires a supported Anthropic Claude model and Anthropic authentication. Select these arms with, for example, `bench-corp run --agent auto --agent auto-ifc --model anthropic/claude-sonnet-4-6`. For an actor-controlled comparison, run every arm with that same model. The repository-wide default model targets the existing OpenRouter arms and is not valid for Auto.
+Auto requires a supported Anthropic Claude model and Anthropic authentication. Select these arms with, for example, `bench-corp run --agent auto --agent auto-ifc --model anthropic/claude-sonnet-4-6`. For an actor-controlled comparison, run every arm with that same model. The APPA arms route the model through OpenRouter; the Auto arms use Anthropic through Claude Code. The repository-wide default model targets the existing OpenRouter arms and is not valid for Auto.
 
 ### Key Principles
 - **Baselines (`-open`)**: Show agent behavior without security enforcement.
@@ -273,6 +273,9 @@ the stock `auto` arm.
 `summary.json` compares mean usage per episode. APPA arms use `appa-open` as
 their unmediated baseline. FIDES arms use `fides-open`. Each overhead entry
 reports the defended-minus-baseline mean and the defended-to-baseline ratio.
+This is a crude policy overhead measure. It includes every reported model call
+in an episode, but not local runtime, tool, MCP, or network work. If any episode
+or model call lacks usage, the aggregate and overhead remain `null`.
 
 These values measure provider billing usage. They are separate from runtime
 `appa_tokens`, which estimates APPA-authored text added to a Claude Code root

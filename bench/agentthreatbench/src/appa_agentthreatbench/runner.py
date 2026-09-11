@@ -491,6 +491,13 @@ def _usage_overhead(measured: dict[str, object], baseline: dict[str, object]) ->
     }
 
 
+USAGE_BASELINES = {
+    "guarded": "permissive",
+    "fides-native": "fides",
+    "auto-ifc": "auto",
+}
+
+
 def _transcript_digest(sample: EvalSample) -> str:
     transcript = [message.model_dump(mode="json") for message in sample.messages]
     encoded = json.dumps(transcript, sort_keys=True, separators=(",", ":")).encode()
@@ -683,10 +690,13 @@ def build_summary(logs: list[EvalLog], audit_dir: Path, manifest: dict[str, obje
         "sample_count": len(samples),
         "model_usage": _aggregate_usage(samples),
         "model_usage_by_arm": usage_by_arm,
-        "usage_overhead_vs_stock": {
-            arm: _usage_overhead(usage, usage_by_arm["stock"])
-            for arm, usage in usage_by_arm.items()
-            if arm != "stock" and "stock" in usage_by_arm
+        "usage_overhead_vs_baseline": {
+            arm: {
+                "baseline": baseline,
+                **_usage_overhead(usage_by_arm[arm], usage_by_arm[baseline]),
+            }
+            for arm, baseline in USAGE_BASELINES.items()
+            if arm in usage_by_arm and baseline in usage_by_arm
         },
         "stock_actual_dispatch_parity": True,
         "groups": grouped_summary,
