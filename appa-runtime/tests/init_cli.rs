@@ -7,7 +7,7 @@ use std::process::Command;
 mod common;
 #[path = "common/init_fixture.rs"]
 mod init_fixture;
-use common::repo_root;
+use common::{free_port, http, repo_root, serve_runtime};
 use init_fixture::{Fixture, Installed, default_policy_key, runtime_fingerprint, shipped_default_config};
 
 /// The release workflow proves a released binary ignores `APPA_ENDPOINT` by
@@ -304,11 +304,12 @@ fn a_rerun_keeps_the_config_and_rewrites_nothing_it_already_wrote() {
     assert_eq!(calls.matches("mcp remove").count(), 0);
 }
 
-/// A foreign runtime already owning the endpoint is refused before the profile
-/// is touched at all, so the installation it would have replaced is still the
-/// one that is registered and running. Another build is one way to be foreign;
-/// this build serving another deployment's configuration is the other, and it
-/// is the one a digest alone cannot see.
+/// A foreign runtime owning the endpoint from a process that is not this
+/// user's appa is refused before the profile is touched at all, so the
+/// installation it would have replaced is still the one that is registered
+/// and running. Another build is one way to be foreign; this build serving
+/// another deployment's configuration is the other, and it is the one a
+/// digest alone cannot see. The fake's pid is its own exited shell.
 #[test]
 fn a_foreign_runtime_is_refused_before_the_profile_is_touched() {
     let fixture = Fixture::new();
@@ -350,6 +351,101 @@ fn a_foreign_runtime_is_refused_before_the_profile_is_touched() {
             "a refused endpoint must leave the working launcher armed"
         );
     }
+}
+
+/// A runtime an earlier deployment of this user's left at the endpoint is
+/// stopped by the activation, which then goes on to its own start. The
+/// stand-in is a process named `appa` of this user's, answering as another
+/// build until it is gone.
+#[test]
+fn an_earlier_deployments_runtime_of_the_users_own_is_stopped_by_the_activation() {
+    let fixture = Fixture::new();
+    let stand_in = fixture.root.join("stand-in");
+    let started = Command::new(fixture.root.join("fake-starter.sh"))
+        .env("FAKE_RUNTIME_STAND_IN", &stand_in)
+        .status()
+        .expect("the stand-in starts");
+    assert!(started.success());
+    let pid: i32 = fs::read_to_string(stand_in.join("pid"))
+        .expect("the stand-in recorded its pid")
+        .trim()
+        .parse()
+        .expect("the recorded pid parses");
+    assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "the stand-in runs");
+
+    let output = fixture
+        .activate()
+        .env("FAKE_RUNTIME_STAND_IN", &stand_in)
+        .env("FAKE_CURL_CALLS", fixture.root.join("curl-calls"))
+        .env("FAKE_RUNTIME_FINGERPRINT", "an-earlier-build")
+        .env("FAKE_RUNTIME_FINGERPRINT_LATER", runtime_fingerprint(&fixture.appa))
+        .output()
+        .expect("appa activates");
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_ne!(
+        unsafe { libc::kill(pid, 0) },
+        0,
+        "the earlier deployment's runtime is gone"
+    );
+    assert!(fixture.launcher_is_armed());
+}
+
+/// A purge takes the profile back, stops the runtime at the deployment's
+/// endpoint, and deletes the data and config directories; `appa` on PATH
+/// stays. It reads none of the installation state, and it applies to the
+/// default deployment only.
+#[test]
+fn a_purge_takes_back_the_profile_stops_the_runtime_and_deletes_the_deployment() {
+    let fixture = Fixture::new();
+    fixture.successful_activation();
+    let mut served = serve_runtime(&fixture.config.join("appa.toml"), &fixture.root.join("served.db"));
+    let installed = Installed::of(&fixture);
+
+    let refused = fixture
+        .purge(&served.url)
+        .args(["--config", fixture.config.join("appa.toml").to_str().unwrap()])
+        .output()
+        .expect("appa runs");
+    assert!(!refused.status.success(), "a purge names no config");
+    assert_eq!(Installed::of(&fixture), installed);
+    assert_eq!(
+        http(&format!("{}/health", served.url), "GET", None).as_deref(),
+        Some("ok")
+    );
+
+    let output = fixture.purge(&served.url).output().expect("appa purges");
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_profile_taken_back(&fixture);
+    assert_eq!(http(&format!("{}/health", served.url), "GET", None), None);
+    assert!(served.has_exited(), "the runtime is stopped");
+    assert!(!fixture.data.exists(), "the data directory is gone");
+    assert!(!fixture.config.exists(), "the config directory is gone");
+    assert!(fixture.bin.join("appa").is_file(), "appa on PATH stays");
+}
+
+/// The profile holds nothing of the install: no hook entry, no status line, no
+/// MCP registration, no skill, no launcher.
+fn assert_profile_taken_back(fixture: &Fixture) {
+    assert_eq!(fixture.settings_value(), serde_json::json!({}));
+    assert_eq!(fixture.mcp_registration(), None);
+    assert!(!fixture.skill().parent().unwrap().exists());
+    assert!(!fixture.launcher().exists());
+}
+
+/// A purge of a deployment whose runtime is down still deletes everything.
+#[test]
+fn a_purge_with_no_runtime_running_deletes_the_deployment() {
+    let fixture = Fixture::new();
+    fixture.successful_activation();
+    let dead = format!("http://127.0.0.1:{}", free_port());
+
+    let output = fixture.purge(&dead).output().expect("appa purges");
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_profile_taken_back(&fixture);
+    assert!(!fixture.data.exists() && !fixture.config.exists());
 }
 
 #[test]

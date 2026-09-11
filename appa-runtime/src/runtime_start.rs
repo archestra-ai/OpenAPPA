@@ -1,6 +1,7 @@
-//! Bring up the deployed runtime when nothing healthy answers its endpoint.
+//! Bring up the deployed runtime when nothing healthy answers its endpoint,
+//! and stop the one that does.
 //!
-//! Two callers share this: `appa plugin install claude-code`, as its last
+//! Two callers share the start: `appa plugin install claude-code`, as its last
 //! step, and every protected SessionStart, before the hook posts its first
 //! event. A protected session therefore needs no login service, and an install
 //! that ends here leaves the runtime up, so the first protected session pays
@@ -43,12 +44,8 @@ pub enum StartError {
     Paths(String),
     #[error("nothing answers {url}, and a runtime at a URL the session named is the user's own to start")]
     UserOwnedUnreachable { url: String },
-    #[error("pid {pid} is not this user's appa runtime; not stopping it")]
-    NotOwned { pid: i32 },
-    #[error("cannot tell whether pid {pid} is this user's appa runtime: {detail}")]
-    Ownership { pid: i32, detail: String },
-    #[error("the stale runtime at {url} (pid {pid}) did not stop")]
-    DidNotStop { url: String, pid: i32 },
+    #[error(transparent)]
+    Stop(#[from] StopError),
     #[error("{url} answers neither ok nor the stale runtime being stopped: {answer:?}")]
     Unexpected { url: String, answer: String },
     #[error("cannot create {path}: {source}")]
@@ -65,6 +62,34 @@ pub enum StartError {
     },
     #[error("the runtime did not become healthy at {url}. Its own error is the last line of {log}")]
     NotHealthy { url: String, log: PathBuf },
+}
+
+/// Why the runtime answering an endpoint was not stopped.
+#[derive(Debug, Error)]
+pub enum StopError {
+    #[error("{url} is not a runtime endpoint: {reason}")]
+    Endpoint { url: String, reason: String },
+    #[error("the runtime at {url} is the user's own to stop: the session named that URL itself")]
+    UserOwned { url: String },
+    #[error("{url} answers healthy but does not identify its pid; stop that process yourself")]
+    Unidentified { url: String },
+    #[error("pid {pid} is not this user's appa runtime; not stopping it")]
+    NotOwned { pid: i32 },
+    #[error("cannot tell whether pid {pid} is this user's appa runtime: {detail}")]
+    Ownership { pid: i32, detail: String },
+    #[error("the runtime at {url} (pid {pid}) did not stop")]
+    DidNotStop { url: String, pid: i32 },
+    #[error("{url} answers neither ok nor stale: {answer:?}")]
+    Unexpected { url: String, answer: String },
+}
+
+/// What a stop found at the endpoint, and did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Stopped {
+    /// Nothing answered.
+    Nothing,
+    /// This user's appa runtime answered from the process named, and is gone.
+    Runtime { pid: i32 },
 }
 
 /// What one health probe found at the endpoint.
@@ -155,27 +180,103 @@ pub fn ensure(target: &RuntimeTarget, deployment: &Deployment, executable: &Path
     start(&endpoint, &target.url, deployment, executable)
 }
 
+/// Stop the runtime answering `target`, whichever deployment started it, when
+/// it is this user's own appa process.
+///
+/// An install claims the deployment's endpoint, so a runtime an earlier
+/// deployment left there is stopped rather than reported. A process that is
+/// not appa, or not this user's, is refused with its pid named: the pid
+/// arrives in an HTTP body from whoever holds the port. A runtime at a URL the
+/// session named is the user's own, and is left as it is.
+pub fn stop(target: &RuntimeTarget) -> Result<Stopped, StopError> {
+    let endpoint = Endpoint::parse(&target.url).map_err(|reason| StopError::Endpoint {
+        url: target.url.clone(),
+        reason,
+    })?;
+    if target.user_owned {
+        return Err(StopError::UserOwned {
+            url: target.url.clone(),
+        });
+    }
+    let pid = match probe(&endpoint) {
+        Health::Unreachable => return Ok(Stopped::Nothing),
+        Health::Stale(pid) => pid,
+        Health::Ok => serving_pid(&endpoint).ok_or_else(|| StopError::Unidentified {
+            url: target.url.clone(),
+        })?,
+        Health::Other(answer) => {
+            return Err(StopError::Unexpected {
+                url: target.url.clone(),
+                answer,
+            });
+        }
+    };
+    terminate_owned(pid)?;
+    let deadline = Instant::now() + STOP_BUDGET;
+    // Gone means the endpoint no longer answers from that process: one its
+    // parent has not reaped yet still exists, and holds nothing.
+    while process_exists(pid) && answering_pid(&endpoint) == Some(pid) {
+        if Instant::now() >= deadline {
+            return Err(StopError::DidNotStop {
+                url: target.url.clone(),
+                pid,
+            });
+        }
+        std::thread::sleep(POLL);
+    }
+    Ok(Stopped::Runtime { pid })
+}
+
+/// The pid the endpoint answers from, healthy or stale.
+fn answering_pid(endpoint: &Endpoint) -> Option<i32> {
+    match probe(endpoint) {
+        Health::Ok => serving_pid(endpoint),
+        Health::Stale(pid) => Some(pid),
+        Health::Other(_) | Health::Unreachable => None,
+    }
+}
+
+/// The pid a healthy runtime names at `/binary-fingerprint`: the second field
+/// of its first line.
+fn serving_pid(endpoint: &Endpoint) -> Option<i32> {
+    let answer = get(endpoint, "/binary-fingerprint", &Deadline::spanning(PROBE_BUDGET)).ok()?;
+    if !answer.is_success() {
+        return None;
+    }
+    String::from_utf8_lossy(&answer.body)
+        .lines()
+        .next()?
+        .split_whitespace()
+        .nth(1)
+        .and_then(crate::init::endpoint::positive_pid)
+}
+
+/// Signal `pid` once it proves to be this user's appa runtime. No process at
+/// that pid is not a failure: a concurrent stop got there first.
+fn terminate_owned(pid: i32) -> Result<(), StopError> {
+    if !process_exists(pid) {
+        return Ok(());
+    }
+    match is_owned_appa_runtime(pid) {
+        Ok(true) => {}
+        Ok(false) => return Err(StopError::NotOwned { pid }),
+        Err(error) => {
+            return Err(StopError::Ownership {
+                pid,
+                detail: error.to_string(),
+            });
+        }
+    }
+    terminate_appa_pid(pid).map_err(|error| StopError::Ownership {
+        pid,
+        detail: error.to_string(),
+    })
+}
+
 /// Stop the stale runtime and wait for the port to refuse. `Ok(true)` means a
 /// concurrent starter has already put a healthy runtime there.
 fn stop_stale(endpoint: &Endpoint, url: &str, pid: i32) -> Result<bool, StartError> {
-    // No process at that pid: a concurrent starter already stopped it, and the
-    // wait below sees the port refuse or that starter's replacement.
-    if process_exists(pid) {
-        match is_owned_appa_runtime(pid) {
-            Ok(true) => {}
-            Ok(false) => return Err(StartError::NotOwned { pid }),
-            Err(error) => {
-                return Err(StartError::Ownership {
-                    pid,
-                    detail: error.to_string(),
-                });
-            }
-        }
-        terminate_appa_pid(pid).map_err(|error| StartError::Ownership {
-            pid,
-            detail: error.to_string(),
-        })?;
-    }
+    terminate_owned(pid)?;
     let deadline = Instant::now() + STOP_BUDGET;
     loop {
         match probe(endpoint) {
@@ -196,10 +297,11 @@ fn stop_stale(endpoint: &Endpoint, url: &str, pid: i32) -> Result<bool, StartErr
             }
         }
         if Instant::now() >= deadline {
-            return Err(StartError::DidNotStop {
+            return Err(StopError::DidNotStop {
                 url: url.to_owned(),
                 pid,
-            });
+            }
+            .into());
         }
         std::thread::sleep(POLL);
     }

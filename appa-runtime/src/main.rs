@@ -106,6 +106,11 @@ enum RuntimeCommand {
         #[arg(long)]
         data_dir: Option<PathBuf>,
     },
+    /// Stop the deployed runtime, when the process answering its endpoint is this user's own appa.
+    Stop {
+        #[command(flatten)]
+        target: crate::runtime_url::RuntimeUrl,
+    },
 }
 
 /// `appa runtime ensure`: the start every protected SessionStart performs, run
@@ -121,6 +126,25 @@ fn ensure(target: &crate::runtime_url::RuntimeUrl, config: Option<PathBuf>, data
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("appa runtime ensure: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `appa runtime stop`: the deployed runtime goes, whichever install started it.
+fn stop(target: &crate::runtime_url::RuntimeUrl) -> ExitCode {
+    let target = target.resolve();
+    match crate::runtime_start::stop(&target) {
+        Ok(crate::runtime_start::Stopped::Nothing) => {
+            println!("nothing answers {}", target.url);
+            ExitCode::SUCCESS
+        }
+        Ok(crate::runtime_start::Stopped::Runtime { pid }) => {
+            println!("stopped the runtime (pid {pid}) at {}", target.url);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("appa runtime stop: {error}");
             ExitCode::FAILURE
         }
     }
@@ -393,8 +417,10 @@ where
     T: Into<OsString> + Clone,
 {
     let args = Args::parse_from(args);
-    if let Some(RuntimeCommand::Ensure { target, data_dir }) = args.command {
-        return ensure(&target, args.config, data_dir);
+    match args.command {
+        Some(RuntimeCommand::Ensure { target, data_dir }) => return ensure(&target, args.config, data_dir),
+        Some(RuntimeCommand::Stop { target }) => return stop(&target),
+        None => {}
     }
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(runtime) => runtime,

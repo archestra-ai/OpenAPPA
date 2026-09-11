@@ -28,9 +28,9 @@ one.
 The install prints progress while it selects the version, updates Claude Code,
 and starts the runtime, and it never prompts. A release binary installs the
 version published for its tag; a checkout build installs its own version,
-exported from the commit it was built from. If a different APPA
-deployment already owns the runtime endpoint, the install refuses and names the
-process to stop. An unidentified listener is never stopped automatically.
+exported from the commit it was built from. A runtime an earlier APPA
+deployment of yours left at the runtime endpoint is stopped; a process there
+that is not your own `appa` is named and never stopped.
 
 Initialization installs `clappa` beside `appa` so the short command works below.
 
@@ -176,17 +176,14 @@ max_concurrent = 4
 
 ## Uninstall
 
-To uninstall OpenAPPA from Claude Code, take its entries out of your Claude Code profile, stop the local runtime, and remove its binaries:
+`appa plugin remove claude-code` takes OpenAPPA's entries out of your Claude Code profile and leaves the runtime, policy, and database in place. `--purge` also stops the runtime and deletes the policy, database, logs, and retained versions, so the next install starts from nothing:
 
 ```sh
-appa plugin remove claude-code
-pkill -f 'appa runtime'
-rm -rf ~/.local/share/appa/bin ~/.local/share/appa/cache
+appa plugin remove claude-code           # the Claude Code profile only
+appa plugin remove claude-code --purge   # also stop the runtime and delete the deployment
 rm -f ~/.local/bin/appa
 cargo uninstall appa   # checkout builds only
-
-# optional — also remove the policy, database, and alias:
-rm -rf ~/.config/appa ~/.local/share/appa      # Linux
-rm -rf ~/Library/"Application Support/appa"    # macOS
 sed -i.bak '/clappa/d' ~/.zshrc                # alias fallback only
 ```
+
+`appa runtime stop` stops the runtime on its own. Both stop only a runtime that is your own `appa` process; a runtime at `APPA_RUNTIME_URL` is yours and is left alone.

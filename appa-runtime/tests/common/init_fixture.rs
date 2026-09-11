@@ -102,6 +102,18 @@ impl Fixture {
         self.bridge("remove-claude")
     }
 
+    /// `appa plugin remove claude-code --purge` against this fixture, with the
+    /// endpoint the purge stops named by the caller.
+    pub fn purge(&self, endpoint: &str) -> Command {
+        let mut command = Command::new(&self.appa);
+        command
+            .current_dir(&self.root)
+            .args(["plugin", "remove", "claude-code", "--purge"]);
+        self.environment(&mut command);
+        command.env("APPA_ENDPOINT", endpoint).env_remove("APPA_CONFIG");
+        command
+    }
+
     fn bridge(&self, subcommand: &str) -> Command {
         let mut command = Command::new(&self.appa);
         command

@@ -1,9 +1,14 @@
-//! Remove only what an activation wrote to this Claude profile.
+//! Remove only what an activation wrote to this Claude profile; or, purged,
+//! everything an install put on this machine.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use super::endpoint::Endpoint;
+use super::paths::DeploymentPaths;
 use super::{CLAPPA, InitError, appa_filename, deployment_paths, file_before, mcp, settings, skill, write_state};
+use crate::runtime_start::{StopError, Stopped};
+use crate::runtime_url::RuntimeTarget;
 
 #[cfg(unix)]
 pub(super) const REMOVING: &str = "#!/bin/sh\nprintf 'APPA plugin removal is incomplete; rerun appa plugin remove claude-code with the same config.\\n' >&2\nexit 1\n";
@@ -18,6 +23,70 @@ pub(super) const REMOVING: &str = "@echo off\r\necho APPA plugin removal is inco
 pub fn claude_code_remove() -> Result<(), InitError> {
     let paths = deployment_paths()?;
     let _profile_lock = super::lock_claude_profile(&paths.claude_dir)?;
+    remove_profile(&paths)
+}
+
+/// What a purge did about the runtime at the deployment's endpoint.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PurgedRuntime {
+    Nothing,
+    Stopped {
+        pid: i32,
+    },
+    /// A process there that is not this user's appa runtime, left as it is.
+    Left {
+        reason: String,
+    },
+}
+
+#[derive(Debug)]
+pub struct Purge {
+    pub runtime: PurgedRuntime,
+    pub removed: Vec<PathBuf>,
+}
+
+/// Everything an install put on this machine, gone: the profile entries, the
+/// runtime, the data directory with the deployed binary, database, logs and
+/// retained versions, and the config directory with the policy and the install
+/// state. `appa` itself stays on PATH for the install that follows. A process
+/// at the endpoint that is not this user's appa runtime is left and named,
+/// never a reason to keep the rest.
+pub fn claude_code_purge() -> Result<Purge, InitError> {
+    let paths = deployment_paths()?;
+    let _profile_lock = super::lock_claude_profile(&paths.claude_dir)?;
+    remove_profile(&paths)?;
+    let endpoint = Endpoint::resolve()?;
+    let target = RuntimeTarget {
+        url: endpoint.url().to_owned(),
+        user_owned: false,
+    };
+    let runtime = match crate::runtime_start::stop(&target) {
+        Ok(Stopped::Nothing) => PurgedRuntime::Nothing,
+        Ok(Stopped::Runtime { pid }) => PurgedRuntime::Stopped { pid },
+        Err(left @ (StopError::Unidentified { .. } | StopError::NotOwned { .. })) => PurgedRuntime::Left {
+            reason: left.to_string(),
+        },
+        Err(error) => return Err(error.into()),
+    };
+    let mut removed = Vec::new();
+    // The data directory first: the deployed binary and the database go before
+    // the policy. On macOS both are one directory, and the second is then absent.
+    for directory in [&paths.data_dir, &paths.config_dir] {
+        match fs::remove_dir_all(directory) {
+            Ok(()) => removed.push(directory.clone()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(InitError::WriteFile {
+                    path: directory.clone(),
+                    source,
+                });
+            }
+        }
+    }
+    Ok(Purge { runtime, removed })
+}
+
+fn remove_profile(paths: &DeploymentPaths) -> Result<(), InitError> {
     let deployed = paths.data_dir.join("bin").join(appa_filename());
     let launcher = paths.install_dir.join(CLAPPA.0);
     let launcher_before = file_before(&launcher)?;
@@ -25,19 +94,19 @@ pub fn claude_code_remove() -> Result<(), InitError> {
     // Everything foreign is refused before anything is removed.
     let registered = mcp::current()?;
     skill::verify(&paths.claude_dir)?;
-    settings::verify(&paths)?;
+    settings::verify(paths)?;
 
     // Disable the protected entrypoint before unregistering its hooks. A crash
     // must not leave a working-looking clappa that starts unprotected Claude.
     if launcher_before.is_some() {
         write_state(&launcher, REMOVING.as_bytes())?;
     }
-    settings::remove_hooks(&paths, &deployed)?;
+    settings::remove_hooks(paths, &deployed)?;
     if let mcp::Registered::Ours { .. } = registered {
         mcp::remove()?;
     }
     skill::remove(&paths.claude_dir)?;
-    settings::remove_statusline(&paths, &deployed)?;
+    settings::remove_statusline(paths, &deployed)?;
     if launcher_before.is_some() {
         if file_before(&launcher)?.as_deref() != Some(REMOVING.as_bytes()) {
             return Err(conflict(

@@ -938,25 +938,24 @@ impl Installation {
             })?;
             if transaction.activation != Activation::None {
                 let activate = || {
-                    let previous = transaction
-                        .previous
-                        .as_ref()
-                        .filter(|selection| selection.plugins.contains("claude-code"))
-                        .map(|selection| {
-                            native::ClaudeArtifacts::prepare(self, selection.generation(), selection.platform)
-                        })
-                        .transpose()?;
                     match transaction.activation {
                         Activation::Claude => native::ClaudeArtifacts::prepare(
                             self,
                             transaction.selection.generation(),
                             transaction.selection.platform,
                         )?
-                        .activate(&self.config, previous.as_ref())?,
-                        Activation::RemoveClaude => previous
-                            .as_ref()
-                            .ok_or_else(|| InstallError::Invalid("removal requires its prior native artifact".into()))?
-                            .remove(&self.config)?,
+                        .activate(&self.config)?,
+                        Activation::RemoveClaude => {
+                            let previous = transaction
+                                .previous
+                                .as_ref()
+                                .filter(|selection| selection.plugins.contains("claude-code"))
+                                .ok_or_else(|| {
+                                    InstallError::Invalid("removal requires its prior native artifact".into())
+                                })?;
+                            native::ClaudeArtifacts::prepare(self, previous.generation(), previous.platform)?
+                                .remove(&self.config)?
+                        }
                         Activation::None => unreachable!("native activation branch excludes None"),
                     }
                     Ok::<_, InstallError>(())
