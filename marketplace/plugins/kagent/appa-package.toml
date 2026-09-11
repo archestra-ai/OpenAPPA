@@ -10,5 +10,5 @@ default_policy = "default.appa.toml"
 # release images. The Go image also publishes the alias kagent derives.
 
 [plugin.images]
-adk = "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk:v0.19.1" # x-release-please-version
-adk-go = "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk-go:v0.19.1" # x-release-please-version
+adk = "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk:v0.20.0" # x-release-please-version
+adk-go = "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk-go:v0.20.0" # x-release-please-version
