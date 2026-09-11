@@ -1,0 +1,460 @@
+diff --git a/cmd/agentsh-unixwrap/main.go b/cmd/agentsh-unixwrap/main.go
+index 199bedc..3595518 100644
+--- a/cmd/agentsh-unixwrap/main.go
++++ b/cmd/agentsh-unixwrap/main.go
+@@ -192,7 +192,7 @@ func main() {
+ 	// Apply Landlock filesystem restrictions before exec.
+ 	if cfg.LandlockEnabled && cfg.LandlockABI > 0 {
+ 		if err := applyLandlock(cfg); err != nil {
+-			log.Printf("landlock: %v (continuing without)", err)
++			fatalf("apply Landlock: %v", err)
+ 		}
+ 	}
+ 
+diff --git a/internal/api/core.go b/internal/api/core.go
+index 89c65fc..eef0b87 100644
+--- a/internal/api/core.go
++++ b/internal/api/core.go
+@@ -16,6 +16,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/agentsh/agentsh/internal/approvals"
++	"github.com/agentsh/agentsh/internal/capabilities"
+ 	"github.com/agentsh/agentsh/internal/config"
+ 	"github.com/agentsh/agentsh/internal/events"
+ 	"github.com/agentsh/agentsh/internal/pkgcheck"
+@@ -72,10 +73,12 @@ type wrapperSetupResult struct {
+ 	extraCfg   *extraProcConfig
+ }
+ 
++var createUnixSocketPairForWrapper = createUnixSocketPair
++
+ // setupSeccompWrapper configures the command to run through agentsh-unixwrap for seccomp enforcement.
+ // Returns the wrapped request and extra process config, or nil extraCfg if wrapping is disabled.
+ // Note: agentsh-unixwrap is Linux-only; this function returns early on other platforms.
+-func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *session.Session) *wrapperSetupResult {
++func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *session.Session) (*wrapperSetupResult, error) {
+ 	// Helper: return early without seccomp wrapping but with envInject applied.
+ 	earlyReturn := func() *wrapperSetupResult {
+ 		sessionPolicy := a.policyEngineFor(s)
+@@ -88,14 +91,14 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
+ 
+ 	// agentsh-unixwrap is Linux-only (uses seccomp-bpf)
+ 	if runtime.GOOS != "linux" {
+-		return earlyReturn()
++		return earlyReturn(), nil
+ 	}
+ 
+ 	// Full ptrace mode: skip wrapper (ptrace handles everything).
+ 	// Hybrid mode (execve-only ptrace): fall through to use wrapper for
+ 	// socket/file monitoring and Landlock — ptrace only handles execve.
+ 	if a.ptraceTracer != nil && !a.cfg.Sandbox.Ptrace.IsExecveOnly() {
+-		return earlyReturn()
++		return earlyReturn(), nil
+ 	}
+ 
+ 	origCommand := req.Command
+@@ -103,7 +106,20 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
+ 
+ 	unixEnabled := a.cfg.Sandbox.UnixSockets.Enabled != nil && *a.cfg.Sandbox.UnixSockets.Enabled
+ 	if !unixEnabled {
+-		return earlyReturn()
++		return earlyReturn(), nil
++	}
++
++	if a.cfg.Landlock.Enabled && !capabilities.DetectLandlock().Available {
++		return nil, fmt.Errorf("required Landlock is unavailable")
++	}
++	if _, _, err := config.EffectiveSyscallBlock(a.cfg.Sandbox.Seccomp); err != nil {
++		return nil, fmt.Errorf("required syscall policy: %w", err)
++	}
++	if _, err := config.ResolveEffectiveBlockedFamilies(a.cfg.Sandbox.Seccomp); err != nil {
++		return nil, fmt.Errorf("required socket families: %w", err)
++	}
++	if _, err := config.ResolveSocketRules(a.cfg.Sandbox.Seccomp); err != nil {
++		return nil, fmt.Errorf("required socket rules: %w", err)
+ 	}
+ 
+ 	wrapperBin := strings.TrimSpace(a.cfg.Sandbox.UnixSockets.WrapperBin)
+@@ -113,19 +129,13 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
+ 
+ 	// Check if wrapper binary exists before proceeding (CGO-disabled builds won't have it)
+ 	if _, err := exec.LookPath(wrapperBin); err != nil {
+-		slog.Warn("seccomp wrapper unavailable: wrapper binary not found (running without seccomp enforcement)",
+-			"wrapper_bin", wrapperBin,
+-			"session_id", sessionID)
+-		return earlyReturn()
++		return nil, fmt.Errorf("required seccomp wrapper %q not found: %w", wrapperBin, err)
+ 	}
+ 
+-	sp := createUnixSocketPair()
++	sp := createUnixSocketPairForWrapper()
+ 	if sp == nil {
+ 		// Log that seccomp wrapping failed - this is security-relevant
+-		slog.Warn("seccomp wrapper disabled: failed to create notify socket pair",
+-			"session_id", sessionID,
+-			"command", origCommand)
+-		return earlyReturn()
++		return nil, fmt.Errorf("required seccomp wrapper setup: create notify socket pair")
+ 	}
+ 
+ 	wrappedReq := req
+@@ -275,7 +285,7 @@ func (a *App) setupSeccompWrapper(req types.ExecRequest, sessionID string, s *se
+ 			"session_id", sessionID, "error", pipeErr)
+ 	}
+ 
+-	return &wrapperSetupResult{wrappedReq: wrappedReq, extraCfg: extraCfg}
++	return &wrapperSetupResult{wrappedReq: wrappedReq, extraCfg: extraCfg}, nil
+ }
+ 
+ // resolveProfile looks up a mount profile and validates it.
+@@ -1083,7 +1093,10 @@ func (a *App) execInSessionCore(ctx context.Context, id string, req types.ExecRe
+ 	origArgs := append([]string{}, req.Args...)
+ 
+ 	// Set up seccomp wrapper (Linux) for syscall enforcement
+-	wrapperResult := a.setupSeccompWrapper(req, id, s)
++	wrapperResult, err := a.setupSeccompWrapper(req, id, s)
++	if err != nil {
++		return nil, http.StatusInternalServerError, err
++	}
+ 	wrappedReq := wrapperResult.wrappedReq
+ 	extraCfg := wrapperResult.extraCfg
+ 
+diff --git a/internal/api/core_landlock_network_test.go b/internal/api/core_landlock_network_test.go
+index 5d6d66d..058fced 100644
+--- a/internal/api/core_landlock_network_test.go
++++ b/internal/api/core_landlock_network_test.go
+@@ -54,7 +54,10 @@ func TestSetupSeccompWrapper_LandlockNetwork_HonorsConfig(t *testing.T) {
+ 			req := types.ExecRequest{Command: "/bin/echo", Args: []string{"hi"}}
+ 			sess := &session.Session{Workspace: "/tmp"}
+ 
+-			result := app.setupSeccompWrapper(req, "test-session", sess)
++			result, err := app.setupSeccompWrapper(req, "test-session", sess)
++			if err != nil {
++				t.Fatalf("setupSeccompWrapper: %v", err)
++			}
+ 			if result == nil || result.extraCfg == nil {
+ 				t.Fatal("expected non-nil wrapper setup result with extraCfg")
+ 			}
+diff --git a/internal/api/exec_stream.go b/internal/api/exec_stream.go
+index 5907e56..4717f55 100644
+--- a/internal/api/exec_stream.go
++++ b/internal/api/exec_stream.go
+@@ -195,7 +195,11 @@ func (a *App) execInSessionStream(w http.ResponseWriter, r *http.Request) {
+ 	flusher.Flush()
+ 
+ 	// Set up seccomp wrapper (Linux) for syscall enforcement
+-	wrapperResult := a.setupSeccompWrapper(req, id, s)
++	wrapperResult, err := a.setupSeccompWrapper(req, id, s)
++	if err != nil {
++		_ = writeSSE(w, flusher, "error", map[string]any{"error": err.Error()})
++		return
++	}
+ 	wrappedReq := wrapperResult.wrappedReq
+ 	extraCfg := wrapperResult.extraCfg
+ 
+diff --git a/internal/api/grpc.go b/internal/api/grpc.go
+index 07e0095..4734200 100644
+--- a/internal/api/grpc.go
++++ b/internal/api/grpc.go
+@@ -398,7 +398,10 @@ func (s *grpcServer) ExecStream(in *structpb.Struct, stream grpc.ServerStream) e
+ 	s.app.broker.Publish(startEv)
+ 
+ 	// Set up seccomp wrapper (Linux) for syscall enforcement
+-	wrapperResult := s.app.setupSeccompWrapper(execReq, req.SessionID, sess)
++	wrapperResult, err := s.app.setupSeccompWrapper(execReq, req.SessionID, sess)
++	if err != nil {
++		return status.Error(codes.Internal, err.Error())
++	}
+ 	wrappedReq := wrapperResult.wrappedReq
+ 	extraCfg := wrapperResult.extraCfg
+ 
+diff --git a/internal/api/seccomp_wrapper_test.go b/internal/api/seccomp_wrapper_test.go
+index 9fa9ac1..e61a296 100644
+--- a/internal/api/seccomp_wrapper_test.go
++++ b/internal/api/seccomp_wrapper_test.go
+@@ -15,6 +15,9 @@ import (
+ 
+ func newTestAppForSeccomp(t *testing.T, cfg *config.Config) *App {
+ 	t.Helper()
++	// These tests exercise wrapper setup, not the kernel capability probe.
++	waitKillable := false
++	cfg.Sandbox.Seccomp.WaitKillable = &waitKillable
+ 	mgr := session.NewManager(5)
+ 	store := composite.New(mockEventStore{}, nil)
+ 	broker := events.NewBroker()
+@@ -34,7 +37,10 @@ func TestSetupSeccompWrapper_DisabledByConfig(t *testing.T) {
+ 		Args:    []string{"hello"},
+ 	}
+ 
+-	result := app.setupSeccompWrapper(req, "test-session", nil)
++	result, err := app.setupSeccompWrapper(req, "test-session", nil)
++	if err != nil {
++		t.Fatalf("setupSeccompWrapper: %v", err)
++	}
+ 
+ 	// Should return original request unchanged
+ 	if result.wrappedReq.Command != "/bin/echo" {
+@@ -58,7 +64,10 @@ func TestSetupSeccompWrapper_NilEnabled(t *testing.T) {
+ 		Args:    []string{"hello"},
+ 	}
+ 
+-	result := app.setupSeccompWrapper(req, "test-session", nil)
++	result, err := app.setupSeccompWrapper(req, "test-session", nil)
++	if err != nil {
++		t.Fatalf("setupSeccompWrapper: %v", err)
++	}
+ 
+ 	// Should return original request unchanged
+ 	if result.wrappedReq.Command != "/bin/echo" {
+@@ -85,7 +94,10 @@ func TestSetupSeccompWrapper_NonLinux(t *testing.T) {
+ 		Args:    []string{"hello"},
+ 	}
+ 
+-	result := app.setupSeccompWrapper(req, "test-session", nil)
++	result, err := app.setupSeccompWrapper(req, "test-session", nil)
++	if err != nil {
++		t.Fatalf("setupSeccompWrapper: %v", err)
++	}
+ 
+ 	// Should return original request unchanged on non-Linux
+ 	if result.wrappedReq.Command != "/bin/echo" {
+@@ -113,14 +125,36 @@ func TestSetupSeccompWrapper_WrapperNotFound(t *testing.T) {
+ 		Args:    []string{"hello"},
+ 	}
+ 
+-	result := app.setupSeccompWrapper(req, "test-session", nil)
++	result, err := app.setupSeccompWrapper(req, "test-session", nil)
++	if err == nil {
++		t.Fatal("expected missing required wrapper to fail setup")
++	}
++	if result != nil {
++		t.Error("expected no setup result when required wrapper is missing")
++	}
++}
+ 
+-	// Should return original request unchanged when wrapper not found
+-	if result.wrappedReq.Command != "/bin/echo" {
+-		t.Errorf("expected command to be unchanged when wrapper not found, got %q", result.wrappedReq.Command)
++func TestSetupSeccompWrapper_SocketPairFailure(t *testing.T) {
++	if runtime.GOOS != "linux" {
++		t.Skip("seccomp wrapper only available on Linux")
+ 	}
+-	if result.extraCfg != nil {
+-		t.Error("expected extraCfg to be nil when wrapper not found")
++
++	enabled := true
++	cfg := &config.Config{}
++	cfg.Sandbox.UnixSockets.Enabled = &enabled
++	cfg.Sandbox.UnixSockets.WrapperBin = "/bin/true"
++	app := newTestAppForSeccomp(t, cfg)
++
++	original := createUnixSocketPairForWrapper
++	createUnixSocketPairForWrapper = func() *unixSocketPair { return nil }
++	t.Cleanup(func() { createUnixSocketPairForWrapper = original })
++
++	result, err := app.setupSeccompWrapper(types.ExecRequest{Command: "/bin/echo"}, "test-session", nil)
++	if err == nil {
++		t.Fatal("expected required wrapper socket setup to fail")
++	}
++	if result != nil {
++		t.Error("expected no setup result after socket pair failure")
+ 	}
+ }
+ 
+@@ -142,7 +176,10 @@ func TestSetupSeccompWrapper_Enabled(t *testing.T) {
+ 		Args:    []string{"hello", "world"},
+ 	}
+ 
+-	result := app.setupSeccompWrapper(req, "test-session", nil)
++	result, err := app.setupSeccompWrapper(req, "test-session", nil)
++	if err != nil {
++		t.Fatalf("setupSeccompWrapper: %v", err)
++	}
+ 
+ 	// Should wrap the command
+ 	if result.wrappedReq.Command != "/bin/true" {
+@@ -212,7 +249,7 @@ func TestSetupSeccompWrapper_PreservesEnv(t *testing.T) {
+ 		},
+ 	}
+ 
+-	result := app.setupSeccompWrapper(req, "test-session", nil)
++	result, _ := app.setupSeccompWrapper(req, "test-session", nil)
+ 
+ 	// Should preserve existing env vars
+ 	if result.wrappedReq.Env["MY_VAR"] != "my_value" {
+@@ -251,7 +288,7 @@ func TestSetupSeccompWrapper_FileMonitorDefaults(t *testing.T) {
+ 		Args:    []string{"hello"},
+ 	}
+ 
+-	result := app.setupSeccompWrapper(req, "test-session", nil)
++	result, _ := app.setupSeccompWrapper(req, "test-session", nil)
+ 	if result == nil || result.extraCfg == nil {
+ 		t.Fatal("expected non-nil wrapper setup result with extraCfg")
+ 	}
+@@ -331,7 +368,7 @@ func TestSetupSeccompWrapper_WriteOnlyOpensForwarded(t *testing.T) {
+ 	cfg.Sandbox.Seccomp.FileMonitor.InterceptMetadata = &disabled
+ 
+ 	app := newTestAppForSeccomp(t, cfg)
+-	result := app.setupSeccompWrapper(types.ExecRequest{
++	result, _ := app.setupSeccompWrapper(types.ExecRequest{
+ 		Command: "/bin/echo",
+ 		Args:    []string{"hello"},
+ 	}, "test-session", nil)
+@@ -389,7 +426,7 @@ seccomp:
+ 		Args:    []string{"hello"},
+ 	}
+ 
+-	result := app.setupSeccompWrapper(req, "test-session", nil)
++	result, _ := app.setupSeccompWrapper(req, "test-session", nil)
+ 	if result == nil || result.extraCfg == nil {
+ 		t.Fatal("expected non-nil wrapper setup result with extraCfg")
+ 	}
+diff --git a/internal/netmonitor/unix/file_handler_test.go b/internal/netmonitor/unix/file_handler_test.go
+index f03a6a3..a9d25ac 100644
+--- a/internal/netmonitor/unix/file_handler_test.go
++++ b/internal/netmonitor/unix/file_handler_test.go
+@@ -596,26 +596,24 @@ func TestEmulationPath_ReadOnlyOpenat_CaughtByGuard(t *testing.T) {
+ 	// intercepted by isReadOnlyOpen → CONTINUE (never emulated via AddFD).
+ }
+ 
+-func TestEmulationPath_ResolvePathAtFailure_ReadVsWrite(t *testing.T) {
++func TestEmulationPath_ResolvePathAtFailureDenies(t *testing.T) {
+ 	// Validates behavior when resolvePathAt fails (e.g., Yama ptrace_scope=1,
+ 	// server is not an ancestor of the tracee — common in `agentsh wrap` path
+ 	// because PR_SET_PTRACER does not inherit across fork()).
+ 	//
+-	// When resolution fails, the emulated handler falls back to CONTINUE for
+-	// ALL operations. If we can't resolve the path, we can't evaluate policy
+-	// either way. Reads are obviously safe; writes are also allowed because
+-	// the alternative (denying ALL child-process writes) makes the environment
+-	// unusable while providing no real enforcement (reads are equally
+-	// unmonitored). Other layers (Landlock, FUSE) handle enforcement when
+-	// seccomp path resolution is unavailable.
+-
+-	t.Run("read_only_flags_fail_open", func(t *testing.T) {
++	// An unresolved primary or second path cannot be evaluated by policy.
++	// The emulated handler must deny rather than let the kernel continue.
++	result := unresolvedPathResult()
++	assert.Equal(t, ActionDeny, result.Action)
++	assert.Equal(t, int32(unix.EACCES), result.Errno)
++
++	t.Run("read_only_flags_classified", func(t *testing.T) {
+ 		// Typical read-only flags from dynamic linker / cat / ls
+ 		readFlags := []uint32{
+-			uint32(unix.O_RDONLY),                     // plain read
+-			uint32(unix.O_RDONLY | unix.O_CLOEXEC),    // shared library load
+-			uint32(unix.O_RDONLY | unix.O_NONBLOCK),   // nonblocking read
+-			uint32(unix.O_RDONLY | unix.O_DIRECTORY),   // directory listing
++			uint32(unix.O_RDONLY),                    // plain read
++			uint32(unix.O_RDONLY | unix.O_CLOEXEC),   // shared library load
++			uint32(unix.O_RDONLY | unix.O_NONBLOCK),  // nonblocking read
++			uint32(unix.O_RDONLY | unix.O_DIRECTORY), // directory listing
+ 		}
+ 		for _, flags := range readFlags {
+ 			assert.True(t, isReadOnlyOpen(flags),
+@@ -628,13 +626,12 @@ func TestEmulationPath_ResolvePathAtFailure_ReadVsWrite(t *testing.T) {
+ 
+ 	t.Run("write_flags_detected", func(t *testing.T) {
+ 		// Write-flagged opens are correctly classified as non-read-only.
+-		// On resolvePathAt failure these also fall back to CONTINUE (not deny),
+-		// because the handler can't evaluate policy without a resolved path.
++		// These operations also use the same fail-closed resolution result.
+ 		writeFlags := []uint32{
+-			uint32(unix.O_WRONLY),                            // write only
+-			uint32(unix.O_RDWR),                              // read-write
++			uint32(unix.O_WRONLY), // write only
++			uint32(unix.O_RDWR),   // read-write
+ 			uint32(unix.O_WRONLY | unix.O_CREAT | unix.O_TRUNC), // truncating write
+-			uint32(unix.O_WRONLY | unix.O_APPEND),            // append
++			uint32(unix.O_WRONLY | unix.O_APPEND),               // append
+ 		}
+ 		for _, flags := range writeFlags {
+ 			assert.False(t, isReadOnlyOpen(flags),
+diff --git a/internal/netmonitor/unix/handler.go b/internal/netmonitor/unix/handler.go
+index aaebd62..306285b 100644
+--- a/internal/netmonitor/unix/handler.go
++++ b/internal/netmonitor/unix/handler.go
+@@ -512,9 +512,9 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
+ 			path, err = resolvePathAtWithFallback(pid, fileArgs.Dirfd, fileArgs.PathPtr)
+ 		}
+ 		if err != nil {
+-			slog.Debug("file handler: failed to resolve path, allowing", "pid", pid, "error", err)
+-			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+-				slog.Debug("file handler: continue response failed", "pid", pid, "error", err)
++			slog.Debug("file handler: failed to resolve path, denying", "pid", pid, "error", err)
++			if err := NotifRespondDeny(int(fd), req.ID, int32(unix.EACCES)); err != nil {
++				slog.Debug("file handler: deny response failed", "pid", pid, "error", err)
+ 			}
+ 			return
+ 		}
+@@ -528,9 +528,9 @@ func handleFileNotification(goCtx context.Context, fd seccomp.ScmpFd, req *secco
+ 			p2, err = resolvePathAtWithFallback(pid, fileArgs.Dirfd2, fileArgs.PathPtr2)
+ 		}
+ 		if err != nil {
+-			slog.Debug("file handler: failed to resolve second path, allowing", "pid", pid, "error", err)
+-			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+-				slog.Debug("file handler: continue response failed", "pid", pid, "error", err)
++			slog.Debug("file handler: failed to resolve second path, denying", "pid", pid, "error", err)
++			if err := NotifRespondDeny(int(fd), req.ID, int32(unix.EACCES)); err != nil {
++				slog.Debug("file handler: deny response failed", "pid", pid, "error", err)
+ 			}
+ 			return
+ 		}
+@@ -627,10 +627,7 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
+ 	// succeed where ProcessVMReadv (PTRACE_MODE_ATTACH_REALCREDS) fails.
+ 	// This ensures deny rules are evaluated for writes even under Yama.
+ 	//
+-	// For read-only operations (open O_RDONLY, stat, access, readlink),
+-	// resolution failure falls back to CONTINUE — the kernel handles the
+-	// syscall without policy evaluation. This is safe because reads cannot
+-	// mutate the filesystem.
++	// An unresolved path cannot be evaluated by policy, so deny it.
+ 	path, err := resolvePathAt(pid, fileArgs.Dirfd, fileArgs.PathPtr)
+ 	if err != nil {
+ 		// For writes, retry with /proc/<pid>/mem fallback — deny rules
+@@ -639,15 +636,10 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
+ 			path, err = resolvePathAtWithFallback(pid, fileArgs.Dirfd, fileArgs.PathPtr)
+ 		}
+ 		if err != nil {
+-			if !isReadOnlyFileOp(args.Nr, fileArgs.Flags) {
+-				slog.Warn("emulated file handler: path resolution failed for write, file policy not enforced",
+-					"pid", pid, "error", err, "session_id", sessID)
+-			} else {
+-				slog.Debug("emulated file handler: path resolution failed for read, falling back to CONTINUE",
+-					"pid", pid, "error", err)
+-			}
+-			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+-				slog.Debug("emulated file handler: continue response failed", "pid", pid, "error", err)
++			slog.Warn("emulated file handler: path resolution failed, denying",
++				"pid", pid, "error", err, "session_id", sessID)
++			if err := NotifRespondDeny(notifFD, req.ID, unresolvedPathResult().Errno); err != nil {
++				slog.Error("emulated file handler: deny response failed", "pid", pid, "error", err)
+ 			}
+ 			return
+ 		}
+@@ -662,10 +654,10 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
+ 			p2, err = resolvePathAtWithFallback(pid, fileArgs.Dirfd2, fileArgs.PathPtr2)
+ 		}
+ 		if err != nil {
+-			slog.Warn("emulated file handler: second path resolution failed for mutating op, file policy not enforced",
++			slog.Warn("emulated file handler: second path resolution failed for mutating op, denying",
+ 				"pid", pid, "error", err, "syscall", args.Nr, "session_id", sessID)
+-			if err := NotifRespondContinue(int(fd), req.ID); err != nil {
+-				slog.Debug("emulated file handler: continue response failed", "pid", pid, "error", err)
++			if err := NotifRespondDeny(notifFD, req.ID, unresolvedPathResult().Errno); err != nil {
++				slog.Error("emulated file handler: deny response failed", "pid", pid, "error", err)
+ 			}
+ 			return
+ 		}
+@@ -774,6 +766,10 @@ func handleFileNotificationEmulated(goCtx context.Context, fd seccomp.ScmpFd, re
+ 	}
+ }
+ 
++func unresolvedPathResult() FileResult {
++	return FileResult{Action: ActionDeny, Errno: int32(unix.EACCES)}
++}
++
+ // emulateOpenat opens a file on behalf of the tracee via /proc/<pid>/root/<path>,
+ // then injects the resulting fd into the tracee using SECCOMP_ADDFD_FLAG_SEND.
+ // This atomically installs the fd and completes the notification, eliminating

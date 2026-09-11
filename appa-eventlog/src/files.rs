@@ -1,5 +1,6 @@
 //! Durable file-version ledger for native filesystem tool calls.
 
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::Read;
 #[cfg(unix)]
@@ -12,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const SCHEMA: i64 = 2;
+const SCHEMA: i64 = 3;
 const ABSENT: &str = "-";
 
 #[derive(Debug, thiserror::Error)]
@@ -55,6 +56,7 @@ pub enum FileOperation {
     Edit,
     Copy,
     Move,
+    Process,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +76,8 @@ pub struct FilePin {
     pub predecessor_digest: Option<String>,
     /// The source bytes consumed by a Copy or Move.
     pub source: Option<FileSourcePin>,
+    /// The source bytes consumed by a Process. Empty for all other operations.
+    pub inputs: Vec<FileSourcePin>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,8 +87,8 @@ pub struct FileVersion {
     pub digest: String,
     pub label: Label,
     pub previous: Option<i64>,
-    /// The version whose bytes were consumed by an Edit, Copy, or Move.
-    pub content_dependency: Option<i64>,
+    /// The versions whose bytes contributed to this content.
+    pub content_dependencies: Vec<i64>,
     pub dispatch: Option<String>,
 }
 
@@ -120,7 +124,7 @@ impl FileStore {
         )?;
         let label = serde_json::to_string(initial)?;
         for (relative, digest) in scan(&workspace)? {
-            transaction.execute("INSERT INTO versions(path,digest,label,previous,content_dependency,dispatch) VALUES (?1,?2,?3,NULL,NULL,NULL)", params![relative, digest, label])?;
+            transaction.execute("INSERT INTO versions(path,digest,label,previous,content_dependencies,dispatch) VALUES (?1,?2,?3,NULL,'[]',NULL)", params![relative, digest, label])?;
             let id = transaction.last_insert_rowid();
             transaction.execute(
                 "INSERT INTO current_paths(path,version) VALUES (?1,?2)",
@@ -168,7 +172,10 @@ impl FileStore {
         operation: FileOperation,
         path: &str,
     ) -> Result<FilePin, FileStoreError> {
-        if matches!(operation, FileOperation::Copy | FileOperation::Move) {
+        if matches!(
+            operation,
+            FileOperation::Copy | FileOperation::Move | FileOperation::Process
+        ) {
             return Err(FileStoreError::Configuration(
                 "use prepare_transfer for Copy or Move".into(),
             ));
@@ -209,6 +216,7 @@ impl FileStore {
             predecessor_label: predecessor.as_ref().map(|v| v.label.clone()),
             predecessor_digest: predecessor.as_ref().map(|v| v.digest.clone()),
             source: None,
+            inputs: vec![],
         };
         tx.execute(
             "INSERT INTO reservation(actor,call_key,pin,bound_dispatch,output_label) VALUES (?1,?2,?3,NULL,NULL)",
@@ -278,6 +286,76 @@ impl FileStore {
                 label: source_version.label,
                 digest: source_version.digest,
             }),
+            inputs: vec![],
+        };
+        tx.execute(
+            "INSERT INTO reservation(actor,call_key,pin,bound_dispatch,output_label) VALUES (?1,?2,?3,NULL,NULL)",
+            params![actor, call_key, serde_json::to_string(&pin)?],
+        )?;
+        tx.commit()?;
+        Ok(pin)
+    }
+
+    pub fn prepare_process(
+        &self,
+        actor: &str,
+        call_key: &str,
+        input_paths: &[String],
+        destination_path: &str,
+    ) -> Result<FilePin, FileStoreError> {
+        let destination = validated_relative(&self.workspace, destination_path)?;
+        let mut seen = HashSet::new();
+        let inputs = input_paths
+            .iter()
+            .map(|path| validated_relative(&self.workspace, path))
+            .collect::<Result<Vec<_>, _>>()?;
+        if inputs.iter().any(|path| path == &destination) || inputs.iter().any(|path| !seen.insert(path.clone())) {
+            return Err(FileStoreError::InvalidPath(
+                "process inputs must be unique and exclude the destination".into(),
+            ));
+        }
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| FileStoreError::Corrupt("connection lock poisoned".into()))?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if tx.query_row("SELECT count(*) FROM reservation", [], |r| r.get::<_, i64>(0))? != 0 {
+            return Err(FileStoreError::Pending);
+        }
+        let mut pinned = Vec::with_capacity(inputs.len());
+        for path in inputs {
+            let version = current_tx(&tx, &path)?.ok_or(FileStoreError::Untracked)?;
+            let absolute = self.workspace.join(&path);
+            if !absolute.exists() {
+                return Err(FileStoreError::Untracked);
+            }
+            check_regular(&absolute)?;
+            if hash(&absolute)? != version.digest {
+                return Err(FileStoreError::DigestMismatch);
+            }
+            pinned.push(FileSourcePin {
+                path,
+                version: version.id,
+                label: version.label,
+                digest: version.digest,
+            });
+        }
+        let predecessor = current_tx(&tx, &destination)?;
+        let destination_absolute = self.workspace.join(&destination);
+        if state_digest(&destination_absolute)? != predecessor.as_ref().map(|v| v.digest.as_str()).unwrap_or(ABSENT) {
+            return Err(FileStoreError::DigestMismatch);
+        }
+        if destination_absolute.exists() {
+            check_regular(&destination_absolute)?;
+        }
+        let pin = FilePin {
+            path: destination,
+            operation: FileOperation::Process,
+            predecessor_version: predecessor.as_ref().map(|v| v.id),
+            predecessor_label: predecessor.as_ref().map(|v| v.label.clone()),
+            predecessor_digest: predecessor.as_ref().map(|v| v.digest.clone()),
+            source: None,
+            inputs: pinned,
         };
         tx.execute(
             "INSERT INTO reservation(actor,call_key,pin,bound_dispatch,output_label) VALUES (?1,?2,?3,NULL,NULL)",
@@ -373,13 +451,26 @@ impl FileStore {
             .as_ref()
             .map(|source| state_digest(&self.workspace.join(&source.path)))
             .transpose()?;
-        let source_label = pin
-            .source
-            .as_ref()
-            .map(|source| source.label.clone())
-            .or_else(|| pin.predecessor_label.clone());
+        let input_states = pin
+            .inputs
+            .iter()
+            .map(|input| Ok(state_digest(&self.workspace.join(&input.path))? == input.digest))
+            .collect::<Result<Vec<_>, FileStoreError>>()?;
+        let inputs_unchanged = input_states.into_iter().all(|unchanged| unchanged);
+        let source_label = if pin.operation == FileOperation::Process {
+            pin.inputs
+                .iter()
+                .map(|input| input.label.clone())
+                .reduce(|label, next| label.combine(&next))
+        } else {
+            pin.source
+                .as_ref()
+                .map(|source| source.label.clone())
+                .or_else(|| pin.predecessor_label.clone())
+        };
         let receipt = if !success {
             if actual != expected
+                || !inputs_unchanged
                 || pin
                     .source
                     .as_ref()
@@ -408,8 +499,8 @@ impl FileStore {
                 dispatch: Some(dispatch),
             }
         } else {
-            let dependency = match pin.operation {
-                FileOperation::Edit => pin.predecessor_version,
+            let dependencies = match pin.operation {
+                FileOperation::Edit => pin.predecessor_version.into_iter().collect(),
                 FileOperation::Copy | FileOperation::Move => {
                     let source = pin
                         .source
@@ -423,9 +514,15 @@ impl FileStore {
                     if !source_ok || actual != source.digest {
                         return Err(FileStoreError::DigestMismatch);
                     }
-                    Some(source.version)
+                    vec![source.version]
                 }
-                FileOperation::Replace => None,
+                FileOperation::Process => {
+                    if !inputs_unchanged {
+                        return Err(FileStoreError::DigestMismatch);
+                    }
+                    pin.inputs.iter().map(|input| input.version).collect()
+                }
+                FileOperation::Replace => vec![],
                 FileOperation::Read => unreachable!(),
             };
             if actual == ABSENT {
@@ -433,13 +530,13 @@ impl FileStore {
             }
             check_regular(&absolute)?;
             tx.execute(
-                "INSERT INTO versions(path,digest,label,previous,content_dependency,dispatch) VALUES (?1,?2,?3,?4,?5,?6)",
+                "INSERT INTO versions(path,digest,label,previous,content_dependencies,dispatch) VALUES (?1,?2,?3,?4,?5,?6)",
                 params![
                     pin.path,
                     actual,
                     serde_json::to_string(&output)?,
                     pin.predecessor_version,
-                    dependency,
+                    serde_json::to_string(&dependencies)?,
                     dispatch
                 ],
             )?;
@@ -464,7 +561,7 @@ impl FileStore {
                 digest: actual,
                 label: output,
                 previous: pin.predecessor_version,
-                content_dependency: dependency,
+                content_dependencies: dependencies,
                 dispatch: Some(dispatch.clone()),
             };
             FileReceipt {
@@ -504,7 +601,7 @@ impl FileStore {
             .lock()
             .map_err(|_| FileStoreError::Corrupt("connection lock poisoned".into()))?;
         let mut statement = connection.prepare(
-            "SELECT id,path,digest,label,previous,content_dependency,dispatch FROM versions WHERE path=?1 ORDER BY id",
+            "SELECT id,path,digest,label,previous,content_dependencies,dispatch FROM versions WHERE path=?1 ORDER BY id",
         )?;
         decode_versions(statement.query_map([relative], decode_version)?)
     }
@@ -514,7 +611,7 @@ impl FileStore {
             .connection
             .lock()
             .map_err(|_| FileStoreError::Corrupt("connection lock poisoned".into()))?;
-        let mut statement = connection.prepare("SELECT v.id,v.path,v.digest,v.label,v.previous,v.content_dependency,v.dispatch FROM current_paths c JOIN versions v ON v.id=c.version WHERE c.version IS NOT NULL ORDER BY v.path")?;
+        let mut statement = connection.prepare("SELECT v.id,v.path,v.digest,v.label,v.previous,v.content_dependencies,v.dispatch FROM current_paths c JOIN versions v ON v.id=c.version WHERE c.version IS NOT NULL ORDER BY v.path")?;
         decode_versions(statement.query_map([], decode_version)?)
     }
 }
@@ -524,7 +621,7 @@ fn configure(c: &Connection) -> Result<(), rusqlite::Error> {
     c.pragma_update(None, "foreign_keys", "ON")
 }
 fn create_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
-    tx.execute_batch("CREATE TABLE ledger_meta(workspace TEXT NOT NULL,policy TEXT NOT NULL); CREATE TABLE versions(id INTEGER PRIMARY KEY,path TEXT NOT NULL,digest TEXT NOT NULL,label TEXT NOT NULL,previous INTEGER,content_dependency INTEGER,dispatch TEXT); CREATE TABLE current_paths(path TEXT PRIMARY KEY,version INTEGER REFERENCES versions(id)); CREATE TABLE reservation(singleton INTEGER PRIMARY KEY DEFAULT 1 CHECK(singleton=1),actor TEXT NOT NULL,call_key TEXT NOT NULL,pin TEXT NOT NULL,bound_dispatch TEXT,output_label TEXT,UNIQUE(actor,call_key)); CREATE TABLE receipts(actor TEXT NOT NULL,call_key TEXT NOT NULL,receipt TEXT NOT NULL,PRIMARY KEY(actor,call_key));")
+    tx.execute_batch("CREATE TABLE ledger_meta(workspace TEXT NOT NULL,policy TEXT NOT NULL); CREATE TABLE versions(id INTEGER PRIMARY KEY,path TEXT NOT NULL,digest TEXT NOT NULL,label TEXT NOT NULL,previous INTEGER,content_dependencies TEXT NOT NULL,dispatch TEXT); CREATE TABLE current_paths(path TEXT PRIMARY KEY,version INTEGER REFERENCES versions(id)); CREATE TABLE reservation(singleton INTEGER PRIMARY KEY DEFAULT 1 CHECK(singleton=1),actor TEXT NOT NULL,call_key TEXT NOT NULL,pin TEXT NOT NULL,bound_dispatch TEXT,output_label TEXT,UNIQUE(actor,call_key)); CREATE TABLE receipts(actor TEXT NOT NULL,call_key TEXT NOT NULL,receipt TEXT NOT NULL,PRIMARY KEY(actor,call_key));")
 }
 fn canonical_workspace(path: &Path) -> Result<PathBuf, FileStoreError> {
     if !cfg!(unix) {
@@ -677,7 +774,7 @@ fn reservation_exists(c: &Connection, a: &str, k: &str) -> Result<bool, rusqlite
         |r| r.get(0),
     )
 }
-type StoredVersion = (i64, String, String, String, Option<i64>, Option<i64>, Option<String>);
+type StoredVersion = (i64, String, String, String, Option<i64>, String, Option<String>);
 
 fn decode_version(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredVersion> {
     Ok((
@@ -697,7 +794,7 @@ fn version(v: StoredVersion) -> Result<FileVersion, FileStoreError> {
         digest: v.2,
         label: serde_json::from_str(&v.3)?,
         previous: v.4,
-        content_dependency: v.5,
+        content_dependencies: serde_json::from_str(&v.5)?,
         dispatch: v.6,
     })
 }
@@ -708,11 +805,11 @@ where
     rows.map(|r| version(r?)).collect()
 }
 fn current_tx(tx: &Transaction<'_>, p: &str) -> Result<Option<FileVersion>, FileStoreError> {
-    let x=tx.query_row("SELECT v.id,v.path,v.digest,v.label,v.previous,v.content_dependency,v.dispatch FROM current_paths c JOIN versions v ON v.id=c.version WHERE c.path=?1",[p],decode_version).optional()?;
+    let x=tx.query_row("SELECT v.id,v.path,v.digest,v.label,v.previous,v.content_dependencies,v.dispatch FROM current_paths c JOIN versions v ON v.id=c.version WHERE c.path=?1",[p],decode_version).optional()?;
     x.map(version).transpose()
 }
 fn current_connection(c: &Connection, p: &str) -> Result<Option<FileVersion>, FileStoreError> {
-    let x=c.query_row("SELECT v.id,v.path,v.digest,v.label,v.previous,v.content_dependency,v.dispatch FROM current_paths c JOIN versions v ON v.id=c.version WHERE c.path=?1",[p],decode_version).optional()?;
+    let x=c.query_row("SELECT v.id,v.path,v.digest,v.label,v.previous,v.content_dependencies,v.dispatch FROM current_paths c JOIN versions v ON v.id=c.version WHERE c.path=?1",[p],decode_version).optional()?;
     x.map(version).transpose()
 }
 
@@ -789,14 +886,17 @@ mod tests {
         let replaced = store.finish("a", "replace", true).unwrap();
         assert_eq!(replaced.version.as_ref().unwrap().label, output);
         assert_eq!(replaced.version.as_ref().unwrap().previous, first.predecessor_version);
-        assert_eq!(replaced.version.as_ref().unwrap().content_dependency, None);
+        assert!(replaced.version.as_ref().unwrap().content_dependencies.is_empty());
         assert_eq!(store.finish("a", "replace", true).unwrap(), replaced);
 
         let pin = store.prepare("a", "edit", FileOperation::Edit, "tracked.txt").unwrap();
         store.bind("a", "edit", "dispatch-2", &Label::top()).unwrap();
         fs::write(fixture.workspace.join("tracked.txt"), "edited").unwrap();
         let edited = store.finish("a", "edit", true).unwrap();
-        assert_eq!(edited.version.unwrap().content_dependency, pin.predecessor_version);
+        assert_eq!(
+            edited.version.unwrap().content_dependencies,
+            vec![pin.predecessor_version.unwrap()]
+        );
         assert_eq!(store.history("tracked.txt").unwrap().len(), 3);
     }
 
@@ -888,7 +988,7 @@ mod tests {
         .unwrap();
         let receipt = store.finish("a", "copy", true).unwrap();
         assert_eq!(receipt.source_label, Some(source_label));
-        assert_eq!(receipt.version.unwrap().content_dependency, Some(source.version));
+        assert_eq!(receipt.version.unwrap().content_dependencies, vec![source.version]);
     }
 
     #[test]
@@ -906,7 +1006,7 @@ mod tests {
         )
         .unwrap();
         let moved = store.finish("a", "move", true).unwrap();
-        assert_eq!(moved.version.unwrap().content_dependency, Some(source_id));
+        assert_eq!(moved.version.unwrap().content_dependencies, vec![source_id]);
         assert!(store.current("tracked.txt").unwrap().is_none());
         assert_eq!(store.history("tracked.txt").unwrap().len(), 1);
         assert!(!store.snapshot().unwrap().iter().any(|v| v.path == "tracked.txt"));
@@ -960,5 +1060,64 @@ mod tests {
         store.bind("a", "copy", "dispatch", &Label::top()).unwrap();
         assert!(!store.finish("a", "copy", false).unwrap().success);
         store.prepare("b", "next", FileOperation::Read, "tracked.txt").unwrap();
+    }
+
+    #[test]
+    fn process_pins_raw_multi_inputs_and_publishes_all_dependencies_across_reopen() {
+        let fixture = Fixture::new();
+        fs::write(fixture.workspace.join("second.bin"), [0, 255, 1, 128]).unwrap();
+        fs::write(fixture.workspace.join("output.bin"), "previous").unwrap();
+        let store = fixture.initialize(&Label::top());
+        let inputs = vec!["tracked.txt".to_string(), "second.bin".to_string()];
+        let pin = store.prepare_process("a", "process", &inputs, "output.bin").unwrap();
+        let dependencies: Vec<_> = pin.inputs.iter().map(|input| input.version).collect();
+        let previous = pin.predecessor_version;
+        let output = Label::new(
+            appa_engine::label::Trust::new(3),
+            appa_engine::label::Audience::restricted([appa_engine::label::ReaderId::new("result")]),
+        );
+        store.bind("a", "process", "dispatch", &output).unwrap();
+        fs::write(fixture.workspace.join("output.bin"), [128, 2, 0, 255]).unwrap();
+        let receipt = store.finish("a", "process", true).unwrap();
+        let version = receipt.version.unwrap();
+        assert_eq!(version.label, output);
+        assert_eq!(version.previous, previous);
+        assert_eq!(version.content_dependencies, dependencies);
+        drop(store);
+        let reopened = FileStore::open(&fixture.db, &fixture.workspace, "policy-a", &Label::top()).unwrap();
+        assert_eq!(reopened.current("output.bin").unwrap().unwrap(), version);
+        assert_eq!(reopened.history("output.bin").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn process_refuses_missing_or_aliased_inputs_and_quarantines_partial_failure() {
+        let fixture = Fixture::new();
+        let store = fixture.initialize(&Label::top());
+        assert!(matches!(
+            store.prepare_process("a", "missing", &["missing".into()], "output"),
+            Err(FileStoreError::Untracked)
+        ));
+        assert!(matches!(
+            store.prepare_process(
+                "a",
+                "duplicate",
+                &["tracked.txt".into(), "tracked.txt".into()],
+                "output"
+            ),
+            Err(FileStoreError::InvalidPath(_))
+        ));
+        assert!(matches!(
+            store.prepare_process("a", "alias", &["tracked.txt".into()], "tracked.txt"),
+            Err(FileStoreError::InvalidPath(_))
+        ));
+        store
+            .prepare_process("a", "partial", &["tracked.txt".into()], "output")
+            .unwrap();
+        store.bind("a", "partial", "dispatch", &Label::top()).unwrap();
+        fs::write(fixture.workspace.join("output"), "partial").unwrap();
+        assert!(matches!(
+            store.finish("a", "partial", false),
+            Err(FileStoreError::Quarantined)
+        ));
     }
 }

@@ -115,30 +115,25 @@ distinct Labels on identical bytes, source-path reuse, destination requirements,
 and incomplete transfers across ledger reopen. These tests establish the mediated
 tool contract, not native-tool or arbitrary subprocess confinement.
 
-### Isolation acceptance blockers
+### Isolated declared-input processing
 
-Subprocess execution is not enabled. Two tested third-party configurations do
-not yet meet the declared-input boundary:
+The opt-in `appa_process_files(input_paths, output_path, command)` tool runs a
+shell command on private input snapshots and publishes one regular output file.
+The engine checks all input Labels before execution and applies their combination
+to the output, stdout, stderr and failures. It records every declared dependency,
+even when the command does not read that input.
 
-- **agentsh v0.20.5:** server-owned execution denied a synthetic file under the
-  normal configuration. Removing its configured `agentsh-unixwrap` binary after
-  startup let the same read succeed, despite `security.strict: true` and
-  `sandbox.allow_degraded: false`. This was host-side fault injection, not a
-  claim that an agent can remove a protected helper. Setup failure must stop
-  execution before this backend can be trusted. Source inspection also found
-  continuation after Landlock setup and syscall-path resolution failures.
-- **bubblewrap 0.8.0:** a private filesystem with user, PID and network namespaces
-  still allowed reading a synthetic host session-keyring value by key ID. File
-  mounts alone therefore do not establish declared-input-only access. An existing
-  backend policy must also restrict non-file channels such as keyring syscalls
-  and inherited descriptors. APPA does not currently provide that policy.
+The host-installed backend combines pinned, locally patched agentsh with bubblewrap
+namespaces. Required helper setup failures refuse execution. The fixed syscall policy
+denies sockets, keyrings and cross-process access; inherited descriptors and environment
+are cleared. Input mounts are read-only. Publication waits for descendant teardown and
+rejects symbolic/hard links or special files. Native Bash remains unsupported.
 
-The orb supports FUSE, seccomp notification and Landlock ABI 2, but agentsh's
-probe found neither eBPF nor Landlock network enforcement. User/network namespace
-creation worked. A future backend must demonstrate forbidden-read/write/network
-denial, descendant teardown before output import, safe handling of hostile output
-paths, and fail-closed setup. Capability detection or a successful normal command
-is not sufficient. These probes are not an isolation-stage acceptance pass.
+See [backend setup and contract](../../../integrations/agentsh/README.md) for requirements,
+tests and limits. Live Claude tests cover a two-input invoice calculation, admitted failure
+text, refused symlink publication and actual denied control-file/network/input-write
+attempts. This confines supported subprocess calls, not Claude's native filesystem
+access, inference traffic or final response.
 
 ### Capabilities deferred to an inference proxy
 

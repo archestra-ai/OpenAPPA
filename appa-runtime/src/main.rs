@@ -61,6 +61,10 @@ struct Args {
     #[arg(long, env = "APPA_FILE_LEDGER", requires = "file_workspace")]
     file_ledger: Option<PathBuf>,
 
+    /// Host-installed agentsh backend directory for isolated declared-input processing.
+    #[arg(long, env = "APPA_FILE_PROCESS_BACKEND", requires = "file_workspace")]
+    file_process_backend: Option<PathBuf>,
+
     /// First start only: classify all existing files with this policy trust name.
     #[arg(long, requires = "file_workspace")]
     initialize_file_trust: Option<String>,
@@ -470,9 +474,15 @@ async fn serve(args: Args) -> ExitCode {
                 }
                 None => None,
             };
-            runtime
+            let runtime = runtime
                 .with_file_tracking(workspace, args.file_ledger.expect("clap requires a ledger"), initial)
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+            match args.file_process_backend {
+                Some(backend) => runtime
+                    .with_file_process_backend(backend)
+                    .map_err(|error| error.to_string()),
+                None => Ok(runtime),
+            }
         };
         match configure() {
             Ok(runtime) => runtime,

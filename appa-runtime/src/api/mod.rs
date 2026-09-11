@@ -1085,10 +1085,35 @@ impl Runtime {
             policy_key,
             workspace,
             ledger,
+            process_backend: None,
         });
         tracing::warn!(
             "experimental file tools require Claude Code launched with native tools and implicit filesystem reads disabled"
         );
+        Ok(self)
+    }
+
+    /// Enable the host-installed, pinned agentsh runner for declared-input processing.
+    /// The backend and system toolchain are trusted host code, outside the managed workspace.
+    pub fn with_file_process_backend(mut self, backend: PathBuf) -> Result<Self, OpenError> {
+        let inner = Arc::get_mut(&mut self.inner)
+            .ok_or_else(|| OpenError::Storage("enable processing before sharing the runtime".into()))?;
+        let files = inner
+            .files
+            .as_mut()
+            .ok_or_else(|| OpenError::Storage("processing requires file tracking".into()))?;
+        let backend = std::fs::canonicalize(backend).map_err(|error| OpenError::Storage(error.to_string()))?;
+        if backend.starts_with(&files.workspace)
+            || ["agentsh", "agentsh-unixwrap", "run.py"].iter().any(|name| {
+                std::fs::canonicalize(backend.join(name))
+                    .map_or(true, |path| !path.is_file() || path.starts_with(&files.workspace))
+            })
+        {
+            return Err(OpenError::Storage(
+                "processing requires a complete backend outside the workspace".into(),
+            ));
+        }
+        files.process_backend = Some(backend);
         Ok(self)
     }
 

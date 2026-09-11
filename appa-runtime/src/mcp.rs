@@ -251,6 +251,9 @@ impl RuntimeTools {
                 tool_router.remove_route(tool);
             }
         }
+        if !runtime.file_process_enabled() {
+            tool_router.remove_route("appa_process_files");
+        }
         RuntimeTools {
             runtime,
             harness,
@@ -339,6 +342,22 @@ impl RuntimeTools {
             &self.runtime,
             self.file_actor.as_ref(),
             "appa_move_file",
+            serde_json::to_value(args).expect("file arguments serialize"),
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Run a shell command in an isolated workspace with only declared input snapshots and a trusted system toolchain. Read inputs at inputs/<path> and write output/result. The runtime publishes that one regular file at output_path after teardown. All outputs and errors carry every input Label. No network or native-workspace access."
+    )]
+    pub async fn appa_process_files(
+        &self,
+        Parameters(args): Parameters<crate::api::files::ProcessArgs>,
+    ) -> CallToolResult {
+        file_result(
+            &self.runtime,
+            self.file_actor.as_ref(),
+            "appa_process_files",
             serde_json::to_value(args).expect("file arguments serialize"),
         )
         .await
