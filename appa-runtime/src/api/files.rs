@@ -36,7 +36,12 @@
 //! `--initialize-file-trust suspicious --initialize-file-audience public` (or the operator's
 //! actual classification). This classifies every existing file; it does not inspect content.
 //! Subsequent starts require that same ledger and policy and omit initialization flags.
-//! Launch `appa claude-files --runtime-url http://127.0.0.1:8787 'prompt'`.
+//! With the APPA plugin installed, launch Claude with `APPA_GATE=1` and
+//! `APPA_RUNTIME_URL` pointing to this runtime. SessionStart describes the file tools.
+//! The plugin's HTTP MCP calls consume exact one-shot hook approvals; their outcomes
+//! are already admitted when the post-tool hook arrives. Native tools remain available
+//! in Claude, but calls reaching APPA are refused in this mode.
+//! `appa claude-files` is a separate constrained test launcher, not required by the plugin.
 //! The policy must declare the three `mcp/plugin_appa-runtime_appa/appa_*_file` tools.
 //! This option does not enforce OS isolation. Use disposable test fixtures only.
 //!
@@ -318,6 +323,128 @@ max_body_bytes = 65536
             .unwrap()
     }
 
+    async fn hook(runtime: &Runtime, event: serde_json::Value) -> appa_runtime_api::HookDecision {
+        use appa_runtime_api::{AdapterName, WireDecision, WireEvent};
+        let codec = appa_adapter_claude_code::codec();
+        let event = (codec.parse)(&serde_json::to_vec(&event).unwrap()).unwrap().unwrap();
+        let wire = WireEvent::from_event(AdapterName::ClaudeCode, &event).unwrap();
+        let (status, answer) = crate::hooks::answer(
+            runtime,
+            &appa_adapter_claude_code::adapter(),
+            &serde_json::to_vec(&wire).unwrap(),
+        )
+        .await;
+        assert_eq!(status, 200, "{answer}");
+        serde_json::from_value::<WireDecision>(answer)
+            .unwrap()
+            .into_decision()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn managed_files_plugin_hooks_bind_exact_calls_and_absorb_duplicate_results() {
+        use appa_runtime_api::HookDecision;
+        let dir = fixture();
+        let runtime = open(dir.path(), true);
+        let start = hook(
+            &runtime,
+            serde_json::json!({
+                "hook_event_name":"SessionStart", "session_id":"plugin-test"
+            }),
+        )
+        .await;
+        assert!(matches!(start, HookDecision::Context { text } if text.contains("appa_read_file(file_path)")));
+        let arguments = serde_json::json!({"file_path":"new.txt", "content":"trusted original"});
+        assert!(
+            runtime
+                .execute_file("appa_write_file", arguments.clone())
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            hook(
+                &runtime,
+                serde_json::json!({
+                    "hook_event_name":"PreToolUse", "session_id":"plugin-test",
+                    "tool_name":"mcp__plugin_appa-runtime_appa__appa_write_file", "tool_input":arguments
+                })
+            )
+            .await,
+            HookDecision::AllowCall { .. }
+        ));
+        assert!(
+            runtime
+                .execute_file(
+                    "appa_write_file",
+                    serde_json::json!({"file_path":"new.txt", "content":"substituted"})
+                )
+                .await
+                .is_err()
+        );
+        // A second trajectory cannot acquire the reserved workspace, even for another path.
+        let competing = hook(
+            &runtime,
+            serde_json::json!({
+                "hook_event_name":"PreToolUse", "session_id":"other-session",
+                "tool_name":"mcp__plugin_appa-runtime_appa__appa_write_file",
+                "tool_input":{"file_path":"other.txt", "content":"other"}
+            }),
+        )
+        .await;
+        assert!(matches!(
+            competing,
+            HookDecision::DenyCall { .. } | HookDecision::Refuse { .. }
+        ));
+        assert_eq!(
+            runtime
+                .execute_file("appa_write_file", arguments.clone())
+                .await
+                .unwrap(),
+            FileReply::Value("file written".into())
+        );
+        let version = runtime
+            .inner
+            .files
+            .as_ref()
+            .unwrap()
+            .store
+            .current("new.txt")
+            .unwrap()
+            .unwrap();
+        for _ in 0..2 {
+            assert!(matches!(
+                hook(
+                    &runtime,
+                    serde_json::json!({
+                        "hook_event_name":"PostToolUse", "session_id":"plugin-test",
+                        "tool_name":"mcp__plugin_appa-runtime_appa__appa_write_file",
+                        "tool_input":arguments, "tool_response":"file written"
+                    })
+                )
+                .await,
+                HookDecision::Ack
+            ));
+        }
+        assert!(runtime.execute_file("appa_write_file", arguments).await.is_err());
+        assert_eq!(
+            runtime
+                .inner
+                .files
+                .as_ref()
+                .unwrap()
+                .store
+                .current("new.txt")
+                .unwrap()
+                .unwrap(),
+            version
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("work/new.txt")).unwrap(),
+            "trusted original"
+        );
+        assert!(!dir.path().join("work/other.txt").exists());
+    }
+
     #[tokio::test]
     async fn managed_files_bound_caller_retains_failure_taint_after_reopen() {
         let dir = fixture();
@@ -593,9 +720,13 @@ max_body_bytes = 65536
             call("Bash", "source.txt"),
             call("Read", "../policy.toml"),
             call("Write", ".claude/settings.json"),
+            call("Write", "CLAUDE.md"),
+            call("Write", "nested/CLAUDE.local.md"),
         ] {
             assert!(session.on_tool_call(proposal, false).await.is_err());
         }
+        assert!(!dir.path().join("work/CLAUDE.md").exists());
+        assert!(!dir.path().join("work/nested").exists());
         allow(&runtime, &id, call("Write", "unreported.txt")).await;
         std::fs::write(dir.path().join("work/unreported.txt"), "outcome lost").unwrap();
         session.on_turn_end().await.unwrap();
