@@ -25,7 +25,7 @@ include = ["../../batteries/claude-code/appa.toml"]
 A battery names each tool by its canonical tool id (`mcp/<server>/<tool>`,
 `host/claude-code/<name>`), never by the host's own spelling.
 
-Each battery's `command` bindings run in the battery's own directory. A
-complete deployment that includes both batteries and overrides parts of
-them is in `examples/claude-code-battery/`. The Batteries page in the
-website docs describes the format.
+Each battery's `command` bindings run in the battery's own directory.
+[`examples/README.md`](../../examples/README.md) explains how a root
+config installs a battery and what it adds around it. The Batteries page
+in the website docs describes the format.

@@ -231,9 +231,19 @@ After approval:
    attention mark but cannot review public audiences, expand its permits
    instead of adding another Authority. Do not modify an explicit hard denial.
    Describe the resulting behavior, not this wiring.
-4. Add the approved uncovered-tool rules to the root config. Do not remove
-   overlapping root rules; they intentionally override batteries.
-5. Reload and report the result as described below.
+4. When the battery binds an Annotator or an audience source, name the
+   variable it reads, `APPA_PROVIDER_<PROVIDER>_TOKEN` as its README
+   states; it belongs in the runtime's environment, never in the config.
+   Map `self` and `internal` onto the source's collections under
+   `[policy.audience]` as the README shows.
+5. Add the approved uncovered-tool rules to the root config. Do not remove
+   overlapping root rules; they intentionally override batteries. To treat
+   a battery's tool differently, add a root rule for it; never edit the
+   battery.
+6. Reload and report the result as described below. When the battery's
+   README names a replay trace, offer
+   `appa replay --config <live-path> <trace>` as the check that the
+   composed config decides as the README states.
 
 ## Adjust the current config
 
@@ -265,7 +275,8 @@ not guess.
    proposal, revise the proposal and ask for approval again.
 8. Include each newly approved battery with
    `appa battery install <name> --config <live-path>`, as in `init` mode, and
-   add any root support it requires. To take one out, use
+   add the root support, credential variable, and audience mapping it
+   requires. To take one out, use
    `appa battery remove <name> --config <live-path>`.
 9. Apply only the approved root-rule changes. To change battery behavior, add
    or edit a root rule; never modify the battery.

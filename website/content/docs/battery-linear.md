@@ -13,7 +13,7 @@ Reads and mutation responses enter as suspicious. A tool that names a resource b
 
 Define `internal` as readers authorized for everything the connection can list; map `self` and `internal` onto the source in the root config and pass the token through `APPA_PROVIDER_LINEAR_TOKEN`. A resource named by a display name gets no answer, so the agent names it by id.
 
-The [root example](https://github.com/archestra-ai/OpenAPPA/tree/main/examples/linear-battery)
+The [live replay](https://github.com/archestra-ai/OpenAPPA/tree/main/examples/live-replays/linear)
 binds human review, maps the chain onto the source, and keeps one root override for a resource whose readers Linear does not model. The review authority cannot widen an audience, so it cannot authorize publishing private Linear content to a public GitHub repository. For read-only use, connect Linear's read-only MCP endpoint.
 
 [Source and setup](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/linear).

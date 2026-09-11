@@ -2,7 +2,7 @@
 # its readers as Linear reports them; the GitHub battery labels each
 # repository with its collaborators. One root override keeps a resource
 # whose readers Linear does not model.
-include = ["../../marketplace/batteries/linear/appa.toml", "../../marketplace/batteries/github/appa.toml"]
+include = ["../../../marketplace/batteries/linear/appa.toml", "../../../marketplace/batteries/github/appa.toml"]
 
 [policy]
 version = 2

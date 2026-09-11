@@ -16,7 +16,7 @@ fn read(path: &str) -> String {
 fn parity_contract_names_every_required_invariant_and_only_allowed_exceptions() {
     let parity = read("integrations/appa-guide/PARITY.md");
     for id in [
-        "P01", "P02", "P03", "P04", "P05", "P06", "P07", "P08", "P09", "P10", "P11", "P12", "P13", "P14",
+        "P01", "P02", "P03", "P04", "P05", "P06", "P07", "P08", "P09", "P10", "P11", "P12", "P13", "P14", "P15",
     ] {
         assert_eq!(
             parity.matches(&format!("| {id} |")).count(),

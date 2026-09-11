@@ -7,6 +7,8 @@ appa replay --config examples/tests/secret-stays-inside/appa.toml examples/tests
 ```
 
 Add `-v` to see every step. `cargo test -p appa --test replay` runs all of them.
+`local-annotator` binds a command, which the runtime accepts on Unix only;
+it needs `python3`.
 
 | Example | What it pins |
 |---|---|
@@ -16,6 +18,7 @@ Add `-v` to see every step. `cargo test -p appa --test replay` runs all of them.
 | [push-only-to-the-org](push-only-to-the-org/) | Three `mcp/shell/bash` contracts chosen by the command text; a non-org push needs a person. |
 | [three-trust-ranks](three-trust-ranks/) | A custom trust chain with two sinks at different ranks. |
 | [redact-before-sending](redact-before-sending/) | Private data leaves only through the declared sanitizer. |
+| [local-annotator](local-annotator/) | A local command annotates each file read; a client file or a dotfile waits for a person. |
 
 A test case lists tool calls in order. Each call has one expected result.
 

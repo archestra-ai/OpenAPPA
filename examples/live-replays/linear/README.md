@@ -26,7 +26,8 @@ needs `APPA_PROVIDER_LINEAR_TOKEN`, and a GitHub repository needs
 
 ```sh
 APPA_PROVIDER_LINEAR_TOKEN=... APPA_PROVIDER_GITHUB_TOKEN=... appa replay \
-  --config examples/linear-battery/appa.toml examples/linear-battery/linear-battery.appa
+  --config examples/live-replays/linear/appa.toml \
+  examples/live-replays/linear/linear-battery.appa
 ```
 
 Replace `ARC-19` with an issue of your workspace, and the repositories with a

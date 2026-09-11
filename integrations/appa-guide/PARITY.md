@@ -26,6 +26,7 @@ reported outcome for equivalent installed tools and configuration.
 | P12 | Unsupported host behavior is explicit and cannot be described as protected. | Stop when the local plugin/runtime deployment cannot be verified. | Verify the resolved image and Ready condition. Refuse unsupported memory prefetch, unsafe Go delegation, and missing `-full` images. |
 | P13 | Multiple runtimes never collapse into one implicit proposal or success claim. | Stop when the discovered process uses another config path. | Make, approve, apply, and verify one named proposal per runtime. |
 | P14 | Battery inclusion preserves maintained defaults. Exact aliases come from the include; only suffix-only host translations become root rules. | Include the unchanged battery and add only approved root overrides. | Include the unchanged battery; copy a declaration only when kagent's wire name requires translation. |
+| P15 | A battery's credential lives in the runtime environment, never in policy; the root maps `self` and `internal` onto the battery's audience source. | Name `APPA_PROVIDER_<PROVIDER>_TOKEN` for the local runtime's environment and add the `[policy.audience]` mapping the battery README shows. | Carry the variable in the chart's `env` values and add the same `[policy.audience]` mapping to the root policy. |
 
 ## Allowed host differences
 

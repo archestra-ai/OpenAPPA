@@ -95,7 +95,7 @@ Root rules take precedence over battery rules. They must state the complete
 annotation, including write requirements and effects. Use `parameters` with
 `additionalProperties = false` when an override assumes a fixed argument shape.
 
-[The root example](../../../examples/linear-battery/appa.toml) combines the
+[The live replay](../../../examples/live-replays/linear/appa.toml) combines the
 Linear and GitHub batteries, maps the chain onto the Linear source, and keeps
 one root override for a resource with readers Linear does not model. That
 override and the review authority cannot widen an audience: reading a private

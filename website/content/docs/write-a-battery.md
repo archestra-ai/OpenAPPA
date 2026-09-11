@@ -64,9 +64,9 @@ with the package. CI checks that the generated catalog is current.
 
 The battery `README.md` must name the server version and list the covered tools. It must also explain each contract, script, test, and known limit.
 
-Add the battery config to `include` in `examples/claude-code-battery/appa.toml`. Add the Authority settings and the `[policy.audience]` mappings it needs; the battery binds its own audience source.
+Declare in the battery's `README.md` what a root config adds around it: the authority its rules require, the `[policy.audience]` mapping onto its source, and the credential variable. [`examples/README.md`](https://github.com/archestra-ai/OpenAPPA/tree/main/examples/README.md) shows the install steps a root follows.
 
-The test suite loads this example to make sure all included batteries work together.
+The test suite composes every battery into each host it declares to make sure the shipped batteries work together.
 
 ## Test the battery
 
@@ -80,13 +80,13 @@ For example, to test a Python battery:
 python3 -m unittest discover -s marketplace/batteries/your-server -p 'test_*.py'
 ```
 
-After you add the battery to `examples/claude-code-battery/appa.toml`, check that the complete config still loads:
+Then check that the battery composes with the shipped ones:
 
 ```sh
-cargo test -p appa --test examples_load
+cargo test -p appa --test marketplace
 ```
 
-This test detects invalid battery config and conflicts with other included batteries. CI also runs Python tests under `marketplace/batteries/*/test_*.py`.
+This test detects invalid battery config and conflicts with other batteries. CI also runs Python tests under `marketplace/batteries/*/test_*.py`.
 
 ### Integration test
 
@@ -127,12 +127,12 @@ selectors = [
 ]
 ```
 
-The battery implementation is in [`marketplace/batteries/github`](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/github) and the complete replay example in [`examples/github-battery`](https://github.com/archestra-ai/OpenAPPA/tree/main/examples/github-battery).
+The battery implementation is in [`marketplace/batteries/github`](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/github) and the live replay in [`examples/live-replays/github`](https://github.com/archestra-ai/OpenAPPA/tree/main/examples/live-replays/github).
 
-The example's `appa.toml` includes the battery and adds two tools that are not part of it. These tools make the trust and audience changes observable.
+The replay's `appa.toml` includes the battery and adds two tools that are not part of it. These tools make the trust and audience changes observable.
 
 ```toml
-include = ["../../marketplace/batteries/github/appa.toml"]
+include = ["../../../marketplace/batteries/github/appa.toml"]
 
 [policy]
 version = 2
@@ -152,7 +152,7 @@ delta = {}
 
 [externals]
 timeout_ms = 30000
-max_body_bytes = 65536
+max_body_bytes = 1048576
 ```
 
 The `github-battery.appa` trace uses one public repository and one private repository that the GitHub token can read:
@@ -203,8 +203,8 @@ Run the replay with a GitHub token that can read both repositories and list the 
 
 ```sh
 APPA_PROVIDER_GITHUB_TOKEN=... appa replay \
-  --config examples/github-battery/appa.toml \
-  examples/github-battery/github-battery.appa
+  --config examples/live-replays/github/appa.toml \
+  examples/live-replays/github/github-battery.appa
 ```
 
 Replay calls the configured annotator for each GitHub tool call. The annotator can call the GitHub API. The GitHub MCP tool and the other tools do not run.
@@ -215,7 +215,6 @@ Open a pull request against `archestra-ai/OpenAPPA` `main`. Include:
 
 - the new battery folder;
 - its `README.md`, scripts, and tests;
-- the updated `include` list in `examples/claude-code-battery/appa.toml`;
 - a battery documentation page under `website/content/docs/`;
 - a card in `website/components/BatteryCatalog.tsx`; and
 - the server repository, exact version or commit, covered tools, and test results in the pull request description.

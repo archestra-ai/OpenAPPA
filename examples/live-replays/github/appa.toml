@@ -1,7 +1,7 @@
 # Replay the GitHub battery against real repositories. The battery's two
 # annotators ask GitHub for each repository's visibility; two tools
 # outside the battery make the resulting trust and audience observable.
-include = ["../../marketplace/batteries/github/appa.toml"]
+include = ["../../../marketplace/batteries/github/appa.toml"]
 
 [policy]
 version = 2

@@ -8,7 +8,7 @@ digest = "sha256:6856d2b668f484385ed3078f27e3fbbf89092941147b2708a9e9c32c871e41a
 
 [packages.battery.github]
 path = "batteries/github"
-digest = "sha256:205fb0ac86a56a78892a3dd1b8042ea7df50a5391ec4e711dfde3319d93fc17d"
+digest = "sha256:91f5a604d4e33288717401f367ab6a70fb905b8df7d5c594fc37067434217c5a"
 
 [packages.battery.google-workspace]
 path = "batteries/google-workspace"
@@ -16,11 +16,11 @@ digest = "sha256:767b11b54a25e2d0d225cce59655d30224419279202703515a2b2f1fe37f2ac
 
 [packages.battery.grain]
 path = "batteries/grain"
-digest = "sha256:1d72dcd5bd5ac7e5920044079f8129017734793108f002872085788dd1a8f211"
+digest = "sha256:62ac0f97c48fdc03f04b242507655d9b6f2b8f9b8fa53362de70c2bdd71517a0"
 
 [packages.battery.linear]
 path = "batteries/linear"
-digest = "sha256:3caaf3bb805e04d3354badc3cc8d48aef0db0424952e62596b978680d32c0846"
+digest = "sha256:2542abb0bdf666be8ead96b6bc94336b69894a0f349ef9977937f851edb6eb7f"
 
 [packages.battery.notion]
 path = "batteries/notion"

@@ -60,9 +60,9 @@ async fn runtime(dir: &tempfile::TempDir, extra: &str, source: Option<&str>) -> 
         std::fs::write(target.join("appa.toml"), policy).unwrap();
     }
     // Use the documented configuration; substitute a deterministic review authority.
-    let text = std::fs::read_to_string(repo_root().join("examples/linear-battery/appa.toml"))
+    let text = std::fs::read_to_string(repo_root().join("examples/live-replays/linear/appa.toml"))
         .unwrap()
-        .replace("../../marketplace/", "marketplace/")
+        .replace("../../../marketplace/", "marketplace/")
         .replace("builtin = \"hitl\"", "builtin = \"approve\"");
     let path = dir.path().join("appa.toml");
     std::fs::write(&path, format!("{text}\n{extra}")).unwrap();

@@ -1,0 +1,33 @@
+# A local command annotates every file read: the content is suspicious, and a
+# dot-prefixed path or anything under clients/ needs a person first.
+
+[policy]
+version = 2
+
+[[policy.annotator]]
+name = "local.read-sensitivity"
+audiences = []
+marks = ["hitl"]
+
+[[policy.tool]]
+name = "host/claude-code/Read"
+description = "Reads a file and returns its contents."
+annotator = "local.read-sensitivity"
+
+[[policy.authority]]
+name = "hitl"
+hint = "Ask the person running this session."
+
+[policy.authority.permits]
+attention = ["hitl"]
+
+[externals]
+timeout_ms = 5000
+max_body_bytes = 65536
+
+# The command runs in this directory.
+[externals.annotators."local.read-sensitivity"]
+command = ["python3", "./read-sensitivity.py"]
+
+[externals.authorities.hitl]
+builtin = "hitl"

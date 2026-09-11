@@ -413,7 +413,7 @@ mod tests {
     const DEPLOYMENTS: &[&str] = &[
         "marketplace/plugins/claude-code/default.appa.toml",
         "marketplace/plugins/claude-code/hitl.appa.toml",
-        "examples/claude-code-battery/appa.toml",
+        "examples/live-replays/linear/appa.toml",
         "bench/corp/policies/appa.toml",
         "bench/corp/policies/open.toml",
     ];

@@ -5,7 +5,9 @@ mod common;
 use common::{repo_root, serve};
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::process::Command;
 
 use appa_runtime::api::{OfferKind, Runtime};
@@ -402,6 +404,7 @@ async fn a_bound_annotator_decides_the_step() {
     );
 }
 
+#[cfg(unix)]
 fn example_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(repo_root().join("examples/tests"))
         .expect("the examples directory is readable")
@@ -412,10 +415,11 @@ fn example_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn every_shipped_example_passes() {
     let dirs = example_dirs();
-    assert!(dirs.len() >= 6, "the shipped examples were found: {dirs:?}");
+    assert!(dirs.len() >= 7, "the shipped examples were found: {dirs:?}");
     for dir in dirs {
         let config = Config::load(&dir.join("appa.toml")).unwrap_or_else(|error| panic!("{}: {error}", dir.display()));
         let runtime =
