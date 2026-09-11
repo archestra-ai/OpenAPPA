@@ -3,6 +3,7 @@
 mod agent_scan;
 pub mod api;
 pub mod batteries;
+mod checkpoint;
 pub mod config;
 mod default_config;
 pub mod describe;
@@ -13,6 +14,8 @@ pub mod installation;
 mod loopback_http;
 mod management;
 pub mod mcp;
+pub mod plugin_bundle;
+mod proxy;
 pub mod replay;
 #[path = "main.rs"]
 pub mod runtime_cli;

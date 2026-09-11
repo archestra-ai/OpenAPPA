@@ -9,7 +9,10 @@ use crate::candidate::{CallStage, ConfinedFrom, DerivedCandidate, SanitizerLinea
 use crate::check::{self, CallRole, CheckOutcome, Narrowing, RawBlock};
 use crate::contract::ToolAnnotation;
 use crate::execute::{self, PlanError};
-use crate::fact::{BoundaryKind, Fact, ObservedResult, ReturnDerivation, ReturnPolicy, ReturnSanitizer};
+use crate::fact::{
+    BoundaryKind, CheckpointId, CheckpointOpening, CheckpointSnapshot, Fact, ObservedResult, ReturnDerivation,
+    ReturnPolicy, ReturnSanitizer,
+};
 use crate::label::{Expansions, Label, MembershipContext, SymbolicAtom};
 use crate::names::{AuthorityName, SanitizerName};
 use crate::params::{ArgumentError, CanonicalArguments};
@@ -368,6 +371,27 @@ impl Engine {
             },
             crate::basis::SubjectKey::Approval(_) => Ok(OfferConsult::Stale),
         }
+    }
+
+    /// The sanitizer selected by a live offer's remedy plan, including an output sanitizer
+    /// selected before a dispatch opens. `offer_consults` reports that pre-dispatch plan as an
+    /// acceptance because no artifact exists to consult yet; integrations still need its name to
+    /// render an actionable sanitizer offer rather than a generic acceptance.
+    pub fn offer_sanitizer(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        offer: &crate::value::OfferId,
+    ) -> Result<Option<SanitizerName>, TransitionError> {
+        let views = view.projection().view(trajectory);
+        let recorded = views.offer(offer).ok_or(TransitionError::UnknownOffer)?;
+        if recorded.trajectory != *trajectory {
+            return Err(TransitionError::OfferElsewhere);
+        }
+        if recorded.end.is_some() || recorded.basis != views.basis_for(&recorded.subject) {
+            return Ok(None);
+        }
+        Ok(recorded.plan.sanitizer().cloned())
     }
 
     /// The fork one child was bound to, or `None` for a trajectory that never forked.
@@ -1333,8 +1357,10 @@ impl Engine {
         let released: Vec<Released> = composed
             .iter()
             .zip(&proposals)
-            .filter_map(|(release, call)| {
+            .enumerate()
+            .filter_map(|(position, (release, call))| {
                 release.as_ref().map(|release| Released {
+                    proposal: Some(position),
                     dispatch: release.dispatch.clone(),
                     call: call.clone(),
                     fork: release.prepares_fork.clone(),
@@ -1397,7 +1423,7 @@ impl Engine {
                 batch: batch.id.clone(),
                 position: position as u32,
             };
-            let (block, opened_offers) = self.surface_call_block(
+            let (mut block, opened_offers) = self.surface_call_block(
                 &final_views,
                 Opening {
                     act: &crate::basis::DecidedAct::Proposals(batch.id.clone()),
@@ -1414,6 +1440,7 @@ impl Engine {
                 },
                 act,
             )?;
+            block.proposal = Some(position);
             facts.extend(opened_offers);
             blocked.push(block);
         }
@@ -1471,6 +1498,7 @@ impl Engine {
             self.open_offers(views, opening, &call.digest(), &Engine::executable(&planned), act);
         Ok((
             Blocked {
+                proposal: None,
                 call: call.clone(),
                 block: planned,
                 block_id,
@@ -1586,6 +1614,7 @@ impl Engine {
             match next.next_if(|dispatch| views.dispatch_call(dispatch) == Some(call)) {
                 // Only a dispatch still awaiting its result may be handed back for invocation.
                 Some(dispatch) if views.is_open(dispatch) && !views.is_succeeded(dispatch) => released.push(Released {
+                    proposal: Some(position),
                     dispatch: dispatch.clone(),
                     call: call.clone(),
                     fork: prepared_fork(views, dispatch),
@@ -1622,6 +1651,7 @@ impl Engine {
                                 (block_id, Vec::new())
                             });
                             blocked.push(Blocked {
+                                proposal: Some(position),
                                 block: plan::plan(
                                     &self.registry,
                                     views,
@@ -1642,6 +1672,7 @@ impl Engine {
                         CheckOutcome::Allow => match views.subject_dispatch(&subject).cloned() {
                             Some(dispatch) if views.is_open(&dispatch) && !views.is_succeeded(&dispatch) => {
                                 released.push(Released {
+                                    proposal: Some(position),
                                     dispatch,
                                     call: candidate,
                                     fork: None,
@@ -2050,6 +2081,7 @@ impl Engine {
                     opened_dispatch(&contract, views, &substituted, recorded.subject.clone(), under);
                 facts.push(opening);
                 OfferFollowUp::Released(Box::new(Released {
+                    proposal: None,
                     dispatch,
                     call: substituted,
                     fork: None,
@@ -2111,6 +2143,7 @@ impl Engine {
         Ok(match views.subject_dispatch(&recorded.subject).cloned() {
             Some(dispatch) if views.is_open(&dispatch) && !views.is_succeeded(&dispatch) => {
                 OfferFollowUp::Released(Box::new(Released {
+                    proposal: None,
                     dispatch,
                     call: candidate,
                     fork: None,
@@ -2254,6 +2287,7 @@ impl Engine {
             .pending_block(&recorded.subject)
             .unwrap_or((offer_block(recorded, execution, &call), Vec::new()));
         Ok(Some(Blocked {
+            proposal: None,
             block: plan::plan(
                 &self.registry,
                 views,
@@ -2455,6 +2489,18 @@ impl Engine {
         trajectory: &TrajectoryId,
         policy_file_key: crate::profile::PolicyFileKey,
     ) -> Result<ValidatedFactBatch, TransitionRefusal> {
+        self.open_trajectory_from_checkpoint(trajectory, policy_file_key, None)
+    }
+
+    /// The opening batch of an independent root that inherits a durable,
+    /// previously validated checkpoint. The event log verifies the checkpoint
+    /// identity before persisting this opening.
+    pub fn open_trajectory_from_checkpoint(
+        &self,
+        trajectory: &TrajectoryId,
+        policy_file_key: crate::profile::PolicyFileKey,
+        checkpoint: Option<(CheckpointId, CheckpointSnapshot)>,
+    ) -> Result<ValidatedFactBatch, TransitionRefusal> {
         let empty = EngineView::validated(Projection::empty(0), self.identity, trajectory.clone());
         self.seal(
             &empty,
@@ -2465,8 +2511,15 @@ impl Engine {
                 policy_digest: self.identity,
                 policy_file_key,
                 open_vectors: self.open_vectors(),
+                checkpoint: checkpoint.map(|(id, snapshot)| CheckpointOpening { id, snapshot }),
             }],
         )
+    }
+
+    /// The settled state that can begin an independent root. `None` means the
+    /// trajectory is unopened, ended, or still has a pending lifecycle act.
+    pub fn checkpoint_snapshot(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<CheckpointSnapshot> {
+        view.projection().checkpoint_snapshot(trajectory)
     }
 
     /// Convert untrusted provider bytes into the only call representation accepted by this
@@ -9540,6 +9593,7 @@ mod tests {
                     policy_digest,
                     policy_file_key,
                     open_vectors,
+                    checkpoint,
                 },
             ] => {
                 assert_eq!(policy_file_key, &key, "the opening names the file it opened under");
@@ -9548,6 +9602,7 @@ mod tests {
                 assert_eq!(profile, e.profile());
                 assert_eq!(*policy_digest, e.identity());
                 assert_eq!(open_vectors, &e.open_vectors());
+                assert!(checkpoint.is_none());
                 assert_eq!(open_vectors.len(), 1);
             }
             other => panic!("expected exactly the opening record, got {other:?}"),

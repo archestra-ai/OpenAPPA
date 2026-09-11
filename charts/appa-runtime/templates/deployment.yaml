@@ -1,5 +1,8 @@
-{{- if or (hasKey .Values.env "APPA_BATTERIES_DIR") (hasKey .Values.env "APPA_CONFIG") (hasKey .Values.env "APPA_GUIDE_RUNTIME_URL") (hasKey .Values.env "APPA_PERSISTENCE_ENABLED") (hasKey .Values.env "APPA_POLICY_CONFIGMAP_NAME") (hasKey .Values.env "APPA_POLICY_CONFIGMAP_KEY") (hasKey .Values.env "APPA_RUNTIME_RELEASE_NAME") }}
-{{- fail "env.APPA_BATTERIES_DIR, env.APPA_CONFIG, env.APPA_GUIDE_RUNTIME_URL, env.APPA_PERSISTENCE_ENABLED, env.APPA_POLICY_CONFIGMAP_NAME, env.APPA_POLICY_CONFIGMAP_KEY, and env.APPA_RUNTIME_RELEASE_NAME are reserved; the chart derives them" }}
+{{- if or (hasKey .Values.env "APPA_BATTERIES_DIR") (hasKey .Values.env "APPA_CONFIG") (hasKey .Values.env "APPA_GUIDE_RUNTIME_URL") (hasKey .Values.env "APPA_PERSISTENCE_ENABLED") (hasKey .Values.env "APPA_POLICY_CONFIGMAP_NAME") (hasKey .Values.env "APPA_POLICY_CONFIGMAP_KEY") (hasKey .Values.env "APPA_RUNTIME_RELEASE_NAME") (hasKey .Values.env "APPA_PROXY_TOKEN") (hasKey .Values.env "APPA_PROXY_APPROVAL_SECRET") }}
+{{- fail "env.APPA_BATTERIES_DIR, env.APPA_CONFIG, env.APPA_GUIDE_RUNTIME_URL, env.APPA_PERSISTENCE_ENABLED, env.APPA_POLICY_CONFIGMAP_NAME, env.APPA_POLICY_CONFIGMAP_KEY, env.APPA_RUNTIME_RELEASE_NAME, APPA_PROXY_TOKEN, and APPA_PROXY_APPROVAL_SECRET are reserved; the chart derives them" }}
+{{- end }}
+{{- if and .Values.proxyTokenSecret.name .Values.proxyApprovalSecret.name (eq .Values.proxyTokenSecret.name .Values.proxyApprovalSecret.name) (eq .Values.proxyTokenSecret.key .Values.proxyApprovalSecret.key) }}
+{{- fail "proxyTokenSecret and proxyApprovalSecret must not reference the same Secret key" }}
 {{- end }}
 {{- include "appa-runtime.validateConfig" . }}
 apiVersion: apps/v1
@@ -129,6 +132,20 @@ spec:
               {{- else }}
               value: /opt/appa/batteries
               {{- end }}
+            {{- if .Values.proxyTokenSecret.name }}
+            - name: APPA_PROXY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.proxyTokenSecret.name | quote }}
+                  key: {{ .Values.proxyTokenSecret.key | quote }}
+            {{- end }}
+            {{- if .Values.proxyApprovalSecret.name }}
+            - name: APPA_PROXY_APPROVAL_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.proxyApprovalSecret.name | quote }}
+                  key: {{ .Values.proxyApprovalSecret.key | quote }}
+            {{- end }}
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}

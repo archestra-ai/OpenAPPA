@@ -16,6 +16,7 @@ use appa_runtime_api::AdapterName;
 pub use appa_runtime_api::AdapterName as Adapter;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
+use axum::http::header::AUTHORIZATION;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -237,6 +238,92 @@ struct AppState {
     battery_state: Arc<RwLock<mcp::BatteryState>>,
     reload_gate: Arc<tokio::sync::Mutex<()>>,
     executable: Option<ExecutableAtStart>,
+}
+
+/// An installed shared secret turns on the network-facing proxy protocol. A malformed configured
+/// secret is a startup error rather than a downgrade to unauthenticated stock behavior.
+#[derive(Clone)]
+struct ProxyToken(Arc<str>);
+
+fn secret_from_env(name: &str) -> Result<Option<Arc<str>>, String> {
+    match std::env::var(name) {
+        Ok(secret) => valid_secret(name, secret).map(Some),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} must be valid Unicode")),
+    }
+}
+
+fn valid_secret(name: &str, secret: String) -> Result<Arc<str>, String> {
+    if secret.chars().count() < 32 {
+        return Err(format!("{name} must contain at least 32 characters"));
+    }
+    Ok(Arc::from(secret))
+}
+
+fn proxy_token_from_env() -> Result<Option<ProxyToken>, String> {
+    secret_from_env("APPA_PROXY_TOKEN").map(|secret| secret.map(ProxyToken))
+}
+
+fn approval_secret_from_env() -> Result<Option<Arc<str>>, String> {
+    secret_from_env("APPA_PROXY_APPROVAL_SECRET")
+}
+
+fn distinct_proxy_secrets(token: &Option<ProxyToken>, approval: &Option<Arc<str>>) -> Result<(), String> {
+    if let (Some(token), Some(approval)) = (token, approval)
+        && token.0.as_ref() == approval.as_ref()
+    {
+        return Err("APPA_PROXY_TOKEN and APPA_PROXY_APPROVAL_SECRET must differ".to_string());
+    }
+    Ok(())
+}
+
+async fn proxy_auth(State(token): State<ProxyToken>, request: Request, next: Next) -> Response {
+    let valid = request
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|header| header.to_str().ok())
+        .and_then(|header| header.strip_prefix("Bearer "))
+        .is_some_and(|candidate| proxy_token_matches(&token.0, candidate));
+    if !valid {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": {"code": "unauthorized", "message": "Bearer token required"}})),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+/// Secure proxy mode exposes only the durable `/proxy/v1` protocol. The stock hook and MCP
+/// protocols could otherwise mutate the same runtime without proxy receipt or grant checks.
+async fn disable_legacy_protocols(request: Request, next: Next) -> Response {
+    let path = request.uri().path();
+    if path == "/hook" || path == "/mcp" || path.starts_with("/mcp/") {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(
+                serde_json::json!({"error": {"code": "legacy_protocol_disabled", "message": "use /proxy/v1/events"}}),
+            ),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+/// Compare fixed-size HMAC tags so token equality does not introduce an early-exit comparison.
+fn proxy_token_matches(expected: &str, candidate: &str) -> bool {
+    use hmac::{Hmac, Mac};
+
+    type HmacSha256 = Hmac<Sha256>;
+    let tag = |token: &str| {
+        let mut mac = HmacSha256::new_from_slice(token.as_bytes()).expect("HMAC accepts any key length");
+        mac.update(b"appa proxy token comparison");
+        mac.finalize().into_bytes()
+    };
+    let expected = tag(expected);
+    let mut candidate_mac = HmacSha256::new_from_slice(candidate.as_bytes()).expect("HMAC accepts any key length");
+    candidate_mac.update(b"appa proxy token comparison");
+    candidate_mac.verify_slice(&expected).is_ok()
 }
 
 async fn hook(
@@ -509,9 +596,7 @@ async fn serve(args: Args) -> ExitCode {
         .route("/report", post(report))
         .route("/reload", post(reload))
         .route_layer(axum::middleware::from_fn(loopback_management_only));
-    let app = axum::Router::new()
-        .route("/health", get(health))
-        .route("/batteries", get(batteries))
+    let stock = axum::Router::new()
         .route("/hook", post(hook))
         .route(
             "/validate",
@@ -522,7 +607,38 @@ async fn serve(args: Args) -> ExitCode {
         .nest_service(
             "/mcp",
             mcp::service_with_allowed_hosts(Arc::clone(&runtime), &args.mcp_allowed_hosts, args.adapter),
-        )
+        );
+    let proxy_token = match proxy_token_from_env() {
+        Ok(token) => token,
+        Err(error) => {
+            eprintln!("appa runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let approval_secret = match approval_secret_from_env() {
+        Ok(secret) => secret,
+        Err(error) => {
+            eprintln!("appa runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(error) = distinct_proxy_secrets(&proxy_token, &approval_secret) {
+        eprintln!("appa runtime: {error}");
+        return ExitCode::FAILURE;
+    }
+    let protected = match proxy_token {
+        Some(token) => stock
+            .nest_service("/proxy/v1", crate::proxy::router(Arc::clone(&runtime), approval_secret))
+            // `proxy_auth` is outermost, so an absent token remains a 401 rather than exposing
+            // whether a legacy endpoint is disabled for authenticated callers.
+            .route_layer(axum::middleware::from_fn(disable_legacy_protocols))
+            .route_layer(axum::middleware::from_fn_with_state(token, proxy_auth)),
+        None => stock,
+    };
+    let app = axum::Router::new()
+        .route("/health", get(health))
+        .route("/batteries", get(batteries))
+        .merge(protected)
         .merge(management)
         .with_state(state);
 
@@ -590,6 +706,7 @@ fn management_peer_is_allowed(peer: SocketAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tower::ServiceExt;
 
     #[test]
     fn a_missing_config_is_created_without_replacing_an_existing_file() {
@@ -650,6 +767,35 @@ mod tests {
         assert!(!management_peer_is_allowed("10.0.0.8:1234".parse().unwrap()));
     }
 
+    #[tokio::test]
+    async fn management_endpoint_is_reachable_only_from_loopback() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let app = axum::Router::new()
+            .route("/reload", post(|| async { StatusCode::NO_CONTENT }))
+            .route_layer(axum::middleware::from_fn(loopback_management_only));
+        let request = |peer: SocketAddr| {
+            Request::builder()
+                .method("POST")
+                .uri("/reload")
+                .extension(ConnectInfo(peer))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let local = app
+            .clone()
+            .oneshot(request("127.0.0.1:1234".parse().unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(local.status(), StatusCode::NO_CONTENT);
+
+        let remote = app.oneshot(request("10.0.0.8:1234".parse().unwrap())).await.unwrap();
+        assert_eq!(remote.status(), StatusCode::FORBIDDEN);
+    }
+
     #[test]
     fn health_reports_a_replaced_executable_by_the_pid_to_stop() {
         let directory = tempfile::tempdir().expect("temporary directory");
@@ -692,5 +838,112 @@ mod tests {
         assert_eq!(log_level(0), "info");
         assert_eq!(log_level(1), "debug");
         assert_eq!(log_level(2), "trace");
+    }
+
+    #[test]
+    fn proxy_tokens_require_the_minimum_length_and_compare_without_plain_equality() {
+        assert!(proxy_token_matches(
+            "01234567890123456789012345678901",
+            "01234567890123456789012345678901"
+        ));
+        assert!(!proxy_token_matches(
+            "01234567890123456789012345678901",
+            "01234567890123456789012345678902"
+        ));
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_protects_checkpoint_routes_with_the_event_token() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let token = ProxyToken(Arc::from("01234567890123456789012345678901"));
+        let app = axum::Router::new()
+            .route("/proxy/v1/checkpoints", post(|| async { StatusCode::NO_CONTENT }))
+            .route_layer(axum::middleware::from_fn_with_state(token, proxy_auth));
+        let request = |authorization: Option<&str>| {
+            let mut request = Request::builder().method("POST").uri("/proxy/v1/checkpoints");
+            if let Some(authorization) = authorization {
+                request = request.header(AUTHORIZATION, authorization);
+            }
+            request.body(Body::empty()).expect("request builds")
+        };
+
+        let unauthorized = app.clone().oneshot(request(None)).await.expect("router responds");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let authorized = app
+            .oneshot(request(Some("Bearer 01234567890123456789012345678901")))
+            .await
+            .expect("router responds");
+        assert_eq!(authorized.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[test]
+    fn configured_short_or_blank_transport_and_approval_secrets_refuse_startup() {
+        for name in ["APPA_PROXY_TOKEN", "APPA_PROXY_APPROVAL_SECRET"] {
+            assert!(valid_secret(name, "".to_string()).is_err());
+            assert!(valid_secret(name, "too-short".to_string()).is_err());
+            assert!(valid_secret(name, "01234567890123456789012345678901".to_string()).is_ok());
+        }
+    }
+
+    #[test]
+    fn matching_transport_and_approval_secrets_refuse_startup() {
+        let secret: Arc<str> = Arc::from("01234567890123456789012345678901");
+        assert!(distinct_proxy_secrets(&Some(ProxyToken(Arc::clone(&secret))), &Some(Arc::clone(&secret))).is_err());
+        assert!(
+            distinct_proxy_secrets(
+                &Some(ProxyToken(secret)),
+                &Some(Arc::from("abcdefghijklmnopqrstuvwxyz012345")),
+            )
+            .is_ok()
+        );
+        assert!(distinct_proxy_secrets(&None, &Some(Arc::from("01234567890123456789012345678901"))).is_ok());
+    }
+
+    #[tokio::test]
+    async fn secure_proxy_mode_rejects_legacy_hook_and_mcp_before_their_handlers() {
+        let app = axum::Router::new()
+            .route("/hook", post(|| async { StatusCode::OK }))
+            .route("/mcp", post(|| async { StatusCode::OK }))
+            .route("/mcp/{*path}", post(|| async { StatusCode::OK }))
+            .route_layer(axum::middleware::from_fn(disable_legacy_protocols))
+            .route_layer(axum::middleware::from_fn_with_state(
+                ProxyToken(Arc::from("01234567890123456789012345678901")),
+                proxy_auth,
+            ));
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/hook")
+                    .body(axum::body::Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router responds");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        for uri in ["/hook", "/mcp", "/mcp/execute_remedy_plan"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header(AUTHORIZATION, "Bearer 01234567890123456789012345678901")
+                        .body(axum::body::Body::empty())
+                        .expect("request builds"),
+                )
+                .await
+                .expect("router responds");
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "{uri} bypassed secure proxy mode"
+            );
+        }
     }
 }

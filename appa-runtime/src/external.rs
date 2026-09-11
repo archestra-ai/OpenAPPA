@@ -1030,6 +1030,8 @@ mod tests {
                     tool: "send_message".to_string(),
                     arguments,
                     requirements: vec![],
+                    logical_action_digest: "call-digest".to_string(),
+                    review_scope: None,
                 },
             },
         }
