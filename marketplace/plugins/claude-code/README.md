@@ -115,6 +115,31 @@ distinct Labels on identical bytes, source-path reuse, destination requirements,
 and incomplete transfers across ledger reopen. These tests establish the mediated
 tool contract, not native-tool or arbitrary subprocess confinement.
 
+### Isolation acceptance blockers
+
+Subprocess execution is not enabled. Two tested third-party configurations do
+not yet meet the declared-input boundary:
+
+- **agentsh v0.20.5:** server-owned execution denied a synthetic file under the
+  normal configuration. Removing its configured `agentsh-unixwrap` binary after
+  startup let the same read succeed, despite `security.strict: true` and
+  `sandbox.allow_degraded: false`. This was host-side fault injection, not a
+  claim that an agent can remove a protected helper. Setup failure must stop
+  execution before this backend can be trusted. Source inspection also found
+  continuation after Landlock setup and syscall-path resolution failures.
+- **bubblewrap 0.8.0:** a private filesystem with user, PID and network namespaces
+  still allowed reading a synthetic host session-keyring value by key ID. File
+  mounts alone therefore do not establish declared-input-only access. An existing
+  backend policy must also restrict non-file channels such as keyring syscalls
+  and inherited descriptors. APPA does not currently provide that policy.
+
+The orb supports FUSE, seccomp notification and Landlock ABI 2, but agentsh's
+probe found neither eBPF nor Landlock network enforcement. User/network namespace
+creation worked. A future backend must demonstrate forbidden-read/write/network
+denial, descendant teardown before output import, safe handling of hostile output
+paths, and fail-closed setup. Capability detection or a successful normal command
+is not sufficient. These probes are not an isolation-stage acceptance pass.
+
 ### Capabilities deferred to an inference proxy
 
 For requests actually routed through it, a proxy could:
