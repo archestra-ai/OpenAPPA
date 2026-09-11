@@ -84,6 +84,7 @@ tar = "0.4"
 url = "2"
 
 [dev-dependencies]
+opentelemetry_sdk = { version = "0.32", features = ["testing"] }
 # The fail points the orchestration tests drive. A dev-dependency, so they are
 # absent from the binary.
 appa-eventlog = { workspace = true, features = ["fault-injection"] }

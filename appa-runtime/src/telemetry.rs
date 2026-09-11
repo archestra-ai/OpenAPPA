@@ -46,6 +46,10 @@ impl Telemetry {
         }
     }
 
+    pub(crate) fn enabled(&self) -> bool {
+        self.tracer.is_some()
+    }
+
     /// Flush all three signals without allowing exporter failure to change the
     /// runtime's exit status.
     pub(crate) fn shutdown(self) {

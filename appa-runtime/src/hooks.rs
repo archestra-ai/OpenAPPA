@@ -1,6 +1,12 @@
 //! The hook dispatcher: one canonical wire event in, one wire decision
 //! out; between them, one typed `HookEvent` and one `HookDecision`.
 
+use std::time::Instant;
+
+use sha2::{Digest, Sha256};
+use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+
 use appa_engine::value::DispatchId as EngineDispatchId;
 use appa_runtime_api::{
     Accepted, Actor, Adapter, HookDecision, HookEvent, ParseRefusal, ProposedCall, Ruling, TrajectoryId, WireDecision,
@@ -21,6 +27,7 @@ fn wire(decision: &HookDecision) -> serde_json::Value {
 /// action — hooks fail closed.
 pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> (u16, serde_json::Value) {
     use crate::events::{HookKind, HookOutcome};
+    let started = Instant::now();
 
     // Every way a hook can end leaves exactly one entry, including the three that never
     // reach the dispatcher. Those are the answers a reader is most likely to be confused
@@ -30,17 +37,53 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> (u16, 
         Ok(Some(accepted)) => accepted,
         Ok(None) => {
             runtime.record(None, bare_hook(HookKind::Ignored, HookOutcome::Ignored, None));
+            crate::telemetry::record_hook("ignored", "ack", started.elapsed().as_secs_f64());
             return (200, wire(&HookDecision::Ack));
         }
         Err(ParseRefusal::Unreadable { detail }) => {
             runtime.record(None, bare_hook(HookKind::Unparsable, HookOutcome::Unreadable, None));
+            observe_parse_refusal("unreadable", started.elapsed().as_secs_f64());
             return (400, serde_json::json!({ "error": detail }));
         }
         Err(ParseRefusal::Malformed { detail }) => {
             runtime.record(None, bare_hook(HookKind::Unparsable, HookOutcome::Malformed, None));
+            observe_parse_refusal("malformed", started.elapsed().as_secs_f64());
             return (409, serde_json::json!({ "error": detail }));
         }
     };
+    let observation = HookObservation::from_event(&accepted.event, ToolArgumentCapture::from_env());
+    let span = hook_span(&observation);
+    async move {
+        let decision = answer_accepted(runtime, adapter, accepted).await;
+        let decision_name = decision_name(&decision);
+        tracing::Span::current().record("appa.decision", decision_name);
+        if matches!(decision, HookDecision::Refuse { .. }) {
+            tracing::Span::current().record("error.type", "appa.runtime.refusal");
+            tracing::Span::current().record("otel.status_code", "ERROR");
+        }
+        tracing::info!(
+            "appa.hook.event" = observation.event,
+            "appa.trajectory.id" = %observation.root,
+            "appa.trajectory.child_id" = observation.child.as_deref().unwrap_or(""),
+            "gen_ai.conversation.id" = %observation.root,
+            "gen_ai.tool.name" = observation.tool.as_deref().unwrap_or(""),
+            "appa.decision" = decision_name,
+            "hook decision"
+        );
+        crate::telemetry::record_hook(observation.event, decision_name, started.elapsed().as_secs_f64());
+        let status = if matches!(decision, HookDecision::Refuse { .. }) {
+            409
+        } else {
+            200
+        };
+        (status, wire(&decision))
+    }
+    .instrument(span)
+    .await
+}
+
+async fn answer_accepted(runtime: &Runtime, adapter: &Adapter, accepted: Accepted) -> HookDecision {
+    use crate::events::{HookKind, HookOutcome};
     let Accepted {
         event,
         names_children,
@@ -66,7 +109,7 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> (u16, 
             if let Err(error) = checked {
                 let (kind, tool) = hook_shape(&event);
                 runtime.record(Some(&root), bare_hook(kind, HookOutcome::Refused, tool));
-                return (409, wire(&refuse(error.to_string())));
+                return refuse(error.to_string());
             }
         }
         let actor = match &event {
@@ -96,7 +139,7 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> (u16, 
         if let Err(error) = observed {
             let (kind, tool) = hook_shape(&event);
             runtime.record(Some(&root), bare_hook(kind, HookOutcome::Refused, tool));
-            return (409, wire(&refuse(error.to_string())));
+            return refuse(error.to_string());
         }
     }
     if let HookEvent::ToolCall { actor, call, .. } = &event {
@@ -108,7 +151,7 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> (u16, 
             Ok(None) => None,
             Err(error) => Some((409, refuse(error.to_string()))),
         };
-        if let Some((status, decision)) = early {
+        if let Some((_status, decision)) = early {
             let (outcome, offers) = hook_result(&decision);
             runtime.record(
                 Some(&root),
@@ -120,18 +163,13 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> (u16, 
                     offers,
                 },
             );
-            return (status, wire(&decision));
+            return decision;
         }
     }
     let handled = handle_internal(runtime, event).await;
     runtime.record(Some(&root), handled.event);
-    let status = match handled.decision {
-        HookDecision::Refuse { .. } => 409,
-        _ => 200,
-    };
-    (status, wire(&handled.decision))
+    handled.decision
 }
-
 /// A hook that ended before an actor existed, so there is nothing to attribute it to.
 fn bare_hook(
     event: crate::events::HookKind,
@@ -1706,5 +1744,227 @@ mod tests {
             runtime.take_vouched(&ticket("the hook blocked", true)),
             Err(crate::api::Unvouched::Nobody)
         );
+    }
+}
+
+fn hook_span(observation: &HookObservation) -> tracing::Span {
+    let span = tracing::info_span!(
+        "appa.hook",
+        "appa.hook.event" = observation.event,
+        "appa.trajectory.id" = %observation.root,
+        "appa.trajectory.child_id" = observation.child.as_deref().unwrap_or(""),
+        "gen_ai.conversation.id" = %observation.root,
+        "gen_ai.tool.name" = observation.tool.as_deref().unwrap_or(""),
+        "appa.decision" = tracing::field::Empty,
+        "error.type" = tracing::field::Empty,
+        "otel.status_code" = tracing::field::Empty,
+    );
+    match &observation.arguments {
+        ToolArguments::NotCaptured => {}
+        ToolArguments::Captured(arguments) => {
+            span.set_attribute("gen_ai.tool.call.arguments", arguments.clone());
+        }
+        ToolArguments::Omitted { size_bytes, sha256 } => {
+            span.set_attribute(
+                "appa.tool.call.arguments.size_bytes",
+                i64::try_from(*size_bytes).unwrap_or(i64::MAX),
+            );
+            span.set_attribute("appa.tool.call.arguments.sha256", sha256.clone());
+        }
+    }
+    span
+}
+
+struct HookObservation {
+    event: &'static str,
+    root: String,
+    child: Option<String>,
+    tool: Option<String>,
+    arguments: ToolArguments,
+}
+
+impl HookObservation {
+    fn from_event(event: &HookEvent, capture: ToolArgumentCapture) -> Self {
+        match event {
+            HookEvent::SessionStart { root } => Self::new("session_start", root, None, None, capture),
+            HookEvent::Prompt { actor, .. } => Self::actor("prompt", actor, None, capture),
+            HookEvent::TurnEnd { actor } => Self::actor("turn_end", actor, None, capture),
+            HookEvent::ToolCall { actor, call, .. } => Self::actor("tool_call", actor, Some(call), capture),
+            HookEvent::SpawnResume { actor, call, .. } => Self::actor("spawn_resume", actor, Some(call), capture),
+            HookEvent::ToolResult { actor, call, .. } => Self::actor("tool_result", actor, Some(call), capture),
+            HookEvent::ChildStart { root, child, .. } => Self::new("child_start", root, Some(child), None, capture),
+            HookEvent::ChildEnd { root, child, .. } => Self::new("child_end", root, Some(child), None, capture),
+            HookEvent::SpawnResult { actor, call, .. } => Self::actor("spawn_result", actor, Some(call), capture),
+        }
+    }
+
+    fn actor(event: &'static str, actor: &Actor, call: Option<&ProposedCall>, capture: ToolArgumentCapture) -> Self {
+        Self::new(event, &actor.root, actor.child.as_ref(), call, capture)
+    }
+
+    fn new(
+        event: &'static str,
+        root: &TrajectoryId,
+        child: Option<&TrajectoryId>,
+        call: Option<&ProposedCall>,
+        capture: ToolArgumentCapture,
+    ) -> Self {
+        Self {
+            event,
+            root: root.0.clone(),
+            child: child.map(|id| id.0.clone()),
+            tool: call.map(|call| call.tool.clone()),
+            arguments: ToolArguments::from_call(call, capture),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ToolArgumentCapture {
+    Disabled,
+    Enabled,
+}
+
+impl ToolArgumentCapture {
+    fn from_env() -> Self {
+        let value = std::env::var(CAPTURE_TOOL_ARGUMENTS_ENV).ok();
+        Self::from_value(value.as_deref())
+    }
+
+    fn from_value(value: Option<&str>) -> Self {
+        match value {
+            Some(value) if value.eq_ignore_ascii_case("true") => Self::Enabled,
+            _ => Self::Disabled,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ToolArguments {
+    NotCaptured,
+    Captured(String),
+    Omitted { size_bytes: usize, sha256: String },
+}
+
+impl ToolArguments {
+    fn from_call(call: Option<&ProposedCall>, capture: ToolArgumentCapture) -> Self {
+        let (Some(call), ToolArgumentCapture::Enabled) = (call, capture) else {
+            return Self::NotCaptured;
+        };
+        let arguments = call.arguments.get();
+        if arguments.len() <= MAX_CAPTURED_TOOL_ARGUMENT_BYTES {
+            return Self::Captured(arguments.to_owned());
+        }
+        Self::Omitted {
+            size_bytes: arguments.len(),
+            sha256: format!("{:x}", Sha256::digest(arguments.as_bytes())),
+        }
+    }
+}
+
+const CAPTURE_TOOL_ARGUMENTS_ENV: &str = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT";
+const MAX_CAPTURED_TOOL_ARGUMENT_BYTES: usize = 32 * 1024;
+
+fn decision_name(decision: &HookDecision) -> &'static str {
+    match decision {
+        HookDecision::Ack => "ack",
+        HookDecision::AllowCall { .. } => "allow",
+        HookDecision::PassControl => "pass_control",
+        HookDecision::DenyCall { .. } => "deny",
+        HookDecision::Block { .. } => "block",
+        HookDecision::ReplaceOutput { .. } => "replace_output",
+        HookDecision::ChildReturn { .. } => "replace_child_return",
+        HookDecision::Context { .. } => "context",
+        HookDecision::Refuse { .. } => "refuse",
+        HookDecision::DeliverValue { .. } => "deliver_value",
+    }
+}
+
+fn observe_parse_refusal(kind: &'static str, elapsed_seconds: f64) {
+    let span = tracing::info_span!(
+        "appa.hook",
+        "appa.hook.event" = "parse",
+        "appa.decision" = "refuse",
+        "error.type" = kind,
+        "otel.status_code" = "ERROR",
+    );
+    span.in_scope(|| {
+        tracing::warn!("error.type" = kind, "hook input refused");
+    });
+    crate::telemetry::record_hook("parse", "refuse", elapsed_seconds);
+}
+
+#[cfg(test)]
+mod telemetry_tests {
+    use super::*;
+    #[test]
+    fn opted_in_tool_arguments_keep_the_harness_json_spelling() {
+        let event = tool_call("cc:root", r#"{"a":1,"a":2}"#);
+
+        let observation = HookObservation::from_event(&event, ToolArgumentCapture::Enabled);
+        assert_eq!(
+            observation.arguments,
+            ToolArguments::Captured(r#"{"a":1,"a":2}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn oversized_tool_arguments_emit_only_size_and_digest_metadata() {
+        let arguments = format!(r#"{{"body":"{}"}}"#, "x".repeat(MAX_CAPTURED_TOOL_ARGUMENT_BYTES));
+        let event = HookEvent::ToolCall {
+            actor: Actor {
+                root: TrajectoryId("cc:root".to_string()),
+                child: None,
+            },
+            call: ProposedCall {
+                tool: "Write".to_string(),
+                arguments: serde_json::value::RawValue::from_string(arguments.clone()).expect("valid arguments"),
+            },
+            spawn: false,
+            ruling: None,
+        };
+
+        let observation = HookObservation::from_event(&event, ToolArgumentCapture::Enabled);
+        let ToolArguments::Omitted { size_bytes, sha256 } = observation.arguments else {
+            panic!("oversized arguments must be omitted");
+        };
+        assert_eq!(size_bytes, arguments.len());
+        assert_eq!(
+            sha256,
+            "411932b4696bf0016b1e8e068dd2f32037bab015a0b2ba26df0117b8c7b2471f"
+        );
+    }
+
+    #[test]
+    fn tool_argument_capture_requires_an_explicit_true_value() {
+        assert!(matches!(
+            ToolArgumentCapture::from_value(Some("true")),
+            ToolArgumentCapture::Enabled
+        ));
+        assert!(matches!(
+            ToolArgumentCapture::from_value(Some("TRUE")),
+            ToolArgumentCapture::Enabled
+        ));
+        for value in [None, Some(""), Some("1"), Some("false"), Some("yes")] {
+            assert!(matches!(
+                ToolArgumentCapture::from_value(value),
+                ToolArgumentCapture::Disabled
+            ));
+        }
+    }
+
+    fn tool_call(root: &str, arguments: &str) -> HookEvent {
+        HookEvent::ToolCall {
+            actor: Actor {
+                root: TrajectoryId(root.to_string()),
+                child: None,
+            },
+            call: ProposedCall {
+                tool: "Bash".to_string(),
+                arguments: serde_json::value::RawValue::from_string(arguments.to_string()).expect("valid arguments"),
+            },
+            spawn: false,
+            ruling: None,
+        }
     }
 }

@@ -34,7 +34,7 @@ fn opted_in_arguments_leave_on_spans_but_not_logs() {
             version = 2
 
             [[policy.tool]]
-            name = "Bash"
+            name = "host/claude-code/Bash"
 
             [externals]
             timeout_ms = 1000
@@ -44,16 +44,18 @@ fn opted_in_arguments_leave_on_spans_but_not_logs() {
     .expect("the fixture config writes");
     let config = Config::load(&config_path).expect("the fixture config loads");
     let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the fixture runtime opens");
-    let codec = appa_adapter_claude_code::codec();
+    let codec = appa_adapter_claude_code::adapter();
     let tokio = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("the test runtime builds");
     tokio.block_on(async {
         let start = br#"{"hook_event_name":"SessionStart","session_id":"telemetry-test"}"#;
-        assert_eq!(answer(&runtime, &codec, start).await.0, 200);
+        let response = answer(&runtime, &codec, &canonical_hook(start)).await;
+        assert_eq!(response.0, 200, "{:?}", response.1);
         let call = br#"{"hook_event_name":"PreToolUse","session_id":"telemetry-test","tool_name":"Bash","tool_input":{"command":"git status","secret":"span-only"}}"#;
-        assert_eq!(answer(&runtime, &codec, call).await.0, 200);
+        let response = answer(&runtime, &codec, &canonical_hook(call)).await;
+        assert_eq!(response.0, 200, "{:?}", response.1);
     });
     drop(_subscriber);
     tracer_provider.force_flush().expect("the spans flush");
@@ -117,3 +119,11 @@ impl Drop for ScopedCaptureOptIn {
 }
 
 const CAPTURE_TOOL_ARGUMENTS_ENV: &str = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT";
+
+fn canonical_hook(body: &[u8]) -> Vec<u8> {
+    let event = (appa_adapter_claude_code::codec().parse)(body).unwrap().unwrap();
+    serde_json::to_vec(
+        &appa_runtime_api::WireEvent::from_event(appa_runtime_api::AdapterName::ClaudeCode, &event).unwrap(),
+    )
+    .unwrap()
+}

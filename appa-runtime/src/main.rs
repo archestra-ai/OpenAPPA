@@ -549,11 +549,13 @@ async fn serve(args: Args) -> ExitCode {
     let result = if let Some((address, guide_listener, guide_app)) = guide {
         tracing::info!(listen = %address, "appa-runtime serving the vouched appa-guide MCP surface");
         tokio::select! {
-            result = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(shutdown_signal()) => result,
-            result = axum::serve(guide_listener, guide_app.into_make_service()).with_graceful_shutdown(shutdown_signal()) => result,
+            result = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(shutdown_signal(telemetry.enabled())) => result,
+            result = axum::serve(guide_listener, guide_app.into_make_service()).with_graceful_shutdown(shutdown_signal(telemetry.enabled())) => result,
         }
     } else {
-        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(shutdown_signal()).await
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+            .with_graceful_shutdown(shutdown_signal(telemetry.enabled()))
+            .await
     };
     let exit = match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -566,7 +568,11 @@ async fn serve(args: Args) -> ExitCode {
     exit
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(enabled: bool) {
+    // Preserve ordinary process termination when no exporters need flushing.
+    if !enabled {
+        std::future::pending::<()>().await;
+    }
     #[cfg(unix)]
     {
         let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
