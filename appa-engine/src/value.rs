@@ -29,6 +29,10 @@ pub enum FileBasis {
         source: FileSource,
         replaced: Option<FileSource>,
     },
+    Process {
+        inputs: Vec<FileSource>,
+        replaced: Option<FileSource>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -552,6 +556,9 @@ impl ResolvedCall {
             ),
             Some(FileBasis::Edit(source)) => receiving.combine(&source.label).combine(&declared),
             Some(FileBasis::Copy { .. } | FileBasis::Move { .. }) => receiving.combine(&declared),
+            Some(FileBasis::Process { inputs, .. }) => inputs
+                .iter()
+                .fold(receiving.combine(&declared), |label, input| label.combine(&input.label)),
         }
     }
 
@@ -565,6 +572,11 @@ impl ResolvedCall {
             Some(FileBasis::Copy { source, .. } | FileBasis::Move { source, .. }) => {
                 Some(receiving.combine(&source.label).combine(&declared))
             }
+            Some(FileBasis::Process { inputs, .. }) => Some(
+                inputs
+                    .iter()
+                    .fold(receiving.combine(&declared), |label, input| label.combine(&input.label)),
+            ),
         }
     }
 
@@ -699,6 +711,40 @@ mod tests {
                 Some(expected_file.combine(&replaced.label))
             );
         }
+    }
+
+    #[test]
+    fn process_result_and_file_inherit_every_input_but_not_replaced_destination() {
+        let contract = file_contract();
+        let receiving = Label::new(Trust::new(1), Audience::public());
+        let first = FileSource {
+            label: Label::new(Trust::new(0), Audience::public()),
+            ..source()
+        };
+        let second = FileSource {
+            version: "v2".into(),
+            digest: "second".into(),
+            label: Label::new(Trust::new(1), Audience::restricted([ReaderId::new("insider")])),
+        };
+        let replaced = FileSource {
+            label: Label::new(Trust::new(0), Audience::restricted([ReaderId::new("destination")])),
+            ..source()
+        };
+        let expected = Label::new(Trust::new(0), Audience::restricted([ReaderId::new("insider")]));
+        let operation = call("file", json!({})).with_file_basis(Some(FileBasis::Process {
+            inputs: vec![first, second],
+            replaced: Some(replaced.clone()),
+        }));
+
+        assert_eq!(operation.output_label(&contract, &receiving), expected);
+        assert_eq!(
+            operation.file_output_label(&contract, &receiving),
+            Some(expected.clone())
+        );
+        assert_ne!(
+            expected,
+            operation.output_label(&contract, &receiving).combine(&replaced.label)
+        );
     }
 
     #[test]

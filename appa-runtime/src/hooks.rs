@@ -261,7 +261,12 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
                            appa_copy_file/appa_move_file(source_path, destination_path) from this plugin's MCP server. \
                            Paths resolve within the host-configured workspace. ToolSearch and native tools are \
                            not supported in this mode. Native pre-hook observations are not tracked."
-                        .into(),
+                        .to_owned()
+                        + if runtime.file_process_enabled() {
+                            " appa_process_files(input_paths, output_path, command) runs in isolation: read inputs/<path> and write output/result."
+                        } else {
+                            ""
+                        },
                 },
                 Ok(()) => HookDecision::Ack,
                 Err(error) => refuse(error.to_string()),

@@ -35,6 +35,9 @@
 //! Copy/Move pin both paths under one reservation. Copy stages raw bytes; Move uses same-filesystem
 //! rename. Success verifies both paths and atomically publishes destination metadata and Move's
 //! source absence in the ledger. Failure must leave both files unchanged or remain quarantined.
+//! Process pins every declared input and one destination. It publishes only after isolated
+//! execution and descendant teardown. Its output, stdout, stderr and failures combine every
+//! input Label with the receiving trajectory and delta; no acknowledgement exemption applies.
 //!
 //! # Enabling the draft
 //!
@@ -49,8 +52,9 @@
 //! are already admitted when the post-tool hook arrives. Native tools remain available
 //! in Claude, but calls reaching APPA are refused in this mode.
 //! `appa claude-files` is a separate constrained test launcher, not required by the plugin.
-//! The policy must declare the enabled `mcp/plugin_appa-runtime_appa/appa_*_file` tools.
-//! This option does not enforce OS isolation. Use disposable test fixtures only.
+//! The policy must declare each enabled tool. File tools alone do not enforce OS isolation.
+//! `--file-process-backend /host/backend` additionally enables `appa_process_files`; its
+//! staged-input contract is in `process.rs`. Use disposable test fixtures only.
 //!
 //! # Limitations
 //!
@@ -59,7 +63,8 @@
 //! Copy/Move support regular files only; same-path and cross-filesystem moves are refused.
 //! Sanitizer/rewrite policies are unsupported. The two databases are not one atomic transaction:
 //! crash gaps stop progress conservatively and have no automatic recovery. Historical bytes are not retained.
-//! No subprocess, unmediated filesystem, metadata or timing-flow guarantee is made.
+//! Only Process calls use the isolated backend. No unmediated filesystem, metadata or
+//! timing-flow guarantee is made. The Claude process and inference remain outside isolation.
 
 use appa_engine::value::{FileBasis, FileSource};
 use appa_eventlog::files::{FileOperation, FilePin, FileStore};
@@ -68,19 +73,24 @@ use std::path::{Path, PathBuf};
 
 use super::{EventError, ProposedCall};
 
+#[path = "process.rs"]
+mod process;
+
 pub(super) struct FileTracking {
     pub store: FileStore,
     pub policy_key: String,
     pub workspace: PathBuf,
     pub ledger: PathBuf,
+    pub process_backend: Option<PathBuf>,
 }
 
-pub(crate) const TOOLS: [&str; 5] = [
+pub(crate) const TOOLS: [&str; 6] = [
     "appa_read_file",
     "appa_write_file",
     "appa_edit_file",
     "appa_copy_file",
     "appa_move_file",
+    "appa_process_files",
 ];
 const PREFIX: &str = "mcp/plugin_appa-runtime_appa/";
 
@@ -112,6 +122,14 @@ pub(crate) struct FileTransferArgs {
     pub destination_path: String,
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProcessArgs {
+    pub input_paths: Vec<String>,
+    pub output_path: String,
+    pub command: String,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum FileReply {
     Value(String),
@@ -129,6 +147,7 @@ pub(super) fn operation(call: &ProposedCall) -> Result<(FileOperation, String), 
         "mcp/plugin_appa-runtime_appa/appa_edit_file" => FileOperation::Edit,
         "mcp/plugin_appa-runtime_appa/appa_copy_file" => FileOperation::Copy,
         "mcp/plugin_appa-runtime_appa/appa_move_file" => FileOperation::Move,
+        "mcp/plugin_appa-runtime_appa/appa_process_files" => FileOperation::Process,
         _ => {
             return Err(refused("file tracking permits only runtime-owned file tools"));
         }
@@ -142,16 +161,21 @@ pub(super) fn operation(call: &ProposedCall) -> Result<(FileOperation, String), 
         FileOperation::Copy | FileOperation::Move => {
             serde_json::from_str::<FileTransferArgs>(call.arguments.get()).map(|args| args.destination_path)
         }
+        FileOperation::Process => {
+            serde_json::from_str::<ProcessArgs>(call.arguments.get()).map(|args| args.output_path)
+        }
     }
     .map_err(refused)?;
     Ok((operation, path))
 }
 
 /// Called only after the exact dispatch has been released for the host-bound caller.
-pub(super) fn perform(workspace: &Path, call: &ProposedCall) -> Result<String, String> {
+pub(super) fn perform(files: &FileTracking, call: &ProposedCall) -> Result<String, String> {
+    let workspace = &files.workspace;
     let (operation, path) = operation(call).map_err(|error| error.to_string())?;
     let path = workspace.join(path);
     match operation {
+        FileOperation::Process => process::perform(files, call),
         FileOperation::Read => std::fs::read_to_string(path).map_err(|error| error.to_string()),
         FileOperation::Replace => {
             let args: WriteArgs = serde_json::from_str(call.arguments.get()).map_err(|error| error.to_string())?;
@@ -215,6 +239,13 @@ impl super::Runtime {
         self.inner.files.is_some()
     }
 
+    pub(crate) fn file_process_enabled(&self) -> bool {
+        self.inner
+            .files
+            .as_ref()
+            .is_some_and(|files| files.process_backend.is_some())
+    }
+
     pub(crate) fn file_deployment(&self, config: PathBuf) -> Option<crate::claude_files::Deployment> {
         let files = self.inner.files.as_ref()?;
         Some(crate::claude_files::Deployment {
@@ -222,6 +253,7 @@ impl super::Runtime {
             db: std::fs::canonicalize(self.inner.state_path.as_ref()?).ok()?,
             workspace: files.workspace.clone(),
             ledger: std::fs::canonicalize(&files.ledger).ok()?,
+            process_backend: files.process_backend.clone(),
         })
     }
 
@@ -267,6 +299,18 @@ pub(super) fn basis(pin: FilePin) -> Result<FileBasis, EventError> {
         _ => return Err(refused("incomplete file ledger pin")),
     };
     Ok(match pin.operation {
+        FileOperation::Process => FileBasis::Process {
+            inputs: pin
+                .inputs
+                .into_iter()
+                .map(|input| FileSource {
+                    version: input.version.to_string(),
+                    digest: input.digest,
+                    label: input.label,
+                })
+                .collect(),
+            replaced: source,
+        },
         FileOperation::Read => FileBasis::Read(source.ok_or_else(|| refused("missing read source"))?),
         FileOperation::Edit => FileBasis::Edit(source.ok_or_else(|| refused("missing edit source"))?),
         FileOperation::Replace => FileBasis::Replace(source),
@@ -331,6 +375,9 @@ name = "mcp/plugin_appa-runtime_appa/appa_copy_file"
 delta = {}
 [[policy.tool]]
 name = "mcp/plugin_appa-runtime_appa/appa_move_file"
+delta = {}
+[[policy.tool]]
+name = "mcp/plugin_appa-runtime_appa/appa_process_files"
 delta = {}
 [externals]
 timeout_ms = 2000
@@ -635,6 +682,71 @@ max_body_bytes = 65536
         );
     }
 
+    #[tokio::test]
+    async fn managed_files_process_results_and_failures_keep_input_labels() {
+        let dir = fixture();
+        let backend = dir.path().join("backend");
+        std::fs::create_dir(&backend).unwrap();
+        for binary in ["agentsh", "agentsh-unixwrap"] {
+            std::fs::write(backend.join(binary), "unit-test backend placeholder").unwrap();
+        }
+        // This trusted fixture tests runtime publication/admission, not OS confinement.
+        std::fs::write(
+            backend.join("run.py"),
+            r#"
+import json, pathlib, sys
+job = pathlib.Path(sys.argv[2])
+request = json.loads((job / 'request.json').read_text())
+if request['command'] == 'fail':
+    print(json.dumps({'result': {'exit_code': 7, 'stderr': 'outside information'}}))
+else:
+    (job / 'output/result').write_bytes((job / 'inputs/source.txt').read_bytes())
+    print(json.dumps({'result': {'exit_code': 0, 'stdout': 'outside information'}}))
+"#,
+        )
+        .unwrap();
+        let runtime = open(dir.path(), true).with_file_process_backend(backend).unwrap();
+        for command in ["success", "absolute", "fail"] {
+            let id = TrajectoryId(format!("process-{command}"));
+            runtime.create_session(id.clone()).unwrap();
+            let input = if command == "absolute" {
+                dir.path().join("work/source.txt").to_str().unwrap().to_string()
+            } else {
+                "source.txt".to_string()
+            };
+            let proposal = ProposedCall {
+                tool: format!("{PREFIX}appa_process_files"),
+                arguments: serde_json::value::to_raw_value(&serde_json::json!({
+                    "input_paths": [input], "output_path": format!("{command}.txt"), "command": command
+                }))
+                .unwrap(),
+            };
+            let session = runtime.session(&id, &id).unwrap();
+            assert!(matches!(
+                session.on_tool_call(proposal.clone(), false).await.unwrap(),
+                ToolCallDecision::Deny { .. }
+            ));
+            assert!(!dir.path().join(format!("work/{command}.txt")).exists());
+            allow(&runtime, &id, proposal.clone()).await;
+            let reply = execute(&runtime, &id, proposal).await;
+            if command != "fail" {
+                assert!(matches!(reply, FileReply::Value(body) if body.contains("outside information")));
+                assert_eq!(label(&runtime, &format!("{command}.txt")).trust, Trust::new(0));
+            } else {
+                assert!(matches!(reply, FileReply::Failure(body) if body.contains("outside information")));
+                assert!(!dir.path().join("work/fail.txt").exists());
+            }
+            let report = call("Write", &format!("{command}-report.txt"));
+            allow(&runtime, &id, report.clone()).await;
+            execute(&runtime, &id, report).await;
+            assert_eq!(label(&runtime, &format!("{command}-report.txt")).trust, Trust::new(0));
+        }
+        assert_eq!(
+            std::fs::read(dir.path().join("work/source.txt")).unwrap(),
+            b"outside information"
+        );
+    }
+
     async fn allow(runtime: &Runtime, id: &TrajectoryId, call: ProposedCall) {
         let session = runtime.session(id, id).unwrap();
         let decision = session.on_tool_call(call.clone(), false).await.unwrap();
@@ -822,8 +934,11 @@ max_body_bytes = 65536
             .current("clean.txt")
             .unwrap()
             .unwrap();
-        assert_eq!(version.previous, version.content_dependency);
-        assert!(version.content_dependency.is_some());
+        assert_eq!(
+            version.previous.into_iter().collect::<Vec<_>>(),
+            version.content_dependencies
+        );
+        assert!(!version.content_dependencies.is_empty());
     }
 
     #[tokio::test]

@@ -30,6 +30,8 @@ pub(crate) struct Deployment {
     pub workspace: PathBuf,
     #[arg(long)]
     pub ledger: PathBuf,
+    #[arg(long)]
+    pub process_backend: Option<PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -50,6 +52,12 @@ pub fn serve(args: ServeArgs) -> ExitCode {
                 .map_err(|error| error.to_string())?
                 .with_file_tracking(deployment.workspace, deployment.ledger, None)
                 .map_err(|error| error.to_string())?;
+        let runtime = match deployment.process_backend {
+            Some(backend) => runtime
+                .with_file_process_backend(backend)
+                .map_err(|error| error.to_string())?,
+            None => runtime,
+        };
         let actor = appa_runtime_api::Actor {
             root: appa_runtime_api::TrajectoryId(format!("cc:{}", args.trajectory)),
             child: None,
@@ -114,6 +122,10 @@ fn command(binary: &Path, deployment: &Deployment, cwd: &Path, args: &Args) -> R
         server_args.push(flag.into());
         server_args.push(path.to_str().ok_or("deployment paths must be UTF-8")?.to_string());
     }
+    if let Some(backend) = &deployment.process_backend {
+        server_args.push("--process-backend".into());
+        server_args.push(backend.to_str().ok_or("backend path must be UTF-8")?.to_string());
+    }
     let mcp = serde_json::json!({"mcpServers":{"plugin_appa-runtime_appa":{
         "command":binary.to_str().ok_or("executable path must be UTF-8")?, "args":server_args
     }}});
@@ -122,7 +134,7 @@ fn command(binary: &Path, deployment: &Deployment, cwd: &Path, args: &Args) -> R
         .args(["--bare", "--print", "--tools", "", "--strict-mcp-config", "--mcp-config"])
         .arg(mcp.to_string())
         .args(["--settings", "{\"autoMemoryEnabled\":false}"])
-        .args(["--allowedTools", "mcp__plugin_appa-runtime_appa__appa_read_file,mcp__plugin_appa-runtime_appa__appa_write_file,mcp__plugin_appa-runtime_appa__appa_edit_file,mcp__plugin_appa-runtime_appa__appa_copy_file,mcp__plugin_appa-runtime_appa__appa_move_file,mcp__plugin_appa-runtime_appa__execute_remedy_plan"])
+        .args(["--allowedTools", "mcp__plugin_appa-runtime_appa__appa_read_file,mcp__plugin_appa-runtime_appa__appa_write_file,mcp__plugin_appa-runtime_appa__appa_edit_file,mcp__plugin_appa-runtime_appa__appa_copy_file,mcp__plugin_appa-runtime_appa__appa_move_file,mcp__plugin_appa-runtime_appa__appa_process_files,mcp__plugin_appa-runtime_appa__execute_remedy_plan"])
         .args(["--no-session-persistence", "--output-format", "stream-json", "--verbose", "--session-id"])
         .arg(trajectory)
         .env("ENABLE_TOOL_SEARCH", "false")
@@ -191,6 +203,7 @@ mod tests {
             db: "/host/runtime.db".into(),
             workspace: "/work".into(),
             ledger: "/host/files.db".into(),
+            process_backend: None,
         };
         let command = command(
             Path::new("/host/appa"),

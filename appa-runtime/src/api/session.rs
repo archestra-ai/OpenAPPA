@@ -279,6 +279,16 @@ impl Session {
         let expected = policy.engine().file_dispatch(&view, &self.trajectory, &call)?;
         let key = super::files::key(&expected)?;
         let pin = match operation {
+            appa_eventlog::files::FileOperation::Process => {
+                if files.process_backend.is_none() {
+                    return Err(super::files::refused("isolated processing is not enabled"));
+                }
+                let args: super::files::ProcessArgs =
+                    serde_json::from_str(call.arguments.get()).map_err(super::files::refused)?;
+                files
+                    .store
+                    .prepare_process(&self.trajectory.0, &key, &args.input_paths, &path)
+            }
             appa_eventlog::files::FileOperation::Copy | appa_eventlog::files::FileOperation::Move => {
                 let args: super::files::FileTransferArgs =
                     serde_json::from_str(call.arguments.get()).map_err(super::files::refused)?;
@@ -499,7 +509,7 @@ impl Session {
         if !is_open_call(&call, || policy.engine().canonical_bytes(&call), &open) {
             return Err(EventError::OutcomeMismatch);
         }
-        let result = super::files::perform(&files.workspace, &call);
+        let result = super::files::perform(files, &call);
         let outcome = match &result {
             Ok(value) => ToolOutcome::Success {
                 body: OutcomeBody::Available(value.clone()),
