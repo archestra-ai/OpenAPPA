@@ -128,8 +128,13 @@ def test_reports_show_defended_token_overhead_against_the_empty_arm() -> None:
     )
     verdict = evaluate([run])
 
-    assert "+20 (+20%)" in render_markdown([run], verdict, "nightly")
+    report = render_markdown([run], verdict, "nightly")
+    assert "defended minus empty over whole trajectories" in report
+    assert "not a count of APPA-added prompt tokens" in report
+    assert "+20 (+20%)" in report
     slack = slack_payload([run], verdict, "nightly", None)["text"]
+    assert "defended − empty over whole trajectories" in slack
+    assert "not APPA-added prompt tokens" in slack
     assert "120" in slack
     assert "100" in slack
     assert "+20 (+20%)" in slack

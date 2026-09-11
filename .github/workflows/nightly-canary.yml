@@ -4,8 +4,9 @@ name: Nightly Canary
 # (guarded `appa`, empty `appa-open`) over the full scenario set under the
 # redteam-chaos prompt profile, on the pinned model pair. Red means the
 # harness broke or the defended arm leaked — never a model-score dip; the
-# empty arm is reported for context only. Provider-reported total tokens also
-# give a crude defended-vs-empty APPA overhead measure in the run summary.
+# empty arm is reported for context only. The run summary also subtracts the
+# empty arm's provider-reported model tokens from the defended arm's over
+# whole trajectories. This is not a count of APPA-added prompt tokens.
 #
 # Results stay internal: the run directory is uploaded as a workflow
 # artifact, the verdict goes to Slack, and nothing is committed back.
