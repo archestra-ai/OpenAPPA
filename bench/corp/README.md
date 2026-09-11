@@ -8,7 +8,7 @@ A benchmark comparing defense systems for LLM agents—**OpenAPPA** and Microsof
 
 ## Benchmark Overview
 
-The benchmark evaluates six agent configurations across identical task scenarios. Each agent runs a demo CLI application paired with a specific defense configuration:
+The benchmark evaluates eight agent configurations across identical task scenarios. Each agent runs a demo CLI application paired with a specific defense configuration:
 
 | Agent | CLI / Target | Defense Configuration | Description |
 |-------|--------------|-----------------------|-------------|
@@ -18,6 +18,12 @@ The benchmark evaluates six agent configurations across identical task scenarios
 | `fides-middleware` | `corp-agent-fides --mode middleware-only` | FIDES policy, automatic hiding disabled | Label tracking and policy enforcement with raw untrusted results visible to the planner |
 | `fides-native` | `corp-agent-fides --mode native-auto-hide` | FIDES policy with automatic hiding | Native FIDES automatic hiding and quarantine tools |
 | `fides-open` | `corp-agent-fides --mode unmediated` | `unmediated` | Undefended baseline (no policy restrictions) |
+| `auto` | Python Claude Agent SDK | Anthropic Auto defaults | Stock Claude Code Auto classifier, with no benchmark-specific classifier rules |
+| `auto-ifc` | Python Claude Agent SDK | Scenario-specific `autoMode` settings | Auto with source trust, audience, sink, and narrowing facts supplied to the classifier |
+
+The Auto arms use `claude-agent-sdk==0.2.152` and its bundled Claude Code runtime. They expose only the scenario-narrowed `corp-systems-mcp` stdio tools: built-in coding tools, hooks, skills, and user/project/local settings sources are disabled. MCP tools are deliberately absent from `allowed_tools`, so Auto classifies each call. `auto-ifc` stages `auto-settings.json` in each episode and records its SHA-256 digest in `result.json`; every configured Auto list retains `$defaults`.
+
+Auto requires a supported Anthropic Claude model and Anthropic authentication. Select these arms with, for example, `bench-corp run --agent auto --agent auto-ifc --model anthropic/claude-sonnet-4-6`. For an actor-controlled comparison, run every arm with that same model. The repository-wide default model targets the existing OpenRouter arms and is not valid for Auto.
 
 ### Key Principles
 - **Baselines (`-open`)**: Show agent behavior without security enforcement.
@@ -257,6 +263,12 @@ provider-reported USD cost. APPA parent and child trajectories share one
 collector. FIDES main and quarantine clients also share one collector. Missing
 provider fields remain `null`; the benchmark does not convert unknown usage to
 zero.
+
+The Auto arms derive query-pipeline usage from `ResultMessage.model_usage` and
+`ResultMessage.total_cost_usd`. The SDK does not include Anthropic's separate
+permission-classifier calls in that accounting, so Corp neither estimates nor
+fabricates their tokens or cost. The report compares `auto-ifc` overhead with
+the stock `auto` arm.
 
 `summary.json` compares mean usage per episode. APPA arms use `appa-open` as
 their unmediated baseline. FIDES arms use `fides-open`. Each overhead entry

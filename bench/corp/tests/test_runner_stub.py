@@ -374,6 +374,12 @@ def test_command_routes_staged_policy_by_typed_target(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="staged policy"):
         command_for(AGENTS["appa"], policy_path=None, **arguments)
 
+    auto = command_for(AGENTS["auto"], policy_path=None, **arguments)
+    auto_ifc = command_for(AGENTS["auto-ifc"], policy_path=policy_path, **arguments)
+    assert auto[:3] == [str(AGENTS["auto"].executable), "-m", "bench_corp.auto_agent"]
+    assert "--settings" not in auto
+    assert auto_ifc[auto_ifc.index("--settings") + 1] == str(policy_path.resolve())
+
 
 def test_agent_refuses_incoherent_policy_targets(tmp_path: Path) -> None:
     with pytest.raises(TypeError, match="PolicyTarget"):

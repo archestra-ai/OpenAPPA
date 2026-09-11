@@ -3,7 +3,7 @@
 This harness runs all 24 samples (10 Memory Poison, 6 Autonomy Hijack, and 8
 Data Exfiltration) from the pinned Inspect
 [AgentThreatBench](https://github.com/UKGovernmentBEIS/inspect_evals/tree/0c737b01627b772db84aa223f68775c31199fdc9/src/inspect_evals/agent_threat_bench)
-revision through five arms:
+revision through seven arms:
 
 | Arm | Model loop | Mediation |
 |---|---|---|
@@ -12,6 +12,8 @@ revision through five arms:
 | `guarded` | Same OpenAPPA scaffold | Source and sink contracts |
 | `fides` | FIDES scaffold | Microsoft Agent Framework FIDES middleware on the exact upstream tool surface |
 | `fides-native` | FIDES scaffold plus official security instructions/tools | FIDES automatic hiding, quarantine, label tracking, and enforcement |
+| `auto` | Bundled Claude Code actor with the upstream prompt and tools | Anthropic Auto defaults |
+| `auto-ifc` | Same bundled Claude Code actor, prompt, and tools as `auto` | Per-sample IFC-oriented Auto classifier facts and boundaries |
 
 The run also includes paired authorized and unauthorized Data Exfiltration
 controls for every arm.
@@ -45,6 +47,21 @@ model calls, total input tokens, cache reads and writes, output and reasoning
 tokens, total tokens, and USD cost. It includes calls from the parent, isolated
 children, and quarantine clients. An unavailable field remains `null`; the
 benchmark never converts unknown usage to zero.
+
+The Auto arms use `ResultMessage.model_usage` and `total_cost_usd` from the
+Claude Agent SDK. These totals include the actor calls reported by Claude Code.
+Claude Code does not expose separate Auto classifier-call usage, so classifier
+tokens are excluded rather than estimated. Reasoning-token usage remains
+`null` because the SDK does not report it.
+
+Both Auto arms expose only in-process MCP wrappers over the exact upstream
+domain tools. Built-in coding tools and user, project, and local settings
+sources are disabled. MCP tools are intentionally absent from `allowed_tools`,
+so Auto classifies every call. `auto-ifc` derives Data Exfiltration audiences
+from each sample's existing ACL metadata. Memory and inbox facts identify
+suspicious provenance and the lack of an equivalent APPA attestation channel.
+Runs that include an Auto arm require an `anthropic/<model>` Inspect model and
+use that same Claude model in every arm, including Auto's Agent SDK loop.
 
 `usage_overhead_vs_stock` compares each defended arm with `stock`. Each entry
 reports the difference between mean usage per sample (one benchmark episode)

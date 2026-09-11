@@ -32,6 +32,7 @@ from typing import Iterator
 
 from . import AGENT_PROMPT_PROFILES
 from .agents import Agent, PolicyTarget, command_for
+from .auto_policy import settings_for
 from .checks import CheckResult, evaluate_check, parse_emails
 from .policy import apply_tool_requires, bind_external_urls, prune_policy
 from .scenario import AnnotatorAnswer, AuthorityAnswer, SanitizerAnswer, Scenario, canonical_args
@@ -96,6 +97,7 @@ class EpisodeResult:
     provider_retries: int
     checks: list[CheckResult]
     model_usage: ModelUsage | None = None
+    auto_policy_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -290,6 +292,13 @@ def _stage_policy(
             destination = episode_dir / "fides.json"
             shutil.copyfile(scenario.policy_profile.fides, destination)
             return destination
+        case PolicyTarget.AUTO:
+            return None
+        case PolicyTarget.AUTO_IFC:
+            rendered, _ = settings_for(scenario.name)
+            destination = episode_dir / "auto-settings.json"
+            destination.write_text(rendered)
+            return destination
         case PolicyTarget.NONE:
             return None
 
@@ -387,6 +396,9 @@ def run_episode(
             model_usage = _read_model_usage(usage_path)
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             error = error or "invalid model usage"
+    auto_policy_sha256 = None
+    if agent.policy_target == PolicyTarget.AUTO_IFC:
+        _, auto_policy_sha256 = settings_for(scenario.name)
     emails = parse_emails(episode_dir / "sink")
     external_requests = (
         [json.loads(line) for line in external_request_log.read_text().splitlines()]
@@ -425,6 +437,7 @@ def run_episode(
         remedy_calls=_count(_REMEDY, stderr_text),
         provider_retries=_provider_retries(stderr_text),
         model_usage=model_usage,
+        auto_policy_sha256=auto_policy_sha256,
         checks=results,
     )
     (episode_dir / "result.json").write_text(

@@ -190,6 +190,7 @@ def usage_overhead(summaries: list[AgentSummary]) -> dict[str, dict[str, float |
         "appa-nofork": "appa-open",
         "fides-middleware": "fides-open",
         "fides-native": "fides-open",
+        "auto-ifc": "auto",
     }
     comparisons = {}
     for agent, baseline_name in baselines.items():
