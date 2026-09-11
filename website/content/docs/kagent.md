@@ -106,6 +106,8 @@ helm upgrade --install appa-runtime \
   --version "$APPA_VERSION" -n "$KAGENT_NAMESPACE" \
   --set persistence.enabled=false \
   --set-file config.contents="$DEMO_POLICY" \
+  --set-string env.GITHUB_API_URL="http://demo-tools.$KAGENT_NAMESPACE.svc.cluster.local:3000" \
+  --set-string env.APPA_PROVIDER_GITHUB_TOKEN=demo \
   --force-conflicts --wait --timeout 10m
 
 kubectl rollout status deployment/appa-runtime -n "$KAGENT_NAMESPACE" --timeout=5m

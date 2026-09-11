@@ -1,10 +1,20 @@
-# Fictional resource ACL: Alice can read ENG-1.
+# Linear and GitHub together. The Linear battery labels each issue with
+# its readers as Linear reports them; the GitHub battery labels each
+# repository with its collaborators. One root override keeps a resource
+# whose readers Linear does not model.
 include = ["../../marketplace/batteries/linear/appa.toml", "../../marketplace/batteries/github/appa.toml"]
 
 [policy]
 version = 2
 
-# Root rules replace the corresponding battery annotation.
+# Audience mappings are root-only: the batteries bind the sources, the
+# root maps the chain onto them.
+[policy.audience]
+self = ["linear:viewer", "github:viewer"]
+internal = ["linear:full-members"]
+
+# Root rules replace the corresponding battery annotation. Fictional
+# resource ACL: only Alice reads ENG-1.
 [[policy.tool]]
 name = "mcp/linear/get_issue(id:ENG-1)"
 parameters = { type = "object", properties = { id = { type = "string" } }, required = ["id"], additionalProperties = false }

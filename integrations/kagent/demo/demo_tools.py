@@ -2,7 +2,9 @@
 
 A small MCP server (streamable HTTP) exposing ten cluster-ops tools
 named by the demo policy (`integrations/kagent/demo/chart/files/demo.appa.toml`)
-and two canned public-GitHub tools covered by the shipped GitHub battery. The example
+and two canned public-GitHub tools covered by the shipped GitHub battery,
+whose annotators read repository visibility from this server's
+`GET /repos/{owner}/{repo}` when the runtime's `GITHUB_API_URL` names it. The example
 policy (`marketplace/plugins/kagent/default.appa.toml`) names seven of
 them and `ask_user`, so under it the runtime refuses `lookup_runbook`,
 `scale_deployment` and `rollback_deployment` at the `ToolCall` hook.
@@ -35,6 +37,8 @@ import argparse
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 # The toolset is served in-cluster and reached by service DNS, so the
 # SDK's localhost-only DNS-rebinding default would answer 421 to every
@@ -174,6 +178,16 @@ def issue_write(owner: str, repo: str, title: str, body: str) -> dict:
         "title": title,
         "body": body,
     }
+
+
+@mcp.custom_route("/repos/{owner}/{repo}", methods=["GET"])
+async def repository(request: Request) -> JSONResponse:
+    """The GitHub REST lookup the battery's annotators make, with the
+    runtime's `GITHUB_API_URL` pointed here: every canned repository is public."""
+    if not request.headers.get("authorization", "").startswith("Bearer "):
+        return JSONResponse({"message": "Requires authentication"}, status_code=401)
+    owner, repo = request.path_params["owner"], request.path_params["repo"]
+    return JSONResponse({"full_name": f"{owner}/{repo}", "visibility": "public"})
 
 
 RUNBOOKS = {

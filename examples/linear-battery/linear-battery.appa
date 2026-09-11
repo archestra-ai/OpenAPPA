@@ -1,0 +1,24 @@
+# Replace ARC-19 with an issue of your workspace, and the repositories with a
+# public and a private one the GitHub token can reach.
+
+# An issue of a public team: read by every full member of the workspace.
+mcp/linear/get_issue {
+  id: "ARC-19"
+}
+expect allow
+
+# Its content cannot reach a public repository.
+mcp/github/issue_write {
+  method: "create"
+  owner: "your-org"
+  repo: "your-public-repo"
+  title: "Leak"
+}
+expect deny
+
+# Commenting back onto the issue: suspicious input needs the reviewer.
+mcp/linear/save_comment {
+  issueId: "ARC-19"
+  body: "summary"
+}
+expect authority linear-operator

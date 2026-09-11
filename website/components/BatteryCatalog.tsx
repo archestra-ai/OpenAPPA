@@ -3,7 +3,7 @@ import Link from "next/link";
 const BATTERIES = [
   {
     name: "Slack",
-    description: "Rules for 19 Slack tools, with audiences from Slack users and groups.",
+    description: "Rules for 19 Slack tools, with audiences from Slack channels, users, and groups.",
     href: "/battery-slack",
     logo: "/images/batteries/slack.svg",
   },
@@ -15,13 +15,13 @@ const BATTERIES = [
   },
   {
     name: "GitHub",
-    description: "Rules for 44 repository, issue, pull request, and user tools.",
+    description: "Rules for 44 repository, issue, pull request, and user tools; each repository's visibility decides its readers.",
     href: "/battery-github",
     logo: "/images/batteries/github.svg",
   },
   {
     name: "Linear",
-    description: "TOML rules for 65 tools, internal audiences, and reviewed writes.",
+    description: "Rules for 65 tools with per-issue, per-team, and per-project audiences, and reviewed writes.",
     href: "/battery-linear",
     logo: "/images/batteries/linear.svg",
   },
@@ -36,6 +36,18 @@ const BATTERIES = [
     description: "Uses your Workspace directory and groups to build audiences.",
     href: "/battery-google-workspace",
     logo: "/images/batteries/google-workspace.svg",
+  },
+  {
+    name: "Sentry",
+    description: "Rules for 9 listed and 55 catalog tools, internal reads, and reviewed writes.",
+    href: "/battery-sentry",
+    logo: "/images/batteries/sentry.svg",
+  },
+  {
+    name: "Notion",
+    description: "Rules for 36 tools; reads are internal because Notion exposes no page permissions.",
+    href: "/battery-notion",
+    logo: "/images/batteries/notion.svg",
   },
   {
     name: "Add your own",

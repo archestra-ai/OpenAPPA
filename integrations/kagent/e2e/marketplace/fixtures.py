@@ -38,7 +38,7 @@ class State:
 
     def reset(self):
         with self.lock:
-            self.data = {"requests": [], "invocations": [], "counts": {"get_file_contents": 0, "issue_write": 0}}
+            self.data = {"requests": [], "invocations": [], "lookups": [], "counts": {"get_file_contents": 0, "issue_write": 0}}
             self.size = 0
 
     def record(self, lane, value):
@@ -256,6 +256,7 @@ def github_mcp(host, port, state):
     from mcp.server.fastmcp import FastMCP
     from mcp.server.transport_security import TransportSecuritySettings
     from mcp.types import ToolAnnotations
+    from starlette.responses import JSONResponse
 
     mcp = FastMCP("github-marketplace-fixture", host=host, port=port,
                   stateless_http=True, json_response=True,
@@ -278,6 +279,15 @@ def github_mcp(host, port, state):
         """Record an actual attempted public issue write; no GitHub network access."""
         record("issue_write", {"owner": owner, "repo": repo, "title": title, "body": body, "method": method})
         return {"created": True, "number": 184, "title": title}
+
+    @mcp.custom_route("/repos/{owner}/{repo}", methods=["GET"])
+    async def repository(request):
+        """The REST lookup the battery's annotators make: every fixture repository is public."""
+        if not request.headers.get("authorization", "").startswith("Bearer "):
+            return JSONResponse({"message": "Requires authentication"}, status_code=401)
+        owner, repo = request.path_params["owner"], request.path_params["repo"]
+        state.record("lookups", {"owner": owner, "repo": repo})
+        return JSONResponse({"full_name": f"{owner}/{repo}", "visibility": "public"})
 
     return mcp
 

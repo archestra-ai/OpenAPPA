@@ -1,0 +1,226 @@
+# Notion battery: the hosted Notion MCP server (`https://mcp.notion.com/mcp`).
+#
+# Notion exposes no page permissions to a policy: no tool reports who can
+# see a page, a database, or a teamspace, and the connection acts with
+# the full permissions of the person who authorized it. So every read is
+# `internal`, the coarsest honest label: map it in the root config to the
+# people who may see everything this connection can reach, and narrow a
+# page or database in a root rule by argument. Page and database content
+# was written by whoever edits the workspace and by connected sources
+# (Slack, mail, calendar, drive), so reads enter `suspicious`.
+#
+# Writes that stay in the workspace need trusted data that `internal` may
+# see and record `notion.changed`; what they return confirms the write and
+# changes no label. Moving pages, changing or trashing a
+# data source, turning a page into an agent Skill, and driving custom
+# Agent sessions need the `notion-review` mark and record
+# `notion.sensitive`. Creating an attachment from a URL makes Notion fetch
+# that URL, so its input must be public and reviewed. The root config
+# supplies an authority permitting `notion-review`.
+
+[policy]
+version = 2
+
+# --- reads: outside content, restricted to internal readers ---
+
+[[policy.tool]]
+name = "mcp/notion/notion-get-async-task"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/notion/notion-search"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/notion/notion-ai-search"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/notion/notion-search-skills"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/notion/notion-download-skill"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/notion/notion-fetch"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/notion/notion-download-attachment"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/notion/notion-query-data-sources"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/notion/notion-query-meeting-notes"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/notion/notion-get-comments"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/notion/notion-get-teams"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/notion/notion-get-users"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/notion/notion-list-agents"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/notion/notion-search-agents"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/notion/notion-query-sessions"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/notion/notion-search-sessions"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/notion/notion-get-session-status"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/notion/notion-wait-session"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/notion/notion-list-session-events"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/notion/notion-read-session-event"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+# --- writes inside the workspace: trusted internal data ---
+
+[[policy.tool]]
+name = "mcp/notion/notion-create-file-upload"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+effects = ["notion.changed"]
+
+[[policy.tool]]
+name = "mcp/notion/notion-create-pages"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+effects = ["notion.changed"]
+
+[[policy.tool]]
+name = "mcp/notion/notion-update-page"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+effects = ["notion.changed"]
+
+[[policy.tool]]
+name = "mcp/notion/notion-duplicate-page"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+effects = ["notion.changed"]
+
+[[policy.tool]]
+name = "mcp/notion/notion-create-database"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+effects = ["notion.changed"]
+
+[[policy.tool]]
+name = "mcp/notion/notion-create-folder"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+effects = ["notion.changed"]
+
+[[policy.tool]]
+name = "mcp/notion/notion-create-view"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+effects = ["notion.changed"]
+
+[[policy.tool]]
+name = "mcp/notion/notion-update-view"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+effects = ["notion.changed"]
+
+[[policy.tool]]
+name = "mcp/notion/notion-create-comment"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+effects = ["notion.changed"]
+
+# --- structural, skill, and agent-session changes: a person reviews ---
+
+[[policy.tool]]
+name = "mcp/notion/notion-move-pages"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["notion-review"] }
+effects = ["notion.sensitive"]
+
+[[policy.tool]]
+name = "mcp/notion/notion-update-data-source"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["notion-review"] }
+effects = ["notion.sensitive"]
+
+[[policy.tool]]
+name = "mcp/notion/notion-convert-page-to-skill"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["notion-review"] }
+effects = ["notion.sensitive"]
+
+[[policy.tool]]
+name = "mcp/notion/notion-spawn-session"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["notion-review"] }
+effects = ["notion.sensitive"]
+
+[[policy.tool]]
+name = "mcp/notion/notion-stop-session"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["notion-review"] }
+effects = ["notion.sensitive"]
+
+[[policy.tool]]
+name = "mcp/notion/notion-send-message-to-session"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["notion-review"] }
+effects = ["notion.sensitive"]
+
+# --- fetching a URL into the workspace: public input, reviewed ---
+
+[[policy.tool]]
+name = "mcp/notion/notion-create-attachment"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["public"] }, attention = ["notion-review"] }
+effects = ["notion.sensitive"]
