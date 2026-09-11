@@ -11,6 +11,7 @@ pub mod hooks;
 pub mod init;
 pub mod installation;
 mod loopback_http;
+pub mod managed_files;
 mod management;
 pub mod mcp;
 pub mod replay;

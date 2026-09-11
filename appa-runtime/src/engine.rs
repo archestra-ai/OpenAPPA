@@ -174,6 +174,8 @@ pub enum ExternalRequest {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExternalEvidence {
+    /// Trusted runtime ledger input, never an external Annotator answer.
+    File { basis: appa_engine::value::FileBasis },
     Authority {
         authority: String,
         verdict: AuthorityVerdict,
@@ -979,6 +981,36 @@ impl RuntimeEngine {
         Some(resolved.canonical_arguments().canonical_bytes().to_vec())
     }
 
+    pub(crate) fn file_dispatch(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        call: &ProposedCall,
+    ) -> Result<EngineDispatchId, EngineRefusal> {
+        let resolved = self
+            .engine
+            .resolve_call(ToolName::new(call.tool.clone()), call.arguments.get().as_bytes())
+            .map_err(|error| EngineRefusal::Arguments {
+                detail: error.to_string(),
+            })?;
+        let owner = engine_id(trajectory);
+        let views = view.views(&owner).ok_or(EngineRefusal::Ended)?;
+        let digest = resolved.digest();
+        let occurrence = views.dispatch_count(&digest);
+        Ok(EngineDispatchId::new(owner, digest, occurrence))
+    }
+
+    pub(crate) fn file_output_label(
+        &self,
+        view: &EngineView,
+        dispatch: &EngineDispatchId,
+    ) -> Result<Label, EngineRefusal> {
+        self.engine
+            .file_output_label(view, dispatch)
+            .map(|label| label.unwrap_or_else(Label::top))
+            .map_err(outcome_refusal)
+    }
+
     /// Render one trajectory's current label from the rebuilt view, for the
     /// statusline. A projection read: no engine event, no fact, nothing
     /// gated.
@@ -1092,7 +1124,7 @@ impl RuntimeEngine {
                     CloseOutcome::Success { effects } => DispatchOutcome::Ran {
                         effects: effect_names(effects),
                     },
-                    CloseOutcome::Failure => DispatchOutcome::Failed,
+                    CloseOutcome::Failure | CloseOutcome::FailureWithBody { .. } => DispatchOutcome::Failed,
                     CloseOutcome::Indeterminate => DispatchOutcome::Unknown,
                 },
             },
@@ -1220,7 +1252,16 @@ impl RuntimeEngine {
                         proposals: vec![proposed.clone()],
                         spawn: marked.then(|| SpawnMark::at(0)),
                         offer_nonce: engine_nonce(entropy),
-                        evidence: Vec::new(),
+                        evidence: evidence
+                            .iter()
+                            .filter_map(|entry| match entry {
+                                ExternalEvidence::File { basis } => Some(Evidence::File {
+                                    position: 0,
+                                    basis: basis.clone(),
+                                }),
+                                _ => None,
+                            })
+                            .collect(),
                         audience: audience.clone(),
                     };
                     self.engine.handle(view, CoreEvent::Proposals(batch))
@@ -1370,7 +1411,19 @@ impl RuntimeEngine {
             |audience| {
                 let report = ToolReport {
                     dispatch: dispatch.clone(),
-                    outcome: engine_outcome(outcome),
+                    outcome: match outcome {
+                        ToolOutcome::Failure { message }
+                            if view
+                                .views(dispatch.trajectory())
+                                .and_then(|views| views.dispatch_call(dispatch).cloned())
+                                .is_some_and(|call| call.file_basis().is_some()) =>
+                        {
+                            CoreToolOutcome::FailureWithBody {
+                                body: ValueBody::new(message.clone()),
+                            }
+                        }
+                        _ => engine_outcome(outcome),
+                    },
                     evidence: sanitizer_evidence(evidence),
                     offer_nonce: engine_nonce(entropy),
                     audience: audience.clone(),

@@ -136,6 +136,7 @@ mod tests {
             receiving: Label::top(),
             proposed_effects: EffectSet::default(),
             annotation: None,
+            file_basis: None,
             subject: crate::basis::fixture_subject(&trajectory),
             evidence: crate::audience::AudienceEvidence::default(),
         });
@@ -316,6 +317,7 @@ mod tests {
             receiving: Label::top(),
             proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
             annotation: None,
+            file_basis: None,
             subject: crate::basis::fixture_subject(&child()),
             evidence: crate::audience::AudienceEvidence::default(),
         });
@@ -438,6 +440,7 @@ mod tests {
             receiving: Label::top(),
             proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
             annotation: None,
+            file_basis: None,
             subject: crate::basis::fixture_subject(&child()),
             evidence: crate::audience::AudienceEvidence::default(),
         });

@@ -7,6 +7,22 @@ use crate::contract::PinnedAnnotation;
 use crate::label::Label;
 use crate::params::CanonicalArguments;
 
+/// Host-pinned identity and label of file content. These values come from the trusted
+/// harness, never from model-provided arguments.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileSource {
+    pub version: String,
+    pub digest: String,
+    pub label: Label,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileBasis {
+    Read(FileSource),
+    Replace(Option<FileSource>),
+    Edit(FileSource),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ToolName(String);
 
@@ -114,6 +130,10 @@ impl CanonicalDigest {
             if let Some(pinned) = &call.annotation {
                 hasher.update([3u8]);
                 hasher.update(canonical_json(pinned));
+            }
+            if let Some(basis) = &call.file_basis {
+                hasher.update([4u8]);
+                hasher.update(canonical_json(basis));
             }
         }
         CanonicalDigest(hasher.finalize().into())
@@ -432,6 +452,8 @@ pub struct ResolvedCall {
     declaration: ToolDeclarationId,
     arguments: CanonicalArguments,
     annotation: Option<PinnedAnnotation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file_basis: Option<FileBasis>,
 }
 
 impl<'de> Deserialize<'de> for ResolvedCall {
@@ -442,10 +464,14 @@ impl<'de> Deserialize<'de> for ResolvedCall {
             declaration: ToolDeclarationId,
             arguments: CanonicalArguments,
             annotation: Option<PinnedAnnotation>,
+            #[serde(default)]
+            file_basis: Option<FileBasis>,
         }
 
         let wire = WireCall::deserialize(deserializer)?;
-        Ok(ResolvedCall::new_keyed(wire.tool, wire.declaration, wire.arguments).with_annotation(wire.annotation))
+        Ok(ResolvedCall::new_keyed(wire.tool, wire.declaration, wire.arguments)
+            .with_annotation(wire.annotation)
+            .with_file_basis(wire.file_basis))
     }
 }
 
@@ -461,6 +487,7 @@ impl ResolvedCall {
             declaration,
             arguments,
             annotation: None,
+            file_basis: None,
         }
     }
 
@@ -496,6 +523,39 @@ impl ResolvedCall {
         self.annotation.as_ref()
     }
 
+    pub fn file_basis(&self) -> Option<&FileBasis> {
+        self.file_basis.as_ref()
+    }
+
+    pub(crate) fn with_file_basis(mut self, basis: Option<FileBasis>) -> Self {
+        self.file_basis = basis;
+        self
+    }
+
+    /// Label of the value returned by this call.
+    pub fn output_label(&self, contract: &crate::contract::ToolAnnotation, receiving: &Label) -> Label {
+        let declared = contract.output_label();
+        match &self.file_basis {
+            None => declared,
+            Some(FileBasis::Read(source)) => source.label.combine(&declared),
+            Some(FileBasis::Replace(predecessor)) => predecessor.as_ref().map_or_else(
+                || receiving.combine(&declared),
+                |source| receiving.combine(&source.label).combine(&declared),
+            ),
+            Some(FileBasis::Edit(source)) => receiving.combine(&source.label).combine(&declared),
+        }
+    }
+
+    /// Label to publish on file content produced by this call.
+    pub fn file_output_label(&self, contract: &crate::contract::ToolAnnotation, receiving: &Label) -> Option<Label> {
+        let declared = contract.output_label();
+        match &self.file_basis {
+            None | Some(FileBasis::Read(_)) => None,
+            Some(FileBasis::Replace(_)) => Some(receiving.combine(&declared)),
+            Some(FileBasis::Edit(source)) => Some(receiving.combine(&source.label).combine(&declared)),
+        }
+    }
+
     /// The canonical digest of this exact rendered call, recomputed from the tool and arguments.
     /// The pinned answers are **not** part of it: a repeat is the same rendered call whatever an
     /// Annotator said, which is why anything holding a call by identity alone must compare the call
@@ -519,7 +579,8 @@ impl ResolvedCall {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::{Delta, PinnedAnnotation, ProducedAnnotation, Requires};
+    use crate::contract::{Delta, PinnedAnnotation, ProducedAnnotation, Requires, ToolAnnotation};
+    use crate::label::{Audience, DeclaredAudience, ReaderId, Trust};
     use crate::params::ToolParameters;
     use serde_json::json;
 
@@ -544,6 +605,54 @@ mod tests {
                 requires: Requires::default(),
             },
         )
+    }
+
+    fn file_contract() -> ToolAnnotation {
+        ToolAnnotation {
+            description: None,
+            name: ToolName::new("file"),
+            tags: vec![],
+            delta: Delta {
+                trust: Some(Trust::new(1)),
+                audience: Some(DeclaredAudience::restricted([
+                    ReaderId::new("insider"),
+                    ReaderId::new("finance"),
+                ])),
+            },
+            parameters: ToolParameters::open(),
+            emits: Default::default(),
+            requires: Requires::default(),
+        }
+    }
+
+    fn source() -> FileSource {
+        FileSource {
+            version: "v1".into(),
+            digest: "old".into(),
+            label: Label::new(Trust::new(0), Audience::restricted([ReaderId::new("insider")])),
+        }
+    }
+
+    #[test]
+    fn file_basis_distinguishes_read_replace_and_edit_labels() {
+        let contract = file_contract();
+        let receiving = Label::new(Trust::new(1), Audience::public());
+        let read = call("file", json!({})).with_file_basis(Some(FileBasis::Read(source())));
+        let replace = call("file", json!({})).with_file_basis(Some(FileBasis::Replace(Some(source()))));
+        let edit = call("file", json!({})).with_file_basis(Some(FileBasis::Edit(source())));
+        let declared = contract.output_label();
+        let inherited = source().label.combine(&declared);
+
+        assert_eq!(read.output_label(&contract, &receiving), inherited);
+        assert_eq!(read.file_output_label(&contract, &receiving), None);
+        assert_eq!(replace.file_output_label(&contract, &receiving), Some(declared.clone()));
+        assert_eq!(replace.output_label(&contract, &receiving), inherited);
+        assert_eq!(edit.file_output_label(&contract, &receiving), Some(inherited.clone()));
+        assert_eq!(edit.output_label(&contract, &receiving), inherited);
+        assert_ne!(
+            replace.file_output_label(&contract, &receiving),
+            Some(replace.output_label(&contract, &receiving))
+        );
     }
 
     #[test]

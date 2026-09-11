@@ -1101,6 +1101,7 @@ mod tests {
             receiving: Label::new(TRUSTED, Audience::public()),
             proposed_effects: EffectSet::new(kinds.iter().map(|kind| effect(kind))).unwrap(),
             annotation: None,
+            file_basis: None,
             subject: crate::basis::fixture_subject(&traj()),
             evidence: crate::audience::AudienceEvidence::default(),
         }

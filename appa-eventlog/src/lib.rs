@@ -46,6 +46,8 @@ use appa_engine::profile::PolicyFileKey;
 use appa_engine::value::TrajectoryId;
 use appa_runtime_api::{AdapterName, inventory::ToolInventory};
 
+pub mod files;
+
 const SCHEMA_VERSION: i64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -10,6 +10,7 @@ appa-runtime-api = { workspace = true }
 rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 
 [features]
