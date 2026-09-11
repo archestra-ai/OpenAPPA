@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -146,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
         help="The corp-systems-mcp binary (defaults to the sibling crate's debug build, built on demand).",
     )
     parser.add_argument("--quiet", action="store_true", help="Print only the final answer.")
+    parser.add_argument("--usage-file", type=Path, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     if not args.quiet and dotenv is not None:
@@ -191,10 +193,14 @@ def main(argv: list[str] | None = None) -> int:
                 quarantine_model=args.quarantine_model,
                 system_prompt_addendum=os.environ.get("APPA_AGENT_PROMPT_ADDENDUM", ""),
             )
-            if args.chat:
-                await _run_chat(built, args.quiet)
-            else:
-                await _run_once(built, args.prompt, args.quiet)
+            try:
+                if args.chat:
+                    await _run_chat(built, args.quiet)
+                else:
+                    await _run_once(built, args.prompt, args.quiet)
+            finally:
+                if args.usage_file is not None:
+                    args.usage_file.write_text(json.dumps(built.usage.summary(), indent=2) + "\n")
 
     asyncio.run(_amain())
     return 0

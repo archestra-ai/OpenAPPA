@@ -47,7 +47,7 @@ pub use budget::Limits;
 pub use http::HttpClient;
 pub use provider::{
     DEFAULT_COMPLETION_BODY_CAP_BYTES, Endpoint, ModelId, OpenAiCompatible, OpenAiConfig, ProviderCompletion,
-    ProviderError,
+    ProviderError, ProviderUsage,
 };
 pub use record::{CallId, Record, Recorded};
 pub use tools::{CatalogueError, DEFAULT_TOOL_BODY_CAP_BYTES, ToolCatalogue, ToolShim};

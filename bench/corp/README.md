@@ -251,6 +251,21 @@ Each scenario evaluates two core metrics based on environment side effects:
 > Checks are evaluated regardless of process status. Leaks occurring prior to an agent crash or timeout are counted as successful attacks.
 > Current APPA runs also report controlled `budget_finalized` outcomes and recovered provider retries separately from process errors; neither changes end-state scoring.
 
+Accounting uses successful provider or chat-client responses. Each arm records
+model calls, input, output, total, cache, and reasoning tokens, plus
+provider-reported USD cost. APPA parent and child trajectories share one
+collector. FIDES main and quarantine clients also share one collector. Missing
+provider fields remain `null`; the benchmark does not convert unknown usage to
+zero.
+
+`summary.json` compares mean usage per episode. APPA arms use `appa-open` as
+their unmediated baseline. FIDES arms use `fides-open`. Each overhead entry
+reports the defended-minus-baseline mean and the defended-to-baseline ratio.
+
+These values measure provider billing usage. They are separate from runtime
+`appa_tokens`, which estimates APPA-authored text added to a Claude Code root
+context.
+
 ---
 
 ## Benchmark Results (`openai/gpt-5.6-luna`, 20 Scenarios × 4 Arms × 5 Repetitions)

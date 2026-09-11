@@ -104,6 +104,10 @@ struct Args {
     /// Optional machine-readable terminal status for an embedding harness.
     #[arg(long)]
     status_file: Option<PathBuf>,
+
+    /// Optional provider-reported model usage for an embedding harness.
+    #[arg(long)]
+    usage_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -174,13 +178,14 @@ async fn main() -> anyhow::Result<()> {
     // the ones the policy files carried before they moved here, unchanged.
     let head = TranscriptHead::new(vec![WireMessage::system(system_prompt())]);
     let runtime = Arc::new(runtime);
+    let provider = OpenAiCompatible::new(
+        OpenAiConfig::openrouter(args.model.clone(), api_key).with_request_timeout(Duration::from_secs(300)),
+    );
     let mut agent = Agent::new(
         Arc::clone(&runtime),
         // A slow OpenRouter upstream can spend minutes on one completion, and
         // retrying a cut-off completion never helps — give each attempt room.
-        OpenAiCompatible::new(
-            OpenAiConfig::openrouter(args.model.clone(), api_key).with_request_timeout(Duration::from_secs(300)),
-        ),
+        provider.clone(),
         ToolShim::new(format!("{origin}{}", shim::TOOLS_PATH)),
         ToolCatalogue::new(catalogue::advertised(&compiled, forking))?,
     )
@@ -221,6 +226,10 @@ async fn main() -> anyhow::Result<()> {
             serde_json::to_vec_pretty(&serde_json::json!({ "version": 1, "status": terminal_status(&outcome) }))?,
         )
         .with_context(|| format!("write terminal status to {}", path.display()))?;
+    }
+    if let Some(path) = &args.usage_file {
+        std::fs::write(path, serde_json::to_vec_pretty(&provider.usage())?)
+            .with_context(|| format!("write model usage to {}", path.display()))?;
     }
 
     match outcome {
