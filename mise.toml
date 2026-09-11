@@ -1,0 +1,28 @@
+[settings]
+lockfile = true
+
+[tool_config]
+locked = true
+
+[tools]
+rust = { version = "1.96", profile = "minimal", components = ["rustfmt", "clippy"] }
+python = ["3.13", "3.11"]
+go = "1.26"
+node = "24"
+uv = "0.12"
+pnpm = "12"
+claude = "2.1.266"
+
+[tasks.setup]
+description = "Install repository dependencies from their language-specific lockfiles"
+run = """
+cargo fetch --locked
+uv sync --frozen --project appa-agent-python
+uv sync --frozen --project bench/agentthreatbench
+uv sync --frozen --project bench/corp-agent-fides
+uv sync --frozen --project bench/corp
+uv sync --frozen --project integrations/kagent/appa-kagent-adk
+uv sync --frozen --project receiver/appa-yell
+(cd integrations/kagent/appa-kagent-adk-go && go mod download)
+pnpm --dir website install --frozen-lockfile
+"""

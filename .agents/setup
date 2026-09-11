@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if command -v mise >/dev/null 2>&1; then
+  mise_bin="$(command -v mise)"
+else
+  curl -fsSL https://mise.run | sh
+  mise_bin="$HOME/.local/bin/mise"
+fi
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+profile_marker="# OpenAPPA mise environment"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >> "$HOME/.bash_profile" <<EOF
+
+$profile_marker
+if [[ "\${PWD}" == "$repo_root" || "\${PWD}" == "$repo_root"/* ]]; then
+  eval "\$("$mise_bin" activate bash)"
+fi
+EOF
+fi
+
+"$mise_bin" trust "$repo_root/mise.toml"
+"$mise_bin" install
+"$mise_bin" run setup
