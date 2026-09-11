@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod batteries;
+pub mod claude_files;
 pub mod config;
 mod default_config;
 pub mod describe;

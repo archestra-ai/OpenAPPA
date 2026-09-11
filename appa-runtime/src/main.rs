@@ -53,8 +53,7 @@ struct Args {
     #[arg(long, env = "APPA_DB", default_value = "appa.db")]
     db: PathBuf,
 
-    /// Experimental Read/Write/Edit tracking for disposable fixtures, not a security boundary.
-    /// Native Claude Code validation can read content before hooks run.
+    /// Workspace served by runtime-owned file tools. Use the constrained claude-files launcher.
     #[arg(long, env = "APPA_FILE_WORKSPACE", requires = "file_ledger")]
     file_workspace: Option<PathBuf>,
 
@@ -203,6 +202,14 @@ async fn hook(
     let (status, body) = hooks::answer(&state.runtime, &state.adapter, &body).await;
     let status = axum::http::StatusCode::from_u16(status).expect("hook answers carry valid status codes");
     (status, axum::Json(body))
+}
+
+async fn file_tools(State(state): State<AppState>) -> Result<axum::Json<crate::claude_files::Deployment>, StatusCode> {
+    state
+        .runtime
+        .file_deployment(state.config)
+        .map(axum::Json)
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 async fn validate_tools(
@@ -497,6 +504,7 @@ async fn serve(args: Args) -> ExitCode {
     let management = axum::Router::new()
         .route("/binary-fingerprint", get(binary_fingerprint))
         .route("/policy-key", get(policy_key))
+        .route("/file-tools", get(file_tools))
         .route("/status", get(status))
         .route("/report", post(report))
         .route("/reload", post(reload))

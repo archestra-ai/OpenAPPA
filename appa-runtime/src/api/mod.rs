@@ -1,7 +1,7 @@
 //! The runtime API: `Runtime` and `Session` — the harness-agnostic
 //! event model this crate declares.
 
-mod files;
+pub(crate) mod files;
 mod session;
 
 /// The fixture-only `Value` → raw-bytes helper, shared with the other
@@ -112,7 +112,7 @@ pub(crate) fn call_key(call: &ProposedCall) -> Option<PermitKey> {
     if bare == "yell" {
         return crate::yell::YellArgs::parse(&call.arguments).map(|args| args.ticket());
     }
-    if !MANAGEMENT_TOOLS.contains(&bare) {
+    if !MANAGEMENT_TOOLS.contains(&bare) && !files::owns(call) {
         return None;
     }
     let mut arguments = serde_json::from_str::<serde_json::Value>(call.arguments.get()).ok()?;
@@ -1021,8 +1021,8 @@ impl Runtime {
     }
 
     /// Enable experimental Read/Write/Edit tracking, not a supported security boundary.
-    /// Claude Code can inspect file content during validation before invoking hooks, so
-    /// unreported observations can escape Label propagation. Use disposable fixtures only.
+    /// Runtime-owned tools require native alternatives and implicit reads disabled.
+    /// Inference and final responses remain unmediated. Use disposable fixtures only.
     /// Configure this before sharing the runtime. `Some(initial)`
     /// explicitly initializes all existing files with the operator's source Label; `None`
     /// requires an existing ledger. Never initialize again to recover a lost ledger.
@@ -1080,9 +1080,14 @@ impl Runtime {
             ),
         }
         .map_err(|error| OpenError::Storage(error.to_string()))?;
-        inner.files = Some(files::FileTracking { store, policy_key });
+        inner.files = Some(files::FileTracking {
+            store,
+            policy_key,
+            workspace,
+            ledger,
+        });
         tracing::warn!(
-            "experimental file tracking is not a security boundary: native Claude Code validation can inspect content before hooks; use disposable fixtures only"
+            "experimental file tools require Claude Code launched with native tools and implicit filesystem reads disabled"
         );
         Ok(self)
     }
