@@ -104,11 +104,11 @@ enum Divergence {
 /// Who is answering the endpoint, as far as one probe can establish.
 ///
 /// A healthy runtime left by an install under a different `APPA_INSTALL_DIR` or
-/// `APPA_DATA_DIR` is foreign: it is named and refused, never stopped. Stale
-/// runtimes are cleared before this classification through their separate
-/// health protocol.
+/// `APPA_DATA_DIR` is foreign: the activation stops it when it is this user's
+/// own appa process, and refuses it by pid otherwise. Stale runtimes are
+/// cleared before this classification through their separate health protocol.
 #[derive(Debug, PartialEq, Eq)]
-enum EndpointOwner {
+pub(super) enum EndpointOwner {
     /// Nothing answered, or what answered serves no fingerprint. Before the
     /// start this is the ordinary case; after it, it is a failure.
     Unidentified,
@@ -231,20 +231,16 @@ fn terminate_owned_appa_runtime(pid: i32, endpoint: &Endpoint) -> Result<(), Ini
     terminate_appa_pid(pid)
 }
 
-/// Stop a runtime this init started, and wait for its process to go.
+/// Stop the appa runtime answering the endpoint as `pid`, this deployment's
+/// or an earlier one's, and wait until the endpoint no longer answers from it.
 pub(super) fn stop_owned_appa_runtime(pid: i32, endpoint: &Endpoint) -> Result<(), InitError> {
-    terminate_owned_appa_runtime(pid, endpoint)?;
-    let deadline = std::time::Instant::now() + STOP_DEADLINE;
-    while std::time::Instant::now() < deadline {
-        if !process_exists(pid) {
-            return Ok(());
+    let loopback = crate::loopback_http::Endpoint::parse(endpoint.url()).map_err(|reason| {
+        crate::runtime_start::StopError::Endpoint {
+            url: endpoint.url().to_owned(),
+            reason,
         }
-        std::thread::sleep(STOP_POLL);
-    }
-    Err(InitError::RuntimeSurvived {
-        pid,
-        endpoint: endpoint.url().to_owned(),
-    })
+    })?;
+    Ok(crate::runtime_start::stop_pid(&loopback, endpoint.url(), pid)?)
 }
 
 #[cfg(unix)]
@@ -358,7 +354,7 @@ pub(crate) fn terminate_appa_pid(pid: i32) -> Result<(), InitError> {
 /// A deployment is a build *and* the configuration it serves. Comparing builds alone makes
 /// every install of one build look like the same deployment, which is how an install ends
 /// up reloading, and reporting on, a runtime that is not its own.
-fn endpoint_owner(binary: &Path, config: &Path, endpoint: &Endpoint) -> Result<EndpointOwner, InitError> {
+pub(super) fn endpoint_owner(binary: &Path, config: &Path, endpoint: &Endpoint) -> Result<EndpointOwner, InitError> {
     let expected = crate::runtime_cli::binary_digest(binary).map_err(|source| InitError::InstallRuntime {
         path: binary.to_path_buf(),
         source,
@@ -501,14 +497,19 @@ fn reload_policy(endpoint: &Endpoint, config: &Path) -> Result<(), InitError> {
 pub(super) fn verify_runtime_deployment(runtime: &Path, config: &Path, endpoint: &Endpoint) -> Result<i32, InitError> {
     match endpoint_owner(runtime, config, endpoint)? {
         EndpointOwner::Deployment { pid } => Ok(pid),
-        EndpointOwner::Unidentified => Err(InitError::RuntimeIdentity {
-            endpoint: endpoint.url().to_owned(),
-            message: "it does not identify itself as an appa runtime. Stop it, then rerun the install.".to_owned(),
-        }),
+        EndpointOwner::Unidentified => Err(unidentified(endpoint)),
         EndpointOwner::Foreign { pid } => Err(InitError::RuntimeIdentity {
             endpoint: endpoint.url().to_owned(),
             message: format!("another appa deployment (pid {pid}) is answering. Stop it, then rerun the install."),
         }),
+    }
+}
+
+/// A listener that serves no appa identity is nobody's to stop from here.
+pub(super) fn unidentified(endpoint: &Endpoint) -> InitError {
+    InitError::RuntimeIdentity {
+        endpoint: endpoint.url().to_owned(),
+        message: "it does not identify itself as an appa runtime. Stop it, then rerun the install.".to_owned(),
     }
 }
 

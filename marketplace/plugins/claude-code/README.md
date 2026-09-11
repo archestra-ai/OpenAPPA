@@ -72,9 +72,9 @@ cargo install --path appa-runtime --force
 appa plugin install claude-code
 ```
 
-The install reports each slow phase on stderr and never prompts. If another
-APPA deployment owns the runtime endpoint, it refuses and names the process to
-stop; an unidentified listener or another user's process is never stopped.
+The install reports each slow phase on stderr and never prompts. A runtime an
+earlier APPA deployment of yours left at the runtime endpoint is stopped; an
+unidentified listener or another user's process is named and never stopped.
 
 The install puts `clappa` beside `appa` so the short command works in later
 examples.
@@ -251,21 +251,21 @@ session's hooks at session start, and the hook wire between the hooks and the
 runtime carries no version, so a session running across an upgrade keeps
 talking to the runtime it started with.
 
-Init stops a runtime that is still executing the path a previous init deployed
-to, and aborts before touching Claude if it cannot, rather than registering
-new hooks against an old runtime. That covers the paths your current
-environment resolves to. A runtime left by an init run under a different
-`APPA_INSTALL_DIR` or `APPA_DATA_DIR` executes a path this init never computes:
-it is reported so you can stop it yourself, never killed. An `appa` left at the
-old install path is named in the receipt and never deleted; remove it when you
-are ready.
+The install claims the runtime endpoint. A runtime an earlier deployment of
+yours left there is stopped, whichever build or config it serves and whatever
+`APPA_INSTALL_DIR` or `APPA_DATA_DIR` it ran under, and the install aborts
+before touching Claude when that runtime will not stop. A process at the
+endpoint that is not your own `appa` is named and never stopped. An `appa`
+left at the old install path is never deleted; remove it when you are ready.
+
+`appa runtime stop` stops the runtime on its own, under the same rule. A
+runtime at `APPA_RUNTIME_URL` is yours and is left alone.
 
 ## Uninstall
 
 ```sh
-appa plugin remove claude-code
-pkill -f 'appa runtime'
-rm -rf ~/.local/share/appa/bin ~/.local/share/appa/cache
+appa plugin remove claude-code           # the Claude Code profile only
+appa plugin remove claude-code --purge   # also stop the runtime and delete the deployment
 rm -f ~/.local/bin/appa
 cargo uninstall appa   # checkout builds only
 ```
@@ -273,10 +273,14 @@ cargo uninstall appa   # checkout builds only
 `appa plugin remove claude-code` takes back only what an install wrote: its
 hook entries, its `statusLine`, the `appa` MCP server, the skill, and
 `clappa`. A statusline, hook entry or skill of your own survives untouched.
+The policy, database, and runtime stay at the locations in the table above.
 
-The policy and database stay at the locations in the table above; delete
-them only if you want the history gone. Remove a `clappa` shell alias
-separately if you added one instead of the command.
+`--purge` goes on to stop the runtime and delete both directories in the
+table: the deployed binary, database, logs, retained versions, policy, and
+install state. It reads none of the install state, so it is the way out of
+a deployment an install refuses. `appa` on PATH stays, so the next
+`appa plugin install claude-code` starts from nothing. Remove a `clappa`
+shell alias separately if you added one instead of the command.
 
 ## Statusline
 

@@ -60,6 +60,13 @@ pub struct ServedRuntime {
     pub url: String,
 }
 
+impl ServedRuntime {
+    /// Whether the runtime process has exited, reaping it when it has.
+    pub fn has_exited(&mut self) -> bool {
+        self.child.try_wait().expect("the child polls").is_some()
+    }
+}
+
 impl Drop for ServedRuntime {
     fn drop(&mut self) {
         let _ = self.child.kill();

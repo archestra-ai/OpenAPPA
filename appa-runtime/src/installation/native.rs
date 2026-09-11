@@ -156,12 +156,12 @@ impl ClaudeArtifacts {
     }
 
     /// Caller holds the installation lock and durable activation journal.
-    pub fn activate(&self, config: &Path, previous: Option<&Self>) -> Result<(), InstallError> {
-        let mut arguments = vec!["activate-claude".as_ref(), "--config".as_ref(), config.as_os_str()];
-        if let Some(previous) = previous {
-            arguments.extend(["--previous-binary".as_ref(), previous.binary.as_os_str()]);
-        }
-        invoke(&self.binary, &arguments, Duration::from_secs(120))?;
+    pub fn activate(&self, config: &Path) -> Result<(), InstallError> {
+        invoke(
+            &self.binary,
+            &["activate-claude".as_ref(), "--config".as_ref(), config.as_os_str()],
+            Duration::from_secs(120),
+        )?;
         Ok(())
     }
 

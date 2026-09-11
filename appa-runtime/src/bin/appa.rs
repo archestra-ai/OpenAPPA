@@ -22,8 +22,6 @@ enum Command {
     ActivateClaude {
         #[arg(long)]
         config: PathBuf,
-        #[arg(long)]
-        previous_binary: Option<PathBuf>,
     },
     /// Internal journalled removal using the selected release executable.
     #[command(hide = true)]
@@ -187,10 +185,7 @@ fn main() -> ExitCode {
     };
     match parsed.command {
         Command::BuildInfo => appa_runtime::installation::native::build_info(),
-        Command::ActivateClaude {
-            config,
-            previous_binary,
-        } => match appa_runtime::init::activate_claude_code(&config, previous_binary.as_deref()) {
+        Command::ActivateClaude { config } => match appa_runtime::init::activate_claude_code(&config) {
             Ok(_) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("appa: {error}");

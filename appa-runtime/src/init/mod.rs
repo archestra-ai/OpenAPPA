@@ -24,18 +24,23 @@ pub(crate) mod settings;
 mod skill;
 
 pub use self::paths::installed_config_path;
-pub use self::removal::claude_code_remove;
+pub use self::removal::{Purge, PurgedRuntime, claude_code_purge, claude_code_remove};
 
 use self::config::{ComposedPolicy, discard_file, verify_config};
 use self::endpoint::{
-    Endpoint, RuntimeOutcome, clear_stale_endpoint, endpoint_health, reconcile_policy, stop_owned_appa_runtime,
-    verify_runtime_deployment,
+    Endpoint, EndpointOwner, RuntimeOutcome, clear_stale_endpoint, endpoint_health, endpoint_owner, reconcile_policy,
+    stop_owned_appa_runtime, unidentified, verify_runtime_deployment,
 };
 #[cfg(windows)]
 use self::paths::windows_identity;
 use self::paths::{DeploymentPaths, appa_filename, deployment_paths, same_file};
 use self::receipt::{Receipt, Style};
 use self::settings::HookTarget;
+
+/// The way out of a deployment state an install cannot repair, named where
+/// that state is refused.
+pub const START_OVER: &str =
+    "to start over: appa plugin remove claude-code --purge, then appa plugin install claude-code";
 
 #[derive(Debug, Error)]
 pub enum InitError {
@@ -55,7 +60,7 @@ pub enum InitError {
     InstallRuntime { path: PathBuf, source: std::io::Error },
     #[error("cannot initialize {path}: {source}")]
     WriteFile { path: PathBuf, source: std::io::Error },
-    #[error("the deployment config {path} does not load: {source}")]
+    #[error("the deployment config {path} does not load: {source}; {}", START_OVER)]
     UnloadableConfig { path: PathBuf, source: Box<ConfigError> },
     #[error("cannot change APPA integration state at {path}: {message}")]
     NativeState { path: PathBuf, message: String },
@@ -84,6 +89,8 @@ pub enum InitError {
         path: PathBuf,
         message: String,
     },
+    #[error(transparent)]
+    Stop(#[from] crate::runtime_start::StopError),
     #[error("{operation}; restoring the previous installation also failed: {recovery}")]
     Recovery {
         operation: Box<InitError>,
@@ -101,7 +108,7 @@ pub enum InitError {
 /// before the profile is switched over. Directories and the deployed binary's
 /// parent are written before that settling; both are additive and neither is
 /// what Claude reads.
-pub fn activate_claude_code(config: &Path, previous_binary: Option<&Path>) -> Result<String, InitError> {
+pub fn activate_claude_code(config: &Path) -> Result<String, InitError> {
     // The endpoint is settled before anything is read: a release build ignores
     // the environment here, and the release check proves it on this refusal.
     let endpoint = Endpoint::resolve()?;
@@ -113,7 +120,7 @@ pub fn activate_claude_code(config: &Path, previous_binary: Option<&Path>) -> Re
         path: config.clone(),
         source: Box::new(source),
     })?;
-    install_claude(&build_label(), endpoint, config, previous_binary)
+    install_claude(&build_label(), endpoint, config)
 }
 
 /// The origin as a receipt names it: this binary's release tag, or the commit
@@ -130,12 +137,7 @@ fn build_label() -> String {
     }
 }
 
-fn install_claude(
-    origin: &str,
-    endpoint: Endpoint,
-    config: PathBuf,
-    previous_binary: Option<&Path>,
-) -> Result<String, InitError> {
+fn install_claude(origin: &str, endpoint: Endpoint, config: PathBuf) -> Result<String, InitError> {
     let appa = env::current_exe().map_err(InitError::CurrentExecutable)?;
     let paths = deployment_paths()?;
     let _profile_lock = lock_claude_profile(&paths.claude_dir)?;
@@ -159,7 +161,7 @@ fn install_claude(
     // 2. What the profile holds under APPA's names. A server or a skill that
     //    no install wrote is refused here, with the profile untouched.
     progress("reading the Claude Code profile");
-    let registered = mcp::current()?;
+    let registered = mcp::current(endpoint.url())?;
     skill::verify(&paths.claude_dir)?;
     settings::verify(&paths)?;
 
@@ -171,15 +173,19 @@ fn install_claude(
     //    endpoint, and its health answer names the stale pid.
     clear_stale_endpoint(&endpoint)?;
     if endpoint_health(&endpoint)?.is_some() {
-        // Nobody is asked on behalf of a different deployment. An update stops
-        // the runtime of the binary it replaces, once that runtime proves to be
-        // serving this config; any other owner is refused with its pid named.
-        if let Err(current_error) = verify_runtime_deployment(&appa, &config, &endpoint) {
-            let Some(previous) = previous_binary else {
-                return Err(current_error);
-            };
-            let pid = verify_runtime_deployment(previous, &config, &endpoint)?;
-            stop_owned_appa_runtime(pid, &endpoint)?;
+        // An install claims the endpoint. The runtime an earlier deployment of
+        // this user's left there is stopped, whichever build or config it
+        // serves; a process that is not this user's appa runtime is refused
+        // with its pid named, and a listener with no appa identity is refused.
+        match endpoint_owner(&appa, &config, &endpoint)? {
+            EndpointOwner::Deployment { .. } => {}
+            EndpointOwner::Foreign { pid } => {
+                progress(&format!(
+                    "stopping the appa runtime (pid {pid}) of an earlier deployment"
+                ));
+                stop_owned_appa_runtime(pid, &endpoint)?;
+            }
+            EndpointOwner::Unidentified => return Err(unidentified(&endpoint)),
         }
     }
 

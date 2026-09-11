@@ -39,6 +39,10 @@ pub enum InstallError {
     Changed(PathBuf),
     #[error("the install did not finish: {reason} Its record is {}; rerunning the install completes it.", path.display())]
     Recovery { path: PathBuf, reason: String },
+    /// The retained selection is not one this build reads: an earlier build's
+    /// shape, or a hand edit. Nothing here repairs it, so the way out is named.
+    #[error("the installation state {} is not one this build reads: {reason}; {}", path.display(), crate::init::START_OVER)]
+    State { path: PathBuf, reason: String },
 }
 
 fn io(operation: &'static str, path: &Path, source: std::io::Error) -> InstallError {
@@ -938,25 +942,24 @@ impl Installation {
             })?;
             if transaction.activation != Activation::None {
                 let activate = || {
-                    let previous = transaction
-                        .previous
-                        .as_ref()
-                        .filter(|selection| selection.plugins.contains("claude-code"))
-                        .map(|selection| {
-                            native::ClaudeArtifacts::prepare(self, selection.generation(), selection.platform)
-                        })
-                        .transpose()?;
                     match transaction.activation {
                         Activation::Claude => native::ClaudeArtifacts::prepare(
                             self,
                             transaction.selection.generation(),
                             transaction.selection.platform,
                         )?
-                        .activate(&self.config, previous.as_ref())?,
-                        Activation::RemoveClaude => previous
-                            .as_ref()
-                            .ok_or_else(|| InstallError::Invalid("removal requires its prior native artifact".into()))?
-                            .remove(&self.config)?,
+                        .activate(&self.config)?,
+                        Activation::RemoveClaude => {
+                            let previous = transaction
+                                .previous
+                                .as_ref()
+                                .filter(|selection| selection.plugins.contains("claude-code"))
+                                .ok_or_else(|| {
+                                    InstallError::Invalid("removal requires its prior native artifact".into())
+                                })?;
+                            native::ClaudeArtifacts::prepare(self, previous.generation(), previous.platform)?
+                                .remove(&self.config)?
+                        }
                         Activation::None => unreachable!("native activation branch excludes None"),
                     }
                     Ok::<_, InstallError>(())
@@ -1002,9 +1005,12 @@ fn read_selection(path: &Path) -> Result<Option<Selection>, InstallError> {
     let Some(bytes) = optional_bytes(path)? else {
         return Ok(None);
     };
-    let selection: Selection =
-        serde_json::from_slice(&bytes).map_err(|error| InstallError::Invalid(error.to_string()))?;
-    selection.validate()?;
+    let state = |reason: String| InstallError::State {
+        path: path.to_owned(),
+        reason,
+    };
+    let selection: Selection = serde_json::from_slice(&bytes).map_err(|error| state(error.to_string()))?;
+    selection.validate().map_err(|error| state(error.to_string()))?;
     Ok(Some(selection))
 }
 
@@ -1267,6 +1273,21 @@ fn owned_include_path(filename: &str, commit: &Commit, entry: &PackageEntry, bat
 
 #[cfg(test)]
 mod tests {
+    /// A selection an earlier build wrote in a shape this one does not read is
+    /// refused as state, not as input: the record is a file, and the caller
+    /// needs to know that no argument of theirs fixes it.
+    #[test]
+    fn a_selection_of_another_shape_is_refused_as_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("active.json");
+        std::fs::write(&path, br#"{"schema":1,"claude_plugin":"gone"}"#).unwrap();
+        let error = super::read_selection(&path).unwrap_err();
+        assert!(
+            matches!(&error, super::InstallError::State { path: refused, .. } if *refused == path),
+            "{error}"
+        );
+    }
+
     use super::*;
 
     #[test]

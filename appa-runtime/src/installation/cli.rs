@@ -101,17 +101,23 @@ pub struct BatteryRemove {
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  appa plugin remove claude-code\n  appa plugin remove claude-code --config ./deployment/appa.toml --json\n\nUnregisters only matching APPA-owned Claude support. Preserves policy, batteries,\nretained artifacts, trajectory data, and the running runtime. Never prompts."
+    after_help = "Examples:\n  appa plugin remove claude-code\n  appa plugin remove claude-code --config ./deployment/appa.toml --json\n  appa plugin remove claude-code --purge\n\nUnregisters only matching APPA-owned Claude support. Preserves policy, batteries,\nretained artifacts, trajectory data, and the running runtime. Never prompts.\n--purge goes on to stop the runtime and delete the data and config directories\nof the default deployment: the deployed binary, database, logs, retained\nversions, policy, and install state. appa itself stays on PATH."
 )]
 pub struct PluginRemove {
     /// Host plugin whose installer-owned registration is removed.
     #[arg(value_parser = ["claude-code", "kagent"])]
     name: String,
+    /// Also stop the runtime and delete the default deployment's data and config directories.
+    #[arg(long)]
+    purge: bool,
     #[command(flatten)]
     target: Target,
 }
 
 pub fn remove_plugin(args: PluginRemove) -> ExitCode {
+    if args.purge {
+        return purge_plugin(args);
+    }
     let result = (|| {
         let path = plugin_path(&args.target, &args.name)?;
         match Installation::inspect(&path) {
@@ -153,6 +159,33 @@ pub fn remove_plugin(args: PluginRemove) -> ExitCode {
         ))
     })();
     finish(&args.target, "plugin.remove".into(), result)
+}
+
+/// `--purge` reads none of the installation state: a state the installer cannot
+/// open is the state a purge exists for.
+fn purge_plugin(args: PluginRemove) -> ExitCode {
+    let result = (|| {
+        if args.name != "claude-code" {
+            return Err(InstallError::Invalid("--purge applies to claude-code".into()));
+        }
+        if args.target.config.is_some() {
+            return Err(InstallError::Invalid(
+                "--purge removes the default deployment only; drop --config and unset APPA_CONFIG".into(),
+            ));
+        }
+        eprintln!("appa: removing claude-code support, stopping the runtime, and deleting the deployment...");
+        let purge = crate::init::claude_code_purge().map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let runtime = match purge.runtime {
+            crate::init::PurgedRuntime::Nothing => serde_json::json!({"state": "absent"}),
+            crate::init::PurgedRuntime::Stopped { pid } => serde_json::json!({"state": "stopped", "pid": pid}),
+            crate::init::PurgedRuntime::Left { reason } => serde_json::json!({"state": "left", "reason": reason}),
+        };
+        Ok((
+            None,
+            serde_json::json!({"plugin": "claude-code", "state": "purged", "runtime": runtime, "removed": purge.removed}),
+        ))
+    })();
+    finish(&args.target, "plugin.purge".into(), result)
 }
 
 fn package_name(value: &str) -> Result<PackageName, String> {
@@ -851,6 +884,7 @@ fn finish(
                 InstallError::Changed(_) => ("concurrent_edit", false),
                 InstallError::Invalid(_) => ("invalid_input", false),
                 InstallError::Io { .. } => ("io", false),
+                InstallError::State { .. } => ("unreadable_state", false),
             };
             (
                 Receipt {
@@ -877,7 +911,14 @@ fn finish(
             .map_err(io::Error::other)
             .and_then(|()| writeln!(output))
     } else if let Some(error) = &receipt.error {
-        writeln!(io::stderr().lock(), "appa: {}", error.message)
+        let mut stderr = io::stderr().lock();
+        writeln!(stderr, "appa: {}", error.message).and_then(|()| {
+            if error.recovery_required {
+                writeln!(stderr, "appa: {}", crate::init::START_OVER)
+            } else {
+                Ok(())
+            }
+        })
     } else if let Some(kind) = receipt.operation.strip_suffix(".list") {
         let result = receipt
             .result
@@ -890,7 +931,28 @@ fn finish(
         .and_then(|result| result.get("plugin"))
         .and_then(serde_json::Value::as_str)
     {
-        if receipt.operation == "plugin.remove" {
+        if receipt.operation == "plugin.purge" {
+            let result = receipt.result.as_ref().expect("plugin result is present");
+            (|| {
+                let runtime = &result["runtime"];
+                match runtime["state"].as_str().unwrap_or_default() {
+                    "stopped" => writeln!(output, "Stopped the runtime (pid {}).", runtime["pid"])?,
+                    "left" => writeln!(
+                        output,
+                        "Left the process at the runtime endpoint: {}.",
+                        runtime["reason"].as_str().unwrap_or_default()
+                    )?,
+                    _ => writeln!(output, "No runtime was running.")?,
+                }
+                for path in result["removed"].as_array().into_iter().flatten() {
+                    writeln!(output, "Removed {}.", path.as_str().unwrap_or_default())?;
+                }
+                writeln!(
+                    output,
+                    "Plugin {plugin}: purged; appa stays on PATH. To install again: appa plugin install claude-code."
+                )
+            })()
+        } else if receipt.operation == "plugin.remove" {
             let result = receipt.result.as_ref().expect("plugin result is present");
             writeln!(
                 output,

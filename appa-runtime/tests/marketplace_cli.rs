@@ -187,7 +187,7 @@ fn corrupt_selection_returns_one_error_envelope_and_preserves_bytes() {
     assert_eq!(output.status.code(), Some(1));
     let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(document["status"], "error");
-    assert_eq!(document["error"]["code"], "invalid_input");
+    assert_eq!(document["error"]["code"], "unreadable_state");
     assert!(document.get("result").is_none());
     assert_eq!(std::fs::read(active).unwrap(), b"broken");
     assert!(!state.join("install.lock").exists());
