@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.18.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.17.1...v0.18.0) (2026-09-11)
+
+
+### Features
+
+* **audience:** declared selector templates and selector placeholders ([#295](https://github.com/archestra-ai/OpenAPPA/issues/295)) ([787eb5c](https://github.com/archestra-ai/OpenAPPA/commit/787eb5cc7bfc3f210140552e851ac2a2e5166079))
+* **batteries:** add Linear MCP policy ([#272](https://github.com/archestra-ai/OpenAPPA/issues/272)) ([0d41b6b](https://github.com/archestra-ai/OpenAPPA/commit/0d41b6be491d29631616e4710a4ac99b6585e137))
+* **batteries:** per-resource audiences for slack, github, linear; sentry and notion batteries ([#296](https://github.com/archestra-ai/OpenAPPA/issues/296)) ([7faab86](https://github.com/archestra-ai/OpenAPPA/commit/7faab867c2674a1d47b399fc05cc1cb5c4970221))
+* **batteries:** per-resource audiences for slack, github, linear; sentry and notion batteries ([#302](https://github.com/archestra-ai/OpenAPPA/issues/302)) ([7faab86](https://github.com/archestra-ai/OpenAPPA/commit/7faab867c2674a1d47b399fc05cc1cb5c4970221))
+* **bench:** report token and USD overhead ([#300](https://github.com/archestra-ai/OpenAPPA/issues/300)) ([1ea1c21](https://github.com/archestra-ai/OpenAPPA/commit/1ea1c2128ebdf40fefa2b0f1ca22b59732b2acac))
+* **cli:** appa runtime stop, and a purge of the deployment ([#301](https://github.com/archestra-ai/OpenAPPA/issues/301)) ([31f52ab](https://github.com/archestra-ai/OpenAPPA/commit/31f52abe2cbde3af5401ce668cc4f6d82509caeb))
+* **cli:** one install for every build; remove `appa init` ([#271](https://github.com/archestra-ai/OpenAPPA/issues/271)) ([ba6966d](https://github.com/archestra-ai/OpenAPPA/commit/ba6966dcb2976afb06fc9ff4b2ea416f17f6e0af))
+* the appa binary owns the Claude Code hooks ([#293](https://github.com/archestra-ai/OpenAPPA/issues/293)) ([8223949](https://github.com/archestra-ai/OpenAPPA/commit/8223949be0839c24cc4e02f7d84fe28508898aa5))
+* **website:** add custom 404/error pages and alert mark in branding ([#290](https://github.com/archestra-ai/OpenAPPA/issues/290)) ([e0b5f49](https://github.com/archestra-ai/OpenAPPA/commit/e0b5f49638c2dffbf3123b050b32ca1d7aa72822))
+
+
+### Bug Fixes
+
+* **ci:** make release init probe offline ([#281](https://github.com/archestra-ai/OpenAPPA/issues/281)) ([3cfad99](https://github.com/archestra-ai/OpenAPPA/commit/3cfad994559af26054ce0c7908067c564c55b8ca))
+* **kagent:** close delegation, approval, and demo gaps ([#285](https://github.com/archestra-ai/OpenAPPA/issues/285)) ([91d432e](https://github.com/archestra-ai/OpenAPPA/commit/91d432e16533d00eafa66c9bdecd2a6b45af8cc6))
+* **kagent:** simplify demo adapters and correct policy bugs ([#284](https://github.com/archestra-ai/OpenAPPA/issues/284)) ([282bbf9](https://github.com/archestra-ai/OpenAPPA/commit/282bbf9374b04f7760c0178bf3b5798ca4741366))
+* **kagent:** trim quickstart chats to five website demos ([#280](https://github.com/archestra-ai/OpenAPPA/issues/280)) ([ace0fa6](https://github.com/archestra-ai/OpenAPPA/commit/ace0fa6cfe4aba61ab3362f4217f8f3b2d466267))
+* **website:** keep the docs rail's scroll position across navigation ([#292](https://github.com/archestra-ai/OpenAPPA/issues/292)) ([50ecddd](https://github.com/archestra-ai/OpenAPPA/commit/50ecdddb5c322adbc55e99bc71d61867dd3eb70a))
+
+
+### Documentation
+
+* align Cedar, Dogwood, and OPA comparisons ([#286](https://github.com/archestra-ai/OpenAPPA/issues/286)) ([b8bf2ce](https://github.com/archestra-ai/OpenAPPA/commit/b8bf2ce340d8a567abc5174779b4d269bc5a5719))
+* **batteries:** clarify when to use annotators ([#289](https://github.com/archestra-ai/OpenAPPA/issues/289)) ([392afad](https://github.com/archestra-ai/OpenAPPA/commit/392afad01ceca64b6f8395566fd4d2c67da2c56f))
+
+
+### Code Refactoring
+
+* **release:** the plugin archive is the batteries archive ([#294](https://github.com/archestra-ai/OpenAPPA/issues/294)) ([6efbff0](https://github.com/archestra-ai/OpenAPPA/commit/6efbff0c753b7d6d656f32be228e6f3f60e4385e))
+* **release:** the plugin archive is the batteries archive ([#298](https://github.com/archestra-ai/OpenAPPA/issues/298)) ([6efbff0](https://github.com/archestra-ai/OpenAPPA/commit/6efbff0c753b7d6d656f32be228e6f3f60e4385e))
+
 ## [0.17.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.17.0...v0.17.1) (2026-09-09)
 
 
