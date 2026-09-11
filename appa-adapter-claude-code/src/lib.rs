@@ -611,6 +611,12 @@ fn render(event: &HookEvent, decision: &HookDecision) -> serde_json::Value {
         // Context reaches an actor at its start only; every other event
         // has no slot for it and is acknowledged.
         HookDecision::Context { text } => match event {
+            HookEvent::SessionStart { .. } => serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": text,
+                }
+            }),
             HookEvent::ChildStart { .. } => serde_json::json!({
                 "hookSpecificOutput": {
                     "hookEventName": "SubagentStart",
@@ -2264,6 +2270,21 @@ mod tests {
             ),
             Some(serde_json::json!({"decision": "block", "reason": "unreadable"})),
             "a post-use hook naming no response carries the reason alone",
+        );
+    }
+
+    #[test]
+    fn session_start_context_reaches_the_root_actor() {
+        assert_eq!(
+            render(
+                &HookEvent::SessionStart { root: root() },
+                &HookDecision::Context {
+                    text: "available file tools".into()
+                },
+            ),
+            serde_json::json!({"hookSpecificOutput": {
+                "hookEventName": "SessionStart", "additionalContext": "available file tools"
+            }}),
         );
     }
 

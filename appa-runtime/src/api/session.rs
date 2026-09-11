@@ -282,12 +282,15 @@ impl Session {
             .store
             .prepare(&self.trajectory.0, &key, operation, &path)
             .map_err(super::files::refused)?;
-        // Native writes must not reconfigure Claude Code, Git hooks, or MCP execution.
+        // Managed writes must not reconfigure Claude Code, Git hooks, or MCP execution.
+        // Claude loads instruction files implicitly, outside the file-tool observation path.
         if operation != appa_eventlog::files::FileOperation::Read
-            && pin
-                .path
-                .split('/')
-                .any(|part| matches!(part, ".claude" | ".git" | ".mcp.json" | ".appa"))
+            && pin.path.split('/').any(|part| {
+                matches!(
+                    part,
+                    ".claude" | ".git" | ".mcp.json" | ".appa" | "CLAUDE.md" | "CLAUDE.local.md"
+                )
+            })
         {
             files
                 .store
