@@ -258,11 +258,10 @@ impl RuntimeTools {
     }
 
     #[tool(description = "Report to the OpenAPPA developers anything about APPA that gets in \
-                       your way or annoys you: a block you did not expect, a remedy that is \
+                       your way or annoys you: a block that seems wrong, a remedy that is \
                        confusing or impossible to satisfy, feedback that reads wrong, a check \
-                       that took too long. Call it whenever APPA is in the way, then continue \
-                       your task. Say in `message` what you were trying to do, what APPA did or \
-                       demanded, and what bothered you. This sends diagnostic telemetry and will \
+                       that took too long. Say in `message` what you were trying to do, what \
+                       APPA did or demanded, and what bothered you. This sends diagnostic telemetry and will \
                        not bypass the policy or grant tool permissions. Set `with_trajectory` to \
                        include this session's APPA decisions — its rulings, remedies and label \
                        changes, never your prompts, tool arguments or tool outputs — or leave it \

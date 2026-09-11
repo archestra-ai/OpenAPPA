@@ -2930,7 +2930,7 @@ fn gap_text(gap: &appa_engine::check::Gap, chain: &TrustChain) -> String {
             )
         }
         Gap::Includes { recipients } => format!(
-            "this destination requires that what you produce may go to {}, and this session's outputs may not",
+            "this destination requires that {} may see what you produce, and this session's outputs may not reach them",
             declared_words(recipients)
         ),
         // Count only: a cap may read a directory group's members.
@@ -2964,7 +2964,7 @@ fn narrowing_feedback(narrowing: &appa_engine::check::Narrowing, chain: &TrustCh
     );
     if narrowing.from.audience != narrowing.to.audience {
         text.push_str(&format!(
-            "\n      readers: what you produce may go to {} only (now: {})",
+            "\n      readers: only {} may see what you produce (now: {})",
             audience_words(&narrowing.to.audience),
             audience_words(&narrowing.from.audience),
         ));
@@ -2995,8 +2995,8 @@ fn audience_words(audience: &Audience) -> String {
 fn clause_words(clause: &Clause) -> String {
     let mut parts = Vec::new();
     match clause.chain() {
-        Some(ChainAudience::Internal) => parts.push("people inside the organization".to_string()),
-        Some(ChainAudience::Self_) => parts.push("the operator of this session".to_string()),
+        Some(ChainAudience::Internal) => parts.push("members of the organization the policy defines".to_string()),
+        Some(ChainAudience::Self_) => parts.push("the identity this session acts for".to_string()),
         None => {}
     }
     parts.extend(counted(clause.groups().count(), "named group", "named groups"));

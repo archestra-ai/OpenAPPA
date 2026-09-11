@@ -242,7 +242,7 @@ def test_the_annotator_confines_an_ops_runbook_at_the_read(stack):
     denied = responses[0]
     assert denied.get("appa") == "denied", f"the per-call contract gates the read: {denied}"
     feedback = str(denied.get("result", ""))
-    assert "readers: what you produce may go to" in feedback, f"the deny names the narrowing: {feedback}"
+    assert "readers: only" in feedback, f"the deny names the narrowing: {feedback}"
     assert "execute_remedy_plan" in feedback, f"the deny carries a runnable offer: {feedback}"
     assert OPS_RUNBOOK_TEXT not in task.everything(), "the ops runbook text never reaches the model"
 
