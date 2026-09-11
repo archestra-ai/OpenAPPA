@@ -20,7 +20,6 @@ pub mod runtime_start;
 pub mod runtime_url;
 pub mod session_context;
 pub mod statusline;
-pub(crate) mod telemetry;
 pub mod tls;
 pub mod tool_validation;
 
