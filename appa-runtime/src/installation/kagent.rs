@@ -137,7 +137,6 @@ pub(super) fn prepare(
     })?;
     selection.validate()?;
     let text = std::str::from_utf8(config).map_err(invalid)?;
-    selection.validate_owned_config(text)?;
     let packages = installation
         .state
         .join("generations")
@@ -166,20 +165,17 @@ pub(super) fn prepare(
     appa_package::RelativePath::parse(filename).map_err(invalid)?;
     let container_config = Path::new("/etc/appa").join(filename);
     let (snapshot, portable) = if let Some(snapshot) = installation.selected_files(selection)? {
-        let portable = snapshot.rebase(text, selection, installation, true)?;
+        let portable = snapshot.rebase(text, installation, true)?;
         (Some(snapshot), portable)
     } else {
-        (
-            files::Snapshot::capture(installation, selection, text)?,
-            text.to_owned(),
-        )
+        (files::Snapshot::capture(installation, text)?, text.to_owned())
     };
     let prepared_text = if let Some(snapshot) = &snapshot {
         let target = assets.join(format!(".appa/{filename}/files/{}", snapshot.digest.hex()));
         fs::create_dir_all(target.parent().expect("snapshot parent"))
             .map_err(|error| io("create prepared snapshot parent", &target, error))?;
         snapshot.copy_for_deployment(&target)?;
-        snapshot.rebase_at(&portable, selection, &container_config, false)?
+        snapshot.rebase_at(&portable, &container_config, false)?
     } else {
         portable
     };
@@ -385,9 +381,7 @@ mod tests {
         assert_eq!(installation.selection().unwrap().unwrap(), selected);
         assert_eq!(fs::read_dir(installation.state.join("kagent")).unwrap().count(), 1);
         let mut removed = selected.clone();
-        removed
-            .deselect(PackageKind::Plugin, &PackageName::parse("kagent").unwrap())
-            .unwrap();
+        removed.deselect(PackageKind::Plugin, &PackageName::parse("kagent").unwrap());
         installation
             .commit_installation(Some(CONFIG.as_bytes()), CONFIG.as_bytes(), &removed)
             .unwrap();
@@ -468,9 +462,7 @@ mod tests {
         let path = directory(&installation, selected.kagent_assets.as_ref().unwrap());
         fs::remove_dir_all(&path).unwrap();
         assert!(matches!(verify(&installation, &selected), Err(InstallError::Changed(found)) if found == path));
-        selected
-            .deselect(PackageKind::Plugin, &PackageName::parse("kagent").unwrap())
-            .unwrap();
+        selected.deselect(PackageKind::Plugin, &PackageName::parse("kagent").unwrap());
         installation
             .commit_installation(Some(CONFIG.as_bytes()), CONFIG.as_bytes(), &selected)
             .unwrap();
@@ -488,8 +480,7 @@ mod tests {
         let previous = installation.selection().unwrap().unwrap();
         let old = directory(&installation, previous.kagent_assets.as_ref().unwrap());
         let mut next = previous.clone();
-        next.deselect(PackageKind::Plugin, &PackageName::parse("kagent").unwrap())
-            .unwrap();
+        next.deselect(PackageKind::Plugin, &PackageName::parse("kagent").unwrap());
         let journal = ConfigTransaction {
             before: Some(CONFIG.as_bytes().to_vec()),
             after: CONFIG.as_bytes().to_vec(),

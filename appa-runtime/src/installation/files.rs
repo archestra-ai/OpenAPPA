@@ -59,15 +59,17 @@ fn strings(document: &toml_edit::DocumentMut, bundle: bool) -> Result<Vec<String
         .collect()
 }
 
-fn manual_includes(text: &str, selection: &Selection) -> Result<Vec<String>, InstallError> {
+/// The includes a bundle carries as files: everything but a battery of the
+/// store, which the bundle's marketplace tree restocks on import.
+fn manual_includes(text: &str) -> Result<Vec<String>, InstallError> {
     Ok(strings(&document(text)?, false)?
         .into_iter()
-        .filter(|path| !selection.includes.iter().any(|owned| owned.path == *path))
+        .filter(|path| crate::batteries::name_from_include(Path::new(path)).is_none())
         .collect())
 }
 
-pub(super) fn requires_snapshot(text: &str, selection: &Selection) -> Result<bool, InstallError> {
-    Ok(!strings(&document(text)?, true)?.is_empty() || !manual_includes(text, selection)?.is_empty())
+pub(super) fn requires_snapshot(text: &str) -> Result<bool, InstallError> {
+    Ok(!strings(&document(text)?, true)?.is_empty() || !manual_includes(text)?.is_empty())
 }
 
 /// Source references may contain parent components; snapshot member paths may not.
@@ -177,14 +179,10 @@ impl Snapshot {
         Ok(())
     }
 
-    pub fn capture(
-        installation: &Installation,
-        selection: &Selection,
-        text: &str,
-    ) -> Result<Option<Self>, InstallError> {
+    pub fn capture(installation: &Installation, text: &str) -> Result<Option<Self>, InstallError> {
         let parsed = document(text)?;
         let declared = strings(&parsed, true)?;
-        let includes = manual_includes(text, selection)?;
+        let includes = manual_includes(text)?;
         if declared.is_empty() && includes.is_empty() {
             return Ok(None);
         }
@@ -460,27 +458,15 @@ impl Snapshot {
     }
 
     /// Rebase only declared references. Policy and argv are not interpreted.
-    pub fn rebase(
-        &self,
-        text: &str,
-        selection: &Selection,
-        installation: &Installation,
-        exporting: bool,
-    ) -> Result<String, InstallError> {
-        self.rebase_at(text, selection, &installation.config, exporting)
+    pub fn rebase(&self, text: &str, installation: &Installation, exporting: bool) -> Result<String, InstallError> {
+        self.rebase_at(text, &installation.config, exporting)
     }
 
     /// Render declared references for a destination without opening that path.
     /// This also supports Linux container paths when preparation runs elsewhere.
-    pub(super) fn rebase_at(
-        &self,
-        text: &str,
-        selection: &Selection,
-        config: &Path,
-        exporting: bool,
-    ) -> Result<String, InstallError> {
+    pub(super) fn rebase_at(&self, text: &str, config: &Path, exporting: bool) -> Result<String, InstallError> {
         let mut document = document(text)?;
-        for path in manual_includes(text, selection)? {
+        for path in manual_includes(text)? {
             let windows_prefix = path.as_bytes().get(1) == Some(&b':');
             if Path::new(&path).is_absolute() || path.contains(['\\', '\0']) || windows_prefix {
                 return Err(invalid(
@@ -503,7 +489,7 @@ impl Snapshot {
             let actual: BTreeSet<_> = if bundle {
                 strings(&document, true)?
             } else {
-                manual_includes(text, selection)?
+                manual_includes(text)?
             }
             .into_iter()
             .collect();
@@ -591,7 +577,7 @@ impl Installation {
     pub(super) fn verify_selected_files(&self, selection: &Selection, text: &str) -> Result<(), InstallError> {
         if let Some(snapshot) = self.selected_files(selection)? {
             snapshot.verify_modes()?;
-            snapshot.rebase(text, selection, self, true)?;
+            snapshot.rebase(text, self, true)?;
         }
         Ok(())
     }
@@ -666,15 +652,7 @@ mod tests {
         let replica = tempfile::tempdir().unwrap();
         let replica_install = Installation::open(&replica.path().join("moved.toml")).unwrap();
         replica_install.retain(&imported).unwrap();
-        let (mut selected, imported_text) = imported.imported().unwrap().configuration(&replica_install).unwrap();
-        let imported_text = selected
-            .relocate(
-                &imported_text,
-                imported.generation().clone(),
-                replica_install.config_path(),
-                imported.marketplace(),
-            )
-            .unwrap();
+        let (selected, imported_text) = imported.imported().unwrap().configuration(&replica_install).unwrap();
         replica_install
             .commit_config(None, imported_text.as_bytes(), &selected)
             .unwrap();
@@ -700,18 +678,10 @@ mod tests {
         let third = tempfile::tempdir().unwrap();
         let third_install = Installation::open(&third.path().join("third.toml")).unwrap();
         third_install.retain(&imported_again).unwrap();
-        let (mut selected, text) = imported_again
+        let (selected, text) = imported_again
             .imported()
             .unwrap()
             .configuration(&third_install)
-            .unwrap();
-        let text = selected
-            .relocate(
-                &text,
-                imported_again.generation().clone(),
-                third_install.config_path(),
-                imported_again.marketplace(),
-            )
             .unwrap();
         third_install.commit_config(None, text.as_bytes(), &selected).unwrap();
         execute_helpers(third_install.config_path());
@@ -727,11 +697,10 @@ mod tests {
     fn missing_and_changed_sources_are_not_silently_omitted() {
         let root = tempfile::tempdir().unwrap();
         let installation = Installation::open(&root.path().join("appa.toml")).unwrap();
-        let selection = super::super::tests::selection();
         let text = format!("[bundle]\nfiles=['data']\n{BASE}");
-        assert!(Snapshot::capture(&installation, &selection, &text).is_err());
+        assert!(Snapshot::capture(&installation, &text).is_err());
         fs::write(root.path().join("data"), "original").unwrap();
-        let snapshot = Snapshot::capture(&installation, &selection, &text).unwrap().unwrap();
+        let snapshot = Snapshot::capture(&installation, &text).unwrap().unwrap();
         fs::write(root.path().join("data"), "changed").unwrap();
         assert!(matches!(snapshot.verify_sources(), Err(InstallError::Changed(_))));
         fs::write(snapshot.root.join("unlisted"), "unlisted").unwrap();
@@ -742,15 +711,14 @@ mod tests {
     fn oversized_and_colliding_files_and_forged_targets_are_refused() {
         let root = tempfile::tempdir().unwrap();
         let installation = Installation::open(&root.path().join("appa.toml")).unwrap();
-        let selection = super::super::tests::selection();
         let path = root.path().join("data");
         let file = File::create(&path).unwrap();
         file.set_len(appa_package::tree::MAX_UNCOMPRESSED_BYTES + 1).unwrap();
         let text = format!("[bundle]\nfiles=['data']\n{BASE}");
-        assert!(Snapshot::capture(&installation, &selection, &text).is_err());
+        assert!(Snapshot::capture(&installation, &text).is_err());
         fs::write(&path, "data").unwrap();
-        assert!(Snapshot::capture(&installation, &selection, &format!("include=['data']\n{text}")).is_err());
-        let mut snapshot = Snapshot::capture(&installation, &selection, &text).unwrap().unwrap();
+        assert!(Snapshot::capture(&installation, &format!("include=['data']\n{text}")).is_err());
+        let mut snapshot = Snapshot::capture(&installation, &text).unwrap().unwrap();
         let member = snapshot.manifest.files.remove("tree/data").unwrap();
         snapshot.manifest.files.insert("../escape".into(), member);
         snapshot.manifest.declared.insert("data".into(), "../escape".into());
@@ -769,20 +737,12 @@ mod tests {
         use std::os::unix::fs::symlink;
         let root = tempfile::tempdir().unwrap();
         let installation = Installation::open(&root.path().join("appa.toml")).unwrap();
-        let selection = super::super::tests::selection();
         fs::create_dir(root.path().join("real")).unwrap();
         fs::write(root.path().join("real/data"), "data").unwrap();
         symlink("real", root.path().join("alias")).unwrap();
         symlink("real/data", root.path().join("link")).unwrap();
         for path in ["alias/data", "link"] {
-            assert!(
-                Snapshot::capture(
-                    &installation,
-                    &selection,
-                    &format!("[bundle]\nfiles=['{path}']\n{BASE}")
-                )
-                .is_err()
-            );
+            assert!(Snapshot::capture(&installation, &format!("[bundle]\nfiles=['{path}']\n{BASE}")).is_err());
         }
         assert!(source_path(root.path(), Path::new("/dev/null")).is_err());
     }

@@ -9,7 +9,7 @@ use appa_package::{Marketplace, PackageKind, PackageName, Role};
 use clap::Args;
 use serde::Serialize;
 
-use super::{Acquired, InstallError, Installation, Requirements, Selection};
+use super::{Acquired, InstallError, Installation, Requirements, Selection, includes};
 
 #[derive(Debug, Args)]
 pub struct Target {
@@ -150,7 +150,7 @@ pub fn remove_plugin(args: PluginRemove) -> ExitCode {
         selection.deselect(
             PackageKind::Plugin,
             &PackageName::parse(&args.name).map_err(|error| InstallError::Invalid(error.to_string()))?,
-        )?;
+        );
         eprintln!("appa: verifying ownership and removing {} support...", args.name);
         installation.commit_installation(Some(&before), &before, &selection)?;
         Ok((
@@ -238,19 +238,13 @@ pub fn install_battery(args: BatteryInstall) -> ExitCode {
             ),
         };
         selection.select(PackageKind::Battery, &name);
-        let mut text = selection.relocate(
-            &text,
-            acquired.generation().clone(),
-            installation.config_path(),
-            acquired.marketplace(),
-        )?;
-        let include = selection.owned_include(installation.config_path(), acquired.marketplace(), &name)?;
-        text = selection.include_battery(&text, &name, &include)?;
+        selection.set_generation(acquired.generation().clone());
+        let mut text = includes::add(&text, &includes::battery_include(&name))?;
         if let Some(server) = &args.server {
             if battery.namespaces.len() != 1 {
                 return Err(InstallError::Invalid("this battery has multiple namespaces; configure server_aliases explicitly in the deployment config".into()));
             }
-            text = selection.associate_battery(&text, &name, battery.namespaces[0].as_str(), server)?;
+            text = includes::bind_server(&text, &battery.namespaces[0], server)?;
         }
         eprintln!("appa: validating and activating the selected policy...");
         installation.commit_installation(Some(&before), text.as_bytes(), &selection)?;
@@ -273,25 +267,18 @@ pub fn remove_battery(args: BatteryRemove) -> ExitCode {
         let mut selection = installation
             .selection()?
             .ok_or_else(|| InstallError::Invalid("no installed selection for this config".into()))?;
-        if !selection.batteries.contains(args.name.as_str()) {
+        let text = String::from_utf8(before.clone()).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let without = includes::remove(&text, &includes::battery_include(&args.name))?;
+        if without == text && !selection.batteries.contains(args.name.as_str()) {
             return Ok((
                 Some(Version::of(selection.generation())),
                 serde_json::json!({"battery": args.name.as_str(), "state": "unchanged"}),
             ));
         }
         let acquired = Acquired::retained(&installation, &selection, Requirements::Packages)?;
-        let catalog = Marketplace::read(&acquired.marketplace().join("marketplace.toml"))
-            .map_err(|error| InstallError::Invalid(error.to_string()))?;
-        let entry = catalog
-            .packages
-            .iter()
-            .find(|entry| entry.kind == PackageKind::Battery && entry.name == args.name)
-            .ok_or_else(|| InstallError::Invalid("selected battery is absent from its catalog".into()))?;
-        let text = String::from_utf8(before.clone()).map_err(|error| InstallError::Invalid(error.to_string()))?;
-        let text = selection.remove_battery_include(&text, &args.name)?;
-        let text = selection.remove_battery_aliases(&text, &args.name)?;
-        selection.deselect(PackageKind::Battery, &args.name)?;
-        installation.validate_removal(&text, &acquired.marketplace().join(entry.path.as_str()))?;
+        let (_, battery) = super::battery_package(acquired.marketplace(), args.name.as_str())?;
+        let text = includes::unbind_servers(&without, &battery.namespaces)?;
+        selection.deselect(PackageKind::Battery, &args.name);
         eprintln!("appa: validating and activating the remaining policy...");
         installation.commit_installation(Some(&before), text.as_bytes(), &selection)?;
         let prepared = prepared_directory(&installation)?;
@@ -541,7 +528,7 @@ pub fn install(args: Install) -> ExitCode {
                 .as_ref()
                 .is_some_and(|selection| selection.plugins.contains(&name));
             if first_install {
-                included = plugin.batteries().to_vec();
+                included = super::host_batteries(acquired.marketplace(), plugin.host())?;
             }
             let selected = current.unwrap_or_else(|| Selection::empty(acquired.generation().clone(), platform));
             let text = match before.as_deref() {
@@ -563,22 +550,30 @@ pub fn install(args: Install) -> ExitCode {
         if let Some(runtime) = args.runtime {
             selection.kagent_runtime = Some(runtime);
         }
-        let mut text = selection.relocate(
-            &text,
-            acquired.generation().clone(),
-            installation.config_path(),
-            acquired.marketplace(),
-        )?;
+        selection.set_generation(acquired.generation().clone());
+        let mut text = text;
         included.retain(|battery| !selection.batteries.contains(battery.as_str()));
         for battery in &included {
             selection.select(PackageKind::Battery, battery);
-            let include = selection.owned_include(installation.config_path(), acquired.marketplace(), battery)?;
-            text = selection.include_battery(&text, battery, &include)?;
+            text = includes::add(&text, &includes::battery_include(battery))?;
         }
         eprintln!("appa: verifying artifacts and preparing selected plugins...");
         installation.commit_installation(before.as_deref(), text.as_bytes(), &selection)?;
         let batteries: Vec<&str> = included.iter().map(PackageName::as_str).collect();
-        let result = if name == "kagent" {
+        // An existing config is the person's and is not edited; one without the
+        // host's own battery gates nothing a Claude session does, so the gap is named.
+        let warning = (name == "claude-code" && !includes::included(&text)?.contains("claude-code")).then(|| {
+            format!(
+                "{} does not include the claude-code battery: add \"{}\" to its include list, or {}",
+                installation.config_path().display(),
+                includes::battery_include(&PackageName::parse("claude-code").expect("a package name")),
+                crate::init::START_OVER
+            )
+        });
+        if let Some(warning) = &warning {
+            eprintln!("appa: warning: {warning}");
+        }
+        let mut result = if name == "kagent" {
             let installed = installation
                 .selection()?
                 .ok_or_else(|| InstallError::Invalid("installation selection is missing".into()))?;
@@ -589,6 +584,9 @@ pub fn install(args: Install) -> ExitCode {
         } else {
             serde_json::json!({"plugin": name, "state": "registered", "batteries": batteries, "runtime": "verified"})
         };
+        if let Some(warning) = warning {
+            result["warning"] = serde_json::Value::from(warning);
+        }
         Ok((Some(Version::of(selection.generation())), result))
     })();
     finish(&args.target, "plugin.install".into(), result)
@@ -692,6 +690,15 @@ fn listing(kind: PackageKind, target: &Target) -> Result<(Option<Version>, serde
         .as_ref()
         .map(|selection| selection.names(kind).clone())
         .unwrap_or_default();
+    // A battery is included by the config's own include list, whoever wrote
+    // the line, and stored when the store beside the config holds it.
+    let included = match (kind, super::optional_bytes(&path)?) {
+        (PackageKind::Battery, Some(bytes)) => {
+            includes::included(std::str::from_utf8(&bytes).map_err(|error| InstallError::Invalid(error.to_string()))?)?
+        }
+        _ => Default::default(),
+    };
+    let store = crate::batteries::store_dir(&path);
     let deployment = match (&selection, path.exists()) {
         (Some(_), _) => "installed",
         (None, true) => "unmanaged",
@@ -729,11 +736,19 @@ fn listing(kind: PackageKind, target: &Target) -> Result<(Option<Version>, serde
             let manifest = marketplace.join(entry.path.as_str()).join(appa_package::MANIFEST_FILE);
             let package =
                 appa_package::Package::read(&manifest).map_err(|error| InstallError::Invalid(error.to_string()))?;
-            Ok(serde_json::json!({
-                "name": entry.name.as_str(),
-                "installed": installed.contains(entry.name.as_str()),
-                "description": package.description,
-            }))
+            Ok(match kind {
+                PackageKind::Plugin => serde_json::json!({
+                    "name": entry.name.as_str(),
+                    "installed": installed.contains(entry.name.as_str()),
+                    "description": package.description,
+                }),
+                PackageKind::Battery => serde_json::json!({
+                    "name": entry.name.as_str(),
+                    "included": included.contains(entry.name.as_str()),
+                    "stored": store.join(entry.name.as_str()).join("appa.toml").is_file(),
+                    "description": package.description,
+                }),
+            })
         })
         .collect::<Result<Vec<_>, InstallError>>()?;
     let mut catalog = serde_json::json!({"source": source});
@@ -794,12 +809,16 @@ fn render_listing(output: &mut impl Write, kind: &str, result: &serde_json::Valu
             .max()
             .unwrap_or(0)
             .max(4);
-        writeln!(output, "{:<width$}  {:<11}  DESCRIPTION", "NAME", "STATUS")?;
+        writeln!(output, "{:<width$}  {:<12}  DESCRIPTION", "NAME", "STATUS")?;
         for package in packages {
             let status = if package["installed"] == true {
-                "● installed"
+                "● installed "
+            } else if package["included"] == true {
+                "● included  "
+            } else if package["stored"] == false {
+                "○ not stored"
             } else {
-                "○ available"
+                "○ available "
             };
             writeln!(
                 output,

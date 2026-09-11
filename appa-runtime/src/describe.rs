@@ -308,7 +308,7 @@ fn inspect(path: &Path, battery_dirs: &[PathBuf]) -> (ConfigDescription, PolicyD
                     .collect();
                 config.batteries = includes
                     .iter()
-                    .filter_map(|include| battery_name(Path::new(include)))
+                    .filter_map(|include| crate::batteries::name_from_include(Path::new(include)))
                     .collect();
                 let mut seen_batteries = BTreeSet::new();
                 config
@@ -363,10 +363,6 @@ fn describe_policy_value(policy_value: &toml::Value, bindings: Bindings<'_>, out
         }
         Err(error) => AudienceSide::Uncompiled(error),
     };
-}
-
-fn battery_name(path: &Path) -> Option<String> {
-    crate::batteries::name_from_include(path)
 }
 
 pub struct Description {

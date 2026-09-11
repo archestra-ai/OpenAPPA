@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use appa_package::generation::{ArtifactDigest, Commit, DESCRIPTOR_FILE, Generation, Platform};
-use appa_package::{Battery, Marketplace, Package, PackageEntry, PackageKind, PackageName, Role, TreeDigest};
+use appa_package::{Battery, Host, Marketplace, Package, PackageEntry, PackageKind, PackageName, Role, TreeDigest};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -15,9 +15,9 @@ const MAX_STATE_BYTES: u64 = 4 * 1024 * 1024;
 
 mod acquisition;
 pub(crate) mod archive;
-mod battery;
 pub mod cli;
 mod files;
+pub(crate) mod includes;
 mod kagent;
 mod kagent_images;
 pub mod native;
@@ -53,14 +53,6 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> InstallEr
     }
 }
 
-/// An installer-owned include. A pre-existing include is never adopted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OwnedInclude {
-    battery: String,
-    path: String,
-}
-
 /// Portable selection evidence. Package paths are derived from the catalog,
 /// never accepted as arbitrary paths from this mutable deployment record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,8 +63,6 @@ pub struct Selection {
     platform: Platform,
     plugins: BTreeSet<String>,
     batteries: BTreeSet<String>,
-    includes: Vec<OwnedInclude>,
-    aliases: Vec<battery::OwnedAlias>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     files: Option<ArtifactDigest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -82,64 +72,20 @@ pub struct Selection {
 }
 
 impl Selection {
-    /// Rebase only installer-owned include paths when a generation or config
-    /// filename changes. Authored policy and manual includes retain their order.
-    pub fn relocate(
-        &mut self,
-        text: &str,
-        generation: Generation,
-        config: &Path,
-        marketplace: &Path,
-    ) -> Result<String, InstallError> {
-        self.validate_owned_config(text)?;
-        let filename = config
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| InstallError::Invalid("config filename must be UTF-8".into()))?;
-        let mut document: toml_edit::DocumentMut = text
-            .parse()
-            .map_err(|error: toml_edit::TomlError| InstallError::Invalid(error.to_string()))?;
-        let mut proposed = self.clone();
-        proposed.generation = generation;
-        for owned in &mut proposed.includes {
-            let (entry, battery) = battery_package(marketplace, &owned.battery)?;
-            let replacement = owned_include_path(filename, proposed.generation.commit(), &entry, &battery);
-            let includes = document
-                .get_mut("include")
-                .and_then(toml_edit::Item::as_array_mut)
-                .expect("owned config validation checked includes");
-            let index = includes
-                .iter()
-                .position(|value| value.as_str() == Some(&owned.path))
-                .expect("owned config validation found each entry");
-            includes.replace(index, replacement.clone());
-            owned.path = replacement;
-        }
-        proposed.validate_packages(marketplace)?;
-        *self = proposed;
-        Ok(document.to_string())
-    }
-
-    /// The include path of a selected battery's policy as this selection retains
-    /// it, relative to the config `config` names.
-    pub fn owned_include(&self, config: &Path, marketplace: &Path, name: &PackageName) -> Result<String, InstallError> {
-        let filename = config
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| InstallError::Invalid("config filename must be UTF-8".into()))?;
-        let (entry, battery) = battery_package(marketplace, name.as_str())?;
-        Ok(owned_include_path(filename, self.commit(), &entry, &battery))
+    /// The version the selection is of. An install of another version moves
+    /// the whole deployment to it; the config's includes are not rewritten,
+    /// they resolve in the store the install fills.
+    pub fn set_generation(&mut self, generation: Generation) {
+        self.generation = generation;
     }
 
     pub fn empty(generation: Generation, platform: Platform) -> Self {
         Self {
-            schema: 1,
+            schema: 2,
             generation,
             platform,
             plugins: BTreeSet::new(),
             batteries: BTreeSet::new(),
-            includes: Vec::new(),
-            aliases: Vec::new(),
             files: None,
             kagent_runtime: None,
             kagent_assets: None,
@@ -172,14 +118,7 @@ impl Selection {
         .insert(name.to_string());
     }
 
-    pub fn deselect(&mut self, kind: PackageKind, name: &PackageName) -> Result<(), InstallError> {
-        if kind == PackageKind::Battery
-            && (self.includes.iter().any(|include| include.battery == name.as_str()) || self.owns_battery_aliases(name))
-        {
-            return Err(InstallError::Invalid(
-                "remove the battery's owned config entries before deselecting it".into(),
-            ));
-        }
+    pub fn deselect(&mut self, kind: PackageKind, name: &PackageName) {
         match kind {
             PackageKind::Plugin => &mut self.plugins,
             PackageKind::Battery => &mut self.batteries,
@@ -189,7 +128,6 @@ impl Selection {
             self.kagent_runtime = None;
             self.kagent_assets = None;
         }
-        Ok(())
     }
 
     fn validate(&self) -> Result<(), InstallError> {
@@ -200,7 +138,7 @@ impl Selection {
                 "kagent preparation does not match selected plugins".into(),
             ));
         }
-        if self.schema != 1 {
+        if self.schema != 2 {
             return Err(InstallError::Invalid("unsupported selection schema".into()));
         }
         if self
@@ -215,19 +153,6 @@ impl Selection {
         for name in self.plugins.iter().chain(&self.batteries) {
             PackageName::parse(name).map_err(|error| InstallError::Invalid(error.to_string()))?;
         }
-        let mut paths = BTreeSet::new();
-        let mut owners = BTreeSet::new();
-        for include in &self.includes {
-            if !self.batteries.contains(&include.battery)
-                || !paths.insert(&include.path)
-                || !owners.insert(&include.battery)
-            {
-                return Err(InstallError::Invalid("inconsistent owned include ledger".into()));
-            }
-            appa_package::RelativePath::parse(&include.path)
-                .map_err(|error| InstallError::Invalid(error.to_string()))?;
-        }
-        self.validate_aliases()?;
         Ok(())
     }
 
@@ -236,8 +161,6 @@ impl Selection {
     fn validate_packages(&self, marketplace: &Path) -> Result<(), InstallError> {
         self.validate()?;
         let packages = verify_packages(marketplace, &self.generation)?;
-        let catalog = Marketplace::read(&marketplace.join("marketplace.toml"))
-            .map_err(|error| InstallError::Invalid(error.to_string()))?;
         let mut hosts = Vec::new();
         for name in &self.plugins {
             let plugin = packages
@@ -267,125 +190,16 @@ impl Selection {
                     "battery {name} does not support every selected host"
                 )));
             }
-            self.validate_battery_aliases(name, &battery.namespaces)?;
-            if let Some(include) = self.includes.iter().find(|include| &include.battery == name) {
-                let entry = catalog
-                    .packages
-                    .iter()
-                    .find(|entry| entry.kind == PackageKind::Battery && entry.name.as_str() == name)
-                    .expect("verified packages and catalog have identical identities");
-                let segments: Vec<_> = include.path.split('/').collect();
-                if segments.len() < 6
-                    || segments[0] != ".appa"
-                    || segments[2] != "generations"
-                    || segments[3] != self.commit().as_str()
-                    || segments[4] != "marketplace"
-                    || segments[5..].join("/") != format!("{}/{}", entry.path, battery.policy)
-                {
-                    return Err(InstallError::Invalid(format!(
-                        "owned include for {name} does not name its selected package policy"
-                    )));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_owned_config(&self, text: &str) -> Result<(), InstallError> {
-        let document: toml_edit::DocumentMut = text
-            .parse()
-            .map_err(|error: toml_edit::TomlError| InstallError::Invalid(error.to_string()))?;
-        for owned in &self.includes {
-            let count = document
-                .get("include")
-                .and_then(toml_edit::Item::as_array)
-                .map(|includes| {
-                    includes
-                        .iter()
-                        .filter(|value| value.as_str() == Some(&owned.path))
-                        .count()
-                })
-                .unwrap_or(0);
-            if count != 1 {
+            // The include spelling names `appa.toml`; a battery kept elsewhere
+            // could not be included by name.
+            if battery.policy.as_str() != "appa.toml" {
                 return Err(InstallError::Invalid(format!(
-                    "owned include for {} was changed or duplicated",
-                    owned.battery
+                    "battery {name} keeps its policy in {}, not appa.toml",
+                    battery.policy
                 )));
             }
         }
-        self.validate_owned_aliases(&document)
-    }
-
-    /// Add only the include; package acquisition never creates an MCP server,
-    /// binds an authority, or obtains credentials.
-    pub fn include_battery(&mut self, text: &str, name: &PackageName, include: &str) -> Result<String, InstallError> {
-        appa_package::RelativePath::parse(include).map_err(|error| InstallError::Invalid(error.to_string()))?;
-        if !self.batteries.contains(name.as_str()) {
-            return Err(InstallError::Invalid(
-                "select the battery before adding its include".into(),
-            ));
-        }
-        let mut document: toml_edit::DocumentMut = text
-            .parse()
-            .map_err(|error: toml_edit::TomlError| InstallError::Invalid(error.to_string()))?;
-        if document.get("include").is_none() {
-            // Root keys must precede tables; toml_edit handles that without
-            // serializing the authored tables or changing their order.
-            document["include"] = toml_edit::value(toml_edit::Array::new());
-        }
-        let includes = document["include"]
-            .as_array_mut()
-            .ok_or_else(|| InstallError::Invalid("include must be an array".into()))?;
-        if includes.iter().any(|value| value.as_str().is_none()) {
-            return Err(InstallError::Invalid("include entries must be strings".into()));
-        }
-        if let Some(owned) = self.includes.iter().find(|entry| entry.battery == name.as_str())
-            && (owned.path != include
-                || includes
-                    .iter()
-                    .filter(|value| value.as_str() == Some(&owned.path))
-                    .count()
-                    != 1)
-        {
-            return Err(InstallError::Invalid(
-                "the owned battery include was changed; resolve it before installing".into(),
-            ));
-        }
-        if includes.iter().any(|value| value.as_str() == Some(include)) {
-            return Ok(text.to_owned());
-        }
-        includes.push(include);
-        self.includes.push(OwnedInclude {
-            battery: name.to_string(),
-            path: include.to_owned(),
-        });
-        Ok(document.to_string())
-    }
-
-    pub fn remove_battery_include(&mut self, text: &str, name: &PackageName) -> Result<String, InstallError> {
-        let Some(index) = self.includes.iter().position(|entry| entry.battery == name.as_str()) else {
-            return Ok(text.to_owned());
-        };
-        let mut document: toml_edit::DocumentMut = text
-            .parse()
-            .map_err(|error: toml_edit::TomlError| InstallError::Invalid(error.to_string()))?;
-        let includes = document
-            .get_mut("include")
-            .and_then(toml_edit::Item::as_array_mut)
-            .ok_or_else(|| InstallError::Invalid("the owned include was changed; resolve it before removing".into()))?;
-        let matches: Vec<_> = includes
-            .iter()
-            .enumerate()
-            .filter_map(|(i, value)| (value.as_str() == Some(&self.includes[index].path)).then_some(i))
-            .collect();
-        if matches.len() != 1 {
-            return Err(InstallError::Invalid(
-                "the owned include was changed or duplicated".into(),
-            ));
-        }
-        includes.remove(matches[0]);
-        self.includes.remove(index);
-        Ok(document.to_string())
+        Ok(())
     }
 }
 
@@ -399,77 +213,6 @@ pub struct Installation {
 }
 
 impl Installation {
-    fn validate_removal(&self, text: &str, removed: &Path) -> Result<(), InstallError> {
-        let parent = self.config.parent().expect("installation config has a parent");
-        let removed = fs::canonicalize(removed).map_err(|error| io("resolve removed battery", removed, error))?;
-        let document: toml::Value = toml::from_str(text).map_err(|error| InstallError::Invalid(error.to_string()))?;
-        for include in document
-            .get("include")
-            .and_then(toml::Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            if let Some(path) = include.as_str() {
-                let path = parent.join(path);
-                if fs::canonicalize(&path)
-                    .map_err(|error| io("resolve remaining include", &path, error))?
-                    .starts_with(&removed)
-                {
-                    return Err(InstallError::Invalid(
-                        "a manual include still references this battery; edit it explicitly before removal".into(),
-                    ));
-                }
-            }
-        }
-        let mut candidate =
-            tempfile::NamedTempFile::new_in(parent).map_err(|error| io("stage removal", parent, error))?;
-        candidate
-            .write_all(text.as_bytes())
-            .map_err(|error| io("write removal candidate", candidate.path(), error))?;
-        let config =
-            crate::config::Config::load(candidate.path()).map_err(|error| InstallError::Invalid(error.to_string()))?;
-        let externals = &config.externals;
-        let commands = externals
-            .authorities
-            .values()
-            .chain(externals.sanitizers.values())
-            .filter_map(|implementation| match implementation {
-                crate::config::Implementation::Command(command) => Some(command),
-                _ => None,
-            })
-            .chain(
-                externals
-                    .audience
-                    .values()
-                    .filter_map(|binding| match &binding.implementation {
-                        crate::config::AudienceImplementation::Command(command) => Some(command),
-                        _ => None,
-                    }),
-            )
-            .chain(
-                externals
-                    .annotators
-                    .values()
-                    .filter_map(|implementation| match implementation {
-                        crate::config::AnnotatorImplementation::Command(command) => Some(command),
-                        _ => None,
-                    }),
-            );
-        for command in commands {
-            if command.cwd.starts_with(&removed)
-                || command.argv.iter().any(|argument| {
-                    fs::canonicalize(command.cwd.join(argument)).is_ok_and(|path| path.starts_with(&removed))
-                })
-            {
-                return Err(InstallError::Invalid(
-                    "an external command still references this battery; edit its binding explicitly before removal"
-                        .into(),
-                ));
-            }
-        }
-        Ok(())
-    }
-
     /// Read-only inspection does not create directories or acquire a mutation
     /// lock. Atomic selection publication gives readers a complete record.
     /// Where this config's installation keeps its state, whether or not it exists yet.
@@ -616,17 +359,14 @@ impl Installation {
             .ok_or_else(|| InstallError::Invalid("no installed selection to export".into()))?;
         kagent::verify(self, &selection)?;
         let config = required_bytes(&self.config)?;
-        selection.validate_owned_config(
-            std::str::from_utf8(&config).map_err(|error| InstallError::Invalid(error.to_string()))?,
-        )?;
         crate::config::Config::load(&self.config).map_err(|error| InstallError::Invalid(error.to_string()))?;
         let text = std::str::from_utf8(&config).map_err(|error| InstallError::Invalid(error.to_string()))?;
         let (snapshot, exported_config) = if let Some(snapshot) = self.selected_files(&selection)? {
             self.verify_selected_files(&selection, text)?;
-            let portable = snapshot.rebase(text, &selection, self, true)?;
+            let portable = snapshot.rebase(text, self, true)?;
             (Some(snapshot), portable.into_bytes())
         } else {
-            (files::Snapshot::capture(self, &selection, text)?, config.clone())
+            (files::Snapshot::capture(self, text)?, config.clone())
         };
         selection.files = snapshot.as_ref().map(|snapshot| snapshot.digest.clone());
         let generation_root = self.state.join("generations").join(selection.commit().as_str());
@@ -743,9 +483,46 @@ impl Installation {
         Ok(destination)
     }
 
-    /// A journal covers only the non-atomic config/selection switch. Immutable
-    /// tree publication needs no journal. Host activation extends this same
-    /// record before it performs any external mutation.
+    /// The retained marketplace tree of a selection's version.
+    fn version_marketplace(&self, selection: &Selection) -> PathBuf {
+        self.state
+            .join("generations")
+            .join(selection.commit().as_str())
+            .join("marketplace")
+    }
+
+    /// The retained batteries tree of a selection's version.
+    fn version_batteries(&self, selection: &Selection) -> PathBuf {
+        self.version_marketplace(selection).join("batteries")
+    }
+
+    /// Every include spelled `batteries/<name>/appa.toml` names a battery the
+    /// version carries: the store holds nothing else once the commit fills it.
+    fn require_version_batteries(&self, selection: &Selection, text: &str) -> Result<(), InstallError> {
+        let tree = self.version_batteries(selection);
+        for name in includes::included(text)? {
+            if !tree.join(&name).join("appa.toml").is_file() {
+                return Err(InstallError::Invalid(format!(
+                    "the config includes batteries/{name}/appa.toml, and version {} has no battery {name}",
+                    selection.commit().as_str()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Replace the store with the selection's batteries.
+    fn stock_store(&self, selection: &Selection) -> Result<(), InstallError> {
+        let store = crate::batteries::store_dir(&self.config);
+        crate::batteries::stock(&self.version_batteries(selection), &store)
+            .map(|_| ())
+            .map_err(|error| io("fill the battery store", &store, error))
+    }
+
+    /// A journal covers only the non-atomic config/selection switch and the
+    /// store that switch fills. Immutable tree publication needs no journal.
+    /// Host activation extends this same record before it performs any
+    /// external mutation.
     pub fn commit_config(
         &self,
         before: Option<&[u8]>,
@@ -808,34 +585,29 @@ impl Installation {
     ) -> Result<(), InstallError> {
         self.recover_config()?;
         selection.validate()?;
-        selection.validate_owned_config(
-            std::str::from_utf8(after).map_err(|error| InstallError::Invalid(error.to_string()))?,
-        )?;
         self.verify_selected_files(
             selection,
             std::str::from_utf8(after).map_err(|error| InstallError::Invalid(error.to_string()))?,
         )?;
         if !selection.plugins.is_empty() || !selection.batteries.is_empty() {
-            selection.validate_packages(
-                &self
-                    .state
-                    .join("generations")
-                    .join(selection.commit().as_str())
-                    .join("marketplace"),
-            )?;
+            selection.validate_packages(&self.version_marketplace(selection))?;
         }
         if optional_bytes(&self.config)?.as_deref() != before {
             return Err(InstallError::Changed(self.config.clone()));
         }
         // Validate beside the real config, so relative user includes and
-        // package helper origins have exactly the activation-time meaning.
+        // package helper origins have exactly the activation-time meaning;
+        // battery includes read the version's tree, which the store will be.
         let parent = self.config.parent().expect("open resolves a config parent");
         let mut candidate =
             tempfile::NamedTempFile::new_in(parent).map_err(|error| io("stage config", parent, error))?;
         candidate
             .write_all(after)
             .map_err(|error| io("write candidate config", candidate.path(), error))?;
-        crate::config::Config::load(candidate.path()).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let text = std::str::from_utf8(after).map_err(|error| InstallError::Invalid(error.to_string()))?;
+        self.require_version_batteries(selection, text)?;
+        crate::config::Config::load_from(candidate.path(), &[self.version_batteries(selection)])
+            .map_err(|error| InstallError::Invalid(error.to_string()))?;
         let previous = self.selection()?;
         if activation == Activation::Claude {
             // Missing or mismatched executables fail before the config changes.
@@ -914,24 +686,17 @@ impl Installation {
         let current = optional_bytes(&self.config)?;
         if current.as_deref() == Some(&transaction.after) {
             let validate = || {
+                self.stock_store(&transaction.selection)?;
                 kagent::verify(self, &transaction.selection)?;
                 self.verify_selected_files(
                     &transaction.selection,
                     std::str::from_utf8(&transaction.after)
                         .map_err(|error| InstallError::Invalid(error.to_string()))?,
                 )?;
-                transaction.selection.validate_owned_config(
-                    std::str::from_utf8(&transaction.after)
-                        .map_err(|error| InstallError::Invalid(error.to_string()))?,
-                )?;
                 if !transaction.selection.plugins.is_empty() || !transaction.selection.batteries.is_empty() {
-                    transaction.selection.validate_packages(
-                        &self
-                            .state
-                            .join("generations")
-                            .join(transaction.selection.commit().as_str())
-                            .join("marketplace"),
-                    )?;
+                    transaction
+                        .selection
+                        .validate_packages(&self.version_marketplace(&transaction.selection))?;
                 }
                 crate::config::Config::load(&self.config).map_err(|error| InstallError::Invalid(error.to_string()))?;
                 Ok::<_, InstallError>(())
@@ -1262,13 +1027,28 @@ pub(crate) fn battery_package(marketplace: &Path, name: &str) -> Result<(Package
     }
 }
 
-/// The one spelling of an installer-owned include: the battery policy inside the
-/// retained marketplace of `commit`, relative to the config file's directory.
-fn owned_include_path(filename: &str, commit: &Commit, entry: &PackageEntry, battery: &Battery) -> String {
-    format!(
-        ".appa/{filename}/generations/{commit}/marketplace/{}/{}",
-        entry.path, battery.policy
-    )
+/// The batteries a first install of a plugin includes: for Claude Code, every
+/// battery of the version written for it. kagent selects its batteries
+/// through its guide, one at a time.
+pub(crate) fn host_batteries(marketplace: &Path, host: Host) -> Result<Vec<PackageName>, InstallError> {
+    match host {
+        Host::Kagent => return Ok(Vec::new()),
+        Host::ClaudeCode => {}
+    }
+    let catalog = Marketplace::read(&marketplace.join("marketplace.toml"))
+        .map_err(|error| InstallError::Invalid(error.to_string()))?;
+    let mut names = Vec::new();
+    for entry in catalog
+        .packages
+        .iter()
+        .filter(|entry| entry.kind == PackageKind::Battery)
+    {
+        let (_, battery) = battery_package(marketplace, entry.name.as_str())?;
+        if battery.hosts.contains(&host) {
+            names.push(entry.name.clone());
+        }
+    }
+    Ok(names)
 }
 
 #[cfg(test)]
@@ -1383,6 +1163,30 @@ mod tests {
         Generation::parse(&serde_json::to_vec(&document).unwrap()).unwrap()
     }
 
+    /// A first Claude Code install includes every battery of the version written
+    /// for it; a kagent install includes none, its guide adds them one at a time.
+    #[test]
+    fn a_first_claude_code_install_includes_every_battery_written_for_it() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace");
+        let claude = host_batteries(&source, Host::ClaudeCode).unwrap();
+        let catalog = Marketplace::read(&source.join("marketplace.toml")).unwrap();
+        for entry in catalog
+            .packages
+            .iter()
+            .filter(|entry| entry.kind == PackageKind::Battery)
+        {
+            let (_, battery) = battery_package(&source, entry.name.as_str()).unwrap();
+            assert_eq!(
+                claude.contains(&entry.name),
+                battery.hosts.contains(&Host::ClaudeCode),
+                "{}",
+                entry.name
+            );
+        }
+        assert!(claude.iter().any(|name| name.as_str() == "claude-code"));
+        assert!(host_batteries(&source, Host::Kagent).unwrap().is_empty());
+    }
+
     #[test]
     fn shipped_github_battery_supports_both_plugins_together() {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace");
@@ -1433,21 +1237,20 @@ mod tests {
         assert!(!install.config_path().exists());
         assert!(install.selection().unwrap().is_none());
         let github = PackageName::parse("github").unwrap();
-        let mut forged_alias = selected.clone();
-        forged_alias
-            .associate_battery("", &github, "other-provider", "work")
-            .unwrap();
-        assert!(forged_alias.validate_packages(&published.join("marketplace")).is_err());
         let base = "# authored deployment\n[policy]\nversion=2\n[externals]\ntimeout_ms=100\nmax_body_bytes=1024\n";
-        let include = format!(
-            ".appa/appa.toml/generations/{}/marketplace/batteries/github/appa.toml",
-            generation.commit()
-        );
-        let with_include = selected.include_battery(base, &github, &include).unwrap();
-        let with_alias = selected
-            .associate_battery(&with_include, &github, "github", "work-github")
-            .unwrap();
+        let store = crate::batteries::store_dir(install.config_path());
+        let with_include = includes::add(base, &includes::battery_include(&github)).unwrap();
+        let with_alias = includes::bind_server(
+            &with_include,
+            &appa_package::Namespace::parse("github").unwrap(),
+            "work-github",
+        )
+        .unwrap();
+        let stray = includes::add(&with_alias, "batteries/stray/appa.toml").unwrap();
+        assert!(install.commit_config(None, stray.as_bytes(), &selected).is_err());
+        assert!(!store.exists(), "a refused commit leaves the store alone");
         install.commit_config(None, with_alias.as_bytes(), &selected).unwrap();
+        assert!(store.join("github/appa.toml").is_file(), "the commit fills the store");
         let effective = crate::config::Config::load(install.config_path()).unwrap();
         assert_eq!(effective.server_aliases["github"], "work-github");
         assert_eq!(
@@ -1455,9 +1258,10 @@ mod tests {
             Some("mcp/github/read")
         );
         let mut removed = selected.clone();
-        let without_include = removed.remove_battery_include(&with_alias, &github).unwrap();
-        let without_alias = removed.remove_battery_aliases(&without_include, &github).unwrap();
-        removed.deselect(PackageKind::Battery, &github).unwrap();
+        let without_include = includes::remove(&with_alias, &includes::battery_include(&github)).unwrap();
+        let without_alias =
+            includes::unbind_servers(&without_include, &[appa_package::Namespace::parse("github").unwrap()]).unwrap();
+        removed.deselect(PackageKind::Battery, &github);
         install
             .commit_config(Some(with_alias.as_bytes()), without_alias.as_bytes(), &removed)
             .unwrap();
@@ -1502,43 +1306,6 @@ mod tests {
         drop(first);
         assert!(lock_path.is_file());
         assert!(Installation::open(&path).is_ok());
-    }
-
-    #[test]
-    fn include_edit_preserves_authored_content_and_never_adopts_manual_entries() {
-        let battery = PackageName::parse("github").unwrap();
-        let path = ".appa/appa.toml/generations/abc/marketplace/batteries/github/appa.toml";
-        let original = "# my policy\n[policy]\nversion = 2\n# keep this order\n[[policy.tool]]\nname = 'Read'\n";
-        let mut selected = selection();
-        selected.select(PackageKind::Battery, &battery);
-        let added = selected.include_battery(original, &battery, path).unwrap();
-        assert!(added.contains(original));
-        assert_eq!(selected.include_battery(&added, &battery, path).unwrap(), added);
-        assert_eq!(selected.includes.len(), 1);
-        let removed = selected.remove_battery_include(&added, &battery).unwrap();
-        assert!(removed.contains(original));
-        assert!(selected.includes.is_empty());
-        let mut manual = selection();
-        manual.select(PackageKind::Battery, &battery);
-        assert_eq!(manual.include_battery(&added, &battery, path).unwrap(), added);
-        assert!(manual.includes.is_empty());
-        assert_eq!(manual.remove_battery_include(&added, &battery).unwrap(), added);
-    }
-
-    #[test]
-    fn changed_owned_include_is_not_removed() {
-        let mut selected = selection();
-        let battery = PackageName::parse("github").unwrap();
-        selected.select(PackageKind::Battery, &battery);
-        let added = selected
-            .include_battery("[policy]\nversion = 2\n", &battery, "owned.toml")
-            .unwrap();
-        assert!(
-            selected
-                .remove_battery_include(&added.replace("owned.toml", "custom.toml"), &battery)
-                .is_err()
-        );
-        assert_eq!(selected.includes.len(), 1);
     }
 
     #[test]
@@ -1611,23 +1378,6 @@ mod tests {
         assert!(!journal.exists());
         assert!(install.recover_config().is_ok());
         assert!(install.selection().unwrap().is_none());
-    }
-
-    #[test]
-    fn deselection_cannot_discard_ownership_without_removing_the_config_entries() {
-        let mut selection = selection();
-        let name = PackageName::parse("github").unwrap();
-        selection.select(PackageKind::Battery, &name);
-        let included = selection.include_battery("", &name, "owned.toml").unwrap();
-        let aliased = selection.associate_battery(&included, &name, "github", "work").unwrap();
-        let before = selection.clone();
-        assert!(selection.deselect(PackageKind::Battery, &name).is_err());
-        assert_eq!(selection, before);
-        let no_include = selection.remove_battery_include(&aliased, &name).unwrap();
-        assert!(selection.deselect(PackageKind::Battery, &name).is_err());
-        selection.remove_battery_aliases(&no_include, &name).unwrap();
-        selection.deselect(PackageKind::Battery, &name).unwrap();
-        assert!(selection.validate().is_ok());
     }
 
     #[test]

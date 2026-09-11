@@ -52,7 +52,7 @@ impl Imported {
     pub fn configuration(&self, installation: &super::Installation) -> Result<(Selection, String), InstallError> {
         let config = if let Some(snapshot) = &self.snapshot {
             // Check all authored mappings before publishing even immutable files.
-            let config = snapshot.rebase(&self.config, &self.selection, installation, false)?;
+            let config = snapshot.rebase(&self.config, installation, false)?;
             snapshot.publish(installation)?;
             config
         } else {
@@ -142,7 +142,6 @@ impl Acquired {
         }
         let config = String::from_utf8(super::required_bytes(&unpacked.join("config.toml"))?)
             .map_err(|error| InstallError::Invalid(error.to_string()))?;
-        selection.validate_owned_config(&config)?;
         let snapshot = selection
             .files
             .as_ref()
@@ -151,7 +150,7 @@ impl Acquired {
         if snapshot.is_none() && unpacked.join("snapshot").exists() {
             return Err(InstallError::Invalid("bundle has an unselected custom snapshot".into()));
         }
-        if snapshot.is_none() && super::files::requires_snapshot(&config, &selection)? {
+        if snapshot.is_none() && super::files::requires_snapshot(&config)? {
             return Err(InstallError::Invalid(
                 "bundle is missing its declared custom files or manual includes".into(),
             ));

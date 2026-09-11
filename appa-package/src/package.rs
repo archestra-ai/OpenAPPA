@@ -90,12 +90,9 @@ pub struct Battery {
 pub enum Plugin {
     ClaudeCode {
         default_policy: RelativePath,
-        /// Batteries a first install of this plugin includes with it.
-        batteries: Vec<PackageName>,
     },
     Kagent {
         default_policy: RelativePath,
-        batteries: Vec<PackageName>,
         images: BTreeMap<ImageName, ImageReference>,
     },
 }
@@ -113,14 +110,6 @@ impl Plugin {
     pub fn default_policy(&self) -> &RelativePath {
         match self {
             Self::ClaudeCode { default_policy, .. } | Self::Kagent { default_policy, .. } => default_policy,
-        }
-    }
-
-    /// The batteries a first install of this plugin includes with it. Later
-    /// installs leave the battery selection to the person.
-    pub fn batteries(&self) -> &[PackageName] {
-        match self {
-            Self::ClaudeCode { batteries, .. } | Self::Kagent { batteries, .. } => batteries,
         }
     }
 }
@@ -283,8 +272,6 @@ struct RawPlugin {
     host: String,
     protocol: u32,
     default_policy: String,
-    #[serde(default)]
-    batteries: Vec<String>,
     images: Option<BTreeMap<String, String>>,
 }
 
@@ -301,21 +288,6 @@ impl RawPlugin {
             });
         }
         let default_policy = relative(&self.default_policy, "plugin.default_policy", path)?;
-        let mut batteries = Vec::new();
-        for battery in &self.batteries {
-            let battery = PackageName::parse(battery).map_err(|source| ManifestError::Name {
-                path: path.to_path_buf(),
-                field: "plugin.batteries".to_owned(),
-                source,
-            })?;
-            if batteries.contains(&battery) {
-                return Err(ManifestError::RepeatedBattery {
-                    path: path.to_path_buf(),
-                    battery: battery.to_string(),
-                });
-            }
-            batteries.push(battery);
-        }
         let absent = |present: bool, field: &'static str| match present {
             true => Err(ManifestError::FieldNotForHost {
                 path: path.to_path_buf(),
@@ -333,10 +305,7 @@ impl RawPlugin {
         match host {
             Host::ClaudeCode => {
                 absent(self.images.is_some(), "images")?;
-                Ok(Plugin::ClaudeCode {
-                    default_policy,
-                    batteries,
-                })
+                Ok(Plugin::ClaudeCode { default_policy })
             }
             Host::Kagent => {
                 let declared = self.images.ok_or_else(|| missing("images"))?;
@@ -353,11 +322,7 @@ impl RawPlugin {
                     })?;
                     images.insert(name, reference);
                 }
-                Ok(Plugin::Kagent {
-                    default_policy,
-                    batteries,
-                    images,
-                })
+                Ok(Plugin::Kagent { default_policy, images })
             }
         }
     }
@@ -453,7 +418,6 @@ mod tests {
             package.plugin().unwrap(),
             &Plugin::ClaudeCode {
                 default_policy: RelativePath::parse("default.appa.toml").unwrap(),
-                batteries: Vec::new(),
             }
         );
     }

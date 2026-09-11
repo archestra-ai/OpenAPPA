@@ -79,17 +79,18 @@ mail, messages, or files merely to infer an identity.
 ### Find useful batteries
 
 Run `appa battery list --json --config <live-path>`. It names every battery
-of the installed version, whether the deployment includes it, and the
-version's commit as `catalog.commit`. The batteries themselves are retained
+of the installed version, whether the deployment includes it (`included`),
+whether the store holds it (`stored`), and the version's commit as
+`catalog.commit`. The batteries themselves are in the deployment's store
 beside the config:
 
 ```sh
-<config-dir>/.appa/<config-name>/generations/<commit>/marketplace/batteries/
+<config-dir>/batteries/<name>/appa.toml
 ```
 
 where `<config-dir>/<config-name>` is the live config path. A battery the
-root config already includes is named there by the same path, relative to
-the config.
+root config includes is named by that path relative to the config,
+`batteries/<name>/appa.toml`.
 
 Match a battery by the tool names in its `appa.toml`, not by its name or
 description. For a matched battery, read only its `appa.toml` and README.
@@ -221,10 +222,10 @@ After approval:
    `appa battery install <name> --config <live-path>`, adding
    `--server <connection-id>` when the host reports the connection under
    another identity. The command adds the battery's `appa.toml` to the root
-   `include` list from the installed version, validates the result, and
-   reloads the runtime. Never copy a battery directory or write its include
-   by hand: `appa battery list` and `appa battery remove` recognize only
-   includes the command wrote, and a version move updates only those.
+   `include` list as `batteries/<name>/appa.toml`, validates the result, and
+   reloads the runtime. Never copy a battery directory: the store beside the
+   config already holds every battery of the installed version, and an
+   install replaces the directory.
 3. Add any root support the battery requires, such as its human-approval
    Authority. If an existing `builtin hitl` Authority handles the relevant
    attention mark but cannot review public audiences, expand its permits
