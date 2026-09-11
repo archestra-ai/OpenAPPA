@@ -3,7 +3,7 @@
 Rules for the Grain MCP server (meeting recordings, notes, transcripts,
 deals, and workspace settings). Add it to your root config with
 `include`. The root config must define an authority named `hitl`; see
-`examples/claude-code-battery/appa.toml`.
+[`examples/README.md`](../../../examples/README.md).
 
 ## Files
 

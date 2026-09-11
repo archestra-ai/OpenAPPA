@@ -303,7 +303,11 @@ When the operator approves a battery include and the ten demo cluster
 tools are already in serving policy and the battery's namespace already
 maps to the returned `server` in `server_aliases`, call `appa_include_battery`
 with that exact battery name and the policy key from the proposal's
-`appa_get_runtime_state`. The tool preserves the complete root policy,
+`appa_get_runtime_state`. A battery that binds an Annotator or an audience
+source reads `APPA_PROVIDER_<PROVIDER>_TOKEN` from the runtime pod: the
+chart's `env` values carry it, never the policy; the root maps `self` and
+`internal` onto the source's collections under `[policy.audience]` as the
+battery README shows. The tool preserves the complete root policy,
 updates only the runtime-owned ConfigMap, waits for kubelet sync, reloads,
 and rolls back on failure. Never synthesize a ConfigMap or invoke a separate
 reload. If the binding is absent, propose the include and

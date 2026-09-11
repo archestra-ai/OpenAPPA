@@ -139,7 +139,7 @@ and declaration checks. Run with `python3 -m unittest discover -s . -p
 
 ## Try it against GitHub
 
-[`examples/github-battery`](../../../examples/github-battery) replays
+[`examples/live-replays/github`](../../../examples/live-replays/github) replays
 one public and one private repository through the battery with a real
 token: reads narrow to the private repository's collaborators, writes
 into it accept what they may see.

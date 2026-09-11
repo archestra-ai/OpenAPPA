@@ -1,7 +1,6 @@
 # Test the GitHub battery against GitHub
 
-This example uses `appa replay` to run the marketplace GitHub battery
-against real repositories. The battery's annotators call the GitHub API
+This replay runs the shipped GitHub battery against real repositories. The battery's annotators call the GitHub API
 and mark each repository's content `suspicious`; a public repository's
 content keeps a public audience, a private repository's narrows to the
 collection `@github:repo/<owner>/<repo>/collaborators`, which the
@@ -19,8 +18,8 @@ collaborators (push access). Then run:
 
 ```sh
 APPA_PROVIDER_GITHUB_TOKEN=... appa replay \
-  --config examples/github-battery/appa.toml \
-  examples/github-battery/github-battery.appa
+  --config examples/live-replays/github/appa.toml \
+  examples/live-replays/github/github-battery.appa
 ```
 
 The battery's unit tests need no token:
