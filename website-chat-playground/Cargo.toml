@@ -21,7 +21,7 @@ toml = { workspace = true }
 anyhow = "1"
 thiserror = "2"
 # Unguessable session ids.
-getrandom = "0.3"
+getrandom = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
