@@ -27,12 +27,13 @@ prompts: Claude Code ends such a subagent without the return check. The
 project and user agent directories and the installed plugins are
 scanned; agents passed on the command line are not.
 
-## Security scope: plugin first, proxy next
+## Security scope and implementation order
 
 The goal is to enforce the guarantees available through a Claude Code plugin
-and its bundled APPA runtime. An inference proxy is a possible extension,
-not a prerequisite for installing the plugin. Guarantees requiring an OS
-sandbox, filesystem interception, or a modified Claude Code are non-goals.
+and its bundled APPA runtime, then extend coverage through third-party isolation.
+An inference proxy remains a documented future extension, outside the current
+implementation sequence. Building a custom sandbox or modifying Claude Code
+is not a goal.
 Assume no process outside Claude Code edits workspace files. This does not
 exclude subprocesses launched by Claude Code itself.
 
@@ -58,12 +59,38 @@ Read/Write prevalidation coverage is not established. The constrained
 `appa claude-files` launcher is an experimental test path, not proof that a
 plugin installation disables native tools or implicit reads.
 
-The next plugin work is to integrate and test the runtime-owned file tools
-through the installed bundle, verify failure and interruption handling, and
-record which native paths remain unmediated. Tests must inspect actual file
-versions and observed results, not just hook responses. Incomplete operations
-currently retain a durable reservation and stop file calls; automatic recovery
-is not implemented. Recovery for runtime-owned operations remains in scope.
+### Implementation sequence
+
+1. **Sharpen the plugin without isolation or an inference proxy.** Integrate
+   and test runtime-owned Read/Write/Edit through the installed bundle. Verify
+   identity binding, failures, concurrent calls, interruption, and durable
+   state. Record native paths that remain unmediated. Tests must inspect actual
+   file versions and observations, not just hook responses, and include live
+   agentic exercises. Incomplete operations currently retain a durable
+   reservation and stop file calls; automatic recovery is not implemented.
+   Recovery for runtime-owned operations remains in scope.
+2. **Add mediated file-to-file Copy/Move.** File bytes need not enter model
+   context for their Labels to propagate. Pin source and destination versions,
+   retain the source's Label contribution, check the destination flow, and
+   record the resulting version/path change. Treat returned acknowledgements
+   and errors separately as trajectory observations. Initially support regular
+   files within one managed workspace; refuse unsupported directory, link,
+   and cross-filesystem cases. Test overwrite, identical bytes with different
+   Labels, copy/move followed by Read, and interruption without losing Labels.
+   This stage covers runtime-owned operations, not arbitrary Bash `cp` or `mv`.
+3. **Integrate third-party isolation.** Evaluate agentsh or an equivalent
+   backend for subprocess file, process, and network enforcement. Require
+   verified capabilities and refuse execution on confinement setup failure.
+   Start with enforced input/output boundaries and conservative combination of
+   all accessible input Labels, rather than relying on audit events arriving
+   before effects. Reuse the file-version and publication contracts from stage
+   two. Test descendant processes, forbidden accesses, network attempts, and
+   restart behavior before claiming coverage of shell `cp` and `mv`.
+
+Copy/Move precedes isolation because its Label and persistence contracts are
+needed by either execution backend. Actual shell-command coverage still
+depends on enforcing that commands use the isolated backend; recognizing a
+command name does not establish mediation.
 
 ### Capabilities deferred to an inference proxy
 
@@ -83,19 +110,19 @@ For requests actually routed through it, a proxy could:
 These capabilities are not implemented. A proxy does not undo a local
 pre-hook observation or gate locally generated tool output, diagnostics, or
 arbitrary subprocess traffic. Proxy coverage requires requests to use it;
-preventing all bypass connections would require enforcement beyond this scope.
+preventing bypass connections requires separately verified network isolation.
 
-### Non-goals for a plugin plus inference proxy
+### Non-goals and unclaimed coverage
 
-- Complete native filesystem mediation, including pre-hook validation,
-  implicit harness reads, and local output that neither layer can intercept.
-- Precise dependencies or confinement for arbitrary Bash, child processes,
-  background jobs, and other tools' hidden filesystem or network effects.
-  Supported contracts may conservatively bound flows; shell parsing or a
-  before/after directory diff cannot prove which inputs a process read.
-- Protection against a process that can disable the plugin, modify policy or
-  ledger files, or bypass the proxy. Execution controls remain trusted host
-  state; a private directory alone is not an OS access boundary.
+- Building APPA's own OS sandbox or a modified Claude Code distribution.
+- Complete native filesystem mediation until a backend has demonstrated
+  interception of those paths, including pre-hook validation and implicit reads.
+  Confining shell children alone does not establish coverage of the parent.
+- Precise per-value dependencies inside arbitrary programs. Supported contracts
+  may conservatively bound flows; shell parsing or a before/after directory diff
+  cannot prove which inputs a process read.
+- Protection outside the verified confinement boundary. Execution controls
+  remain trusted host state; a private directory alone is not an OS access boundary.
 - Metadata and timing-flow guarantees, or protection against outside writers.
 
 Disabling or refusing a capability is a supported restriction, not evidence

@@ -7,9 +7,10 @@ their actions while the process is down. They do not intercept every
 observation or emission inside Claude Code; root Stop reports completion
 rather than gating visible output.
 
-The [security scope](../README.md#security-scope-plugin-first-proxy-next)
-separates plugin guarantees, potential inference-proxy capabilities, and
-non-goals. Native pre-hook file validation is a known gap. Runtime-owned
+The [security scope](../README.md#security-scope-and-implementation-order)
+orders plugin hardening, mediated Copy/Move, and third-party isolation;
+inference-proxy capabilities remain deferred. Native pre-hook file validation
+is a known gap. Runtime-owned
 file tools are experimental; installing the plugin does not establish
 exclusive use of those tools. The constrained `appa claude-files` launcher
 is a separate test path, not the plugin's deployment requirement.
