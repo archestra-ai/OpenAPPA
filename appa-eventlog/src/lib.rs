@@ -42,11 +42,106 @@ use std::sync::Mutex;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 pub use appa_engine::fact::Fact;
+use appa_engine::fact::{CheckpointId, CheckpointOpening, CheckpointSnapshot};
 use appa_engine::profile::PolicyFileKey;
 use appa_engine::value::TrajectoryId;
 use appa_runtime_api::{AdapterName, inventory::ToolInventory};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 9;
+const MAX_PROXY_EVENTS_PER_ROOT: i64 = 10_000;
+
+/// The durable result of admitting one proxy protocol event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProxyEventAdmission {
+    Started,
+    Replay(Vec<u8>),
+    Conflict,
+    InProgress,
+    Uncertain,
+    RootPending,
+    BudgetExceeded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyApprovalAdmission {
+    Started,
+    Consumed,
+}
+
+/// The immutable association between an offer and the call that surfaced it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyOfferBinding {
+    pub offer_id: String,
+    pub root_id: String,
+    pub tool: String,
+    pub arguments_sha256: String,
+    pub kind: String,
+    pub deployment_fingerprint: String,
+    pub batch_id: Option<String>,
+    pub position: Option<u32>,
+}
+
+/// The immutable association from a proxy lane-local call id to the engine dispatch it opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyDispatchBinding {
+    pub root_id: String,
+    pub lane_id: String,
+    pub call_id: String,
+    pub tool: String,
+    pub arguments_sha256: String,
+    pub dispatch: String,
+    pub spawn_binding: Option<String>,
+    pub deployment_fingerprint: String,
+    pub batch_id: Option<String>,
+    pub position: Option<u32>,
+}
+
+/// The completed receipt and immutable bindings produced by one proxy event.
+pub struct ProxyEventCompletion<'a> {
+    pub root_id: &'a str,
+    pub event_id: &'a str,
+    pub body_digest: &'a str,
+    pub response: &'a [u8],
+    pub bindings: &'a [ProxyOfferBinding],
+    pub dispatch_bindings: &'a [ProxyDispatchBinding],
+    pub approval_id: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyBatchBinding {
+    pub batch_id: String,
+    pub root_id: String,
+    pub lane_id: String,
+    pub core_batch_id: String,
+    pub positions: u32,
+    pub basis: u64,
+    pub deployment_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyBatchPosition {
+    pub batch_id: String,
+    pub position: u32,
+    pub call_id: String,
+    pub tool: String,
+    pub arguments_sha256: String,
+    pub arguments: String,
+    pub effective_tool: String,
+    pub effective_arguments_sha256: String,
+    pub effective_arguments: String,
+    pub dispatch: Option<String>,
+    pub spawn: bool,
+    pub spawn_binding: Option<String>,
+    pub authorized: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProxyStoreError {
+    #[error("proxy event storage failure: {0}")]
+    Storage(#[from] rusqlite::Error),
+    #[error("proxy event completion does not match a pending intent")]
+    LostIntent,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Backend {
@@ -92,6 +187,28 @@ pub struct InventoryObservation {
 enum Batch {
     Facts(Vec<Fact>),
     Inventory(InventoryObservation),
+}
+
+/// The opaque checkpoint a runtime issued from one settled root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checkpoint {
+    id: CheckpointId,
+    root: TrajectoryId,
+    snapshot: CheckpointSnapshot,
+}
+
+impl Checkpoint {
+    pub fn id(&self) -> &CheckpointId {
+        &self.id
+    }
+
+    pub fn root(&self) -> &TrajectoryId {
+        &self.root
+    }
+
+    pub fn snapshot(&self) -> &CheckpointSnapshot {
+        &self.snapshot
+    }
 }
 
 impl Log {
@@ -188,6 +305,15 @@ impl From<&AppendError> for StoreErrorClass {
     }
 }
 
+impl From<&CheckpointError> for StoreErrorClass {
+    fn from(error: &CheckpointError) -> Self {
+        match error {
+            CheckpointError::Conflict { .. } => StoreErrorClass::Conflict,
+            CheckpointError::IdConflict { .. } | CheckpointError::Storage(_) => StoreErrorClass::Storage,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
     #[error("the database at {path} is damaged: {detail}")]
@@ -239,6 +365,42 @@ pub enum AppendError {
     Injected,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum CheckpointError {
+    #[error("the log is at {current}, not the position this checkpoint was read at")]
+    Conflict { current: u64 },
+    #[error("checkpoint {id} already exists for another source or snapshot")]
+    IdConflict { id: String },
+    #[error("storage failure: {0}")]
+    Storage(#[from] rusqlite::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CheckpointLookupError {
+    #[error("checkpoint not found")]
+    Unknown,
+    #[error("a stored checkpoint does not decode: {0}")]
+    Undecodable(String),
+    #[error("storage failure: {0}")]
+    Storage(#[from] rusqlite::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ForkError {
+    #[error("no checkpoint with id {id} exists")]
+    UnknownCheckpoint { id: String },
+    #[error("the detached opening does not match its durable checkpoint")]
+    CheckpointMismatch,
+    #[error("the detached opening does not use the checkpoint policy")]
+    PolicyMismatch,
+    #[error("the target root {root} is already used by another trajectory")]
+    TargetExists { root: String },
+    #[error("the opening batch is not usable as one: {detail}")]
+    Malformed { detail: String },
+    #[error("storage failure: {0}")]
+    Storage(#[from] rusqlite::Error),
+}
+
 impl LogStore {
     /// Open the log. A fresh database gets the schema and its version stamp; an existing one is
     /// checked for damage and for a version this build understands, and refused otherwise.
@@ -279,8 +441,259 @@ impl LogStore {
                          PRIMARY KEY (root, seq)
                      );
                      CREATE TABLE policy_files (
-                         key   TEXT PRIMARY KEY,
-                         bytes BLOB NOT NULL
+                           key   TEXT PRIMARY KEY,
+                          bytes BLOB NOT NULL
+                     );
+                     CREATE TABLE proxy_events (
+                         root_id TEXT NOT NULL,
+                         event_id TEXT NOT NULL,
+                         body_digest TEXT NOT NULL,
+                         state TEXT NOT NULL CHECK (state IN ('pending', 'completed')),
+                         boot_owner TEXT NOT NULL,
+                         response BLOB,
+                         PRIMARY KEY (root_id, event_id)
+                     );
+                     CREATE TABLE proxy_offer_bindings (
+                         offer_id TEXT PRIMARY KEY,
+                         root_id TEXT NOT NULL,
+                         tool TEXT NOT NULL,
+                          arguments_sha256 TEXT NOT NULL,
+                          kind TEXT NOT NULL,
+                          deployment_fingerprint TEXT NOT NULL,
+                          batch_id TEXT,
+                          position INTEGER
+                     );
+                     CREATE TABLE proxy_approval_grants (
+                         approval_id TEXT PRIMARY KEY,
+                         root_id TEXT NOT NULL,
+                         event_id TEXT NOT NULL,
+                         body_digest TEXT NOT NULL,
+                          state TEXT NOT NULL CHECK (state IN ('pending', 'completed'))
+                     );
+                      CREATE TABLE proxy_dispatch_bindings (
+                           root_id TEXT NOT NULL,
+                           lane_id TEXT NOT NULL,
+                           call_id TEXT NOT NULL,
+                          tool TEXT NOT NULL,
+                          arguments_sha256 TEXT NOT NULL,
+                          dispatch TEXT NOT NULL,
+                           spawn_binding TEXT,
+                           deployment_fingerprint TEXT NOT NULL,
+                           batch_id TEXT,
+                           position INTEGER,
+                            PRIMARY KEY (root_id, lane_id, call_id)
+                      );
+                     CREATE TABLE proxy_batches (
+                           batch_id TEXT PRIMARY KEY,
+                           root_id TEXT NOT NULL,
+                           lane_id TEXT NOT NULL,
+                           core_batch_id TEXT NOT NULL,
+                           positions INTEGER NOT NULL,
+                           basis INTEGER NOT NULL,
+                           deployment_fingerprint TEXT NOT NULL
+                     );
+                     CREATE TABLE proxy_batch_positions (
+                           batch_id TEXT NOT NULL,
+                           position INTEGER NOT NULL,
+                           call_id TEXT NOT NULL,
+                           tool TEXT NOT NULL,
+                           arguments_sha256 TEXT NOT NULL,
+                           arguments TEXT NOT NULL,
+                           effective_tool TEXT NOT NULL,
+                           effective_arguments_sha256 TEXT NOT NULL,
+                           effective_arguments TEXT NOT NULL,
+                           dispatch TEXT,
+                           spawn INTEGER NOT NULL CHECK (spawn IN (0, 1)),
+                           spawn_binding TEXT,
+                           authorized INTEGER NOT NULL CHECK (authorized IN (0, 1)),
+                           PRIMARY KEY (batch_id, position),
+                           UNIQUE (batch_id, call_id)
+                     );
+                     CREATE TABLE proxy_batch_quarantines (
+                           batch_id TEXT PRIMARY KEY,
+                           reason TEXT NOT NULL
+                     );
+                     CREATE TABLE checkpoints (
+                         id          TEXT PRIMARY KEY,
+                         source_root TEXT NOT NULL,
+                         basis       INTEGER NOT NULL,
+                         policy_key  TEXT NOT NULL,
+                         snapshot    BLOB NOT NULL
+                     );",
+                )?;
+                transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            } else if version == 1 {
+                transaction.execute_batch(
+                    "CREATE TABLE proxy_events (
+                         root_id TEXT NOT NULL,
+                         event_id TEXT NOT NULL,
+                         body_digest TEXT NOT NULL,
+                         state TEXT NOT NULL CHECK (state IN ('pending', 'completed')),
+                         boot_owner TEXT NOT NULL,
+                         response BLOB,
+                         PRIMARY KEY (root_id, event_id)
+                     );
+                     CREATE TABLE proxy_offer_bindings (
+                         offer_id TEXT PRIMARY KEY,
+                         root_id TEXT NOT NULL,
+                         tool TEXT NOT NULL,
+                         arguments_sha256 TEXT NOT NULL,
+                         kind TEXT NOT NULL,
+                         deployment_fingerprint TEXT NOT NULL
+                     );
+                     CREATE TABLE proxy_approval_grants (
+                         approval_id TEXT PRIMARY KEY,
+                         root_id TEXT NOT NULL,
+                         event_id TEXT NOT NULL,
+                         body_digest TEXT NOT NULL,
+                          state TEXT NOT NULL CHECK (state IN ('pending', 'completed'))
+                     );
+                      CREATE TABLE proxy_dispatch_bindings (
+                           root_id TEXT NOT NULL,
+                           lane_id TEXT NOT NULL,
+                           call_id TEXT NOT NULL,
+                          tool TEXT NOT NULL,
+                          arguments_sha256 TEXT NOT NULL,
+                          dispatch TEXT NOT NULL,
+                          spawn_binding TEXT,
+                          deployment_fingerprint TEXT NOT NULL,
+                           PRIMARY KEY (root_id, lane_id, call_id)
+                     );",
+                )?;
+                transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            } else if version == 2 {
+                transaction.execute_batch(
+                    "ALTER TABLE proxy_offer_bindings ADD COLUMN deployment_fingerprint TEXT NOT NULL DEFAULT '';
+                     CREATE TABLE proxy_approval_grants (
+                         approval_id TEXT PRIMARY KEY,
+                         root_id TEXT NOT NULL,
+                         event_id TEXT NOT NULL,
+                         body_digest TEXT NOT NULL,
+                          state TEXT NOT NULL CHECK (state IN ('pending', 'completed'))
+                     );
+                      CREATE TABLE proxy_dispatch_bindings (
+                           root_id TEXT NOT NULL,
+                           lane_id TEXT NOT NULL,
+                           call_id TEXT NOT NULL,
+                          tool TEXT NOT NULL,
+                          arguments_sha256 TEXT NOT NULL,
+                          dispatch TEXT NOT NULL,
+                          spawn_binding TEXT,
+                          deployment_fingerprint TEXT NOT NULL,
+                           PRIMARY KEY (root_id, lane_id, call_id)
+                     );",
+                )?;
+                transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            } else if version == 3 {
+                transaction.execute_batch(
+                    "CREATE TABLE proxy_dispatch_bindings (
+                          root_id TEXT NOT NULL,
+                          lane_id TEXT NOT NULL,
+                          call_id TEXT NOT NULL,
+                         tool TEXT NOT NULL,
+                          arguments_sha256 TEXT NOT NULL,
+                          dispatch TEXT NOT NULL,
+                          spawn_binding TEXT,
+                          deployment_fingerprint TEXT NOT NULL,
+                          PRIMARY KEY (root_id, lane_id, call_id)
+                     );",
+                )?;
+                transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            } else if version == 4 {
+                transaction.execute_batch(
+                    "ALTER TABLE proxy_dispatch_bindings ADD COLUMN spawn_binding TEXT;
+                     ALTER TABLE proxy_dispatch_bindings RENAME TO proxy_dispatch_bindings_v4;
+                     CREATE TABLE proxy_dispatch_bindings (
+                         root_id TEXT NOT NULL,
+                         lane_id TEXT NOT NULL,
+                         call_id TEXT NOT NULL,
+                         tool TEXT NOT NULL,
+                         arguments_sha256 TEXT NOT NULL,
+                         dispatch TEXT NOT NULL,
+                         spawn_binding TEXT,
+                         deployment_fingerprint TEXT NOT NULL,
+                         PRIMARY KEY (root_id, lane_id, call_id)
+                     );
+                     INSERT INTO proxy_dispatch_bindings (root_id, lane_id, call_id, tool, arguments_sha256, dispatch, spawn_binding, deployment_fingerprint)
+                     SELECT root_id, 'kagent:' || root_id, call_id, tool, arguments_sha256, dispatch, spawn_binding, deployment_fingerprint
+                     FROM proxy_dispatch_bindings_v4;
+                     DROP TABLE proxy_dispatch_bindings_v4;",
+                )?;
+                transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            } else if version == 5 {
+                transaction.execute_batch(
+                    "ALTER TABLE proxy_dispatch_bindings RENAME TO proxy_dispatch_bindings_v5;
+                     CREATE TABLE proxy_dispatch_bindings (
+                         root_id TEXT NOT NULL,
+                         lane_id TEXT NOT NULL,
+                         call_id TEXT NOT NULL,
+                         tool TEXT NOT NULL,
+                         arguments_sha256 TEXT NOT NULL,
+                         dispatch TEXT NOT NULL,
+                         spawn_binding TEXT,
+                         deployment_fingerprint TEXT NOT NULL,
+                         PRIMARY KEY (root_id, lane_id, call_id)
+                     );
+                     INSERT INTO proxy_dispatch_bindings (root_id, lane_id, call_id, tool, arguments_sha256, dispatch, spawn_binding, deployment_fingerprint)
+                     SELECT root_id, 'kagent:' || root_id, call_id, tool, arguments_sha256, dispatch, spawn_binding, deployment_fingerprint
+                     FROM proxy_dispatch_bindings_v5;
+                     DROP TABLE proxy_dispatch_bindings_v5;",
+                )?;
+                transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            } else if version == 6 {
+                transaction.execute_batch(
+                    "ALTER TABLE proxy_offer_bindings ADD COLUMN batch_id TEXT;
+                     ALTER TABLE proxy_offer_bindings ADD COLUMN position INTEGER;
+                     ALTER TABLE proxy_dispatch_bindings ADD COLUMN batch_id TEXT;
+                     ALTER TABLE proxy_dispatch_bindings ADD COLUMN position INTEGER;
+                     CREATE TABLE proxy_batches (
+                           batch_id TEXT PRIMARY KEY,
+                           root_id TEXT NOT NULL,
+                           lane_id TEXT NOT NULL,
+                           core_batch_id TEXT NOT NULL,
+                           positions INTEGER NOT NULL,
+                           basis INTEGER NOT NULL,
+                           deployment_fingerprint TEXT NOT NULL
+                     );
+                     CREATE TABLE proxy_batch_positions (
+                           batch_id TEXT NOT NULL,
+                           position INTEGER NOT NULL,
+                           call_id TEXT NOT NULL,
+                           tool TEXT NOT NULL,
+                           arguments_sha256 TEXT NOT NULL,
+                           arguments TEXT NOT NULL,
+                           effective_tool TEXT NOT NULL,
+                           effective_arguments_sha256 TEXT NOT NULL,
+                           effective_arguments TEXT NOT NULL,
+                           dispatch TEXT,
+                           spawn INTEGER NOT NULL CHECK (spawn IN (0, 1)),
+                           spawn_binding TEXT,
+                           authorized INTEGER NOT NULL CHECK (authorized IN (0, 1)),
+                           PRIMARY KEY (batch_id, position),
+                           UNIQUE (batch_id, call_id)
+                     );
+                     CREATE TABLE proxy_batch_quarantines (
+                           batch_id TEXT PRIMARY KEY,
+                           reason TEXT NOT NULL
+                     );",
+                )?;
+                transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            } else if version == 7 {
+                transaction.execute_batch(
+                    "ALTER TABLE proxy_batch_positions ADD COLUMN spawn INTEGER NOT NULL DEFAULT 0 CHECK (spawn IN (0, 1));
+                     ALTER TABLE proxy_batch_positions ADD COLUMN spawn_binding TEXT;",
+                )?;
+                transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            } else if version == 8 {
+                // Checkpoints are independent durable snapshots, so this additive
+                // migration leaves proxy receipts and bindings untouched.
+                transaction.execute_batch(
+                    "CREATE TABLE checkpoints (
+                         id          TEXT PRIMARY KEY,
+                         source_root TEXT NOT NULL,
+                         basis       INTEGER NOT NULL,
+                         policy_key  TEXT NOT NULL,
+                         snapshot    BLOB NOT NULL
                      );",
                 )?;
                 transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -312,6 +725,11 @@ impl LogStore {
     /// root or none is.
     pub fn create_root(&self, opening: Vec<Fact>, policy_file: &[u8]) -> Result<TrajectoryId, CreateError> {
         let (root, key) = opened_by(&opening)?;
+        if checkpoint_opening(&opening).is_some() {
+            return Err(CreateError::Malformed {
+                detail: "a checkpoint opening must use fork_checkpoint".to_string(),
+            });
+        }
         if PolicyFileKey::of(policy_file) != key {
             return Err(CreateError::PolicyFileMismatch);
         }
@@ -340,6 +758,158 @@ impl LogStore {
             // commit would leave the file.
             return Err(CreateError::Injected);
         }
+        transaction.commit()?;
+        Ok(root)
+    }
+
+    /// Persist a runtime-issued checkpoint only while the root remains at the
+    /// view the runtime validated. Checkpoints never add a family fact, so the
+    /// source trajectory remains unchanged.
+    pub fn checkpoint(
+        &self,
+        based_on: &Log,
+        id: CheckpointId,
+        snapshot: CheckpointSnapshot,
+    ) -> Result<Checkpoint, CheckpointError> {
+        let snapshot_bytes = serde_json::to_vec(&snapshot).expect("checkpoint snapshots serialize");
+        let policy_key = PolicyFileKey::of(&based_on.policy_file);
+        let mut connection = self.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = position(&transaction, &based_on.root)?;
+        if current != based_on.basis {
+            return Err(CheckpointError::Conflict { current });
+        }
+        let existing: Option<(String, Vec<u8>)> = transaction
+            .query_row(
+                "SELECT source_root, snapshot FROM checkpoints WHERE id = ?1",
+                params![id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((source_root, stored)) = existing {
+            if source_root == based_on.root.as_str() && stored == snapshot_bytes {
+                return Ok(Checkpoint {
+                    id,
+                    root: based_on.root.clone(),
+                    snapshot,
+                });
+            }
+            return Err(CheckpointError::IdConflict {
+                id: id.as_str().to_string(),
+            });
+        }
+        transaction.execute(
+            "INSERT INTO checkpoints (id, source_root, basis, policy_key, snapshot) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                id.as_str(),
+                based_on.root.as_str(),
+                based_on.basis as i64,
+                policy_key.as_str(),
+                snapshot_bytes
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(Checkpoint {
+            id,
+            root: based_on.root.clone(),
+            snapshot,
+        })
+    }
+
+    /// Read the server-owned checkpoint record. The runtime uses the source
+    /// root to recover the exact policy bytes before it asks the core to build
+    /// the detached opening.
+    pub fn checkpoint_by_id(&self, id: &CheckpointId) -> Result<Checkpoint, CheckpointLookupError> {
+        let connection = self.lock();
+        let row: Option<(String, Vec<u8>)> = connection
+            .query_row(
+                "SELECT source_root, snapshot FROM checkpoints WHERE id = ?1",
+                params![id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((root, snapshot)) = row else {
+            return Err(CheckpointLookupError::Unknown);
+        };
+        let snapshot =
+            serde_json::from_slice(&snapshot).map_err(|error| CheckpointLookupError::Undecodable(error.to_string()))?;
+        Ok(Checkpoint {
+            id: id.clone(),
+            root: TrajectoryId::new(root),
+            snapshot,
+        })
+    }
+
+    /// Open a root from a durable checkpoint. The checkpoint and the opening
+    /// are verified in the same transaction that reserves the target id.
+    /// Repeating the exact request returns the existing root; every other
+    /// target reuse is refused.
+    pub fn fork_checkpoint(&self, opening: Vec<Fact>, policy_file: &[u8]) -> Result<TrajectoryId, ForkError> {
+        let (root, key) = opened_by(&opening).map_err(|error| ForkError::Malformed {
+            detail: error.to_string(),
+        })?;
+        if PolicyFileKey::of(policy_file) != key {
+            return Err(ForkError::PolicyMismatch);
+        }
+        let Some(checkpoint) = checkpoint_opening(&opening) else {
+            return Err(ForkError::Malformed {
+                detail: "the opening names no checkpoint".to_string(),
+            });
+        };
+        let snapshot_bytes = serde_json::to_vec(&checkpoint.snapshot).expect("checkpoint snapshots serialize");
+        let bytes = encode(&opening);
+        let mut connection = self.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let durable: Option<(String, String, Vec<u8>)> = transaction
+            .query_row(
+                "SELECT source_root, policy_key, snapshot FROM checkpoints WHERE id = ?1",
+                params![checkpoint.id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((source_root, policy_key, stored_snapshot)) = durable else {
+            return Err(ForkError::UnknownCheckpoint {
+                id: checkpoint.id.as_str().to_string(),
+            });
+        };
+        if policy_key != key.as_str() {
+            return Err(ForkError::PolicyMismatch);
+        }
+        if source_root == root.as_str() {
+            return Err(ForkError::TargetExists {
+                root: root.as_str().to_string(),
+            });
+        }
+        if stored_snapshot != snapshot_bytes {
+            return Err(ForkError::CheckpointMismatch);
+        }
+        let existing: Option<Vec<u8>> = transaction
+            .query_row(
+                "SELECT facts FROM logs WHERE root = ?1 AND seq = 0",
+                params![root.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            let existing = decode(&existing).map_err(|error| ForkError::Malformed {
+                detail: error.to_string(),
+            })?;
+            let same = matches!(existing, Batch::Facts(facts) if checkpoint_opening(&facts).is_some_and(|found| found == checkpoint));
+            if same {
+                return Ok(root);
+            }
+            return Err(ForkError::TargetExists {
+                root: root.as_str().to_string(),
+            });
+        }
+        transaction.execute(
+            "INSERT INTO policy_files (key, bytes) VALUES (?1, ?2) ON CONFLICT (key) DO NOTHING",
+            params![key.as_str(), policy_file],
+        )?;
+        transaction.execute(
+            "INSERT INTO logs (root, seq, facts) VALUES (?1, 0, ?2)",
+            params![root.as_str(), bytes],
+        )?;
         transaction.commit()?;
         Ok(root)
     }
@@ -414,6 +984,329 @@ impl LogStore {
         }
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Write the proxy request's intent before a runtime event can change the trajectory.
+    /// Pending rows deliberately have no lease: a process death leaves an uncertainty tombstone.
+    pub fn begin_proxy_event(
+        &self,
+        root_id: &str,
+        event_id: &str,
+        body_digest: &str,
+        boot_owner: &str,
+    ) -> Result<ProxyEventAdmission, ProxyStoreError> {
+        let mut connection = self.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<(String, String, String, Option<Vec<u8>>)> = transaction
+            .query_row(
+                "SELECT body_digest, state, boot_owner, response FROM proxy_events WHERE root_id = ?1 AND event_id = ?2",
+                params![root_id, event_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let admission = match existing {
+            Some((digest, _, _, _)) if digest != body_digest => ProxyEventAdmission::Conflict,
+            Some((_, state, _, Some(response))) if state == "completed" => ProxyEventAdmission::Replay(response),
+            Some((_, state, owner, _)) if state == "pending" && owner == boot_owner => ProxyEventAdmission::InProgress,
+            Some((_, state, _, _)) if state == "pending" => ProxyEventAdmission::Uncertain,
+            Some(_) => ProxyEventAdmission::Uncertain,
+            None => {
+                let pending: Option<i64> = transaction
+                    .query_row(
+                        "SELECT 1 FROM proxy_events WHERE root_id = ?1 AND state = 'pending' LIMIT 1",
+                        params![root_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if pending.is_some() {
+                    return Ok(ProxyEventAdmission::RootPending);
+                }
+                let count: i64 = transaction.query_row(
+                    "SELECT COUNT(*) FROM proxy_events WHERE root_id = ?1",
+                    params![root_id],
+                    |row| row.get(0),
+                )?;
+                if count >= MAX_PROXY_EVENTS_PER_ROOT {
+                    ProxyEventAdmission::BudgetExceeded
+                } else {
+                    transaction.execute(
+                        "INSERT INTO proxy_events (root_id, event_id, body_digest, state, boot_owner) VALUES (?1, ?2, ?3, 'pending', ?4)",
+                        params![root_id, event_id, body_digest, boot_owner],
+                    )?;
+                    ProxyEventAdmission::Started
+                }
+            }
+        };
+        transaction.commit()?;
+        Ok(admission)
+    }
+
+    /// Atomically cache a completed response and the offer bindings it surfaced.
+    pub fn complete_proxy_event(&self, completion: &ProxyEventCompletion<'_>) -> Result<(), ProxyStoreError> {
+        let mut connection = self.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
+            "UPDATE proxy_events SET state = 'completed', response = ?4 WHERE root_id = ?1 AND event_id = ?2 AND body_digest = ?3 AND state = 'pending'",
+            params![completion.root_id, completion.event_id, completion.body_digest, completion.response],
+        )?;
+        if changed != 1 {
+            return Err(ProxyStoreError::LostIntent);
+        }
+        for binding in completion.bindings {
+            transaction.execute(
+                "INSERT INTO proxy_offer_bindings (offer_id, root_id, tool, arguments_sha256, kind, deployment_fingerprint, batch_id, position) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![binding.offer_id, binding.root_id, binding.tool, binding.arguments_sha256, binding.kind, binding.deployment_fingerprint, binding.batch_id, binding.position],
+            )?;
+        }
+        for binding in completion.dispatch_bindings {
+            transaction.execute(
+                "INSERT INTO proxy_dispatch_bindings (root_id, lane_id, call_id, tool, arguments_sha256, dispatch, spawn_binding, deployment_fingerprint, batch_id, position) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![binding.root_id, binding.lane_id, binding.call_id, binding.tool, binding.arguments_sha256, binding.dispatch, binding.spawn_binding, binding.deployment_fingerprint, binding.batch_id, binding.position],
+            )?;
+        }
+        if let Some(approval_id) = completion.approval_id {
+            let changed = transaction.execute(
+                "UPDATE proxy_approval_grants SET state = 'completed' WHERE approval_id = ?1 AND root_id = ?2 AND event_id = ?3 AND body_digest = ?4 AND state = 'pending'",
+                params![approval_id, completion.root_id, completion.event_id, completion.body_digest],
+            )?;
+            if changed != 1 {
+                return Err(ProxyStoreError::LostIntent);
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Read the immutable binding that a later resolution must match exactly.
+    pub fn proxy_offer_binding(&self, offer_id: &str) -> Result<Option<ProxyOfferBinding>, ProxyStoreError> {
+        let connection = self.lock();
+        connection
+            .query_row(
+                "SELECT offer_id, root_id, tool, arguments_sha256, kind, deployment_fingerprint, batch_id, position FROM proxy_offer_bindings WHERE offer_id = ?1",
+                params![offer_id],
+                |row| {
+                    Ok(ProxyOfferBinding {
+                        offer_id: row.get(0)?,
+                        root_id: row.get(1)?,
+                        tool: row.get(2)?,
+                        arguments_sha256: row.get(3)?,
+                        kind: row.get(4)?,
+                        deployment_fingerprint: row.get(5)?,
+                        batch_id: row.get(6)?,
+                        position: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(ProxyStoreError::from)
+    }
+
+    /// Read the immutable dispatch mapping a later `tool_result` must use.
+    pub fn proxy_dispatch_binding(
+        &self,
+        root_id: &str,
+        lane_id: &str,
+        call_id: &str,
+    ) -> Result<Option<ProxyDispatchBinding>, ProxyStoreError> {
+        let connection = self.lock();
+        connection
+            .query_row(
+                "SELECT root_id, lane_id, call_id, tool, arguments_sha256, dispatch, spawn_binding, deployment_fingerprint, batch_id, position FROM proxy_dispatch_bindings WHERE root_id = ?1 AND lane_id = ?2 AND call_id = ?3",
+                params![root_id, lane_id, call_id],
+                |row| {
+                    Ok(ProxyDispatchBinding {
+                        root_id: row.get(0)?,
+                        lane_id: row.get(1)?,
+                        call_id: row.get(2)?,
+                        tool: row.get(3)?,
+                        arguments_sha256: row.get(4)?,
+                        dispatch: row.get(5)?,
+                        spawn_binding: row.get(6)?,
+                        deployment_fingerprint: row.get(7)?,
+                        batch_id: row.get(8)?,
+                        position: row.get(9)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(ProxyStoreError::from)
+    }
+
+    /// Persist a held batch before any client can be told about its offers. A duplicate write is
+    /// allowed only when every immutable field is identical; a reused UUID otherwise refuses.
+    pub fn create_proxy_batch(
+        &self,
+        batch: &ProxyBatchBinding,
+        positions: &[ProxyBatchPosition],
+    ) -> Result<bool, ProxyStoreError> {
+        let mut connection = self.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<(String, String, String, i64, i64, String)> = transaction
+            .query_row(
+                "SELECT root_id, lane_id, core_batch_id, positions, basis, deployment_fingerprint FROM proxy_batches WHERE batch_id = ?1",
+                params![batch.batch_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            let same = existing
+                == (
+                    batch.root_id.clone(),
+                    batch.lane_id.clone(),
+                    batch.core_batch_id.clone(),
+                    i64::from(batch.positions),
+                    i64::try_from(batch.basis).unwrap_or(i64::MAX),
+                    batch.deployment_fingerprint.clone(),
+                );
+            transaction.commit()?;
+            return Ok(same);
+        }
+        if positions.len() != batch.positions as usize
+            || positions
+                .iter()
+                .enumerate()
+                .any(|(index, position)| position.batch_id != batch.batch_id || position.position != index as u32)
+        {
+            return Err(ProxyStoreError::LostIntent);
+        }
+        transaction.execute(
+            "INSERT INTO proxy_batches (batch_id, root_id, lane_id, core_batch_id, positions, basis, deployment_fingerprint) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![batch.batch_id, batch.root_id, batch.lane_id, batch.core_batch_id, batch.positions, i64::try_from(batch.basis).unwrap_or(i64::MAX), batch.deployment_fingerprint],
+        )?;
+        for position in positions {
+            transaction.execute(
+                "INSERT INTO proxy_batch_positions (batch_id, position, call_id, tool, arguments_sha256, arguments, effective_tool, effective_arguments_sha256, effective_arguments, dispatch, spawn, spawn_binding, authorized) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![position.batch_id, position.position, position.call_id, position.tool, position.arguments_sha256, position.arguments, position.effective_tool, position.effective_arguments_sha256, position.effective_arguments, position.dispatch, position.spawn, position.spawn_binding, position.authorized],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    pub fn proxy_batch(&self, batch_id: &str) -> Result<Option<ProxyBatchBinding>, ProxyStoreError> {
+        let connection = self.lock();
+        connection
+            .query_row(
+                "SELECT batch_id, root_id, lane_id, core_batch_id, positions, basis, deployment_fingerprint FROM proxy_batches WHERE batch_id = ?1",
+                params![batch_id],
+                |row| Ok(ProxyBatchBinding {
+                    batch_id: row.get(0)?,
+                    root_id: row.get(1)?,
+                    lane_id: row.get(2)?,
+                    core_batch_id: row.get(3)?,
+                    positions: row.get(4)?,
+                    basis: u64::try_from(row.get::<_, i64>(5)?).unwrap_or(u64::MAX),
+                    deployment_fingerprint: row.get(6)?,
+                }),
+            )
+            .optional()
+            .map_err(ProxyStoreError::from)
+    }
+
+    /// Advance a held batch's expected family-log position only if no other batch has advanced
+    /// it first. The runtime has already verified that `next` is the position immediately after
+    /// the batch action it just admitted.
+    pub fn advance_proxy_batch_basis(&self, batch_id: &str, expected: u64, next: u64) -> Result<bool, ProxyStoreError> {
+        let changed = self.lock().execute(
+            "UPDATE proxy_batches SET basis = ?3 WHERE batch_id = ?1 AND basis = ?2",
+            params![
+                batch_id,
+                i64::try_from(expected).unwrap_or(i64::MAX),
+                i64::try_from(next).unwrap_or(i64::MAX)
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn proxy_batch_positions(&self, batch_id: &str) -> Result<Vec<ProxyBatchPosition>, ProxyStoreError> {
+        let connection = self.lock();
+        let mut statement = connection.prepare(
+                "SELECT batch_id, position, call_id, tool, arguments_sha256, arguments, effective_tool, effective_arguments_sha256, effective_arguments, dispatch, spawn, spawn_binding, authorized FROM proxy_batch_positions WHERE batch_id = ?1 ORDER BY position",
+        )?;
+        let positions = statement
+            .query_map(params![batch_id], |row| {
+                Ok(ProxyBatchPosition {
+                    batch_id: row.get(0)?,
+                    position: row.get(1)?,
+                    call_id: row.get(2)?,
+                    tool: row.get(3)?,
+                    arguments_sha256: row.get(4)?,
+                    arguments: row.get(5)?,
+                    effective_tool: row.get(6)?,
+                    effective_arguments_sha256: row.get(7)?,
+                    effective_arguments: row.get(8)?,
+                    dispatch: row.get(9)?,
+                    spawn: row.get(10)?,
+                    spawn_binding: row.get(11)?,
+                    authorized: row.get(12)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(positions)
+    }
+
+    pub fn update_proxy_batch_position(&self, position: &ProxyBatchPosition) -> Result<(), ProxyStoreError> {
+        let changed = self.lock().execute(
+            "UPDATE proxy_batch_positions SET effective_tool = ?3, effective_arguments_sha256 = ?4, effective_arguments = ?5, dispatch = ?6, spawn_binding = ?7, authorized = ?8 WHERE batch_id = ?1 AND position = ?2",
+            params![position.batch_id, position.position, position.effective_tool, position.effective_arguments_sha256, position.effective_arguments, position.dispatch, position.spawn_binding, position.authorized],
+        )?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(ProxyStoreError::LostIntent)
+        }
+    }
+
+    /// A quarantined batch has an unknown external boundary. It stays durable so a restart
+    /// cannot turn "did the authority/sanitizer act?" into permission to ask it again.
+    pub fn quarantine_proxy_batch(&self, batch_id: &str, reason: &str) -> Result<(), ProxyStoreError> {
+        self.lock().execute(
+            "INSERT OR IGNORE INTO proxy_batch_quarantines (batch_id, reason) VALUES (?1, ?2)",
+            params![batch_id, reason],
+        )?;
+        Ok(())
+    }
+
+    pub fn proxy_batch_quarantined(&self, batch_id: &str) -> Result<bool, ProxyStoreError> {
+        let quarantined: Option<i64> = self
+            .lock()
+            .query_row(
+                "SELECT 1 FROM proxy_batch_quarantines WHERE batch_id = ?1",
+                params![batch_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(quarantined.is_some())
+    }
+
+    /// Consume a signed approval grant before the runtime can consult its HITL authority.
+    pub fn begin_proxy_approval_grant(
+        &self,
+        approval_id: &str,
+        root_id: &str,
+        event_id: &str,
+        body_digest: &str,
+    ) -> Result<ProxyApprovalAdmission, ProxyStoreError> {
+        let mut connection = self.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<i64> = transaction
+            .query_row(
+                "SELECT 1 FROM proxy_approval_grants WHERE approval_id = ?1",
+                params![approval_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let admission = if existing.is_some() {
+            ProxyApprovalAdmission::Consumed
+        } else {
+            transaction.execute(
+                "INSERT INTO proxy_approval_grants (approval_id, root_id, event_id, body_digest, state) VALUES (?1, ?2, ?3, ?4, 'pending')",
+                params![approval_id, root_id, event_id, body_digest],
+            )?;
+            ProxyApprovalAdmission::Started
+        };
+        transaction.commit()?;
+        Ok(admission)
     }
 
     /// Arm the fail point: `skip` commits land normally and the one after them rolls back, as a
@@ -496,11 +1389,11 @@ fn consume(counter: &std::sync::atomic::AtomicU64) -> Option<u64> {
 
 fn has_schema(connection: &Connection) -> Result<bool, rusqlite::Error> {
     let found: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('logs', 'policy_files')",
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('logs', 'policy_files', 'proxy_events', 'proxy_offer_bindings', 'proxy_approval_grants', 'proxy_dispatch_bindings', 'proxy_batches', 'proxy_batch_positions', 'proxy_batch_quarantines', 'checkpoints')",
         [],
         |row| row.get(0),
     )?;
-    Ok(found == 2)
+    Ok(found == 10)
 }
 
 fn is_empty(connection: &Connection) -> Result<bool, rusqlite::Error> {
@@ -525,6 +1418,13 @@ fn opened_by(opening: &[Fact]) -> Result<(TrajectoryId, PolicyFileKey), CreateEr
         None => Err(CreateError::Malformed {
             detail: "the batch is empty".to_string(),
         }),
+    }
+}
+
+fn checkpoint_opening(opening: &[Fact]) -> Option<&CheckpointOpening> {
+    match opening.first() {
+        Some(Fact::TrajectoryOpened { checkpoint, .. }) => checkpoint.as_ref(),
+        _ => None,
     }
 }
 
@@ -653,6 +1553,24 @@ mod tests {
             .create_root(opening(&root()), POLICY.as_bytes())
             .expect("a fresh root opens");
         store
+    }
+
+    fn settled_snapshot(store: &LogStore) -> CheckpointSnapshot {
+        let log = store.log(&root()).expect("the source reads");
+        let engine = engine();
+        let view = engine
+            .view(&root(), log.facts().to_vec(), log.basis())
+            .expect("the source history validates");
+        engine
+            .checkpoint_snapshot(&view, &root())
+            .expect("an untouched root is quiescent")
+    }
+
+    fn checkpoint_opening(target: &TrajectoryId, id: CheckpointId, snapshot: CheckpointSnapshot) -> Vec<Fact> {
+        engine()
+            .open_trajectory_from_checkpoint(target, PolicyFileKey::of(POLICY.as_bytes()), Some((id, snapshot)))
+            .expect("the detached opening seals")
+            .into_unsealed()
     }
 
     #[test]
@@ -850,6 +1768,72 @@ mod tests {
     }
 
     #[test]
+    fn a_checkpoint_fork_is_atomic_idempotent_and_preserves_the_source() {
+        let store = opened();
+        let source = store.log(&root()).unwrap();
+        let snapshot = settled_snapshot(&store);
+        let id = CheckpointId::new("checkpoint-test");
+        store.checkpoint(&source, id.clone(), snapshot.clone()).unwrap();
+        assert_eq!(
+            store.log(&root()).unwrap(),
+            source,
+            "checkpointing does not append to its source"
+        );
+
+        let target = TrajectoryId::new("cc:detached");
+        let detached_opening = checkpoint_opening(&target, id.clone(), snapshot);
+        assert_eq!(
+            store
+                .fork_checkpoint(detached_opening.clone(), POLICY.as_bytes())
+                .unwrap(),
+            target
+        );
+        assert_eq!(
+            store.fork_checkpoint(detached_opening, POLICY.as_bytes()).unwrap(),
+            target,
+            "exact replay is idempotent"
+        );
+        assert!(
+            matches!(
+                store.fork_checkpoint(
+                    checkpoint_opening(&root(), id, settled_snapshot(&store)),
+                    POLICY.as_bytes()
+                ),
+                Err(ForkError::TargetExists { .. }),
+            ),
+            "a detached fork cannot alias its source root"
+        );
+        assert!(
+            matches!(
+                store.create_root(opening(&target), POLICY.as_bytes()),
+                Err(CreateError::AlreadyExists { .. }),
+            ),
+            "the detached root cannot be overwritten"
+        );
+    }
+
+    #[test]
+    fn checkpoints_survive_reopen_and_keep_their_exact_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("checkpoint.db");
+        let id = CheckpointId::new("checkpoint-restart");
+        let target = TrajectoryId::new("cc:after-restart");
+        {
+            let store = LogStore::open(Backend::Sqlite { path: path.clone() }).unwrap();
+            store.create_root(opening(&root()), POLICY.as_bytes()).unwrap();
+            let source = store.log(&root()).unwrap();
+            let snapshot = settled_snapshot(&store);
+            store.checkpoint(&source, id.clone(), snapshot).unwrap();
+        }
+        let store = LogStore::open(Backend::Sqlite { path }).unwrap();
+        let checkpoint = store.checkpoint_by_id(&id).unwrap();
+        assert_eq!(checkpoint.root().as_str(), root().as_str());
+        let opening = checkpoint_opening(&target, checkpoint.id().clone(), checkpoint.snapshot().clone());
+        store.fork_checkpoint(opening, POLICY.as_bytes()).unwrap();
+        assert!(store.log(&target).is_ok());
+    }
+
+    #[test]
     fn two_connections_serialize_through_the_conflict() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let path = dir.path().join("appa.db");
@@ -947,5 +1931,320 @@ mod tests {
         let first = opened();
         assert!(first.log(&root()).is_ok());
         assert!(matches!(memory().log(&root()), Err(ReadError::UnknownRoot { .. })));
+    }
+
+    #[test]
+    fn a_version_one_database_upgrades_without_touching_its_log() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.db");
+        let connection = Connection::open(&path).expect("the database opens");
+        connection
+            .execute_batch(
+                "CREATE TABLE logs (root TEXT NOT NULL, seq INTEGER NOT NULL, facts BLOB NOT NULL, PRIMARY KEY (root, seq));
+                 CREATE TABLE policy_files (key TEXT PRIMARY KEY, bytes BLOB NOT NULL);",
+            )
+            .expect("version one tables create");
+        connection
+            .pragma_update(None, "user_version", 1)
+            .expect("version one stamp lands");
+        drop(connection);
+
+        let store = LogStore::open(Backend::Sqlite { path }).expect("version one upgrades");
+        assert_eq!(
+            store
+                .begin_proxy_event("root", "event", "digest", "boot")
+                .expect("proxy intent persists"),
+            ProxyEventAdmission::Started
+        );
+    }
+
+    #[test]
+    fn schema_eight_upgrades_to_checkpoints_without_rewriting_proxy_receipts() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.db");
+        let store = LogStore::open(Backend::Sqlite { path: path.clone() }).expect("a fresh store opens");
+        assert_eq!(
+            store
+                .begin_proxy_event("root", "event", "digest", "boot")
+                .expect("proxy receipt persists"),
+            ProxyEventAdmission::Started
+        );
+        drop(store);
+
+        let connection = Connection::open(&path).expect("the database reopens");
+        connection
+            .execute_batch("DROP TABLE checkpoints; PRAGMA user_version = 8;")
+            .expect("the schema eight fixture is created");
+        drop(connection);
+
+        let store = LogStore::open(Backend::Sqlite { path: path.clone() }).expect("schema eight upgrades");
+        assert_eq!(
+            store
+                .begin_proxy_event("root", "event", "digest", "other-boot")
+                .expect("proxy receipt survives"),
+            ProxyEventAdmission::Uncertain
+        );
+        let connection = Connection::open(&path).expect("the upgraded database reopens");
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("the version reads");
+        let checkpoint_table: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'checkpoints'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the checkpoint table reads");
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(checkpoint_table, 1);
+    }
+
+    #[test]
+    fn proxy_events_replay_completed_rows_and_preserve_pending_tombstones() {
+        let store = memory();
+        assert_eq!(
+            store
+                .begin_proxy_event("root", "event", "a", "boot")
+                .expect("intent persists"),
+            ProxyEventAdmission::Started
+        );
+        assert_eq!(
+            store
+                .begin_proxy_event("root", "event", "a", "boot")
+                .expect("intent reads"),
+            ProxyEventAdmission::InProgress
+        );
+        assert_eq!(
+            store
+                .begin_proxy_event("root", "event", "a", "other")
+                .expect("intent reads"),
+            ProxyEventAdmission::Uncertain
+        );
+        assert_eq!(
+            store
+                .begin_proxy_event("root", "later", "a", "other")
+                .expect("root pending reads"),
+            ProxyEventAdmission::RootPending
+        );
+        assert_eq!(
+            store
+                .begin_proxy_event("root", "event", "b", "boot")
+                .expect("intent reads"),
+            ProxyEventAdmission::Conflict
+        );
+        store
+            .complete_proxy_event(&ProxyEventCompletion {
+                root_id: "root",
+                event_id: "event",
+                body_digest: "a",
+                response: br#"{"decision":"ack"}"#,
+                bindings: &[ProxyOfferBinding {
+                    offer_id: "offer".to_string(),
+                    root_id: "root".to_string(),
+                    tool: "tool".to_string(),
+                    arguments_sha256: "hash".to_string(),
+                    kind: "restriction".to_string(),
+                    deployment_fingerprint: "deployment".to_string(),
+                    batch_id: None,
+                    position: None,
+                }],
+                dispatch_bindings: &[ProxyDispatchBinding {
+                    root_id: "root".to_string(),
+                    lane_id: "kagent:root".to_string(),
+                    call_id: "call-1".to_string(),
+                    tool: "tool".to_string(),
+                    arguments_sha256: "hash".to_string(),
+                    dispatch: "dispatch".to_string(),
+                    spawn_binding: Some("spawn".to_string()),
+                    deployment_fingerprint: "deployment".to_string(),
+                    batch_id: None,
+                    position: None,
+                }],
+                approval_id: None,
+            })
+            .expect("completion persists");
+        assert_eq!(
+            store
+                .begin_proxy_event("root", "event", "a", "later")
+                .expect("completion replays"),
+            ProxyEventAdmission::Replay(br#"{"decision":"ack"}"#.to_vec())
+        );
+        assert_eq!(
+            store.proxy_offer_binding("offer").expect("binding reads"),
+            Some(ProxyOfferBinding {
+                offer_id: "offer".to_string(),
+                root_id: "root".to_string(),
+                tool: "tool".to_string(),
+                arguments_sha256: "hash".to_string(),
+                kind: "restriction".to_string(),
+                deployment_fingerprint: "deployment".to_string(),
+                batch_id: None,
+                position: None,
+            })
+        );
+        assert_eq!(
+            store
+                .proxy_dispatch_binding("root", "kagent:root", "call-1")
+                .expect("dispatch binding reads"),
+            Some(ProxyDispatchBinding {
+                root_id: "root".to_string(),
+                lane_id: "kagent:root".to_string(),
+                call_id: "call-1".to_string(),
+                tool: "tool".to_string(),
+                arguments_sha256: "hash".to_string(),
+                dispatch: "dispatch".to_string(),
+                spawn_binding: Some("spawn".to_string()),
+                deployment_fingerprint: "deployment".to_string(),
+                batch_id: None,
+                position: None,
+            })
+        );
+    }
+
+    #[test]
+    fn dispatch_bindings_are_scoped_to_their_actor_lane() {
+        let store = memory();
+        for (event_id, lane_id, dispatch) in [
+            ("parent-event", "kagent:root", "parent-dispatch"),
+            ("child-event", "kagent:root:child", "child-dispatch"),
+        ] {
+            assert_eq!(
+                store
+                    .begin_proxy_event("root", event_id, event_id, "boot")
+                    .expect("intent persists"),
+                ProxyEventAdmission::Started
+            );
+            store
+                .complete_proxy_event(&ProxyEventCompletion {
+                    root_id: "root",
+                    event_id,
+                    body_digest: event_id,
+                    response: br#"{"decision":"allow_calls"}"#,
+                    bindings: &[],
+                    dispatch_bindings: &[ProxyDispatchBinding {
+                        root_id: "root".to_string(),
+                        lane_id: lane_id.to_string(),
+                        call_id: "call-1".to_string(),
+                        tool: "fetch".to_string(),
+                        arguments_sha256: "hash".to_string(),
+                        dispatch: dispatch.to_string(),
+                        spawn_binding: None,
+                        deployment_fingerprint: "deployment".to_string(),
+                        batch_id: None,
+                        position: None,
+                    }],
+                    approval_id: None,
+                })
+                .expect("completion persists");
+        }
+        assert_eq!(
+            store
+                .proxy_dispatch_binding("root", "kagent:root", "call-1")
+                .expect("parent binding reads")
+                .map(|binding| binding.dispatch),
+            Some("parent-dispatch".to_string())
+        );
+        assert_eq!(
+            store
+                .proxy_dispatch_binding("root", "kagent:root:child", "call-1")
+                .expect("child binding reads")
+                .map(|binding| binding.dispatch),
+            Some("child-dispatch".to_string())
+        );
+    }
+
+    #[test]
+    fn held_batch_positions_keep_identical_calls_distinct_across_a_reopen() {
+        let directory = tempfile::tempdir().expect("temporary directory exists");
+        let path = directory.path().join("appa.db");
+        let first = LogStore::open(Backend::Sqlite { path: path.clone() }).expect("store opens");
+        let batch = ProxyBatchBinding {
+            batch_id: "123e4567-e89b-12d3-a456-426614174000".to_string(),
+            root_id: "root".to_string(),
+            lane_id: "kagent:root".to_string(),
+            core_batch_id: "123e4567-e89b-12d3-a456-426614174000".to_string(),
+            positions: 2,
+            basis: 7,
+            deployment_fingerprint: "deployment".to_string(),
+        };
+        let position = |index, dispatch: Option<&str>| ProxyBatchPosition {
+            batch_id: batch.batch_id.clone(),
+            position: index,
+            call_id: format!("call-{index}"),
+            tool: "same".to_string(),
+            arguments_sha256: "same-arguments".to_string(),
+            arguments: "{}".to_string(),
+            effective_tool: "same".to_string(),
+            effective_arguments_sha256: "same-arguments".to_string(),
+            effective_arguments: "{}".to_string(),
+            dispatch: dispatch.map(str::to_string),
+            spawn: false,
+            spawn_binding: None,
+            authorized: true,
+        };
+        assert!(
+            first
+                .create_proxy_batch(&batch, &[position(0, Some("dispatch-0")), position(1, None)])
+                .expect("mapping persists")
+        );
+        drop(first);
+
+        let reopened = LogStore::open(Backend::Sqlite { path }).expect("store reopens");
+        let positions = reopened.proxy_batch_positions(&batch.batch_id).expect("positions read");
+        assert_eq!(positions.len(), 2);
+        assert_eq!(positions[0].dispatch.as_deref(), Some("dispatch-0"));
+        assert_eq!(positions[1].dispatch, None);
+        assert_eq!(
+            positions[0].tool, positions[1].tool,
+            "identical calls retain their positions"
+        );
+    }
+
+    #[test]
+    fn held_batch_basis_advances_only_from_the_expected_position() {
+        let store = memory();
+        let batch = ProxyBatchBinding {
+            batch_id: "123e4567-e89b-12d3-a456-426614174009".to_string(),
+            root_id: "root".to_string(),
+            lane_id: "kagent:root".to_string(),
+            core_batch_id: "123e4567-e89b-12d3-a456-426614174009".to_string(),
+            positions: 1,
+            basis: 7,
+            deployment_fingerprint: "deployment".to_string(),
+        };
+        let position = ProxyBatchPosition {
+            batch_id: batch.batch_id.clone(),
+            position: 0,
+            call_id: "call".to_string(),
+            tool: "tool".to_string(),
+            arguments_sha256: "hash".to_string(),
+            arguments: "{}".to_string(),
+            effective_tool: "tool".to_string(),
+            effective_arguments_sha256: "hash".to_string(),
+            effective_arguments: "{}".to_string(),
+            dispatch: None,
+            spawn: false,
+            spawn_binding: None,
+            authorized: false,
+        };
+        assert!(store.create_proxy_batch(&batch, &[position]).expect("batch persists"));
+        assert!(
+            store
+                .advance_proxy_batch_basis(&batch.batch_id, 7, 8)
+                .expect("expected basis advances")
+        );
+        assert!(
+            !store
+                .advance_proxy_batch_basis(&batch.batch_id, 7, 9)
+                .expect("stale basis is refused")
+        );
+        assert_eq!(
+            store
+                .proxy_batch(&batch.batch_id)
+                .expect("batch reads")
+                .expect("batch exists")
+                .basis,
+            8
+        );
     }
 }

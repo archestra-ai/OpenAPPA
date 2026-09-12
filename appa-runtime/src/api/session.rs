@@ -6,14 +6,16 @@ use std::sync::Arc;
 use crate::elicit::Elicitation;
 
 use crate::consult::{
-    AnnotationAnswer, AnnotationArtifact, Consult, ConsultBody, LookupAnswer, MembersAnswer, SanitizerAnswer,
+    AnnotationAnswer, AnnotationArtifact, AuthorityReviewScope, Consult, ConsultBody, LookupAnswer, MembersAnswer,
+    SanitizerAnswer,
 };
 use crate::engine::{
-    AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback, ForkStatus,
-    Liveness, Next, OfferNonce, OpenDispatch, Presentation, RemedyArguments, engine_id,
+    AuthorityVerdict, BatchCallDecision, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest,
+    Feedback, ForkStatus, Liveness, Next, OfferNonce, OpenDispatch, Presentation, RemedyArguments, engine_id,
 };
 use crate::external::ConsultOutcome;
 use appa_engine::label::ReaderId;
+use appa_engine::profile::PolicyFileKey;
 
 use super::{
     ChildReturnDecision, Deployment, EventError, ExactCall, Inner, OfferId, OutcomeBody, ProposedCall, RemedyDecision,
@@ -129,16 +131,22 @@ const ENDED_CHILD: &str = "[appa] this subagent ended without a return; nothing 
 fn outcome_decision(decision: EngineDecision) -> Result<ToolResultDecision, EventError> {
     match decision.then {
         Next::PresentToModel(Presentation::KeepOutput) => Ok(ToolResultDecision::Keep),
-        Next::PresentToModel(Presentation::ReplaceOutput { placeholder, .. }) => {
-            Ok(ToolResultDecision::Replace { placeholder })
-        }
+        Next::PresentToModel(Presentation::ReplaceOutput { placeholder, .. }) => Ok(ToolResultDecision::Replace {
+            placeholder,
+            offers: Vec::new(),
+        }),
         // An admitted value delivered in place of the raw output, as it crossed.
         Next::PresentToModel(Presentation::Value { value }) => Ok(ToolResultDecision::Deliver { value }),
-        // The runtime's own words: the narrowing this result causes and the control call
-        // that accepts it.
-        Next::PresentToModel(Presentation::Blocked { feedback, .. }) => {
-            Ok(ToolResultDecision::Replace { placeholder: feedback })
-        }
+        Next::PresentToModel(Presentation::Blocked { feedback, offers }) => Ok(ToolResultDecision::Replace {
+            placeholder: feedback,
+            offers: offers
+                .into_iter()
+                .map(|id| appa_runtime_api::OfferedRemedy {
+                    id: id.0,
+                    returns: None,
+                })
+                .collect(),
+        }),
         _ => Err(EventError::UnexpectedDecision),
     }
 }
@@ -317,6 +325,77 @@ impl Session {
         }
     }
 
+    /// Decide one complete model response in one engine proposal batch. Unlike repeated
+    /// `on_tool_call` calls, every sibling is composed against the same snapshot and may open a
+    /// dispatch concurrently. The returned order is exactly the submitted order.
+    pub async fn on_tool_calls(&self, calls: Vec<(ProposedCall, bool)>) -> Result<Vec<BatchCallDecision>, EventError> {
+        self.on_tool_calls_with_id(None, calls).await
+    }
+
+    /// A proxy-held batch supplies the engine's proposal identity. This makes a retry bind the
+    /// same core `SubjectKey::Call { batch, position }`, rather than opening lookalike offers.
+    pub async fn on_tool_calls_with_id(
+        &self,
+        batch_id: Option<String>,
+        calls: Vec<(ProposedCall, bool)>,
+    ) -> Result<Vec<BatchCallDecision>, EventError> {
+        if calls.is_empty() {
+            return Err(EventError::UnexpectedDecision);
+        }
+        if calls
+            .iter()
+            .any(|(call, _)| self.substituted_release(call).ok().flatten().is_some())
+        {
+            return Err(EventError::CallOutstanding);
+        }
+        let spawns: Vec<usize> = calls
+            .iter()
+            .enumerate()
+            .filter_map(|(position, (_, spawn))| (*spawn).then_some(position))
+            .collect();
+        let [spawn] = spawns.as_slice() else {
+            if spawns.is_empty() {
+                return self.decide_tool_batch(batch_id, calls, None).await;
+            }
+            return Err(EventError::CallOutstanding);
+        };
+        let (spawn_call, _) = &calls[*spawn];
+        if self.inner.naming.spawn_coverage() == super::SpawnCoverage::Declared && !self.names_tool(&spawn_call.tool)? {
+            return Err(EventError::UndeclaredSpawn {
+                tool: spawn_call.tool.clone(),
+            });
+        }
+        self.decide_tool_batch(batch_id, calls, Some(*spawn)).await
+    }
+
+    async fn decide_tool_batch(
+        &self,
+        batch_id: Option<String>,
+        calls: Vec<(ProposedCall, bool)>,
+        spawn: Option<usize>,
+    ) -> Result<Vec<BatchCallDecision>, EventError> {
+        let proposed: Vec<ProposedCall> = calls.into_iter().map(|(call, _)| call).collect();
+        let decision = self
+            .drive_with_evidence(
+                |_, evidence| {
+                    Ok(EngineEvent::ModelResponseBatch {
+                        calls: proposed.clone(),
+                        evidence,
+                        entropy: fresh_entropy(),
+                        batch_id: batch_id.clone(),
+                        spawn,
+                    })
+                },
+                None,
+                None,
+            )
+            .await?;
+        match decision.then {
+            Next::ModelResponseBatch { calls } => Ok(calls),
+            _ => Err(EventError::UnexpectedDecision),
+        }
+    }
+
     /// Whether the serving policy writes a contract for this tool's exact name — the
     /// wildcard does not count. What a spawn needs under [`super::SpawnCoverage::Declared`].
     fn names_tool(&self, tool: &str) -> Result<bool, EventError> {
@@ -401,6 +480,35 @@ impl Session {
     pub async fn on_tool_result(&self, call: ProposedCall, o: ToolOutcome) -> Result<ToolResultDecision, EventError> {
         let o = self.cap_outcome(o);
         outcome_decision(self.report_outcome(&call, &o).await?)
+    }
+
+    /// Report a batch release by the engine-issued dispatch identity. The proxy persists this
+    /// identity with its client call id, so equal tool calls in one parallel batch cannot be
+    /// confused when their outcomes arrive in a different order.
+    pub async fn on_dispatch_result(
+        &self,
+        dispatch: appa_engine::value::DispatchId,
+        outcome: ToolOutcome,
+    ) -> Result<ToolResultDecision, EventError> {
+        if dispatch.trajectory() != &engine_id(&self.trajectory) {
+            return Err(EventError::UnknownDispatch);
+        }
+        let outcome = self.cap_outcome(outcome);
+        let decision = self
+            .drive_with_evidence(
+                |_, evidence| {
+                    Ok(EngineEvent::ToolOutcome {
+                        dispatch: dispatch.clone(),
+                        outcome: outcome.clone(),
+                        evidence,
+                        entropy: fresh_entropy(),
+                    })
+                },
+                None,
+                None,
+            )
+            .await?;
+        outcome_decision(decision)
     }
 
     async fn report_outcome(&self, call: &ProposedCall, o: &ToolOutcome) -> Result<EngineDecision, EventError> {
@@ -834,17 +942,17 @@ impl Session {
                 // consults run concurrently — an annotation consult can take a model call's
                 // seconds, and the batch should cost its slowest member, not their sum. With a
                 // reviewer they stay serial: one staged review on screen at a time.
-                Next::ResolveExternal(requests) => match elicitation {
-                    None => {
-                        // Batch-terminal: every sibling settles first; any no-answer
-                        // then aborts the invocation, discarding the siblings' answers,
-                        // before another engine round or any append.
+                Next::ResolveExternal(requests) => match (elicitation, ruling) {
+                    (None, None) => {
+                        // Batch-terminal: join_all settles every sibling first; any
+                        // no-answer then aborts the invocation, discarding the
+                        // siblings' answers, before another engine round or any append.
                         let consults = requests.into_iter().map(|request| self.consult(request, None, None));
                         for answered in crate::external::settle_batch(consults).await {
                             evidence.push(answered?);
                         }
                     }
-                    Some(_) => {
+                    (elicitation, ruling) => {
                         for request in requests {
                             let answered = self.consult(request, elicitation, ruling).await?;
                             evidence.push(answered);
@@ -891,6 +999,7 @@ impl Session {
                 }
             }
             let event = event(&context)?;
+            let permits_parallel_dispatches = matches!(event, EngineEvent::ModelResponseBatch { .. });
             if let EngineEvent::ChildReturn { child, .. } = &event
                 && !policy.engine().open_dispatches(&view, child).is_empty()
             {
@@ -904,7 +1013,7 @@ impl Session {
             let Some(facts) = decision.append.as_ref() else {
                 return Ok(decision);
             };
-            if policy.engine().opens_a_second_dispatch(&view, &self.trajectory, facts) {
+            if !permits_parallel_dispatches && policy.engine().opens_a_second_dispatch(&view, &self.trajectory, facts) {
                 return Err(EventError::CallOutstanding);
             }
             match self.inner.store.append(&log, facts) {
@@ -968,16 +1077,25 @@ impl Session {
     ) -> Result<ExternalEvidence, EventError> {
         Ok(match &request {
             ExternalRequest::Authority {
+                offer,
                 authority,
                 declaration,
                 artifact,
                 review,
             } => {
+                let log = self.inner.log(&self.root)?;
+                let mut artifact = artifact.clone();
+                artifact.review_scope = Some(AuthorityReviewScope {
+                    root_id: self.root.0.clone(),
+                    child_id: (self.trajectory != self.root).then(|| self.trajectory.0.clone()),
+                    offer_id: offer.0.clone(),
+                    opening_policy_fingerprint: PolicyFileKey::of(log.policy_file()).as_str().to_string(),
+                });
                 let consult = Consult {
                     name: authority.clone(),
                     body: ConsultBody::Authority {
                         declaration: declaration.clone(),
-                        artifact: artifact.clone(),
+                        artifact,
                     },
                 };
                 let verdict = match self.timed_consult(&consult, elicitation, ruling).await {
@@ -1204,8 +1322,8 @@ mod real_engine_tests {
     use super::*;
     use crate::api::{RemedyDecision, SpawnBinding, ToolCallDecision, ToolOutcome, ToolResultDecision};
     use crate::config::Config;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     /// One fixture configuration, from its whole TOML text. The file has
     /// to exist on disk because `Config::load` reads the policy file's
@@ -2395,6 +2513,158 @@ attention = ["irreversible"]
     }
 
     #[tokio::test]
+    async fn authority_artifacts_bind_the_active_root_offer_call_and_opening_policy() {
+        use axum::routing::post;
+
+        let observed = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let captured = Arc::clone(&observed);
+        let app = axum::Router::new().route(
+            "/",
+            post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let captured = Arc::clone(&captured);
+                async move {
+                    captured.lock().expect("the capture lock is live").push(body);
+                    axum::Json(serde_json::json!({"version": 1, "answer": {"ruling": "approve"}}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback listener binds");
+        let address = listener.local_addr().expect("the listener has an address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("the authority stub serves");
+        });
+
+        let authority_url = format!("http://{address}/");
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(
+            config_with(ATTENTION, Some(&authority_url)),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the deployment opens");
+        let session = runtime.create_session(root()).expect("a fresh id opens");
+        assert!(matches!(
+            session.on_tool_call(wire(500), false).await.unwrap(),
+            ToolCallDecision::Deny { .. }
+        ));
+        let first_quoted = runtime
+            .minted_offers(&root(), &root())
+            .into_iter()
+            .next()
+            .expect("the first block surfaces an offer");
+        let first_offer = surfaced_offer(&runtime);
+        assert!(matches!(
+            session
+                .on_remedy(first_offer.clone(), RemedyArguments::default(), None, None)
+                .await
+                .unwrap(),
+            RemedyDecision::Authorized { .. }
+        ));
+        assert!(matches!(
+            session.on_tool_call(wire(500), false).await.unwrap(),
+            ToolCallDecision::Allow { .. }
+        ));
+        session
+            .on_tool_result(
+                wire(500),
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("sent".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            session.on_tool_call(wire(501), false).await.unwrap(),
+            ToolCallDecision::Deny { .. }
+        ));
+        let second_offer = runtime
+            .minted_offers(&root(), &root())
+            .into_iter()
+            .last()
+            .and_then(|quoted| runtime.resolve_in(&root(), &quoted).map(|(offer, _)| offer))
+            .expect("the changed call surfaces a distinct offer");
+        assert!(matches!(
+            session
+                .on_remedy(second_offer.clone(), RemedyArguments::default(), None, None)
+                .await
+                .unwrap(),
+            RemedyDecision::Authorized { .. }
+        ));
+
+        let first_opening = {
+            let captured = observed.lock().expect("the capture lock is live");
+            assert_eq!(captured.len(), 2);
+            let first = &captured[0]["artifact"];
+            let second = &captured[1]["artifact"];
+            assert_eq!(first["review_scope"]["root_id"], root().0);
+            assert!(first["review_scope"].get("child_id").is_none());
+            assert_eq!(first["review_scope"]["offer_id"], first_quoted.0);
+            assert_ne!(
+                first["logical_action_digest"], second["logical_action_digest"],
+                "changed arguments are a new logical action"
+            );
+            assert_ne!(first["review_scope"]["offer_id"], second["review_scope"]["offer_id"]);
+            assert!(
+                first["review_scope"]["opening_policy_fingerprint"]
+                    .as_str()
+                    .is_some_and(|fingerprint| fingerprint.len() == 64)
+            );
+            first["review_scope"]["opening_policy_fingerprint"].clone()
+        };
+
+        let changed_opening = tempfile::tempdir().expect("a second temp dir is creatable");
+        let changed_policy = format!("{ATTENTION}\n[[policy.tool]]\nname = \"opening-revision\"\ndelta = {{}}\n");
+        let changed = Runtime::open(
+            config_with(&changed_policy, Some(&authority_url)),
+            changed_opening.path().join("appa.db"),
+            None,
+        )
+        .expect("the revised deployment opens");
+        let changed_root = TrajectoryId("cc:changed-opening".to_string());
+        let changed_session = changed
+            .create_session(changed_root.clone())
+            .expect("the revised root opens");
+        assert!(matches!(
+            changed_session.on_tool_call(wire(500), false).await.unwrap(),
+            ToolCallDecision::Deny { .. }
+        ));
+        let changed_offer = surfaced_offer_for(&changed, &changed_root, &changed_root);
+        assert!(matches!(
+            changed_session
+                .on_remedy(changed_offer, RemedyArguments::default(), None, None)
+                .await
+                .unwrap(),
+            RemedyDecision::Authorized { .. }
+        ));
+        let changed_opening = {
+            let captured = observed.lock().expect("the capture lock is live");
+            assert_eq!(
+                captured.len(),
+                3,
+                "a changed opening requires a fresh authority consult"
+            );
+            captured[2]["artifact"]["review_scope"]["opening_policy_fingerprint"].clone()
+        };
+        assert_ne!(
+            first_opening, changed_opening,
+            "a ruling cannot cross opening policy identities"
+        );
+
+        let other = runtime
+            .create_session(TrajectoryId("cc:other-root".to_string()))
+            .expect("a second root opens");
+        let cross_root = other
+            .on_remedy(first_offer, RemedyArguments::default(), None, None)
+            .await;
+        assert!(
+            !matches!(cross_root, Ok(RemedyDecision::Authorized { .. })),
+            "an approval offer cannot cross roots: {cross_root:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_denial_retires_plans_naming_the_denier_and_sticks() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let url = stub(serde_json::json!({"ruling": "deny", "reason": "no"})).await;
@@ -3432,7 +3702,8 @@ confined_results = ["leak"]
             ToolCallDecision::Deny { .. },
         ));
         let before = runtime.minted_offers(&root(), &root()).len();
-        let ToolResultDecision::Replace { placeholder } = run_sanitize_offer(&runtime, &mut session).await else {
+        let ToolResultDecision::Replace { placeholder, offers } = run_sanitize_offer(&runtime, &mut session).await
+        else {
             panic!("a staged derivation is delivered as a replacement, not kept");
         };
         assert!(
@@ -3443,6 +3714,7 @@ confined_results = ["leak"]
             runtime.minted_offers(&root(), &root()).len() > before,
             "the stage surfaced its own remedy for the narrowing the sanitizer left",
         );
+        assert!(!offers.is_empty(), "the output decision retains its sanitizer offers");
     }
 
     const PARTLY_CLEARED_CHILD: &str = r#"
@@ -3561,7 +3833,7 @@ context_control = true
             ToolCallDecision::Deny { .. },
         ));
         let decision = run_sanitize_offer(&runtime, &mut session).await;
-        let ToolResultDecision::Replace { placeholder } = decision else {
+        let ToolResultDecision::Replace { placeholder, .. } = decision else {
             panic!("the raw must be withheld");
         };
         assert!(!placeholder.contains("pii"), "the raw body never reaches the model");
@@ -3588,6 +3860,23 @@ delta = { trust = "suspicious" }
 [[policy.tool]]
 name = "bare"
 parameters = { type = "object", properties = { a = { type = "integer" } } }
+delta = {}
+
+[[policy.tool]]
+name = "private"
+parameters = { type = "object", properties = { a = { type = "integer" } } }
+delta = { audience = ["insider"] }
+
+[[policy.tool]]
+name = "trusted-only"
+parameters = { type = "object", properties = { a = { type = "integer" } } }
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "public-only"
+parameters = { type = "object", properties = { a = { type = "integer" } } }
+requires = { audience = { contains = ["public"] } }
 delta = {}
 
 [policy.deployment]
@@ -3672,6 +3961,198 @@ context_control = true
         let status = runtime.status(&root()).expect("the root answers");
         assert_eq!(status.trust, "suspicious", "the fold never widens");
         assert_eq!(status.audience, "public", "a neutral admission resolves cleanly");
+    }
+
+    #[tokio::test]
+    async fn a_detached_checkpoint_keeps_a_suspicious_sources_restrictive_label() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        admit_success(&runtime, &mut session, mark()).await;
+        let checkpoint = runtime.checkpoint(&root()).expect("the settled source checkpoints");
+        let detached = TrajectoryId("cc:detached".to_string());
+        runtime
+            .fork_checkpoint(
+                appa_runtime_api::AdapterName::ClaudeCode,
+                checkpoint.id,
+                detached.clone(),
+            )
+            .expect("the checkpoint opens an independent root");
+        let status = runtime.status(&detached).expect("the detached root answers");
+        assert_eq!(status.trust, "suspicious");
+        assert_eq!(status.audience, "public");
+        assert_eq!(runtime.status(&root()).expect("the source answers").trust, "suspicious");
+    }
+
+    #[tokio::test]
+    async fn a_detached_checkpoint_still_enforces_trust_and_audience_guards() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let mut source = runtime.create_session(root()).expect("a fresh id opens");
+        admit_success(&runtime, &mut source, mark()).await;
+        let checkpoint = runtime.checkpoint(&root()).expect("the settled source checkpoints");
+        let detached = TrajectoryId("cc:restricted-detached".to_string());
+        runtime
+            .fork_checkpoint(
+                appa_runtime_api::AdapterName::ClaudeCode,
+                checkpoint.id,
+                detached.clone(),
+            )
+            .expect("the checkpoint opens an independent root");
+        let fork = runtime.session(&detached, &detached).expect("the detached root opens");
+        for tool in ["trusted-only"] {
+            assert!(
+                matches!(
+                    fork.on_tool_call(
+                        ProposedCall {
+                            tool: tool.to_string(),
+                            arguments: raw(serde_json::json!({"a": 1})),
+                        },
+                        false,
+                    )
+                    .await
+                    .expect("the guard answers"),
+                    ToolCallDecision::Deny { .. },
+                ),
+                "the inherited restrictive label must deny {tool}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_detached_checkpoint_still_enforces_a_private_audience_guard() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let mut source = runtime.create_session(root()).expect("a fresh id opens");
+        admit_success(
+            &runtime,
+            &mut source,
+            ProposedCall {
+                tool: "private".to_string(),
+                arguments: raw(serde_json::json!({"a": 1})),
+            },
+        )
+        .await;
+        let checkpoint = runtime.checkpoint(&root()).expect("the settled source checkpoints");
+        let detached = TrajectoryId("cc:private-detached".to_string());
+        runtime
+            .fork_checkpoint(
+                appa_runtime_api::AdapterName::ClaudeCode,
+                checkpoint.id,
+                detached.clone(),
+            )
+            .expect("the checkpoint opens an independent root");
+        let fork = runtime.session(&detached, &detached).expect("the detached root opens");
+        assert!(matches!(
+            fork.on_tool_call(
+                ProposedCall {
+                    tool: "public-only".to_string(),
+                    arguments: raw(serde_json::json!({"a": 1})),
+                },
+                false,
+            )
+            .await
+            .expect("the audience guard answers"),
+            ToolCallDecision::Deny { .. },
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_detached_checkpoint_satisfies_a_history_requirement_from_a_completed_witness() {
+        let witness_url = stub(serde_json::json!({
+            "delta": {},
+            "requires": { "history": [], "attention": [] },
+            "emits": ["checkpoint-witness"],
+        }))
+        .await;
+        let gated_url = stub(serde_json::json!({
+            "delta": {},
+            "requires": { "history": [{ "contains": "checkpoint-witness" }], "attention": [] },
+            "emits": [],
+        }))
+        .await;
+        let config = config_from(&format!(
+            r#"[policy]
+version = 2
+[[policy.annotator]]
+name = "witness-annotator"
+audiences = ["insider"]
+effects = ["checkpoint-witness"]
+[[policy.annotator]]
+name = "history-annotator"
+audiences = ["insider"]
+[[policy.tool]]
+name = "witness"
+annotator = "witness-annotator"
+[[policy.tool]]
+name = "history-gated"
+annotator = "history-annotator"
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+[externals.annotators.witness-annotator]
+url = "{witness_url}"
+[externals.annotators.history-annotator]
+url = "{gated_url}"
+"#
+        ));
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
+        let source = runtime.create_session(root()).expect("a fresh id opens");
+        let witness = ProposedCall {
+            tool: "witness".to_string(),
+            arguments: raw(serde_json::json!({})),
+        };
+        assert!(matches!(
+            source
+                .on_tool_call(witness.clone(), false)
+                .await
+                .expect("the witness is admitted"),
+            ToolCallDecision::Allow { .. }
+        ));
+        assert_eq!(
+            source
+                .on_tool_result(
+                    witness,
+                    ToolOutcome::Success {
+                        body: OutcomeBody::Available("witnessed".to_string()),
+                    },
+                )
+                .await
+                .expect("the witness completes"),
+            ToolResultDecision::Keep
+        );
+        let source_audit = runtime.audit(&root()).expect("the source audit reads");
+        let checkpoint = runtime.checkpoint(&root()).expect("the completed source checkpoints");
+        let detached = TrajectoryId("cc:history-detached".to_string());
+        runtime
+            .fork_checkpoint(
+                appa_runtime_api::AdapterName::ClaudeCode,
+                checkpoint.id,
+                detached.clone(),
+            )
+            .expect("the checkpoint opens an independent root");
+        assert_eq!(
+            runtime.audit(&root()).unwrap(),
+            source_audit,
+            "the parent remains unchanged"
+        );
+        let fork = runtime.session(&detached, &detached).expect("the detached root opens");
+        assert!(matches!(
+            fork.on_tool_call(
+                ProposedCall {
+                    tool: "history-gated".to_string(),
+                    arguments: raw(serde_json::json!({})),
+                },
+                false,
+            )
+            .await
+            .expect("the inherited history is evaluated"),
+            ToolCallDecision::Allow { .. },
+        ));
     }
 
     #[tokio::test]

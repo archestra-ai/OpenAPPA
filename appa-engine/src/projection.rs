@@ -7,7 +7,8 @@ use crate::basis::SubjectKey;
 use crate::candidate::{DerivedCandidate, SanitizerLineage};
 use crate::contract::PinnedAnnotation;
 use crate::fact::{
-    BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ForkSnapshot, ObservedResult, ReturnPolicy,
+    BoundaryKind, CheckpointSnapshot, CloseOutcome, EffectKind, EffectSet, Fact, ForkSnapshot, ObservedResult,
+    ReturnPolicy,
 };
 use crate::label::Label;
 use crate::names::{AuthorityName, SanitizerName};
@@ -281,14 +282,26 @@ impl Projection {
         {
             match fact {
                 Fact::TrajectoryOpened {
-                    trajectory, profile, ..
+                    trajectory,
+                    profile,
+                    checkpoint,
+                    ..
                 } => {
-                    let starting = profile.starting_label().clone();
+                    let starting = checkpoint.as_ref().map_or_else(
+                        || profile.starting_label().clone(),
+                        |checkpoint| checkpoint.snapshot.label().clone(),
+                    );
                     assert!(
                         opening.is_none(),
                         "the validator admits one opening per family log, as its first record"
                     );
                     *opening = Some((trajectory.clone(), starting));
+                    if let Some(checkpoint) = checkpoint {
+                        effects.extend(checkpoint.snapshot.effects().iter().cloned());
+                        if !checkpoint.snapshot.denials().is_empty() {
+                            denials.insert(trajectory.clone(), checkpoint.snapshot.denials().clone());
+                        }
+                    }
                 }
                 Fact::BasisAdvanced { advance, .. } => versions.advance(advance),
                 Fact::OfferOpened {
@@ -614,6 +627,39 @@ impl Projection {
     /// at all, and the fork cannot retract that afterwards.
     pub(crate) fn is_opened(&self, trajectory: &TrajectoryId) -> bool {
         self.root_opening(trajectory).is_some() || self.fork_of.contains_key(trajectory)
+    }
+
+    /// The state a detached root may inherit. Only a live, settled trajectory
+    /// yields a snapshot, so no standing dispatch, offer, or approval crosses
+    /// the root boundary.
+    pub(crate) fn checkpoint_snapshot(&self, trajectory: &TrajectoryId) -> Option<CheckpointSnapshot> {
+        if !self.is_opened(trajectory)
+            || self.ended.contains(trajectory)
+            || self.open_dispatches(trajectory).next().is_some()
+            || self.offers.values().any(|offer| {
+                &offer.trajectory == trajectory
+                    && offer.end.is_none()
+                    && offer.basis == self.versions.basis_for(trajectory, &offer.subject)
+            })
+            || self.approvals.iter().any(|(offer, approval)| {
+                &approval.trajectory == trajectory
+                    && approval.basis == self.versions.basis_for(trajectory, &SubjectKey::Approval(*offer))
+            })
+        {
+            return None;
+        }
+        Some(CheckpointSnapshot::of(
+            self.fold_for(trajectory),
+            EffectSet::new(self.effects.iter().cloned().collect::<std::collections::BTreeSet<_>>())
+                .expect("a set contains no duplicate effect kinds"),
+            self.denials.get(trajectory).cloned().unwrap_or_default(),
+        ))
+    }
+
+    fn open_dispatches<'a>(&'a self, trajectory: &'a TrajectoryId) -> impl Iterator<Item = &'a DispatchId> + 'a {
+        self.open
+            .iter()
+            .filter(move |dispatch| dispatch.trajectory() == trajectory)
     }
 
     fn fold_for(&self, trajectory: &TrajectoryId) -> Label {

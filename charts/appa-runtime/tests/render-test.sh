@@ -281,8 +281,18 @@ if render --set env.APPA_CONFIG=/tmp/other; then
   echo "render accepted reserved APPA_CONFIG" >&2
   exit 1
 fi
-if ! grep -F -q 'env.APPA_BATTERIES_DIR, env.APPA_CONFIG, env.APPA_GUIDE_RUNTIME_URL, env.APPA_PERSISTENCE_ENABLED, env.APPA_POLICY_CONFIGMAP_NAME, env.APPA_POLICY_CONFIGMAP_KEY, and env.APPA_RUNTIME_RELEASE_NAME are reserved' "$work/err"; then
+if ! grep -F -q 'env.APPA_BATTERIES_DIR, env.APPA_CONFIG, env.APPA_GUIDE_RUNTIME_URL, env.APPA_PERSISTENCE_ENABLED, env.APPA_POLICY_CONFIGMAP_NAME, env.APPA_POLICY_CONFIGMAP_KEY, env.APPA_RUNTIME_RELEASE_NAME, APPA_PROXY_TOKEN, and APPA_PROXY_APPROVAL_SECRET are reserved' "$work/err"; then
   echo "reserved env refusal did not name the contract" >&2
+  exit 1
+fi
+
+if render --set proxyTokenSecret.name=shared --set proxyTokenSecret.key=token \
+  --set proxyApprovalSecret.name=shared --set proxyApprovalSecret.key=token; then
+  echo "render accepted identical proxy Secret references" >&2
+  exit 1
+fi
+if ! grep -F -q 'proxyTokenSecret and proxyApprovalSecret must not reference the same Secret key' "$work/err"; then
+  echo "proxy Secret reference refusal did not name the contract" >&2
   exit 1
 fi
 

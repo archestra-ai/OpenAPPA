@@ -254,6 +254,24 @@ pub struct AuthorityArtifact {
     pub tool: String,
     pub arguments: serde_json::Value,
     pub requirements: Vec<Requirement>,
+    /// The canonical proposal identity, distinct from a host/provider retry id.
+    pub logical_action_digest: String,
+    /// Runtime-derived execution provenance. It is absent only from an
+    /// in-process preview; every authority consult carries it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_scope: Option<AuthorityReviewScope>,
+}
+
+/// Immutable context of the one active authority execution. The broker may
+/// bind this exact object into its own audit/HMAC envelope, but it is never an
+/// authority-grant input or a provider-call identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AuthorityReviewScope {
+    pub root_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_id: Option<String>,
+    pub offer_id: String,
+    pub opening_policy_fingerprint: String,
 }
 
 /// One requirement a ruling covers, projected from the gap the engine assigned. The
@@ -1139,6 +1157,8 @@ mod tests {
                     requirements: vec![Requirement::Trust {
                         required: "trusted".to_string(),
                     }],
+                    logical_action_digest: "call-digest".to_string(),
+                    review_scope: None,
                 },
             },
         };
@@ -1154,7 +1174,8 @@ mod tests {
                 "artifact": {
                     "tool": "send",
                     "arguments": {"to": "x"},
-                    "requirements": [{"kind": "trust", "required": "trusted"}]
+                    "requirements": [{"kind": "trust", "required": "trusted"}],
+                    "logical_action_digest": "call-digest"
                 }
             })
         );
