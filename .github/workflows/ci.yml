@@ -729,7 +729,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: integrations/kagent/appa-kagent-adk-go/go.mod
           cache-dependency-path: integrations/kagent/appa-kagent-adk-go/go.sum
@@ -834,7 +834,7 @@ jobs:
           pytest integrations/kagent/appa-kagent-adk/tests/test_mcp_lifecycle.py -q
 
       - name: Setup Go for authenticated MCP lifecycle
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: integrations/kagent/appa-kagent-adk-go/go.mod
           cache-dependency-path: integrations/kagent/appa-kagent-adk-go/go.sum
@@ -1020,7 +1020,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: integrations/kagent/appa-kagent-adk-go/go.mod
           cache: false
