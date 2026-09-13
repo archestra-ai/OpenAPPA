@@ -351,6 +351,9 @@ fn start(endpoint: &Endpoint, url: &str, deployment: &Deployment, executable: &P
         .stdin(Stdio::null())
         .stdout(log("runtime.stdout.log")?)
         .stderr(log("runtime.stderr.log")?);
+    for name in session_scoped_variables(std::env::vars_os().map(|(name, _)| name)) {
+        command.env_remove(name);
+    }
     detach(&mut command);
     command.spawn().map_err(|source| StartError::Spawn {
         executable: executable.to_path_buf(),
@@ -374,6 +377,29 @@ fn start(endpoint: &Endpoint, url: &str, deployment: &Deployment, executable: &P
     })
 }
 
+/// The variables the runtime must not inherit when it is started from inside a
+/// Claude Code session — `CLAUDECODE` set — and none otherwise. The runtime
+/// outlives the session; the session's model endpoint and credential
+/// (`ANTHROPIC_*`, set by a harness for that session alone) expire with it, and
+/// every consult the runtime then spawns would hang on them. Started from a
+/// shell, the runtime inherits what the shell set, a proxy included.
+fn session_scoped_variables<I>(names: I) -> Vec<std::ffi::OsString>
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
+    let names: Vec<std::ffi::OsString> = names.into_iter().collect();
+    if !names.iter().any(|name| name == "CLAUDECODE") {
+        return Vec::new();
+    }
+    names
+        .into_iter()
+        .filter(|name| {
+            let name = name.to_string_lossy();
+            name == "CLAUDECODE" || name.starts_with("CLAUDE_CODE_") || name.starts_with("ANTHROPIC_")
+        })
+        .collect()
+}
+
 /// The runtime outlives the hook that starts it: it leaves the hook's process
 /// group so the harness reaping the hook does not take the runtime with it.
 #[cfg(unix)]
@@ -393,6 +419,36 @@ fn detach(command: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Inside a Claude Code session the runtime sheds that session's
+    /// credential and markers; from a shell it inherits everything.
+    #[test]
+    fn a_session_started_runtime_sheds_the_sessions_variables() {
+        let names = |list: &[&str]| list.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        let shell = ["PATH", "HOME", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"];
+        assert!(session_scoped_variables(names(&shell)).is_empty());
+
+        let session = [
+            "PATH",
+            "HOME",
+            "CLAUDECODE",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_ENTRYPOINT",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_AUTH_TOKEN",
+            "APPA_GATE",
+        ];
+        assert_eq!(
+            session_scoped_variables(names(&session)),
+            names(&[
+                "CLAUDECODE",
+                "CLAUDE_CODE_SESSION_ID",
+                "CLAUDE_CODE_ENTRYPOINT",
+                "ANTHROPIC_BASE_URL",
+                "ANTHROPIC_AUTH_TOKEN",
+            ])
+        );
+    }
 
     /// A runtime the session named is healthy while it answers at all: a stale
     /// answer there is the user's to act on, and the start returns at once
