@@ -821,6 +821,7 @@ pub(crate) fn stderr_tail(stderr: tokio::process::ChildStderr) -> tokio::task::J
 
 /// The last non-empty line of what a child said about its own failure, stripped of
 /// control characters and bounded, fit for a log field and a diagnostic.
+#[cfg(unix)]
 pub(crate) fn error_line(text: &str) -> String {
     const MAX_LINE: usize = 200;
     let line: String = text
