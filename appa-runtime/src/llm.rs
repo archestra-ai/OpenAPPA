@@ -284,6 +284,7 @@ fn no_answer(error: PromptError) -> NoAnswerReason {
     if let Some(status) = error.provider_response_status() {
         return NoAnswerReason::NonSuccess {
             status: status.as_u16(),
+            detail: None,
         };
     }
     match error {
@@ -546,7 +547,10 @@ mod tests {
         stub.answering(StubAnswer::Status(500));
         assert_eq!(
             backend.consult(&prompt()).await,
-            Err(NoAnswerReason::NonSuccess { status: 500 })
+            Err(NoAnswerReason::NonSuccess {
+                status: 500,
+                detail: None
+            })
         );
 
         stub.answering(StubAnswer::Text("not json".to_string()));

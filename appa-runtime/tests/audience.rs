@@ -276,6 +276,72 @@ async fn an_unconfigured_group_argument_fails_operationally() {
     assert_eq!(audit_len(&runtime), before);
 }
 
+/// A policy that maps `internal` to no sources loads, and a contract can still require
+/// it. Once the trajectory narrows to `self`, that requirement needs the members of
+/// `internal` and can never obtain them: a static policy gap, denied as one — the same
+/// answer on every proposal, no consult, no engine act.
+#[tokio::test]
+async fn an_unmapped_built_in_level_denies_without_a_retry_hint() {
+    const UNMAPPED: &str = r#"
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "read_secret"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "send_internal"
+requires = { audience = { contains = ["internal"] } }
+effects = ["egress"]
+delta = {}
+
+[externals]
+timeout_ms = 1000
+max_body_bytes = 4096
+"#;
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let path = dir.path().join("appa.toml");
+    std::fs::write(&path, UNMAPPED).expect("the fixture writes");
+    let config = Config::load(&path).expect("the fixture validates");
+    let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"));
+    assert_eq!(
+        hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
+        HookDecision::Ack
+    );
+    let read_secret = || ProposedCall {
+        tool: "read_secret".to_string(),
+        arguments: raw(serde_json::json!({})),
+    };
+    let send_internal = || ProposedCall {
+        tool: "send_internal".to_string(),
+        arguments: raw(serde_json::json!({})),
+    };
+    let HookDecision::DenyCall { feedback, .. } = propose(&runtime, read_secret()).await else {
+        panic!("the narrowing read is offered for acceptance");
+    };
+    assert!(matches!(
+        runtime.execute_remedy(&actor(), last_offer(&feedback)).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    assert_eq!(
+        propose(&runtime, read_secret()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, read_secret()).await;
+    let before = audit_len(&runtime);
+
+    for _ in 0..2 {
+        let HookDecision::DenyCall { feedback, offers, .. } = propose(&runtime, send_internal()).await else {
+            panic!("the call is denied");
+        };
+        // The feedback points at the key the operator must fill, not at a retry.
+        assert!(feedback.contains("[policy.audience] internal"), "{feedback}");
+        assert!(offers.is_empty());
+        assert_eq!(audit_len(&runtime), before);
+    }
+}
+
 #[tokio::test]
 async fn public_and_literal_arguments_never_consult_the_source() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");

@@ -389,7 +389,7 @@ pub(crate) async fn run_claude_code(
     use std::os::unix::process::CommandExt as _;
     use std::process::Stdio;
 
-    use crate::external::{CommandProcess, exchange_with_child};
+    use crate::external::{CommandProcess, exchange_with_child, finished_tail, stderr_tail};
 
     let schema = serde_json::to_string(&prompt.schema).map_err(|_| NoAnswerReason::Malformed)?;
     let work = tempfile::tempdir().map_err(|_| NoAnswerReason::Transport)?;
@@ -416,15 +416,19 @@ pub(crate) async fn run_claude_code(
         .current_dir(work.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
     command.as_std_mut().process_group(0);
     isolate_claude_environment(&mut command);
     tracing::debug!("claude consult starts");
-    let child = command.spawn().map_err(|_| {
+    let mut child = command.spawn().map_err(|_| {
         tracing::warn!(command = %backend.command.display(), "the claude executable did not start");
         NoAnswerReason::Unreachable
     })?;
+    // The CLI's own error — not logged in, a bad model name — is the one line an
+    // operator needs when every consult fails; it is read to the end so the pipe never
+    // blocks the answer.
+    let tail = child.stderr.take().map(stderr_tail);
     // The guard ends the consult's whole process group on every outcome, a dropped future
     // included: no helper the CLI spawned outlives the answer.
     let mut process = CommandProcess::spawned(child)?;
@@ -453,9 +457,18 @@ pub(crate) async fn run_claude_code(
     };
     let status = process.terminate_and_reap().await?;
     if !status.success() {
-        tracing::debug!(code = ?status.code(), "claude exited without an answer");
+        let detail = match tail {
+            Some(tail) => finished_tail(tail).await,
+            None => None,
+        };
+        tracing::warn!(
+            code = ?status.code(),
+            stderr = detail.as_deref().unwrap_or(""),
+            "claude exited without an answer"
+        );
         return Err(NoAnswerReason::NonSuccess {
             status: status.code().and_then(|code| u16::try_from(code).ok()).unwrap_or(0),
+            detail,
         });
     }
     let envelope: ClaudeResultEnvelope = serde_json::from_slice(&output).map_err(|_| NoAnswerReason::Malformed)?;
@@ -519,6 +532,45 @@ mod tests {
                 name == "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" && value.is_some_and(|value| value == "1")
             }),
             "the consult runs without the CLI's background traffic"
+        );
+    }
+
+    /// A CLI that exits without an answer names its own error: the last stderr line
+    /// travels with the exit code, so a logged-out CLI is not just `status=1`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_claude_consult_carries_the_clis_last_stderr_line() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let fake = dir.path().join("fake-claude");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\ncat > /dev/null\necho 'warning: something else' >&2\necho 'Not logged in · Please run /login' >&2\nexit 1\n",
+        )
+        .expect("the fake claude writes");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("the fake is executable");
+        let backend = ClaudeCodeBackend {
+            command: fake,
+            model: "m".to_string(),
+            timeout: std::time::Duration::from_secs(5),
+            max_body_bytes: 65_536,
+        };
+        let prompt = ModelPrompt {
+            system: "rule".to_string(),
+            input: "{}".to_string(),
+            schema: serde_json::json!({"type": "object"}),
+        };
+
+        let answer = backend
+            .consult(&prompt, tokio::time::Instant::now() + std::time::Duration::from_secs(5))
+            .await;
+        assert_eq!(
+            answer,
+            Err(NoAnswerReason::NonSuccess {
+                status: 1,
+                detail: Some("Not logged in · Please run /login".to_string()),
+            })
         );
     }
 

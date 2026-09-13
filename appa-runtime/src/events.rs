@@ -178,7 +178,8 @@ impl From<&crate::external::NoAnswerReason> for NoAnswerClass {
             Reason::Unregistered => NoAnswerClass::Unregistered,
             Reason::Unreachable => NoAnswerClass::Unreachable,
             Reason::Dismissed => NoAnswerClass::Dismissed,
-            Reason::NonSuccess { status } => NoAnswerClass::NonSuccess { status: *status },
+            // The detail is what the command said on stderr, and it is not carried.
+            Reason::NonSuccess { status, .. } => NoAnswerClass::NonSuccess { status: *status },
             Reason::Timeout => NoAnswerClass::Timeout,
             Reason::Transport => NoAnswerClass::Transport,
             // The detail is what the external said, and it is not carried.
