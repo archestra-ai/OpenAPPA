@@ -333,6 +333,8 @@ Membership answers: who belongs to this audience? OpenAPPA asks an external memb
 
 Under `[policy.audience]`, `self` and `internal` list the selectors that supply their members. `[policy.audience.group.<name>]` declares a named group with `within` and `from`.
 
+A policy can omit `self` or `internal`. A check that needs the members of an omitted level — for example, `contains = ["internal"]` after a `delta` narrowed the audience to `self` — cannot be established. OpenAPPA denies that call and names the missing key; proposing the call again does not change the answer.
+
 Each selector entry has the form `provider:selector`. The provider identifies the service configured under `[externals.audience.<provider>]`. The selector tells that service which reader or group to read. The service's `selectors` declaration lists the selector templates it understands.
 
 The example below uses a Google Workspace membership service to define `self`, `internal`, and `@finance`:

@@ -36,7 +36,7 @@
 //! the plan from the live views and matches it by value, so an offer whose
 //! basis has moved declines instead of executing.
 
-use appa_engine::audience::{AudienceEvidence, MemberLookup, SelectorSpec, SourceClaims};
+use appa_engine::audience::{AudienceEvidence, MemberLookup, SelectorSpec, SourceClaims, Unroutable};
 use appa_engine::contract::{
     AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, LabelRequirements, PinnedAnnotation,
     ProducedAnnotation, RecipientSpec, Requires, ToolDeclaration,
@@ -47,7 +47,7 @@ use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
 use appa_engine::fact::{
     BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ReturnDerivation, ReturnPolicy, ReturnSanitizer,
 };
-use appa_engine::label::{Audience, Clause, DeclaredAudience, Label, ReaderId, SymbolicAtom, Trust};
+use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, Label, ReaderId, SymbolicAtom, Trust};
 use appa_engine::names::MarkName;
 use appa_engine::plan::{
     ExecutableRemedyPlan, FloorStanding, ForkAdvice, PlanId, PlannedBlock, RemedyPlan, RequiredRuling,
@@ -2183,6 +2183,9 @@ impl RuntimeEngine {
                 AudienceConsult::Unresolved(detail) => {
                     Ok(AudienceRound::Presented(unresolved.present(&detail, self.naming)))
                 }
+                AudienceConsult::Unconfigured(level) => Ok(AudienceRound::Presented(
+                    unresolved.present_unconfigured(level, self.naming),
+                )),
             },
             Err(error) => Ok(AudienceRound::Failed(error)),
         }
@@ -2294,6 +2297,9 @@ impl RuntimeEngine {
         let audience = self.engine.registry().audience();
         let primitives = match audience.needed_primitives(&needed) {
             Ok(primitives) => primitives,
+            // A built-in level the policy maps to no sources is a static gap the policy
+            // loads with: the check needs its members and can never obtain them.
+            Err(Unroutable::UnmappedChain(level)) => return Ok(AudienceConsult::Unconfigured(level)),
             // A dynamically supplied reference no source serves: an operational failure,
             // never a policy state. (A statically written one refuses at policy load.)
             Err(unroutable) => return Ok(AudienceConsult::Unresolved(unroutable.to_string())),
@@ -2455,6 +2461,13 @@ fn unresolved_audience(tool: &str, detail: &str) -> String {
     format!("[appa] {tool}: {detail}; the call was not checked — propose it again later")
 }
 
+fn unconfigured_audience(level: ChainAudience) -> String {
+    format!(
+        "the policy configures no membership sources for the built-in audience {level} \
+         ([policy.audience] {level}), so a check that needs its members cannot be established"
+    )
+}
+
 enum AuthorityOutcome {
     Outcome(OfferOutcome),
     Consult(Vec<ExternalRequest>),
@@ -2473,11 +2486,16 @@ struct Resolution(Vec<ExternalRequest>);
 
 enum AudienceConsult {
     Requests(Vec<ExternalRequest>),
+    /// An answer this trajectory did not obtain; proposing again can obtain it.
     Unresolved(String),
+    /// A built-in level the loaded policy maps to no sources; proposing again cannot
+    /// change the answer.
+    Unconfigured(ChainAudience),
 }
 
 /// How an act presents an audience answer it cannot obtain: a failed or inadmissible
-/// consult, or a dynamically supplied reference no registered source serves.
+/// consult, a dynamically supplied reference no registered source serves, or a built-in
+/// level the policy configures no sources for.
 #[derive(Clone, Copy)]
 enum UnresolvedAudience<'a> {
     /// The proposed call is denied.
@@ -2501,6 +2519,25 @@ impl UnresolvedAudience<'_> {
             UnresolvedAudience::OfferStands => {
                 no_answer(format!("[appa] {detail}; the offer stands and may be executed again"))
             }
+        }
+    }
+
+    /// The same act, short of an answer no retry obtains: the wording names the policy
+    /// gap and invites no retry.
+    fn present_unconfigured(self, level: ChainAudience, naming: ToolNaming) -> EngineDecision {
+        let detail = unconfigured_audience(level);
+        match self {
+            UnresolvedAudience::Denied { tool } => deny(format!(
+                "[appa] {}: {detail}; the call is denied",
+                naming.model_spelling(tool)
+            )),
+            UnresolvedAudience::Withheld { subject } => {
+                EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
+                    feedback: format!("[appa] {detail}; the {subject} is withheld"),
+                    offers: Vec::new(),
+                }))
+            }
+            UnresolvedAudience::OfferStands => declined(format!("[appa] {detail}; the offer is declined")),
         }
     }
 }

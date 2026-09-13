@@ -349,10 +349,30 @@ fn open_library(path: &Path) -> Result<libloading::Library, libloading::Error> {
     unsafe { libloading::Library::new(path) }
 }
 
+/// The CLI's `--output-format json` result. On a failure the CLI still exits through
+/// this envelope: `is_error` set and its own message — "Not logged in · Please run
+/// /login" — in `result`, on stdout rather than stderr.
 #[cfg(unix)]
 #[derive(Debug, serde::Deserialize)]
 struct ClaudeResultEnvelope {
     structured_output: Option<serde_json::Value>,
+    #[serde(default)]
+    is_error: bool,
+    result: Option<String>,
+}
+
+#[cfg(unix)]
+impl ClaudeResultEnvelope {
+    /// The message the CLI reported a failure with, where the output is that envelope.
+    fn reported_error(output: &[u8]) -> Option<String> {
+        let envelope: ClaudeResultEnvelope = serde_json::from_slice(output).ok()?;
+        envelope
+            .is_error
+            .then_some(envelope.result)
+            .flatten()
+            .map(|result| crate::external::error_line(&result))
+            .filter(|line| !line.is_empty())
+    }
 }
 
 /// The stock `claude-code` model transport: one isolated, tool-less `claude` process per
@@ -389,7 +409,7 @@ pub(crate) async fn run_claude_code(
     use std::os::unix::process::CommandExt as _;
     use std::process::Stdio;
 
-    use crate::external::{CommandProcess, exchange_with_child};
+    use crate::external::{CommandProcess, exchange_with_child, finished_tail, stderr_tail};
 
     let schema = serde_json::to_string(&prompt.schema).map_err(|_| NoAnswerReason::Malformed)?;
     let work = tempfile::tempdir().map_err(|_| NoAnswerReason::Transport)?;
@@ -416,15 +436,18 @@ pub(crate) async fn run_claude_code(
         .current_dir(work.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
     command.as_std_mut().process_group(0);
     isolate_claude_environment(&mut command);
     tracing::debug!("claude consult starts");
-    let child = command.spawn().map_err(|_| {
+    let mut child = command.spawn().map_err(|_| {
         tracing::warn!(command = %backend.command.display(), "the claude executable did not start");
         NoAnswerReason::Unreachable
     })?;
+    // The CLI's own error — a bad model name — is the one line an operator needs when
+    // every consult fails; it is read to the end so the pipe never blocks the answer.
+    let tail = child.stderr.take().map(stderr_tail);
     // The guard ends the consult's whole process group on every outcome, a dropped future
     // included: no helper the CLI spawned outlives the answer.
     let mut process = CommandProcess::spawned(child)?;
@@ -453,9 +476,21 @@ pub(crate) async fn run_claude_code(
     };
     let status = process.terminate_and_reap().await?;
     if !status.success() {
-        tracing::debug!(code = ?status.code(), "claude exited without an answer");
+        let stderr = match tail {
+            Some(tail) => finished_tail(tail).await,
+            None => None,
+        };
+        // The envelope's own message first: the CLI reports a login failure there and
+        // writes nothing to stderr.
+        let detail = ClaudeResultEnvelope::reported_error(&output).or(stderr);
+        tracing::warn!(
+            code = ?status.code(),
+            error = detail.as_deref().unwrap_or(""),
+            "claude exited without an answer"
+        );
         return Err(NoAnswerReason::NonSuccess {
             status: status.code().and_then(|code| u16::try_from(code).ok()).unwrap_or(0),
+            detail,
         });
     }
     let envelope: ClaudeResultEnvelope = serde_json::from_slice(&output).map_err(|_| NoAnswerReason::Malformed)?;
@@ -519,6 +554,66 @@ mod tests {
                 name == "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" && value.is_some_and(|value| value == "1")
             }),
             "the consult runs without the CLI's background traffic"
+        );
+    }
+
+    /// A fake `claude` that reads its input and exits 1 after `script`.
+    #[cfg(unix)]
+    async fn failed_consult(script: &str) -> Result<serde_json::Value, NoAnswerReason> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let fake = dir.path().join("fake-claude");
+        std::fs::write(&fake, format!("#!/bin/sh\ncat > /dev/null\n{script}\nexit 1\n"))
+            .expect("the fake claude writes");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("the fake is executable");
+        let backend = ClaudeCodeBackend {
+            command: fake,
+            model: "m".to_string(),
+            timeout: std::time::Duration::from_secs(5),
+            max_body_bytes: 65_536,
+        };
+        let prompt = ModelPrompt {
+            system: "rule".to_string(),
+            input: "{}".to_string(),
+            schema: serde_json::json!({"type": "object"}),
+        };
+        backend
+            .consult(&prompt, tokio::time::Instant::now() + std::time::Duration::from_secs(5))
+            .await
+    }
+
+    /// A CLI that exits without an answer names its own error, so a failed consult is
+    /// not just `status=1`: the message of an error envelope on stdout — how the CLI
+    /// reports a logged-out session — or else the last stderr line.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_claude_consult_carries_the_clis_own_error() {
+        let logged_out = r#"echo '{"type":"result","is_error":true,"result":"Not logged in · Please run /login"}'"#;
+        assert_eq!(
+            failed_consult(logged_out).await,
+            Err(NoAnswerReason::NonSuccess {
+                status: 1,
+                detail: Some("Not logged in · Please run /login".to_string()),
+            })
+        );
+
+        let bad_model =
+            "echo 'warning: something else' >&2\necho '[claude-code:unrecognized_model] {\"model\":\"m\"}' >&2";
+        assert_eq!(
+            failed_consult(bad_model).await,
+            Err(NoAnswerReason::NonSuccess {
+                status: 1,
+                detail: Some("[claude-code:unrecognized_model] {\"model\":\"m\"}".to_string()),
+            })
+        );
+
+        assert_eq!(
+            failed_consult("").await,
+            Err(NoAnswerReason::NonSuccess {
+                status: 1,
+                detail: None
+            })
         );
     }
 

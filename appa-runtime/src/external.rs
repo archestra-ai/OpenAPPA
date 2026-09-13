@@ -33,7 +33,12 @@ pub enum NoAnswerReason {
     Unregistered,
     Unreachable,
     Dismissed,
-    NonSuccess { status: u16 },
+    /// A non-success exit or HTTP status. `detail` is the last line a command wrote to
+    /// stderr — its own error, never its answer — where one was read.
+    NonSuccess {
+        status: u16,
+        detail: Option<String>,
+    },
     Timeout,
     Transport,
     Malformed,
@@ -53,7 +58,11 @@ impl NoAnswerReason {
             NoAnswerReason::Unregistered => "unregistered".to_string(),
             NoAnswerReason::Unreachable => "unreachable".to_string(),
             NoAnswerReason::Dismissed => "dismissed".to_string(),
-            NoAnswerReason::NonSuccess { status } => format!("non_success status={status}"),
+            NoAnswerReason::NonSuccess { status, detail: None } => format!("non_success status={status}"),
+            NoAnswerReason::NonSuccess {
+                status,
+                detail: Some(detail),
+            } => format!("non_success status={status} detail={detail:?}"),
             NoAnswerReason::Timeout => "timeout".to_string(),
             NoAnswerReason::Transport => "transport".to_string(),
             NoAnswerReason::Malformed => "malformed".to_string(),
@@ -518,6 +527,7 @@ impl ExternalServices {
         if !status.is_success() {
             return Err(NoAnswerReason::NonSuccess {
                 status: status.as_u16(),
+                detail: None,
             });
         }
         let cap = self.max_body_bytes as u64;
@@ -785,6 +795,58 @@ pub(crate) async fn exchange_with_child(
     }
 }
 
+/// The last line a child wrote to stderr, read to its end so the pipe never fills: the
+/// command's own error, bounded and stripped of control characters, for the log and the
+/// no-answer diagnostic. Empty where the child said nothing.
+#[cfg(unix)]
+pub(crate) fn stderr_tail(stderr: tokio::process::ChildStderr) -> tokio::task::JoinHandle<String> {
+    const MAX_READ: usize = 4096;
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt as _;
+        let mut bytes = Vec::new();
+        let mut stderr = stderr;
+        let mut chunk = [0u8; 1024];
+        while let Ok(read) = stderr.read(&mut chunk).await {
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+            if bytes.len() > MAX_READ {
+                bytes.drain(..bytes.len() - MAX_READ);
+            }
+        }
+        error_line(&String::from_utf8_lossy(&bytes))
+    })
+}
+
+/// The last non-empty line of what a child said about its own failure, stripped of
+/// control characters and bounded, fit for a log field and a diagnostic.
+#[cfg(unix)]
+pub(crate) fn error_line(text: &str) -> String {
+    const MAX_LINE: usize = 200;
+    let line: String = text
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    let cut = line.char_indices().nth(MAX_LINE).map_or(line.len(), |(index, _)| index);
+    line[..cut].to_string()
+}
+
+/// What a finished tail task reports; a task that failed reports nothing.
+#[cfg(unix)]
+pub(crate) async fn finished_tail(tail: tokio::task::JoinHandle<String>) -> Option<String> {
+    tokio::time::timeout(std::time::Duration::from_secs(1), tail)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .filter(|line| !line.is_empty())
+}
+
 #[cfg(unix)]
 async fn run_command_process(
     command: ResolverCommand,
@@ -805,7 +867,7 @@ async fn run_command_process(
         .current_dir(&command.cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
     configured.as_std_mut().process_group(0);
     // The runtime's own namespace stops here: no bearer token it sends, and no wiring
@@ -827,7 +889,8 @@ async fn run_command_process(
         configured.env(var, credential);
     }
 
-    let child = configured.spawn().map_err(|_| NoAnswerReason::Unreachable)?;
+    let mut child = configured.spawn().map_err(|_| NoAnswerReason::Unreachable)?;
+    let tail = child.stderr.take().map(stderr_tail);
     let mut process = CommandProcess::spawned(child)?;
     let process_group = process.process_group();
     let outcome = {
@@ -845,6 +908,11 @@ async fn run_command_process(
             if status.success() {
                 Ok(output)
             } else {
+                let stderr = match tail {
+                    Some(tail) => finished_tail(tail).await.unwrap_or_default(),
+                    None => String::new(),
+                };
+                tracing::warn!(code = ?status.code(), stderr = %stderr, "the command exited without an answer");
                 Err(NoAnswerReason::Transport)
             }
         }
@@ -1692,7 +1760,10 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         // shell can take over a second to start, and that is not the failure under test.
         assert_eq!(
             run(fake_claude(dir.path(), "exit 7"), 5000, 1024).await,
-            Err(NoAnswerReason::NonSuccess { status: 7 })
+            Err(NoAnswerReason::NonSuccess {
+                status: 7,
+                detail: None
+            })
         );
         assert_eq!(
             run(fake_claude(dir.path(), "sleep 1"), 20, 1024).await,
@@ -1846,7 +1917,10 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         .await;
         assert_eq!(
             resolve(&services(Some(url), 2000, 65536)).await,
-            ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess { status: 500 }),
+            ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess {
+                status: 500,
+                detail: None
+            }),
         );
 
         for (response, expected) in [
@@ -1911,7 +1985,10 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         .await;
         assert_eq!(
             resolve(&services(Some(url), 2000, 65536)).await,
-            ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess { status: 301 }),
+            ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess {
+                status: 301,
+                detail: None
+            }),
         );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -2001,7 +2078,10 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             services
                 .consult(&authority_consult("directory", serde_json::json!({})), None, None)
                 .await,
-            ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess { status: 403 }),
+            ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess {
+                status: 403,
+                detail: None
+            }),
         );
 
         let url = stub(Router::new().route("/", post(|| async { "not json" }))).await;
