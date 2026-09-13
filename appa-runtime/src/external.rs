@@ -801,7 +801,6 @@ pub(crate) async fn exchange_with_child(
 #[cfg(unix)]
 pub(crate) fn stderr_tail(stderr: tokio::process::ChildStderr) -> tokio::task::JoinHandle<String> {
     const MAX_READ: usize = 4096;
-    const MAX_LINE: usize = 200;
     tokio::spawn(async move {
         use tokio::io::AsyncReadExt as _;
         let mut bytes = Vec::new();
@@ -816,19 +815,25 @@ pub(crate) fn stderr_tail(stderr: tokio::process::ChildStderr) -> tokio::task::J
                 bytes.drain(..bytes.len() - MAX_READ);
             }
         }
-        let text = String::from_utf8_lossy(&bytes);
-        let line: String = text
-            .lines()
-            .rev()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .unwrap_or_default()
-            .chars()
-            .filter(|c| !c.is_control())
-            .collect();
-        let cut = line.char_indices().nth(MAX_LINE).map_or(line.len(), |(index, _)| index);
-        line[..cut].to_string()
+        error_line(&String::from_utf8_lossy(&bytes))
     })
+}
+
+/// The last non-empty line of what a child said about its own failure, stripped of
+/// control characters and bounded, fit for a log field and a diagnostic.
+pub(crate) fn error_line(text: &str) -> String {
+    const MAX_LINE: usize = 200;
+    let line: String = text
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    let cut = line.char_indices().nth(MAX_LINE).map_or(line.len(), |(index, _)| index);
+    line[..cut].to_string()
 }
 
 /// What a finished tail task reports; a task that failed reports nothing.
