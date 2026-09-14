@@ -20,20 +20,13 @@ use super::{InstallError, battery_package};
 pub(crate) fn servers(host: Host, cwd: &Path) -> BTreeSet<Namespace> {
     match host {
         Host::ClaudeCode => {
-            let config = claude_code_config();
+            let config = crate::init::paths::claude_config_file().unwrap_or_else(|error| {
+                eprintln!("appa: warning: Claude Code's configuration was not read for its MCP servers: {error}");
+                None
+            });
             claude_code_servers(config.as_deref(), &project_root(cwd))
         }
         Host::Kagent => BTreeSet::new(),
-    }
-}
-
-/// `.claude.json`: under `CLAUDE_CONFIG_DIR` when that is set, otherwise
-/// under the home directory. The `claude` command owns its writes; this
-/// reads it once.
-fn claude_code_config() -> Option<PathBuf> {
-    match std::env::var_os("CLAUDE_CONFIG_DIR") {
-        Some(directory) => Some(PathBuf::from(directory).join(".claude.json")),
-        None => crate::init::paths::user_home().map(|home| home.join(".claude.json")),
     }
 }
 
@@ -193,10 +186,13 @@ fn shell_word(text: &str) -> String {
 
 /// Matching is exact, never by substring: a server key equal to a namespace a
 /// battery declares is that battery's, and one equal to a battery's name is
-/// too, bound as that battery's one namespace. A battery already included
-/// covers the servers its namespaces name, and a server its `bindings`
-/// (namespace to server key) already bind; those are not suggested again.
-/// One battery is suggested once, with its binding when any server needs it.
+/// too, bound as that battery's one namespace, as is one a namespace is
+/// already bound to in `bindings` (namespace to server key). A battery
+/// already included covers the servers its namespaces name or are bound to;
+/// those are not suggested again. A binding moves the battery's rules to the
+/// bound key, so one battery serves one server: it is suggested once, with
+/// the binding when a server needs it, and a server its own namespace names
+/// is then uncovered.
 pub(crate) fn coverage(
     servers: &BTreeSet<Namespace>,
     batteries: &[(PackageName, Battery)],
@@ -210,11 +206,18 @@ pub(crate) fn coverage(
             .iter()
             .find(|(_, battery)| battery.namespaces.contains(server))
             .map(|(name, _)| (name, None));
+        let by_binding = batteries.iter().find_map(|(name, battery)| {
+            battery
+                .namespaces
+                .iter()
+                .find(|namespace| bindings.get(namespace.as_str()) == Some(&server.as_str().to_owned()))
+                .map(|namespace| (name, Some(namespace)))
+        });
         let by_name = batteries
             .iter()
             .find(|(name, battery)| name.as_str() == server.as_str() && battery.namespaces.len() == 1)
             .map(|(name, battery)| (name, Some(&battery.namespaces[0])));
-        let Some((name, binds)) = by_namespace.or(by_name) else {
+        let Some((name, binds)) = by_namespace.or(by_binding).or(by_name) else {
             uncovered.push(server.clone());
             continue;
         };
@@ -239,12 +242,18 @@ pub(crate) fn coverage(
             bind_server: binds.is_some(),
         };
         match suggestions.get(name) {
-            Some(existing) if existing.bind_server || !suggestion.bind_server => {}
-            _ => {
+            None => {
                 suggestions.insert(name.clone(), suggestion);
             }
+            Some(existing) if existing.bind_server => uncovered.push(server.clone()),
+            Some(existing) if suggestion.bind_server => {
+                uncovered.push(existing.server.clone());
+                suggestions.insert(name.clone(), suggestion);
+            }
+            Some(_) => uncovered.push(server.clone()),
         }
     }
+    uncovered.sort();
     Coverage {
         suggestions: suggestions.into_values().collect(),
         uncovered,
@@ -411,9 +420,33 @@ mod tests {
         assert_eq!(redirected.suggestions, vec![]);
         assert_eq!(redirected.uncovered, vec![namespace("claude_ai_Slack")]);
 
+        // One battery serves one server: the binding is suggested and the
+        // connector's own key, which the bound battery will not name, is
+        // reported uncovered rather than hidden behind the one suggestion.
         let both = BTreeSet::from([namespace("claude_ai_Slack"), namespace("slack")]);
         let once = coverage(&both, &batteries, &BTreeSet::new(), &BTreeMap::new());
         assert_eq!(once.commands(None), vec!["appa battery install slack --server slack"]);
+        assert_eq!(once.uncovered, vec![namespace("claude_ai_Slack")]);
+    }
+
+    /// A server a battery's namespace is already bound to is that battery's:
+    /// covered when the battery is included, and suggested with the same
+    /// binding when it is not.
+    #[test]
+    fn a_server_a_namespace_is_bound_to_matches_its_battery() {
+        let batteries = vec![battery("github", &["github"])];
+        let servers = BTreeSet::from([namespace("work-github")]);
+        let bindings = BTreeMap::from([("github".to_owned(), "work-github".to_owned())]);
+
+        let included = coverage(&servers, &batteries, &BTreeSet::from(["github".to_owned()]), &bindings);
+        assert_eq!(included, Coverage::default());
+
+        let absent = coverage(&servers, &batteries, &BTreeSet::new(), &bindings);
+        assert_eq!(
+            absent.commands(None),
+            vec!["appa battery install github --server work-github"]
+        );
+        assert_eq!(absent.uncovered, vec![]);
     }
 
     /// Every battery without a binding goes in one command, so the person
