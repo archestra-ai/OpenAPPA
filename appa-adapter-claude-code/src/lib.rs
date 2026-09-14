@@ -151,6 +151,12 @@
 //!
 //! A `PreToolUse` release carries no slot for the spawn binding, and
 //! needs none: the child start names the spawn in flight instead.
+//!
+//! Beside the two translations, [`environment`] reads what Claude Code's
+//! process environment says — whether a process is inside a session, and
+//! which of its variables are that session's alone.
+
+pub mod environment;
 
 use serde::Deserialize;
 

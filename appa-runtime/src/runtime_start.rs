@@ -15,6 +15,7 @@
 //! go stale, where a lock file would outlive a hook the harness kills at its
 //! timeout and block every start after it.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -142,6 +143,8 @@ impl Deployment {
 }
 
 /// Make a healthy runtime answer `target`, starting `executable` when none does.
+/// The started runtime inherits this process's environment less `withheld`: it
+/// outlives the caller, so the caller names what must not outlive it.
 ///
 /// A runtime the user runs at a URL of their own is theirs to start and restart:
 /// it is healthy while it answers, stale or not, and nothing is started there
@@ -149,7 +152,12 @@ impl Deployment {
 /// started or its stale one replaced, and only when the process answering is
 /// this user's own appa process: the pid arrives in an HTTP body from whoever
 /// holds the port, so it is checked before it is signalled.
-pub fn ensure(target: &RuntimeTarget, deployment: &Deployment, executable: &Path) -> Result<(), StartError> {
+pub fn ensure(
+    target: &RuntimeTarget,
+    deployment: &Deployment,
+    executable: &Path,
+    withheld: &[OsString],
+) -> Result<(), StartError> {
     let endpoint = Endpoint::parse(&target.url).map_err(|reason| StartError::Endpoint {
         url: target.url.clone(),
         reason,
@@ -176,7 +184,7 @@ pub fn ensure(target: &RuntimeTarget, deployment: &Deployment, executable: &Path
         }
         Health::Unreachable => {}
     }
-    start(&endpoint, &target.url, deployment, executable)
+    start(&endpoint, &target.url, deployment, executable, withheld)
 }
 
 /// Stop the runtime answering `target`, whichever deployment started it, when
@@ -315,7 +323,13 @@ fn stop_stale(endpoint: &Endpoint, url: &str, pid: i32) -> Result<bool, StartErr
     }
 }
 
-fn start(endpoint: &Endpoint, url: &str, deployment: &Deployment, executable: &Path) -> Result<(), StartError> {
+fn start(
+    endpoint: &Endpoint,
+    url: &str,
+    deployment: &Deployment,
+    executable: &Path,
+    withheld: &[OsString],
+) -> Result<(), StartError> {
     // The runtime writes the default policy on its first start and refuses to
     // start when it cannot.
     let directory = |path: &Path| {
@@ -351,6 +365,9 @@ fn start(endpoint: &Endpoint, url: &str, deployment: &Deployment, executable: &P
         .stdin(Stdio::null())
         .stdout(log("runtime.stdout.log")?)
         .stderr(log("runtime.stderr.log")?);
+    for name in withheld {
+        command.env_remove(name);
+    }
     detach(&mut command);
     command.spawn().map_err(|source| StartError::Spawn {
         executable: executable.to_path_buf(),
@@ -413,7 +430,7 @@ mod tests {
             config: PathBuf::from("unused.toml"),
             data_dir: PathBuf::from("unused"),
         };
-        ensure(&target, &deployment, Path::new("unused")).expect("the session's own runtime is left as it is");
+        ensure(&target, &deployment, Path::new("unused"), &[]).expect("the session's own runtime is left as it is");
     }
 
     /// Nothing answering at a URL the session named is the user's to start:
@@ -430,7 +447,8 @@ mod tests {
             data_dir: root.path().join("data"),
         };
         let target = RuntimeTarget { url, user_owned: true };
-        let error = ensure(&target, &deployment, &root.path().join("absent/appa")).expect_err("nothing is started");
+        let error =
+            ensure(&target, &deployment, &root.path().join("absent/appa"), &[]).expect_err("nothing is started");
         assert!(matches!(error, StartError::UserOwnedUnreachable { .. }), "{error}");
         assert!(!root.path().join("config").exists());
         assert!(!root.path().join("data").exists());
@@ -449,7 +467,7 @@ mod tests {
             data_dir: root.path().join("data"),
         };
         let target = RuntimeTarget { url, user_owned: false };
-        let error = ensure(&target, &deployment, &root.path().join("absent/appa")).expect_err("nothing to start");
+        let error = ensure(&target, &deployment, &root.path().join("absent/appa"), &[]).expect_err("nothing to start");
         assert!(matches!(error, StartError::Spawn { .. }), "{error}");
         assert!(root.path().join("config").is_dir());
         assert!(root.path().join("data").is_dir());
