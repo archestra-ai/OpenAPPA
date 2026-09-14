@@ -264,6 +264,11 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
             if battery.namespaces.len() != 1 {
                 return Err(InstallError::Invalid("this battery has multiple namespaces; configure server_aliases explicitly in the deployment config".into()));
             }
+            if battery.namespaces[0].as_str() == server {
+                return Err(InstallError::Invalid(format!(
+                    "{server} is the namespace this battery already names; no --server binding is needed"
+                )));
+            }
             text = includes::bind_server(&text, &battery.namespaces[0], server)?;
         }
         eprintln!("appa: validating and activating the selected policy...");

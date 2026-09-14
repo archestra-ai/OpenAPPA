@@ -1052,11 +1052,17 @@ pub(crate) fn battery_package_in(
         .find(|entry| entry.kind == PackageKind::Battery && entry.name.as_str() == name)
         .cloned()
         .ok_or_else(|| InstallError::Invalid(format!("battery {name} is absent from this version")))?;
+    let battery = battery_at(marketplace, &entry)?;
+    Ok((entry, battery))
+}
+
+/// The battery manifest a catalog entry names under `marketplace`.
+pub(crate) fn battery_at(marketplace: &Path, entry: &PackageEntry) -> Result<Battery, InstallError> {
     let package = Package::read(&marketplace.join(entry.path.as_str()).join(appa_package::MANIFEST_FILE))
         .map_err(|error| InstallError::Invalid(error.to_string()))?;
     match package.role {
-        Role::Battery(battery) => Ok((entry, battery)),
-        Role::Plugin(_) => Err(InstallError::Invalid(format!("{name} is not a battery"))),
+        Role::Battery(battery) => Ok(battery),
+        Role::Plugin(_) => Err(InstallError::Invalid(format!("{} is not a battery", entry.name))),
     }
 }
 
