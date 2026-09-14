@@ -54,15 +54,11 @@ const BATTERIES = [
     description: "Rules for 3 read-only documentation tools; queries must be sharable with public.",
     href: "/battery-microsoft-learn",
     logo: "/images/batteries/microsoft-learn.svg",
+  },
+  {
     name: "Cloudflare docs",
     description: "Rules for 2 documentation tools; results are public and the query must be sharable with public.",
     href: "/battery-cloudflare-docs",
-    logo: "/images/batteries/cloudflare.svg",
-  },
-  {
-    name: "Cloudflare Radar",
-    description: "Rules for 66 tools: public Internet measurement reads, internal URL Scanner reads, one reviewed scan.",
-    href: "/battery-cloudflare-radar",
     logo: "/images/batteries/cloudflare.svg",
   },
   {
@@ -70,10 +66,14 @@ const BATTERIES = [
     description: "Rules for 8 Workers logs, telemetry, and documentation tools; every one of them reads.",
     href: "/battery-cloudflare-observability",
     logo: "/images/batteries/cloudflare.svg",
+  },
+  {
     name: "LaunchDarkly",
     description: "Rules for 20 flag, environment, AI Config, and audit tools; every write is reviewed.",
     href: "/battery-launchdarkly",
     logo: "/images/batteries/launchdarkly.svg",
+  },
+  {
     name: "PostHog",
     description: "Rules for 44 analytics, flag, experiment, and survey tools; internal reads and reviewed writes.",
     href: "/battery-posthog",

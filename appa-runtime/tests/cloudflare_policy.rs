@@ -1,9 +1,9 @@
-//! The three Cloudflare batteries composed together: public Radar and documentation
-//! reads, internal Workers logs, and the one reviewed URL scan.
+//! The two Cloudflare batteries composed together: public documentation reads and
+//! internal Workers logs, with no writes on either server.
 mod common;
 
 use appa_runtime::{
-    api::{AuditEvent, RemedyOutcome, Runtime},
+    api::{AuditEvent, Runtime},
     config::Config,
     hooks,
 };
@@ -12,7 +12,7 @@ use axum::{Router, routing::post};
 use common::{actor, offer_of, propose, ran, raw, repo_root, root, serve};
 use std::sync::Arc;
 
-const BATTERIES: [&str; 3] = ["cloudflare-docs", "cloudflare-radar", "cloudflare-observability"];
+const BATTERIES: [&str; 2] = ["cloudflare-docs", "cloudflare-observability"];
 
 fn call(namespace: &str, tool: &str, args: serde_json::Value) -> ProposedCall {
     ProposedCall {
@@ -22,8 +22,7 @@ fn call(namespace: &str, tool: &str, args: serde_json::Value) -> ProposedCall {
 }
 
 /// A loopback audience source answering every collection with one fixed roster: the
-/// Workers logs and the URL Scanner reads are `internal`, which needs a source to
-/// narrow onto.
+/// Workers logs are `internal`, which needs a source to narrow onto.
 async fn members_source() -> String {
     let router = Router::new().route(
         "/audience",
@@ -62,17 +61,9 @@ version = 2
 [policy.audience]
 internal = ["people:members"]
 
-[[policy.authority]]
-name = "cloudflare-operator"
-permits = {{ trust_below = "trusted", attention = ["cloudflare-radar-review"] }}
-
 [externals]
 timeout_ms = 30000
-review_timeout_ms = 600000
 max_body_bytes = 1048576
-
-[externals.authorities.cloudflare-operator]
-builtin = "approve"
 
 [externals.audience.people]
 url = "{source}"
@@ -89,43 +80,42 @@ selectors = [{{ template = "members", feeds = "internal" }}]
     runtime
 }
 
-/// Radar and documentation reads stay public, so they run outright. Reading Workers
-/// logs narrows the trajectory to internal, and the documentation search and the URL
-/// scan then refuse that input while a Radar read, which carries no audience bound,
-/// keeps running.
+/// Documentation reads stay public, so they run outright. Reading Workers logs
+/// narrows the trajectory to internal, and the documentation search on either server
+/// then refuses that input.
 #[tokio::test]
 async fn public_reads_run_until_the_workers_logs_narrow_the_trajectory() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = runtime(&dir).await;
 
     // The first read admits the trust fall to `suspicious`; the trajectory stays public.
-    let outages = call(
-        "cloudflare-radar",
-        "get_outages",
-        serde_json::json!({ "dateRange": "7d" }),
-    );
-    let offer = offer_of(&propose(&runtime, outages.clone()).await);
-    assert!(matches!(
-        runtime.execute_remedy(&actor(), offer).await,
-        RemedyOutcome::Authorized { .. }
-    ));
-    assert_eq!(
-        propose(&runtime, outages.clone()).await,
-        HookDecision::AllowCall { spawn: None }
-    );
-    ran(&runtime, outages).await;
-
-    // Still public, so a documentation search runs outright.
     let docs = call(
         "cloudflare-docs",
         "search_cloudflare_documentation",
         serde_json::json!({ "query": "durable objects alarms" }),
     );
+    let offer = offer_of(&propose(&runtime, docs.clone()).await);
+    assert!(matches!(
+        runtime.execute_remedy(&actor(), offer).await,
+        appa_runtime::api::RemedyOutcome::Authorized { .. }
+    ));
     assert_eq!(
         propose(&runtime, docs.clone()).await,
         HookDecision::AllowCall { spawn: None }
     );
     ran(&runtime, docs).await;
+
+    // Still public, so the migration guide runs outright.
+    let guide = call(
+        "cloudflare-docs",
+        "migrate_pages_to_workers_guide",
+        serde_json::json!({}),
+    );
+    assert_eq!(
+        propose(&runtime, guide.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, guide).await;
 
     let logs = call(
         "cloudflare-observability",
@@ -135,7 +125,7 @@ async fn public_reads_run_until_the_workers_logs_narrow_the_trajectory() {
     let offer = offer_of(&propose(&runtime, logs.clone()).await);
     assert!(matches!(
         runtime.execute_remedy(&actor(), offer).await,
-        RemedyOutcome::Authorized { .. }
+        appa_runtime::api::RemedyOutcome::Authorized { .. }
     ));
     assert_eq!(
         propose(&runtime, logs.clone()).await,
@@ -155,18 +145,6 @@ async fn public_reads_run_until_the_workers_logs_narrow_the_trajectory() {
     );
     ran(&runtime, code).await;
 
-    // A Radar read carries no audience bound, so internal data does not stop it.
-    let radar = call(
-        "cloudflare-radar",
-        "get_bgp_leaks",
-        serde_json::json!({ "dateRange": "7d" }),
-    );
-    assert_eq!(
-        propose(&runtime, radar.clone()).await,
-        HookDecision::AllowCall { spawn: None }
-    );
-    ran(&runtime, radar).await;
-
     // The public-input rules refuse internal input, on either server carrying them.
     for public_input in [
         call(
@@ -178,11 +156,6 @@ async fn public_reads_run_until_the_workers_logs_narrow_the_trajectory() {
             "cloudflare-observability",
             "search_cloudflare_documentation",
             serde_json::json!({ "query": "workers logs" }),
-        ),
-        call(
-            "cloudflare-radar",
-            "create_url_scan",
-            serde_json::json!({ "url": "https://example.com/" }),
         ),
     ] {
         assert!(
@@ -196,38 +169,7 @@ async fn public_reads_run_until_the_workers_logs_narrow_the_trajectory() {
     }
 
     // Every tool that ran here reads: none of them recorded an effect.
-    assert!(released_effects(&runtime).iter().all(Vec::is_empty));
-}
-
-/// Submitting a URL to be scanned needs the reviewer even on an untouched trajectory,
-/// and records the sensitive effect.
-#[tokio::test]
-async fn a_url_scan_needs_review_and_records_its_effect() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime(&dir).await;
-
-    let scan = call(
-        "cloudflare-radar",
-        "create_url_scan",
-        serde_json::json!({ "url": "https://example.com/" }),
-    );
-    let decision = propose(&runtime, scan.clone()).await;
-    assert!(!matches!(decision, HookDecision::AllowCall { .. }));
-    assert!(matches!(
-        runtime.execute_remedy(&actor(), offer_of(&decision)).await,
-        RemedyOutcome::Authorized { .. }
-    ));
-    assert_eq!(
-        propose(&runtime, scan.clone()).await,
-        HookDecision::AllowCall { spawn: None }
-    );
-    ran(&runtime, scan).await;
-
-    assert_eq!(released_effects(&runtime), vec![vec!["cloudflare-radar.sensitive"]]);
-}
-
-fn released_effects(runtime: &Arc<Runtime>) -> Vec<Vec<String>> {
-    runtime
+    let effects: Vec<Vec<String>> = runtime
         .audit(&root())
         .unwrap()
         .into_iter()
@@ -235,5 +177,7 @@ fn released_effects(runtime: &Arc<Runtime>) -> Vec<Vec<String>> {
             AuditEvent::Released { tool, effects, .. } if tool.starts_with("mcp/cloudflare-") => Some(effects),
             _ => None,
         })
-        .collect()
+        .collect();
+    assert_eq!(effects.len(), 4);
+    assert!(effects.iter().all(Vec::is_empty));
 }

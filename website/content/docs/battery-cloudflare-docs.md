@@ -1,7 +1,7 @@
 ---
 title: Cloudflare docs battery
 category: Batteries
-order: 6.68
+order: 6.69
 description: Rules for Cloudflare's documentation MCP server: two public reads whose query must be sharable with public.
 sidebar: false
 breadcrumb: Cloudflare docs

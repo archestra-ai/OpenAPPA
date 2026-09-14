@@ -1,7 +1,7 @@
 ---
 title: LaunchDarkly battery
 category: Batteries
-order: 6.68
+order: 6.71
 description: Rules for LaunchDarkly's official MCP server, all 20 tools, with internal reads and every write reviewed.
 sidebar: false
 breadcrumb: LaunchDarkly

@@ -1,7 +1,7 @@
 ---
 title: PostHog battery
 category: Batteries
-order: 6.68
+order: 6.72
 description: Rules for PostHog's MCP server, all 44 registry tools, with internal analytics reads and reviewed writes.
 sidebar: false
 breadcrumb: PostHog

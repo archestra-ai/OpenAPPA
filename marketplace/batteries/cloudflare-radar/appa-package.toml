@@ -1,9 +1,0 @@
-schema = 1
-name = "cloudflare-radar"
-description = "Rules for Cloudflare's Radar MCP server's 66 tools: 61 public Internet measurement reads, four internal URL Scanner reads, and one reviewed scan submission."
-
-[battery]
-policy = "appa.toml"
-hosts = ["claude-code", "kagent"]
-namespaces = ["cloudflare-radar"]
-helpers = []
