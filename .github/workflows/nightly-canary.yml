@@ -20,6 +20,15 @@ on:
   schedule:
     - cron: "30 2 * * *"
   workflow_dispatch:
+    inputs:
+      benchmark_archive_url:
+        description: One-time authenticated URL for the prepared benchmark archives
+        required: false
+        type: string
+      benchmark_archive_sha256:
+        description: SHA-256 of the transfer archive
+        required: false
+        type: string
 
 permissions: {}
 
@@ -29,6 +38,7 @@ concurrency:
 
 jobs:
   canary:
+    if: ${{ inputs.benchmark_archive_url == '' }}
     name: Defended vs empty
     runs-on: ubuntu-latest
     timeout-minutes: 150
@@ -106,3 +116,55 @@ jobs:
             printf '{"text":"🔥 APPA nightly canary crashed before reporting: %s"}' "$RUN_URL" |
               curl -sf -X POST -H 'Content-Type: application/json' --data @- "$WEBHOOK"
           fi
+
+  publish-benchmark-archive:
+    if: ${{ inputs.benchmark_archive_url != '' }}
+    name: Publish prepared benchmark archives
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download and verify transfer archive
+        env:
+          SOURCE_URL: ${{ inputs.benchmark_archive_url }}
+          SOURCE_SHA256: ${{ inputs.benchmark_archive_sha256 }}
+        run: |
+          curl --fail --location --cookie-jar /tmp/portal-cookie --cookie /tmp/portal-cookie \
+            --output /tmp/bench-publish-transfer.tar.gz "$SOURCE_URL"
+          echo "$SOURCE_SHA256  /tmp/bench-publish-transfer.tar.gz" | sha256sum --check --strict
+          mkdir /tmp/bench-publish
+          tar -xzf /tmp/bench-publish-transfer.tar.gz -C /tmp/bench-publish
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          service_account: ${{ secrets.APPA_BENCH_GCP_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+
+      - name: Set up Google Cloud
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Publish and verify immutable archives
+        env:
+          BUCKET: ${{ vars.APPA_BENCH_GCS_BUCKET }}
+        run: |
+          set -euo pipefail
+          commit=c79958dce63cf37ca4fc269c787eb54a8782e64b
+          publish() {
+            bench=$1
+            run=$2
+            index="/tmp/bench-publish/$run.index.json"
+            archive=$(jq -r .archive "$index")
+            sha=$(jq -r .sha256 "$index")
+            prefix="gs://$BUCKET/bench/$bench/$commit/$run"
+            echo "$sha  /tmp/bench-publish/$archive" | sha256sum --check --strict
+            gcloud storage cp --no-clobber "/tmp/bench-publish/$archive" "$prefix/$archive"
+            gcloud storage cp --no-clobber "$index" "$prefix/index.json"
+            gcloud storage cp "$prefix/$archive" "/tmp/verified-$archive"
+            echo "$sha  /tmp/verified-$archive" | sha256sum --check --strict
+            gcloud storage ls "$prefix/"
+          }
+          publish agentthreatbench full-sonnet-5
+          publish corp 20260911-162255
+          publish corp 20260911-164615
