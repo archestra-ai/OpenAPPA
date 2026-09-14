@@ -104,6 +104,15 @@ class LiveTests(unittest.TestCase):
             finally:
                 os.close(fd)
 
+    def test_the_process_ceiling_stops_a_fork_bomb(self):
+        # The ceiling is the runner's, not the command's own: the loop cannot spawn 400
+        # children, and the shell dies trying.
+        result, _ = self.execute(
+            "i=0; while [ $i -lt 400 ]; do sleep 30 & i=$((i+1)); done; echo forked=$i"
+        )
+        self.assertNotIn("forked=400", result.get("stdout", ""))
+        self.assertIn("Cannot fork", result.get("stderr", ""))
+
     def test_descendants_cannot_modify_after_return(self):
         result, root = self.execute(
             "setsid sh -c 'printf started > output/started; sleep 2; printf late >> output/result' >/dev/null 2>&1 & "

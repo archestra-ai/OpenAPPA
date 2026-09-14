@@ -156,6 +156,17 @@ hashes every file and refuses a workspace that holds a symlink or a hard link an
 in it. Give the runtime a dedicated directory rather than a working checkout, and keep
 the policy, the ledger, the runtime database and the backend outside that directory.
 
+The policy this runtime runs needs two things the shipped starting policy does not
+have, so give the file runtime a policy of its own:
+
+- It must name all six file tools (`mcp/appa/appa_read_file`, `appa_write_file`,
+  `appa_edit_file`, `appa_copy_file`, `appa_move_file`, `appa_process_files`); a tool
+  the policy does not name is refused, not annotated.
+- It must not use sanitizers or rewrite routes. File tracking refuses to start when the
+  registry holds any, because a rewritten call would render arguments the ledger never
+  pinned. The starting policy declares the Claude fallback annotator's sanitizers, so
+  `--file-workspace` against it stops at startup with that reason.
+
 In file mode, every call that reaches APPA and is not one of the six file tools is
 refused — including APPA's own management tools (`appa_get_runtime_state`,
 `appa_include_battery`, `appa_match_batteries`, `appa_reload_policy`,

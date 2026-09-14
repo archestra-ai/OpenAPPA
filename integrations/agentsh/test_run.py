@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import resource
 import tempfile
 import unittest
 from pathlib import Path
@@ -43,21 +44,32 @@ class RunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             job = self.make_job(root)
             cmd = run.bwrap_command(Path(root) / "backend", job, Path(root) / "run.py")
+        sizes = []
         for index, argument in enumerate(cmd):
             if argument == "--tmpfs":
                 self.assertEqual(cmd[index - 2], "--size", cmd)
-                self.assertTrue(cmd[index - 1].endswith("m"), cmd)
+                # bubblewrap takes a plain byte count; a suffixed size is a launch failure.
+                sizes.append(cmd[index - 1])
         self.assertEqual(
             [cmd[i + 1] for i, argument in enumerate(cmd) if argument == "--tmpfs"],
             ["/tmp", "/job/work"],
         )
+        self.assertEqual(sizes, [run.TMP_SIZE, run.WORK_SIZE])
+        for size in sizes:
+            self.assertTrue(size.isdigit() and int(size) > 0, size)
 
     def test_the_command_runs_under_resource_limits(self):
-        # The shell that execs the command sets the ceilings, and refuses to run without them.
-        for limit in ("-c", "-f", "-v", "-u", "-n", "-t"):
+        # The shell that execs the command sets the ceilings dash can set, and refuses to run
+        # without them.
+        for limit in ("-c", "-f", "-v", "-n", "-t"):
             self.assertIn(f"ulimit {limit}", run.LIMIT_SCRIPT)
-        self.assertEqual(run.LIMIT_SCRIPT.count("|| exit 125"), 6)
+        self.assertEqual(run.LIMIT_SCRIPT.count("|| exit 125"), 5)
         self.assertTrue(run.LIMIT_SCRIPT.endswith('exec /bin/sh -c "$1"'))
+        # dash has no option for the process count; that one is applied to the daemon.
+        self.assertNotIn("-u ", run.LIMIT_SCRIPT)
+        self.assertEqual(run.process_ceiling(resource.RLIM_INFINITY, resource.RLIM_INFINITY), run.MAX_PROCESSES)
+        self.assertEqual(run.process_ceiling(64, resource.RLIM_INFINITY), 64)
+        self.assertEqual(run.process_ceiling(resource.RLIM_INFINITY, 32), 32)
 
     def test_the_generated_configuration_is_fail_closed(self):
         run.assert_fail_closed(run.config_document())

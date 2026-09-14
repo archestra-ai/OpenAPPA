@@ -67,6 +67,13 @@ pub(super) fn perform(
         .output()
         .map_err(|_| "isolated process launcher failed")?;
     if !output.status.success() {
+        // The launcher's own diagnostics: the operator's, not the model's. The message the
+        // model sees stays generic, because a launcher failure is not about its content.
+        tracing::warn!(
+            status = ?output.status.code(),
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "the isolated process launcher failed"
+        );
         return Err("isolated process failed before verified completion".into());
     }
     let response: Response =

@@ -2,6 +2,7 @@
 """Run one staged command in an agentsh sandbox inside a bwrap namespace."""
 
 import json
+import resource
 import stat
 import subprocess
 import sys
@@ -19,13 +20,15 @@ OUTER_TIMEOUT = 140.0
 
 # Resource ceilings for the command and its descendants. The namespace is not a resource
 # boundary on its own, so each limit is set on the shell that execs the command and inherited
-# from there: address space, processes, open descriptors, and one file's size. A shell that
-# cannot set one refuses to run the command rather than running it unbounded.
+# from there: address space, one file's size, open descriptors, CPU time, core dumps. A shell
+# that cannot set one refuses to run the command rather than running it unbounded.
+#
+# The process count is not here: `sh` is dash on Debian, and dash's `ulimit` has no option for
+# it. It is set on the daemon instead (see `apply_process_ceiling`), which the command inherits.
 LIMITS = {
     "core": 0,
     "fsize": 65536,
     "data": 2097152,
-    "procs": 256,
     "nofile": 256,
     "cpu": 150,
 }
@@ -33,16 +36,21 @@ LIMIT_SCRIPT = (
     "ulimit -c {core} || exit 125; "
     "ulimit -f {fsize} || exit 125; "
     "ulimit -v {data} || exit 125; "
-    "ulimit -u {procs} || exit 125; "
     "ulimit -n {nofile} || exit 125; "
     "ulimit -t {cpu} || exit 125; "
     'exec /bin/sh -c "$1"'
 ).format(**LIMITS)
 
+# The process ceiling, applied to the daemon: RLIMIT_NPROC counts threads as well as processes,
+# and the daemon is a Go server that spawns the command, so this bounds a fork bomb without
+# starving the launcher.
+MAX_PROCESSES = 256
+
 # Sizes of the memory-backed mounts the command may write: scratch, and its working directory.
-# A tmpfs without a size is host RAM, which the namespace does not bound either.
-TMP_SIZE = "64m"
-WORK_SIZE = "256m"
+# A tmpfs without a size is host RAM, which the namespace does not bound either. bubblewrap's
+# `--size` takes a plain byte count, never a suffixed size.
+TMP_SIZE = str(64 << 20)
+WORK_SIZE = str(256 << 20)
 
 # How much of a stream the runner echoes back to the runtime. The runtime parses one JSON
 # document out of the launcher's stdout, so an unbounded stream is unbounded runtime memory.
@@ -388,6 +396,22 @@ def assert_fail_closed(document: dict) -> None:
         raise RunnerError("configuration enables full ptrace tracing")
 
 
+def process_ceiling(soft: int, hard: int) -> int:
+    """The lowest of the requested process ceiling and whatever the host already allows."""
+    wanted = [value for value in (MAX_PROCESSES, soft, hard) if value != resource.RLIM_INFINITY]
+    return min(wanted)
+
+
+def apply_process_ceiling() -> None:
+    """Set the one ceiling `sh` cannot set, on this process and everything it spawns.
+
+    dash's `ulimit` has no option for the process count, so it is applied here instead: the
+    agentsh daemon is started after this, and the command it spawns inherits the limit.
+    """
+    soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
+    resource.setrlimit(resource.RLIMIT_NPROC, (process_ceiling(soft, hard), hard))
+
+
 def inner() -> int:
     command = validate_job(Path("/job"))
     control = Path("/job/control")
@@ -396,6 +420,7 @@ def inner() -> int:
     assert_fail_closed(document)
     (control / "config.json").write_text(json.dumps(document))
     (control / "policies/appa.yaml").write_text(json.dumps(policy_document()))
+    apply_process_ceiling()
     with open(control / "launcher.log", "wb") as log:
         daemon = subprocess.Popen(
             ["/appa/agentsh", "server", "--config", "/job/control/config.json"],
@@ -476,13 +501,23 @@ def outer(backend: Path, job: Path) -> int:
         text=True,
     )
     try:
-        stdout, _stderr = proc.communicate(timeout=OUTER_TIMEOUT)
+        stdout, stderr = proc.communicate(timeout=OUTER_TIMEOUT)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
         raise RunnerError("sandbox timed out")
     if proc.returncode != 0:
-        raise RunnerError("sandbox failed")
+        # The launcher's own stderr, which carries the inner process's message too: what the
+        # operator needs to see when a sandbox cannot start. This process's own generic line
+        # is dropped, or it would mask that message. The command's output is never here: it
+        # travels in the JSON result.
+        lines = [
+            line.strip()
+            for line in (stderr or "").splitlines()
+            if line.strip() and "agentsh runner failed" not in line
+        ]
+        detail = lines[-1] if lines else ""
+        raise RunnerError("sandbox failed: " + detail[:400])
     try:
         value = json.loads(stdout)
     except json.JSONDecodeError as exc:
@@ -514,8 +549,10 @@ def main() -> int:
         TypeError,
         subprocess.SubprocessError,
         urllib.error.URLError,
-    ):
-        print("agentsh runner failed", file=sys.stderr)
+    ) as error:
+        # The reason, not just the verdict: a launcher that cannot start is an operator's
+        # problem, and "it failed" leaves them with nothing to act on.
+        print(f"agentsh runner failed: {error}"[:400], file=sys.stderr)
         return 1
 
 

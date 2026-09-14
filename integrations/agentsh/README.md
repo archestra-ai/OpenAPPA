@@ -101,9 +101,14 @@ matters.
 
 Tests cover allowed processing, input immutability, control-file denial, socket and
 keyring denial, inherited descriptors, parent-memory access, detached-child teardown,
-and failure handling. Runtime tests cover narrowing, success/failure Labels, absolute
-input paths, binary output import, dependency persistence and quarantine. Live Claude
-tests exercise a two-input invoice calculation and actual denied-access attempts.
+the process ceiling, and failure handling. Runtime tests cover narrowing, success/failure
+Labels, absolute input paths, binary output import, dependency persistence and quarantine.
+Live Claude tests exercise a two-input invoice calculation and actual denied-access
+attempts.
+
+A launcher that cannot start reports the reason: the runner's failure message carries
+the sandbox's own last line, and the runtime logs it at warn level, because a launcher
+failure is the operator's problem rather than the model's.
 
 The runner refuses a configuration that would reach the patch's retained fail-open
 paths — a disabled unix-socket wrapper, a full ptrace tracer, a degraded sandbox mode —
