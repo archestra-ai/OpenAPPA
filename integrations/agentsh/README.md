@@ -8,7 +8,9 @@ for the Claude Code plugin, not confinement of Claude Code itself.
 
 The build requires Go, a C compiler, `pkg-config` and `libseccomp-dev`. Execution
 requires `/usr/bin/python3`, `/usr/bin/bwrap`, user/PID/network namespaces,
-Landlock and seccomp notification. The acceptance tests also use `keyctl`.
+Landlock and seccomp notification, and Linux 5.14 or newer: the runner's
+`RLIMIT_NPROC` ceiling is counted per user namespace there, while an older kernel
+counts the whole host user against it. The acceptance tests also use `keyctl`.
 
 ```sh
 bash integrations/agentsh/build.sh /absolute/new/backend

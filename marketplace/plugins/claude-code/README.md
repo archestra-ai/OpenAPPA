@@ -175,7 +175,9 @@ appa file-ledger --ledger /host/files.db --release  # only while the workspace m
 The command reads the ledger directly: no runtime, no policy file, and no workspace
 argument, because the ledger records the workspace it is bound to. It never releases a
 workspace that moved. Restore the recorded bytes, or start a new workspace with a fresh
-ledger.
+ledger. Stop the runtime before `--release`: a live reservation may belong to an
+operation that is running right now, and a runtime that is up releases its own abandoned
+calls at the turn end anyway.
 
 ### Capabilities deferred to an inference proxy
 

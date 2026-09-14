@@ -253,7 +253,7 @@ impl Session {
         };
         let dispatch = open.id.clone();
         self.abandon_open(&ToolOutcome::Indeterminate).await?;
-        self.release_file_reservation(&dispatch);
+        self.release_file_reservation(&dispatch).await;
         tracing::debug!(
             trajectory = %self.trajectory.0,
             dispatch = ?open.id,
@@ -274,10 +274,10 @@ impl Session {
     /// A ledger failure never turns a turn end into a refusal: the session would then be
     /// blocked by bookkeeping rather than by a policy decision, and the reservation it could
     /// not read stays exactly as it was.
-    fn release_file_reservation(&self, dispatch: &appa_engine::value::DispatchId) {
-        let Some(files) = &self.inner.files else {
+    async fn release_file_reservation(&self, dispatch: &appa_engine::value::DispatchId) {
+        if self.inner.files.is_none() {
             return;
-        };
+        }
         let key = match super::files::key(dispatch) {
             Ok(key) => key,
             Err(error) => {
@@ -285,7 +285,12 @@ impl Session {
                 return;
             }
         };
-        match files.store.abandon(&self.trajectory.0, &key) {
+        let released = ledger(self.inner.clone(), {
+            let (actor, key) = (self.trajectory.0.clone(), key);
+            move |files| files.store.abandon(&actor, &key)
+        })
+        .await;
+        match released {
             Ok(appa_eventlog::files::AbandonOutcome::Absent) => {}
             Ok(appa_eventlog::files::AbandonOutcome::Released) => tracing::info!(
                 trajectory = %self.trajectory.0,
@@ -1028,7 +1033,7 @@ impl Session {
         if let Some(open) = policy.engine().substituted_release(view, &self.trajectory) {
             let dispatch = open.id.clone();
             self.abandon_open(&unrun_substitution()).await?;
-            self.release_file_reservation(&dispatch);
+            self.release_file_reservation(&dispatch).await;
             tracing::debug!(
                 trajectory = %self.trajectory.0,
                 dispatch = ?open.id,
@@ -1040,7 +1045,7 @@ impl Session {
         if let Some(open) = policy.engine().open_dispatches(view, &self.trajectory).pop() {
             let dispatch = open.id.clone();
             self.abandon_open(&ToolOutcome::Indeterminate).await?;
-            self.release_file_reservation(&dispatch);
+            self.release_file_reservation(&dispatch).await;
             tracing::debug!(
                 trajectory = %self.trajectory.0,
                 dispatch = ?open.id,

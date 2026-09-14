@@ -10,6 +10,11 @@
 //! workspace still shows the pinned state. A workspace that moved is never released here: the
 //! runtime cannot tell an unrun call from one whose report was lost, so those bytes are an
 //! operator's decision, not a command's.
+//!
+//! A live reservation may belong to an operation that is running right now. Stop the runtime
+//! before `--release`: releasing a reservation out from under an operation that then finishes
+//! leaves the workspace holding bytes the ledger never recorded, which refuses every later
+//! call on that path. A runtime that is up releases its own abandoned calls at the turn end.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -62,6 +67,7 @@ pub fn run(args: Args) -> ExitCode {
             }
             if !args.release {
                 println!("  the workspace still shows the pinned state; --release gives it back");
+                println!("  (stop the runtime first: an operation that is running holds this too)");
                 return drifted(&store, false);
             }
             match store.abandon(&reservation.actor, &reservation.call_key) {
