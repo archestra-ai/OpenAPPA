@@ -121,7 +121,10 @@ fn ensure(target: &crate::runtime_url::RuntimeUrl, config: Option<PathBuf>, data
         let executable = std::env::current_exe().map_err(|error| {
             crate::runtime_start::StartError::Paths(format!("this executable has no path to start from: {error}"))
         })?;
-        crate::runtime_start::ensure(&target.resolve(), &deployment, &executable)
+        // An install run from inside a Claude Code session must not hand that
+        // session's credential to a runtime that outlives it.
+        let withheld = appa_adapter_claude_code::environment::session_scoped(std::env::vars_os().map(|(name, _)| name));
+        crate::runtime_start::ensure(&target.resolve(), &deployment, &executable, &withheld)
     });
     match started {
         Ok(()) => ExitCode::SUCCESS,

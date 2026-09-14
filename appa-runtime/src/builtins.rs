@@ -503,7 +503,7 @@ fn isolate_claude_environment(command: &mut tokio::process::Command) {
     // while that marker is present. This consult is deliberately isolated,
     // tool-less, and non-persistent, so it is safe and necessary to clear the
     // harness marker before launching it.
-    command.env_remove("CLAUDECODE");
+    command.env_remove(appa_adapter_claude_code::environment::SESSION_MARKER);
     // A consult is one answer, not a session: the CLI's background traffic (telemetry,
     // bootstrap fetches, the session-title call) is one more connection per consult
     // on a host that may run many consults at once, and none of it reaches the answer.

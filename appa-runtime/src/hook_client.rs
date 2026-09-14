@@ -177,7 +177,10 @@ pub fn run(target: &RuntimeTarget, turn_end: bool, ensure: Option<&Deployment>) 
                 ));
             }
         };
-        if let Err(error) = runtime_start::ensure(target, deployment, &executable) {
+        // The runtime outlives this session; what the session was handed for
+        // itself alone must not reach it.
+        let withheld = appa_adapter_claude_code::environment::session_scoped(std::env::vars_os().map(|(name, _)| name));
+        if let Err(error) = runtime_start::ensure(target, deployment, &executable, &withheld) {
             return block(&format!("the runtime could not be started: {error}"));
         }
     }
