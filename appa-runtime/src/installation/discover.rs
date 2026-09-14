@@ -146,6 +146,7 @@ pub(crate) struct Coverage {
 }
 
 /// How one server key matched a battery.
+#[derive(Clone, Copy)]
 enum Match<'a> {
     /// The key is a namespace the battery declares.
     Native,
@@ -191,7 +192,11 @@ pub(crate) fn coverage(
             .iter()
             .find(|(name, battery)| name.as_str() == server.as_str() && battery.namespaces.len() == 1)
             .map(|(name, battery)| (name, Match::Named(&battery.namespaces[0])));
-        let Some((name, matched)) = by_namespace.or(by_binding).or(by_name) else {
+        // A battery already included and covering the key is its cover,
+        // ahead of one that would only be suggested for it.
+        let mut candidates = [by_namespace, by_binding, by_name].into_iter().flatten();
+        let already = candidates.clone().find(|(name, _)| included.contains(name.as_str()));
+        let Some((name, matched)) = already.or_else(|| candidates.next()) else {
             uncovered.push(server.clone());
             continue;
         };
@@ -214,10 +219,10 @@ pub(crate) fn coverage(
             server: server.clone(),
             bind_server: matches!(matched, Match::Named(_)),
         };
-        // Every namespace a battery declares is served by the one plain
-        // include; a binding, suggested or already in the config, takes the
-        // battery for one server, and the battery's other keys go uncovered.
-        let exclusive = !matches!(matched, Match::Native);
+        // Every namespace a battery declares, or is bound to, is served by the
+        // one plain include; a suggested binding takes a battery over one
+        // namespace for one server, and its other key goes uncovered.
+        let exclusive = matches!(matched, Match::Named(_));
         match suggestions.get(name) {
             None => {
                 suggestions.insert(name.clone(), (suggestion, exclusive));
@@ -435,6 +440,34 @@ mod tests {
             through_binding.suggestions,
             vec![suggestion("acme", "work-acme", false)]
         );
+
+        // Each namespace bound to its own server: one include covers them all.
+        let each = bindings(&[("acme-docs", "w1"), ("acme-api", "w2")]);
+        let servers = BTreeSet::from([namespace("w1"), namespace("w2")]);
+        let all = coverage(&servers, &batteries, &BTreeSet::new(), &each);
+        assert_eq!(all.suggestions, vec![suggestion("acme", "w1", false)]);
+        assert_eq!(all.uncovered, vec![]);
+        assert_eq!(
+            coverage(&servers, &batteries, &included(&["acme"]), &each),
+            Coverage::default()
+        );
+    }
+
+    /// A key another battery declares natively is still the included
+    /// battery's when a binding sends that battery to it: nothing is
+    /// suggested for a server an included battery already gates.
+    #[test]
+    fn an_included_battery_bound_to_a_key_covers_it_ahead_of_a_native_match() {
+        let batteries = vec![battery("work", &["work-github"]), battery("github", &["github"])];
+        let servers = BTreeSet::from([namespace("work-github")]);
+        let bound = bindings(&[("github", "work-github")]);
+
+        assert_eq!(
+            coverage(&servers, &batteries, &included(&["github"]), &bound),
+            Coverage::default()
+        );
+        let neither = coverage(&servers, &batteries, &BTreeSet::new(), &bound);
+        assert_eq!(neither.suggestions, vec![suggestion("work", "work-github", false)]);
     }
 
     /// A server a battery's namespace is already bound to is that battery's:
