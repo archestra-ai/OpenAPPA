@@ -56,7 +56,7 @@ impl ProxyError {
     }
 }
 
-/// The public in-process form of the authenticated proxy protocol.
+/// The public in-process lifecycle protocol.
 ///
 /// This facade has no network client or server. It owns receipt, event,
 /// checkpoint, approval, and child-workflow processing directly.
