@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use appa_package::generation::{ArtifactDigest, Commit, DESCRIPTOR_FILE, Generation, Platform};
-use appa_package::{Battery, Host, Marketplace, Package, PackageEntry, PackageKind, PackageName, Role, TreeDigest};
+use appa_package::{Battery, Marketplace, Package, PackageEntry, PackageKind, PackageName, Role, TreeDigest};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -16,6 +16,7 @@ const MAX_STATE_BYTES: u64 = 4 * 1024 * 1024;
 mod acquisition;
 pub(crate) mod archive;
 pub mod cli;
+pub(crate) mod discover;
 mod files;
 pub(crate) mod includes;
 mod kagent;
@@ -176,6 +177,28 @@ impl Selection {
                 ));
             }
             hosts.push(plugin.host());
+            // A required battery is one the plugin's first install includes;
+            // a version whose catalog lacks it, or whose battery is not
+            // written for the host, cannot install the plugin as it declares.
+            for required in plugin.batteries() {
+                let battery = packages
+                    .iter()
+                    .find_map(|package| match &package.role {
+                        Role::Battery(battery) if package.name == *required => Some(battery),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        InstallError::Invalid(format!(
+                            "plugin {name} requires battery {required}, which is absent from the installed version"
+                        ))
+                    })?;
+                if !battery.hosts.contains(&plugin.host()) {
+                    return Err(InstallError::Invalid(format!(
+                        "plugin {name} requires battery {required}, which is not written for {}",
+                        plugin.host()
+                    )));
+                }
+            }
         }
         for name in &self.batteries {
             let battery = packages
@@ -1027,30 +1050,6 @@ pub(crate) fn battery_package(marketplace: &Path, name: &str) -> Result<(Package
     }
 }
 
-/// The batteries a first install of a plugin includes: for Claude Code, every
-/// battery of the version written for it. kagent selects its batteries
-/// through its guide, one at a time.
-pub(crate) fn host_batteries(marketplace: &Path, host: Host) -> Result<Vec<PackageName>, InstallError> {
-    match host {
-        Host::Kagent => return Ok(Vec::new()),
-        Host::ClaudeCode => {}
-    }
-    let catalog = Marketplace::read(&marketplace.join("marketplace.toml"))
-        .map_err(|error| InstallError::Invalid(error.to_string()))?;
-    let mut names = Vec::new();
-    for entry in catalog
-        .packages
-        .iter()
-        .filter(|entry| entry.kind == PackageKind::Battery)
-    {
-        let (_, battery) = battery_package(marketplace, entry.name.as_str())?;
-        if battery.hosts.contains(&host) {
-            names.push(entry.name.clone());
-        }
-    }
-    Ok(names)
-}
-
 #[cfg(test)]
 mod tests {
     /// A selection an earlier build wrote in a shape this one does not read is
@@ -1163,28 +1162,46 @@ mod tests {
         Generation::parse(&serde_json::to_vec(&document).unwrap()).unwrap()
     }
 
-    /// A first Claude Code install includes every battery of the version written
-    /// for it; a kagent install includes none, its guide adds them one at a time.
+    /// A plugin's first install includes the batteries its manifest requires,
+    /// and only those: each shipped plugin's requirements exist in the
+    /// catalog and are written for its host. Claude Code cannot be gated
+    /// without its own battery; kagent requires none, its guide adds them one
+    /// at a time.
     #[test]
-    fn a_first_claude_code_install_includes_every_battery_written_for_it() {
+    fn each_shipped_plugin_requires_batteries_its_version_ships_for_its_host() {
+        use std::collections::BTreeMap;
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace");
-        let claude = host_batteries(&source, Host::ClaudeCode).unwrap();
         let catalog = Marketplace::read(&source.join("marketplace.toml")).unwrap();
+        let mut required = BTreeMap::new();
         for entry in catalog
             .packages
             .iter()
-            .filter(|entry| entry.kind == PackageKind::Battery)
+            .filter(|entry| entry.kind == PackageKind::Plugin)
         {
-            let (_, battery) = battery_package(&source, entry.name.as_str()).unwrap();
-            assert_eq!(
-                claude.contains(&entry.name),
-                battery.hosts.contains(&Host::ClaudeCode),
-                "{}",
-                entry.name
+            let package = Package::read(&source.join(entry.path.as_str()).join(appa_package::MANIFEST_FILE)).unwrap();
+            let Role::Plugin(plugin) = package.role else {
+                panic!("{} is not a plugin", entry.name);
+            };
+            for name in plugin.batteries() {
+                let (_, battery) = battery_package(&source, name.as_str()).unwrap();
+                assert!(battery.hosts.contains(&plugin.host()), "{} requires {name}", entry.name);
+            }
+            required.insert(
+                entry.name.to_string(),
+                plugin
+                    .batteries()
+                    .iter()
+                    .map(PackageName::to_string)
+                    .collect::<Vec<_>>(),
             );
         }
-        assert!(claude.iter().any(|name| name.as_str() == "claude-code"));
-        assert!(host_batteries(&source, Host::Kagent).unwrap().is_empty());
+        assert_eq!(
+            required,
+            BTreeMap::from([
+                ("claude-code".to_owned(), vec!["claude-code".to_owned()]),
+                ("kagent".to_owned(), vec![]),
+            ])
+        );
     }
 
     #[test]

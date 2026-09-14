@@ -10,9 +10,9 @@ The smaller protocol-translation components remain **adapters** in the runtime
 API. They are implementation components of the host plugins, not package kinds.
 
 Each directory under `plugins/` or `batteries/` has an `appa-package.toml`. A
-battery's `hosts` names the hosts it is written for; a first
-`appa plugin install claude-code` includes every battery written for Claude
-Code. The directory name must match the manifest's package name. The package manifest
+battery's `hosts` names the hosts it is written for; a plugin's `batteries`
+names the batteries its first install includes, the ones its host cannot be
+gated without. The directory name must match the manifest's package name. The package manifest
 is the authored source; `marketplace.toml` is generated from these manifests and
 the package contents.
 
@@ -52,10 +52,13 @@ nothing updates automatically.
 Claude installation registers the runtime's hooks, MCP server and skill in
 the user's Claude Code profile, replaces the deployment's battery store
 (`batteries/` beside the config) with the version's batteries, includes
-every battery written for Claude Code on a first install, and verifies the
-running APPA runtime. A battery is one line of the root config's include
-list, `batteries/<name>/appa.toml`, whoever wrote it. Battery installation
-adds that line and activates the policy in the same operation.
+the plugin's required batteries on a first install, and verifies the
+running APPA runtime. It then reads the MCP servers configured in Claude
+Code and names the batteries that cover them, as the commands that include
+them; it never includes one unasked. A battery is one line of the root
+config's include list, `batteries/<name>/appa.toml`, whoever wrote it.
+Battery installation adds that line, one per name given, and activates the
+policy in the same operation.
 It does not register an MCP server or obtain credentials. A connection with a
 different identity can be associated using `--server <connection-id>`; use the
 identity reported by the host's discovery/validation, not a guessed provider URL.
