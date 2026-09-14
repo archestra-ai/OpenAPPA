@@ -227,10 +227,8 @@ pub fn install_battery(args: BatteryInstall) -> ExitCode {
             .source
             .acquire(&installation, Some(&current), current.requirements())?;
         installation.retain(&acquired)?;
-        let mut batteries = Vec::new();
         for name in &args.names {
-            let (_, battery) = super::battery_package(acquired.marketplace(), name.as_str())?;
-            batteries.push(battery);
+            super::battery_package(acquired.marketplace(), name.as_str())?;
         }
         let (mut selection, text) = match acquired.imported() {
             Some(imported) => {
@@ -257,7 +255,7 @@ pub fn install_battery(args: BatteryInstall) -> ExitCode {
             text = includes::add(&text, &includes::battery_include(name))?;
         }
         if let Some(server) = &args.server {
-            let battery = &batteries[0];
+            let (_, battery) = super::battery_package(acquired.marketplace(), args.names[0].as_str())?;
             if battery.namespaces.len() != 1 {
                 return Err(InstallError::Invalid("this battery has multiple namespaces; configure server_aliases explicitly in the deployment config".into()));
             }
@@ -595,11 +593,15 @@ pub fn install(args: Install) -> ExitCode {
         let servers = std::env::current_dir()
             .map(|cwd| discover::servers(plugin.host(), &cwd))
             .unwrap_or_default();
-        let coverage = discover::coverage(
-            &servers,
-            &discover::catalog(acquired.marketplace(), plugin.host())?,
-            &includes::included(&text)?,
-        );
+        let coverage = match servers.is_empty() {
+            true => discover::Coverage::default(),
+            false => discover::coverage(
+                &servers,
+                &discover::catalog(acquired.marketplace(), plugin.host())?,
+                &includes::included(&text)?,
+                &includes::server_bindings(&text)?,
+            ),
+        };
         let suggestions: Vec<serde_json::Value> = coverage
             .suggestions
             .iter()

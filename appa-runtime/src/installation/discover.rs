@@ -7,7 +7,7 @@
 //! the namespaces its contracts name, and a server key is the namespace the
 //! harness reports for that server's tools.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use appa_package::{Battery, Host, Marketplace, Namespace, PackageKind, PackageName};
@@ -75,30 +75,33 @@ fn project_spellings(project: &Path) -> BTreeSet<String> {
         .collect()
 }
 
-/// A file that is absent has no servers. One that cannot be read is named
-/// on stderr and has none either: a suggestion is never worth failing an
-/// install over.
+/// A file that is absent has no servers. One that cannot be read, or is
+/// larger than any configuration, is named on stderr and has none either: a
+/// suggestion is never worth failing an install over, and a project's
+/// `.mcp.json` is a stranger's file.
 fn read_json(path: &Path) -> Option<serde_json::Value> {
+    let skip = |reason: &dyn std::fmt::Display| {
+        eprintln!(
+            "appa: warning: {} was not read for its MCP servers: {reason}",
+            path.display()
+        );
+        None
+    };
+    let size = match std::fs::metadata(path) {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => return skip(&error),
+    };
+    if size > super::MAX_STATE_BYTES {
+        return skip(&format!("{size} bytes is larger than a configuration"));
+    }
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(error) => {
-            eprintln!(
-                "appa: warning: {} was not read for its MCP servers: {error}",
-                path.display()
-            );
-            return None;
-        }
+        Err(error) => return skip(&error),
     };
     match serde_json::from_slice(&bytes) {
         Ok(document) => Some(document),
-        Err(error) => {
-            eprintln!(
-                "appa: warning: {} was not read for its MCP servers: {error}",
-                path.display()
-            );
-            None
-        }
+        Err(error) => skip(&error),
     }
 }
 
@@ -181,33 +184,51 @@ impl Coverage {
 /// Matching is exact, never by substring: a server key equal to a namespace a
 /// battery declares is that battery's, and one equal to a battery's name is
 /// too, bound as that battery's one namespace. A battery already included
-/// covers its servers and is not suggested again.
+/// covers the servers its namespaces name, and a server its `bindings`
+/// (namespace to server key) already bind; those are not suggested again.
+/// One battery is suggested once, with its binding when any server needs it.
 pub(crate) fn coverage(
     servers: &BTreeSet<Namespace>,
     batteries: &[(PackageName, Battery)],
     included: &BTreeSet<String>,
+    bindings: &BTreeMap<String, String>,
 ) -> Coverage {
-    let mut coverage = Coverage::default();
+    let mut suggestions: BTreeMap<PackageName, Suggestion> = BTreeMap::new();
+    let mut uncovered = Vec::new();
     for server in servers {
         let by_namespace = batteries
             .iter()
             .find(|(_, battery)| battery.namespaces.contains(server))
-            .map(|(name, _)| (name, false));
+            .map(|(name, _)| (name, None));
         let by_name = batteries
             .iter()
             .find(|(name, battery)| name.as_str() == server.as_str() && battery.namespaces.len() == 1)
-            .map(|(name, _)| (name, true));
-        match by_namespace.or(by_name) {
-            Some((name, _)) if included.contains(name.as_str()) => {}
-            Some((name, bind_server)) => coverage.suggestions.push(Suggestion {
-                battery: name.clone(),
-                server: server.clone(),
-                bind_server,
-            }),
-            None => coverage.uncovered.push(server.clone()),
+            .map(|(name, battery)| (name, Some(&battery.namespaces[0])));
+        let Some((name, binds)) = by_namespace.or(by_name) else {
+            uncovered.push(server.clone());
+            continue;
+        };
+        let covered = included.contains(name.as_str())
+            && binds.is_none_or(|namespace| bindings.get(namespace.as_str()) == Some(&server.as_str().to_owned()));
+        if covered {
+            continue;
+        }
+        let suggestion = Suggestion {
+            battery: name.clone(),
+            server: server.clone(),
+            bind_server: binds.is_some(),
+        };
+        match suggestions.get(name) {
+            Some(existing) if existing.bind_server || !suggestion.bind_server => {}
+            _ => {
+                suggestions.insert(name.clone(), suggestion);
+            }
         }
     }
-    coverage
+    Coverage {
+        suggestions: suggestions.into_values().collect(),
+        uncovered,
+    }
 }
 
 #[cfg(test)]
@@ -313,7 +334,7 @@ mod tests {
         ]);
         let included = BTreeSet::from(["linear".to_owned()]);
 
-        let coverage = coverage(&servers, &batteries, &included);
+        let coverage = coverage(&servers, &batteries, &included, &BTreeMap::new());
 
         assert_eq!(
             coverage.suggestions,
@@ -343,6 +364,31 @@ mod tests {
         );
     }
 
+    /// An included battery covers a server its namespace names, but a server
+    /// matched by the battery's name is covered only once bound; until then
+    /// the binding is still suggested. One battery is suggested once, with
+    /// the binding when any of its servers needs it.
+    #[test]
+    fn an_included_battery_is_suggested_again_only_for_a_binding_it_lacks() {
+        let batteries = vec![battery("slack", &["claude_ai_Slack"])];
+        let included = BTreeSet::from(["slack".to_owned()]);
+        let servers = BTreeSet::from([namespace("slack")]);
+
+        let unbound = coverage(&servers, &batteries, &included, &BTreeMap::new());
+        assert_eq!(
+            unbound.commands(None),
+            vec!["appa battery install slack --server slack"]
+        );
+
+        let bindings = BTreeMap::from([("claude_ai_Slack".to_owned(), "slack".to_owned())]);
+        let bound = coverage(&servers, &batteries, &included, &bindings);
+        assert_eq!(bound, Coverage::default());
+
+        let both = BTreeSet::from([namespace("claude_ai_Slack"), namespace("slack")]);
+        let once = coverage(&both, &batteries, &BTreeSet::new(), &BTreeMap::new());
+        assert_eq!(once.commands(None), vec!["appa battery install slack --server slack"]);
+    }
+
     /// Every battery without a binding goes in one command, so the person
     /// runs one line; each binding is its own, as the command takes one.
     #[test]
@@ -354,8 +400,8 @@ mod tests {
         ];
         let servers = BTreeSet::from([namespace("github"), namespace("linear"), namespace("slack")]);
 
-        let commands =
-            coverage(&servers, &batteries, &BTreeSet::new()).commands(Some(Path::new("./deployment/appa.toml")));
+        let commands = coverage(&servers, &batteries, &BTreeSet::new(), &BTreeMap::new())
+            .commands(Some(Path::new("./deployment/appa.toml")));
 
         assert_eq!(
             commands,
