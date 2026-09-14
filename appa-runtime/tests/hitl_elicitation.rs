@@ -527,6 +527,34 @@ async fn a_harness_ruling_approves_with_no_elicitation_channel() {
 }
 
 #[tokio::test]
+async fn an_embedded_host_ruling_survives_without_any_mcp_request_context() {
+    let deployment = deployment().await;
+    let actor = Actor {
+        root: deployment.root.clone(),
+        child: None,
+    };
+    let args = serde_json::json!({ "offer_id": deployment.offer });
+    let gate = hooks::handle(
+        &deployment.runtime,
+        HookEvent::ToolCall {
+            actor: actor.clone(),
+            call: ProposedCall {
+                tool: appa_runtime_api::CONTROL_TOOL.into(),
+                arguments: raw(args.clone()),
+            },
+            spawn: false,
+            ruling: Some(Ruling::Approve),
+        },
+    )
+    .await;
+    assert!(matches!(gate, HookDecision::PassControl));
+    let result =
+        appa_runtime::mcp::execute_embedded_remedy(&deployment.runtime, &actor, serde_json::from_value(args).unwrap())
+            .await;
+    assert!(format!("{:?}", result.content).contains("Authorized"), "{result:?}");
+}
+
+#[tokio::test]
 async fn a_harness_ruling_denies_and_retires_the_offer() {
     let deployment = deployment().await;
     let answer = execute_with(&deployment, Absent, Some(Ruling::Deny)).await;

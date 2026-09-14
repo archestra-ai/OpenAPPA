@@ -11,8 +11,12 @@ rusqlite = { version = "0.40", default-features = false, features = ["bundled"] 
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+postgres = { version = "0.19", optional = true, features = ["with-serde_json-1"] }
+postgres-native-tls = { version = "0.5", optional = true }
+native-tls = { version = "0.2", optional = true }
 
 [features]
+postgres = ["dep:postgres", "dep:postgres-native-tls", "dep:native-tls"]
 # The fail points the runtime's own tests drive: a commit that rolls back in
 # place of committing, and a foreign writer that wins the compare-and-swap.
 # A dev-dependency enables it, so it is absent from every non-test build.

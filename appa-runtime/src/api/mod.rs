@@ -711,7 +711,11 @@ impl Prepared {
             error @ appa_eventlog::OpenError::ForeignSchema { .. } => OpenError::Damaged(error.to_string()),
             error => OpenError::Storage(error.to_string()),
         })?;
-        Ok(Runtime {
+        Ok(self.with_store(Arc::new(store)))
+    }
+
+    fn with_store(self, store: Arc<LogStore>) -> Runtime {
+        Runtime {
             inner: Arc::new(Inner {
                 deployment: std::sync::RwLock::new(Arc::new(self.deployment)),
                 retired: std::sync::Mutex::new(std::collections::BTreeMap::new()),
@@ -724,14 +728,14 @@ impl Prepared {
                 gates: self.gates,
                 naming: self.naming,
             }),
-        })
+        }
     }
 }
 
 struct Inner {
     deployment: std::sync::RwLock<Arc<Deployment>>,
     retired: std::sync::Mutex<std::collections::BTreeMap<String, Arc<RuntimeEngine>>>,
-    store: LogStore,
+    store: Arc<LogStore>,
     modules: crate::builtins::ModuleRegistry,
     executing: std::sync::Mutex<std::collections::BTreeSet<String>>,
     permits: std::sync::Mutex<std::collections::BTreeMap<PermitKey, Vec<Vouch>>>,
@@ -827,6 +831,16 @@ fn inventory_at(
 }
 
 impl Runtime {
+    /// Embed the existing runtime over host-managed storage without changing
+    /// policy naming, hook semantics, or starting an HTTP server.
+    pub fn open_with_store(
+        config: Config,
+        store: Arc<LogStore>,
+        modules: Option<PathBuf>,
+    ) -> Result<Runtime, OpenError> {
+        Ok(Prepared::new(config, modules, ToolNaming::AsAuthored)?.with_store(store))
+    }
+
     /// Run the serving load checks without opening a store, making network requests,
     /// or activating a deployment. Unknown inventory is reported, not rejected.
     pub(crate) fn validate_served(

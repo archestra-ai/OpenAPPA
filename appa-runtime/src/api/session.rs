@@ -839,7 +839,8 @@ impl Session {
                         // Batch-terminal: every sibling settles first; any no-answer
                         // then aborts the invocation, discarding the siblings' answers,
                         // before another engine round or any append.
-                        let consults = requests.into_iter().map(|request| self.consult(request, None, None));
+                        // Embedded hosts supply the ruling outside an MCP elicitation context.
+                        let consults = requests.into_iter().map(|request| self.consult(request, None, ruling));
                         for answered in crate::external::settle_batch(consults).await {
                             evidence.push(answered?);
                         }
