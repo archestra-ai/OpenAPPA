@@ -600,14 +600,10 @@ pub fn install(args: Install) -> ExitCode {
         // named, never a failure of the install.
         let coverage = match servers.is_empty() {
             true => discover::Coverage::default(),
-            false => discover::catalog(acquired.marketplace(), plugin.host())
+            false => discover::batteries(acquired.marketplace(), &catalog, plugin.host())
                 .and_then(|batteries| {
-                    Ok(discover::coverage(
-                        &servers,
-                        &batteries,
-                        &includes::included(&text)?,
-                        &includes::server_bindings(&text)?,
-                    ))
+                    let (included, bindings) = includes::batteries(&text)?;
+                    Ok(discover::coverage(&servers, &batteries, &included, &bindings))
                 })
                 .unwrap_or_else(|error| {
                     eprintln!("appa: warning: battery suggestions were not computed: {error}");

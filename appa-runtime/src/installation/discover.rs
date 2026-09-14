@@ -109,10 +109,12 @@ fn server_keys(document: &serde_json::Value) -> impl Iterator<Item = Namespace> 
         .filter_map(|key| Namespace::parse(key).ok())
 }
 
-/// The batteries of the version at `marketplace` written for `host`.
-pub(crate) fn catalog(marketplace: &Path, host: Host) -> Result<Vec<(PackageName, Battery)>, InstallError> {
-    let catalog = Marketplace::read(&marketplace.join("marketplace.toml"))
-        .map_err(|error| InstallError::Invalid(error.to_string()))?;
+/// The batteries of `catalog`, the version at `marketplace`, written for `host`.
+pub(crate) fn batteries(
+    marketplace: &Path,
+    catalog: &Marketplace,
+    host: Host,
+) -> Result<Vec<(PackageName, Battery)>, InstallError> {
     let mut batteries = Vec::new();
     for entry in catalog
         .packages
@@ -216,10 +218,20 @@ pub(crate) fn coverage(
             uncovered.push(server.clone());
             continue;
         };
-        let covered = included.contains(name.as_str())
-            && binds.is_none_or(|namespace| bindings.get(namespace.as_str()) == Some(&server.as_str().to_owned()));
-        if covered {
-            continue;
+        if included.contains(name.as_str()) {
+            // A binding moves the battery's rules to the bound server key, so
+            // a battery serves one server: the one its namespace is bound to,
+            // or the namespace's own server while unbound.
+            let namespace = binds.unwrap_or(server);
+            match bindings.get(namespace.as_str()).map(String::as_str) {
+                None if binds.is_none() => continue,
+                Some(bound) if bound == server.as_str() => continue,
+                None => {}
+                Some(_) => {
+                    uncovered.push(server.clone());
+                    continue;
+                }
+            }
         }
         let suggestion = Suggestion {
             battery: name.clone(),
@@ -391,6 +403,13 @@ mod tests {
         let bindings = BTreeMap::from([("claude_ai_Slack".to_owned(), "slack".to_owned())]);
         let bound = coverage(&servers, &batteries, &included, &bindings);
         assert_eq!(bound, Coverage::default());
+
+        // Bound to `slack`, the battery's rules no longer name the connector's
+        // own key, so that server is uncovered, not silently covered.
+        let native = BTreeSet::from([namespace("claude_ai_Slack")]);
+        let redirected = coverage(&native, &batteries, &included, &bindings);
+        assert_eq!(redirected.suggestions, vec![]);
+        assert_eq!(redirected.uncovered, vec![namespace("claude_ai_Slack")]);
 
         let both = BTreeSet::from([namespace("claude_ai_Slack"), namespace("slack")]);
         let once = coverage(&both, &batteries, &BTreeSet::new(), &BTreeMap::new());
