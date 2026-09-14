@@ -2,7 +2,7 @@
 title: Cloudflare Observability battery
 category: Batteries
 order: 6.70
-description: Rules for the Cloudflare Workers Observability MCP server's 8 tools: internal logs, telemetry and Worker reads, plus two public documentation reads.
+description: "Rules for the Cloudflare Workers Observability MCP server's 8 tools: internal logs, telemetry and Worker reads, plus two public documentation reads."
 sidebar: false
 breadcrumb: Cloudflare Observability
 ---
