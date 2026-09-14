@@ -232,8 +232,9 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
         installation.retain(&acquired)?;
         let catalog = Marketplace::read(&acquired.marketplace().join("marketplace.toml"))
             .map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let mut batteries = Vec::new();
         for name in &args.names {
-            super::battery_package_in(acquired.marketplace(), &catalog, name.as_str())?;
+            batteries.push(super::battery_package_in(acquired.marketplace(), &catalog, name.as_str())?.1);
         }
         let (mut selection, text) = match acquired.imported() {
             Some(imported) => {
@@ -260,7 +261,7 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
             text = includes::add(&text, &includes::battery_include(name))?;
         }
         if let Some(server) = &args.server {
-            let (_, battery) = super::battery_package_in(acquired.marketplace(), &catalog, args.names[0].as_str())?;
+            let battery = &batteries[0];
             if battery.namespaces.len() != 1 {
                 return Err(InstallError::Invalid("this battery has multiple namespaces; configure server_aliases explicitly in the deployment config".into()));
             }
