@@ -40,10 +40,7 @@ pub fn run(args: Args) -> ExitCode {
         Ok(None) => println!("reservation: none"),
         Ok(Some(reservation)) => {
             let pin = &reservation.pin;
-            println!(
-                "reservation: {} {:?} {}",
-                reservation.actor, pin.operation, pin.path
-            );
+            println!("reservation: {} {:?} {}", reservation.actor, pin.operation, pin.path);
             if let Some(dispatch) = &reservation.bound_dispatch {
                 println!("  bound dispatch: {dispatch}");
             }
@@ -102,11 +99,7 @@ fn drifted(store: &FileStore, failure: bool) -> ExitCode {
     };
     if versions.is_empty() {
         println!("drifted paths: none");
-        return if failure {
-            ExitCode::FAILURE
-        } else {
-            ExitCode::SUCCESS
-        };
+        return if failure { ExitCode::FAILURE } else { ExitCode::SUCCESS };
     }
     println!("drifted paths: {}", versions.len());
     for version in &versions {

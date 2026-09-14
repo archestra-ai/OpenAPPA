@@ -68,7 +68,11 @@ fn a_released_call_the_harness_never_ran_is_given_back_on_request() {
     let released = fixture.run(true);
     let stdout = text(&released);
     assert!(stdout.contains("released: the harness never ran this call"), "{stdout}");
-    assert!(released.status.success(), "{}", String::from_utf8_lossy(&released.stderr));
+    assert!(
+        released.status.success(),
+        "{}",
+        String::from_utf8_lossy(&released.stderr)
+    );
     let store = FileStore::inspect(&fixture.db).expect("ledger");
     assert!(store.reservation().expect("readable").is_none());
     // The workspace accepts file calls again.
@@ -85,8 +89,7 @@ fn a_workspace_that_moved_is_reported_and_never_released() {
         .prepare("session", "call", FileOperation::Replace, "tracked.txt")
         .expect("reservation");
     store.bind("session", "call", "dispatch", &Label::top()).expect("bound");
-    std::fs::write(fixture.workspace.join("tracked.txt"), "somebody else wrote here")
-        .expect("drift");
+    std::fs::write(fixture.workspace.join("tracked.txt"), "somebody else wrote here").expect("drift");
     drop(store);
 
     let output = fixture.run(true);
@@ -127,4 +130,3 @@ fn an_uninitialized_ledger_is_refused_rather_than_created() {
     assert!(!absent.exists(), "inspection never creates a ledger");
     assert!(String::from_utf8_lossy(&output.stderr).contains("not initialized"));
 }
-

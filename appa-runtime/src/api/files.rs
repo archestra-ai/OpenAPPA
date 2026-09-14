@@ -169,13 +169,20 @@ pub(super) fn operation(call: &ProposedCall) -> Result<(FileOperation, String), 
     Ok((operation, path))
 }
 
-/// Called only after the exact dispatch has been released for the host-bound caller.
-pub(super) fn perform(files: &FileTracking, call: &ProposedCall) -> Result<String, String> {
+/// Called only after the exact dispatch has been released for the host-bound caller, on the
+/// path the ledger pinned for it. The call's own argument bytes are read for content and
+/// commands; every path comes from `pin`, so the file this runs on is the file the ledger
+/// validated, hashed and reserved — never a second reading of what the model spelled.
+pub(super) fn perform(
+    files: &FileTracking,
+    call: &ProposedCall,
+    pin: &appa_eventlog::files::FilePin,
+) -> Result<String, String> {
     let workspace = &files.workspace;
-    let (operation, path) = operation(call).map_err(|error| error.to_string())?;
-    let path = workspace.join(path);
+    let (operation, _) = operation(call).map_err(|error| error.to_string())?;
+    let path = workspace.join(&pin.path);
     match operation {
-        FileOperation::Process => process::perform(files, call),
+        FileOperation::Process => process::perform(files, call, pin),
         FileOperation::Read => std::fs::read_to_string(path).map_err(|error| error.to_string()),
         FileOperation::Replace => {
             let args: WriteArgs = serde_json::from_str(call.arguments.get()).map_err(|error| error.to_string())?;
@@ -197,12 +204,11 @@ pub(super) fn perform(files: &FileTracking, call: &ProposedCall) -> Result<Strin
                 .map_err(|error| error.to_string())
         }
         FileOperation::Copy | FileOperation::Move => {
-            let args: FileTransferArgs =
-                serde_json::from_str(call.arguments.get()).map_err(|error| error.to_string())?;
+            let source = pin.source.as_ref().ok_or("the transfer pin carries no source")?;
             let result = (|| -> std::io::Result<()> {
                 let parent = path.parent().ok_or_else(|| std::io::Error::other("missing parent"))?;
                 std::fs::create_dir_all(parent)?;
-                let source = workspace.join(args.source_path);
+                let source = workspace.join(&source.path);
                 if operation == FileOperation::Move {
                     std::fs::rename(source, &path)?;
                 } else {
@@ -992,6 +998,36 @@ else:
                 .to_string()
                 .contains("pending")
         );
+    }
+
+    #[tokio::test]
+    async fn managed_files_execute_the_pinned_path_not_the_argument_path() {
+        let dir = fixture();
+        let runtime = open(dir.path(), true);
+        // The pin names source.txt; the call's bytes name elsewhere.txt. The ledger validated,
+        // hashed and reserved the pinned path, so that is the one that runs.
+        let call = ProposedCall {
+            tool: format!("{PREFIX}appa_write_file"),
+            arguments: super::super::session::raw(
+                serde_json::json!({"file_path": "elsewhere.txt", "content": "pinned content"}),
+            ),
+        };
+        let files = runtime.inner.files.as_ref().unwrap();
+        let pin = FilePin {
+            path: "source.txt".into(),
+            operation: FileOperation::Replace,
+            predecessor_version: None,
+            predecessor_label: None,
+            predecessor_digest: None,
+            source: None,
+            inputs: vec![],
+        };
+        assert_eq!(perform(files, &call, &pin).unwrap(), "file written".to_string());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("work/source.txt")).unwrap(),
+            "pinned content"
+        );
+        assert!(!dir.path().join("work/elsewhere.txt").exists());
     }
 
     #[tokio::test]

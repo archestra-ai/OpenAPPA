@@ -68,6 +68,27 @@ fn is_open_call(call: &ProposedCall, canonical: impl FnOnce() -> Option<Vec<u8>>
     call.tool == open.tool && canonical().as_deref() == Some(open.bytes.as_slice())
 }
 
+/// Run one ledger operation on the blocking pool.
+///
+/// Every one of them hashes whole files or writes rows under a synchronous connection, and
+/// this executor also serves the harness's hooks and MCP requests. `bind`, `cancel` and
+/// `abandon` stay inline: each is one indexed row, with no file read behind it.
+async fn ledger<T: Send + 'static>(
+    inner: std::sync::Arc<super::Inner>,
+    work: impl FnOnce(&super::files::FileTracking) -> Result<T, appa_eventlog::files::FileStoreError> + Send + 'static,
+) -> Result<T, EventError> {
+    let joined = tokio::task::spawn_blocking(move || {
+        let files = inner
+            .files
+            .as_ref()
+            .ok_or_else(|| appa_eventlog::files::FileStoreError::Corrupt("file tools are not enabled".into()))?;
+        work(files)
+    })
+    .await
+    .map_err(|error| super::files::refused(format!("the file ledger task failed: {error}")))?;
+    joined.map_err(super::files::refused)
+}
+
 /// Which dispatch a reported outcome belongs to, or why none can take
 /// it. Total over everything the log shows: the reported call in the
 /// engine's canonical domain and the dispatches this
@@ -323,20 +344,31 @@ impl Session {
                 }
                 let args: super::files::ProcessArgs =
                     serde_json::from_str(call.arguments.get()).map_err(super::files::refused)?;
-                files
-                    .store
-                    .prepare_process(&self.trajectory.0, &key, &args.input_paths, &path)
+                ledger(self.inner.clone(), {
+                    let (actor, key, path, inputs) =
+                        (self.trajectory.0.clone(), key.clone(), path.clone(), args.input_paths);
+                    move |files| files.store.prepare_process(&actor, &key, &inputs, &path)
+                })
+                .await?
             }
             appa_eventlog::files::FileOperation::Copy | appa_eventlog::files::FileOperation::Move => {
                 let args: super::files::FileTransferArgs =
                     serde_json::from_str(call.arguments.get()).map_err(super::files::refused)?;
-                files
-                    .store
-                    .prepare_transfer(&self.trajectory.0, &key, operation, &args.source_path, &path)
+                ledger(self.inner.clone(), {
+                    let (actor, key, path, source) =
+                        (self.trajectory.0.clone(), key.clone(), path.clone(), args.source_path);
+                    move |files| files.store.prepare_transfer(&actor, &key, operation, &source, &path)
+                })
+                .await?
             }
-            _ => files.store.prepare(&self.trajectory.0, &key, operation, &path),
-        }
-        .map_err(super::files::refused)?;
+            _ => {
+                ledger(self.inner.clone(), {
+                    let (actor, key, path) = (self.trajectory.0.clone(), key.clone(), path.clone());
+                    move |files| files.store.prepare(&actor, &key, operation, &path)
+                })
+                .await?
+            }
+        };
         // Managed writes must not reconfigure Claude Code, Git hooks, or MCP execution.
         // Claude loads instruction files implicitly, outside the file-tool observation path.
         if operation != appa_eventlog::files::FileOperation::Read
@@ -535,19 +567,37 @@ impl Session {
 
     /// Execute only the exact released runtime-owned call. Content-dependent checks happen
     /// here, never during proposal parsing or in Claude Code's native validation.
+    ///
+    /// The file work runs on the blocking pool: it reads and hashes files, and a Process call
+    /// may run a sandboxed command for two minutes. The runtime serves hooks and MCP on this
+    /// executor, so none of that belongs on an async worker.
     pub(super) async fn execute_file(&self, call: ProposedCall) -> Result<super::files::FileReply, EventError> {
-        let files = self
-            .inner
-            .files
-            .as_ref()
-            .ok_or_else(|| super::files::refused("file tools are not enabled"))?;
+        if self.inner.files.is_none() {
+            return Err(super::files::refused("file tools are not enabled"));
+        }
         let open = self.carried_call()?.ok_or(EventError::UnknownDispatch)?;
         let log = self.inner.log(&self.root)?;
         let policy = self.inner.resolve_policy(&self.deployment, &log)?;
         if !is_open_call(&call, || policy.engine().canonical_bytes(&call), &open) {
             return Err(EventError::OutcomeMismatch);
         }
-        let result = super::files::perform(files, &call);
+        let key = super::files::key(&open.id)?;
+        let pin = ledger(self.inner.clone(), {
+            let (actor, key) = (self.trajectory.0.clone(), key.clone());
+            move |files| files.store.pin_for(&actor, &key)
+        })
+        .await?
+        .ok_or_else(|| super::files::refused("the released call holds no file reservation"))?;
+        let result = {
+            let inner = self.inner.clone();
+            let (call, pin) = (call.clone(), pin.clone());
+            tokio::task::spawn_blocking(move || match inner.files.as_ref() {
+                Some(files) => super::files::perform(files, &call, &pin),
+                None => Err("file tools are not enabled".to_string()),
+            })
+            .await
+            .map_err(|error| super::files::refused(format!("the file operation did not complete: {error}")))?
+        };
         let outcome = match &result {
             Ok(value) => ToolOutcome::Success {
                 body: OutcomeBody::Available(value.clone()),
@@ -573,7 +623,7 @@ impl Session {
     }
 
     pub async fn on_tool_result(&self, call: ProposedCall, o: ToolOutcome) -> Result<ToolResultDecision, EventError> {
-        if let Some(files) = &self.inner.files {
+        if self.inner.files.is_some() {
             super::files::operation(&call)?;
             let open = self.carried_call()?.ok_or(EventError::UnknownDispatch)?;
             let log = self.inner.log(&self.root)?;
@@ -596,10 +646,11 @@ impl Session {
                 // Verify the physical version before admitting a successful result. The
                 // dispatch was durably released; an append failure afterward cannot erase
                 // this already-published file's Label.
-                files
-                    .store
-                    .finish(&self.trajectory.0, &key, true)
-                    .map_err(super::files::refused)?;
+                ledger(self.inner.clone(), {
+                    let (actor, key) = (self.trajectory.0.clone(), key.clone());
+                    move |files| files.store.finish(&actor, &key, true)
+                })
+                .await?;
             }
             let decision = self.report_outcome(&call, &o).await?;
             match &o {
@@ -609,10 +660,11 @@ impl Session {
                     ));
                 }
                 ToolOutcome::Failure { .. } => {
-                    files
-                        .store
-                        .finish(&self.trajectory.0, &key, false)
-                        .map_err(super::files::refused)?;
+                    ledger(self.inner.clone(), {
+                        let (actor, key) = (self.trajectory.0.clone(), key.clone());
+                        move |files| files.store.finish(&actor, &key, false)
+                    })
+                    .await?;
                 }
                 ToolOutcome::Success { .. } => {}
             }

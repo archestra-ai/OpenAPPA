@@ -681,6 +681,26 @@ impl FileStore {
         Ok(drifted)
     }
 
+    /// The pin a live reservation holds for this exact call, if it holds one. What an
+    /// operation executes is the path this pin recorded, never the path the call spelled: the
+    /// ledger validated and hashed that one.
+    pub fn pin_for(&self, actor: &str, call_key: &str) -> Result<Option<FilePin>, FileStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| FileStoreError::Corrupt("connection lock poisoned".into()))?;
+        let encoded = connection
+            .query_row(
+                "SELECT pin FROM reservation WHERE actor=?1 AND call_key=?2",
+                params![actor, call_key],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        encoded
+            .map(|pin| serde_json::from_str(&pin).map_err(FileStoreError::from))
+            .transpose()
+    }
+
     /// The live reservation, if any. One workspace holds at most one.
     pub fn reservation(&self) -> Result<Option<Reservation>, FileStoreError> {
         let connection = self
@@ -688,18 +708,14 @@ impl FileStore {
             .lock()
             .map_err(|_| FileStoreError::Corrupt("connection lock poisoned".into()))?;
         let row = connection
-            .query_row(
-                "SELECT actor,call_key,pin,bound_dispatch FROM reservation",
-                [],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, Option<String>>(3)?,
-                    ))
-                },
-            )
+            .query_row("SELECT actor,call_key,pin,bound_dispatch FROM reservation", [], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            })
             .optional()?;
         row.map(|(actor, call_key, pin, bound_dispatch)| {
             Ok(Reservation {
@@ -1021,7 +1037,11 @@ mod tests {
         store.prepare("a", "unrun", FileOperation::Edit, "tracked.txt").unwrap();
         store.bind("a", "unrun", "dispatch", &Label::top()).unwrap();
         assert_eq!(store.reservation().unwrap().unwrap().actor, "a");
-        assert!(store.pin_matches_workspace(&store.reservation().unwrap().unwrap().pin).unwrap());
+        assert!(
+            store
+                .pin_matches_workspace(&store.reservation().unwrap().unwrap().pin)
+                .unwrap()
+        );
         assert_eq!(store.abandon("a", "unrun").unwrap(), AbandonOutcome::Released);
         assert!(store.reservation().unwrap().is_none());
         assert_eq!(store.abandon("a", "unrun").unwrap(), AbandonOutcome::Absent);

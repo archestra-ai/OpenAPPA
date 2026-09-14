@@ -30,7 +30,11 @@ struct Response {
     result: ProcessResult,
 }
 
-pub(super) fn perform(files: &FileTracking, call: &ProposedCall) -> Result<String, String> {
+pub(super) fn perform(
+    files: &FileTracking,
+    call: &ProposedCall,
+    pin: &appa_eventlog::files::FilePin,
+) -> Result<String, String> {
     let backend = files
         .process_backend
         .as_ref()
@@ -40,13 +44,10 @@ pub(super) fn perform(files: &FileTracking, call: &ProposedCall) -> Result<Strin
     let prepare = || -> std::io::Result<()> {
         fs::create_dir(job.path().join("inputs"))?;
         fs::create_dir(job.path().join("output"))?;
-        for path in &args.input_paths {
-            // Paths were validated and pinned before dispatch. There are no outside writers.
-            let source = files.workspace.join(path);
-            let relative = source
-                .strip_prefix(&files.workspace)
-                .map_err(|_| std::io::Error::other("input is outside the workspace"))?;
-            let target = job.path().join("inputs").join(relative);
+        for input in &pin.inputs {
+            // The pinned paths were validated before dispatch. There are no outside writers.
+            let source = files.workspace.join(&input.path);
+            let target = job.path().join("inputs").join(&input.path);
             fs::create_dir_all(target.parent().expect("input paths have the staging parent"))?;
             fs::copy(source, target)?;
         }
@@ -74,11 +75,8 @@ pub(super) fn perform(files: &FileTracking, call: &ProposedCall) -> Result<Strin
     if response.result.exit_code != 0 {
         return Err(text);
     }
-    publish(
-        &job.path().join("output/result"),
-        &files.workspace.join(args.output_path),
-    )
-    .map_err(|error| format!("isolated output not published: {error}"))?;
+    publish(&job.path().join("output/result"), &files.workspace.join(&pin.path))
+        .map_err(|error| format!("isolated output not published: {error}"))?;
     Ok(text)
 }
 
