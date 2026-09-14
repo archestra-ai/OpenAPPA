@@ -74,6 +74,10 @@ const BATTERIES = [
     description: "Rules for 20 flag, environment, AI Config, and audit tools; every write is reviewed.",
     href: "/battery-launchdarkly",
     logo: "/images/batteries/launchdarkly.svg",
+    name: "PostHog",
+    description: "Rules for 44 analytics, flag, experiment, and survey tools; internal reads and reviewed writes.",
+    href: "/battery-posthog",
+    logo: "/images/batteries/posthog.svg",
   },
   {
     name: "Add your own",
