@@ -31,13 +31,20 @@
 //! result. No file-derived result reaches MCP before admission. An unchanged failure admits
 //! its error text but publishes no version. A changed failure, missing outcome,
 //! or unmatched digest leaves the durable reservation in place, including across restarts.
-//! Further file calls stop. Recovery requires operator reconciliation; there is no reset API.
+//! Further file calls stop. A released call the harness never ran gives its reservation back
+//! at the turn end, and only while the workspace still shows the pinned state; anything else
+//! is an operator's, and `appa file-ledger` reports it, names the drifted paths, and gives a
+//! reservation back under the same condition.
 //! Copy/Move pin both paths under one reservation. Copy stages raw bytes; Move uses same-filesystem
 //! rename. Success verifies both paths and atomically publishes destination metadata and Move's
 //! source absence in the ledger. Failure must leave both files unchanged or remain quarantined.
+//! Every operation executes on the path its pin recorded, never on a second reading of the
+//! path the call spelled.
 //! Process pins every declared input and one destination. It publishes only after isolated
 //! execution and descendant teardown. Its output, stdout, stderr and failures combine every
 //! input Label with the receiving trajectory and delta; no acknowledgement exemption applies.
+//! The isolated command runs under the runner's resource ceilings, and the runtime imports
+//! one regular output file of at most 64 MiB.
 //!
 //! # Enabling the draft
 //!
@@ -45,16 +52,22 @@
 //! `--file-ledger /protected/files.db`. On the first start only, also supply
 //! `--initialize-file-trust suspicious --initialize-file-audience public` (or the operator's
 //! actual classification). This classifies every existing file; it does not inspect content.
+//! Initialization hashes the whole workspace and refuses one that contains any symlink or
+//! hard link, so give the runtime a dedicated directory rather than a working checkout.
 //! Subsequent starts require that same ledger and policy and omit initialization flags.
 //! With the APPA plugin installed, launch Claude with `APPA_GATE=1` and
 //! `APPA_RUNTIME_URL` pointing to this runtime. SessionStart describes the file tools.
 //! The plugin's HTTP MCP calls consume exact one-shot hook approvals; their outcomes
 //! are already admitted when the post-tool hook arrives. Native tools remain available
-//! in Claude, but calls reaching APPA are refused in this mode.
+//! in Claude, but calls reaching APPA are refused in this mode — including APPA's own
+//! management tools, which an operator runs from the `appa` command line instead.
 //! `appa claude-files` is a separate constrained test launcher, not required by the plugin.
 //! The policy must declare each enabled tool. File tools alone do not enforce OS isolation.
 //! `--file-process-backend /host/backend` additionally enables `appa_process_files`; its
 //! staged-input contract is in `process.rs`. Use disposable test fixtures only.
+//! `appa file-ledger --ledger /protected/files.db` reads that ledger without a runtime: it
+//! reports the live reservation, every tracked path that no longer holds its recorded bytes,
+//! and `--release` gives back a reservation the harness never ran.
 //!
 //! # Limitations
 //!

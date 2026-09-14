@@ -56,16 +56,44 @@ in the policy. The tool is absent from MCP unless the backend is enabled.
 5. The runner waits for namespace PID 1 to exit. Its descendants are torn down
    before the runtime imports output. A successful command must leave one regular,
    singly linked `output/result`; symlinks, directories and special files are refused.
-   Extra staged files are discarded. Child metadata is not imported.
+   Extra staged files are discarded. Child metadata is not imported. The runtime
+   refuses an output file over 64 MiB before copying it.
 6. The runtime stages and atomically replaces the destination, verifies the ledger
    pins, records all input dependencies, and admits the result before returning it
-   through MCP. A failed command publishes nothing. Uncertain ledger publication
-   retains the reservation and requires operator reconciliation.
+   through MCP. A failed command publishes nothing. A workspace that moved away from
+   its pins retains the reservation; `appa file-ledger` reports it and names the
+   drifted paths.
 
 The command timeout is 120 seconds. A launcher timeout or malformed response never
 publishes output. Command failures retain their captured diagnostic text with the
 combined Label; launcher failures return a generic error. Commands start in a fresh
 workspace on every call and cannot persist scratch files into the next call.
+
+## Resource ceilings
+
+A namespace is not a resource boundary, so the runner sets its own and refuses to
+start without them. The shell that execs the command applies them and `exec`s, so
+every descendant inherits them:
+
+| Limit | Value | Bounds |
+| --- | --- | --- |
+| `RLIMIT_AS` | 2 GiB | the command's own address space |
+| `RLIMIT_NPROC` | 256 | processes and threads |
+| `RLIMIT_NOFILE` | 256 | open descriptors |
+| `RLIMIT_FSIZE` | 64 MiB | one file's size, including `output/result` |
+| `RLIMIT_CPU` | 150 s | CPU time per process, beside the 120 s wall clock |
+| `RLIMIT_CORE` | 0 | core dumps |
+
+Both memory-backed mounts are sized (`/tmp` 64 MiB, the working directory 256 MiB),
+the diagnostic streams the runner echoes back are truncated at 1 MiB each with a mark,
+and one call may declare at most 64 inputs.
+
+What stays unbounded: the output directory is a host-backed bind mount, so a command
+that writes *many* files there consumes host disk until the wall clock ends, even
+though each file is capped. The system toolchain mounts and the job's own control
+files are outside the command's Landlock grant but inside its namespace. Put the
+runtime's temporary directory on a size-limited filesystem when a hard ceiling
+matters.
 
 ## Verified scope and exclusions
 
@@ -75,10 +103,15 @@ and failure handling. Runtime tests cover narrowing, success/failure Labels, abs
 input paths, binary output import, dependency persistence and quarantine. Live Claude
 tests exercise a two-input invoice calculation and actual denied-access attempts.
 
+The runner refuses a configuration that would reach the patch's retained fail-open
+paths — a disabled unix-socket wrapper, a full ptrace tracer, a degraded sandbox mode —
+so a later edit that weakens one is a refusal rather than a silent unconfined run.
+
 Native Claude tools, implicit reads, inference requests and final responses are not
 confined by this backend. Native Bash is still refused; shell commands must use the
 Process tool. This is conservative whole-command taint, not precise dependencies
-inside programs. No sanitization or declassification is supported. Resource exhaustion,
-kernel vulnerabilities, metadata/timing flows and automatic crash recovery are not
-covered. Run the acceptance probes on the deployment host; a capability score alone
-does not establish enforcement.
+inside programs. No sanitization or declassification is supported. Kernel
+vulnerabilities, metadata/timing flows and automatic crash recovery are not
+covered, and the ceilings above bound cost rather than eliminate it. Run the
+acceptance probes on the deployment host; a capability score alone does not
+establish enforcement.
