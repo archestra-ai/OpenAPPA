@@ -15,6 +15,7 @@ so a deployment can customize its hint without editing the battery.
 | `grain/` | the Grain MCP server: meetings, transcripts, notes, deals, clips, stories, collections, workspace admin (49 tools) | none |
 | `sentry/` | the Sentry MCP server: 9 listed tools and the 55 catalog tools behind `execute_sentry_tool`; internal reads, reviewed writes | none |
 | `notion/` | the hosted Notion MCP server, all 36 tools; internal reads (Notion exposes no page permissions), reviewed structural changes | none |
+| `posthog/` | PostHog's MCP server, all 44 registry tools: analytics, insights, dashboards, error tracking, flags, experiments, surveys, docs; internal reads, public documentation input, reviewed writes | none |
 
 Include a battery with a path relative to the root config:
 

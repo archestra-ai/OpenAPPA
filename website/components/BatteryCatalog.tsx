@@ -50,6 +50,12 @@ const BATTERIES = [
     logo: "/images/batteries/notion.svg",
   },
   {
+    name: "PostHog",
+    description: "Rules for 44 analytics, flag, experiment, and survey tools; internal reads and reviewed writes.",
+    href: "/battery-posthog",
+    logo: "/images/batteries/posthog.svg",
+  },
+  {
     name: "Add your own",
     href: "/write-a-battery",
     add: true,
