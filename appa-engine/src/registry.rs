@@ -433,11 +433,13 @@ impl AudienceVocabulary {
         }
     }
 
-    fn extend(&mut self, other: &AudienceVocabulary) {
+    /// The other vocabulary's static entries — its chain levels, groups and readers. A
+    /// selector placeholder is left behind: it reads the arguments of the calls its own
+    /// annotator sees and names no audience anywhere else.
+    fn extend_static(&mut self, other: &AudienceVocabulary) {
         self.chain.extend(other.chain.iter().copied());
         self.groups.extend(other.groups.iter().cloned());
         self.readers.extend(other.readers.iter().cloned());
-        self.placeholders.extend(other.placeholders.iter().cloned());
     }
 }
 
@@ -1902,7 +1904,7 @@ fn configured_audience_vocabulary(
     }
     for annotator in &config.annotators {
         if let Some(bound) = &annotator.audiences {
-            vocabulary.extend(bound);
+            vocabulary.extend_static(bound);
         }
     }
     for authority in &config.authorities {
@@ -2492,6 +2494,54 @@ mod tests {
                 "support",
             ]
         );
+    }
+
+    /// Another annotator's selector placeholder reads that annotator's calls; the whole
+    /// vocabulary carries its static entries and not the placeholder, so a tool routed
+    /// through an open annotator is not asked for arguments it never declared.
+    #[test]
+    fn an_omitted_mandate_bound_leaves_other_annotators_placeholders_behind() {
+        let mut cfg = base();
+        cfg.audience = crate::audience::AudienceConfig {
+            sources: vec![crate::audience::SourceRegistration {
+                provider: "slack".to_string(),
+                templates: vec![crate::audience::DeclaredTemplate::named("channel/<id>")],
+            }],
+            ..crate::audience::AudienceConfig::default()
+        };
+        cfg.tools = vec![annotated("shell", "open"), annotated("post", "channels")];
+        cfg.annotators = vec![
+            annotator("open"),
+            AnnotatorDeclaration {
+                audiences: Some(vocabulary(&["support", "@slack:channel/$channel"])),
+                ..annotator("channels")
+            },
+        ];
+        let registry = Registry::build_covered(cfg).expect("the surfaces load");
+
+        let open = registry
+            .annotator_mandate(&AnnotatorName::new("open"))
+            .expect("open is registered");
+        assert_eq!(
+            open.audiences().entries().collect::<Vec<_>>(),
+            ["self", "internal", "support"]
+        );
+        let no_arguments = serde_json::json!({});
+        let (_, shell) = registry
+            .select_tool(&ToolName::new("shell"), &no_arguments)
+            .expect("shell is declared");
+        registry
+            .placeholders_filled(shell, &no_arguments)
+            .expect("an open annotator asks the call for no argument");
+
+        let channels = registry
+            .annotator_mandate(&AnnotatorName::new("channels"))
+            .expect("channels is registered");
+        assert_eq!(channels.audiences().placeholders().count(), 1);
+        let (_, post) = registry
+            .select_tool(&ToolName::new("post"), &no_arguments)
+            .expect("post is declared");
+        assert!(registry.placeholders_filled(post, &no_arguments).is_err());
     }
 
     #[test]
