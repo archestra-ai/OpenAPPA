@@ -1,15 +1,9 @@
-//! Authenticated kagent proxy protocol with durable request receipts.
+//! Embedded kagent lifecycle protocol with durable request receipts.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::body::Bytes;
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
-use axum::{Json, Router};
 use sha2::{Digest, Sha256};
 
 use appa_eventlog::{
@@ -26,42 +20,46 @@ use crate::api::{BatchCallDecision, OfferId, OfferKind, RemedyArguments, RemedyO
 const MAX_REQUEST_BYTES: usize = 128 * 1024;
 const MAX_RESPONSE_BYTES: usize = 128 * 1024;
 
-/// An authenticated proxy response produced without an HTTP transport.
-///
-/// The status and body deliberately match the `/proxy/v1` routes so an embedded
-/// host has the same durable receipt and refusal contract as a remote client.
+/// A durable lifecycle decision produced for an embedded host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProxyResponse {
-    status: u16,
     body: Vec<u8>,
 }
 
 impl ProxyResponse {
-    pub fn status(&self) -> u16 {
-        self.status
-    }
-
     pub fn body(&self) -> &[u8] {
         &self.body
     }
 }
 
-impl IntoResponse for ProxyResponse {
-    fn into_response(self) -> Response {
-        (
-            StatusCode::from_u16(self.status).expect("proxy responses use HTTP status codes"),
-            [(axum::http::header::CONTENT_TYPE, "application/json")],
-            self.body,
-        )
-            .into_response()
+/// A refusal made before an embedded lifecycle event can be admitted.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ProxyError {
+    #[error("{message}")]
+    PayloadTooLarge { message: &'static str },
+    #[error("{message}")]
+    InvalidEvent { message: &'static str },
+    #[error("{message}")]
+    Conflict { message: &'static str },
+    #[error("{message}")]
+    Unavailable { message: &'static str },
+}
+
+impl ProxyError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::PayloadTooLarge { .. } => "payload_too_large",
+            Self::InvalidEvent { .. } => "invalid_event",
+            Self::Conflict { .. } => "event_conflict",
+            Self::Unavailable { .. } => "event_uncertain",
+        }
     }
 }
 
 /// The public in-process form of the authenticated proxy protocol.
 ///
-/// This facade has no network client or server. It invokes the same receipt,
-/// event, checkpoint, approval, and child-workflow implementation that the
-/// Axum routes use below.
+/// This facade has no network client or server. It owns receipt, event,
+/// checkpoint, approval, and child-workflow processing directly.
 #[derive(Clone)]
 pub struct EmbeddedProxy {
     state: ProxyState,
@@ -78,11 +76,11 @@ impl EmbeddedProxy {
         capabilities_value(&self.state)
     }
 
-    pub async fn event(&self, body: &[u8]) -> ProxyResponse {
-        dispatch_event(&self.state, Bytes::copy_from_slice(body)).await
+    pub async fn event(&self, body: &[u8]) -> Result<ProxyResponse, ProxyError> {
+        dispatch_event(&self.state, body).await
     }
 
-    pub fn checkpoint(&self, body: &[u8]) -> ProxyResponse {
+    pub fn checkpoint(&self, body: &[u8]) -> Result<ProxyResponse, ProxyError> {
         checkpoint_response(&self.state, body)
     }
 }
@@ -108,26 +106,6 @@ impl ProxyState {
     }
 }
 
-pub(crate) fn router(runtime: Arc<Runtime>, approval_secret: Option<Arc<str>>) -> Router {
-    let state = ProxyState::new(runtime, approval_secret);
-    Router::new()
-        .route("/capabilities", get(capabilities))
-        .route("/openapi.json", get(openapi))
-        .route(
-            "/events",
-            post(event).layer(axum::extract::DefaultBodyLimit::max(MAX_REQUEST_BYTES)),
-        )
-        .route(
-            "/checkpoints",
-            post(checkpoint).layer(axum::extract::DefaultBodyLimit::max(MAX_REQUEST_BYTES)),
-        )
-        .with_state(state)
-}
-
-async fn capabilities(State(state): State<ProxyState>) -> Json<serde_json::Value> {
-    Json(capabilities_value(&state))
-}
-
 fn capabilities_value(state: &ProxyState) -> serde_json::Value {
     serde_json::json!({
         "protocol_version": 1,
@@ -150,70 +128,29 @@ fn capabilities_value(state: &ProxyState) -> serde_json::Value {
         "spawn_result": true,
         "durable_checkpoints": true,
         "review_provenance": true,
-        "openapi": true,
     })
 }
 
-async fn openapi() -> Json<serde_json::Value> {
-    let schema = |value| serde_json::to_value(value).expect("runtime API schemas serialize");
-    Json(serde_json::json!({
-        "openapi": "3.1.0",
-        "info": { "title": "OpenAPPA authenticated proxy", "version": "1" },
-        "security": [{ "bearerAuth": [] }],
-        "paths": {
-            "/proxy/v1/capabilities": {
-                "get": { "responses": { "200": { "description": "Supported protocol features" } } }
-            },
-            "/proxy/v1/openapi.json": {
-                "get": { "responses": { "200": { "description": "This OpenAPI document" } } }
-            },
-            "/proxy/v1/events": {
-                "post": {
-                    "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProxyEventEnvelope" } } } },
-                    "responses": { "200": { "description": "Durable event decision" }, "400": { "description": "Malformed event" }, "409": { "description": "Conflicting event" }, "503": { "description": "Event receipt is in progress or unavailable" } }
-                }
-            },
-            "/proxy/v1/checkpoints": {
-                "post": {
-                    "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CheckpointRequest" } } } },
-                    "responses": { "200": { "description": "Checkpoint created or forked" }, "400": { "description": "Malformed request" }, "409": { "description": "Checkpoint cannot be created or forked" }, "413": { "description": "Request exceeds the 128 KiB proxy payload limit" } }
-                }
-            }
-        },
-        "components": {
-            "securitySchemes": { "bearerAuth": { "type": "http", "scheme": "bearer" } },
-            "schemas": {
-                "ProxyEventEnvelope": schema(schemars::schema_for!(Envelope)),
-                "ProxyHookEvent": schema(schemars::schema_for!(ProxyHookEvent)),
-                "ToolCalls": schema(schemars::schema_for!(ToolCalls)),
-                "PrepareBatch": schema(schemars::schema_for!(PrepareBatch)),
-                "CommitBatch": schema(schemars::schema_for!(CommitBatch)),
-                "CancelBatch": schema(schemars::schema_for!(CancelBatch)),
-                "ToolResult": schema(schemars::schema_for!(ToolResult)),
-                "SpawnResult": schema(schemars::schema_for!(SpawnResult)),
-                "ResolveOffer": schema(schemars::schema_for!(ResolveOffer)),
-                "CheckpointRequest": crate::checkpoint::schema(),
-            }
-        }
-    }))
-}
-
-async fn checkpoint(State(state): State<ProxyState>, body: Bytes) -> ProxyResponse {
-    checkpoint_response(&state, &body)
-}
-
-fn checkpoint_response(state: &ProxyState, body: &[u8]) -> ProxyResponse {
+fn checkpoint_response(state: &ProxyState, body: &[u8]) -> Result<ProxyResponse, ProxyError> {
     if body.len() > MAX_REQUEST_BYTES {
-        return error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "payload_too_large",
-            "checkpoint request exceeds the payload limit",
-        );
+        return Err(ProxyError::PayloadTooLarge {
+            message: "checkpoint request exceeds the payload limit",
+        });
     }
     let (status, response) = crate::checkpoint::answer(&state.runtime, appa_adapter_kagent::adapter(), body);
-    ProxyResponse {
-        status,
-        body: serde_json::to_vec(&response).expect("checkpoint responses serialize"),
+    match status {
+        200 => Ok(ProxyResponse {
+            body: serde_json::to_vec(&response).expect("checkpoint responses serialize"),
+        }),
+        400 => Err(ProxyError::InvalidEvent {
+            message: "checkpoint request was refused",
+        }),
+        409 => Err(ProxyError::Conflict {
+            message: "checkpoint cannot be created or forked",
+        }),
+        _ => Err(ProxyError::Unavailable {
+            message: "checkpoint processing is unavailable",
+        }),
     }
 }
 
@@ -417,53 +354,47 @@ struct ApprovalGrant {
     position: Option<u32>,
 }
 
-async fn event(State(state): State<ProxyState>, body: Bytes) -> ProxyResponse {
-    dispatch_event(&state, body).await
-}
-
-async fn dispatch_event(state: &ProxyState, body: Bytes) -> ProxyResponse {
+async fn dispatch_event(state: &ProxyState, body: &[u8]) -> Result<ProxyResponse, ProxyError> {
     if body.len() > MAX_REQUEST_BYTES {
-        return error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "payload_too_large",
-            "proxy event exceeds the payload limit",
-        );
+        return Err(ProxyError::PayloadTooLarge {
+            message: "embedded event exceeds the payload limit",
+        });
     }
-    let envelope: Envelope = match serde_json::from_slice(&body) {
+    let envelope: Envelope = match serde_json::from_slice(body) {
         Ok(envelope) => envelope,
         Err(_) => {
-            return error(
-                StatusCode::BAD_REQUEST,
-                "invalid_event",
-                "proxy event is not a valid envelope",
-            );
+            return Err(ProxyError::InvalidEvent {
+                message: "event is not a valid envelope",
+            });
         }
     };
     if uuid::Uuid::parse_str(&envelope.event_id).is_err() {
-        return error(StatusCode::BAD_REQUEST, "invalid_event", "event_id must be a UUID");
+        return Err(ProxyError::InvalidEvent {
+            message: "event_id must be a UUID",
+        });
     }
     let header: EventHeader = match serde_json::from_str(envelope.event.get()) {
         Ok(header) => header,
-        Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_event", "event must name its root_id"),
+        Err(_) => {
+            return Err(ProxyError::InvalidEvent {
+                message: "event must name its root_id",
+            });
+        }
     };
-    let digest = format!("{:x}", Sha256::digest(&body));
+    let digest = format!("{:x}", Sha256::digest(body));
     let key = (header.root_id.clone(), envelope.event_id.clone());
     {
         let active = state.active.lock().expect("proxy event active set is never poisoned");
         match active.get(&key) {
             Some(active_digest) if active_digest != &digest => {
-                return error(
-                    StatusCode::CONFLICT,
-                    "event_conflict",
-                    "event_id was already received with different bytes",
-                );
+                return Err(ProxyError::Conflict {
+                    message: "event_id was already received with different bytes",
+                });
             }
             Some(_) => {
-                return error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "event_in_progress",
-                    "event is executing",
-                );
+                return Err(ProxyError::Unavailable {
+                    message: "event is executing",
+                });
             }
             None => {}
         }
@@ -489,41 +420,33 @@ async fn dispatch_event(state: &ProxyState, body: Bytes) -> ProxyResponse {
             Ok(admission) => admission,
             Err(_) => {
                 remove_active(state, &key);
-                return error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "event_uncertain",
-                    "event receipt storage is unavailable",
-                );
+                return Err(ProxyError::Unavailable {
+                    message: "event receipt storage is unavailable",
+                });
             }
         };
     match admission {
         ProxyEventAdmission::Replay(response) => {
             remove_active(state, &key);
-            return cached(response);
+            return Ok(cached(response));
         }
         ProxyEventAdmission::Conflict => {
             remove_active(state, &key);
-            return error(
-                StatusCode::CONFLICT,
-                "event_conflict",
-                "event_id was already received with different bytes",
-            );
+            return Err(ProxyError::Conflict {
+                message: "event_id was already received with different bytes",
+            });
         }
         ProxyEventAdmission::InProgress | ProxyEventAdmission::Uncertain | ProxyEventAdmission::RootPending => {
             remove_active(state, &key);
-            return error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "event_uncertain",
-                "event was left pending and will not be re-executed",
-            );
+            return Err(ProxyError::Unavailable {
+                message: "event was left pending and will not be re-executed",
+            });
         }
         ProxyEventAdmission::BudgetExceeded => {
             remove_active(state, &key);
-            return error(
-                StatusCode::CONFLICT,
-                "event_budget_exhausted",
-                "proxy receipt budget is exhausted for this root",
-            );
+            return Err(ProxyError::Conflict {
+                message: "event receipt budget is exhausted for this root",
+            });
         }
         ProxyEventAdmission::Started => {}
     }
@@ -577,13 +500,11 @@ async fn dispatch_event(state: &ProxyState, body: Bytes) -> ProxyResponse {
     if completed.is_err() {
         // The intent remains a tombstone. Replaying after this point is unsafe because the
         // engine and receipt commits are deliberately separate transactions.
-        return error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "event_uncertain",
-            "event completion could not be recorded",
-        );
+        return Err(ProxyError::Unavailable {
+            message: "event completion could not be recorded",
+        });
     }
-    cached(response)
+    Ok(cached(response))
 }
 
 fn remove_active(state: &ProxyState, key: &(String, String)) {
@@ -2016,26 +1937,12 @@ fn response_or_refusal(event_id: &str, request_sha256: &str, response: Vec<u8>) 
 }
 
 fn cached(response: Vec<u8>) -> ProxyResponse {
-    ProxyResponse {
-        status: StatusCode::OK.as_u16(),
-        body: response,
-    }
-}
-
-fn error(status: StatusCode, code: &str, message: &str) -> ProxyResponse {
-    ProxyResponse {
-        status: status.as_u16(),
-        body: serde_json::to_vec(&serde_json::json!({"error": {"code": code, "message": message}}))
-            .expect("proxy errors serialize"),
-    }
+    ProxyResponse { body: response }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
-    use axum::http::Request;
-    use tower::ServiceExt;
 
     use crate::config::Config;
 
@@ -2080,26 +1987,17 @@ mod tests {
         format!(r#"{{"event_id":"{id}","event":{{"event":"session_start","root_id":"root-1"}}}}"#)
     }
 
-    async fn post(app: Router, body: String) -> Response {
-        app.oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/events")
-                .header("content-type", "application/json")
-                .body(Body::from(body))
-                .expect("request builds"),
-        )
-        .await
-        .expect("router responds")
+    fn router(runtime: Arc<Runtime>, approval_secret: Option<Arc<str>>) -> EmbeddedProxy {
+        EmbeddedProxy::new(runtime, approval_secret)
     }
 
-    async fn decision(app: Router, body: String) -> serde_json::Value {
-        let response = post(app, body).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), MAX_RESPONSE_BYTES)
-            .await
-            .expect("response body reads");
-        serde_json::from_slice(&body).expect("response is JSON")
+    async fn post(proxy: EmbeddedProxy, body: String) -> Result<ProxyResponse, ProxyError> {
+        proxy.event(body.as_bytes()).await
+    }
+
+    async fn decision(proxy: EmbeddedProxy, body: String) -> serde_json::Value {
+        let response = post(proxy, body).await.expect("event is admitted");
+        serde_json::from_slice(response.body()).expect("response is JSON")
     }
 
     fn wrapped(id: &str, event: serde_json::Value) -> String {
@@ -2107,117 +2005,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proxy_checkpoint_and_openapi_routes_share_the_kagent_protocol_surface() {
+    async fn embedded_proxy_checkpoints_and_forks_share_the_kagent_protocol_surface() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let runtime = runtime(&directory);
-        let app = router(Arc::clone(&runtime), None);
+        let proxy = router(Arc::clone(&runtime), None);
 
-        let started = post(app.clone(), session_start("123e4567-e89b-12d3-a456-426614174140")).await;
-        assert_eq!(started.status(), StatusCode::OK);
+        post(proxy.clone(), session_start("123e4567-e89b-12d3-a456-426614174140"))
+            .await
+            .expect("session starts");
 
-        let checkpoint = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/checkpoints")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "protocol": appa_runtime_api::PROTOCOL,
-                            "adapter": "kagent",
-                            "operation": "create",
-                            "root_id": "root-1",
-                        })
-                        .to_string(),
-                    ))
-                    .expect("request builds"),
+        let checkpoint = proxy
+            .checkpoint(
+                serde_json::json!({
+                    "protocol": appa_runtime_api::PROTOCOL,
+                    "adapter": "kagent",
+                    "operation": "create",
+                    "root_id": "root-1",
+                })
+                .to_string()
+                .as_bytes(),
             )
-            .await
-            .expect("router responds");
-        assert_eq!(checkpoint.status(), StatusCode::OK);
-        let checkpoint = axum::body::to_bytes(checkpoint.into_body(), MAX_RESPONSE_BYTES)
-            .await
-            .expect("checkpoint body reads");
-        let checkpoint: serde_json::Value = serde_json::from_slice(&checkpoint).expect("checkpoint is JSON");
-        let fork = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/checkpoints")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "protocol": appa_runtime_api::PROTOCOL,
-                            "adapter": "kagent",
-                            "operation": "fork",
-                            "checkpoint_id": checkpoint["checkpoint_id"],
-                            "root_id": "fork-1",
-                        })
-                        .to_string(),
-                    ))
-                    .expect("request builds"),
+            .expect("checkpoint creates");
+        let checkpoint: serde_json::Value = serde_json::from_slice(checkpoint.body()).expect("checkpoint is JSON");
+        proxy
+            .checkpoint(
+                serde_json::json!({
+                    "protocol": appa_runtime_api::PROTOCOL,
+                    "adapter": "kagent",
+                    "operation": "fork",
+                    "checkpoint_id": checkpoint["checkpoint_id"],
+                    "root_id": "fork-1",
+                })
+                .to_string()
+                .as_bytes(),
             )
-            .await
-            .expect("router responds");
-        assert_eq!(fork.status(), StatusCode::OK);
+            .expect("checkpoint forks");
 
-        let capabilities = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/capabilities")
-                    .body(Body::empty())
-                    .expect("request builds"),
-            )
-            .await
-            .expect("router responds");
-        let capabilities = axum::body::to_bytes(capabilities.into_body(), MAX_RESPONSE_BYTES)
-            .await
-            .expect("capabilities body reads");
-        let capabilities: serde_json::Value = serde_json::from_slice(&capabilities).expect("capabilities are JSON");
+        let capabilities = proxy.capabilities();
         assert_eq!(capabilities["durable_checkpoints"], true);
         assert_eq!(capabilities["review_provenance"], true);
-        assert_eq!(capabilities["openapi"], true);
         assert_eq!(capabilities["spawn_result"], true);
-
-        let schema = app
-            .oneshot(
-                Request::builder()
-                    .uri("/openapi.json")
-                    .body(Body::empty())
-                    .expect("request builds"),
-            )
-            .await
-            .expect("router responds");
-        assert_eq!(schema.status(), StatusCode::OK);
-        let schema = axum::body::to_bytes(schema.into_body(), MAX_RESPONSE_BYTES)
-            .await
-            .expect("schema body reads");
-        let schema: serde_json::Value = serde_json::from_slice(&schema).expect("schema is JSON");
-        assert_eq!(schema["openapi"], "3.1.0");
-        assert!(schema["paths"].get("/proxy/v1/events").is_some());
-        assert!(schema["paths"].get("/proxy/v1/checkpoints").is_some());
-        assert!(schema["components"]["schemas"].get("ProxyEventEnvelope").is_some());
-        assert!(schema["components"]["schemas"].get("CheckpointRequest").is_some());
-        assert!(schema["components"]["schemas"].get("ToolCalls").is_some());
-        assert!(schema["components"]["schemas"].get("SpawnResult").is_some());
-        assert!(
-            schema["components"]["schemas"]["SpawnResult"]["properties"]
-                .get("outcome")
-                .is_none()
-        );
-        assert_eq!(
-            schema["components"]["schemas"]["SpawnResult"]["$defs"]["SpawnResultControl"]["properties"]["agent_id"]["type"],
-            "string"
-        );
-        assert!(schema["components"]["schemas"].get("PrepareBatch").is_some());
-        assert!(
-            schema["paths"]["/proxy/v1/checkpoints"]["post"]["responses"]
-                .get("413")
-                .is_some()
-        );
     }
 
     #[tokio::test]
@@ -2228,25 +2055,14 @@ mod tests {
         let root = kagent_root(&host_root);
         runtime.create_session(root.clone()).expect("root opens");
         let before = runtime.audit(&root).expect("root audit reads");
-        let app = router(Arc::clone(&runtime), None);
         let oversized = format!(
             "{{\"protocol\":{},\"adapter\":\"kagent\",\"operation\":\"create\",\"root_id\":\"{}\"}}",
             appa_runtime_api::PROTOCOL,
             host_root,
         );
 
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/checkpoints")
-                    .header("content-type", "application/json")
-                    .body(Body::from(oversized))
-                    .expect("request builds"),
-            )
-            .await
-            .expect("router responds");
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let response = router(Arc::clone(&runtime), None).checkpoint(oversized.as_bytes());
+        assert!(matches!(response, Err(ProxyError::PayloadTooLarge { .. })));
         assert_eq!(runtime.audit(&root).expect("root audit reads"), before);
     }
 
@@ -2327,18 +2143,16 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let body = session_start("123e4567-e89b-12d3-a456-426614174000");
         let first = runtime(&directory);
-        assert_eq!(
-            post(router(Arc::clone(&first), None), body.clone()).await.status(),
-            StatusCode::OK
-        );
+        post(router(Arc::clone(&first), None), body.clone())
+            .await
+            .expect("event is admitted");
         assert_eq!(first.log_basis(&kagent_root("root-1")), 1);
         drop(first);
 
         let reopened = runtime(&directory);
-        assert_eq!(
-            post(router(Arc::clone(&reopened), None), body).await.status(),
-            StatusCode::OK
-        );
+        post(router(Arc::clone(&reopened), None), body)
+            .await
+            .expect("replayed event is admitted");
         assert_eq!(
             reopened.log_basis(&kagent_root("root-1")),
             1,
@@ -2351,51 +2165,50 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let runtime = runtime(&directory);
         let body = session_start("123e4567-e89b-12d3-a456-426614174001");
-        assert_eq!(
-            post(router(Arc::clone(&runtime), None), body.clone()).await.status(),
-            StatusCode::OK
-        );
-        assert_eq!(
-            post(router(Arc::clone(&runtime), None), format!("{body} "))
-                .await
-                .status(),
-            StatusCode::CONFLICT
-        );
+        post(router(Arc::clone(&runtime), None), body.clone())
+            .await
+            .expect("event is admitted");
+        assert!(matches!(
+            post(router(Arc::clone(&runtime), None), format!("{body} ")).await,
+            Err(ProxyError::Conflict { .. })
+        ));
         assert_eq!(runtime.log_basis(&kagent_root("root-1")), 1);
     }
 
     #[tokio::test]
-    async fn embedded_proxy_reuses_the_authenticated_receipt_and_checkpoint_protocol() {
+    async fn embedded_proxy_reuses_the_durable_receipt_and_checkpoint_protocol() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let runtime = runtime(&directory);
         let proxy = EmbeddedProxy::new(Arc::clone(&runtime), Some(Arc::from("approval-secret")));
         let body = session_start("123e4567-e89b-12d3-a456-426614174007");
 
-        let first = proxy.event(body.as_bytes()).await;
-        assert_eq!(first.status(), 200);
-        let replay = proxy.event(body.as_bytes()).await;
-        assert_eq!(replay.status(), 200);
+        let first = proxy.event(body.as_bytes()).await.expect("event is admitted");
+        let replay = proxy.event(body.as_bytes()).await.expect("event is replayed");
         assert_eq!(replay.body(), first.body(), "the completed receipt replays exactly");
 
         let conflict = proxy.event(format!("{body} ").as_bytes()).await;
-        assert_eq!(conflict.status(), 409, "a changed body cannot reuse a receipt id");
+        assert!(
+            matches!(conflict, Err(ProxyError::Conflict { .. })),
+            "a changed body cannot reuse a receipt id"
+        );
         assert_eq!(
             runtime.log_basis(&kagent_root("root-1")),
             1,
             "the conflict did not re-run"
         );
 
-        let checkpoint = proxy.checkpoint(
-            serde_json::json!({
-                "protocol": appa_runtime_api::PROTOCOL,
-                "adapter": "kagent",
-                "operation": "create",
-                "root_id": "root-1",
-            })
-            .to_string()
-            .as_bytes(),
-        );
-        assert_eq!(checkpoint.status(), 200);
+        let checkpoint = proxy
+            .checkpoint(
+                serde_json::json!({
+                    "protocol": appa_runtime_api::PROTOCOL,
+                    "adapter": "kagent",
+                    "operation": "create",
+                    "root_id": "root-1",
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .expect("checkpoint creates");
         let checkpoint: serde_json::Value = serde_json::from_slice(checkpoint.body()).expect("checkpoint is JSON");
         assert!(checkpoint["checkpoint_id"].is_string());
 
@@ -2424,8 +2237,8 @@ mod tests {
             ProxyEventAdmission::Started
         );
         let body = session_start("123e4567-e89b-12d3-a456-426614174003");
-        let response = event(State(state), Bytes::from(body)).await;
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let response = dispatch_event(&state, body.as_bytes()).await;
+        assert!(matches!(response, Err(ProxyError::Unavailable { .. })));
         assert_eq!(
             runtime
                 .begin_proxy_event("root-1", "123e4567-e89b-12d3-a456-426614174003", &digest, "new-boot")
@@ -2459,11 +2272,8 @@ mod tests {
         let held = gate.lock().await;
         let waiting_state = state.clone();
         let waiting = tokio::spawn(async move {
-            event(
-                State(waiting_state),
-                Bytes::from(session_start("123e4567-e89b-12d3-a456-426614174005")),
-            )
-            .await
+            let body = session_start("123e4567-e89b-12d3-a456-426614174005");
+            dispatch_event(&waiting_state, body.as_bytes()).await
         });
         tokio::task::yield_now().await;
         assert!(
@@ -2472,30 +2282,15 @@ mod tests {
         );
         waiting.abort();
         drop(held);
-        let response = event(
-            State(state),
-            Bytes::from(session_start("123e4567-e89b-12d3-a456-426614174006")),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = session_start("123e4567-e89b-12d3-a456-426614174006");
+        let response = dispatch_event(&state, body.as_bytes()).await;
+        assert!(matches!(response, Err(ProxyError::Unavailable { .. })));
     }
 
     #[tokio::test]
     async fn no_approval_secret_keeps_basic_proxy_features_but_hides_human_approval() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let response = router(runtime(&directory), None)
-            .oneshot(
-                Request::builder()
-                    .uri("/capabilities")
-                    .body(Body::empty())
-                    .expect("request builds"),
-            )
-            .await
-            .expect("router responds");
-        let body = axum::body::to_bytes(response.into_body(), MAX_RESPONSE_BYTES)
-            .await
-            .expect("capability body reads");
-        let capabilities: serde_json::Value = serde_json::from_slice(&body).expect("capabilities are JSON");
+        let capabilities = router(runtime(&directory), None).capabilities();
         assert_eq!(capabilities["completed_event_replay"], true);
         assert_eq!(capabilities["human_approval"], false);
         assert_eq!(capabilities["approval_grants"], false);

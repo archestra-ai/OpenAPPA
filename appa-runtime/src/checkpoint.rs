@@ -1,29 +1,23 @@
-//! Durable checkpoint control API for the authenticated proxy client.
+//! Durable checkpoint control for embedded hosts.
 
 use appa_runtime_api::{Adapter, AdapterName, PROTOCOL};
 
 use crate::api::Runtime;
 
-#[derive(serde::Deserialize, schemars::JsonSchema)]
+#[derive(serde::Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
     Create {
         protocol: u32,
-        #[schemars(with = "String")]
         adapter: AdapterName,
         root_id: String,
     },
     Fork {
         protocol: u32,
-        #[schemars(with = "String")]
         adapter: AdapterName,
         checkpoint_id: String,
         root_id: String,
     },
-}
-
-pub(crate) fn schema() -> serde_json::Value {
-    serde_json::to_value(schemars::schema_for!(Request)).expect("checkpoint request schema serializes")
 }
 
 /// Decode and admit one checkpoint control request. The served adapter derives
