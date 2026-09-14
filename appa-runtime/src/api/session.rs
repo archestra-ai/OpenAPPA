@@ -230,7 +230,9 @@ impl Session {
             tracing::debug!(trajectory = %self.trajectory.0, "no call outstanding");
             return Ok(());
         };
+        let dispatch = open.id.clone();
         self.abandon_open(&ToolOutcome::Indeterminate).await?;
+        self.release_file_reservation(&dispatch);
         tracing::debug!(
             trajectory = %self.trajectory.0,
             dispatch = ?open.id,
@@ -238,6 +240,42 @@ impl Session {
             "call closed as unreported",
         );
         Ok(())
+    }
+
+    /// Give back the ledger reservation of a released file call the harness never ran.
+    ///
+    /// The ledger releases it only while the workspace still shows the pinned state, which is
+    /// what an unrun call leaves behind. A workspace that moved keeps its reservation: the
+    /// runtime cannot tell an unrun call from one whose report was lost, and guessing would
+    /// publish bytes whose Label nobody recorded. That case is an operator's, so it is
+    /// reported loudly rather than resolved here.
+    ///
+    /// A ledger failure never turns a turn end into a refusal: the session would then be
+    /// blocked by bookkeeping rather than by a policy decision, and the reservation it could
+    /// not read stays exactly as it was.
+    fn release_file_reservation(&self, dispatch: &appa_engine::value::DispatchId) {
+        let Some(files) = &self.inner.files else {
+            return;
+        };
+        let key = match super::files::key(dispatch) {
+            Ok(key) => key,
+            Err(error) => {
+                tracing::warn!(%error, "a file reservation key could not be rendered");
+                return;
+            }
+        };
+        match files.store.abandon(&self.trajectory.0, &key) {
+            Ok(appa_eventlog::files::AbandonOutcome::Absent) => {}
+            Ok(appa_eventlog::files::AbandonOutcome::Released) => tracing::info!(
+                trajectory = %self.trajectory.0,
+                "released the reservation of a file call the harness never ran"
+            ),
+            Ok(appa_eventlog::files::AbandonOutcome::Quarantined) => tracing::warn!(
+                trajectory = %self.trajectory.0,
+                "a released file call left the workspace inconsistent; the reservation stands and file calls stay refused"
+            ),
+            Err(error) => tracing::warn!(%error, "a file reservation could not be released"),
+        }
     }
 
     /// The call a turn end closes. A trajectory that has ended or never
@@ -936,7 +974,9 @@ impl Session {
         view: &EngineView,
     ) -> Result<(), EventError> {
         if let Some(open) = policy.engine().substituted_release(view, &self.trajectory) {
+            let dispatch = open.id.clone();
             self.abandon_open(&unrun_substitution()).await?;
+            self.release_file_reservation(&dispatch);
             tracing::debug!(
                 trajectory = %self.trajectory.0,
                 dispatch = ?open.id,
@@ -946,7 +986,9 @@ impl Session {
             return Ok(());
         }
         if let Some(open) = policy.engine().open_dispatches(view, &self.trajectory).pop() {
+            let dispatch = open.id.clone();
             self.abandon_open(&ToolOutcome::Indeterminate).await?;
+            self.release_file_reservation(&dispatch);
             tracing::debug!(
                 trajectory = %self.trajectory.0,
                 dispatch = ?open.id,

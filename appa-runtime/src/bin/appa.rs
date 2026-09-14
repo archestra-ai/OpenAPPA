@@ -19,6 +19,8 @@ enum Command {
     /// Internal trajectory-bound MCP server launched by claude-files.
     #[command(hide = true)]
     FileMcp(appa_runtime::claude_files::ServeArgs),
+    /// Inspect a tracked workspace's file ledger, and give back a reservation the harness never ran.
+    FileLedger(appa_runtime::file_ledger::Args),
     /// Internal release identity used when activating a selected binary.
     #[command(hide = true)]
     BuildInfo,
@@ -229,6 +231,7 @@ fn main() -> ExitCode {
         Command::Bundle(args) => appa_runtime::installation::cli::bundle(args),
         Command::ClaudeFiles(args) => appa_runtime::claude_files::run(args),
         Command::FileMcp(args) => appa_runtime::claude_files::serve(args),
+        Command::FileLedger(args) => appa_runtime::file_ledger::run(args),
         Command::Hook {
             target,
             turn_end,

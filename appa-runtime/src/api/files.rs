@@ -995,6 +995,40 @@ else:
     }
 
     #[tokio::test]
+    async fn managed_files_release_a_released_call_the_harness_never_ran() {
+        let dir = fixture();
+        let runtime = open(dir.path(), true);
+        let id = TrajectoryId("host-owned-session".into());
+        let session = runtime.create_session(id.clone()).unwrap();
+        // The policy released this call and the harness never ran it — a declined prompt, an
+        // interrupted turn. The turn end gives the reservation back instead of wedging the
+        // workspace for every later file call.
+        allow(&runtime, &id, call("Write", "never-run.txt")).await;
+        assert!(!dir.path().join("work/never-run.txt").exists());
+        session.on_turn_end().await.unwrap();
+        allow(&runtime, &id, call("Write", "later.txt")).await;
+        assert_eq!(
+            execute(&runtime, &id, call("Write", "later.txt")).await,
+            FileReply::Value("file written".into())
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("work/later.txt")).unwrap(),
+            "fixture"
+        );
+        assert!(
+            runtime
+                .inner
+                .files
+                .as_ref()
+                .unwrap()
+                .store
+                .current("later.txt")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
     async fn managed_files_bypasses_and_missing_outcomes_fail_closed() {
         let dir = fixture();
         let runtime = open(dir.path(), true);

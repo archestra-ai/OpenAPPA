@@ -7,6 +7,7 @@ pub mod claude_files;
 pub mod config;
 mod default_config;
 pub mod describe;
+pub mod file_ledger;
 pub mod hook_client;
 pub mod hooks;
 pub mod init;

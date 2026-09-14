@@ -102,6 +102,27 @@ pub struct FileReceipt {
     pub dispatch: Option<String>,
 }
 
+/// A live reservation: the pinned operation a released call holds the workspace for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reservation {
+    pub actor: String,
+    pub call_key: String,
+    pub pin: FilePin,
+    pub bound_dispatch: Option<String>,
+}
+
+/// What releasing a call that never ran did to its reservation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AbandonOutcome {
+    /// The call held no reservation.
+    Absent,
+    /// The workspace still showed the pinned state; the reservation is released.
+    Released,
+    /// The workspace moved away from the pin. The reservation stands, and every later file
+    /// call in this workspace is refused until an operator reconciles it.
+    Quarantined,
+}
+
 pub struct FileStore {
     connection: Mutex<Connection>,
     workspace: PathBuf,
@@ -456,7 +477,7 @@ impl FileStore {
             .iter()
             .map(|input| Ok(state_digest(&self.workspace.join(&input.path))? == input.digest))
             .collect::<Result<Vec<_>, FileStoreError>>()?;
-        let inputs_unchanged = input_states.into_iter().all(|unchanged| unchanged);
+        let inputs_unchanged = input_states.iter().all(|unchanged| *unchanged);
         let source_label = if pin.operation == FileOperation::Process {
             pin.inputs
                 .iter()
@@ -469,13 +490,7 @@ impl FileStore {
                 .or_else(|| pin.predecessor_label.clone())
         };
         let receipt = if !success {
-            if actual != expected
-                || !inputs_unchanged
-                || pin
-                    .source
-                    .as_ref()
-                    .is_some_and(|source| source_actual.as_deref() != Some(source.digest.as_str()))
-            {
+            if !undisturbed(&pin, &actual, source_actual.as_deref(), &input_states) {
                 return Err(FileStoreError::Quarantined);
             }
             FileReceipt {
@@ -583,6 +598,145 @@ impl FileStore {
         )?;
         tx.commit()?;
         Ok(receipt)
+    }
+
+    /// Whether the workspace still shows exactly the state this pin recorded: the bytes the
+    /// operation would have replaced, the bytes a transfer would have consumed, and every
+    /// declared input. `finish` and `abandon` answer the same question from values they have
+    /// already hashed; an operator surface asks it here.
+    pub fn pin_matches_workspace(&self, pin: &FilePin) -> Result<bool, FileStoreError> {
+        let destination = state_digest(&self.workspace.join(&pin.path))?;
+        let source = pin
+            .source
+            .as_ref()
+            .map(|source| state_digest(&self.workspace.join(&source.path)))
+            .transpose()?;
+        let inputs = pin
+            .inputs
+            .iter()
+            .map(|input| Ok(state_digest(&self.workspace.join(&input.path))? == input.digest))
+            .collect::<Result<Vec<_>, FileStoreError>>()?;
+        Ok(undisturbed(pin, &destination, source.as_deref(), &inputs))
+    }
+
+    /// Release the reservation of a call that was released and never ran, provided the
+    /// workspace still shows its pinned state. The runtime cannot tell an unrun call from one
+    /// whose report was lost, so anything else keeps the reservation: a workspace that moved
+    /// is reconciled by an operator, never by guessing here.
+    pub fn abandon(&self, actor: &str, call_key: &str) -> Result<AbandonOutcome, FileStoreError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| FileStoreError::Corrupt("connection lock poisoned".into()))?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let pin = tx
+            .query_row(
+                "SELECT pin FROM reservation WHERE actor=?1 AND call_key=?2",
+                params![actor, call_key],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(pin) = pin else {
+            return Ok(AbandonOutcome::Absent);
+        };
+        let pin: FilePin = serde_json::from_str(&pin)?;
+        let destination = state_digest(&self.workspace.join(&pin.path))?;
+        let source = pin
+            .source
+            .as_ref()
+            .map(|source| state_digest(&self.workspace.join(&source.path)))
+            .transpose()?;
+        let inputs = pin
+            .inputs
+            .iter()
+            .map(|input| Ok(state_digest(&self.workspace.join(&input.path))? == input.digest))
+            .collect::<Result<Vec<_>, FileStoreError>>()?;
+        if !undisturbed(&pin, &destination, source.as_deref(), &inputs) {
+            return Ok(AbandonOutcome::Quarantined);
+        }
+        tx.execute(
+            "DELETE FROM reservation WHERE actor=?1 AND call_key=?2",
+            params![actor, call_key],
+        )?;
+        tx.commit()?;
+        Ok(AbandonOutcome::Released)
+    }
+
+    /// Every tracked path that no longer holds the bytes its recorded version describes. A
+    /// path that is gone counts: the ledger cannot tell a deletion from a loss.
+    pub fn drifted(&self) -> Result<Vec<FileVersion>, FileStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| FileStoreError::Corrupt("connection lock poisoned".into()))?;
+        let mut statement = connection.prepare("SELECT v.id,v.path,v.digest,v.label,v.previous,v.content_dependencies,v.dispatch FROM current_paths c JOIN versions v ON v.id=c.version WHERE c.version IS NOT NULL ORDER BY v.path")?;
+        let current = decode_versions(statement.query_map([], decode_version)?)?;
+        drop(statement);
+        let mut drifted = Vec::new();
+        for version in current {
+            if state_digest(&self.workspace.join(&version.path))? != version.digest {
+                drifted.push(version);
+            }
+        }
+        Ok(drifted)
+    }
+
+    /// The live reservation, if any. One workspace holds at most one.
+    pub fn reservation(&self) -> Result<Option<Reservation>, FileStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| FileStoreError::Corrupt("connection lock poisoned".into()))?;
+        let row = connection
+            .query_row(
+                "SELECT actor,call_key,pin,bound_dispatch FROM reservation",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(|(actor, call_key, pin, bound_dispatch)| {
+            Ok(Reservation {
+                actor,
+                call_key,
+                pin: serde_json::from_str(&pin)?,
+                bound_dispatch,
+            })
+        })
+        .transpose()
+    }
+
+    /// Open a ledger for operator inspection. The workspace and policy it is bound to are read
+    /// from the ledger itself, so no deployment configuration is needed to look at it.
+    pub fn inspect(db: &Path) -> Result<Self, FileStoreError> {
+        if !db.is_file() {
+            return Err(FileStoreError::Uninitialized);
+        }
+        let connection = Connection::open(db)?;
+        configure(&connection)?;
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version != SCHEMA {
+            return Err(FileStoreError::Uninitialized);
+        }
+        let workspace = connection
+            .query_row("SELECT workspace FROM ledger_meta", [], |r| r.get::<_, String>(0))
+            .optional()?
+            .ok_or(FileStoreError::Uninitialized)?;
+        Ok(Self {
+            connection: Mutex::new(connection),
+            workspace: PathBuf::from(workspace),
+        })
+    }
+
+    /// The workspace this ledger is bound to.
+    pub fn workspace(&self) -> &Path {
+        &self.workspace
     }
 
     pub fn current(&self, path: &str) -> Result<Option<FileVersion>, FileStoreError> {
@@ -767,6 +921,19 @@ fn scan(root: &Path) -> Result<Vec<(String, String)>, FileStoreError> {
     o.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(o)
 }
+/// Whether a pin still describes the workspace: the destination holds the bytes the operation
+/// would have replaced, a transfer's source is where the operation would have left it, and
+/// every declared input is unchanged. `finish` and `abandon` compute these values themselves;
+/// both ask this one question of them.
+fn undisturbed(pin: &FilePin, destination: &str, source_state: Option<&str>, inputs: &[bool]) -> bool {
+    destination == pin.predecessor_digest.as_deref().unwrap_or(ABSENT)
+        && pin
+            .source
+            .as_ref()
+            .is_none_or(|source| source_state == Some(source.digest.as_str()))
+        && inputs.iter().all(|unchanged| *unchanged)
+}
+
 fn reservation_exists(c: &Connection, a: &str, k: &str) -> Result<bool, rusqlite::Error> {
     c.query_row(
         "SELECT EXISTS(SELECT 1 FROM reservation WHERE actor=?1 AND call_key=?2)",
@@ -842,6 +1009,61 @@ mod tests {
         fn initialize(&self, label: &Label) -> FileStore {
             FileStore::initialize(&self.db, &self.workspace, "policy-a", label).unwrap()
         }
+    }
+
+    #[test]
+    fn abandoning_releases_only_an_undisturbed_workspace() {
+        let fixture = Fixture::new();
+        // Both paths exist before initialization, so both are classified and tracked.
+        fs::write(fixture.workspace.join("destination.txt"), "before").unwrap();
+        let store = fixture.initialize(&Label::top());
+        // A released call the harness never ran: the workspace still shows the pin.
+        store.prepare("a", "unrun", FileOperation::Edit, "tracked.txt").unwrap();
+        store.bind("a", "unrun", "dispatch", &Label::top()).unwrap();
+        assert_eq!(store.reservation().unwrap().unwrap().actor, "a");
+        assert!(store.pin_matches_workspace(&store.reservation().unwrap().unwrap().pin).unwrap());
+        assert_eq!(store.abandon("a", "unrun").unwrap(), AbandonOutcome::Released);
+        assert!(store.reservation().unwrap().is_none());
+        assert_eq!(store.abandon("a", "unrun").unwrap(), AbandonOutcome::Absent);
+        // The next call proceeds: the release did not leave the workspace wedged.
+        store.prepare("b", "next", FileOperation::Read, "tracked.txt").unwrap();
+        store.cancel("b", "next").unwrap();
+
+        // A transfer whose destination moved is not released: the runtime cannot tell an
+        // unrun call from one whose report was lost.
+        store
+            .prepare_transfer("a", "copy", FileOperation::Copy, "tracked.txt", "destination.txt")
+            .unwrap();
+        store.bind("a", "copy", "dispatch-2", &Label::top()).unwrap();
+        fs::write(fixture.workspace.join("destination.txt"), "partial").unwrap();
+        assert_eq!(store.abandon("a", "copy").unwrap(), AbandonOutcome::Quarantined);
+        assert!(store.reservation().unwrap().is_some());
+        assert!(matches!(
+            store.prepare("b", "after-quarantine", FileOperation::Read, "tracked.txt"),
+            Err(FileStoreError::Pending)
+        ));
+    }
+
+    #[test]
+    fn inspection_reads_the_binding_from_the_ledger_and_matches_a_pin() {
+        let fixture = Fixture::new();
+        let store = fixture.initialize(&Label::top());
+        let pin = store.prepare("a", "read", FileOperation::Read, "tracked.txt").unwrap();
+        store.bind("a", "read", "dispatch", &Label::top()).unwrap();
+        drop(store);
+
+        let inspected = FileStore::inspect(&fixture.db).unwrap();
+        assert_eq!(inspected.workspace(), fixture.workspace.as_path());
+        let reservation = inspected.reservation().unwrap().unwrap();
+        assert_eq!(reservation.pin.path, "tracked.txt");
+        assert_eq!(reservation.bound_dispatch.as_deref(), Some("dispatch"));
+        assert!(inspected.pin_matches_workspace(&pin).unwrap());
+        fs::write(fixture.workspace.join("tracked.txt"), "moved").unwrap();
+        assert!(!inspected.pin_matches_workspace(&pin).unwrap());
+        assert!(matches!(
+            FileStore::inspect(&fixture._root.path().join("absent.db")),
+            Err(FileStoreError::Uninitialized)
+        ));
     }
 
     #[test]
