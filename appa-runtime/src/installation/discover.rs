@@ -122,14 +122,15 @@ pub(crate) fn batteries(
     Ok(batteries)
 }
 
-/// One battery an install would suggest for one discovered server.
+/// One battery an install would suggest for the servers it covers.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Suggestion {
-    pub(crate) battery: PackageName,
-    pub(crate) server: Namespace,
+pub(crate) enum Suggestion {
+    /// Included as it is, the battery covers the servers its namespaces name
+    /// or are bound to.
+    Plain(PackageName),
     /// The battery's contracts name another namespace than the server's key,
     /// so including it takes a `--server` binding of that key.
-    pub(crate) bind_server: bool,
+    Bound { battery: PackageName, server: Namespace },
 }
 
 /// How a version's batteries cover the discovered servers.
@@ -217,6 +218,18 @@ pub(crate) fn coverage(
             _ => None,
         })
         .collect();
+    // The batteries a binding is suggested for: a battery named by a server
+    // key, its one namespace unbound and not gating a server as it stands. A
+    // key is one battery's name, so a battery gets at most one binding.
+    let binding: BTreeSet<&PackageName> = covers
+        .iter()
+        .filter_map(|(server, cover)| match cover {
+            Some((name, matched @ Match::Named(_))) if !redirected(server, *matched) && !gating.contains(name) => {
+                Some(*name)
+            }
+            _ => None,
+        })
+        .collect();
     let mut suggestions: BTreeMap<PackageName, Suggestion> = BTreeMap::new();
     let mut uncovered = Vec::new();
     for (server, cover) in covers {
@@ -224,32 +237,32 @@ pub(crate) fn coverage(
             uncovered.push(server.clone());
             continue;
         };
-        let needs_binding = matches!(matched, Match::Named(_));
-        if redirected(server, matched) || (needs_binding && gating.contains(name)) {
+        if redirected(server, matched) {
             uncovered.push(server.clone());
             continue;
         }
-        if included.contains(name.as_str()) && !needs_binding {
-            continue;
-        }
-        let suggestion = Suggestion {
-            battery: name.clone(),
-            server: server.clone(),
-            bind_server: needs_binding,
-        };
-        // Every namespace a battery declares, or is bound to, is served by the
-        // one plain include; a suggested binding takes a battery over one
-        // namespace for one server, and its other key goes uncovered.
-        match suggestions.get(name) {
-            None => {
-                suggestions.insert(name.clone(), suggestion);
+        match matched {
+            Match::Named(_) if binding.contains(name) => {
+                suggestions.insert(
+                    name.clone(),
+                    Suggestion::Bound {
+                        battery: name.clone(),
+                        server: server.clone(),
+                    },
+                );
             }
-            Some(existing) if existing.bind_server => uncovered.push(server.clone()),
-            Some(existing) if needs_binding => {
-                uncovered.push(existing.server.clone());
-                suggestions.insert(name.clone(), suggestion);
+            // Every namespace a battery declares, or is bound to, is served
+            // by the one plain include; a suggested binding takes the battery
+            // for one server, and its other key goes uncovered.
+            Match::Named(_) => uncovered.push(server.clone()),
+            Match::Native | Match::Bound if binding.contains(name) => uncovered.push(server.clone()),
+            Match::Native | Match::Bound => {
+                if !included.contains(name.as_str()) {
+                    suggestions
+                        .entry(name.clone())
+                        .or_insert_with(|| Suggestion::Plain(name.clone()));
+                }
             }
-            Some(_) => {}
         }
     }
     uncovered.sort();
@@ -281,11 +294,14 @@ mod tests {
         )
     }
 
-    fn suggestion(battery: &str, server: &str, bind_server: bool) -> Suggestion {
-        Suggestion {
+    fn suggested(battery: &str) -> Suggestion {
+        Suggestion::Plain(PackageName::parse(battery).unwrap())
+    }
+
+    fn suggested_binding(battery: &str, server: &str) -> Suggestion {
+        Suggestion::Bound {
             battery: PackageName::parse(battery).unwrap(),
             server: namespace(server),
-            bind_server,
         }
     }
 
@@ -384,10 +400,7 @@ mod tests {
 
         assert_eq!(
             coverage.suggestions,
-            vec![
-                suggestion("github", "github", false),
-                suggestion("slack", "slack", true)
-            ]
+            vec![suggested("github"), suggested_binding("slack", "slack")]
         );
         assert_eq!(
             coverage.uncovered,
@@ -405,7 +418,7 @@ mod tests {
         let servers = BTreeSet::from([namespace("slack")]);
 
         let unbound = coverage(&servers, &batteries, &included(&["slack"]), &BTreeMap::new());
-        assert_eq!(unbound.suggestions, vec![suggestion("slack", "slack", true)]);
+        assert_eq!(unbound.suggestions, vec![suggested_binding("slack", "slack")]);
         assert_eq!(unbound.uncovered, vec![]);
 
         let bound = bindings(&[("claude_ai_Slack", "slack")]);
@@ -438,7 +451,7 @@ mod tests {
 
         let once = coverage(&servers, &batteries, &BTreeSet::new(), &BTreeMap::new());
 
-        assert_eq!(once.suggestions, vec![suggestion("slack", "slack", true)]);
+        assert_eq!(once.suggestions, vec![suggested_binding("slack", "slack")]);
         assert_eq!(once.uncovered, vec![namespace("claude_ai_Slack")]);
     }
 
@@ -450,9 +463,9 @@ mod tests {
         let batteries = vec![battery("acme", &["acme-docs", "acme-api"])];
         let servers = BTreeSet::from([namespace("acme-docs"), namespace("acme-api")]);
 
-        let plain = coverage(&servers, &batteries, &BTreeSet::new(), &BTreeMap::new());
-        assert_eq!(plain.suggestions, vec![suggestion("acme", "acme-api", false)]);
-        assert_eq!(plain.uncovered, vec![]);
+        let one = coverage(&servers, &batteries, &BTreeSet::new(), &BTreeMap::new());
+        assert_eq!(one.suggestions, vec![suggested("acme")]);
+        assert_eq!(one.uncovered, vec![]);
 
         let bound = bindings(&[("acme-api", "work-acme")]);
         let through_binding = coverage(
@@ -461,16 +474,13 @@ mod tests {
             &BTreeSet::new(),
             &bound,
         );
-        assert_eq!(
-            through_binding.suggestions,
-            vec![suggestion("acme", "work-acme", false)]
-        );
+        assert_eq!(through_binding.suggestions, vec![suggested("acme")]);
 
         // Each namespace bound to its own server: one include covers them all.
         let each = bindings(&[("acme-docs", "w1"), ("acme-api", "w2")]);
         let servers = BTreeSet::from([namespace("w1"), namespace("w2")]);
         let all = coverage(&servers, &batteries, &BTreeSet::new(), &each);
-        assert_eq!(all.suggestions, vec![suggestion("acme", "w1", false)]);
+        assert_eq!(all.suggestions, vec![suggested("acme")]);
         assert_eq!(all.uncovered, vec![]);
         assert_eq!(
             coverage(&servers, &batteries, &included(&["acme"]), &each),
@@ -492,7 +502,7 @@ mod tests {
             Coverage::default()
         );
         let neither = coverage(&servers, &batteries, &BTreeSet::new(), &bound);
-        assert_eq!(neither.suggestions, vec![suggestion("work", "work-github", false)]);
+        assert_eq!(neither.suggestions, vec![suggested("work")]);
     }
 
     /// A server a battery's namespace is already bound to is that battery's:
@@ -510,7 +520,7 @@ mod tests {
         );
 
         let absent = coverage(&servers, &batteries, &BTreeSet::new(), &bound);
-        assert_eq!(absent.suggestions, vec![suggestion("github", "work-github", false)]);
+        assert_eq!(absent.suggestions, vec![suggested("github")]);
         assert_eq!(absent.uncovered, vec![]);
 
         // A binding to the key itself changes nothing.

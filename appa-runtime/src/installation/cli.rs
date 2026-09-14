@@ -294,6 +294,14 @@ pub fn remove_battery(args: BatteryRemove) -> ExitCode {
             .ok_or_else(|| InstallError::Invalid("no installed selection for this config".into()))?;
         let text = String::from_utf8(before.clone()).map_err(|error| InstallError::Invalid(error.to_string()))?;
         let without = includes::remove(&text, &includes::battery_include(&args.name))?;
+        // Another spelling of the include is the person's line; it stays,
+        // and so does the battery until they take it out.
+        if includes::included(&without)?.contains(args.name.as_str()) {
+            return Err(InstallError::Invalid(format!(
+                "{} is still included by a line this command does not edit; remove that include yourself",
+                args.name
+            )));
+        }
         if without == text && !selection.batteries.contains(args.name.as_str()) {
             return Ok((
                 Some(Version::of(selection.generation())),
@@ -618,8 +626,11 @@ pub fn install(args: Install) -> ExitCode {
         let suggestions: Vec<serde_json::Value> = coverage
             .suggestions
             .iter()
-            .map(|suggestion| {
-                serde_json::json!({"battery": suggestion.battery.as_str(), "server": suggestion.server.as_str()})
+            .map(|suggestion| match suggestion {
+                discover::Suggestion::Plain(battery) => serde_json::json!({"battery": battery.as_str()}),
+                discover::Suggestion::Bound { battery, server } => {
+                    serde_json::json!({"battery": battery.as_str(), "server": server.as_str()})
+                }
             })
             .collect();
         let commands = suggestion_commands(&coverage, args.target.config.as_deref());
@@ -845,19 +856,22 @@ fn suggestion_commands(coverage: &discover::Coverage, config: Option<&Path>) -> 
     let plain: Vec<&str> = coverage
         .suggestions
         .iter()
-        .filter(|suggestion| !suggestion.bind_server)
-        .map(|suggestion| suggestion.battery.as_str())
+        .filter_map(|suggestion| match suggestion {
+            discover::Suggestion::Plain(battery) => Some(battery.as_str()),
+            discover::Suggestion::Bound { .. } => None,
+        })
         .collect();
     let mut commands = Vec::new();
     if !plain.is_empty() {
         commands.push(format!("appa battery install {}{target}", plain.join(" ")));
     }
-    for suggestion in coverage.suggestions.iter().filter(|suggestion| suggestion.bind_server) {
-        commands.push(format!(
-            "appa battery install {} --server {}{target}",
-            suggestion.battery,
-            suggestion.server.as_str()
-        ));
+    for suggestion in &coverage.suggestions {
+        if let discover::Suggestion::Bound { battery, server } = suggestion {
+            commands.push(format!(
+                "appa battery install {battery} --server {}{target}",
+                server.as_str()
+            ));
+        }
     }
     commands
 }
@@ -1219,16 +1233,15 @@ mod tests {
     /// config path a shell would split is quoted.
     #[test]
     fn suggestion_commands_batch_plain_batteries_and_separate_bindings() {
-        let suggestion = |battery: &str, server: &str, bind_server: bool| discover::Suggestion {
-            battery: PackageName::parse(battery).unwrap(),
-            server: appa_package::Namespace::parse(server).unwrap(),
-            bind_server,
-        };
+        let plain = |battery: &str| discover::Suggestion::Plain(PackageName::parse(battery).unwrap());
         let coverage = discover::Coverage {
             suggestions: vec![
-                suggestion("github", "github", false),
-                suggestion("linear", "linear", false),
-                suggestion("slack", "slack", true),
+                plain("github"),
+                plain("linear"),
+                discover::Suggestion::Bound {
+                    battery: PackageName::parse("slack").unwrap(),
+                    server: appa_package::Namespace::parse("slack").unwrap(),
+                },
             ],
             uncovered: vec![],
         };
