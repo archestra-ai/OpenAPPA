@@ -6,6 +6,18 @@ name = "appa"
 path = "batteries/claude-code"
 digest = "sha256:6856d2b668f484385ed3078f27e3fbbf89092941147b2708a9e9c32c871e41ae"
 
+[packages.battery.cloudflare-docs]
+path = "batteries/cloudflare-docs"
+digest = "sha256:4dc7c2161fa8c75f1b9e94908f10dff66cc6371a99b0b4dc0d33373ec2778206"
+
+[packages.battery.cloudflare-observability]
+path = "batteries/cloudflare-observability"
+digest = "sha256:f92118f4b234d267ebea72a7e0cedcbb55e002f706d80345fd69ba2c011ad7aa"
+
+[packages.battery.cloudflare-radar]
+path = "batteries/cloudflare-radar"
+digest = "sha256:1cd674db69220ba76e2ff1faedeb198bdb3fe0f50718e4daa8199b90e8d898ab"
+
 [packages.battery.github]
 path = "batteries/github"
 digest = "sha256:91f5a604d4e33288717401f367ab6a70fb905b8df7d5c594fc37067434217c5a"

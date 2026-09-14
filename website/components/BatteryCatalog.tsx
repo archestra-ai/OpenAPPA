@@ -54,6 +54,22 @@ const BATTERIES = [
     description: "Rules for 3 read-only documentation tools; queries must be sharable with public.",
     href: "/battery-microsoft-learn",
     logo: "/images/batteries/microsoft-learn.svg",
+    name: "Cloudflare docs",
+    description: "Rules for 2 documentation tools; results are public and the query must be sharable with public.",
+    href: "/battery-cloudflare-docs",
+    logo: "/images/batteries/cloudflare.svg",
+  },
+  {
+    name: "Cloudflare Radar",
+    description: "Rules for 66 tools: public Internet measurement reads, internal URL Scanner reads, one reviewed scan.",
+    href: "/battery-cloudflare-radar",
+    logo: "/images/batteries/cloudflare.svg",
+  },
+  {
+    name: "Cloudflare Observability",
+    description: "Rules for 8 Workers logs, telemetry, and documentation tools; every one of them reads.",
+    href: "/battery-cloudflare-observability",
+    logo: "/images/batteries/cloudflare.svg",
   },
   {
     name: "Add your own",

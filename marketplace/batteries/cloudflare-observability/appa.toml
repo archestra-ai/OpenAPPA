@@ -1,0 +1,73 @@
+# Cloudflare Workers Observability battery: Cloudflare's hosted observability
+# MCP server (`https://observability.mcp.cloudflare.com/mcp`), the
+# `workers-observability` app of `cloudflare/mcp-server-cloudflare` at tag
+# `workers-observability@0.5.5`.
+#
+# The server lists eight tools and every one of them reads. Six are account
+# scoped: three query the Workers Observability API for logs, metrics, filter
+# keys and filter values, and three list Workers, one Worker's details, and one
+# Worker's source code. Workers logs carry whatever the account's Workers
+# wrote and whatever their callers sent - request paths, headers, bodies,
+# error strings - so this data is attacker reachable and enters `suspicious`.
+# A Cloudflare account shows its members the same logs, so the audience is
+# `internal`, and a query's input must be sharable with `internal`.
+#
+# Worker source code is also `suspicious`: the download is the deployed
+# bundle, which carries third-party dependencies the policy cannot vouch for.
+#
+# The remaining two tools are the documentation tools this server shares with
+# Cloudflare's documentation server. They return public pages of
+# developers.cloudflare.com, so they leave the audience alone;
+# `search_cloudflare_documentation` sends the agent's `query` to Cloudflare's
+# public documentation index, so the query must be sharable with `public`.
+#
+# No tool changes anything. The battery has no write, no effect, and no review
+# mark.
+
+[policy]
+version = 2
+
+# --- Workers logs and telemetry: the account's own, attacker reachable ---
+
+[[policy.tool]]
+name = "mcp/cloudflare-observability/query_worker_observability"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/cloudflare-observability/observability_keys"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/cloudflare-observability/observability_values"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+# --- the Workers themselves ---
+
+[[policy.tool]]
+name = "mcp/cloudflare-observability/workers_list"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/cloudflare-observability/workers_get_worker"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/cloudflare-observability/workers_get_worker_code"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+# --- the public documentation tools this server also carries ---
+
+[[policy.tool]]
+name = "mcp/cloudflare-observability/search_cloudflare_documentation"
+delta = { trust = "suspicious" }
+requires = { audience = { contains = ["public"] } }
+
+[[policy.tool]]
+name = "mcp/cloudflare-observability/migrate_pages_to_workers_guide"
+delta = { trust = "suspicious" }
