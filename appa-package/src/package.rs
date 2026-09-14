@@ -301,13 +301,20 @@ impl RawPlugin {
             });
         }
         let default_policy = relative(&self.default_policy, "plugin.default_policy", path)?;
-        let mut batteries = Vec::new();
+        let mut batteries: Vec<PackageName> = Vec::new();
         for battery in &self.batteries {
-            batteries.push(PackageName::parse(battery).map_err(|source| ManifestError::Name {
+            let battery = PackageName::parse(battery).map_err(|source| ManifestError::Name {
                 path: path.to_path_buf(),
                 field: "plugin.batteries".to_owned(),
                 source,
-            })?);
+            })?;
+            if batteries.contains(&battery) {
+                return Err(ManifestError::RepeatedBattery {
+                    path: path.to_path_buf(),
+                    battery: battery.to_string(),
+                });
+            }
+            batteries.push(battery);
         }
         let absent = |present: bool, field: &'static str| match present {
             true => Err(ManifestError::FieldNotForHost {
@@ -467,6 +474,9 @@ mod tests {
 
         let refused = manifest(&format!("{CLAUDE_CODE}batteries = [\"Claude Code\"]\n"));
         assert!(matches!(refused, Err(ManifestError::Name { .. })));
+
+        let repeated = manifest(&format!("{CLAUDE_CODE}batteries = [\"github\", \"github\"]\n"));
+        assert!(matches!(repeated, Err(ManifestError::RepeatedBattery { .. })));
     }
 
     #[test]

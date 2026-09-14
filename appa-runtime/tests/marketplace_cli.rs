@@ -267,10 +267,6 @@ fn deployment(root: &Path) -> std::path::PathBuf {
     stage(root, None, &["github"])
 }
 
-fn deployment_for(root: &Path, kagent: bool) -> std::path::PathBuf {
-    stage(root, kagent.then_some(&[][..]), &["github"])
-}
-
 /// Stages one battery per name, each over the namespace its name spells, and,
 /// with `kagent`, the real kagent plugin declaring those required batteries.
 /// The store beside the config holds the batteries, as an install leaves it.
@@ -353,7 +349,7 @@ fn stage(root: &Path, kagent: Option<&[&str]>, batteries: &[&str]) -> std::path:
 #[test]
 fn kagent_prepares_updates_roundtrips_offline_and_removes_without_host_activation() {
     let source = tempfile::tempdir().unwrap();
-    let config = deployment_for(source.path(), true);
+    let config = stage(source.path(), Some(&[]), &["github"]);
     let config_name = config.to_str().unwrap();
     let invoke = |args: &[&str]| {
         let output = run(source.path(), args);
@@ -445,7 +441,7 @@ fn kagent_prepares_updates_roundtrips_offline_and_removes_without_host_activatio
 #[test]
 fn a_kagent_install_includes_no_battery_and_a_battery_install_includes_one() {
     let source = tempfile::tempdir().unwrap();
-    let config = deployment_for(source.path(), true);
+    let config = stage(source.path(), Some(&[]), &["github"]);
     let config_name = config.to_str().unwrap();
     let invoke = |args: &[&str]| {
         let output = run(source.path(), args);

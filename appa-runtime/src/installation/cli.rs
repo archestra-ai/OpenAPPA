@@ -196,10 +196,13 @@ fn server_name(value: &str) -> Result<String, String> {
     Ok(value.to_owned())
 }
 
-pub fn install_battery(args: BatteryInstall) -> ExitCode {
+pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
     if args.names.is_empty() {
         return orient(PackageKind::Battery, &args.target);
     }
+    // A battery named twice is one battery: the include is one line either way.
+    let mut seen = std::collections::BTreeSet::new();
+    args.names.retain(|name| seen.insert(name.clone()));
     let result = (|| {
         if args.server.is_some() && args.names.len() != 1 {
             return Err(InstallError::Invalid(
@@ -593,14 +596,23 @@ pub fn install(args: Install) -> ExitCode {
         let servers = std::env::current_dir()
             .map(|cwd| discover::servers(plugin.host(), &cwd))
             .unwrap_or_default();
+        // The install is committed; a suggestion that cannot be computed is
+        // named, never a failure of the install.
         let coverage = match servers.is_empty() {
             true => discover::Coverage::default(),
-            false => discover::coverage(
-                &servers,
-                &discover::catalog(acquired.marketplace(), plugin.host())?,
-                &includes::included(&text)?,
-                &includes::server_bindings(&text)?,
-            ),
+            false => discover::catalog(acquired.marketplace(), plugin.host())
+                .and_then(|batteries| {
+                    Ok(discover::coverage(
+                        &servers,
+                        &batteries,
+                        &includes::included(&text)?,
+                        &includes::server_bindings(&text)?,
+                    ))
+                })
+                .unwrap_or_else(|error| {
+                    eprintln!("appa: warning: battery suggestions were not computed: {error}");
+                    discover::Coverage::default()
+                }),
         };
         let suggestions: Vec<serde_json::Value> = coverage
             .suggestions

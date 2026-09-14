@@ -179,6 +179,7 @@ impl Coverage {
 /// character is one a shell passes through, single-quoted otherwise.
 fn shell_word(text: &str) -> String {
     let plain = !text.is_empty()
+        && !text.starts_with('-')
         && text
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || "/._~+:@,-".contains(character));
@@ -424,5 +425,6 @@ mod tests {
             spaced[0],
             "appa battery install github linear --config '/Users/me/my deployment/it'\\''s.toml'"
         );
+        assert_eq!(shell_word("-deploy/appa.toml"), "'-deploy/appa.toml'");
     }
 }
