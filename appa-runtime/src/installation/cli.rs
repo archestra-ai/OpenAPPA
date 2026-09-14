@@ -86,7 +86,7 @@ pub struct BatteryInstall {
     #[command(flatten)]
     source: Source,
     /// Existing connection identity for one single-namespace battery.
-    #[arg(long, value_parser = server_name, requires = "names")]
+    #[arg(long, value_parser = server_name, requires = "names", allow_hyphen_values = true)]
     server: Option<String>,
 }
 
@@ -230,8 +230,10 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
             .source
             .acquire(&installation, Some(&current), current.requirements())?;
         installation.retain(&acquired)?;
+        let catalog = Marketplace::read(&acquired.marketplace().join("marketplace.toml"))
+            .map_err(|error| InstallError::Invalid(error.to_string()))?;
         for name in &args.names {
-            super::battery_package(acquired.marketplace(), name.as_str())?;
+            super::battery_package_in(acquired.marketplace(), &catalog, name.as_str())?;
         }
         let (mut selection, text) = match acquired.imported() {
             Some(imported) => {
@@ -258,7 +260,7 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
             text = includes::add(&text, &includes::battery_include(name))?;
         }
         if let Some(server) = &args.server {
-            let (_, battery) = super::battery_package(acquired.marketplace(), args.names[0].as_str())?;
+            let (_, battery) = super::battery_package_in(acquired.marketplace(), &catalog, args.names[0].as_str())?;
             if battery.namespaces.len() != 1 {
                 return Err(InstallError::Invalid("this battery has multiple namespaces; configure server_aliases explicitly in the deployment config".into()));
             }
@@ -578,9 +580,10 @@ pub fn install(args: Install) -> ExitCode {
         eprintln!("appa: verifying artifacts and preparing selected plugins...");
         installation.commit_installation(before.as_deref(), text.as_bytes(), &selection)?;
         let batteries: Vec<&str> = included.iter().map(PackageName::as_str).collect();
+        let (included_now, bindings) = includes::batteries(&text)?;
         // An existing config is the person's and is not edited; one without the
         // host's own battery gates nothing a Claude session does, so the gap is named.
-        let warning = (name == "claude-code" && !includes::included(&text)?.contains("claude-code")).then(|| {
+        let warning = (name == "claude-code" && !included_now.contains("claude-code")).then(|| {
             format!(
                 "{} does not include the claude-code battery: add \"{}\" to its include list, or {}",
                 installation.config_path().display(),
@@ -601,10 +604,7 @@ pub fn install(args: Install) -> ExitCode {
         let coverage = match servers.is_empty() {
             true => discover::Coverage::default(),
             false => discover::batteries(acquired.marketplace(), &catalog, plugin.host())
-                .and_then(|batteries| {
-                    let (included, bindings) = includes::batteries(&text)?;
-                    Ok(discover::coverage(&servers, &batteries, &included, &bindings))
-                })
+                .map(|batteries| discover::coverage(&servers, &batteries, &included_now, &bindings))
                 .unwrap_or_else(|error| {
                     eprintln!("appa: warning: battery suggestions were not computed: {error}");
                     discover::Coverage::default()
@@ -617,7 +617,7 @@ pub fn install(args: Install) -> ExitCode {
                 serde_json::json!({"battery": suggestion.battery.as_str(), "server": suggestion.server.as_str()})
             })
             .collect();
-        let commands = coverage.commands(args.target.config.as_deref());
+        let commands = suggestion_commands(&coverage, args.target.config.as_deref());
         let uncovered: Vec<&str> = coverage.uncovered.iter().map(Namespace::as_str).collect();
         let mut result = if name == "kagent" {
             let installed = installation
@@ -828,6 +828,47 @@ fn orient(kind: PackageKind, target: &Target) -> ExitCode {
     };
     let _ = writeln!(stderr, "\n{usage}");
     ExitCode::from(2)
+}
+
+/// The commands that include the suggested batteries: every battery without
+/// a binding in one `appa battery install`, and one command per binding,
+/// since a binding names one battery.
+fn suggestion_commands(coverage: &discover::Coverage, config: Option<&Path>) -> Vec<String> {
+    let target = config
+        .map(|config| format!(" --config {}", shell_word(&config.to_string_lossy())))
+        .unwrap_or_default();
+    let plain: Vec<&str> = coverage
+        .suggestions
+        .iter()
+        .filter(|suggestion| !suggestion.bind_server)
+        .map(|suggestion| suggestion.battery.as_str())
+        .collect();
+    let mut commands = Vec::new();
+    if !plain.is_empty() {
+        commands.push(format!("appa battery install {}{target}", plain.join(" ")));
+    }
+    for suggestion in coverage.suggestions.iter().filter(|suggestion| suggestion.bind_server) {
+        commands.push(format!(
+            "appa battery install {} --server {}{target}",
+            suggestion.battery,
+            suggestion.server.as_str()
+        ));
+    }
+    commands
+}
+
+/// `text` as one word of a POSIX shell command line: as it is when every
+/// character is one a shell passes through, single-quoted otherwise.
+fn shell_word(text: &str) -> String {
+    let plain = !text.is_empty()
+        && !text.starts_with('-')
+        && text
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "/._~+:@,-".contains(character));
+    match plain {
+        true => text.to_owned(),
+        false => format!("'{}'", text.replace('\'', "'\\''")),
+    }
 }
 
 /// The batteries an install found servers for, as the commands that include
@@ -1166,6 +1207,43 @@ mod tests {
         assert_eq!(lines[2], "  appa battery install slack --server slack");
         assert_eq!(lines.len(), 4);
         assert!(lines[3].contains("fetch"));
+    }
+
+    /// Every battery without a binding goes in one command, so the person
+    /// runs one line; each binding is its own, as the command takes one. A
+    /// config path a shell would split is quoted.
+    #[test]
+    fn suggestion_commands_batch_plain_batteries_and_separate_bindings() {
+        let suggestion = |battery: &str, server: &str, bind_server: bool| discover::Suggestion {
+            battery: PackageName::parse(battery).unwrap(),
+            server: appa_package::Namespace::parse(server).unwrap(),
+            bind_server,
+        };
+        let coverage = discover::Coverage {
+            suggestions: vec![
+                suggestion("github", "github", false),
+                suggestion("linear", "linear", false),
+                suggestion("slack", "slack", true),
+            ],
+            uncovered: vec![],
+        };
+
+        assert_eq!(
+            suggestion_commands(&coverage, Some(Path::new("./deployment/appa.toml"))),
+            vec![
+                "appa battery install github linear --config ./deployment/appa.toml",
+                "appa battery install slack --server slack --config ./deployment/appa.toml"
+            ]
+        );
+        assert_eq!(
+            suggestion_commands(&coverage, Some(Path::new("/Users/me/my deployment/it's.toml")))[0],
+            "appa battery install github linear --config '/Users/me/my deployment/it'\\''s.toml'"
+        );
+        assert_eq!(shell_word("-deploy/appa.toml"), "'-deploy/appa.toml'");
+        assert_eq!(
+            suggestion_commands(&discover::Coverage::default(), None),
+            Vec::<String>::new()
+        );
     }
 
     /// The answer works by replacing the one line the shipped policy carries, so the

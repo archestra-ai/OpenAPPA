@@ -1037,10 +1037,20 @@ fn verify_packages(root: &Path, generation: &Generation) -> Result<Vec<Package>,
 pub(crate) fn battery_package(marketplace: &Path, name: &str) -> Result<(PackageEntry, Battery), InstallError> {
     let catalog = Marketplace::read(&marketplace.join("marketplace.toml"))
         .map_err(|error| InstallError::Invalid(error.to_string()))?;
+    battery_package_in(marketplace, &catalog, name)
+}
+
+/// A battery of `catalog`, the one read from `marketplace`, with its entry.
+pub(crate) fn battery_package_in(
+    marketplace: &Path,
+    catalog: &Marketplace,
+    name: &str,
+) -> Result<(PackageEntry, Battery), InstallError> {
     let entry = catalog
         .packages
-        .into_iter()
+        .iter()
         .find(|entry| entry.kind == PackageKind::Battery && entry.name.as_str() == name)
+        .cloned()
         .ok_or_else(|| InstallError::Invalid(format!("battery {name} is absent from this version")))?;
     let package = Package::read(&marketplace.join(entry.path.as_str()).join(appa_package::MANIFEST_FILE))
         .map_err(|error| InstallError::Invalid(error.to_string()))?;
