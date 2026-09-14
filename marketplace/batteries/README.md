@@ -15,6 +15,9 @@ so a deployment can customize its hint without editing the battery.
 | `grain/` | the Grain MCP server: meetings, transcripts, notes, deals, clips, stories, collections, workspace admin (49 tools) | none |
 | `sentry/` | the Sentry MCP server: 9 listed tools and the 55 catalog tools behind `execute_sentry_tool`; internal reads, reviewed writes | none |
 | `notion/` | the hosted Notion MCP server, all 36 tools; internal reads (Notion exposes no page permissions), reviewed structural changes | none |
+| `cloudflare-docs/` | Cloudflare's documentation MCP server, both tools; public results, and the search query must be sharable with `public` | none |
+| `cloudflare-radar/` | Cloudflare's Radar MCP server, all 66 tools; public Internet measurement reads, internal URL Scanner reads, one reviewed scan submission | none |
+| `cloudflare-observability/` | Cloudflare's Workers Observability MCP server, all 8 tools; internal logs, telemetry and Worker reads, plus two public documentation reads, no writes | none |
 
 Include a battery with a path relative to the root config:
 

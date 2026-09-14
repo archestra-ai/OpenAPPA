@@ -1,0 +1,9 @@
+schema = 1
+name = "cloudflare-observability"
+description = "Rules for Cloudflare's Workers Observability MCP server's 8 tools: internal logs, telemetry and Worker reads, plus two public documentation reads. No writes."
+
+[battery]
+policy = "appa.toml"
+hosts = ["claude-code", "kagent"]
+namespaces = ["cloudflare-observability"]
+helpers = []
