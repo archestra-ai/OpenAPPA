@@ -148,6 +148,13 @@ pub fn record_event(recorded: &Recorded) -> Vec<WireEvent> {
             call_id: call.0.clone(),
             text: reason.clone(),
         }],
+        // A refused call shows as the call that did not run: the text names it as the
+        // runtime's refusal, not a policy block.
+        Record::Refused { call, detail, .. } => vec![WireEvent::Blocked {
+            trajectory,
+            call_id: call.0.clone(),
+            text: format!("[appa] refused: {detail}"),
+        }],
         Record::Admitted { body, .. } | Record::Substituted { body, .. } => {
             vec![WireEvent::ToolResult {
                 trajectory,
