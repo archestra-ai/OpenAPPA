@@ -42,6 +42,18 @@ in the policy. The tool is absent from MCP unless the backend is enabled.
 
 ## Execution and publication contract
 
+```mermaid
+flowchart LR
+    ws[("live workspace<br/>never mounted")] -->|"pin, then snapshot the declared inputs"| stage["private staging<br/>inputs/"]
+    stage --> sandbox["bubblewrap namespaces<br/>agentsh Landlock + seccomp<br/>resource ceilings"]
+    sandbox --> out["output/result<br/>one regular file, at most 64 MiB"]
+    out -->|"after descendant teardown"| dest[("new destination version<br/>carrying every input Label")]
+    sandbox -.->|"stdout, stderr, failure text"| dest
+```
+
+The runtime side of this contract — the reservation, the Label algebra and the admission
+order — is in [the file-mediation architecture note](../../appa-runtime/FILE-MEDIATION.md).
+
 1. The runtime binds the tool call to the host-owned trajectory. The ledger pins
    all inputs and the destination under one durable workspace reservation.
 2. The engine combines the receiving trajectory Label, tool delta and every input

@@ -36,7 +36,7 @@ digest = "sha256:05683c96e66f8e8afcb66e9bfa0535bed1a226467241399aec082b687a947ed
 
 [packages.plugin.claude-code]
 path = "plugins/claude-code"
-digest = "sha256:399583d32402a3983ed6c51b87aa59446270255cddabe68d75d5c43aa6156716"
+digest = "sha256:2d03fd074f35ac690bd95f5ba5e505132b9fddec5db647a1f0a81e9bcd40f4f0"
 
 [packages.plugin.kagent]
 path = "plugins/kagent"

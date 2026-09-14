@@ -5,7 +5,7 @@ conformance check, and the install and uninstall instructions below. The
 host-side code — the hooks, the status line, the runtime start, the
 `appa` MCP registration and the `appa-guide` skill — is the `appa` binary
 itself, the `appa-runtime` crate; its
-[README](../../appa-runtime/README.md) covers build, configuration, and
+[README](../../../appa-runtime/README.md) covers build, configuration, and
 start.
 
 How it works, in one paragraph: the install registers `appa hook` in the
@@ -40,6 +40,19 @@ implementation sequence. Building a custom sandbox or modifying Claude Code
 is not a goal.
 Assume no process outside Claude Code edits workspace files. This does not
 exclude subprocesses launched by Claude Code itself.
+
+```mermaid
+flowchart LR
+    stage1["1. Plugin hardening<br/>runtime-owned Read/Write/Edit<br/>implemented, opt-in"]
+    stage2["2. Mediated Copy/Move<br/>Labels move without payloads<br/>implemented, opt-in"]
+    stage3["3. Third-party isolation<br/>isolated Process commands<br/>implemented, opt-in"]
+    proxy["Inference proxy<br/>not implemented"]
+    stage1 --> stage2 --> stage3 --> proxy
+```
+
+The three implemented stages are described in this README and in
+[the file-mediation architecture note](../../../appa-runtime/FILE-MEDIATION.md), which
+carries the component map, the call sequence, the ledger model and the boundary list.
 
 ### Plugin and bundled runtime
 
