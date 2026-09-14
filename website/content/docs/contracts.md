@@ -663,13 +663,13 @@ An annotator's permits limit the values it can use in its answers. The following
 | Field | Allowed values in an answer | If omitted |
 |---|---|---|
 | `ranks` | Ranks used in `delta.trust` or `requires.trust`. | Every rank in the trust chain. |
-| `audiences` | Built-in audiences, `@` references, selector placeholders, or literal reader IDs that the answer may use. | `self`, `internal`, named groups, and reader IDs declared in the policy. Never a selector placeholder, not even one another annotator declares. |
+| `audiences` | Built-in audiences, `@` references, selector placeholders, or literal reader IDs that the answer may use. | `self`, `internal`, named groups, and reader IDs declared in the policy. |
 | `marks` | Required attention marks. | Every mark declared in an authority's `permits.attention`. |
 | `effects` | Effects that the call may record or require. | Every effect name declared by the policy. |
 
 `public` is always allowed in an answer, so it is not listed in `audiences`. Setting `audiences = []` allows only public answers.
 
-A selector placeholder in `audiences`, such as `@github:repo/$owner/$repo/collaborators`, is instantiated for each call. Every `$<argument_name>` in it becomes a required top-level string argument of every tool that uses the annotator, so the wildcard `*` tool, whose arguments the policy does not describe, cannot use such an annotator. The consult request and the answer schema list the concrete spelling for that call, such as `@github:repo/acme/api/collaborators`, and the answer MAY use only that spelling. The annotator can answer about the resource the call names and about no other. See [Read a source collection from a tool argument](#read-a-source-collection-from-a-tool-argument) for the placeholder rules.
+An annotator can use a selector placeholder only when its own `audiences` lists it. A selector placeholder in `audiences`, such as `@github:repo/$owner/$repo/collaborators`, is instantiated for each call. Every `$<argument_name>` in it becomes a required top-level string argument of every tool that uses the annotator, so the wildcard `*` tool, whose arguments the policy does not describe, cannot use such an annotator. The consult request and the answer schema list the concrete spelling for that call, such as `@github:repo/acme/api/collaborators`, and the answer MAY use only that spelling. The annotator can answer about the resource the call names and about no other. See [Read a source collection from a tool argument](#read-a-source-collection-from-a-tool-argument) for the placeholder rules.
 
 An empty list and an omitted field have different meanings. For example, `marks = []` prevents the annotator from requiring attention. Omitting `marks` allows it to use any mark declared in an authority's `permits.attention`.
 
