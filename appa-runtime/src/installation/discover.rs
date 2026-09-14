@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use appa_package::{Battery, Host, Marketplace, Namespace, PackageKind, PackageName};
 
-use super::{InstallError, battery_package};
+use super::{InstallError, battery_at};
 
 /// The MCP servers `host` has configured, as the namespaces their tool keys
 /// spell. Discovery reads configuration and never runs a server. A host with
@@ -114,7 +114,7 @@ pub(crate) fn batteries(
         .iter()
         .filter(|entry| entry.kind == PackageKind::Battery)
     {
-        let (_, battery) = battery_package(marketplace, entry.name.as_str())?;
+        let battery = battery_at(marketplace, entry)?;
         if battery.hosts.contains(&host) {
             batteries.push((entry.name.clone(), battery));
         }
@@ -122,14 +122,15 @@ pub(crate) fn batteries(
     Ok(batteries)
 }
 
-/// One battery an install would suggest for one discovered server.
+/// One battery an install would suggest for the servers it covers.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Suggestion {
-    pub(crate) battery: PackageName,
-    pub(crate) server: Namespace,
+pub(crate) enum Suggestion {
+    /// Included as it is, the battery covers the servers its namespaces name
+    /// or are bound to.
+    Plain(PackageName),
     /// The battery's contracts name another namespace than the server's key,
     /// so including it takes a `--server` binding of that key.
-    pub(crate) bind_server: bool,
+    Bound { battery: PackageName, server: Namespace },
 }
 
 /// How a version's batteries cover the discovered servers.
@@ -141,116 +142,127 @@ pub(crate) struct Coverage {
     pub(crate) uncovered: Vec<Namespace>,
 }
 
-impl Coverage {
-    /// The commands that include the suggested batteries: every battery
-    /// without a binding in one `appa battery install`, and one command per
-    /// binding, since a binding names one battery.
-    pub(crate) fn commands(&self, config: Option<&Path>) -> Vec<String> {
-        let target = config
-            .map(|config| format!(" --config {}", shell_word(&config.to_string_lossy())))
-            .unwrap_or_default();
-        let plain: Vec<&str> = self
-            .suggestions
-            .iter()
-            .filter(|suggestion| !suggestion.bind_server)
-            .map(|suggestion| suggestion.battery.as_str())
-            .collect();
-        let mut commands = Vec::new();
-        if !plain.is_empty() {
-            commands.push(format!("appa battery install {}{target}", plain.join(" ")));
-        }
-        for suggestion in self.suggestions.iter().filter(|suggestion| suggestion.bind_server) {
-            commands.push(format!(
-                "appa battery install {} --server {}{target}",
-                suggestion.battery,
-                suggestion.server.as_str()
-            ));
-        }
-        commands
-    }
-}
-
-/// `text` as one word of a POSIX shell command line: as it is when every
-/// character is one a shell passes through, single-quoted otherwise.
-fn shell_word(text: &str) -> String {
-    let plain = !text.is_empty()
-        && !text.starts_with('-')
-        && text
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "/._~+:@,-".contains(character));
-    match plain {
-        true => text.to_owned(),
-        false => format!("'{}'", text.replace('\'', "'\\''")),
-    }
+/// How one server key matched a battery.
+#[derive(Clone, Copy)]
+enum Match<'a> {
+    /// The key is a namespace the battery declares.
+    Native,
+    /// A namespace of the battery is already bound to the key.
+    Bound,
+    /// The key is the battery's name; its one namespace needs a binding to it.
+    Named(&'a Namespace),
 }
 
 /// Matching is exact, never by substring: a server key equal to a namespace a
-/// battery declares is that battery's, and one equal to a battery's name is
-/// too, bound as that battery's one namespace, as is one a namespace is
-/// already bound to in `bindings` (namespace to server key). A battery
-/// already included covers the servers its namespaces name or are bound to;
+/// battery declares is that battery's, as is one a namespace is already
+/// bound to in `bindings` (namespace to server key), and one equal to the
+/// name of a battery over one namespace, bound to it. A battery already
+/// included covers the servers it matches natively or through a binding;
 /// those are not suggested again. A binding moves the battery's rules to the
-/// bound key, so one battery serves one server: it is suggested once, with
-/// the binding when a server needs it, and a server its own namespace names
-/// is then uncovered.
+/// bound key, so a bound battery serves one server: a battery is suggested
+/// once, with the binding when a server needs it, and a server its own
+/// namespace names is then uncovered.
 pub(crate) fn coverage(
     servers: &BTreeSet<Namespace>,
     batteries: &[(PackageName, Battery)],
     included: &BTreeSet<String>,
     bindings: &BTreeMap<String, String>,
 ) -> Coverage {
+    let bound_to = |namespace: &Namespace| bindings.get(namespace.as_str()).map(String::as_str);
+    // A binding in the config already sends the battery's rules to another
+    // key, included or not; one to the key itself changes nothing.
+    let redirected = |server: &Namespace, matched: Match<'_>| match matched {
+        Match::Native => bound_to(server).is_some_and(|bound| bound != server.as_str()),
+        Match::Named(namespace) => bound_to(namespace).is_some(),
+        Match::Bound => false,
+    };
+    let covers: Vec<(&Namespace, Option<(&PackageName, Match<'_>)>)> = servers
+        .iter()
+        .map(|server| {
+            let by_namespace = batteries
+                .iter()
+                .find(|(_, battery)| battery.namespaces.contains(server))
+                .map(|(name, _)| (name, Match::Native));
+            let by_binding = batteries
+                .iter()
+                .find(|(_, battery)| {
+                    battery
+                        .namespaces
+                        .iter()
+                        .any(|namespace| bound_to(namespace) == Some(server.as_str()))
+                })
+                .map(|(name, _)| (name, Match::Bound));
+            let by_name = batteries
+                .iter()
+                .find(|(name, battery)| name.as_str() == server.as_str() && battery.namespaces.len() == 1)
+                .map(|(name, battery)| (name, Match::Named(&battery.namespaces[0])));
+            // A battery already included and covering the key is its cover,
+            // ahead of one that would only be suggested for it.
+            let mut candidates = [by_namespace, by_binding, by_name].into_iter().flatten();
+            let already = candidates.clone().find(|(name, _)| included.contains(name.as_str()));
+            (server, already.or_else(|| candidates.next()))
+        })
+        .collect();
+    // The included batteries gating a server as they stand: a binding
+    // suggested for one of them would take that server away from it.
+    let gating: BTreeSet<&PackageName> = covers
+        .iter()
+        .filter_map(|(server, cover)| match cover {
+            Some((name, matched))
+                if included.contains(name.as_str())
+                    && !matches!(matched, Match::Named(_))
+                    && !redirected(server, *matched) =>
+            {
+                Some(*name)
+            }
+            _ => None,
+        })
+        .collect();
+    // The batteries a binding is suggested for: a battery named by a server
+    // key, its one namespace unbound and not gating a server as it stands. A
+    // key is one battery's name, so a battery gets at most one binding.
+    let binding: BTreeSet<&PackageName> = covers
+        .iter()
+        .filter_map(|(server, cover)| match cover {
+            Some((name, matched @ Match::Named(_))) if !redirected(server, *matched) && !gating.contains(name) => {
+                Some(*name)
+            }
+            _ => None,
+        })
+        .collect();
     let mut suggestions: BTreeMap<PackageName, Suggestion> = BTreeMap::new();
     let mut uncovered = Vec::new();
-    for server in servers {
-        let by_namespace = batteries
-            .iter()
-            .find(|(_, battery)| battery.namespaces.contains(server))
-            .map(|(name, _)| (name, None));
-        let by_binding = batteries.iter().find_map(|(name, battery)| {
-            battery
-                .namespaces
-                .iter()
-                .find(|namespace| bindings.get(namespace.as_str()) == Some(&server.as_str().to_owned()))
-                .map(|namespace| (name, Some(namespace)))
-        });
-        let by_name = batteries
-            .iter()
-            .find(|(name, battery)| name.as_str() == server.as_str() && battery.namespaces.len() == 1)
-            .map(|(name, battery)| (name, Some(&battery.namespaces[0])));
-        let Some((name, binds)) = by_namespace.or(by_binding).or(by_name) else {
+    for (server, cover) in covers {
+        let Some((name, matched)) = cover else {
             uncovered.push(server.clone());
             continue;
         };
-        if included.contains(name.as_str()) {
-            // A binding moves the battery's rules to the bound server key, so
-            // a battery serves one server: the one its namespace is bound to,
-            // or the namespace's own server while unbound.
-            let namespace = binds.unwrap_or(server);
-            match bindings.get(namespace.as_str()).map(String::as_str) {
-                None if binds.is_none() => continue,
-                Some(bound) if bound == server.as_str() => continue,
-                None => {}
-                Some(_) => {
-                    uncovered.push(server.clone());
-                    continue;
+        if redirected(server, matched) {
+            uncovered.push(server.clone());
+            continue;
+        }
+        match matched {
+            Match::Named(_) if binding.contains(name) => {
+                suggestions.insert(
+                    name.clone(),
+                    Suggestion::Bound {
+                        battery: name.clone(),
+                        server: server.clone(),
+                    },
+                );
+            }
+            // Every namespace a battery declares, or is bound to, is served
+            // by the one plain include; a suggested binding takes the battery
+            // for one server, and its other key goes uncovered.
+            Match::Named(_) => uncovered.push(server.clone()),
+            Match::Native | Match::Bound if binding.contains(name) => uncovered.push(server.clone()),
+            Match::Native | Match::Bound => {
+                if !included.contains(name.as_str()) {
+                    suggestions
+                        .entry(name.clone())
+                        .or_insert_with(|| Suggestion::Plain(name.clone()));
                 }
             }
-        }
-        let suggestion = Suggestion {
-            battery: name.clone(),
-            server: server.clone(),
-            bind_server: binds.is_some(),
-        };
-        match suggestions.get(name) {
-            None => {
-                suggestions.insert(name.clone(), suggestion);
-            }
-            Some(existing) if existing.bind_server => uncovered.push(server.clone()),
-            Some(existing) if suggestion.bind_server => {
-                uncovered.push(existing.server.clone());
-                suggestions.insert(name.clone(), suggestion);
-            }
-            Some(_) => uncovered.push(server.clone()),
         }
     }
     uncovered.sort();
@@ -280,6 +292,28 @@ mod tests {
                 audiences: vec![],
             },
         )
+    }
+
+    fn suggested(battery: &str) -> Suggestion {
+        Suggestion::Plain(PackageName::parse(battery).unwrap())
+    }
+
+    fn suggested_binding(battery: &str, server: &str) -> Suggestion {
+        Suggestion::Bound {
+            battery: PackageName::parse(battery).unwrap(),
+            server: namespace(server),
+        }
+    }
+
+    fn included(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    fn bindings(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(namespace, server)| ((*namespace).to_owned(), (*server).to_owned()))
+            .collect()
     }
 
     /// The three places Claude Code reads servers from are read together, the
@@ -361,122 +395,150 @@ mod tests {
             namespace("linear-server"),
             namespace("github-status-bot"),
         ]);
-        let included = BTreeSet::from(["linear".to_owned()]);
 
-        let coverage = coverage(&servers, &batteries, &included, &BTreeMap::new());
+        let coverage = coverage(&servers, &batteries, &included(&["linear"]), &BTreeMap::new());
 
         assert_eq!(
             coverage.suggestions,
-            vec![
-                Suggestion {
-                    battery: PackageName::parse("github").unwrap(),
-                    server: namespace("github"),
-                    bind_server: false,
-                },
-                Suggestion {
-                    battery: PackageName::parse("slack").unwrap(),
-                    server: namespace("slack"),
-                    bind_server: true,
-                },
-            ]
+            vec![suggested("github"), suggested_binding("slack", "slack")]
         );
         assert_eq!(
             coverage.uncovered,
             vec![namespace("github-status-bot"), namespace("linear-server")]
         );
-        assert_eq!(
-            coverage.commands(None),
-            vec![
-                "appa battery install github",
-                "appa battery install slack --server slack"
-            ]
-        );
     }
 
     /// An included battery covers a server its namespace names, but a server
     /// matched by the battery's name is covered only once bound; until then
-    /// the binding is still suggested. One battery is suggested once, with
-    /// the binding when any of its servers needs it.
+    /// the binding is still suggested. Bound elsewhere, the battery's rules
+    /// no longer name the connector's own key, so that server is uncovered.
     #[test]
     fn an_included_battery_is_suggested_again_only_for_a_binding_it_lacks() {
         let batteries = vec![battery("slack", &["claude_ai_Slack"])];
-        let included = BTreeSet::from(["slack".to_owned()]);
         let servers = BTreeSet::from([namespace("slack")]);
 
-        let unbound = coverage(&servers, &batteries, &included, &BTreeMap::new());
+        let unbound = coverage(&servers, &batteries, &included(&["slack"]), &BTreeMap::new());
+        assert_eq!(unbound.suggestions, vec![suggested_binding("slack", "slack")]);
+        assert_eq!(unbound.uncovered, vec![]);
+
+        let bound = bindings(&[("claude_ai_Slack", "slack")]);
         assert_eq!(
-            unbound.commands(None),
-            vec!["appa battery install slack --server slack"]
+            coverage(&servers, &batteries, &included(&["slack"]), &bound),
+            Coverage::default()
         );
 
-        let bindings = BTreeMap::from([("claude_ai_Slack".to_owned(), "slack".to_owned())]);
-        let bound = coverage(&servers, &batteries, &included, &bindings);
-        assert_eq!(bound, Coverage::default());
-
-        // Bound to `slack`, the battery's rules no longer name the connector's
-        // own key, so that server is uncovered, not silently covered.
         let native = BTreeSet::from([namespace("claude_ai_Slack")]);
-        let redirected = coverage(&native, &batteries, &included, &bindings);
+        let redirected = coverage(&native, &batteries, &included(&["slack"]), &bound);
         assert_eq!(redirected.suggestions, vec![]);
         assert_eq!(redirected.uncovered, vec![namespace("claude_ai_Slack")]);
 
-        // One battery serves one server: the binding is suggested and the
-        // connector's own key, which the bound battery will not name, is
-        // reported uncovered rather than hidden behind the one suggestion.
+        // Unbound and gating the connector's own key, the battery is not
+        // offered a binding that would take that key away from it: the alias
+        // is uncovered instead.
         let both = BTreeSet::from([namespace("claude_ai_Slack"), namespace("slack")]);
-        let once = coverage(&both, &batteries, &BTreeSet::new(), &BTreeMap::new());
-        assert_eq!(once.commands(None), vec!["appa battery install slack --server slack"]);
+        let kept = coverage(&both, &batteries, &included(&["slack"]), &BTreeMap::new());
+        assert_eq!(kept.suggestions, vec![]);
+        assert_eq!(kept.uncovered, vec![namespace("slack")]);
+    }
+
+    /// One battery serves one server: with both the connector's own key and
+    /// a name alias connected, the binding is suggested and the native key
+    /// is reported uncovered rather than hidden behind the one suggestion.
+    #[test]
+    fn a_battery_needed_under_two_keys_is_suggested_once_and_the_other_key_is_uncovered() {
+        let batteries = vec![battery("slack", &["claude_ai_Slack"])];
+        let servers = BTreeSet::from([namespace("claude_ai_Slack"), namespace("slack")]);
+
+        let once = coverage(&servers, &batteries, &BTreeSet::new(), &BTreeMap::new());
+
+        assert_eq!(once.suggestions, vec![suggested_binding("slack", "slack")]);
         assert_eq!(once.uncovered, vec![namespace("claude_ai_Slack")]);
     }
 
+    /// A battery over several namespaces covers every server they name with
+    /// its one include: one suggestion, nothing uncovered. Bound, it is not
+    /// suggested with `--server`, which takes a battery over one namespace.
+    #[test]
+    fn a_battery_over_several_namespaces_is_one_plain_suggestion() {
+        let batteries = vec![battery("acme", &["acme-docs", "acme-api"])];
+        let servers = BTreeSet::from([namespace("acme-docs"), namespace("acme-api")]);
+
+        let one = coverage(&servers, &batteries, &BTreeSet::new(), &BTreeMap::new());
+        assert_eq!(one.suggestions, vec![suggested("acme")]);
+        assert_eq!(one.uncovered, vec![]);
+
+        let bound = bindings(&[("acme-api", "work-acme")]);
+        let through_binding = coverage(
+            &BTreeSet::from([namespace("work-acme")]),
+            &batteries,
+            &BTreeSet::new(),
+            &bound,
+        );
+        assert_eq!(through_binding.suggestions, vec![suggested("acme")]);
+
+        // Each namespace bound to its own server: one include covers them all.
+        let each = bindings(&[("acme-docs", "w1"), ("acme-api", "w2")]);
+        let servers = BTreeSet::from([namespace("w1"), namespace("w2")]);
+        let all = coverage(&servers, &batteries, &BTreeSet::new(), &each);
+        assert_eq!(all.suggestions, vec![suggested("acme")]);
+        assert_eq!(all.uncovered, vec![]);
+        assert_eq!(
+            coverage(&servers, &batteries, &included(&["acme"]), &each),
+            Coverage::default()
+        );
+    }
+
+    /// A key another battery declares natively is still the included
+    /// battery's when a binding sends that battery to it: nothing is
+    /// suggested for a server an included battery already gates.
+    #[test]
+    fn an_included_battery_bound_to_a_key_covers_it_ahead_of_a_native_match() {
+        let batteries = vec![battery("work", &["work-github"]), battery("github", &["github"])];
+        let servers = BTreeSet::from([namespace("work-github")]);
+        let bound = bindings(&[("github", "work-github")]);
+
+        assert_eq!(
+            coverage(&servers, &batteries, &included(&["github"]), &bound),
+            Coverage::default()
+        );
+        let neither = coverage(&servers, &batteries, &BTreeSet::new(), &bound);
+        assert_eq!(neither.suggestions, vec![suggested("work")]);
+    }
+
     /// A server a battery's namespace is already bound to is that battery's:
-    /// covered when the battery is included, and suggested with the same
-    /// binding when it is not.
+    /// covered when the battery is included, and a plain suggestion when it
+    /// is not, since the binding is already in the config.
     #[test]
     fn a_server_a_namespace_is_bound_to_matches_its_battery() {
         let batteries = vec![battery("github", &["github"])];
         let servers = BTreeSet::from([namespace("work-github")]);
-        let bindings = BTreeMap::from([("github".to_owned(), "work-github".to_owned())]);
+        let bound = bindings(&[("github", "work-github")]);
 
-        let included = coverage(&servers, &batteries, &BTreeSet::from(["github".to_owned()]), &bindings);
-        assert_eq!(included, Coverage::default());
-
-        let absent = coverage(&servers, &batteries, &BTreeSet::new(), &bindings);
         assert_eq!(
-            absent.commands(None),
-            vec!["appa battery install github --server work-github"]
+            coverage(&servers, &batteries, &included(&["github"]), &bound),
+            Coverage::default()
         );
+
+        let absent = coverage(&servers, &batteries, &BTreeSet::new(), &bound);
+        assert_eq!(absent.suggestions, vec![suggested("github")]);
         assert_eq!(absent.uncovered, vec![]);
-    }
 
-    /// Every battery without a binding goes in one command, so the person
-    /// runs one line; each binding is its own, as the command takes one.
-    #[test]
-    fn commands_batch_plain_batteries_and_separate_bindings() {
-        let batteries = vec![
-            battery("github", &["github"]),
-            battery("linear", &["linear"]),
-            battery("slack", &["claude_ai_Slack"]),
-        ];
-        let servers = BTreeSet::from([namespace("github"), namespace("linear"), namespace("slack")]);
-
-        let commands = coverage(&servers, &batteries, &BTreeSet::new(), &BTreeMap::new())
-            .commands(Some(Path::new("./deployment/appa.toml")));
-
+        // A binding to the key itself changes nothing.
+        let identity = bindings(&[("github", "github")]);
+        let own = BTreeSet::from([namespace("github")]);
         assert_eq!(
-            commands,
-            vec![
-                "appa battery install github linear --config ./deployment/appa.toml",
-                "appa battery install slack --server slack --config ./deployment/appa.toml"
-            ]
+            coverage(&own, &batteries, &included(&["github"]), &identity),
+            Coverage::default()
         );
 
-        let spaced = coverage(&servers, &batteries, &BTreeSet::new(), &BTreeMap::new())
-            .commands(Some(Path::new("/Users/me/my deployment/it's.toml")));
-        assert_eq!(
-            spaced[0],
-            "appa battery install github linear --config '/Users/me/my deployment/it'\\''s.toml'"
-        );
-        assert_eq!(shell_word("-deploy/appa.toml"), "'-deploy/appa.toml'");
+        // The binding in the config already sends the battery's rules to
+        // `work-github`, so its own key is uncovered whether the battery is
+        // included or only suggested.
+        let both = BTreeSet::from([namespace("github"), namespace("work-github")]);
+        for included in [BTreeSet::new(), included(&["github"])] {
+            let redirected = coverage(&both, &batteries, &included, &bound);
+            assert_eq!(redirected.uncovered, vec![namespace("github")]);
+            assert_eq!(redirected.suggestions.len(), included.is_empty() as usize);
+        }
     }
 }

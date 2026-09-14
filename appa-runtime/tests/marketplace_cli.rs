@@ -651,6 +651,21 @@ fn a_hand_written_include_is_the_installers_own() {
         String::from_utf8_lossy(&installed.stdout)
     );
     assert_eq!(std::fs::read_to_string(&config).unwrap(), text);
+
+    // Spelled another way, the line is the person's: a removal neither takes
+    // it nor reports the battery gone.
+    let spelled = text.replace("'batteries/github", "'./batteries/github");
+    std::fs::write(&config, &spelled).unwrap();
+    let refused = run(root.path(), &["battery", "remove", "github", "--json"]);
+    assert_eq!(refused.status.code(), Some(1));
+    let document: serde_json::Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(document["status"], "error");
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), spelled);
+    let listed = run(root.path(), &["battery", "list", "--json"]);
+    let document: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(document["result"]["packages"][0]["included"], true);
+    std::fs::write(&config, &text).unwrap();
+
     let removed = run(root.path(), &["battery", "remove", "github", "--json"]);
     assert!(removed.status.success(), "{}", String::from_utf8_lossy(&removed.stdout));
     let after = std::fs::read_to_string(&config).unwrap();
@@ -722,14 +737,16 @@ fn several_batteries_install_together_and_a_server_binding_takes_exactly_one() {
     let config = stage(root.path(), None, &["github", "linear"]);
     let original = std::fs::read_to_string(&config).unwrap();
 
-    let refused = run(
-        root.path(),
-        &["battery", "install", "github", "linear", "--server", "work", "--json"],
-    );
-    assert_eq!(refused.status.code(), Some(1));
-    let document: serde_json::Value = serde_json::from_slice(&refused.stdout).unwrap();
-    assert_eq!(document["status"], "error");
-    assert_eq!(std::fs::read_to_string(&config).unwrap(), original);
+    for args in [
+        &["battery", "install", "github", "linear", "--server", "work", "--json"][..],
+        &["battery", "install", "github", "--server", "github", "--json"][..],
+    ] {
+        let refused = run(root.path(), args);
+        assert_eq!(refused.status.code(), Some(1), "{args:?}");
+        let document: serde_json::Value = serde_json::from_slice(&refused.stdout).unwrap();
+        assert_eq!(document["status"], "error");
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), original);
+    }
 
     let installed = run(root.path(), &["battery", "install", "github", "linear", "--json"]);
     assert!(
