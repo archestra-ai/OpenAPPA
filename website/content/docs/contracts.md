@@ -663,7 +663,7 @@ An annotator's permits limit the values it can use in its answers. The following
 | Field | Allowed values in an answer | If omitted |
 |---|---|---|
 | `ranks` | Ranks used in `delta.trust` or `requires.trust`. | Every rank in the trust chain. |
-| `audiences` | Built-in audiences, `@` references, selector placeholders, or literal reader IDs that the answer may use. | `self`, `internal`, named groups, and reader IDs declared in the policy. |
+| `audiences` | Built-in audiences, `@` references, selector placeholders, or literal reader IDs that the answer may use. | `self`, `internal`, named groups, and reader IDs declared in the policy. Never a selector placeholder, not even one another annotator declares. |
 | `marks` | Required attention marks. | Every mark declared in an authority's `permits.attention`. |
 | `effects` | Effects that the call may record or require. | Every effect name declared by the policy. |
 
