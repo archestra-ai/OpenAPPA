@@ -82,6 +82,7 @@ async fn capabilities(State(state): State<ProxyState>) -> Json<serde_json::Value
         "sanitized_results": true,
         "child_workflows": true,
         "child_actor_targeting": true,
+        "spawn_result": true,
         "durable_checkpoints": true,
         "review_provenance": true,
         "openapi": true,
@@ -124,6 +125,7 @@ async fn openapi() -> Json<serde_json::Value> {
                 "CommitBatch": schema(schemars::schema_for!(CommitBatch)),
                 "CancelBatch": schema(schemars::schema_for!(CancelBatch)),
                 "ToolResult": schema(schemars::schema_for!(ToolResult)),
+                "SpawnResult": schema(schemars::schema_for!(SpawnResult)),
                 "ResolveOffer": schema(schemars::schema_for!(ResolveOffer)),
                 "CheckpointRequest": crate::checkpoint::schema(),
             }
@@ -262,6 +264,27 @@ struct ToolResult {
     call_id: String,
     dispatch_id: String,
     outcome: ProxyOutcome,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SpawnResult {
+    event: String,
+    root_id: String,
+    #[serde(default)]
+    child_id: Option<String>,
+    call_id: String,
+    dispatch_id: String,
+    #[serde(default)]
+    control: Option<SpawnResultControl>,
+}
+
+/// The narrow stock launch metadata a parent needs before its child has an
+/// archived return. The backend derives it from its durable issued task alias.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SpawnResultControl {
+    agent_id: String,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -459,6 +482,9 @@ async fn event(State(state): State<ProxyState>, body: Bytes) -> Response {
         (decision, bindings, dispatch_bindings, None)
     } else if header.event == "tool_result" {
         let (decision, bindings) = dispatch_tool_result(&state.runtime, envelope.event.get()).await;
+        (decision, bindings, Vec::new(), None)
+    } else if header.event == "spawn_result" {
+        let (decision, bindings) = dispatch_spawn_result(&state.runtime, envelope.event.get()).await;
         (decision, bindings, Vec::new(), None)
     } else {
         let (decision, bindings) = dispatch_kagent(&state.runtime, &header.root_id, envelope.event.get()).await;
@@ -1072,6 +1098,100 @@ async fn dispatch_tool_result(runtime: &Runtime, raw: &str) -> (serde_json::Valu
         }
         Err(error) => (refuse(&error.to_string()), Vec::new()),
     }
+}
+
+/// Settle a native parent spawn only through the spawn result path. A generic tool result would
+/// admit its provider-shaped body after the child return already crossed into the parent.
+async fn dispatch_spawn_result(runtime: &Runtime, raw: &str) -> (serde_json::Value, Vec<ProxyOfferBinding>) {
+    let result: SpawnResult = match serde_json::from_str::<SpawnResult>(raw) {
+        Ok(result) if result.event == "spawn_result" => result,
+        _ => return (refuse("spawn_result is malformed"), Vec::new()),
+    };
+    let root = kagent_root(&result.root_id);
+    let lane = match kagent_lane(&result.root_id, result.child_id.as_deref()) {
+        Some(lane) => lane,
+        None => return (refuse("child_id must not be empty"), Vec::new()),
+    };
+    let Some(binding) = (match runtime.proxy_dispatch_binding(&result.root_id, &lane.0, &result.call_id) {
+        Ok(binding) => binding,
+        Err(_) => return (refuse("dispatch binding storage is unavailable"), Vec::new()),
+    }) else {
+        return (
+            refuse("spawn_result call_id does not name a released dispatch"),
+            Vec::new(),
+        );
+    };
+    if binding.deployment_fingerprint != runtime.serving_policy_key() {
+        return (refuse("dispatch was issued by a different deployment"), Vec::new());
+    }
+    if binding.spawn_binding.is_none() {
+        return (
+            refuse("spawn_result call_id does not name a released spawn"),
+            Vec::new(),
+        );
+    }
+    if binding.dispatch != result.dispatch_id {
+        return (refuse("spawn_result dispatch_id does not match call_id"), Vec::new());
+    }
+    let dispatch = match serde_json::from_str(&binding.dispatch) {
+        Ok(dispatch) => dispatch,
+        Err(_) => return (refuse("stored dispatch binding is invalid"), Vec::new()),
+    };
+    let control_agent_id = match result.control {
+        Some(control) if valid_spawn_control(&control.agent_id) => Some(control.agent_id),
+        Some(_) => return (refuse("spawn_result control is malformed"), Vec::new()),
+        None => None,
+    };
+    let control_presentation = control_agent_id
+        .as_deref()
+        .map(spawn_control_presentation)
+        .unwrap_or_else(|| SPAWN_CONTROL_UNAVAILABLE.to_string());
+    let session = match runtime.session(&root, &lane) {
+        Ok(session) => session,
+        Err(_) => return (refuse("root is not open"), Vec::new()),
+    };
+    match session.on_bound_spawn_dispatch_result(dispatch, control_agent_id).await {
+        Ok(crate::api::SpawnResultDecision::Return(crate::api::ChildReturnDecision::Returned { value })) => (
+            serde_json::json!({
+                "decision": "result_admitted",
+                "call_id": result.call_id,
+                "presentation": value,
+            }),
+            Vec::new(),
+        ),
+        Ok(crate::api::SpawnResultDecision::Return(crate::api::ChildReturnDecision::NoValue)) => (
+            serde_json::json!({"decision": "ack", "call_id": result.call_id}),
+            Vec::new(),
+        ),
+        Ok(crate::api::SpawnResultDecision::Return(crate::api::ChildReturnDecision::Staged { .. }))
+        | Ok(crate::api::SpawnResultDecision::Return(crate::api::ChildReturnDecision::Blocked { .. })) => (
+            serde_json::json!({
+                "decision": "result_admitted",
+                "call_id": result.call_id,
+                "presentation": SPAWN_CONTROL_UNAVAILABLE,
+            }),
+            Vec::new(),
+        ),
+        Ok(crate::api::SpawnResultDecision::Outcome(_decision)) => (
+            serde_json::json!({
+                "decision": "result_admitted",
+                "call_id": result.call_id,
+                "presentation": control_presentation,
+            }),
+            Vec::new(),
+        ),
+        Err(error) => (refuse(&error.to_string()), Vec::new()),
+    }
+}
+
+const SPAWN_CONTROL_UNAVAILABLE: &str = "{\"status\":\"unavailable\"}";
+
+fn valid_spawn_control(agent_id: &str) -> bool {
+    !agent_id.is_empty() && agent_id.len() <= 512 && !agent_id.chars().any(char::is_control)
+}
+
+fn spawn_control_presentation(agent_id: &str) -> String {
+    serde_json::json!({ "agent_id": agent_id }).to_string()
 }
 
 /// The proxy only exposes a result as one canonical JSON string. The raw harness spelling
@@ -1990,6 +2110,7 @@ mod tests {
         assert_eq!(capabilities["durable_checkpoints"], true);
         assert_eq!(capabilities["review_provenance"], true);
         assert_eq!(capabilities["openapi"], true);
+        assert_eq!(capabilities["spawn_result"], true);
 
         let schema = app
             .oneshot(
@@ -2011,6 +2132,16 @@ mod tests {
         assert!(schema["components"]["schemas"].get("ProxyEventEnvelope").is_some());
         assert!(schema["components"]["schemas"].get("CheckpointRequest").is_some());
         assert!(schema["components"]["schemas"].get("ToolCalls").is_some());
+        assert!(schema["components"]["schemas"].get("SpawnResult").is_some());
+        assert!(
+            schema["components"]["schemas"]["SpawnResult"]["properties"]
+                .get("outcome")
+                .is_none()
+        );
+        assert_eq!(
+            schema["components"]["schemas"]["SpawnResult"]["$defs"]["SpawnResultControl"]["properties"]["agent_id"]["type"],
+            "string"
+        );
         assert!(schema["components"]["schemas"].get("PrepareBatch").is_some());
         assert!(
             schema["paths"]["/proxy/v1/checkpoints"]["post"]["responses"]
@@ -3230,6 +3361,356 @@ mod tests {
         .await;
         assert_eq!(admitted["decision"]["decision"], "result_admitted");
         assert_eq!(admitted["decision"]["call_id"], "call-1");
+    }
+
+    #[tokio::test]
+    async fn bound_spawn_results_replay_the_child_return_before_the_parent_continues() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let runtime = runtime_with_policy(
+            &directory,
+            r#"
+                [policy]
+                version = 2
+                [[policy.tool]]
+                name = "agent/fixture/lifecycle_child"
+                parameters = { type = "object", properties = {} }
+                delta = {}
+                [[policy.tool]]
+                name = "read_public"
+                parameters = { type = "object", properties = {} }
+                delta = {}
+                [[policy.tool]]
+                name = "read_private"
+                parameters = { type = "object", properties = {} }
+                delta = { audience = ["ops"] }
+                [[policy.tool]]
+                name = "publish"
+                parameters = { type = "object", properties = {} }
+                requires = { trust = "trusted", audience = { contains = ["public"] } }
+                delta = {}
+                [policy.deployment]
+                context_control = true
+                [externals]
+                timeout_ms = 1000
+                max_body_bytes = 4096
+            "#,
+        );
+        let start = |id: String, event| decision(router(Arc::clone(&runtime), None), wrapped(&id, event));
+        // Mirrors the long JSON return Claude carries through its Agent result without exposing
+        // any live child content in this regression.
+        let child_return = format!("{{\"note\":\"{}\"}}", "x".repeat(250));
+        assert_eq!(child_return.len(), 261);
+
+        for (root, source, floor, expected) in [
+            (
+                "root-child-public",
+                "read_public",
+                serde_json::json!({"audience":["public"]}),
+                "allow_calls",
+            ),
+            (
+                "root-child-private",
+                "read_private",
+                serde_json::json!({"audience":["ops"]}),
+                "deny_calls",
+            ),
+        ] {
+            let child_tool = source;
+            let event_id = |suffix| {
+                format!(
+                    "123e4567-e89b-12d3-a456-4266141742{suffix:02}",
+                    suffix = if source == "read_public" { suffix } else { suffix + 10 }
+                )
+            };
+            start(
+                event_id(1),
+                serde_json::json!({"event":"session_start", "root_id":root}),
+            )
+            .await;
+            start(
+                event_id(2),
+                serde_json::json!({"event":"prompt", "root_id":root, "text":"delegate"}),
+            )
+            .await;
+            let proposed = start(
+                event_id(3),
+                serde_json::json!({"event":"tool_calls", "root_id":root, "calls":[{"call_id":"spawn", "tool":"agent/fixture/lifecycle_child", "arguments":{}, "spawn":true}]}),
+            )
+            .await;
+            let offer = &proposed["decision"]["calls"][0]["offers"][0];
+            let accepted = start(
+                event_id(4),
+                serde_json::json!({
+                    "event":"resolve_offer",
+                    "root_id":root,
+                    "offer_id":offer["offer_id"],
+                    "tool":"agent/fixture/lifecycle_child",
+                    "arguments_sha256":offer["arguments_sha256"],
+                    "resolution":"accept",
+                    "label":floor,
+                }),
+            )
+            .await;
+            assert_eq!(
+                accepted["decision"]["resolution"], "accepted",
+                "spawn declaration: {accepted}"
+            );
+            let spawned = start(
+                event_id(5),
+                serde_json::json!({"event":"tool_calls", "root_id":root, "calls":[{"call_id":"spawn", "tool":"agent/fixture/lifecycle_child", "arguments":{}, "spawn":true}]}),
+            )
+            .await;
+            let binding = &spawned["decision"]["calls"][0]["spawn_binding"];
+            let dispatch = &spawned["decision"]["calls"][0]["dispatch_id"];
+            assert!(binding.is_string(), "spawn call releases: {spawned}");
+            let child = format!("child-{source}");
+            if source == "read_public" {
+                let spoofed = start(
+                    event_id(11),
+                    serde_json::json!({
+                        "event":"spawn_result",
+                        "root_id":root,
+                        "call_id":"spawn",
+                        "dispatch_id":dispatch,
+                        "control":{"agent_id":child, "private_bytes":"do not admit"}
+                    }),
+                )
+                .await;
+                assert_eq!(spoofed["decision"]["decision"], "refuse");
+            }
+            let early_result = if source == "read_public" {
+                Some(
+                    start(
+                        event_id(10),
+                        serde_json::json!({"event":"spawn_result", "root_id":root, "call_id":"spawn", "dispatch_id":dispatch, "control":{"agent_id":child}}),
+                    )
+                    .await,
+                )
+            } else {
+                None
+            };
+            start(
+                event_id(6),
+                serde_json::json!({"event":"child_start", "root_id":root, "child_id":child, "spawn_binding":binding}),
+            )
+            .await;
+            let child_read = start(
+                event_id(7),
+                serde_json::json!({"event":"tool_calls", "root_id":root, "child_id":child, "calls":[{"call_id":"read", "tool":child_tool, "arguments":{}, "spawn":false}]}),
+            )
+            .await;
+            let child_read = if source == "read_private" {
+                let offer = &child_read["decision"]["calls"][0]["offers"][0];
+                let accepted = start(
+                    event_id(40),
+                    serde_json::json!({
+                        "event":"resolve_offer",
+                        "root_id":root,
+                        "child_id":child,
+                        "offer_id":offer["offer_id"],
+                        "tool":child_tool,
+                        "arguments_sha256":offer["arguments_sha256"],
+                        "resolution":"accept",
+                    }),
+                )
+                .await;
+                assert_eq!(
+                    accepted["decision"]["resolution"], "accepted",
+                    "private child read is accepted: {accepted}"
+                );
+                start(
+                    event_id(41),
+                    serde_json::json!({"event":"tool_calls", "root_id":root, "child_id":child, "calls":[{"call_id":"read", "tool":child_tool, "arguments":{}, "spawn":false}]}),
+                )
+                .await
+            } else {
+                child_read
+            };
+            let child_dispatch = &child_read["decision"]["calls"][0]["dispatch_id"];
+            if source == "read_private" {
+                let wrong_control = start(
+                    event_id(42),
+                    serde_json::json!({"event":"spawn_result", "root_id":root, "call_id":"spawn", "dispatch_id":dispatch, "control":{"agent_id":"other-child"}}),
+                )
+                .await;
+                assert_eq!(wrong_control["decision"]["decision"], "refuse");
+                let wrong_root = start(
+                    event_id(43),
+                    serde_json::json!({"event":"spawn_result", "root_id":"other-root", "call_id":"spawn", "dispatch_id":dispatch, "control":{"agent_id":child}}),
+                )
+                .await;
+                assert_eq!(wrong_root["decision"]["decision"], "refuse");
+                let wrong_dispatch = start(
+                    event_id(44),
+                    serde_json::json!({"event":"spawn_result", "root_id":root, "call_id":"spawn", "dispatch_id":"other-dispatch", "control":{"agent_id":child}}),
+                )
+                .await;
+                assert_eq!(wrong_dispatch["decision"]["decision"], "refuse");
+            }
+            start(
+                event_id(8),
+                serde_json::json!({"event":"tool_result", "root_id":root, "child_id":child, "call_id":"read", "dispatch_id":child_dispatch, "outcome":{"status":"success", "body":child_return}}),
+            )
+            .await;
+            let ended = start(
+                event_id(9),
+                serde_json::json!({"event":"child_end", "root_id":root, "child_id":child, "value":child_return}),
+            )
+            .await;
+            assert_eq!(
+                ended["decision"]["decision"], "ack",
+                "child return crosses once: {ended}"
+            );
+            if source == "read_private" {
+                let wrong_actor = start(
+                    event_id(45),
+                    serde_json::json!({"event":"spawn_result", "root_id":root, "child_id":child, "call_id":"spawn", "dispatch_id":dispatch, "control":{"agent_id":child}}),
+                )
+                .await;
+                assert_eq!(wrong_actor["decision"]["decision"], "refuse");
+                let non_spawn = start(
+                    event_id(46),
+                    serde_json::json!({"event":"spawn_result", "root_id":root, "child_id":child, "call_id":"read", "dispatch_id":child_dispatch, "control":{"agent_id":child}}),
+                )
+                .await;
+                assert_eq!(non_spawn["decision"]["decision"], "refuse");
+            }
+            let result = match early_result {
+                Some(result) => result,
+                None => start(
+                    event_id(10),
+                    serde_json::json!({"event":"spawn_result", "root_id":root, "call_id":"spawn", "dispatch_id":dispatch, "control":{"agent_id":child}}),
+                )
+                .await,
+            };
+            assert_eq!(
+                result["decision"]["decision"], "result_admitted",
+                "parent result replays the checked child return: {result}"
+            );
+            if source == "read_public" {
+                assert_eq!(
+                    result["decision"]["presentation"],
+                    format!("{{\"agent_id\":\"child-{source}\"}}")
+                );
+            } else {
+                assert_eq!(result["decision"]["presentation"], child_return);
+                let replay = start(
+                    event_id(10),
+                    serde_json::json!({"event":"spawn_result", "root_id":root, "call_id":"spawn", "dispatch_id":dispatch, "control":{"agent_id":child}}),
+                )
+                .await;
+                assert_eq!(replay, result, "the durable receipt replays once");
+            }
+            start(
+                event_id(21),
+                serde_json::json!({"event":"prompt", "root_id":root, "text":"publish"}),
+            )
+            .await;
+            let publication = start(
+                event_id(23),
+                serde_json::json!({"event":"tool_calls", "root_id":root, "calls":[{"call_id":"publish", "tool":"publish", "arguments":{}, "spawn":false}]}),
+            )
+            .await;
+            assert_eq!(
+                publication["decision"]["decision"], expected,
+                "parent publication follows the child return label: {publication}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_spawn_results_validate_root_relative_control_child_ids() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let runtime = runtime_with_policy(
+            &directory,
+            r#"
+                [policy]
+                version = 2
+                [[policy.tool]]
+                name = "agent/fixture/worker"
+                parameters = { type = "object", properties = {} }
+                delta = {}
+                [policy.deployment]
+                context_control = true
+                [externals]
+                timeout_ms = 1000
+                max_body_bytes = 4096
+            "#,
+        );
+        let start = |id, event| decision(router(Arc::clone(&runtime), None), wrapped(id, event));
+        let root = "root-nested-control";
+
+        start(
+            "123e4567-e89b-12d3-a456-426614174301",
+            serde_json::json!({"event":"session_start", "root_id":root}),
+        )
+        .await;
+        let parent = start(
+            "123e4567-e89b-12d3-a456-426614174302",
+            serde_json::json!({"event":"tool_calls", "root_id":root, "calls":[{"call_id":"parent", "tool":"agent/fixture/worker", "arguments":{}, "spawn":true}]}),
+        )
+        .await;
+        let parent_offer = &parent["decision"]["calls"][0]["offers"][0];
+        let accepted = start(
+            "123e4567-e89b-12d3-a456-426614174303",
+            serde_json::json!({"event":"resolve_offer", "root_id":root, "offer_id":parent_offer["offer_id"], "tool":"agent/fixture/worker", "arguments_sha256":parent_offer["arguments_sha256"], "resolution":"accept", "label":{}}),
+        )
+        .await;
+        assert_eq!(accepted["decision"]["resolution"], "accepted", "{accepted}");
+        let parent = start(
+            "123e4567-e89b-12d3-a456-426614174304",
+            serde_json::json!({"event":"tool_calls", "root_id":root, "calls":[{"call_id":"parent", "tool":"agent/fixture/worker", "arguments":{}, "spawn":true}]}),
+        )
+        .await;
+        let parent_binding = &parent["decision"]["calls"][0]["spawn_binding"];
+        assert!(parent_binding.is_string(), "parent spawn releases: {parent}");
+        let parent_started = start(
+            "123e4567-e89b-12d3-a456-426614174305",
+            serde_json::json!({"event":"child_start", "root_id":root, "child_id":"parent", "spawn_binding":parent_binding}),
+        )
+        .await;
+        assert_ne!(parent_started["decision"]["decision"], "refuse", "{parent_started}");
+
+        let nested = start(
+            "123e4567-e89b-12d3-a456-426614174306",
+            serde_json::json!({"event":"tool_calls", "root_id":root, "child_id":"parent", "calls":[{"call_id":"child", "tool":"agent/fixture/worker", "arguments":{}, "spawn":true}]}),
+        )
+        .await;
+        let nested_offer = &nested["decision"]["calls"][0]["offers"][0];
+        let accepted = start(
+            "123e4567-e89b-12d3-a456-426614174307",
+            serde_json::json!({"event":"resolve_offer", "root_id":root, "child_id":"parent", "offer_id":nested_offer["offer_id"], "tool":"agent/fixture/worker", "arguments_sha256":nested_offer["arguments_sha256"], "resolution":"accept", "label":{}}),
+        )
+        .await;
+        assert_eq!(accepted["decision"]["resolution"], "accepted", "{accepted}");
+        let nested = start(
+            "123e4567-e89b-12d3-a456-426614174308",
+            serde_json::json!({"event":"tool_calls", "root_id":root, "child_id":"parent", "calls":[{"call_id":"child", "tool":"agent/fixture/worker", "arguments":{}, "spawn":true}]}),
+        )
+        .await;
+        let child_binding = &nested["decision"]["calls"][0]["spawn_binding"];
+        let child_dispatch = &nested["decision"]["calls"][0]["dispatch_id"];
+        assert!(child_binding.is_string(), "nested spawn releases: {nested}");
+        let child_started = start(
+            "123e4567-e89b-12d3-a456-426614174309",
+            serde_json::json!({"event":"child_start", "root_id":root, "child_id":"child", "spawn_binding":child_binding}),
+        )
+        .await;
+        assert_ne!(child_started["decision"]["decision"], "refuse", "{child_started}");
+
+        let mismatched = start(
+            "123e4567-e89b-12d3-a456-426614174310",
+            serde_json::json!({"event":"spawn_result", "root_id":root, "child_id":"parent", "call_id":"child", "dispatch_id":child_dispatch, "control":{"agent_id":"other-child"}}),
+        )
+        .await;
+        assert_eq!(mismatched["decision"]["decision"], "refuse", "{mismatched}");
+        let admitted = start(
+            "123e4567-e89b-12d3-a456-426614174311",
+            serde_json::json!({"event":"spawn_result", "root_id":root, "child_id":"parent", "call_id":"child", "dispatch_id":child_dispatch, "control":{"agent_id":"child"}}),
+        )
+        .await;
+        assert_eq!(admitted["decision"]["decision"], "result_admitted", "{admitted}");
+        assert_eq!(admitted["decision"]["presentation"], "{\"agent_id\":\"child\"}");
     }
 
     #[test]

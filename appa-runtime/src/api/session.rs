@@ -180,6 +180,10 @@ fn fresh_entropy() -> OfferNonce {
     OfferNonce(rand::random::<[u8; 32]>())
 }
 
+fn root_relative_child_agent_id<'a>(root: &TrajectoryId, child: &'a TrajectoryId) -> Option<&'a str> {
+    child.0.strip_prefix(&root.0)?.strip_prefix(':')
+}
+
 /// One per trajectory (root or child). The adapter drives it; it never
 /// renders, and the adapter never stores.
 ///
@@ -392,6 +396,19 @@ impl Session {
             .await?;
         match decision.then {
             Next::ModelResponseBatch { calls } => Ok(calls),
+            // A batch can require audience evidence just like a singleton proposal. The engine
+            // presents a terminal policy block in that case; preserve it as a per-call denial
+            // instead of treating the valid policy decision as a protocol error.
+            Next::PresentToModel(Presentation::Blocked { feedback, .. }) => Ok(proposed
+                .iter()
+                .map(|_| BatchCallDecision::Deny {
+                    feedback: Feedback {
+                        text: feedback.clone(),
+                        offers: Vec::new(),
+                        review: Vec::new(),
+                    },
+                })
+                .collect()),
             _ => Err(EventError::UnexpectedDecision),
         }
     }
@@ -509,6 +526,97 @@ impl Session {
             )
             .await?;
         outcome_decision(decision)
+    }
+
+    /// Settle a proxy-issued spawn from its durable dispatch. A launch control is metadata,
+    /// never result data; after a child return, only the archived crossing is replayed.
+    pub async fn on_bound_spawn_dispatch_result(
+        &self,
+        dispatch: appa_engine::value::DispatchId,
+        control_agent_id: Option<String>,
+    ) -> Result<SpawnResultDecision, EventError> {
+        if dispatch.trajectory() != &engine_id(&self.trajectory) {
+            return Err(EventError::UnknownDispatch);
+        }
+        let mut plan: Option<SpawnPlan> = None;
+        let mut archived_return: Option<String> = None;
+        let decision = self
+            .drive_with_evidence(
+                |context, evidence| {
+                    let fork = appa_engine::value::ForkId::of(&dispatch);
+                    let next = match context.fork_status(&fork) {
+                        ForkStatus::Unprepared | ForkStatus::Prepared => SpawnPlan::Outcome,
+                        ForkStatus::Bound(bound) => {
+                            let child = TrajectoryId(bound.as_str().to_string());
+                            if let Some(agent_id) = control_agent_id.as_deref()
+                                && root_relative_child_agent_id(&self.root, &child) != Some(agent_id)
+                            {
+                                return Err(EventError::BindingMismatch);
+                            }
+                            match context.latest_return(&child) {
+                                Some(value) => {
+                                    archived_return = Some(value);
+                                    SpawnPlan::Replay
+                                }
+                                None => SpawnPlan::Outcome,
+                            }
+                        }
+                        ForkStatus::Failed | ForkStatus::ParentEnded => {
+                            return Err(EventError::SpawnNotTaken);
+                        }
+                    };
+                    let event = match &next {
+                        SpawnPlan::Outcome => EngineEvent::ToolOutcome {
+                            dispatch: dispatch.clone(),
+                            outcome: ToolOutcome::Success {
+                                body: OutcomeBody::Unavailable,
+                            },
+                            evidence,
+                            entropy: fresh_entropy(),
+                        },
+                        SpawnPlan::Replay | SpawnPlan::Withheld => EngineEvent::ToolOutcome {
+                            dispatch: dispatch.clone(),
+                            outcome: ToolOutcome::Success {
+                                body: OutcomeBody::Unavailable,
+                            },
+                            evidence,
+                            entropy: fresh_entropy(),
+                        },
+                        SpawnPlan::Bind { .. } | SpawnPlan::Close(_) => {
+                            return Err(EventError::EngineInvariant(
+                                "a bound spawn result selected an unreachable plan".to_string(),
+                            ));
+                        }
+                    };
+                    plan = Some(next);
+                    Ok(event)
+                },
+                None,
+                None,
+            )
+            .await?;
+        let plan = plan.ok_or_else(|| {
+            EventError::EngineInvariant("the bound spawn result did not select a settlement plan".to_string())
+        })?;
+        match plan {
+            SpawnPlan::Outcome => outcome_decision(decision).map(SpawnResultDecision::Outcome),
+            SpawnPlan::Replay => {
+                outcome_decision(decision)?;
+                let value = archived_return.ok_or_else(|| {
+                    EventError::EngineInvariant("a replay selected without an archived child return".to_string())
+                })?;
+                Ok(SpawnResultDecision::Return(ChildReturnDecision::Returned { value }))
+            }
+            SpawnPlan::Withheld => {
+                outcome_decision(decision)?;
+                Ok(SpawnResultDecision::Return(ChildReturnDecision::Blocked {
+                    feedback: UNCHECKED_RETURN.to_string(),
+                }))
+            }
+            SpawnPlan::Bind { .. } | SpawnPlan::Close(_) => Err(EventError::EngineInvariant(
+                "a bound spawn result completed with an unreachable plan".to_string(),
+            )),
+        }
     }
 
     async fn report_outcome(&self, call: &ProposedCall, o: &ToolOutcome) -> Result<EngineDecision, EventError> {
