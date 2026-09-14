@@ -53,14 +53,27 @@ changes, retains them under the deployment's `.appa/` state so a later
 install needs no network, replaces the deployment's battery store
 (`batteries/` beside the config) with that version's batteries, and activates
 Claude Code
-support with that version's own binary. The result does not depend on the
-working directory.
+support with that version's own binary. What it installs does not depend on
+the working directory.
 
-A first install includes every battery written for Claude Code, one line of
-the config's include list each (`batteries/<name>/appa.toml`). A later
-install leaves the include list alone and warns when the claude-code battery
-is not among it. `appa battery list` shows what is included; `appa battery
-install <name>` and `appa battery remove <name>` add and remove one line.
+A first install includes the `claude-code` battery, the one the plugin
+requires, as one line of the config's include list
+(`batteries/claude-code/appa.toml`). A later install leaves the include list
+alone and warns when that battery is not among it. Every install then reads
+the MCP servers Claude Code has configured, in its user scope and in the
+current project's local and project scopes, and prints the batteries that
+cover them as the commands that include them:
+
+```text
+MCP servers configured here have batteries; include them with:
+  appa battery install github linear
+MCP servers without a battery: fetch. Their tools are annotated call by call until the appa-guide skill writes rules for them.
+```
+
+Connectors from claude.ai are not in those files; the `appa-guide` skill
+sees them in a session. `appa battery list` shows what is included;
+`appa battery install <name>...` and `appa battery remove <name>` add and
+remove lines.
 
 A release binary installs the version published for its tag. The installer
 verifies the checksum of the binary for Linux or macOS and places it in

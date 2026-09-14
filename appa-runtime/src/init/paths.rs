@@ -66,7 +66,7 @@ pub(crate) fn claude_config_dir() -> Result<Option<PathBuf>, InitError> {
     }
 }
 
-pub(super) fn user_home() -> Option<PathBuf> {
+pub(crate) fn user_home() -> Option<PathBuf> {
     env::var_os("HOME").map(PathBuf::from).or({
         #[cfg(windows)]
         {

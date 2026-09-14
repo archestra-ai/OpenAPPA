@@ -264,33 +264,41 @@ fn invalid_install_input_is_refused_before_creating_state_or_contacting_a_host()
 }
 
 fn deployment(root: &Path) -> std::path::PathBuf {
-    deployment_for(root, false)
+    stage(root, None, &["github"])
 }
 
-/// `kagent` stages the real kagent plugin beside the github battery. The store
-/// beside the config holds the battery, as an install leaves it.
 fn deployment_for(root: &Path, kagent: bool) -> std::path::PathBuf {
+    stage(root, kagent.then_some(&[][..]), &["github"])
+}
+
+/// Stages one battery per name, each over the namespace its name spells, and,
+/// with `kagent`, the real kagent plugin declaring those required batteries.
+/// The store beside the config holds the batteries, as an install leaves it.
+fn stage(root: &Path, kagent: Option<&[&str]>, batteries: &[&str]) -> std::path::PathBuf {
     use appa_package::generation::{ArtifactDigest, Generation, Image, Platform, REPOSITORY};
     use appa_runtime::installation::{Installation, Selection};
     use std::collections::BTreeMap;
     let source = root.join("source");
-    let battery = source.join("batteries/github");
-    std::fs::create_dir_all(&battery).unwrap();
-    std::fs::write(
-        battery.join("appa-package.toml"),
-        "schema=1\nname='github'\ndescription='test'\n[battery]\npolicy='appa.toml'\nhosts=['claude-code','kagent']\n",
-    )
-    .unwrap();
-    std::fs::write(
-        battery.join("appa.toml"),
-        "[policy]\nversion=2\n[[policy.tool]]\nname='mcp/github/read'\n",
-    )
-    .unwrap();
-    let mut catalog = format!(
-        "schema=1\nname='appa'\n[packages.battery.github]\npath='batteries/github'\ndigest='{}'\n",
-        appa_package::TreeDigest::of_tree(&battery).unwrap()
-    );
-    if kagent {
+    let mut catalog = "schema=1\nname='appa'\n".to_owned();
+    for name in batteries {
+        let battery = source.join("batteries").join(name);
+        std::fs::create_dir_all(&battery).unwrap();
+        std::fs::write(
+            battery.join("appa-package.toml"),
+            format!("schema=1\nname='{name}'\ndescription='test'\n[battery]\npolicy='appa.toml'\nhosts=['claude-code','kagent']\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            battery.join("appa.toml"),
+            format!("[policy]\nversion=2\n[[policy.tool]]\nname='mcp/{name}/read'\n"),
+        )
+        .unwrap();
+        catalog.push_str(&format!(
+            "[packages.battery.{name}]\npath='batteries/{name}'\ndigest='{}'\n",
+            appa_package::TreeDigest::of_tree(&battery).unwrap()
+        ));
+    }
+    if let Some(required) = kagent {
         let plugin_source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace/plugins/kagent");
         let plugin = source.join("plugins/kagent");
         std::fs::create_dir_all(&plugin).unwrap();
@@ -303,6 +311,19 @@ fn deployment_for(root: &Path, kagent: bool) -> std::path::PathBuf {
                 }
             }
         }
+        let manifest = plugin.join("appa-package.toml");
+        let declared = std::fs::read_to_string(&manifest).unwrap().replace(
+            "default_policy = \"default.appa.toml\"\n",
+            &format!(
+                "default_policy = \"default.appa.toml\"\nbatteries = [{}]\n",
+                required
+                    .iter()
+                    .map(|name| format!("\"{name}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
+        std::fs::write(&manifest, declared).unwrap();
         catalog.push_str(&format!(
             "[packages.plugin.kagent]\npath='plugins/kagent'\ndigest='{}'\n",
             appa_package::TreeDigest::of_tree(&plugin).unwrap()
@@ -644,6 +665,93 @@ fn a_hand_written_include_is_the_installers_own() {
     let listed = run(root.path(), &["battery", "list", "--json"]);
     let document: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
     assert_eq!(document["result"]["packages"][0]["included"], false);
+}
+
+/// A plugin's first install includes the batteries its manifest requires and
+/// no other; a later install leaves the person's removal of one alone.
+#[test]
+fn a_first_install_includes_the_batteries_the_plugin_requires_and_a_reinstall_keeps_the_persons_choice() {
+    let source = tempfile::tempdir().unwrap();
+    let config = stage(source.path(), Some(&["github"]), &["github", "linear"]);
+    let config_name = config.to_str().unwrap();
+    let invoke = |args: &[&str]| {
+        let output = run(source.path(), args);
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let installed = invoke(&["plugin", "install", "kagent", "--config", config_name, "--json"]);
+    assert_eq!(installed["result"]["batteries"], serde_json::json!(["github"]));
+    assert_eq!(installed["result"]["suggestions"], serde_json::json!([]));
+    assert_eq!(installed["result"]["commands"], serde_json::json!([]));
+    assert_eq!(installed["result"]["uncovered_servers"], serde_json::json!([]));
+    let included = |listed: &serde_json::Value| -> Vec<(String, bool)> {
+        listed["result"]["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|package| {
+                (
+                    package["name"].as_str().unwrap().to_owned(),
+                    package["included"] == true,
+                )
+            })
+            .collect()
+    };
+    let listed = invoke(&["battery", "list", "--config", config_name, "--json"]);
+    assert_eq!(
+        included(&listed),
+        vec![("github".to_owned(), true), ("linear".to_owned(), false)]
+    );
+
+    invoke(&["battery", "remove", "github", "--config", config_name, "--json"]);
+    let again = invoke(&["plugin", "install", "kagent", "--config", config_name, "--json"]);
+    assert_eq!(again["result"]["batteries"], serde_json::json!([]));
+    let listed = invoke(&["battery", "list", "--config", config_name, "--json"]);
+    assert_eq!(
+        included(&listed),
+        vec![("github".to_owned(), false), ("linear".to_owned(), false)]
+    );
+}
+
+/// Several batteries install as one operation; a binding names one battery's
+/// namespace, so it is refused with more than one before anything is written.
+#[test]
+fn several_batteries_install_together_and_a_server_binding_takes_exactly_one() {
+    let root = tempfile::tempdir().unwrap();
+    let config = stage(root.path(), None, &["github", "linear"]);
+    let original = std::fs::read_to_string(&config).unwrap();
+
+    let refused = run(
+        root.path(),
+        &["battery", "install", "github", "linear", "--server", "work", "--json"],
+    );
+    assert_eq!(refused.status.code(), Some(1));
+    let document: serde_json::Value = serde_json::from_slice(&refused.stdout).unwrap();
+    assert_eq!(document["status"], "error");
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), original);
+
+    let installed = run(root.path(), &["battery", "install", "github", "linear", "--json"]);
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&installed.stdout).unwrap();
+    assert_eq!(document["result"]["batteries"], serde_json::json!(["github", "linear"]));
+    assert_eq!(document["result"]["state"], "installed");
+    let effective = appa_runtime::config::Config::load(&config).unwrap();
+    let tools: Vec<&str> = effective.policy_file().value()["tool"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert_eq!(tools, vec!["Custom", "mcp/github/read", "mcp/linear/read"]);
 }
 
 #[test]
