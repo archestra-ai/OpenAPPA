@@ -1,0 +1,9 @@
+schema = 1
+name = "posthog"
+description = "Rules for PostHog's MCP server, all 44 registry tools: end-user analytics reads are internal, documentation search is public, and every write is reviewed."
+
+[battery]
+policy = "appa.toml"
+hosts = ["claude-code", "kagent"]
+namespaces = ["posthog"]
+helpers = []

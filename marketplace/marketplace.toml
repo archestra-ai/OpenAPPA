@@ -6,6 +6,14 @@ name = "appa"
 path = "batteries/claude-code"
 digest = "sha256:6856d2b668f484385ed3078f27e3fbbf89092941147b2708a9e9c32c871e41ae"
 
+[packages.battery.cloudflare-docs]
+path = "batteries/cloudflare-docs"
+digest = "sha256:4dc7c2161fa8c75f1b9e94908f10dff66cc6371a99b0b4dc0d33373ec2778206"
+
+[packages.battery.cloudflare-observability]
+path = "batteries/cloudflare-observability"
+digest = "sha256:f92118f4b234d267ebea72a7e0cedcbb55e002f706d80345fd69ba2c011ad7aa"
+
 [packages.battery.github]
 path = "batteries/github"
 digest = "sha256:91f5a604d4e33288717401f367ab6a70fb905b8df7d5c594fc37067434217c5a"
@@ -18,13 +26,25 @@ digest = "sha256:767b11b54a25e2d0d225cce59655d30224419279202703515a2b2f1fe37f2ac
 path = "batteries/grain"
 digest = "sha256:62ac0f97c48fdc03f04b242507655d9b6f2b8f9b8fa53362de70c2bdd71517a0"
 
+[packages.battery.launchdarkly]
+path = "batteries/launchdarkly"
+digest = "sha256:803411c2ff166e2ad78762241deb98722edf7c226a065d7d7c014b588d9802f1"
+
 [packages.battery.linear]
 path = "batteries/linear"
 digest = "sha256:2542abb0bdf666be8ead96b6bc94336b69894a0f349ef9977937f851edb6eb7f"
 
+[packages.battery.microsoft-learn]
+path = "batteries/microsoft-learn"
+digest = "sha256:3af0b11a68e2e2e5f2c83dd29fda95d872a3407e4f67d8fa70066e996c8564da"
+
 [packages.battery.notion]
 path = "batteries/notion"
 digest = "sha256:dea7e48a6f9d07705c6784f3fdcfc6aacc74883bc8c669fb98282ca0ceda0024"
+
+[packages.battery.posthog]
+path = "batteries/posthog"
+digest = "sha256:76d6b83c67176ae69e0a6ce3ce7d970ae91d22c5ca9c34cd7a9b5b6abc67ebb6"
 
 [packages.battery.sentry]
 path = "batteries/sentry"

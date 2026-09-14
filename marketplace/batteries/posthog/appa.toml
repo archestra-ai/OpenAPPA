@@ -1,0 +1,278 @@
+# PostHog battery: PostHog's official MCP server (`@posthog/agent-toolkit`,
+# hosted at mcp.posthog.com/mcp, also runnable from the PostHog/mcp
+# repository).
+#
+# The server builds its tool list from one registry,
+# `schema/tool-definitions.json`, which holds 44 entries. The hosted
+# endpoint accepts `?features=<list>` to expose one subset (`flags`,
+# `insights`, `dashboards`, `experiments`, `surveys`, `error-tracking`,
+# `events`, `llm-analytics`, `workspace`, `docs`) and exposes every tool
+# when the parameter is absent, so the rules below name all 44 entries.
+# The server also drops a tool the personal API key lacks the scope for.
+#
+# What PostHog returns — analytics events and their properties, error
+# tracking issues and stack traces, survey responses, experiment results,
+# LLM analytics — was produced by the customer's own end users, so every
+# read enters `suspicious`, restricted to the project's members
+# (`internal`). The query tools are read-only: `query-run` accepts only a
+# trends, funnel, or HogQL node (`InsightQuerySchema`) and posts it to
+# `/api/environments/<id>/query/`, which reads.
+#
+# `docs-search` sends its `query` to Inkeep and returns public PostHog
+# documentation, so its input must be sharable with `public`.
+#
+# Every write needs trusted data that `internal` may see and the
+# `posthog-review` mark. Feature flags gate production behaviour, so
+# creating or changing one records `posthog.sensitive`; so does every
+# experiment write, because an experiment owns a feature flag
+# (`feature_flag_key`) and `launch` starts serving its variants. Deleting
+# anything records `posthog.sensitive` too. Insight, dashboard, and
+# survey writes record `posthog.changed`. The root config supplies an
+# authority permitting `posthog-review`.
+
+[policy]
+version = 2
+
+# --- reads: end-user data, restricted to internal readers ---
+
+[[policy.tool]]
+name = "mcp/posthog/organizations-get"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/organization-details-get"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/projects-get"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/switch-organization"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/switch-project"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/event-definitions-list"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/properties-list"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/property-definitions"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/query-run"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/query-generate-hogql-from-question"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/insight-query"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/insights-get-all"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/insight-get"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/dashboards-get-all"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/dashboard-get"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/list-errors"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/error-details"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/get-llm-total-costs-for-project"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/feature-flag-get-all"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/feature-flag-get-definition"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/experiment-get-all"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/experiment-get"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/experiment-results-get"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/surveys-get-all"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/survey-get"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/surveys-global-stats"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/posthog/survey-stats"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+# --- documentation: public data, public input ---
+
+[[policy.tool]]
+name = "mcp/posthog/docs-search"
+delta = { trust = "suspicious" }
+requires = { audience = { contains = ["public"] } }
+
+# --- analysis artefacts: trusted internal data, reviewed ---
+
+[[policy.tool]]
+name = "mcp/posthog/insight-create-from-query"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+effects = ["posthog.changed"]
+
+[[policy.tool]]
+name = "mcp/posthog/insight-update"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+effects = ["posthog.changed"]
+
+[[policy.tool]]
+name = "mcp/posthog/dashboard-create"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+effects = ["posthog.changed"]
+
+[[policy.tool]]
+name = "mcp/posthog/dashboard-update"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+effects = ["posthog.changed"]
+
+[[policy.tool]]
+name = "mcp/posthog/add-insight-to-dashboard"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+effects = ["posthog.changed"]
+
+[[policy.tool]]
+name = "mcp/posthog/survey-create"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+effects = ["posthog.changed"]
+
+[[policy.tool]]
+name = "mcp/posthog/survey-update"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+effects = ["posthog.changed"]
+
+# --- feature flags, experiments, and deletions: reviewed, sensitive ---
+
+[[policy.tool]]
+name = "mcp/posthog/create-feature-flag"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+effects = ["posthog.sensitive"]
+
+[[policy.tool]]
+name = "mcp/posthog/update-feature-flag"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+effects = ["posthog.sensitive"]
+
+[[policy.tool]]
+name = "mcp/posthog/delete-feature-flag"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+effects = ["posthog.sensitive"]
+
+[[policy.tool]]
+name = "mcp/posthog/experiment-create"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+effects = ["posthog.sensitive"]
+
+[[policy.tool]]
+name = "mcp/posthog/experiment-update"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+effects = ["posthog.sensitive"]
+
+[[policy.tool]]
+name = "mcp/posthog/experiment-delete"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+effects = ["posthog.sensitive"]
+
+[[policy.tool]]
+name = "mcp/posthog/insight-delete"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+effects = ["posthog.sensitive"]
+
+[[policy.tool]]
+name = "mcp/posthog/dashboard-delete"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+effects = ["posthog.sensitive"]
+
+[[policy.tool]]
+name = "mcp/posthog/survey-delete"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+effects = ["posthog.sensitive"]
