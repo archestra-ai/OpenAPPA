@@ -229,13 +229,13 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
         let acquired = args
             .source
             .acquire(&installation, Some(&current), current.requirements())?;
-        installation.retain(&acquired)?;
         let catalog = Marketplace::read(&acquired.marketplace().join("marketplace.toml"))
             .map_err(|error| InstallError::Invalid(error.to_string()))?;
         let mut batteries = Vec::new();
         for name in &args.names {
             batteries.push(super::battery_package_in(acquired.marketplace(), &catalog, name.as_str())?.1);
         }
+        installation.retain(&acquired)?;
         let (mut selection, text) = match acquired.imported() {
             Some(imported) => {
                 if let Some(name) = args
