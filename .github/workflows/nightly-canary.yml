@@ -147,7 +147,7 @@ jobs:
 
       - name: Publish and verify immutable archives
         env:
-          BUCKET: ${{ vars.APPA_BENCH_GCS_BUCKET }}
+          BUCKET: archestra-appa-bench-archive
         run: |
           set -euo pipefail
           commit=c79958dce63cf37ca4fc269c787eb54a8782e64b
