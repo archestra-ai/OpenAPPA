@@ -99,7 +99,7 @@ def test_cli_defaults_describe_a_complete_submission_run() -> None:
     assert run_spec().digest() != run_spec(agent_prompt_profile="verification-recovery-chaos").digest()
 
 
-def test_static_preflight_binds_policy_and_loads_the_complete_split() -> None:
+def test_static_preflight_binds_policy_and_loads_the_complete_split(tau_checkout) -> None:
     tasks, policy = bench.preflight(
         "alltools-qwen",
         "openrouter/openai/gpt-4.1-mini",
