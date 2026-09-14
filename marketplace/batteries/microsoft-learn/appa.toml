@@ -1,0 +1,43 @@
+# Microsoft Learn battery: the Microsoft Learn MCP Server, the public remote
+# endpoint `https://learn.microsoft.com/api/mcp` (Streamable HTTP, no
+# authentication). `serverInfo` reports version 1.0.0; the server is closed
+# source, so the tool list below is a `tools/list` capture from that endpoint
+# on 2026-09-14.
+#
+# The server lists three tools and all three only read: `microsoft_docs_search`
+# searches Microsoft Learn, `microsoft_code_sample_search` searches the code
+# samples in those pages, and `microsoft_docs_fetch` converts one
+# microsoft.com documentation page to markdown. Each declares
+# `readOnlyHint = true` and `destructiveHint = false`, and the server holds no
+# account or profile data to change.
+#
+# What the tools return is published documentation and sample code written by
+# Microsoft and its contributors, not by this deployment, so every result
+# enters `suspicious`: it may carry instructions aimed at the agent. It is
+# already public, so no result restricts the audience.
+#
+# Every call sends its own input outward to a public Microsoft endpoint — the
+# free-text `query`, or the `url` to fetch — so each call requires an audience
+# that contains `public`. A trajectory that has read restricted data cannot
+# search or fetch until that data leaves it.
+#
+# The battery declares no write, so it needs no review mark, no effect, and no
+# authority in the root config.
+
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "mcp/microsoft-learn/microsoft_docs_search"
+delta = { trust = "suspicious" }
+requires = { audience = { contains = ["public"] } }
+
+[[policy.tool]]
+name = "mcp/microsoft-learn/microsoft_code_sample_search"
+delta = { trust = "suspicious" }
+requires = { audience = { contains = ["public"] } }
+
+[[policy.tool]]
+name = "mcp/microsoft-learn/microsoft_docs_fetch"
+delta = { trust = "suspicious" }
+requires = { audience = { contains = ["public"] } }

@@ -22,6 +22,10 @@ digest = "sha256:62ac0f97c48fdc03f04b242507655d9b6f2b8f9b8fa53362de70c2bdd71517a
 path = "batteries/linear"
 digest = "sha256:2542abb0bdf666be8ead96b6bc94336b69894a0f349ef9977937f851edb6eb7f"
 
+[packages.battery.microsoft-learn]
+path = "batteries/microsoft-learn"
+digest = "sha256:3af0b11a68e2e2e5f2c83dd29fda95d872a3407e4f67d8fa70066e996c8564da"
+
 [packages.battery.notion]
 path = "batteries/notion"
 digest = "sha256:dea7e48a6f9d07705c6784f3fdcfc6aacc74883bc8c669fb98282ca0ceda0024"

@@ -50,6 +50,12 @@ const BATTERIES = [
     logo: "/images/batteries/notion.svg",
   },
   {
+    name: "Microsoft Learn",
+    description: "Rules for 3 read-only documentation tools; queries must be sharable with public.",
+    href: "/battery-microsoft-learn",
+    logo: "/images/batteries/microsoft-learn.svg",
+  },
+  {
     name: "Add your own",
     href: "/write-a-battery",
     add: true,
