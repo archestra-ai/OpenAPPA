@@ -23,6 +23,6 @@ Your root config must define an Authority permitting `posthog-review` for writes
 
 ## Limit
 
-PostHog has per-project access that a policy cannot see. No tool reports who can read a project, an insight, or a dashboard, so every read is `internal`. Map it to the people who may see everything the API key can reach, and narrow one project in the root config by argument. Root rules run before battery rules.
+PostHog API keys do not expose per-project reader boundaries to policy, so all analytics reads default to `internal`. To restrict an agent to a specific project, pin it in your root policy using argument selectors.
 
 `switch-organization` and `switch-project` move which project later calls target. They change no PostHog data and carry no effect. Pin one project in a root rule when it must not move.

@@ -28,9 +28,9 @@ one.
 The install prints progress while it selects the version, updates Claude Code,
 and starts the runtime, and it never prompts. A release binary installs the
 version published for its tag; a checkout build installs its own version,
-exported from the commit it was built from. A runtime an earlier APPA
-deployment of yours left at the runtime endpoint is stopped; a process there
-that is not your own `appa` is named and never stopped.
+exported from the commit it was built from. If an earlier APPA runtime is
+already running at the endpoint, the installer stops it. If an unrelated process
+occupies the port, the installer reports it and leaves it running.
 
 Initialization installs `clappa` beside `appa` so the short command works below.
 
@@ -40,9 +40,9 @@ settings: one hook entry per session event, each naming that binary by its
 absolute path, and the status line. It registers the runtime's `appa` MCP
 server in Claude Code's user scope, writes the `appa-guide` skill to your
 user skills directory, and installs `clappa`, a protected way to start Claude
-Code. Rerunning it rewrites only what it wrote: hook entries, an MCP server
-or a skill of your own are left alone, and an `appa` MCP server or
-`appa-guide` skill that no install wrote stops it before it touches anything.
+Code. Rerunning the install updates only OpenAPPA-managed files. Custom hooks,
+MCP servers, and skills are preserved. If the installer detects unmanaged `appa`
+entries, it halts to avoid overwriting your setup.
 It preserves an existing policy and custom statusline. It does not replace
 `claude` or change how ordinary sessions start.
 

@@ -22,7 +22,7 @@ The plugin runs inside the Python or Go agent image. The separate `appa-runtime`
 
 ## Quickstart
 
-Installs the kagent controller and agent runtime with the OpenAPPA plugin, a pre-configured `appa-runtime` service, and demo agents with tools for showcase scenarios.
+This quickstart deploys the kagent controller, the OpenAPPA runtime, and demo agents configured for the showcase scenarios below.
 
 *(Already running kagent? Skip to [Protect existing agents](#protect-existing-agents).)*
 
@@ -258,9 +258,9 @@ init
 
 `appa-guide` scans your cluster tools, matches relevant [batteries](/batteries) (like GitHub or Slack), and drafts starting policy rules.
 
-Review the proposed behavior and approve that proposal in a later chat message. The guide then submits the change through the runtime-owned policy tool and opens a native **Approve / Reject** card. Approve that card to authorize publication. Neither `init` alone nor approval text alone publishes policy.
+Review the proposed rules in chat. Once you confirm, `appa-guide` opens an interactive **Approve / Reject** card to authorize publishing the policy.
 
-If the active policy already provides the proposed behavior, the guide should report that no change is needed, without writing or requesting approval.
+If your active policy already covers the discovered tools, the guide confirms that no updates are needed. Once approved, the new policy activates immediately for all new agent sessions.
 
 #### 3. Protect your agents with appa-guide
 

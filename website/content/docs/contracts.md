@@ -325,7 +325,7 @@ Each `$<argument_name>` becomes a required top-level string argument of the tool
 
 At check time OpenAPPA replaces each `$<argument_name>` with the call's argument value. The result is an ordinary `@provider:selector` mention: OpenAPPA reads its members from the provider's service, records the answer with the decision, and checks the call exactly as for a static mention. In the example above, reading channel `C0123` restricts the result to the members of `C0123`, and posting to `C0123` requires that every member of `C0123` is already a reader.
 
-A static mention cannot contain a segment that starts with `$`. There is no escape: a collection whose selector begins with `$` cannot be written in a policy.
+Static mentions cannot contain segments starting with `$`. Dollar-sign prefixes are reserved for argument placeholders and cannot be escaped.
 
 #### Configure audience membership
 
