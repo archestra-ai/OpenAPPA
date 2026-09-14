@@ -21,5 +21,12 @@ EOF
 fi
 
 "$mise_bin" trust "$repo_root/mise.toml"
+echo "==> Installing pinned toolchains"
+toolchain_start=$SECONDS
 "$mise_bin" install
+echo "==> Toolchains installed in $((SECONDS - toolchain_start))s"
+
+echo "==> Installing locked dependencies"
+dependency_start=$SECONDS
 "$mise_bin" run setup
+echo "==> Dependencies installed in $((SECONDS - dependency_start))s"
