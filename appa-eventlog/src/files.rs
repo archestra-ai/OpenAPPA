@@ -15,6 +15,9 @@ use sha2::{Digest, Sha256};
 
 const SCHEMA: i64 = 3;
 const ABSENT: &str = "-";
+/// How many input snapshots one Process call may declare. Every one of them is hashed at
+/// reservation and copied into the job, so the count is a ceiling on both, not a convenience.
+const MAX_PROCESS_INPUTS: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FileStoreError {
@@ -334,6 +337,9 @@ impl FileStore {
             return Err(FileStoreError::InvalidPath(
                 "process inputs must be unique and exclude the destination".into(),
             ));
+        }
+        if inputs.len() > MAX_PROCESS_INPUTS {
+            return Err(FileStoreError::InvalidPath("too many process inputs".into()));
         }
         let mut connection = self
             .connection
@@ -1350,6 +1356,13 @@ mod tests {
         ));
         assert!(matches!(
             store.prepare_process("a", "alias", &["tracked.txt".into()], "tracked.txt"),
+            Err(FileStoreError::InvalidPath(_))
+        ));
+        let many = (0..MAX_PROCESS_INPUTS + 1)
+            .map(|index| format!("input-{index}"))
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            store.prepare_process("a", "many", &many, "output"),
             Err(FileStoreError::InvalidPath(_))
         ));
         store

@@ -39,6 +39,65 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn(str(Path.home()), cmd)
         self.assertEqual(cmd[-2:], ["/runner/run.py", "--inner"])
 
+    def test_every_memory_backed_mount_is_sized(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = self.make_job(root)
+            cmd = run.bwrap_command(Path(root) / "backend", job, Path(root) / "run.py")
+        for index, argument in enumerate(cmd):
+            if argument == "--tmpfs":
+                self.assertEqual(cmd[index - 2], "--size", cmd)
+                self.assertTrue(cmd[index - 1].endswith("m"), cmd)
+        self.assertEqual(
+            [cmd[i + 1] for i, argument in enumerate(cmd) if argument == "--tmpfs"],
+            ["/tmp", "/job/work"],
+        )
+
+    def test_the_command_runs_under_resource_limits(self):
+        # The shell that execs the command sets the ceilings, and refuses to run without them.
+        for limit in ("-c", "-f", "-v", "-u", "-n", "-t"):
+            self.assertIn(f"ulimit {limit}", run.LIMIT_SCRIPT)
+        self.assertEqual(run.LIMIT_SCRIPT.count("|| exit 125"), 6)
+        self.assertTrue(run.LIMIT_SCRIPT.endswith('exec /bin/sh -c "$1"'))
+
+    def test_the_generated_configuration_is_fail_closed(self):
+        run.assert_fail_closed(run.config_document())
+        for path, weakened in (
+            (("sandbox", "unix_sockets", "enabled"), False),
+            (("sandbox", "allow_degraded"), True),
+            (("sandbox", "seccomp", "mode"), "monitor"),
+            (("landlock", "enabled"), False),
+            (("security", "minimum_mode"), "none"),
+        ):
+            document = run.config_document()
+            node = document
+            for key in path[:-1]:
+                node = node[key]
+            node[path[-1]] = weakened
+            with self.assertRaises(run.RunnerError):
+                run.assert_fail_closed(document)
+        document = run.config_document()
+        document["sandbox"]["ptrace"] = {"enabled": True}
+        with self.assertRaises(run.RunnerError):
+            run.assert_fail_closed(document)
+        document = run.config_document()
+        del document["sandbox"]["seccomp"]
+        with self.assertRaises(run.RunnerError):
+            run.assert_fail_closed(document)
+
+    def test_diagnostic_streams_are_truncated_with_a_mark(self):
+        oversized = "x" * (run.MAX_STREAM_BYTES + 1)
+        result = run.bounded({"result": {"exit_code": 0, "stdout": oversized, "stderr": "short"}})
+        self.assertEqual(result["result"]["stderr"], "short")
+        self.assertTrue(result["result"]["stdout"].endswith(run.TRUNCATION_MARK))
+        self.assertEqual(
+            len(result["result"]["stdout"].encode()),
+            run.MAX_STREAM_BYTES + len(run.TRUNCATION_MARK),
+        )
+        # A multibyte character on the boundary is replaced, never split into invalid UTF-8.
+        multibyte = "\u00e9" * run.MAX_STREAM_BYTES
+        result = run.bounded({"result": {"exit_code": 0, "stdout": multibyte}})
+        result["result"]["stdout"].encode()
+
     def test_outer_clears_env_closes_fds_and_waits_before_output(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)

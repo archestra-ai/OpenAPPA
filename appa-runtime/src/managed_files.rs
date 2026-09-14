@@ -1,3 +1,16 @@
+//! # Lab prototype — not the runtime's file tracking
+//!
+//! This module is a teaching simulator, kept for [`examples/appa_managed_files_lab.rs`] and
+//! its unit tests. Nothing in the runtime reaches it, and nothing here is a security
+//! boundary: it holds a volatile in-memory ledger, takes its callbacks as function pointers,
+//! and never consults a policy.
+//!
+//! The mediated file tools that ship are elsewhere and share nothing with this file:
+//! `appa-eventlog::files` owns the durable version ledger, and `appa-runtime::api::files`
+//! owns the tools, the reservations and the engine admission. Its `FileKey` validation is
+//! the lab's own too — `appa-eventlog::files::validated_relative` is the one that guards a
+//! real workspace.
+//!
 //! Draft, opt-in file-content tracking for an exclusively owned workspace.
 //!
 //! Each path selects a current file version. Successful writes create distinct, immutable

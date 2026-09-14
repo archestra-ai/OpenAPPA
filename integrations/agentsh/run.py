@@ -17,6 +17,38 @@ STARTUP_TIMEOUT = 10.0
 EXEC_TIMEOUT = 120.0
 OUTER_TIMEOUT = 140.0
 
+# Resource ceilings for the command and its descendants. The namespace is not a resource
+# boundary on its own, so each limit is set on the shell that execs the command and inherited
+# from there: address space, processes, open descriptors, and one file's size. A shell that
+# cannot set one refuses to run the command rather than running it unbounded.
+LIMITS = {
+    "core": 0,
+    "fsize": 65536,
+    "data": 2097152,
+    "procs": 256,
+    "nofile": 256,
+    "cpu": 150,
+}
+LIMIT_SCRIPT = (
+    "ulimit -c {core} || exit 125; "
+    "ulimit -f {fsize} || exit 125; "
+    "ulimit -v {data} || exit 125; "
+    "ulimit -u {procs} || exit 125; "
+    "ulimit -n {nofile} || exit 125; "
+    "ulimit -t {cpu} || exit 125; "
+    'exec /bin/sh -c "$1"'
+).format(**LIMITS)
+
+# Sizes of the memory-backed mounts the command may write: scratch, and its working directory.
+# A tmpfs without a size is host RAM, which the namespace does not bound either.
+TMP_SIZE = "64m"
+WORK_SIZE = "256m"
+
+# How much of a stream the runner echoes back to the runtime. The runtime parses one JSON
+# document out of the launcher's stdout, so an unbounded stream is unbounded runtime memory.
+MAX_STREAM_BYTES = 1 << 20
+TRUNCATION_MARK = "\n[truncated by the APPA runner]\n"
+
 BLOCKED_SYSCALLS = [
     "socket",
     "socketpair",
@@ -111,6 +143,8 @@ def bwrap_command(backend: Path, job: Path, runner: Path) -> list[str]:
         "/proc",
         "--dev",
         "/dev",
+        "--size",
+        TMP_SIZE,
         "--tmpfs",
         "/tmp",
         "--ro-bind",
@@ -122,6 +156,8 @@ def bwrap_command(backend: Path, job: Path, runner: Path) -> list[str]:
         "--bind",
         str(job),
         "/job",
+        "--size",
+        WORK_SIZE,
         "--tmpfs",
         "/job/work",
         "--ro-bind",
@@ -146,6 +182,22 @@ def bwrap_command(backend: Path, job: Path, runner: Path) -> list[str]:
         "--inner",
     ]
     return args
+
+
+def bounded(value: dict) -> dict:
+    """Cap the diagnostic streams the runtime will parse out of this process's stdout.
+
+    A command may print without bound; the runtime reads one JSON document and holds it in
+    memory. Truncation keeps the exit code and the head of each stream, and says so.
+    """
+    result = value.get("result")
+    if isinstance(result, dict):
+        for key in ("stdout", "stderr"):
+            text = result.get(key)
+            if isinstance(text, str) and len(text.encode("utf-8", "surrogatepass")) > MAX_STREAM_BYTES:
+                cut = text.encode("utf-8", "surrogatepass")[:MAX_STREAM_BYTES]
+                result[key] = cut.decode("utf-8", "replace") + TRUNCATION_MARK
+    return value
 
 
 def config_document() -> dict:
@@ -299,11 +351,50 @@ def _stop_daemon(daemon) -> None:
             daemon.wait()
 
 
+REQUIRED_CONFIG = {
+    ("security", "strict"): True,
+    ("security", "mode"): "landlock-only",
+    ("security", "minimum_mode"): "landlock-only",
+    ("sandbox", "enabled"): True,
+    ("sandbox", "allow_degraded"): False,
+    ("sandbox", "network", "enabled"): False,
+    ("sandbox", "unix_sockets", "enabled"): True,
+    ("sandbox", "seccomp", "enabled"): True,
+    ("sandbox", "seccomp", "mode"): "enforce",
+    ("sandbox", "seccomp", "unix_socket", "enabled"): True,
+    ("sandbox", "seccomp", "file_monitor", "enabled"): True,
+    ("landlock", "enabled"): True,
+}
+
+
+def assert_fail_closed(document: dict) -> None:
+    """Refuse a configuration whose patched fail-closed paths would run the command unwrapped.
+
+    The patch keeps upstream's early returns for a disabled unix-socket wrapper, for a full
+    ptrace tracer, and for non-Linux hosts. None of them is reachable from the document this
+    runner writes, and that is the point: a later edit that weakens one is a refusal here,
+    never a silent unconfined run.
+    """
+    for path, expected in REQUIRED_CONFIG.items():
+        node = document
+        for key in path:
+            if not isinstance(node, dict) or key not in node:
+                raise RunnerError("configuration is missing " + ".".join(path))
+            node = node[key]
+        if node != expected:
+            raise RunnerError("configuration weakens " + ".".join(path) + f": {node!r}")
+    ptrace = document.get("sandbox", {}).get("ptrace", {})
+    if isinstance(ptrace, dict) and ptrace.get("enabled") and not ptrace.get("execve_only"):
+        raise RunnerError("configuration enables full ptrace tracing")
+
+
 def inner() -> int:
     command = validate_job(Path("/job"))
     control = Path("/job/control")
     (control / "policies").mkdir(parents=True, exist_ok=False)
-    (control / "config.json").write_text(json.dumps(config_document()))
+    document = config_document()
+    assert_fail_closed(document)
+    (control / "config.json").write_text(json.dumps(document))
     (control / "policies/appa.yaml").write_text(json.dumps(policy_document()))
     with open(control / "launcher.log", "wb") as log:
         daemon = subprocess.Popen(
@@ -344,7 +435,7 @@ def inner() -> int:
             "/api/v1/sessions/{}/exec".format(session["id"]),
             {
                 "command": "/bin/sh",
-                "args": ["-c", command],
+                "args": ["-c", LIMIT_SCRIPT, "appa-command", command],
                 "working_dir": "/job/work",
                 "timeout": "120s",
                 "include_events": "none",
@@ -359,7 +450,7 @@ def inner() -> int:
         ):
             raise RunnerError("malformed exec response")
         sys.stdout.write(
-            json.dumps({"result": result["result"]}, separators=(",", ":")) + "\n"
+            json.dumps(bounded({"result": result["result"]}), separators=(",", ":")) + "\n"
         )
         return 0
     finally:

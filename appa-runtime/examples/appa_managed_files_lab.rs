@@ -1,5 +1,11 @@
 //! Interactive lab for the managed-files prototype, with synthetic data only.
 //!
+//! The prototype this drives lives in [`appa_runtime::managed_files`] — a teaching simulator
+//! with a volatile ledger and its own toy semantics, not the runtime's file tracking. The
+//! shipped tools are `appa-eventlog::files` (the durable ledger) and `appa-runtime::api::files`
+//! (the mediated Read/Write/Edit/Copy/Move/Process tools), and they go through engine
+//! admission. Use this lab to show label propagation to a person, never to check a boundary.
+//!
 //! Run `cargo run -p appa --example appa_managed_files_lab -- serve PORT JOURNAL`.
 //! Send one JSON command on stdin to the same example with `call PORT`.
 //! Commands: list, audit, read/write/append (trajectory, path; writes also content),

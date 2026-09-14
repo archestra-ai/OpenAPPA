@@ -75,15 +75,26 @@ pub(super) fn perform(
     if response.result.exit_code != 0 {
         return Err(text);
     }
-    publish(&job.path().join("output/result"), &files.workspace.join(&pin.path))
-        .map_err(|error| format!("isolated output not published: {error}"))?;
+    publish(
+        &job.path().join("output/result"),
+        &files.workspace.join(&pin.path),
+        MAX_OUTPUT_BYTES,
+    )
+    .map_err(|error| format!("isolated output not published: {error}"))?;
     Ok(text)
 }
 
-fn publish(source: &Path, destination: &Path) -> std::io::Result<()> {
+/// The largest isolated output the runtime imports. The runner caps one file at 64 MiB through
+/// RLIMIT_FSIZE, which is the same ceiling; this refuses the bytes before they are copied.
+const MAX_OUTPUT_BYTES: u64 = 64 << 20;
+
+fn publish(source: &Path, destination: &Path, limit: u64) -> std::io::Result<()> {
     let metadata = fs::symlink_metadata(source)?;
     if !metadata.is_file() {
         return Err(std::io::Error::other("output must be a regular file"));
+    }
+    if metadata.len() > limit {
+        return Err(std::io::Error::other("output exceeds the import limit"));
     }
     #[cfg(unix)]
     {
@@ -117,14 +128,20 @@ mod tests {
         fs::write(&input, b"private bytes").unwrap();
         fs::write(&destination, b"old bytes").unwrap();
         std::os::unix::fs::symlink(&input, &output).unwrap();
-        assert!(publish(&output, &destination).is_err());
+        assert!(publish(&output, &destination, MAX_OUTPUT_BYTES).is_err());
         fs::remove_file(&output).unwrap();
         fs::hard_link(&input, &output).unwrap();
-        assert!(publish(&output, &destination).is_err());
+        assert!(publish(&output, &destination, MAX_OUTPUT_BYTES).is_err());
         assert_eq!(fs::read(&destination).unwrap(), b"old bytes");
         fs::remove_file(&output).unwrap();
+        // The ceiling is refused before any byte is copied, and the destination is untouched.
+        fs::write(&output, b"four").unwrap();
+        assert!(publish(&output, &destination, 3).is_err());
+        assert_eq!(fs::read(&destination).unwrap(), b"old bytes");
+        assert!(publish(&output, &destination, 4).is_ok());
+        assert_eq!(fs::read(&destination).unwrap(), b"four");
         fs::write(&output, [0, 255, 17]).unwrap();
-        publish(&output, &destination).unwrap();
+        publish(&output, &destination, MAX_OUTPUT_BYTES).unwrap();
         assert_eq!(fs::read(&destination).unwrap(), [0, 255, 17]);
     }
 }
