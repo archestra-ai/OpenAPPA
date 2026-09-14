@@ -18,6 +18,10 @@ digest = "sha256:767b11b54a25e2d0d225cce59655d30224419279202703515a2b2f1fe37f2ac
 path = "batteries/grain"
 digest = "sha256:62ac0f97c48fdc03f04b242507655d9b6f2b8f9b8fa53362de70c2bdd71517a0"
 
+[packages.battery.launchdarkly]
+path = "batteries/launchdarkly"
+digest = "sha256:803411c2ff166e2ad78762241deb98722edf7c226a065d7d7c014b588d9802f1"
+
 [packages.battery.linear]
 path = "batteries/linear"
 digest = "sha256:2542abb0bdf666be8ead96b6bc94336b69894a0f349ef9977937f851edb6eb7f"
