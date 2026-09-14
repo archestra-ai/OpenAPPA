@@ -241,6 +241,8 @@ pub(crate) fn coverage(
             server: server.clone(),
             bind_server: binds.is_some(),
         };
+        // Every namespace a battery declares is served by the one plain
+        // include; only a binding takes the battery for one server.
         match suggestions.get(name) {
             None => {
                 suggestions.insert(name.clone(), suggestion);
@@ -250,7 +252,7 @@ pub(crate) fn coverage(
                 uncovered.push(existing.server.clone());
                 suggestions.insert(name.clone(), suggestion);
             }
-            Some(_) => uncovered.push(server.clone()),
+            Some(_) => {}
         }
     }
     uncovered.sort();
@@ -432,6 +434,19 @@ mod tests {
     /// A server a battery's namespace is already bound to is that battery's:
     /// covered when the battery is included, and suggested with the same
     /// binding when it is not.
+    /// A battery over several namespaces covers every server they name with
+    /// its one include: one suggestion, nothing uncovered.
+    #[test]
+    fn a_battery_over_several_namespaces_is_one_suggestion_for_all_of_them() {
+        let batteries = vec![battery("acme", &["acme-docs", "acme-api"])];
+        let servers = BTreeSet::from([namespace("acme-docs"), namespace("acme-api")]);
+
+        let coverage = coverage(&servers, &batteries, &BTreeSet::new(), &BTreeMap::new());
+
+        assert_eq!(coverage.commands(None), vec!["appa battery install acme"]);
+        assert_eq!(coverage.uncovered, vec![]);
+    }
+
     #[test]
     fn a_server_a_namespace_is_bound_to_matches_its_battery() {
         let batteries = vec![battery("github", &["github"])];
