@@ -70,6 +70,10 @@ const BATTERIES = [
     description: "Rules for 8 Workers logs, telemetry, and documentation tools; every one of them reads.",
     href: "/battery-cloudflare-observability",
     logo: "/images/batteries/cloudflare.svg",
+    name: "LaunchDarkly",
+    description: "Rules for 20 flag, environment, AI Config, and audit tools; every write is reviewed.",
+    href: "/battery-launchdarkly",
+    logo: "/images/batteries/launchdarkly.svg",
   },
   {
     name: "Add your own",

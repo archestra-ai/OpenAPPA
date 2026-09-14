@@ -19,6 +19,7 @@ so a deployment can customize its hint without editing the battery.
 | `cloudflare-docs/` | Cloudflare's documentation MCP server, both tools; public results, and the search query must be sharable with `public` | none |
 | `cloudflare-radar/` | Cloudflare's Radar MCP server, all 66 tools; public Internet measurement reads, internal URL Scanner reads, one reviewed scan submission | none |
 | `cloudflare-observability/` | Cloudflare's Workers Observability MCP server, all 8 tools; internal logs, telemetry and Worker reads, plus two public documentation reads, no writes | none |
+| `launchdarkly/` | LaunchDarkly's official MCP server, all 20 tools: feature flags, environments, AI Configs, code references, audit log; internal reads, every write reviewed | none |
 
 Include a battery with a path relative to the root config:
 

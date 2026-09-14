@@ -1,0 +1,9 @@
+schema = 1
+name = "launchdarkly"
+description = "Rules for LaunchDarkly's official MCP server, all 20 tools: internal reads over flags, environments, AI Configs, code references, and the audit log; every write reviewed."
+
+[battery]
+policy = "appa.toml"
+hosts = ["claude-code", "kagent"]
+namespaces = ["launchdarkly"]
+helpers = []
