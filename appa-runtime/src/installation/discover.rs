@@ -75,10 +75,11 @@ fn project_spellings(project: &Path) -> BTreeSet<String> {
         .collect()
 }
 
-/// A file that is absent has no servers. One that cannot be read, or is
-/// larger than any configuration, is named on stderr and has none either: a
-/// suggestion is never worth failing an install over, and a project's
-/// `.mcp.json` is a stranger's file.
+/// A file that is absent has no servers. One the installer would not read
+/// as state (a link, a FIFO, a file past the state byte limit) or that is
+/// not JSON is named on stderr and has none either: a suggestion is never
+/// worth failing an install over, and a project's `.mcp.json` is a
+/// stranger's file.
 fn read_json(path: &Path) -> Option<serde_json::Value> {
     let skip = |reason: &dyn std::fmt::Display| {
         eprintln!(
@@ -87,16 +88,9 @@ fn read_json(path: &Path) -> Option<serde_json::Value> {
         );
         None
     };
-    let size = match std::fs::metadata(path) {
-        Ok(metadata) => metadata.len(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(error) => return skip(&error),
-    };
-    if size > super::MAX_STATE_BYTES {
-        return skip(&format!("{size} bytes is larger than a configuration"));
-    }
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
+    let bytes = match super::optional_bytes(path) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return None,
         Err(error) => return skip(&error),
     };
     match serde_json::from_slice(&bytes) {
@@ -158,7 +152,7 @@ impl Coverage {
     /// binding, since a binding names one battery.
     pub(crate) fn commands(&self, config: Option<&Path>) -> Vec<String> {
         let target = config
-            .map(|config| format!(" --config {}", config.display()))
+            .map(|config| format!(" --config {}", shell_word(&config.to_string_lossy())))
             .unwrap_or_default();
         let plain: Vec<&str> = self
             .suggestions
@@ -178,6 +172,19 @@ impl Coverage {
             ));
         }
         commands
+    }
+}
+
+/// `text` as one word of a POSIX shell command line: as it is when every
+/// character is one a shell passes through, single-quoted otherwise.
+fn shell_word(text: &str) -> String {
+    let plain = !text.is_empty()
+        && text
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "/._~+:@,-".contains(character));
+    match plain {
+        true => text.to_owned(),
+        false => format!("'{}'", text.replace('\'', "'\\''")),
     }
 }
 
@@ -409,6 +416,13 @@ mod tests {
                 "appa battery install github linear --config ./deployment/appa.toml",
                 "appa battery install slack --server slack --config ./deployment/appa.toml"
             ]
+        );
+
+        let spaced = coverage(&servers, &batteries, &BTreeSet::new(), &BTreeMap::new())
+            .commands(Some(Path::new("/Users/me/my deployment/it's.toml")));
+        assert_eq!(
+            spaced[0],
+            "appa battery install github linear --config '/Users/me/my deployment/it'\\''s.toml'"
         );
     }
 }

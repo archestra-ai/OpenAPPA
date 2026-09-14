@@ -108,8 +108,6 @@ pub(crate) fn unbind_servers(text: &str, namespaces: &[Namespace]) -> Result<Str
     Ok(document.to_string())
 }
 
-/// The batteries the include list names: the entries spelled
-/// `batteries/<name>/appa.toml`.
 /// The `server_aliases` table: each namespace bound to the server key the host
 /// reports for it.
 pub(crate) fn server_bindings(text: &str) -> Result<BTreeMap<String, String>, InstallError> {
@@ -123,6 +121,8 @@ pub(crate) fn server_bindings(text: &str) -> Result<BTreeMap<String, String>, In
         .collect())
 }
 
+/// The batteries the include list names: the entries spelled
+/// `batteries/<name>/appa.toml`.
 pub(crate) fn included(text: &str) -> Result<BTreeSet<String>, InstallError> {
     let document = document(text)?;
     Ok(document
