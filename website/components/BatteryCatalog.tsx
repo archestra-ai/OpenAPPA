@@ -51,19 +51,19 @@ const BATTERIES = [
   },
   {
     name: "Microsoft Learn",
-    description: "Rules for 3 read-only documentation tools; queries must be sharable with public.",
+    description: "Public documentation search and page fetches with untrusted result labeling.",
     href: "/battery-microsoft-learn",
     logo: "/images/batteries/microsoft-learn.svg",
   },
   {
     name: "Cloudflare docs",
-    description: "Rules for 2 documentation tools; results are public and the query must be sharable with public.",
+    description: "Public developer documentation search and guide fetches.",
     href: "/battery-cloudflare-docs",
     logo: "/images/batteries/cloudflare.svg",
   },
   {
     name: "Cloudflare Observability",
-    description: "Rules for 8 Workers logs, telemetry, and documentation tools; every one of them reads.",
+    description: "Read-only coverage for Workers logs, metrics, telemetry, and bundle downloads.",
     href: "/battery-cloudflare-observability",
     logo: "/images/batteries/cloudflare.svg",
   },

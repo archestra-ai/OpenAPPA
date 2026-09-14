@@ -22,4 +22,4 @@ Your root config must define an Authority permitting `notion-review` for structu
 
 ## Limit
 
-Notion exposes no page permissions to a policy: no tool reports who can see a page, a database, or a teamspace, and the connection acts with the full permissions of the person who authorized it. Every read is therefore `internal`, and per-page sharing is not modeled. Map `internal` to the people who may see everything the connection can reach, and narrow a page or database in the root config by argument. Root rules run before battery rules.
+The Notion connection inherits the authorizing user's full permissions without exposing granular page ACLs. All reads default to `internal`. To restrict an agent to specific pages or databases, scope them in your root `appa.toml` using argument selectors.
