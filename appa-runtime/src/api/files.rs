@@ -92,7 +92,7 @@ pub(crate) const TOOLS: [&str; 6] = [
     "appa_move_file",
     "appa_process_files",
 ];
-const PREFIX: &str = "mcp/plugin_appa-runtime_appa/";
+const PREFIX: &str = "mcp/appa/";
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -142,12 +142,12 @@ pub(crate) fn owns(call: &ProposedCall) -> bool {
 
 pub(super) fn operation(call: &ProposedCall) -> Result<(FileOperation, String), EventError> {
     let operation = match call.tool.as_str() {
-        "mcp/plugin_appa-runtime_appa/appa_read_file" => FileOperation::Read,
-        "mcp/plugin_appa-runtime_appa/appa_write_file" => FileOperation::Replace,
-        "mcp/plugin_appa-runtime_appa/appa_edit_file" => FileOperation::Edit,
-        "mcp/plugin_appa-runtime_appa/appa_copy_file" => FileOperation::Copy,
-        "mcp/plugin_appa-runtime_appa/appa_move_file" => FileOperation::Move,
-        "mcp/plugin_appa-runtime_appa/appa_process_files" => FileOperation::Process,
+        "mcp/appa/appa_read_file" => FileOperation::Read,
+        "mcp/appa/appa_write_file" => FileOperation::Replace,
+        "mcp/appa/appa_edit_file" => FileOperation::Edit,
+        "mcp/appa/appa_copy_file" => FileOperation::Copy,
+        "mcp/appa/appa_move_file" => FileOperation::Move,
+        "mcp/appa/appa_process_files" => FileOperation::Process,
         _ => {
             return Err(refused("file tracking permits only runtime-owned file tools"));
         }
@@ -362,22 +362,22 @@ mod tests {
 [policy]
 version = 2
 [[policy.tool]]
-name = "mcp/plugin_appa-runtime_appa/appa_read_file"
+name = "mcp/appa/appa_read_file"
 delta = {}
 [[policy.tool]]
-name = "mcp/plugin_appa-runtime_appa/appa_write_file"
+name = "mcp/appa/appa_write_file"
 delta = {}
 [[policy.tool]]
-name = "mcp/plugin_appa-runtime_appa/appa_edit_file"
+name = "mcp/appa/appa_edit_file"
 delta = {}
 [[policy.tool]]
-name = "mcp/plugin_appa-runtime_appa/appa_copy_file"
+name = "mcp/appa/appa_copy_file"
 delta = {}
 [[policy.tool]]
-name = "mcp/plugin_appa-runtime_appa/appa_move_file"
+name = "mcp/appa/appa_move_file"
 delta = {}
 [[policy.tool]]
-name = "mcp/plugin_appa-runtime_appa/appa_process_files"
+name = "mcp/appa/appa_process_files"
 delta = {}
 [externals]
 timeout_ms = 2000
@@ -484,7 +484,7 @@ max_body_bytes = 65536
                 &runtime,
                 serde_json::json!({
                     "hook_event_name":"PreToolUse", "session_id":"plugin-test",
-                    "tool_name":"mcp__plugin_appa-runtime_appa__appa_write_file", "tool_input":arguments
+                    "tool_name":"mcp__appa__appa_write_file", "tool_input":arguments
                 })
             )
             .await,
@@ -504,7 +504,7 @@ max_body_bytes = 65536
             &runtime,
             serde_json::json!({
                 "hook_event_name":"PreToolUse", "session_id":"other-session",
-                "tool_name":"mcp__plugin_appa-runtime_appa__appa_write_file",
+                "tool_name":"mcp__appa__appa_write_file",
                 "tool_input":{"file_path":"other.txt", "content":"other"}
             }),
         )
@@ -535,7 +535,7 @@ max_body_bytes = 65536
                     &runtime,
                     serde_json::json!({
                         "hook_event_name":"PostToolUse", "session_id":"plugin-test",
-                        "tool_name":"mcp__plugin_appa-runtime_appa__appa_write_file",
+                        "tool_name":"mcp__appa__appa_write_file",
                         "tool_input":arguments, "tool_response":"file written"
                     })
                 )

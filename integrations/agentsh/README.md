@@ -35,7 +35,7 @@ appa runtime --config /host/policy.toml --db /host/runtime.db \
 ```
 
 The workspace must already be initialized using the file runtime's explicit host
-classification flags. Declare `mcp/plugin_appa-runtime_appa/appa_process_files`
+classification flags. Declare `mcp/appa/appa_process_files`
 in the policy. The tool is absent from MCP unless the backend is enabled.
 
 ## Execution and publication contract

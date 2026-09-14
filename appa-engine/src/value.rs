@@ -603,7 +603,7 @@ impl ResolvedCall {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::{Delta, PinnedAnnotation, ProducedAnnotation, Requires, ToolAnnotation};
+    use crate::contract::{Delta, DeltaAudience, PinnedAnnotation, ProducedAnnotation, Requires, ToolAnnotation};
     use crate::label::{Audience, DeclaredAudience, ReaderId, Trust};
     use crate::params::ToolParameters;
     use serde_json::json;
@@ -638,10 +638,10 @@ mod tests {
             tags: vec![],
             delta: Delta {
                 trust: Some(Trust::new(1)),
-                audience: Some(DeclaredAudience::restricted([
+                audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([
                     ReaderId::new("insider"),
                     ReaderId::new("finance"),
-                ])),
+                ]))),
             },
             parameters: ToolParameters::open(),
             emits: Default::default(),

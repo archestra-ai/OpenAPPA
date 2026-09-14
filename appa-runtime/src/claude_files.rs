@@ -126,7 +126,7 @@ fn command(binary: &Path, deployment: &Deployment, cwd: &Path, args: &Args) -> R
         server_args.push("--process-backend".into());
         server_args.push(backend.to_str().ok_or("backend path must be UTF-8")?.to_string());
     }
-    let mcp = serde_json::json!({"mcpServers":{"plugin_appa-runtime_appa":{
+    let mcp = serde_json::json!({"mcpServers":{"appa":{
         "command":binary.to_str().ok_or("executable path must be UTF-8")?, "args":server_args
     }}});
     let mut command = Command::new("claude");
@@ -134,7 +134,7 @@ fn command(binary: &Path, deployment: &Deployment, cwd: &Path, args: &Args) -> R
         .args(["--bare", "--print", "--tools", "", "--strict-mcp-config", "--mcp-config"])
         .arg(mcp.to_string())
         .args(["--settings", "{\"autoMemoryEnabled\":false}"])
-        .args(["--allowedTools", "mcp__plugin_appa-runtime_appa__appa_read_file,mcp__plugin_appa-runtime_appa__appa_write_file,mcp__plugin_appa-runtime_appa__appa_edit_file,mcp__plugin_appa-runtime_appa__appa_copy_file,mcp__plugin_appa-runtime_appa__appa_move_file,mcp__plugin_appa-runtime_appa__appa_process_files,mcp__plugin_appa-runtime_appa__execute_remedy_plan"])
+        .args(["--allowedTools", "mcp__appa__appa_read_file,mcp__appa__appa_write_file,mcp__appa__appa_edit_file,mcp__appa__appa_copy_file,mcp__appa__appa_move_file,mcp__appa__appa_process_files,mcp__appa__execute_remedy_plan"])
         .args(["--no-session-persistence", "--output-format", "stream-json", "--verbose", "--session-id"])
         .arg(trajectory)
         .env("ENABLE_TOOL_SEARCH", "false")
