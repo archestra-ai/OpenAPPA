@@ -26,6 +26,67 @@ use crate::api::{BatchCallDecision, OfferId, OfferKind, RemedyArguments, RemedyO
 const MAX_REQUEST_BYTES: usize = 128 * 1024;
 const MAX_RESPONSE_BYTES: usize = 128 * 1024;
 
+/// An authenticated proxy response produced without an HTTP transport.
+///
+/// The status and body deliberately match the `/proxy/v1` routes so an embedded
+/// host has the same durable receipt and refusal contract as a remote client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyResponse {
+    status: u16,
+    body: Vec<u8>,
+}
+
+impl ProxyResponse {
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+}
+
+impl IntoResponse for ProxyResponse {
+    fn into_response(self) -> Response {
+        (
+            StatusCode::from_u16(self.status).expect("proxy responses use HTTP status codes"),
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            self.body,
+        )
+            .into_response()
+    }
+}
+
+/// The public in-process form of the authenticated proxy protocol.
+///
+/// This facade has no network client or server. It invokes the same receipt,
+/// event, checkpoint, approval, and child-workflow implementation that the
+/// Axum routes use below.
+#[derive(Clone)]
+pub struct EmbeddedProxy {
+    state: ProxyState,
+}
+
+impl EmbeddedProxy {
+    pub fn new(runtime: Arc<Runtime>, approval_secret: Option<Arc<str>>) -> Self {
+        Self {
+            state: ProxyState::new(runtime, approval_secret),
+        }
+    }
+
+    pub fn capabilities(&self) -> serde_json::Value {
+        capabilities_value(&self.state)
+    }
+
+    pub async fn event(&self, body: &[u8]) -> ProxyResponse {
+        dispatch_event(&self.state, Bytes::copy_from_slice(body)).await
+    }
+
+    pub fn checkpoint(&self, body: &[u8]) -> ProxyResponse {
+        checkpoint_response(&self.state, body)
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ProxyState {
     runtime: Arc<Runtime>,
@@ -64,7 +125,11 @@ pub(crate) fn router(runtime: Arc<Runtime>, approval_secret: Option<Arc<str>>) -
 }
 
 async fn capabilities(State(state): State<ProxyState>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
+    Json(capabilities_value(&state))
+}
+
+fn capabilities_value(state: &ProxyState) -> serde_json::Value {
+    serde_json::json!({
         "protocol_version": 1,
         "completed_event_replay": true,
         "typed_offers": true,
@@ -86,7 +151,7 @@ async fn capabilities(State(state): State<ProxyState>) -> Json<serde_json::Value
         "durable_checkpoints": true,
         "review_provenance": true,
         "openapi": true,
-    }))
+    })
 }
 
 async fn openapi() -> Json<serde_json::Value> {
@@ -133,7 +198,11 @@ async fn openapi() -> Json<serde_json::Value> {
     }))
 }
 
-async fn checkpoint(State(state): State<ProxyState>, body: Bytes) -> Response {
+async fn checkpoint(State(state): State<ProxyState>, body: Bytes) -> ProxyResponse {
+    checkpoint_response(&state, &body)
+}
+
+fn checkpoint_response(state: &ProxyState, body: &[u8]) -> ProxyResponse {
     if body.len() > MAX_REQUEST_BYTES {
         return error(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -141,12 +210,11 @@ async fn checkpoint(State(state): State<ProxyState>, body: Bytes) -> Response {
             "checkpoint request exceeds the payload limit",
         );
     }
-    let (status, response) = crate::checkpoint::answer(&state.runtime, appa_adapter_kagent::adapter(), &body);
-    (
-        StatusCode::from_u16(status).expect("checkpoint answers carry valid status codes"),
-        Json(response),
-    )
-        .into_response()
+    let (status, response) = crate::checkpoint::answer(&state.runtime, appa_adapter_kagent::adapter(), body);
+    ProxyResponse {
+        status,
+        body: serde_json::to_vec(&response).expect("checkpoint responses serialize"),
+    }
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -349,7 +417,11 @@ struct ApprovalGrant {
     position: Option<u32>,
 }
 
-async fn event(State(state): State<ProxyState>, body: Bytes) -> Response {
+async fn event(State(state): State<ProxyState>, body: Bytes) -> ProxyResponse {
+    dispatch_event(&state, body).await
+}
+
+async fn dispatch_event(state: &ProxyState, body: Bytes) -> ProxyResponse {
     if body.len() > MAX_REQUEST_BYTES {
         return error(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -416,7 +488,7 @@ async fn event(State(state): State<ProxyState>, body: Bytes) -> Response {
         {
             Ok(admission) => admission,
             Err(_) => {
-                remove_active(&state, &key);
+                remove_active(state, &key);
                 return error(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "event_uncertain",
@@ -426,11 +498,11 @@ async fn event(State(state): State<ProxyState>, body: Bytes) -> Response {
         };
     match admission {
         ProxyEventAdmission::Replay(response) => {
-            remove_active(&state, &key);
+            remove_active(state, &key);
             return cached(response);
         }
         ProxyEventAdmission::Conflict => {
-            remove_active(&state, &key);
+            remove_active(state, &key);
             return error(
                 StatusCode::CONFLICT,
                 "event_conflict",
@@ -438,7 +510,7 @@ async fn event(State(state): State<ProxyState>, body: Bytes) -> Response {
             );
         }
         ProxyEventAdmission::InProgress | ProxyEventAdmission::Uncertain | ProxyEventAdmission::RootPending => {
-            remove_active(&state, &key);
+            remove_active(state, &key);
             return error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "event_uncertain",
@@ -446,7 +518,7 @@ async fn event(State(state): State<ProxyState>, body: Bytes) -> Response {
             );
         }
         ProxyEventAdmission::BudgetExceeded => {
-            remove_active(&state, &key);
+            remove_active(state, &key);
             return error(
                 StatusCode::CONFLICT,
                 "event_budget_exhausted",
@@ -460,7 +532,7 @@ async fn event(State(state): State<ProxyState>, body: Bytes) -> Response {
         || header.event == "resolve_batch_offer"
     {
         let (decision, bindings, approval_id) = resolve_offer(
-            &state,
+            state,
             envelope.event.get(),
             &header.root_id,
             &envelope.event_id,
@@ -501,7 +573,7 @@ async fn event(State(state): State<ProxyState>, body: Bytes) -> Response {
         dispatch_bindings: &dispatch_bindings,
         approval_id: approval_id.as_deref(),
     });
-    remove_active(&state, &key);
+    remove_active(state, &key);
     if completed.is_err() {
         // The intent remains a tombstone. Replaying after this point is unsafe because the
         // engine and receipt commits are deliberately separate transactions.
@@ -1943,21 +2015,19 @@ fn response_or_refusal(event_id: &str, request_sha256: &str, response: Vec<u8>) 
     .expect("compact proxy refusal serializes")
 }
 
-fn cached(response: Vec<u8>) -> Response {
-    (
-        StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "application/json")],
-        response,
-    )
-        .into_response()
+fn cached(response: Vec<u8>) -> ProxyResponse {
+    ProxyResponse {
+        status: StatusCode::OK.as_u16(),
+        body: response,
+    }
 }
 
-fn error(status: StatusCode, code: &str, message: &str) -> Response {
-    (
-        status,
-        Json(serde_json::json!({"error": {"code": code, "message": message}})),
-    )
-        .into_response()
+fn error(status: StatusCode, code: &str, message: &str) -> ProxyResponse {
+    ProxyResponse {
+        status: status.as_u16(),
+        body: serde_json::to_vec(&serde_json::json!({"error": {"code": code, "message": message}}))
+            .expect("proxy errors serialize"),
+    }
 }
 
 #[cfg(test)]
@@ -2292,6 +2362,47 @@ mod tests {
             StatusCode::CONFLICT
         );
         assert_eq!(runtime.log_basis(&kagent_root("root-1")), 1);
+    }
+
+    #[tokio::test]
+    async fn embedded_proxy_reuses_the_authenticated_receipt_and_checkpoint_protocol() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let runtime = runtime(&directory);
+        let proxy = EmbeddedProxy::new(Arc::clone(&runtime), Some(Arc::from("approval-secret")));
+        let body = session_start("123e4567-e89b-12d3-a456-426614174007");
+
+        let first = proxy.event(body.as_bytes()).await;
+        assert_eq!(first.status(), 200);
+        let replay = proxy.event(body.as_bytes()).await;
+        assert_eq!(replay.status(), 200);
+        assert_eq!(replay.body(), first.body(), "the completed receipt replays exactly");
+
+        let conflict = proxy.event(format!("{body} ").as_bytes()).await;
+        assert_eq!(conflict.status(), 409, "a changed body cannot reuse a receipt id");
+        assert_eq!(
+            runtime.log_basis(&kagent_root("root-1")),
+            1,
+            "the conflict did not re-run"
+        );
+
+        let checkpoint = proxy.checkpoint(
+            serde_json::json!({
+                "protocol": appa_runtime_api::PROTOCOL,
+                "adapter": "kagent",
+                "operation": "create",
+                "root_id": "root-1",
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert_eq!(checkpoint.status(), 200);
+        let checkpoint: serde_json::Value = serde_json::from_slice(checkpoint.body()).expect("checkpoint is JSON");
+        assert!(checkpoint["checkpoint_id"].is_string());
+
+        let capabilities = proxy.capabilities();
+        assert_eq!(capabilities["approval_grants"], true);
+        assert_eq!(capabilities["child_workflows"], true);
+        assert_eq!(capabilities["spawn_result"], true);
     }
 
     #[tokio::test]

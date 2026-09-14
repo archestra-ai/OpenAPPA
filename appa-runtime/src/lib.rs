@@ -14,7 +14,7 @@ pub mod installation;
 mod loopback_http;
 mod management;
 pub mod mcp;
-mod proxy;
+pub mod proxy;
 pub mod replay;
 #[path = "main.rs"]
 pub mod runtime_cli;
