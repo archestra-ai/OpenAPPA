@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.20.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.19.1...v0.20.0) (2026-09-14)
+
+
+### Features
+
+* **batteries:** one store beside the config, and one include spelling ([#305](https://github.com/archestra-ai/OpenAPPA/issues/305)) ([80c468d](https://github.com/archestra-ai/OpenAPPA/commit/80c468df8adbd31a392fa39a877c7f93a6e07e1a))
+
+
+### Bug Fixes
+
+* **ci:** let a retried release keep its already-published images ([#312](https://github.com/archestra-ai/OpenAPPA/issues/312)) ([90d4fd0](https://github.com/archestra-ai/OpenAPPA/commit/90d4fd092b307fdc7a2dd0c5be7e78b85b9ac5c8))
+* **engine:** an open annotator mandate carries no other annotator's selector placeholder ([#321](https://github.com/archestra-ai/OpenAPPA/issues/321)) ([308e7d9](https://github.com/archestra-ai/OpenAPPA/commit/308e7d96ff3a55cd5aebb5e9f6f25207c1360d59))
+* **example-agent:** a refused call costs the call, not the run ([#320](https://github.com/archestra-ai/OpenAPPA/issues/320)) ([439aa2f](https://github.com/archestra-ai/OpenAPPA/commit/439aa2f90826c49ad14e26ffde3948572f9cb232))
+* **runtime:** a runtime started inside a Claude Code session sheds that session's variables ([#319](https://github.com/archestra-ai/OpenAPPA/issues/319)) ([ce98b53](https://github.com/archestra-ai/OpenAPPA/commit/ce98b535356e733f2c018ed78611f46e580770a5))
+* **runtime:** name the annotator's error and deny an unmapped audience level honestly ([#317](https://github.com/archestra-ai/OpenAPPA/issues/317)) ([18ca2fb](https://github.com/archestra-ai/OpenAPPA/commit/18ca2fb9eac01f9348f79e6cb4607c30ab665bb4))
+
+
+### Code Refactoring
+
+* **examples:** batteries live in the marketplace only ([#311](https://github.com/archestra-ai/OpenAPPA/issues/311)) ([688fa8c](https://github.com/archestra-ai/OpenAPPA/commit/688fa8c98a77b142edf087edbe18ddda37b0f4ab))
+
 ## [0.19.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.19.0...v0.19.1) (2026-09-11)
 
 
