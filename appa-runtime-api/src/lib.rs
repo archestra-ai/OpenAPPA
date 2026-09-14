@@ -504,6 +504,14 @@ pub enum HookDecision {
     Context {
         text: String,
     },
+    /// The runtime judged nothing for this event because of an
+    /// operational fault it names in `detail`: an annotator or store
+    /// that did not answer, a policy that would not load. Fail the one
+    /// event closed — the call does not run, the result is not admitted
+    /// — and hand the model `detail` as the runtime's words, never as
+    /// policy feedback: nothing was decided and no remedy is offered.
+    /// The trajectory stays open; a harness ends it only when a
+    /// lifecycle event is refused.
     Refuse {
         detail: String,
     },

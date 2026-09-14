@@ -25,6 +25,13 @@ pub enum Record {
         tool: String,
         feedback: String,
     },
+    /// The runtime could not judge the call — an annotator or store did not
+    /// answer — so it did not run. Not a policy decision.
+    Refused {
+        call: CallId,
+        tool: String,
+        detail: String,
+    },
     Admitted {
         call: CallId,
         body: String,
@@ -85,6 +92,7 @@ impl std::fmt::Display for Record {
             Record::Says { text } => write!(f, "says: {text}"),
             Record::Proposes { tool, arguments, .. } => write!(f, "proposes {tool}({arguments})"),
             Record::Blocked { tool, feedback, .. } => write!(f, "blocked {tool}: {feedback}"),
+            Record::Refused { tool, detail, .. } => write!(f, "refused {tool}: {detail}"),
             Record::Admitted { body, .. } => write!(f, "the output crossed as produced: {body}"),
             Record::Substituted { body, .. } => write!(f, "the output crossed as: {body}"),
             Record::OutputBlocked { reason, .. } => write!(f, "the output was blocked: {reason}"),

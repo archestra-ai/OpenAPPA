@@ -25,6 +25,7 @@ use crate::wire::{ChatCompletionRequest, WireMessage, WireToolCall};
 /// result makes it retry already-committed effects merely to obtain a reply.
 const VOID_CHILD_COMPLETION: &str = "[appa] the child trajectory ended and returned no value; no child result was admitted. This does not attest that its task or side effects succeeded. Do not repeat the delegated task merely to obtain a response.";
 const BLOCKED_CHILD_COMPLETION_CONTEXT: &str = "[appa] the child trajectory ended, but its return value was not admitted. This does not roll back child side effects; they may already have committed. Do not repeat the delegated task merely because its return was blocked.";
+const REFUSED_CALL_CONTEXT: &str = "This is an operational refusal, not a policy decision: nothing was judged and no remedy is offered. Propose the call again or finish without it.";
 const BUDGET_SKIPPED_CALL: &str = "[appa] this proposed call was not run because the execution budget was reached.";
 const BUDGET_FINALIZATION_PROMPT: &str = "The execution budget is reached. Do not call tools. Briefly report only work evidenced by this parent transcript and clearly name anything unresolved. Do not claim that a child task or side effect succeeded unless an admitted result says so.";
 
@@ -109,6 +110,10 @@ pub enum StopReason {
     BudgetExhausted,
     #[error("inference failed: {0}")]
     InferenceFailed(ProviderError),
+    /// A lifecycle event — a child's start or the crossing of its return —
+    /// was refused, or an event was answered with a decision this harness
+    /// cannot deliver. A refused call or result never stops the run: it
+    /// is withheld and the trajectory goes on.
     #[error("the runtime refused the run: {0}")]
     Refused(String),
 }
@@ -456,13 +461,26 @@ impl Run<'_> {
                 Ok(Answered::Reply(feedback))
             }
             HookDecision::PassControl => self.execute_remedy(frame, &id, &proposed).await,
-            HookDecision::Refuse { detail } => Err(StopReason::Refused(detail)),
+            HookDecision::Refuse { detail } => Ok(self.refuse_call(frame, id, &proposed.tool, detail).await),
             other => Err(unexpected("a proposed call", &other)),
         }
     }
 
     fn marks_spawn(&self, call: &ProposedCall) -> bool {
         self.agent.spawn.as_ref().is_some_and(|spawn| spawn.name.0 == call.tool)
+    }
+
+    async fn refuse_call(&self, frame: &Frame, call: CallId, tool: &str, detail: String) -> Answered {
+        self.record(
+            frame,
+            Record::Refused {
+                call,
+                tool: tool.to_string(),
+                detail: detail.clone(),
+            },
+        )
+        .await;
+        Answered::Reply(refused_call(&detail))
     }
 
     async fn run_released(
@@ -550,19 +568,10 @@ impl Run<'_> {
                     other => return Err(unexpected("an echoed child return", &other)),
                 }
             }
-            HookDecision::Block { reason } => {
-                self.record(&parent.frame, Record::ReturnBlocked { reason: reason.clone() })
-                    .await;
-                (
-                    ToolOutcome::Failure {
-                        message: reason.clone(),
-                    },
-                    Some(format!(
-                        "{reason}\n\nHarness context:\n  - {BLOCKED_CHILD_COMPLETION_CONTEXT}"
-                    )),
-                )
-            }
-            HookDecision::Refuse { detail } => return Err(StopReason::Refused(detail)),
+            HookDecision::Block { reason } => self.unadmitted_return(parent, reason).await,
+            // The return could not be judged; it is withheld like a blocked one and the
+            // parent goes on. Only a refused lifecycle event ends the run.
+            HookDecision::Refuse { detail } => self.unadmitted_return(parent, withheld(&detail)).await,
             other => return Err(unexpected("a child return", &other)),
         };
         let id = CallId(parent.reply_to.clone());
@@ -574,6 +583,19 @@ impl Run<'_> {
             .transcript
             .push(WireMessage::tool_result(&parent.reply_to, reply));
         Ok(())
+    }
+
+    async fn unadmitted_return(&self, parent: &Suspended, reason: String) -> (ToolOutcome, Option<String>) {
+        self.record(&parent.frame, Record::ReturnBlocked { reason: reason.clone() })
+            .await;
+        (
+            ToolOutcome::Failure {
+                message: reason.clone(),
+            },
+            Some(format!(
+                "{reason}\n\nHarness context:\n  - {BLOCKED_CHILD_COMPLETION_CONTEXT}"
+            )),
+        )
     }
 
     async fn report(
@@ -633,7 +655,18 @@ impl Run<'_> {
                 .await;
                 Ok(reason)
             }
-            HookDecision::Refuse { detail } => Err(StopReason::Refused(detail)),
+            HookDecision::Refuse { detail } => {
+                let reason = withheld(&detail);
+                self.record(
+                    frame,
+                    Record::OutputBlocked {
+                        call: id.clone(),
+                        reason: reason.clone(),
+                    },
+                )
+                .await;
+                Ok(reason)
+            }
             other => Err(unexpected("a tool outcome", &other)),
         }
     }
@@ -728,7 +761,7 @@ impl Run<'_> {
         match hooks::handle(&self.agent.runtime, event).await {
             HookDecision::AllowCall { spawn } => self.run_released(frame, id, call, spawn).await,
             HookDecision::DenyCall { feedback, .. } => Ok(Answered::Reply(feedback)),
-            HookDecision::Refuse { detail } => Err(StopReason::Refused(detail)),
+            HookDecision::Refuse { detail } => Ok(self.refuse_call(frame, id.clone(), &call.tool, detail).await),
             other => Err(unexpected("a substituted call", &other)),
         }
     }
@@ -851,6 +884,18 @@ fn errand_of(call: &ProposedCall, key: &ArgumentKey) -> String {
         .ok()
         .and_then(|arguments| Some(arguments.get(&key.0)?.as_str()?.to_string()))
         .unwrap_or_else(|| call.arguments.get().to_string())
+}
+
+/// The runtime's refusal of a call it could not judge, as the model reads it. The
+/// call did not run and the trajectory stays open: an operational fault costs the one
+/// call it interrupted, never the run.
+fn refused_call(detail: &str) -> String {
+    format!("[appa] this call was refused and did not run: {detail}\n\n{REFUSED_CALL_CONTEXT}")
+}
+
+/// A result the runtime could not judge, withheld in the words the hook adapter uses.
+fn withheld(detail: &str) -> String {
+    format!("[appa] the tool result was withheld: {detail}")
 }
 
 fn spawn_closed() -> ToolOutcome {
