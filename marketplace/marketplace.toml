@@ -14,6 +14,10 @@ digest = "sha256:4dc7c2161fa8c75f1b9e94908f10dff66cc6371a99b0b4dc0d33373ec277820
 path = "batteries/cloudflare-observability"
 digest = "sha256:f92118f4b234d267ebea72a7e0cedcbb55e002f706d80345fd69ba2c011ad7aa"
 
+[packages.battery.databricks]
+path = "batteries/databricks"
+digest = "sha256:eec292dabc10a87c8acbf4af06c5265241d125b10aa087829ee3ed7bb37cc14e"
+
 [packages.battery.github]
 path = "batteries/github"
 digest = "sha256:b3f6d27b409e3fb4b80bfe35d52b419ec136a3ac7e1f172017526c9c72928a1b"

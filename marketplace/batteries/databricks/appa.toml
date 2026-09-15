@@ -1,0 +1,90 @@
+# Databricks battery: Databricks' managed MCP servers with fixed tool names,
+# Genie One (`https://<workspace>/api/2.0/mcp/genie`) and Databricks SQL
+# (`https://<workspace>/api/2.0/mcp/sql`).
+#
+# The two endpoints are two MCP servers in the host, so the deployment
+# binds this one namespace to both: `appa battery install databricks
+# --server <genie> --server <sql>`, or `server_aliases.databricks =
+# ["<genie>", "<sql>"]` in the root config. Every rule below then covers
+# each of them; a tool one server does not expose is never called there.
+#
+# Genie One answers a natural-language question with SQL it generates and
+# the rows that SQL returns from Unity Catalog tables. Those rows were
+# written by whoever loads the tables, so every read enters `suspicious`,
+# restricted to the workspace's members (`internal`), and the question
+# itself must be sharable with `internal`: it goes to a model Databricks
+# hosts inside the workspace. Unity Catalog enforces the caller's own
+# permissions on every request, and Genie One picks the space itself, so
+# no rule can name one space's readers; the audience source below serves
+# `genie-space/<id>/readers` for root rules over a per-space Genie Agent
+# server.
+#
+# `execute_sql` runs whatever statement the agent writes, reads and writes
+# alike unless the workspace sets `disallow_writes` in the
+# `system.ai.dbsql_policy` policy. No static rule can tell them apart, so
+# the Claude Code model classifies each statement before it runs, inside
+# the vocabulary a static rule writes: a statement that only reads returns
+# suspicious internal data; INSERT, UPDATE, DELETE, MERGE, or COPY INTO
+# needs trusted internal input and records `databricks.changed`; DDL,
+# grants, several statements, scripting, or anything unclear needs the
+# `databricks-review` mark and records `databricks.sensitive`. The root
+# config supplies an authority permitting `databricks-review`; a root rule
+# for `mcp/databricks/execute_sql` replaces the annotator outright.
+
+[policy]
+version = 2
+
+# --- Genie One: five tools, all reads over the workspace's tables ---
+
+[[policy.tool]]
+name = "mcp/databricks/genie_ask"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/databricks/view_ask"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/databricks/genie_poll_response"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/databricks/genie_get_query_result"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+# Cancelling a response returns nothing the trajectory did not already hold.
+[[policy.tool]]
+name = "mcp/databricks/genie_cancel_response"
+delta = {}
+
+# --- Databricks SQL: one tool, classified per statement ---
+
+[[policy.annotator]]
+name = "databricks.sql-statement"
+builtin = "claude-code"
+ranks = ["suspicious", "trusted"]
+audiences = ["internal"]
+marks = ["databricks-review"]
+effects = ["databricks.changed", "databricks.sensitive"]
+hint = "Classify the SQL statement in `query`. One that only reads (SELECT, SHOW, DESCRIBE, EXPLAIN, WITH ... SELECT) returns suspicious internal data and needs input sharable with internal; no mark, no effect. INSERT, UPDATE, DELETE, MERGE, or COPY INTO needs trusted internal input and records databricks.changed. DDL, GRANT or REVOKE, several statements, scripting, or anything unclear needs the databricks-review mark and records databricks.sensitive."
+
+[[policy.tool]]
+name = "mcp/databricks/execute_sql"
+description = "Runs one SQL statement on a Databricks SQL warehouse and returns its result."
+annotator = "databricks.sql-statement"
+
+# --- who reads what: the workspace directory and Genie space permissions ---
+
+[externals.audience.databricks]
+command = ["python3", "audience-source.py"]
+token_env = "APPA_PROVIDER_DATABRICKS_TOKEN"
+selectors = [
+  { template = "viewer", feeds = "self" },
+  { template = "members", feeds = "internal" },
+  { template = "group/<name>" },
+  { template = "genie-space/<id>/readers" },
+]
