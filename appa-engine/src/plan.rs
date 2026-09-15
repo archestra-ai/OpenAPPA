@@ -1179,7 +1179,7 @@ pub(crate) fn covers_gap(authority: &Authority, gap: &Gap, tags: &[TagName], con
 
 /// The atoms the planning of one surfaced block reads, so the operation answers them
 /// before [`plan`] runs — the deterministic second gathering stage, a pure function of the
-/// block, the policy, and the role. Each read site of the enumeration is mirrored by its
+/// block and the policy. Each read site of the enumeration is mirrored by its
 /// gate here: an `includes` gap reads the mandate of every in-scope authority (`gap_cover`);
 /// a `cap` gap reads every tool's delta. A sanitizer's transition is not gathered: its
 /// admission derives from the value's label first and asks for members only where the
