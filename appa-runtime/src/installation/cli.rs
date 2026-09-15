@@ -210,13 +210,8 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
                 "--server binds one battery's namespace; install that battery on its own".into(),
             ));
         }
-        if let Some(repeated) = args
-            .server
-            .iter()
-            .enumerate()
-            .find(|(index, server)| args.server[..*index].contains(server))
-            .map(|(_, server)| server)
-        {
+        let mut bound = std::collections::BTreeSet::new();
+        if let Some(repeated) = args.server.iter().find(|server| !bound.insert(server.as_str())) {
             return Err(InstallError::Invalid(format!("--server {repeated} is given twice")));
         }
         let path = args.target.path();
