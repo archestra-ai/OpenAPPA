@@ -111,7 +111,11 @@ enum Command {
 
     /// Print the advice a protected session starts with.
     #[command(hide = true)]
-    SessionContext,
+    SessionContext {
+        /// Print it in the shape a SubagentStart hook is heard through.
+        #[arg(long)]
+        subagent: bool,
+    },
 
     /// Post one harness hook event to the running runtime.
     #[command(hide = true)]
@@ -242,7 +246,11 @@ fn main() -> ExitCode {
             appa_runtime::hook_client::run(&target.resolve(), turn_end, deployment.as_ref())
         }
         Command::Statusline { target } => appa_runtime::statusline::run(&target.resolve()),
-        Command::SessionContext => appa_runtime::session_context::run(),
+        Command::SessionContext { subagent } => appa_runtime::session_context::run(if subagent {
+            appa_runtime::session_context::Delivery::SubagentContext
+        } else {
+            appa_runtime::session_context::Delivery::SessionStdout
+        }),
         Command::Yell { url, yes, message } => appa_runtime::yell::cli::run(&url, yes, message),
         Command::Replay {
             config,
