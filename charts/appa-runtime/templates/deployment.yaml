@@ -1,5 +1,5 @@
 {{- if or (hasKey .Values.env "APPA_BATTERIES_DIR") (hasKey .Values.env "APPA_CONFIG") (hasKey .Values.env "APPA_GUIDE_RUNTIME_URL") (hasKey .Values.env "APPA_PERSISTENCE_ENABLED") (hasKey .Values.env "APPA_POLICY_CONFIGMAP_NAME") (hasKey .Values.env "APPA_POLICY_CONFIGMAP_KEY") (hasKey .Values.env "APPA_RUNTIME_RELEASE_NAME") }}
-{{- fail "env.APPA_BATTERIES_DIR, env.APPA_CONFIG, env.APPA_GUIDE_RUNTIME_URL, env.APPA_PERSISTENCE_ENABLED, env.APPA_POLICY_CONFIGMAP_NAME, env.APPA_POLICY_CONFIGMAP_KEY, and env.APPA_RUNTIME_RELEASE_NAME are reserved; the chart derives them" }}
+{{- fail "env.APPA_BATTERIES_DIR, env.APPA_CONFIG, env.APPA_GUIDE_RUNTIME_URL, env.APPA_PERSISTENCE_ENABLED, env.APPA_POLICY_CONFIGMAP_NAME, env.APPA_POLICY_CONFIGMAP_KEY, and APPA_RUNTIME_RELEASE_NAME are reserved; the chart derives them" }}
 {{- end }}
 {{- include "appa-runtime.validateConfig" . }}
 apiVersion: apps/v1

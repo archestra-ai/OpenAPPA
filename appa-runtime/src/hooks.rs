@@ -182,6 +182,16 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
     handle_internal(runtime, event).await.decision
 }
 
+/// Dispatch a pre-parsed event through the live path and retain the same diagnostic entry that
+/// `/hook` writes. Proxy protocol handlers use this after authenticating and durably admitting
+/// their own request; codecs remain responsible only for wire translation.
+pub(crate) async fn handle_recorded(runtime: &Runtime, event: HookEvent) -> HookDecision {
+    let root = hook_root(&event).clone();
+    let handled = handle_internal(runtime, event).await;
+    runtime.record(Some(&root), handled.event);
+    handled.decision
+}
+
 /// One dispatched hook: the decision the adapters render, and the entry the runtime keeps
 /// about it.
 ///
@@ -422,7 +432,7 @@ fn outcome_decision(decision: ToolResultDecision) -> HookDecision {
     match decision {
         ToolResultDecision::Keep => HookDecision::Ack,
         ToolResultDecision::Deliver { value } => HookDecision::DeliverValue { value },
-        ToolResultDecision::Replace { placeholder } => HookDecision::ReplaceOutput { output: placeholder },
+        ToolResultDecision::Replace { placeholder, .. } => HookDecision::ReplaceOutput { output: placeholder },
     }
 }
 

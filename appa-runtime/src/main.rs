@@ -512,9 +512,7 @@ async fn serve(args: Args) -> ExitCode {
         .route("/report", post(report))
         .route("/reload", post(reload))
         .route_layer(axum::middleware::from_fn(loopback_management_only));
-    let app = axum::Router::new()
-        .route("/health", get(health))
-        .route("/batteries", get(batteries))
+    let stock = axum::Router::new()
         .route("/hook", post(hook))
         .route(
             "/validate",
@@ -525,7 +523,11 @@ async fn serve(args: Args) -> ExitCode {
         .nest_service(
             "/mcp",
             mcp::service_with_allowed_hosts(Arc::clone(&runtime), &args.mcp_allowed_hosts, args.adapter),
-        )
+        );
+    let app = axum::Router::new()
+        .route("/health", get(health))
+        .route("/batteries", get(batteries))
+        .merge(stock)
         .merge(management)
         .with_state(state);
 
@@ -651,6 +653,35 @@ mod tests {
         assert!(management_peer_is_allowed("127.0.0.1:1234".parse().unwrap()));
         assert!(management_peer_is_allowed("[::1]:1234".parse().unwrap()));
         assert!(!management_peer_is_allowed("10.0.0.8:1234".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn management_endpoint_is_reachable_only_from_loopback() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let app = axum::Router::new()
+            .route("/reload", post(|| async { StatusCode::NO_CONTENT }))
+            .route_layer(axum::middleware::from_fn(loopback_management_only));
+        let request = |peer: SocketAddr| {
+            Request::builder()
+                .method("POST")
+                .uri("/reload")
+                .extension(ConnectInfo(peer))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let local = app
+            .clone()
+            .oneshot(request("127.0.0.1:1234".parse().unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(local.status(), StatusCode::NO_CONTENT);
+
+        let remote = app.oneshot(request("10.0.0.8:1234".parse().unwrap())).await.unwrap();
+        assert_eq!(remote.status(), StatusCode::FORBIDDEN);
     }
 
     #[test]
