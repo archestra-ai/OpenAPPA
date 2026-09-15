@@ -18,6 +18,7 @@ description = "Install locked dependencies without eagerly building repository p
 run = """
 cargo fetch --locked
 uv sync --frozen --inexact --no-install-project --project appa-agent-python
+uv sync --frozen --project bench/publish
 uv sync --frozen --inexact --no-install-project --no-install-package appa-agent-python --project bench/agentthreatbench
 uv sync --frozen --project bench/corp-agent-fides
 uv sync --frozen --project bench/corp
