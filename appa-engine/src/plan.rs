@@ -1180,16 +1180,12 @@ pub(crate) fn covers_gap(authority: &Authority, gap: &Gap, tags: &[TagName], con
 /// The atoms the planning of one surfaced block reads, so the operation answers them
 /// before [`plan`] runs — the deterministic second gathering stage, a pure function of the
 /// block, the policy, and the role. Each read site of the enumeration is mirrored by its
-/// gate here: an `includes` gap reads the mandate of every in-scope authority (`gap_cover`)
-/// and the transition of every in-scope input sanitizer; a narrowing at a confined result
-/// point reads the transition of every in-scope output sanitizer; a `cap` gap reads every
-/// tool's delta. The check's own reads — the call's contract — are the check stage's.
-pub(crate) fn block_atoms(
-    registry: &Registry,
-    contract: &ToolAnnotation,
-    raw: &RawBlock,
-    role: CallRole,
-) -> Vec<SymbolicAtom> {
+/// gate here: an `includes` gap reads the mandate of every in-scope authority (`gap_cover`);
+/// a `cap` gap reads every tool's delta. A sanitizer's transition is not gathered: its
+/// admission derives from the value's label first and asks for members only where the
+/// enumeration itself finds derivation short, so the gate would demand atoms the decision
+/// never reads. The check's own reads — the call's contract — are the check stage's.
+pub(crate) fn block_atoms(registry: &Registry, contract: &ToolAnnotation, raw: &RawBlock) -> Vec<SymbolicAtom> {
     let providers = registry.audience().providers();
     let mut atoms: Vec<SymbolicAtom> = Vec::new();
     let has = |wanted: fn(&Gap) -> bool| raw.requirement_gaps.iter().any(wanted);
@@ -1197,20 +1193,6 @@ pub(crate) fn block_atoms(
         for authority in registry.authorities() {
             if authority.scope.covers(&contract.tags) {
                 atoms.extend(authority.mandate.needed_atoms(providers));
-            }
-        }
-        if role != CallRole::MarkedSpawn {
-            for sanitizer in registry.sanitizers() {
-                if sanitizer.on.input && sanitizer.applies_to(&contract.tags) {
-                    atoms.extend(sanitizer.needed_atoms(providers));
-                }
-            }
-        }
-    }
-    if raw.narrowing.is_some() && registry.profile().confines_result(&contract.name) {
-        for sanitizer in registry.sanitizers() {
-            if sanitizer.on.output && !sanitizer.name.is_attest_schema() && sanitizer.applies_to(&contract.tags) {
-                atoms.extend(sanitizer.needed_atoms(providers));
             }
         }
     }
@@ -1226,9 +1208,9 @@ pub(crate) fn block_atoms(
     atoms
 }
 
-/// The atoms executing one offered plan reads: the call's own contract, the mandate of
-/// every assigned authority as far as the gaps it covers consult it and the transition
-/// of every sanitizer a step names.
+/// The atoms executing one offered plan reads: the call's own contract and the mandate of
+/// every assigned authority as far as the gaps it covers consult it. A step's sanitizer
+/// reads its transition against the value when it applies, as [`block_atoms`] explains.
 pub(crate) fn plan_atoms(
     registry: &Registry,
     contract: &ToolAnnotation,
@@ -1241,34 +1223,7 @@ pub(crate) fn plan_atoms(
             atoms.extend(authority.mandate.reads(&required.covers, providers));
         }
     }
-    for step in &plan.steps {
-        // A return declaration runs its sanitizer at the child's stop, which reads its atoms then.
-        let sanitizer = match step {
-            RemedyStep::Derive(sanitizer) | RemedyStep::Sanitize(sanitizer) => sanitizer,
-            RemedyStep::Accept(_) | RemedyStep::Authorize(_) | RemedyStep::Return(_) => continue,
-        };
-        if let Some(sanitizer) = registry.sanitizer(sanitizer) {
-            atoms.extend(sanitizer.needed_atoms(providers));
-        }
-    }
     atoms
-}
-
-/// The atoms one confined candidate's stage reads: the transition of every
-/// in-scope output sanitizer the chain has not spent.
-pub(crate) fn confined_stage_atoms(
-    registry: &Registry,
-    contract: &ToolAnnotation,
-    lineage: &SanitizerLineage,
-) -> Vec<SymbolicAtom> {
-    let providers = registry.audience().providers();
-    registry
-        .sanitizers()
-        .filter(|sanitizer| !lineage.contains(&sanitizer.name))
-        .filter(|sanitizer| !sanitizer.name.is_attest_schema())
-        .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(&contract.tags))
-        .flat_map(|sanitizer| sanitizer.needed_atoms(providers))
-        .collect()
 }
 
 fn direct_redispatches(
@@ -2350,7 +2305,6 @@ mod tests {
     mod gathering {
         use super::*;
         use crate::authority::DeclaredTransition;
-        use crate::candidate::SanitizerLineage;
         use crate::check::{Gap, Narrowing, RawBlock};
         use crate::label::{Clause, GroupRef};
         use crate::names::{GroupName, SanitizerName, TagName};
@@ -2497,35 +2451,21 @@ mod tests {
             }
         }
 
-        fn lineage(names: &[&str]) -> SanitizerLineage {
-            SanitizerLineage::try_from(names.iter().map(|name| SanitizerName::new(*name)).collect::<Vec<_>>())
-                .expect("a lineage without repeats")
-        }
-
         #[test]
         fn a_block_reads_each_component_the_gap_it_carries_consults() {
             let unconfined = registry(&[]);
             let confined = registry(&["send"]);
             let contract = send(&unconfined);
-            let collect = |registry: &Registry, raw: &RawBlock, role: CallRole| -> BTreeSet<SymbolicAtom> {
-                block_atoms(registry, &contract, raw, role).into_iter().collect()
+            let collect = |registry: &Registry, raw: &RawBlock| -> BTreeSet<SymbolicAtom> {
+                block_atoms(registry, &contract, raw).into_iter().collect()
             };
             assert_eq!(
-                collect(&unconfined, &raw(vec![includes()], false), CallRole::Ordinary),
-                atoms(&["team", "legal"]),
-                "an includes gap reads the in-scope authority and the in-scope input sanitizer"
-            );
-            assert_eq!(
-                collect(&unconfined, &raw(vec![includes()], false), CallRole::MarkedSpawn),
+                collect(&unconfined, &raw(vec![includes()], false)),
                 atoms(&["team"]),
-                "a marked spawn never routes through an input sanitizer"
+                "an includes gap reads the in-scope authority; the input sanitizer reads its transition against the value"
             );
             assert_eq!(
-                collect(
-                    &unconfined,
-                    &raw(vec![Gap::Cap { cap: group("team") }], false),
-                    CallRole::Ordinary
-                ),
+                collect(&unconfined, &raw(vec![Gap::Cap { cap: group("team") }], false)),
                 atoms(&["press"]),
                 "a cap gap reads every tool's delta and no authority"
             );
@@ -2539,42 +2479,19 @@ mod tests {
                         }],
                         false
                     ),
-                    CallRole::Ordinary
                 ),
                 atoms(&[]),
                 "a trust-floor gap consults no reader ceiling"
             );
             assert_eq!(
-                collect(&unconfined, &raw(vec![], true), CallRole::Ordinary),
+                collect(&confined, &raw(vec![], true)),
                 atoms(&[]),
-                "a narrowing at an unconfined result point reads no output sanitizer"
-            );
-            assert_eq!(
-                collect(&confined, &raw(vec![], true), CallRole::Ordinary),
-                atoms(&["legal"]),
-                "a narrowing at a confined result point reads the in-scope output sanitizers"
+                "a narrowing at a confined result point gathers nothing: the output sanitizers derive from the value"
             );
         }
 
         #[test]
-        fn a_confined_stage_reads_the_unspent_in_scope_output_sanitizers() {
-            let registry = registry(&["send"]);
-            let contract = send(&registry);
-            let collect = |lineage: &SanitizerLineage| -> BTreeSet<SymbolicAtom> {
-                confined_stage_atoms(&registry, &contract, lineage)
-                    .into_iter()
-                    .collect()
-            };
-            assert_eq!(collect(&lineage(&[])), atoms(&["legal"]));
-            assert_eq!(
-                collect(&lineage(&["redact"])),
-                atoms(&[]),
-                "a spent sanitizer is not read again"
-            );
-        }
-
-        #[test]
-        fn a_plan_reads_its_rulings_as_far_as_their_gaps_consult_the_mandate_and_its_steps() {
+        fn a_plan_reads_its_rulings_as_far_as_their_gaps_consult_the_mandate() {
             let registry = registry(&[]);
             let contract = send(&registry);
             let collect = |required: Vec<RequiredRuling>, steps: Vec<RemedyStep>| -> BTreeSet<SymbolicAtom> {
@@ -2597,7 +2514,8 @@ mod tests {
                         RemedyStep::Sanitize(SanitizerName::new("redact")),
                     ]
                 ),
-                atoms(&["team", "legal"])
+                atoms(&["team"]),
+                "a ruling over an includes gap reads the ceiling; a sanitize step reads its transition against the value"
             );
             assert_eq!(
                 collect(

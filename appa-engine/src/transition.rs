@@ -1473,12 +1473,7 @@ impl<'a> Sequence<'a> {
                 };
                 // The live act answered this whole gate before planning; the enumeration may
                 // read less, but the gathered evidence is still the operation's own ask.
-                self.audit_atoms(crate::plan::block_atoms(
-                    self.engine.registry(),
-                    &contract,
-                    &block,
-                    role,
-                ));
+                self.audit_atoms(crate::plan::block_atoms(self.engine.registry(), &contract, &block));
                 Ok(crate::plan::plan(
                     self.engine.registry(),
                     views,
@@ -1522,11 +1517,6 @@ impl<'a> Sequence<'a> {
                 };
                 let lineage = views.lineage(subject);
                 let contract = self.dispatch_contract(trajectory, dispatch)?;
-                self.audit_atoms(crate::plan::confined_stage_atoms(
-                    self.engine.registry(),
-                    &contract,
-                    &lineage,
-                ));
                 let floor = crate::plan::floor_of(self.engine.registry(), views);
                 crate::plan::confined_stage(
                     self.engine.registry(),
@@ -1675,7 +1665,7 @@ impl<'a> Sequence<'a> {
         if let Ok(CheckOutcome::Block(raw)) =
             crate::check::evaluate(&contract, &views, call, &stage, role, &self.context(&expansions))
         {
-            self.audit_atoms(crate::plan::block_atoms(self.engine.registry(), &contract, &raw, role));
+            self.audit_atoms(crate::plan::block_atoms(self.engine.registry(), &contract, &raw));
         }
         self.audit_atoms(crate::plan::plan_atoms(self.engine.registry(), &contract, offered));
         self.audit_reads(&expansions);
@@ -2216,7 +2206,7 @@ impl<'a> Sequence<'a> {
             if let Ok(CheckOutcome::Block(raw)) =
                 crate::check::evaluate(&contract, &final_views, call, &CallStage::default(), role, &context)
             {
-                self.audit_atoms(crate::plan::block_atoms(self.engine.registry(), &contract, &raw, role));
+                self.audit_atoms(crate::plan::block_atoms(self.engine.registry(), &contract, &raw));
             }
         }
         let expected: Vec<&DispatchId> = composed.iter().flatten().map(|release| &release.dispatch).collect();
@@ -3040,8 +3030,7 @@ impl<'a> Sequence<'a> {
             released: false,
         });
         // The live hop's act gated the standing block's whole atom set before offering.
-        let role = views.call_role(subject);
-        self.audit_atoms(crate::plan::block_atoms(registry, &before_contract, &before, role));
+        self.audit_atoms(crate::plan::block_atoms(registry, &before_contract, &before));
         self.audit_inherit(&recorded.evidence)?;
         self.audit_reads(expansions);
         Ok(())
