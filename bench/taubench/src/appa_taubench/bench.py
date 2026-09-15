@@ -22,7 +22,7 @@ from tau2.runner import get_tasks, run_tasks
 from tau2.scripts.leaderboard.verify_trajectories_public import check_num_trials, check_tasks
 from tau2.utils import llm_utils as tau_llm_utils
 
-from appa_taubench import AGENT_PROMPT_PROFILES
+from appa_taubench import AGENT_PROMPT_PROFILES, DEFAULT_REASONING_EFFORT
 from appa_taubench.agent import create_appa_agent, drain_stats
 from appa_taubench.evaluation import (
     TASK_102_ASSERTION,
@@ -107,7 +107,7 @@ class RunSpec:
     tau2_revision: str = TAU2_REVISION
     domain: str = DOMAIN
     task_split_name: str = "base"
-    model_args: tuple[tuple[str, object], ...] = (("reasoning_effort", "high"),)
+    model_args: tuple[tuple[str, object], ...] = (("reasoning_effort", DEFAULT_REASONING_EFFORT),)
     user_model_args: tuple[tuple[str, object], ...] = (("reasoning_effort", "low"),)
     judge_model_args: tuple[tuple[str, object], ...] = (("temperature", 0),)
     review_model_args: tuple[tuple[str, object], ...] = (("temperature", 0),)
@@ -708,7 +708,7 @@ def run_bench(
     max_steps: int,
     max_concurrency: int,
     num_trials: int,
-    reasoning_effort: str = "high",
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     policy_mode: str = "guarded",
     dry_run: bool = False,
     agent_prompt_profile: str = "standard",
@@ -746,7 +746,7 @@ def run_pilot(
     seed: int,
     max_steps: int,
     max_concurrency: int,
-    reasoning_effort: str = "high",
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     dry_run: bool = False,
     agent_prompt_profile: str = "standard",
 ) -> int:
@@ -794,7 +794,7 @@ def run_chaos_screen(
     seed: int,
     max_steps: int,
     max_concurrency: int,
-    reasoning_effort: str = "high",
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     dry_run: bool = False,
     agent_prompt_profile: str = "standard",
 ) -> int:

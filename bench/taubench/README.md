@@ -11,7 +11,7 @@ The interpreter is Python 3.12 (`.python-version`): Tau at this pin imports `aud
 AgentThreatBench samples attack scenarios, where OpenAPPA intervenes in nearly every episode, so its token overhead answers "what does mediation cost when the policy fires". Tau's normal profile answers the other question: what does it cost across 97 ordinary banking tasks, where the published run triggered no policy block at all in 8,151 checked calls. The matched summary reports both, per simulation:
 
 - `guarded_minus_permissive` is the policy's own cost: the same scaffold, the same tools, the same prompts, only the contract differs.
-- `permissive_minus_stock` is the scaffold's cost: the extra system-prompt addendum, the one-call-per-completion rule, and the tool schemas.
+- `permissive_minus_stock` is the scaffold's cost: the extra system-prompt addendum, the one-call-per-completion rule, and the tool schemas. The scaffold's cost is a joint property of the scaffold and the model that ran it, so it is reported next to the model and effort that produced it.
 - `hidden_agent_total_per_simulation` is the discarded work: completions a policy block or the one-call rule threw away and the model paid for anyway. Tau's trajectory omits them; the `appa-audit/` record includes them, and the totals here use it.
 
 `runs/<name>-matched-summary.json` carries `token_overhead.per_arm`, `.deltas`, and `.ratios`; `run-summary.json` per arm carries the raw cumulative counts and the per-simulation means they come from.
@@ -52,11 +52,11 @@ The pilot fixes ten tasks spanning reads, verification, mutation, transfer, user
 ```sh
 uv run appa-taubench pilot --run-name tau-knowledge-pilot
 
-# Override and record the agent's reasoning effort for models that support it.
+# Override the publication agent or its reasoning effort; both are recorded.
 uv run appa-taubench pilot \
-  --model openrouter/openai/gpt-5.6-luna \
-  --reasoning-effort max \
-  --run-name tau-knowledge-luna-max-pilot
+  --model openrouter/openai/gpt-5.2 \
+  --reasoning-effort high \
+  --run-name tau-knowledge-gpt-5.2-high-pilot
 ```
 
 The three arms expose different associations. Guarded versus permissive holds the OpenAPPA prompt, remedy tool, and one-call scaffold constant while changing policy enforcement. Stock versus permissive changes that custom scaffold itself, so a custom result is not presented as though it used Tau's standard agent. Matched task IDs and seeds do not make stochastic trajectories a causal experiment.
@@ -126,7 +126,9 @@ The screen is useful when the guarded audit contains a pre-verification policy b
 
 ## Publication runs freeze every effective setting
 
-The default agent is OpenRouter's GPT-5.2 at `reasoning_effort=high`, matching the current Tau GPT-5.2 leaderboard configuration. `--reasoning-effort` overrides that agent setting and records it in the run digest and manifest. The user simulator is explicitly fixed to the leaderboard-recommended GPT-5.2 at `reasoning_effort=low`; it never changes when `--model` or `--reasoning-effort` changes. GPT-4.1 at temperature zero performs task 102's score-bearing NL judgment and the separate user-simulator review. The audit records both requested and provider-resolved model identifiers, but OpenRouter's aliases do not establish a stronger immutable snapshot identity.
+The publication agent is OpenRouter's GPT-5.6 Luna at `reasoning_effort=max`, the model the committed [`results/`](results/README.md) were produced with. Tau's submission guide requires no particular model or reasoning effort for `banking_knowledge`, and this harness is a `custom` submission either way, so the agent model is a measurement choice rather than a leaderboard requirement: holding it fixed keeps a re-run comparable with the published table while the engine port changes. `--model` and `--reasoning-effort` override the defaults, and both land in the run digest and manifest. The user simulator is explicitly fixed to the leaderboard-recommended GPT-5.2 at `reasoning_effort=low`; it never changes when `--model` or `--reasoning-effort` changes. GPT-4.1 at temperature zero performs task 102's score-bearing NL judgment and the separate user-simulator review. The audit records both requested and provider-resolved model identifiers, but OpenRouter's aliases do not establish a stronger immutable snapshot identity.
+
+A Claude arm is a later addition, not a second publication baseline. Claude Sonnet 5 has no Tau leaderboard row to anchor a stock arm, and a Claude run must use the `openrouter/anthropic/...` route: the pinned litellm maps `reasoning_effort` for Anthropic only through OpenRouter, and the native route refuses `max`. Add one as its own guarded-versus-permissive slice, and name the model and effort beside every ratio — at `max`, reasoning tokens are billed as output and consume most of the output ceiling.
 
 ```sh
 # Validate the exact 388-simulation guarded plan without model calls.

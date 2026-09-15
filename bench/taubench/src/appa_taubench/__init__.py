@@ -1,5 +1,16 @@
 """OpenAPPA evaluation harness for Tau Knowledge."""
 
+# The publication agent is the model the committed results were produced with
+# (see results/README.md). Tau mandates no model for this domain and the
+# harness is a custom submission either way, so holding the agent model fixed
+# keeps a re-run comparable with the published table while the engine changes.
+# The user simulator and the judge stay on the leaderboard's own configuration
+# and never follow --model or --reasoning-effort.
+DEFAULT_MODEL = "openrouter/openai/gpt-5.6-luna"
+DEFAULT_REASONING_EFFORT = "max"
+DEFAULT_USER_MODEL = "openrouter/openai/gpt-5.2"
+DEFAULT_JUDGE_MODEL = "openrouter/openai/gpt-4.1"
+
 SUPPORTED_RETRIEVAL_CONFIGS = ("alltools", "alltools-qwen")
 AGENT_PROMPT_PROFILES = {
     "standard": "",

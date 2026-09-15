@@ -84,8 +84,8 @@ def test_cli_defaults_describe_a_complete_submission_run() -> None:
     assert args.num_trials == 4
     assert args.max_steps == 200
     assert args.seed == 300
-    assert args.model == "openrouter/openai/gpt-5.2"
-    assert args.reasoning_effort == "high"
+    assert args.model == "openrouter/openai/gpt-5.6-luna"
+    assert args.reasoning_effort == "max"
     assert args.user_model == "openrouter/openai/gpt-5.2"
     assert args.judge_model == "openrouter/openai/gpt-4.1"
     assert args.policy_mode == "guarded"
@@ -93,7 +93,7 @@ def test_cli_defaults_describe_a_complete_submission_run() -> None:
     assert not hasattr(args, "task_ids")
     assert not hasattr(args, "defense")
     assert args.agent_prompt_profile == "standard"
-    assert dict(run_spec().model_args) == {"reasoning_effort": "high"}
+    assert dict(run_spec().model_args) == {"reasoning_effort": "max"}
     assert dict(run_spec().user_model_args) == {"reasoning_effort": "low"}
     assert run_spec().payload()["agent_prompt_profile"] == "standard"
     assert run_spec().digest() != run_spec(agent_prompt_profile="verification-recovery-chaos").digest()

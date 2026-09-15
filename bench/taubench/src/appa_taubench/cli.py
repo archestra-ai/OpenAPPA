@@ -5,12 +5,16 @@ import logging
 import os
 from pathlib import Path
 
-from appa_taubench import AGENT_PROMPT_PROFILES, SUPPORTED_RETRIEVAL_CONFIGS
+from appa_taubench import (
+    AGENT_PROMPT_PROFILES,
+    DEFAULT_JUDGE_MODEL,
+    DEFAULT_MODEL,
+    DEFAULT_REASONING_EFFORT,
+    DEFAULT_USER_MODEL,
+    SUPPORTED_RETRIEVAL_CONFIGS,
+)
 from appa_taubench.policies import POLICY_MODES
 
-DEFAULT_MODEL = "openrouter/openai/gpt-5.2"
-DEFAULT_USER_MODEL = "openrouter/openai/gpt-5.2"
-DEFAULT_JUDGE_MODEL = "openrouter/openai/gpt-4.1"
 REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
@@ -46,7 +50,7 @@ def add_data_argument(parser: argparse.ArgumentParser) -> None:
 def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--retrieval-config", choices=SUPPORTED_RETRIEVAL_CONFIGS, default="alltools-qwen")
     parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--reasoning-effort", choices=REASONING_EFFORTS, default="high")
+    parser.add_argument("--reasoning-effort", choices=REASONING_EFFORTS, default=DEFAULT_REASONING_EFFORT)
     parser.add_argument("--user-model", default=DEFAULT_USER_MODEL)
     parser.add_argument("--judge-model", default=DEFAULT_JUDGE_MODEL)
     parser.add_argument("--review-model", default=None)
