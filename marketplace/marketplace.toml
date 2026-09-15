@@ -42,6 +42,10 @@ digest = "sha256:3af0b11a68e2e2e5f2c83dd29fda95d872a3407e4f67d8fa70066e996c8564d
 path = "batteries/notion"
 digest = "sha256:dea7e48a6f9d07705c6784f3fdcfc6aacc74883bc8c669fb98282ca0ceda0024"
 
+[packages.battery.pagerduty]
+path = "batteries/pagerduty"
+digest = "sha256:2e1e7ad194caa618b976fbf90740274af6e153fd01d82fecd903a9e0822bfbad"
+
 [packages.battery.posthog]
 path = "batteries/posthog"
 digest = "sha256:76d6b83c67176ae69e0a6ce3ce7d970ae91d22c5ca9c34cd7a9b5b6abc67ebb6"
