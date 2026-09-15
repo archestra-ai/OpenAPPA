@@ -7,7 +7,9 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use appa_engine::audience::{AudienceConfig, DeclaredTemplate, NamedAudience, SelectorSpec, SourceRegistration};
-use appa_engine::authority::{Authority, DeclaredTransition, Hint, Mandate, Sanitizer, SanitizerPoints, Scope};
+use appa_engine::authority::{
+    Attends, Authority, DeclaredTransition, Hint, Mandate, Sanitizer, SanitizerPoints, Scope,
+};
 use appa_engine::contract::{
     AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, LabelRequirements, RecipientSpec, Requires,
     SelectorPlaceholder, ToolAnnotation, ToolDeclaration,
@@ -48,6 +50,8 @@ pub enum ConfigError {
     NoSanitizerPoint { name: String },
     #[error("sanitizer {name} permits: {reason}")]
     SanitizerMandateShape { name: String, reason: &'static str },
+    #[error("{context} permits: `*` must be the only attention entry")]
+    MixedAttentionWildcard { context: String },
     #[error("{kind} {name}: {reason}")]
     BadImplementation {
         kind: &'static str,
@@ -1180,8 +1184,21 @@ impl RawPermits {
                 .map(|r| parse_declared_audience(&r, &format!("{ctx} audience_missing")))
                 .transpose()?,
             waivers: self.effects_containing.into_iter().map(EffectKind::new).collect(),
-            attends: self.attention.into_iter().map(MarkName::new).collect(),
+            attends: parse_attends(self.attention, ctx)?,
         })
+    }
+}
+
+/// `["*"]` is the catch-all; the wildcard beside a name is refused rather than read as
+/// either a name or a catch-all.
+fn parse_attends(attention: Vec<String>, context: &str) -> Result<Attends, ConfigError> {
+    let wildcards = attention.iter().filter(|mark| *mark == Attends::WILDCARD).count();
+    match (wildcards, attention.len()) {
+        (0, _) => Ok(Attends::Named(attention.into_iter().map(MarkName::new).collect())),
+        (1, 1) => Ok(Attends::Any),
+        _ => Err(ConfigError::MixedAttentionWildcard {
+            context: context.to_string(),
+        }),
     }
 }
 
@@ -1825,6 +1842,31 @@ confined_results = ["lookup"]
             matches!(load(selected), Err(ConfigError::Registry(LoadError::WildcardMetadata))),
             "a wildcard with an argument selector must be refused"
         );
+    }
+
+    #[test]
+    fn a_catch_all_attention_permit_loads_and_the_wildcard_never_mixes_with_names() {
+        let catch_all = "version = 2\n[[authority]]\nname = \"anyone\"\n[authority.permits]\nattention = [\"*\"]\n";
+        let config = load(catch_all).expect("a catch-all permit loads");
+        let anyone = config
+            .registry()
+            .authority(&AuthorityName::new("anyone"))
+            .expect("the catch-all registers");
+        assert_eq!(anyone.mandate.attends, Attends::Any);
+
+        let mixed =
+            "version = 2\n[[authority]]\nname = \"anyone\"\n[authority.permits]\nattention = [\"*\", \"signoff\"]\n";
+        assert!(matches!(
+            load(mixed),
+            Err(ConfigError::MixedAttentionWildcard { context }) if context == "authority anyone"
+        ));
+
+        let reserved =
+            "version = 2\n[[authority]]\nname = \"anyone\"\n[authority.permits]\nattention = [\"blocked\"]\n";
+        assert!(matches!(
+            load(reserved),
+            Err(ConfigError::Registry(LoadError::ReservedMark(name))) if name == "anyone"
+        ));
     }
 
     #[test]

@@ -9,7 +9,7 @@ breadcrumb: Sentry
 
 The Sentry battery covers the Sentry MCP server: the nine primary tools plus 55 catalog tools dispatched dynamically through `execute_sentry_tool`.
 
-Your root config must define an Authority permitting `sentry-review` for writes.
+Writes need `sentry-review`. The Claude Code and kagent plugin defaults permit every mark, so the person running the session reviews them; another root config must define an Authority permitting the mark.
 
 [View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/sentry).
 

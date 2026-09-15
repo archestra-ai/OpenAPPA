@@ -38,6 +38,7 @@ jobs:
       plugin: ${{ steps.filter.outputs.plugin }}
       installer: ${{ steps.filter.outputs.installer }}
       corp: ${{ steps.filter.outputs.corp }}
+      bench_publish: ${{ steps.filter.outputs.bench_publish }}
       agentthreatbench: ${{ steps.filter.outputs.agentthreatbench }}
       marketplace: ${{ steps.filter.outputs.marketplace }}
       receiver: ${{ steps.filter.outputs.receiver }}
@@ -142,10 +143,15 @@ jobs:
               - '.github/workflows/ci.yml'
             corp:
               - 'bench/corp/**'
+              - 'bench/publish/**'
+              - '.github/workflows/ci.yml'
+            bench_publish:
+              - 'bench/publish/**'
               - '.github/workflows/ci.yml'
             agentthreatbench:
               - *rust
               - 'bench/agentthreatbench/**'
+              - 'bench/publish/**'
             marketplace:
               - 'marketplace/**'
               - 'appa-package/**'
@@ -618,6 +624,32 @@ jobs:
 
       - name: Corporate benchmark tests
         run: uv run --project bench/corp pytest bench/corp/tests
+
+  benchmark-publisher-checks:
+    name: Benchmark Publisher Checks
+    needs: changes
+    if: needs.changes.outputs.bench_publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Benchmark publisher lint
+        run: |
+          uv run --project bench/publish ruff check bench/publish
+          uv run --project bench/publish ruff format --check bench/publish
+
+      - name: Benchmark publisher tests
+        run: uv run --project bench/publish pytest bench/publish/tests
 
   receiver-checks:
     name: Yell Receiver Checks

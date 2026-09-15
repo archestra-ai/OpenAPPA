@@ -83,6 +83,14 @@ pub struct Battery {
     /// `validate_package` and empty from the manifest alone. A marketplace
     /// gives each provider one owner, as it does each namespace.
     pub audiences: Vec<String>,
+    /// The environment variables the policy's bindings name as `token_env`,
+    /// read from the policy by `validate_package` like `audiences`, so the
+    /// manifest cannot disagree with the policy about what its helpers read.
+    /// An install names each one to the person who then has to set it.
+    pub credentials: Vec<String>,
+    /// What the manifest tells the person after an install and the variable
+    /// names cannot: the token's scopes, or a login the helpers fall back to.
+    pub setup: Option<String>,
 }
 
 /// A plugin package, with installation fields specific to its host.
@@ -227,6 +235,7 @@ struct RawBattery {
     namespaces: Vec<String>,
     #[serde(default)]
     helpers: Vec<String>,
+    setup: Option<String>,
 }
 
 impl RawBattery {
@@ -265,12 +274,25 @@ impl RawBattery {
         for helper in &self.helpers {
             helpers.push(relative(helper, "battery.helpers", path)?);
         }
+        // One line the install prints verbatim: a blank or multi-line note is
+        // a manifest mistake, refused where it is read rather than tidied.
+        let setup = match self.setup.as_deref().map(str::trim) {
+            None => None,
+            Some(note) if !note.is_empty() && !note.contains(['\n', '\r']) => Some(note.to_owned()),
+            Some(_) => {
+                return Err(ManifestError::Setup {
+                    path: path.to_path_buf(),
+                });
+            }
+        };
         Ok(Battery {
             policy,
             hosts,
             namespaces,
             helpers,
             audiences: Vec::new(),
+            credentials: Vec::new(),
+            setup,
         })
     }
 }
@@ -401,9 +423,30 @@ mod tests {
                 hosts: vec![Host::ClaudeCode],
                 namespaces: vec![Namespace::parse("github").unwrap()],
                 audiences: vec![],
+                credentials: vec![],
+                setup: None,
                 helpers: vec![RelativePath::parse("audience-source.py").unwrap()],
             }
         );
+    }
+
+    /// `setup` is one line the install prints verbatim, so a blank or
+    /// multi-line note is refused where it is read.
+    #[test]
+    fn a_battery_setup_note_is_one_non_empty_line() {
+        let with = |note: &str| manifest(&BATTERY.replace("helpers", &format!("setup = {note:?}\nhelpers")));
+        assert_eq!(
+            with("Uses your gh login when unset.")
+                .unwrap()
+                .battery()
+                .unwrap()
+                .setup
+                .as_deref(),
+            Some("Uses your gh login when unset.")
+        );
+        assert!(matches!(with("  "), Err(ManifestError::Setup { .. })));
+        assert!(matches!(with("one\ntwo"), Err(ManifestError::Setup { .. })));
+        assert!(matches!(with("one\rtwo"), Err(ManifestError::Setup { .. })));
     }
 
     /// A battery covers the namespace its own name spells until it says

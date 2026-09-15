@@ -1056,9 +1056,11 @@ pub(crate) fn battery_package_in(
     Ok((entry, battery))
 }
 
-/// The battery manifest a catalog entry names under `marketplace`.
+/// The battery a catalog entry names under `marketplace`, validated so that what
+/// its policy binds (its audience providers, the credentials its helpers read)
+/// is filled in as the manifest alone cannot.
 pub(crate) fn battery_at(marketplace: &Path, entry: &PackageEntry) -> Result<Battery, InstallError> {
-    let package = Package::read(&marketplace.join(entry.path.as_str()).join(appa_package::MANIFEST_FILE))
+    let package = appa_package::validate_package(&marketplace.join(entry.path.as_str()))
         .map_err(|error| InstallError::Invalid(error.to_string()))?;
     match package.role {
         Role::Battery(battery) => Ok(battery),

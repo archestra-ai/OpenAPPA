@@ -859,7 +859,12 @@ impl RuntimeEngine {
             .offer_consults(view, &engine_id(trajectory), &engine_offer)
             .ok()?
         {
-            OfferConsult::Accept => Some(crate::api::OfferKind::Accept),
+            OfferConsult::Accept { sanitizer: None } => Some(crate::api::OfferKind::Accept),
+            OfferConsult::Accept {
+                sanitizer: Some(sanitizer),
+            } => Some(crate::api::OfferKind::Sanitizer {
+                name: sanitizer.as_str().to_string(),
+            }),
             OfferConsult::Authorities { required, .. } => {
                 let mut names: Vec<String> = required
                     .iter()
@@ -1444,7 +1449,7 @@ impl RuntimeEngine {
                 ));
             }
             OfferConsult::Replay(outcome) => outcome,
-            OfferConsult::Accept => OfferOutcome::Approved(Vec::new()),
+            OfferConsult::Accept { .. } => OfferOutcome::Approved(Vec::new()),
             OfferConsult::Rewrite { sanitizer, call } => {
                 let arguments = call.canonical_arguments();
                 let source = RawResultDigest::of(arguments.canonical_bytes());
@@ -3251,7 +3256,7 @@ fn block_feedback(
         appa_engine::check::Gap::Attention(mark) => registry
             .authorities()
             .iter()
-            .any(|authority| authority.mandate.attends.contains(mark)),
+            .any(|authority| authority.mandate.attends.covers(mark)),
         _ => false,
     });
     let public_expansion_reviewable = registry.authorities().iter().any(|authority| {

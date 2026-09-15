@@ -1,0 +1,135 @@
+# PagerDuty battery: the PagerDuty-hosted MCP server
+# (`https://mcp.pagerduty.com/mcp`), "PagerDuty MCP Server" 3.3.1.
+#
+# The server lists 18 tools. Each takes one required argument, `request`,
+# an object whose `oneOf` variants carry the operation as a `const`
+# `action`. Nine `browse_*` tools read; seven `manage_*` tools write. The
+# server marks every `manage_*` tool `readOnlyHint: false,
+# destructiveHint: true`.
+#
+# Reads return incidents, alerts, notes, log entries, and change events
+# that monitoring integrations, responders, and status page posts
+# produced, so every read enters `suspicious`, restricted to the
+# account's members (`internal`), and a query's input must be sharable
+# with `internal`.
+#
+# Every `manage_*` action changes PagerDuty, so all seven need trusted
+# data that `internal` may see and the `pagerduty-review` mark.
+# `manage_incidents` is the operational write path — acknowledge or
+# resolve an incident, append a note, page responders, start a workflow —
+# and records `pagerduty.changed`. The other six change configuration or
+# publish outward: a service, a schedule or override, a team's
+# membership, an event orchestration router, an alert grouping setting,
+# or a status page post readers outside the account see. They record
+# `pagerduty.sensitive`. The root config supplies an authority permitting
+# `pagerduty-review`.
+#
+# The action is nested under `request`, and a selector checks top-level
+# string arguments only, so no rule here can separate `add_note` from
+# `create`. Each contract covers a whole tool.
+
+[policy]
+version = 2
+
+# --- reads: operational data, restricted to internal readers ---
+
+[[policy.tool]]
+name = "mcp/pagerduty/browse_incidents"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/pagerduty/browse_services"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/pagerduty/browse_schedules"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/pagerduty/browse_teams"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/pagerduty/browse_event_orchestrations"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/pagerduty/browse_alert_grouping"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/pagerduty/browse_status_pages"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/pagerduty/browse_escalation_policies"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/pagerduty/browse_users"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/pagerduty/browse_change_events"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/pagerduty/browse_activity"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+# --- the operational write path: a person reviews the change ---
+
+[[policy.tool]]
+name = "mcp/pagerduty/manage_incidents"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["pagerduty-review"] }
+effects = ["pagerduty.changed"]
+
+# --- configuration and public-facing changes ---
+
+[[policy.tool]]
+name = "mcp/pagerduty/manage_services"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["pagerduty-review"] }
+effects = ["pagerduty.sensitive"]
+
+[[policy.tool]]
+name = "mcp/pagerduty/manage_schedules"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["pagerduty-review"] }
+effects = ["pagerduty.sensitive"]
+
+[[policy.tool]]
+name = "mcp/pagerduty/manage_teams"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["pagerduty-review"] }
+effects = ["pagerduty.sensitive"]
+
+[[policy.tool]]
+name = "mcp/pagerduty/manage_event_orchestrations"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["pagerduty-review"] }
+effects = ["pagerduty.sensitive"]
+
+[[policy.tool]]
+name = "mcp/pagerduty/manage_alert_grouping"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["pagerduty-review"] }
+effects = ["pagerduty.sensitive"]
+
+[[policy.tool]]
+name = "mcp/pagerduty/manage_status_pages"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["pagerduty-review"] }
+effects = ["pagerduty.sensitive"]

@@ -80,6 +80,12 @@ const BATTERIES = [
     logo: "/images/batteries/posthog.svg",
   },
   {
+    name: "PagerDuty",
+    description: "Rules for 18 incident, schedule, team, and status page tools; internal reads and every write reviewed.",
+    href: "/battery-pagerduty",
+    logo: "/images/batteries/pagerduty.svg",
+  },
+  {
     name: "Add your own",
     href: "/write-a-battery",
     add: true,

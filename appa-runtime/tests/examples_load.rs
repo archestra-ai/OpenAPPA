@@ -8,13 +8,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(unix)]
-use appa_runtime::api::RemedyOutcome;
-use appa_runtime::api::Runtime;
+use appa_runtime::api::{OfferId, RemedyOutcome, Runtime};
 use appa_runtime::config::Config;
 #[cfg(unix)]
 use appa_runtime::hooks;
 #[cfg(unix)]
-use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
+use appa_runtime_api::{HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome};
 
 /// The policies a package directory ships, by the suffix every one of them
 /// carries. The package's own `appa-package.toml` manifest is not a policy.
@@ -187,6 +186,19 @@ fn the_shipped_annotators_admit_every_audience_the_policy_writes() {
     }
 }
 
+/// The offer the feedback attributes to the `redact-secrets` sanitizer. An offer's
+/// `returns` describes a child's return only, so the feedback is where an output
+/// sanitizer's offer is named.
+#[cfg(unix)]
+fn masker_offer(feedback: &str) -> OfferId {
+    let line = feedback
+        .lines()
+        .skip_while(|line| !line.contains("sanitizer redact-secrets"))
+        .nth(1)
+        .unwrap_or_else(|| panic!("no redact-secrets offer in feedback: {feedback}"));
+    last_offer(line)
+}
+
 #[cfg(unix)]
 fn call(tool: &str, argument: &str, value: &str) -> ProposedCall {
     ProposedCall {
@@ -196,7 +208,8 @@ fn call(tool: &str, argument: &str, value: &str) -> ProposedCall {
 }
 
 /// A credential named relatively — `.env`, `cat .netrc` — is judged like its absolute
-/// spelling. A Bash call naming one is refused without a remedy. A Read narrows the
+/// spelling. A Bash call naming one narrows the trajectory to `self` and offers the stock
+/// masker, which returns the command's masked output to `public`. A Read narrows the
 /// trajectory to `self`, after which a public sink requires an exact-call human review.
 #[cfg(unix)]
 #[tokio::test]
@@ -210,17 +223,55 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
         HookDecision::Ack
     );
 
+    // A credential read is `self` data: the block offers the masker beside the plain
+    // narrowing and consults no person; the masked output is what reaches the model.
     for command in [
         "cat .env",
         "cat .netrc",
         "cat ~/.ssh/id_ed25519",
         "cat /home/me/.aws/credentials",
     ] {
-        let refused = propose(&runtime, call("host/claude-code/Bash", "command", command)).await;
-        let HookDecision::DenyCall { offers, .. } = refused else {
-            panic!("`{command}` is refused, got {refused:?}");
+        let read = call("host/claude-code/Bash", "command", command);
+        let blocked = propose(&runtime, read.clone()).await;
+        let HookDecision::DenyCall {
+            feedback,
+            offers,
+            review,
+        } = blocked
+        else {
+            panic!("`{command}` is blocked with the masker offered, got {blocked:?}");
         };
-        assert!(offers.is_empty(), "`{command}` is refused without a remedy");
+        assert_eq!(offers.len(), 2, "`{command}` offers the narrowing and the masker");
+        assert!(review.is_empty(), "`{command}` consults no person");
+        assert!(matches!(
+            runtime.execute_remedy(&actor(), masker_offer(&feedback)).await,
+            RemedyOutcome::Authorized { .. }
+        ));
+        assert_eq!(
+            propose(&runtime, read.clone()).await,
+            HookDecision::AllowCall { spawn: None }
+        );
+        let delivered = hooks::handle(
+            &runtime,
+            HookEvent::ToolResult {
+                actor: actor(),
+                call: read,
+                outcome: ToolOutcome::Success {
+                    body: OutcomeBody::Available(
+                        "GITHUB_TOKEN=ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789\nAWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nREGION=eu-west-1\n"
+                            .to_string(),
+                    ),
+                },
+            },
+        )
+        .await;
+        let HookDecision::DeliverValue { value } = delivered else {
+            panic!("`{command}`'s output crosses through the masker, got {delivered:?}");
+        };
+        assert_eq!(
+            value,
+            "GITHUB_TOKEN=[redacted-secret]\nAWS_SECRET_ACCESS_KEY=[redacted-secret]\nREGION=eu-west-1\n"
+        );
     }
 
     for path in ["./README.md", "../src/main.rs", "src/.gitignore/../main.rs"] {
@@ -247,6 +298,15 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
         HookDecision::AllowCall { spawn: None }
     );
     ran(&runtime, read).await;
+
+    // With the trajectory at `self`, a credential command needs no masker: it runs, and
+    // its confined result is kept as the tool returned it.
+    let settled = call("host/claude-code/Bash", "command", "cat ~/.npmrc");
+    assert_eq!(
+        propose(&runtime, settled.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, settled).await;
 
     let publication = propose(&runtime, call("host/claude-code/Artifact", "file_path", "page.html")).await;
     let HookDecision::DenyCall {

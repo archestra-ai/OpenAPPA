@@ -125,6 +125,7 @@ dependencies = [
  "libc",
  "libloading",
  "rand 0.10.2",
+ "regex",
  "reqwest",
  "rig-agent",
  "rig-core",

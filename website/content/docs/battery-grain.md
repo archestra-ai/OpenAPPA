@@ -9,7 +9,7 @@ breadcrumb: Grain
 
 The Grain battery covers 49 tools for recordings, notes, transcripts, deals, clips, stories, collections, and workspace administration.
 
-Your root config must define an Authority named `hitl` for actions that need a person's approval.
+Actions that need a person's approval carry the `hitl` mark. The Claude Code and kagent plugin defaults permit every mark, so the person running the session reviews them; another root config must define an Authority permitting the mark.
 
 [View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/grain).
 

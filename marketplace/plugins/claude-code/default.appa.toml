@@ -284,17 +284,20 @@ trust = { from = "suspicious", to = "trusted" }
 [policy.deployment]
 context_control = true
 
-# Batteries and Annotators can require fresh `hitl` attention or a wider
-# audience before a tool runs. This authority shows the person running the
-# Claude Code session the exact call and can approve those gaps for that call.
+# Batteries and Annotators can require fresh attention, trusted data, or a
+# wider audience before a tool runs. This authority shows the person running
+# the Claude Code session the exact call and can approve those gaps for that
+# call: any attention mark a battery declares (`*` — every mark but the
+# reserved `blocked`), data below `trusted`, and an audience up to `public`.
 # Approval does not change the trajectory's label or authorize later calls.
 [[policy.authority]]
 name = "hitl"
-hint = "Ask the person running this session to review the exact call and any required audience expansion."
+hint = "Ask the person running this session to review the exact call, the data it carries, and any required audience expansion."
 
 [policy.authority.permits]
+trust_below = "trusted"
 audience_missing = ["public"]
-attention = ["hitl"]
+attention = ["*"]
 
 [externals]
 timeout_ms = 5000

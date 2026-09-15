@@ -88,7 +88,7 @@ pub(crate) fn rulings_cover<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::{Authority, Mandate, Scope};
+    use crate::authority::{Attends, Authority, Mandate, Scope};
     use crate::contract::{Delta, LabelRequirements, Requires, ToolAnnotation};
     use crate::fact::EffectSet;
     use crate::label::Trust;
@@ -140,7 +140,7 @@ mod tests {
         let attester = Authority {
             name: AuthorityName::new("attester"),
             mandate: Mandate {
-                attends: vec![MarkName::new("signoff")],
+                attends: Attends::Named(vec![MarkName::new("signoff")]),
                 ..Mandate::default()
             },
             scope: Scope::default(),

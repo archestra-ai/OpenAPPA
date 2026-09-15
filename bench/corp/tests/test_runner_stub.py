@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from appa_bench_publish.publish import prepare_bundle
 from bench_corp import cli, runner
 from bench_corp.agents import AGENTS, Agent, PolicyTarget, command_for
 from bench_corp.policy import prune_policy
@@ -374,6 +375,12 @@ def test_command_routes_staged_policy_by_typed_target(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="staged policy"):
         command_for(AGENTS["appa"], policy_path=None, **arguments)
 
+    auto = command_for(AGENTS["auto"], policy_path=None, **arguments)
+    auto_ifc = command_for(AGENTS["auto-ifc"], policy_path=policy_path, **arguments)
+    assert auto[:3] == [str(AGENTS["auto"].executable), "-m", "bench_corp.auto_agent"]
+    assert "--settings" not in auto
+    assert auto_ifc[auto_ifc.index("--settings") + 1] == str(policy_path.resolve())
+
 
 def test_agent_refuses_incoherent_policy_targets(tmp_path: Path) -> None:
     with pytest.raises(TypeError, match="PolicyTarget"):
@@ -419,7 +426,18 @@ def test_scenario_policies_are_staged_before_launch(tmp_path: Path) -> None:
         artifact = episode_dir / "fides.json"
         assert artifact.read_bytes() == scenario.policy_profile.fides.read_bytes()
         command = json.loads((episode_dir / "result.json").read_text())["command"]
-        assert command[command.index("--profile") + 1] == str(artifact)
+        assert command[command.index("--profile") + 1] == "fides.json"
+        assert command[command.index("--data-root") + 1] == "data"
+        assert command[command.index("--sink-root") + 1] == "sink"
+        assert all(not Path(argument).is_absolute() for argument in command)
+
+    bundle = prepare_bundle(
+        tmp_path / "episode-fides-native",
+        "corp",
+        "a" * 40,
+        tmp_path / "publish-bundle",
+    )
+    assert bundle.archive.is_file()
 
 
 def test_episode_serves_and_records_annotator_answers(tmp_path: Path) -> None:

@@ -1,0 +1,17 @@
+# A plain command runs. A credential read goes through the masker; an internal email
+# after it is allowed.
+mcp/shell/bash {
+  command: "ls -la"
+}
+expect allow
+
+mcp/shell/bash {
+  command: "cat .env"
+}
+expect sanitizer mask-secrets
+
+mcp/mail/send {
+  to: "team@corp.example"
+  body: "the config keys"
+}
+expect allow

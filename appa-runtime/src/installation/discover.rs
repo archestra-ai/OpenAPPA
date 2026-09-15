@@ -290,6 +290,8 @@ mod tests {
                 namespaces: namespaces.iter().map(|text| namespace(text)).collect(),
                 helpers: vec![],
                 audiences: vec![],
+                credentials: vec![],
+                setup: None,
             },
         )
     }

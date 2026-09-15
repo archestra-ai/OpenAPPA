@@ -59,7 +59,9 @@ experiment writes: `experiment-create` takes the
 `delete-feature-flag`, `insight-delete`, `dashboard-delete`,
 `experiment-delete`, `survey-delete` — records `posthog.sensitive` too.
 
-Your root config must define an authority permitting `posthog-review`:
+The Claude Code and kagent plugin defaults ship a human authority
+permitting every mark (`attention = ["*"]`), so `posthog-review` needs no
+wiring there. Another root config must permit it itself:
 
 ```toml
 [[policy.authority]]

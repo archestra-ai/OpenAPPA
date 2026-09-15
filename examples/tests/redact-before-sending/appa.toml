@@ -2,9 +2,10 @@
 # restricts the trajectory to the HR desk; an outside email needs `public`;
 # the sanitizer is the declared way from one to the other.
 #
-# The HR desk is a literal reader here, not the built-in `internal`: a
-# sanitizer's `from` needs the members of the audience it moves from, and
-# `internal` has members only when a `[policy.audience] internal` source is bound.
+# The HR desk is a literal reader here. A sanitizer's `from` is decided against
+# the value's label: two levels of the built-in chain compare without members
+# (see mask-before-sharing), while a literal reader against `internal` needs the
+# members a `[policy.audience] internal` source supplies.
 
 [policy]
 version = 2

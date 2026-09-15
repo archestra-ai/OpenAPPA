@@ -208,12 +208,7 @@ fn authority_descriptions(compiled: &appa_policy::Config, bindings: Bindings<'_>
                 .iter()
                 .map(|effect| effect.as_str().to_string())
                 .collect(),
-            attention: authority
-                .mandate
-                .attends
-                .iter()
-                .map(|mark| mark.as_str().to_string())
-                .collect(),
+            attention: authority.mandate.attends.spellings(),
         })
         .collect::<Vec<_>>();
     authorities.sort_by(|left, right| left.name.cmp(&right.name));

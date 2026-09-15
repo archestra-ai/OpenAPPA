@@ -9,92 +9,112 @@
 [policy]
 version = 2
 
-# --- Bash: commands naming requester credentials require token-exposed ---
+# --- Bash: commands naming requester credentials are `self` data, masked ---
 
-# We have no good sanitizer for tokens at the moment. A command naming a
-# credential path requires the `token-exposed` mark. Because no authority
-# permits `token-exposed` today and no token sanitizer yet covers it, the call
-# is refused before secrets reach the model. In the future, a token sanitizer
-# can permit `token-exposed` by redacting or masking values.
+# A command naming a credential path narrows the session to `self`, the
+# requester. The battery withholds the command's result (`confined_results`
+# below) and the `redact-secrets` sanitizer, scoped to these `credentials`
+# rules, masks every token before the output reaches the model and returns the
+# value to `public`: the session keeps its label and the masked text is what
+# the model reads.
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*.env*)"
-requires = { attention = ["token-exposed"] }
-delta = {}
+delta = { audience = ["self"] }
+tags = ["credentials"]
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*.claude.json*)"
-requires = { attention = ["token-exposed"] }
-delta = {}
+delta = { audience = ["self"] }
+tags = ["credentials"]
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*.credentials.json*)"
-requires = { attention = ["token-exposed"] }
-delta = {}
+delta = { audience = ["self"] }
+tags = ["credentials"]
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*.ssh/*)"
-requires = { attention = ["token-exposed"] }
-delta = {}
+delta = { audience = ["self"] }
+tags = ["credentials"]
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*.aws/credentials*)"
-requires = { attention = ["token-exposed"] }
-delta = {}
+delta = { audience = ["self"] }
+tags = ["credentials"]
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*.netrc*)"
-requires = { attention = ["token-exposed"] }
-delta = {}
+delta = { audience = ["self"] }
+tags = ["credentials"]
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*.config/gh/hosts.yml*)"
-requires = { attention = ["token-exposed"] }
-delta = {}
+delta = { audience = ["self"] }
+tags = ["credentials"]
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*id_rsa*)"
-requires = { attention = ["token-exposed"] }
-delta = {}
+delta = { audience = ["self"] }
+tags = ["credentials"]
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*id_ed25519*)"
-requires = { attention = ["token-exposed"] }
-delta = {}
+delta = { audience = ["self"] }
+tags = ["credentials"]
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*/proc/*environ*)"
-requires = { attention = ["token-exposed"] }
-delta = {}
+delta = { audience = ["self"] }
+tags = ["credentials"]
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*/Library/Keychains/*)"
-requires = { attention = ["token-exposed"] }
-delta = {}
+delta = { audience = ["self"] }
+tags = ["credentials"]
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*.docker/config.json*)"
-requires = { attention = ["token-exposed"] }
-delta = {}
+delta = { audience = ["self"] }
+tags = ["credentials"]
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*.git-credentials*)"
-requires = { attention = ["token-exposed"] }
-delta = {}
+delta = { audience = ["self"] }
+tags = ["credentials"]
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*.kube/*)"
-requires = { attention = ["token-exposed"] }
-delta = {}
+delta = { audience = ["self"] }
+tags = ["credentials"]
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*.npmrc*)"
-requires = { attention = ["token-exposed"] }
-delta = {}
+delta = { audience = ["self"] }
+tags = ["credentials"]
 
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*.pypirc*)"
-requires = { attention = ["token-exposed"] }
-delta = {}
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+# The stock `redact-secrets` sanitizer masks private-key blocks, tokens of
+# well-known shapes, the value of any assignment whose key names a secret, and
+# long high-entropy runs. It applies only to results of the `credentials` rules
+# above, never to other confined results or a subagent's return.
+[[policy.sanitizer]]
+name = "redact-secrets"
+on = ["tool_output"]
+tags = ["credentials"]
+
+[policy.sanitizer.permits]
+audience = { from = ["self"], to = ["public"] }
+
+# The battery withholds its own tool's result so the sanitizer can run on it.
+[policy.deployment]
+confined_results = ["host/claude-code/Bash"]
+
+[externals.sanitizers.redact-secrets]
+builtin = "redact-secrets"
 
 # The default model Annotator generates every other command's complete contract
 # before dispatch: its output label, required trust, review marks, and effects.

@@ -570,7 +570,7 @@ Attention requires fresh approval for each call. A previous approval or recorded
 | Field | Meaning | Example |
 |---|---|---|
 | `requires.attention` | Lists the approvals required before the tool can run. | `requires = { attention = ["sre-signoff"] }` |
-| `permits.attention` | Lists the approvals an authority is allowed to give. | `permits = { attention = ["sre-signoff"] }` |
+| `permits.attention` | Lists the approvals an authority is allowed to give. `["*"]` alone allows every mark the policy declares except `blocked`. | `permits = { attention = ["sre-signoff"] }` |
 
 In the example below, each `apply_db_migration` call requires `sre-signoff`. The `sre-reviewer` authority has permission to give that approval and uses the built-in human approval handler, `hitl`.
 
@@ -590,6 +590,10 @@ builtin = "hitl"
 ```
 
 An attention mark is the name of an approval requirement, such as `sre-signoff`. OpenAPPA can ask any authority whose `permits.attention` includes that name, regardless of its tags. See [Authorities](#authorities) for other approval permissions.
+
+A deployment with one reviewer can permit every mark at once. `permits = { attention = ["*"] }` allows the authority to give every approval the policy declares, under any name a battery or annotator uses. The wildcard MUST be the only entry; `["*", "sre-signoff"]` is a load error.
+
+`blocked` is the reserved mark that denies a call. No authority can list it in `permits.attention`, and `["*"]` does not cover it. A tool that requires `blocked` has no remedy, whatever authorities the policy declares.
 
 ## Annotators
 
@@ -664,14 +668,14 @@ An annotator's permits limit the values it can use in its answers. The following
 |---|---|---|
 | `ranks` | Ranks used in `delta.trust` or `requires.trust`. | Every rank in the trust chain. |
 | `audiences` | Built-in audiences, `@` references, selector placeholders, or literal reader IDs that the answer may use. | `self`, `internal`, named groups, and reader IDs declared in the policy. |
-| `marks` | Required attention marks. | Every mark declared in an authority's `permits.attention`. |
+| `marks` | Required attention marks. | Every mark the policy declares: in a tool's `requires.attention`, an authority's `permits.attention`, or another annotator's `marks`. |
 | `effects` | Effects that the call may record or require. | Every effect name declared by the policy. |
 
 `public` is always allowed in an answer, so it is not listed in `audiences`. Setting `audiences = []` allows only public answers.
 
 An annotator can use a selector placeholder only when its own `audiences` lists it. A selector placeholder in `audiences`, such as `@github:repo/$owner/$repo/collaborators`, is instantiated for each call. Every `$<argument_name>` in it becomes a required top-level string argument of every tool that uses the annotator, so the wildcard `*` tool, whose arguments the policy does not describe, cannot use such an annotator. The consult request and the answer schema list the concrete spelling for that call, such as `@github:repo/acme/api/collaborators`, and the answer MAY use only that spelling. The annotator can answer about the resource the call names and about no other. See [Read a source collection from a tool argument](#read-a-source-collection-from-a-tool-argument) for the placeholder rules.
 
-An empty list and an omitted field have different meanings. For example, `marks = []` prevents the annotator from requiring attention. Omitting `marks` allows it to use any mark declared in an authority's `permits.attention`.
+An empty list and an omitted field have different meanings. For example, `marks = []` prevents the annotator from requiring attention. Omitting `marks` allows it to use any mark the policy declares, `blocked` included; a catch-all `["*"]` permit declares no mark of its own.
 
 The optional `hint` tells the annotator how to classify the call. It can explain what to look for and give examples. It cannot allow values excluded by the permits and cannot exceed 512 characters. An annotator name must be non-empty and can contain dots.
 
@@ -846,6 +850,7 @@ You can also select a built-in implementation with `builtin` under `[externals.s
 | Configuration | Behavior |
 |---|---|
 | `builtin = "redact-email"` | Replaces email addresses with a fixed placeholder. It does not remove other private information. |
+| `builtin = "redact-secrets"` | Replaces credentials with a fixed placeholder: private-key blocks, tokens of well-known shapes (AWS, GitHub, Anthropic, OpenAI, Slack, Google, GitLab, npm, JWT), the password in a URL's `user:password@host`, the value of an assignment whose key names a password, passphrase, secret, token, credential, authorization, key or auth (quoted JSON keys, `Bearer` values and netrc `password` lines included), and any run of 20 or more characters with high entropy. It is a detector, not a proof that no secret remains. |
 | `builtin = "claude-code"` | Uses Claude Code to transform data according to the sanitizer's `hint`, `on`, and `permits`. |
 | `builtin = "llm"` | Uses the model configured under `[externals.llm]` to transform data according to the sanitizer's `hint`, `on`, and `permits`. |
 
@@ -893,7 +898,7 @@ Each field in `permits` allows the authority to approve a different type of requ
 | `trust_below` | Allows a call whose required trust rank is not met, up to the rank specified here. |
 | `audience_missing` | Allows sharing with readers outside the current audience, limited to the audience specified here. |
 | `effects_containing` | Allows a call blocked by `excludes` because a listed effect has already occurred. |
-| `attention` | The listed attention marks for this call. |
+| `attention` | The listed attention marks for this call, or every declared mark except `blocked` when the list is `["*"]`. |
 
 For example, these permissions let an authority approve a call that needs `trusted` data, a public audience, an exception for an earlier `email.sent` effect, or `finance-signoff`:
 
@@ -1128,7 +1133,7 @@ max_body_bytes = 65536
 OpenAPPA checks declarations in the root file first, then declarations from included files in the order listed by `include`. The following rules apply:
 
 - An included file cannot include another file.
-- An included file cannot replace settings that apply to the whole deployment.
+- An included file cannot replace settings that apply to the whole deployment. The one exception is `confined_results` under `[policy.deployment]`: an included file can list tools it declares itself, and the names join the root's list.
 - A root `[[policy.annotator]]` replaces an included annotator with the same name. Fields omitted from the replacement are not inherited.
 - Two included files cannot declare the same annotator.
 - Two files cannot configure the same external component name within the same kind, such as two `[externals.sanitizers.clean]` sections.

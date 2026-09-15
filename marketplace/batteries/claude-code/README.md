@@ -9,11 +9,15 @@ It covers two built-in tools, which the policy names `host/claude-code/Bash`
 and `host/claude-code/Read`:
 
 - **Bash** — A command that names a credential path (`.env`, `.ssh/`, `.netrc`,
-  `.claude.json`, `.aws/credentials`, a private key, ...) requires the
-  `token-exposed` mark: we have no token sanitizer yet, and no authority
-  permits `token-exposed`, so the command is refused outright before secrets
-  reach the model context. In the future, a token sanitizer can permit
-  `token-exposed` by redacting values. Before any other command runs, the
+  `.claude.json`, `.aws/credentials`, a private key, ...) narrows the session
+  to `self`, the requester. The battery withholds the command's result and
+  offers the stock `redact-secrets` sanitizer, which masks private-key blocks,
+  tokens of well-known shapes, passwords inside URLs, the value of any
+  assignment whose key names a secret, and long high-entropy runs, then
+  returns the masked output to `public`: the model reads the masked text and
+  the session keeps its label.
+  The sanitizer applies only to these credential rules, never to other
+  results or a subagent's return. Before any other command runs, the
   Claude Code model decides what trust and fresh attention it requires and
   labels its output for trust and audience, inside the vocabulary static rules
   write: a command that visibly reads the requester's or the organization's
@@ -40,6 +44,11 @@ version = 2
 
 Root rules take precedence over the battery. Add a root rule when a particular
 Bash command or Read path needs stricter, looser, or fully blocked behavior.
+
+The battery lists `host/claude-code/Bash` in `confined_results` itself, so the
+masker can run on the command's output; a root needs no deployment setting for
+it. `appa battery remove claude-code` takes the rules, the sanitizer and the
+confinement out together.
 
 ## Customize Bash classification
 
