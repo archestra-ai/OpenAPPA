@@ -319,7 +319,7 @@ class AddressTests(unittest.TestCase):
     def test_only_a_plain_address_is_a_reader(self):
         for text in ["alice@corp.com", "a.b+c@sub.corp.com"]:
             self.assertTrue(AUDIENCE_SOURCE.is_address(text))
-        for text in ["svc-agent", "a@b@c", "@corp.com", "alice@", "alice @corp.com", "databricks:1@corp.com", None, 3]:
+        for text in ["svc-agent", "a@b@c", "@corp.com", "alice@", "alice @corp.com", "databricks:1@corp.com", "alice@corp.com:evil", None, 3]:
             self.assertFalse(AUDIENCE_SOURCE.is_address(text))
 
 

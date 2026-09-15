@@ -93,11 +93,12 @@ class Workspace:
 
 def is_address(text):
     """Whether a userName is a reader address under the contract: one `@`,
-    something on both sides, no whitespace, and no `:` before the `@`."""
-    if not isinstance(text, str) or text.count("@") != 1 or any(character.isspace() for character in text):
+    something on both sides, no whitespace, and no `:` anywhere, since a
+    `:` makes a reader a qualified id."""
+    if not isinstance(text, str) or text.count("@") != 1 or ":" in text:
         return False
     local, domain = text.split("@")
-    return bool(local) and bool(domain) and ":" not in local
+    return bool(local) and bool(domain) and not any(character.isspace() for character in text)
 
 
 def qualified(user_id):
