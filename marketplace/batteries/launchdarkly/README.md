@@ -64,8 +64,9 @@ record `launchdarkly.sensitive`. A create or update returns the changed
 object, so it labels the trajectory like a read; a delete returns no
 content and changes no label.
 
-Your root config must define an authority permitting
-`launchdarkly-review`:
+The Claude Code and kagent plugin defaults ship a human authority
+permitting every mark (`attention = ["*"]`), so `launchdarkly-review`
+needs no wiring there. Another root config must permit it itself:
 
 ```toml
 [[policy.authority]]

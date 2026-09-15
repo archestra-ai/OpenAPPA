@@ -3251,7 +3251,7 @@ fn block_feedback(
         appa_engine::check::Gap::Attention(mark) => registry
             .authorities()
             .iter()
-            .any(|authority| authority.mandate.attends.contains(mark)),
+            .any(|authority| authority.mandate.attends.covers(mark)),
         _ => false,
     });
     let public_expansion_reviewable = registry.authorities().iter().any(|authority| {

@@ -82,6 +82,17 @@ impl AudienceArgument {
 }
 
 name_newtype!(MarkName);
+
+impl MarkName {
+    /// The reserved denial. A contract requiring it has no remedy by definition: no
+    /// authority may attend it, and a catch-all mandate never covers it.
+    pub const BLOCKED: &'static str = "blocked";
+
+    pub fn is_blocked(&self) -> bool {
+        self.0 == Self::BLOCKED
+    }
+}
+
 name_newtype!(TagName);
 name_newtype!(SurfaceName);
 

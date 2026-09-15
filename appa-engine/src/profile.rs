@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::authority::Attends;
 use crate::contract::{ToolAnnotation, ToolDeclaration};
 use crate::label::{Label, Trust};
 use crate::names::SurfaceName;
@@ -419,7 +420,10 @@ fn identity_document(registry: &RegistryConfig, profile: &DeploymentProfile) -> 
                     "trust_ceiling": authority.mandate.trust_ceiling,
                     "reader_ceiling": authority.mandate.reader_ceiling,
                     "waivers": sorted_set(&authority.mandate.waivers),
-                    "attends": sorted_set(&authority.mandate.attends),
+                    "attends": match &authority.mandate.attends {
+                        Attends::Named(marks) => serde_json::Value::Array(sorted_set(marks)),
+                        Attends::Any => serde_json::Value::String(Attends::WILDCARD.to_string()),
+                    },
                 },
                 "scope": sorted_set(&authority.scope.tags),
             })

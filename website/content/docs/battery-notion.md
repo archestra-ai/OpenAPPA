@@ -9,7 +9,7 @@ breadcrumb: Notion
 
 The Notion battery covers all 36 tools on the hosted Notion MCP server's supported-tools page.
 
-Your root config must define an Authority permitting `notion-review` for structural and agent-session changes.
+Structural and agent-session changes need `notion-review`. The Claude Code and kagent plugin defaults permit every mark, so the person running the session reviews them; another root config must define an Authority permitting the mark.
 
 [View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/notion).
 

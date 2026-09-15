@@ -9,7 +9,7 @@ breadcrumb: LaunchDarkly
 
 The LaunchDarkly battery covers all 20 tools that LaunchDarkly's official MCP server registers: feature flags, environments, AI Configs, code references, and the audit log.
 
-Your root config must define an Authority permitting `launchdarkly-review` for writes.
+Writes need `launchdarkly-review`. The Claude Code and kagent plugin defaults permit every mark, so the person running the session reviews them; another root config must define an Authority permitting the mark.
 
 [View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/launchdarkly).
 

@@ -9,7 +9,7 @@ breadcrumb: PostHog
 
 The PostHog battery covers PostHog's official MCP server: all 44 tools in its registry. The hosted endpoint exposes one feature subset per `features` query parameter and every tool without it, so the battery names the whole registry.
 
-Your root config must define an Authority permitting `posthog-review` for writes.
+Writes need `posthog-review`. The Claude Code and kagent plugin defaults permit every mark, so the person running the session reviews them; another root config must define an Authority permitting the mark.
 
 [View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/posthog).
 

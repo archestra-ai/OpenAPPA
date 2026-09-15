@@ -1165,7 +1165,7 @@ pub(crate) fn gap_cover(
         }
         Gap::NoPrior(kind) => Evaluation::of_exact(authority.scope.covers(tags) && mandate.waivers.contains(kind)),
         // Attention routes by its own currency — the attended mark — never by scope.
-        Gap::Attention(mark) => Evaluation::of_exact(mandate.attends.contains(mark)),
+        Gap::Attention(mark) => Evaluation::of_exact(mandate.attends.covers(mark)),
         Gap::Prior(_) | Gap::Cap { .. } => Evaluation::Fails,
     }
 }
@@ -1340,7 +1340,7 @@ pub(crate) fn direct_clears(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::{Hint, Mandate, Sanitizer, SanitizerPoints, Scope};
+    use crate::authority::{Attends, Hint, Mandate, Sanitizer, SanitizerPoints, Scope};
     use crate::check::CheckOutcome;
     use crate::contract::{
         AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, LabelRequirements, PinnedAnnotation,
@@ -1759,7 +1759,7 @@ mod tests {
         let steward = Authority {
             name: AuthorityName::new("steward"),
             mandate: Mandate {
-                attends: vec![MarkName::new("signoff")],
+                attends: Attends::Named(vec![MarkName::new("signoff")]),
                 ..Mandate::default()
             },
             scope: Scope::default(),
@@ -2131,7 +2131,7 @@ mod tests {
         let attester = Authority {
             name: AuthorityName::new("attester"),
             mandate: Mandate {
-                attends: vec![MarkName::new("signoff")],
+                attends: Attends::Named(vec![MarkName::new("signoff")]),
                 ..Mandate::default()
             },
             scope: Scope::default(),
@@ -3294,7 +3294,7 @@ mod tests {
         let attester = |name: &str| Authority {
             name: AuthorityName::new(name),
             mandate: Mandate {
-                attends: vec![MarkName::new("signoff")],
+                attends: Attends::Named(vec![MarkName::new("signoff")]),
                 ..Mandate::default()
             },
             scope: Scope::default(),
@@ -3342,7 +3342,7 @@ mod tests {
             name: AuthorityName::new("officer"),
             mandate: Mandate {
                 trust_ceiling: Some(TRUSTED),
-                attends: vec![MarkName::new("signoff")],
+                attends: Attends::Named(vec![MarkName::new("signoff")]),
                 ..Mandate::default()
             },
             scope: Scope::default(),
@@ -3668,7 +3668,7 @@ mod tests {
         let officer = Authority {
             name: AuthorityName::new("officer"),
             mandate: Mandate {
-                attends: vec![MarkName::new("signoff")],
+                attends: Attends::Named(vec![MarkName::new("signoff")]),
                 ..Mandate::default()
             },
             scope: Scope {
@@ -3709,7 +3709,7 @@ mod tests {
         let officer = Authority {
             name: AuthorityName::new("officer"),
             mandate: Mandate {
-                attends: vec![MarkName::new("other")],
+                attends: Attends::Named(vec![MarkName::new("other")]),
                 ..Mandate::default()
             },
             scope: Scope::default(),
@@ -3726,6 +3726,59 @@ mod tests {
         let log = vec![opened(known(TRUSTED, Audience::public()))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert!(!planned.is_curable());
+    }
+
+    #[test]
+    fn a_catch_all_authority_remedies_any_mark_but_leaves_blocked_terminal() {
+        let wire = ToolAnnotation {
+            description: Some("A test tool.".to_string()),
+            name: ToolName::new("wire"),
+            tags: vec![],
+            delta: Delta::NONE,
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::default(),
+            requires: Requires {
+                attention: vec![MarkName::new("sentry-review")],
+                ..Requires::default()
+            },
+        };
+        let denied = ToolAnnotation {
+            description: Some("A test tool.".to_string()),
+            name: ToolName::new("denied"),
+            tags: vec![],
+            delta: Delta::NONE,
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::default(),
+            requires: Requires {
+                attention: vec![MarkName::new(MarkName::BLOCKED)],
+                ..Requires::default()
+            },
+        };
+        let anyone = Authority {
+            name: AuthorityName::new("anyone"),
+            mandate: Mandate {
+                attends: Attends::Any,
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: declared(vec![wire, denied]),
+            authorities: vec![anyone],
+            sanitizers: vec![],
+            audience: crate::audience::AudienceConfig::default(),
+            annotators: vec![],
+        });
+        let log = vec![opened(known(TRUSTED, Audience::public()))];
+        let reviewed = plan_of(&registry, &log, &call("wire", json!({})));
+        assert_eq!(
+            exec(&reviewed.plans[0]).steps,
+            vec![RemedyStep::Authorize(AuthorityName::new("anyone"))]
+        );
+        let blocked = plan_of(&registry, &log, &call("denied", json!({})));
+        assert!(!blocked.is_curable());
     }
 
     #[test]
@@ -3812,7 +3865,7 @@ mod tests {
                     })
                 }
                 Gap::NoPrior(kind) => authority.mandate.waivers.contains(kind),
-                Gap::Attention(mark) => authority.mandate.attends.contains(mark),
+                Gap::Attention(mark) => authority.mandate.attends.covers(mark),
                 Gap::Prior(_) | Gap::Cap { .. } => false,
             })
         }
@@ -3968,7 +4021,11 @@ mod tests {
             prop::option::of((0u8..2).prop_map(Trust::new)),
             prop::option::of(small_audience()),
             prop::collection::vec(small_effect(), 0..2),
-            prop::bool::ANY,
+            prop_oneof![
+                Just(Attends::Named(vec![])),
+                Just(Attends::Named(vec![MarkName::new("m0")])),
+                Just(Attends::Any),
+            ],
         )
             .prop_map(move |(trust_ceiling, reader_ceiling, waivers, attends)| Authority {
                 name: name.clone(),
@@ -3976,7 +4033,7 @@ mod tests {
                     trust_ceiling,
                     reader_ceiling: reader_ceiling.map(DeclaredAudience::literal),
                     waivers,
-                    attends: if attends { vec![MarkName::new("m0")] } else { vec![] },
+                    attends,
                 },
                 scope: Scope::default(),
                 hint: None,
@@ -4240,7 +4297,7 @@ mod tests {
             }
             let marks: BTreeSet<_> = contract.requires.attention_marks().iter().collect();
             for mark in &marks {
-                multiply(authorities.iter().filter(|a| a.mandate.attends.contains(mark)).count());
+                multiply(authorities.iter().filter(|a| a.mandate.attends.covers(mark)).count());
             }
             let output_sanitizers = registry.sanitizers().filter(|sanitizer| sanitizer.on.output).count();
             bound = bound.saturating_mul(1 + output_sanitizers as u128);
@@ -4357,7 +4414,7 @@ mod tests {
                     Gap::Includes { recipients } => scoped && authority.mandate.reader_ceiling.as_ref()
                         .is_some_and(|c| decided(Audience::of_declared(c).includes(recipients, &parts.context()))),
                     Gap::NoPrior(kind) => scoped && authority.mandate.waivers.contains(kind),
-                    Gap::Attention(mark) => authority.mandate.attends.contains(mark),
+                    Gap::Attention(mark) => authority.mandate.attends.covers(mark),
                     Gap::Prior(_) | Gap::Cap { .. } => false,
                 }
             };
