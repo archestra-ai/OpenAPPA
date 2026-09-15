@@ -85,9 +85,10 @@ pub struct BatteryInstall {
     target: Target,
     #[command(flatten)]
     source: Source,
-    /// Existing connection identity for one single-namespace battery.
+    /// Existing connection identity for one single-namespace battery; repeat
+    /// it to bind the battery to several connections.
     #[arg(long, value_parser = server_name, requires = "names", allow_hyphen_values = true)]
-    server: Option<String>,
+    server: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -204,10 +205,14 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
     let mut seen = std::collections::BTreeSet::new();
     args.names.retain(|name| seen.insert(name.clone()));
     let result = (|| {
-        if args.server.is_some() && args.names.len() != 1 {
+        if !args.server.is_empty() && args.names.len() != 1 {
             return Err(InstallError::Invalid(
                 "--server binds one battery's namespace; install that battery on its own".into(),
             ));
+        }
+        let mut bound = std::collections::BTreeSet::new();
+        if let Some(repeated) = args.server.iter().find(|server| !bound.insert(server.as_str())) {
+            return Err(InstallError::Invalid(format!("--server {repeated} is given twice")));
         }
         let path = args.target.path();
         if !path.exists() {
@@ -260,17 +265,20 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
             selection.select(PackageKind::Battery, name);
             text = includes::add(&text, &includes::battery_include(name))?;
         }
-        if let Some(server) = &args.server {
+        if let [server] = args.server.as_slice()
+            && batteries[0].namespaces.len() == 1
+            && batteries[0].namespaces[0].as_str() == server
+        {
+            return Err(InstallError::Invalid(format!(
+                "{server} is the namespace this battery already names; no --server binding is needed"
+            )));
+        }
+        if !args.server.is_empty() {
             let battery = &batteries[0];
             if battery.namespaces.len() != 1 {
                 return Err(InstallError::Invalid("this battery has multiple namespaces; configure server_aliases explicitly in the deployment config".into()));
             }
-            if battery.namespaces[0].as_str() == server {
-                return Err(InstallError::Invalid(format!(
-                    "{server} is the namespace this battery already names; no --server binding is needed"
-                )));
-            }
-            text = includes::bind_server(&text, &battery.namespaces[0], server)?;
+            text = includes::bind_servers(&text, &battery.namespaces[0], &args.server)?;
         }
         eprintln!("appa: validating and activating the selected policy...");
         installation.commit_installation(Some(&before), text.as_bytes(), &selection)?;

@@ -86,6 +86,12 @@ const BATTERIES = [
     logo: "/images/batteries/pagerduty.svg",
   },
   {
+    name: "Databricks",
+    description: "Rules for the Genie One and Databricks SQL managed servers; internal reads, every SQL statement classified before it runs.",
+    href: "/battery-databricks",
+    logo: "/images/batteries/databricks.svg",
+  },
+  {
     name: "Add your own",
     href: "/write-a-battery",
     add: true,

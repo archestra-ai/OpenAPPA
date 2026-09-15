@@ -50,6 +50,13 @@ opt-level = 3
 [profile.release.package.sha2]
 opt-level = 3
 
+# A served runtime digests its own executable before it binds, and a debug build is
+# well over a hundred megabytes: through an unoptimized sha2 that is tens of seconds
+# of startup, past the served tests' health deadline. Optimizing the one crate keeps
+# the debug build's startup under a second.
+[profile.dev.package.sha2]
+opt-level = 3
+
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

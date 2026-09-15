@@ -992,7 +992,7 @@ mod tests {
             format!(
                 r#"
             [server_aliases]
-            github = "{server}"
+            github = ["{server}"]
             [externals]
             timeout_ms = 1000
             max_body_bytes = 4096
