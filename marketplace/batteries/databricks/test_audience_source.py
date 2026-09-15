@@ -124,6 +124,26 @@ class SelectorTests(unittest.TestCase):
         members = AUDIENCE_SOURCE.answer(call, {"selector": "group/everyone"})["members"]
         self.assertEqual(members, [f"u{i}@corp.com" for i in ids])
 
+    def test_a_space_shared_with_several_large_groups_reads_the_directory_once(self):
+        first = [str(i) for i in range(21)]
+        second = [str(i) for i in range(10, 31)]
+        acl = {
+            "access_control_list": [
+                {"group_name": "east", "all_permissions": [{"permission_level": "CAN_VIEW"}]},
+                {"group_name": "west", "all_permissions": [{"permission_level": "CAN_VIEW"}]},
+            ]
+        }
+        call = fixture_api(
+            [
+                ("/api/2.0/permissions/genie/space-1", {}, acl),
+                (*group_listing("east"), {"Resources": [group("g1", "east", users=first)]}),
+                (*group_listing("west"), {"Resources": [group("g2", "west", users=second)]}),
+                (*users_listing(), user_page([user(str(i), f"u{i}@corp.com") for i in range(31)])),
+            ]
+        )
+        members = AUDIENCE_SOURCE.answer(call, {"selector": "genie-space/space-1/readers"})["members"]
+        self.assertEqual(members, [f"u{i}@corp.com" for i in range(31)])
+
     def test_a_group_member_the_directory_does_not_report_is_a_failure(self):
         call = fixture_api(
             [

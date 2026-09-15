@@ -7,4 +7,4 @@ policy = "appa.toml"
 hosts = ["claude-code"]
 namespaces = ["databricks"]
 helpers = ["audience-source.py", "databricks_token.py"]
-setup = "Bind both managed servers: appa battery install databricks --server <genie-server> --server <sql-server>. Falls back to your Databricks CLI login (databricks auth login) when the variables are unset; the token needs to read SCIM users and groups and Genie space permissions."
+setup = "Bind both managed servers: appa battery install databricks --server <genie-server> --server <sql-server>. Set APPA_PROVIDER_DATABRICKS_HOST and APPA_PROVIDER_DATABRICKS_TOKEN where the runtime runs, or log in with `databricks auth login`; the token needs to read SCIM users and groups and Genie space permissions."

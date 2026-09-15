@@ -31,7 +31,7 @@ def workspace_url(text):
     if "://" not in text:
         text = f"https://{text}"
     parsed = urlparse(text)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.path not in ("", "/"):
+    if parsed.scheme != "https" or not parsed.hostname or parsed.path not in ("", "/") or parsed.username is not None:
         return None
     return f"https://{parsed.netloc}"
 
@@ -59,10 +59,16 @@ def cli_json(environ, arguments):
 
 
 def resolve_host(environ):
+    """The workspace a set variable names, else the CLI's; a variable that is set
+    to something unusable is refused, never skipped for the next source."""
     for variable in (HOST_VAR, SDK_HOST_VAR):
-        host = workspace_url(environ.get(variable))
-        if host:
-            return host
+        value = (environ.get(variable) or "").strip()
+        if not value:
+            continue
+        host = workspace_url(value)
+        if not host:
+            raise RuntimeError(f"{variable} is {value!r}, not a workspace URL such as https://<workspace>.cloud.databricks.com")
+        return host
     described = cli_json(environ, ["auth", "describe", "-o", "json"]) or {}
     details = described.get("details")
     return workspace_url(details.get("host")) if isinstance(details, dict) else None

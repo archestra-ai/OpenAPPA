@@ -77,6 +77,20 @@ def rest_api(host, token):
     return call
 
 
+class Workspace:
+    """One consult's view of the workspace: the REST call, and the directory
+    read at most once however many groups the consult expands."""
+
+    def __init__(self, call):
+        self.call = call
+        self.users = None
+
+    def directory(self):
+        if self.users is None:
+            self.users = {user["id"]: user for user in paged_users(self.call)}
+        return self.users
+
+
 def is_address(text):
     """Whether a userName is a reader address under the contract: one `@`,
     something on both sides, no whitespace, and no `:` before the `@`."""
@@ -98,13 +112,13 @@ def reader_of(user):
     return user_name if is_address(user_name) else qualified(user["id"])
 
 
+def distinct(readers):
+    """The readers once each, in first-seen order."""
+    return list(dict.fromkeys(readers))
+
+
 def readers_of(users):
-    readers = []
-    for user in users:
-        reader = reader_of(user)
-        if reader is not None and reader not in readers:
-            readers.append(reader)
-    return readers
+    return distinct(reader for user in users if (reader := reader_of(user)) is not None)
 
 
 def paged_users(call, **params):
@@ -126,44 +140,49 @@ def paged_users(call, **params):
             return
 
 
-def viewer_members(call):
-    me = call(f"{SCIM}/Me")
+def viewer_members(workspace):
+    me = workspace.call(f"{SCIM}/Me")
     return readers_of([me])
 
 
-def workspace_members(call):
-    return readers_of(paged_users(call, filter="active eq true"))
+def workspace_members(workspace):
+    return readers_of(paged_users(workspace.call, filter="active eq true"))
 
 
-def users_by_id(call, user_ids):
+def users_by_id(workspace, user_ids):
     """The directory entries for exactly these ids; an id the workspace does
     not report is a failure, never a member silently dropped."""
     if len(user_ids) <= DIRECT_LOOKUPS:
         users = {}
         for user_id in user_ids:
             try:
-                users[user_id] = call(f"{SCIM}/Users/{urllib.parse.quote(user_id, safe='')}")
+                users[user_id] = workspace.call(f"{SCIM}/Users/{urllib.parse.quote(user_id, safe='')}")
             except NotFound:
                 raise RuntimeError(f"the directory does not report member {user_id}") from None
         return users
-    directory = {user["id"]: user for user in paged_users(call)}
+    directory = workspace.directory()
     missing = [user_id for user_id in user_ids if user_id not in directory]
     if missing:
         raise RuntimeError(f"the directory does not report members {missing}")
     return {user_id: directory[user_id] for user_id in user_ids}
 
 
-def group_by_name(call, name):
-    listing = call(f"{SCIM}/Groups", filter=f'displayName eq "{name}"', attributes="id,displayName,members")
-    matches = [group for group in listing.get("Resources", []) if group.get("displayName") == name]
+def sole_match(listing, attribute, value, what):
+    """The one listed resource whose attribute is exactly the value."""
+    matches = [resource for resource in listing.get("Resources", []) if resource.get(attribute) == value]
     if len(matches) != 1:
-        raise RuntimeError(f"{len(matches)} groups are named {name!r}")
+        raise RuntimeError(f"{len(matches)} {what} are named {value!r}")
     return matches[0]
 
 
-def group_by_id(call, group_id):
+def group_by_name(workspace, name):
+    listing = workspace.call(f"{SCIM}/Groups", filter=f'displayName eq "{name}"', attributes="id,displayName,members")
+    return sole_match(listing, "displayName", name, "groups")
+
+
+def group_by_id(workspace, group_id):
     try:
-        return call(f"{SCIM}/Groups/{urllib.parse.quote(group_id, safe='')}", attributes="id,displayName,members")
+        return workspace.call(f"{SCIM}/Groups/{urllib.parse.quote(group_id, safe='')}", attributes="id,displayName,members")
     except NotFound:
         raise RuntimeError(f"the directory does not report group {group_id}") from None
 
@@ -172,64 +191,58 @@ def is_group_member(member):
     return "/Groups/" in str(member.get("$ref", "")) or member.get("type") == "Group"
 
 
-def group_users(call, group, depth=0):
+def group_users(workspace, group, depth=0):
     """The users of one group, its nested groups expanded, in listing order."""
     if depth > MAX_GROUP_DEPTH:
         raise RuntimeError(f"group {group.get('displayName')!r} nests deeper than {MAX_GROUP_DEPTH} groups")
     members = group.get("members", [])
     user_ids = [member["value"] for member in members if not is_group_member(member)]
-    users = list(users_by_id(call, user_ids).values())
+    users = list(users_by_id(workspace, user_ids).values())
     for member in members:
         if is_group_member(member):
-            users.extend(group_users(call, group_by_id(call, member["value"]), depth + 1))
+            users.extend(group_users(workspace, group_by_id(workspace, member["value"]), depth + 1))
     return users
 
 
-def group_members(call, name):
-    return readers_of(group_users(call, group_by_name(call, name)))
+def group_members(workspace, name):
+    return readers_of(group_users(workspace, group_by_name(workspace, name)))
 
 
-def user_by_name(call, user_name):
-    listing = call(f"{SCIM}/Users", filter=f'userName eq "{user_name}"', attributes="id,userName,active")
-    matches = [user for user in listing.get("Resources", []) if user.get("userName") == user_name]
-    if len(matches) != 1:
-        raise RuntimeError(f"{len(matches)} users are named {user_name!r}")
-    return matches[0]
+def user_by_name(workspace, user_name):
+    listing = workspace.call(f"{SCIM}/Users", filter=f'userName eq "{user_name}"', attributes="id,userName,active")
+    return sole_match(listing, "userName", user_name, "users")
 
 
-def genie_space_readers(call, space_id):
+def genie_space_readers(workspace, space_id):
     """Everyone holding any permission level on the space, as the Permissions
-    API lists them: users by login, groups by name, service principals by
-    application id."""
-    acl = call(f"/api/2.0/permissions/genie/{urllib.parse.quote(space_id, safe='')}").get("access_control_list")
+    API lists them: service principals by application id, users by login,
+    groups by name."""
+    acl = workspace.call(f"/api/2.0/permissions/genie/{urllib.parse.quote(space_id, safe='')}").get("access_control_list")
     if not isinstance(acl, list):
         raise RuntimeError("the space permissions report no access control list")
     users = []
-    readers = []
+    principals = []
     for entry in acl:
         if not entry.get("all_permissions"):
             continue
         match entry:
             case {"user_name": str() as user_name}:
-                users.append(user_by_name(call, user_name))
+                users.append(user_by_name(workspace, user_name))
             case {"group_name": str() as group_name}:
-                users.extend(group_users(call, group_by_name(call, group_name)))
+                users.extend(group_users(workspace, group_by_name(workspace, group_name)))
             case {"service_principal_name": str() as application_id}:
-                readers.append(qualified(application_id))
+                principals.append(qualified(application_id))
             case _:
                 raise RuntimeError("a permission entry names no principal")
-    for reader in readers_of(users):
-        if reader not in readers:
-            readers.append(reader)
-    return readers
+    return distinct(principals + readers_of(users))
 
 
-def member_principal(call, member):
+def member_principal(workspace, member):
     prefix = "databricks:"
     if not member.startswith(prefix) or member == prefix:
         raise ValueError(f"{member!r} is not a databricks-qualified member")
     try:
-        user = call(f"{SCIM}/Users/{urllib.parse.quote(member[len(prefix) :], safe='')}")
+        user = workspace.call(f"{SCIM}/Users/{urllib.parse.quote(member[len(prefix) :], safe='')}")
     except NotFound:
         # The workspace definitively knows no such user, who stays the
         # reader as written.
@@ -243,26 +256,27 @@ def member_principal(call, member):
 def answer(call, artifact):
     if not isinstance(artifact, dict):
         raise ValueError("the artifact must be an object")
+    workspace = Workspace(call)
     match sorted(artifact):
         case ["selector"]:
             selector = artifact["selector"]
             match selector:
                 case "viewer":
-                    members = viewer_members(call)
+                    members = viewer_members(workspace)
                 case "members":
-                    members = workspace_members(call)
+                    members = workspace_members(workspace)
                 case str() if selector.startswith("group/") and len(selector) > len("group/"):
-                    members = group_members(call, selector[len("group/") :])
+                    members = group_members(workspace, selector[len("group/") :])
                 case str() if selector.startswith("genie-space/") and selector.endswith("/readers"):
                     space_id = selector[len("genie-space/") : -len("/readers")]
                     if not space_id or "/" in space_id:
                         raise ValueError(f"{selector!r} names no Genie space")
-                    members = genie_space_readers(call, space_id)
+                    members = genie_space_readers(workspace, space_id)
                 case _:
                     raise ValueError(f"{selector!r} names no collection this source serves")
             return {"members": members}
         case ["member"]:
-            return {"principal": member_principal(call, artifact["member"])}
+            return {"principal": member_principal(workspace, artifact["member"])}
         case _:
             raise ValueError("the artifact must carry exactly a selector or a member")
 

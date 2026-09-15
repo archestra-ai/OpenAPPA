@@ -114,6 +114,15 @@ class ResolveTests(unittest.TestCase):
         self.assertIn("APPA_PROVIDER_DATABRICKS_HOST", str(refused.exception))
         self.assertIn("databricks auth login", str(refused.exception))
 
+    def test_an_unusable_host_variable_is_refused_not_skipped(self):
+        cli = self.cli(describe=DESCRIBE, token=TOKEN)
+
+        for variable in ["APPA_PROVIDER_DATABRICKS_HOST", "DATABRICKS_HOST"]:
+            with self.assertRaises(RuntimeError) as refused:
+                DATABRICKS_TOKEN.resolve(cli.environ(**{variable: "http://plain.cloud.databricks.com"}))
+            self.assertIn(variable, str(refused.exception))
+        self.assertEqual(cli.argv(), [])
+
     def test_a_cli_answer_that_is_not_json_is_no_host(self):
         cli = self.cli(describe="Host: https://cli.cloud.databricks.com", token=TOKEN)
 
@@ -135,7 +144,15 @@ class WorkspaceUrlTests(unittest.TestCase):
             self.assertEqual(DATABRICKS_TOKEN.workspace_url(spelling), "https://dbc-1.cloud.databricks.com")
 
     def test_anything_but_a_bare_https_host_is_refused(self):
-        for spelling in ["", "   ", None, "http://dbc-1.cloud.databricks.com", "https://dbc-1.cloud.databricks.com/api", "https://"]:
+        for spelling in [
+            "",
+            "   ",
+            None,
+            "http://dbc-1.cloud.databricks.com",
+            "https://dbc-1.cloud.databricks.com/api",
+            "https://",
+            "https://user:secret@dbc-1.cloud.databricks.com",
+        ]:
             self.assertIsNone(DATABRICKS_TOKEN.workspace_url(spelling))
 
 

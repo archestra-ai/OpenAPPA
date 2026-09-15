@@ -28,8 +28,14 @@
 # needs trusted internal input and records `databricks.changed`; DDL,
 # grants, several statements, scripting, or anything unclear needs the
 # `databricks-review` mark and records `databricks.sensitive`. The root
-# config supplies an authority permitting `databricks-review`; a root rule
-# for `mcp/databricks/execute_sql` replaces the annotator outright.
+# config supplies an authority permitting `databricks-review`. A root rule
+# for the tool replaces the annotator outright; this one sends every
+# statement to a person instead:
+#
+#   [[policy.tool]]
+#   name = "mcp/databricks/execute_sql"
+#   delta = { trust = "suspicious", audience = ["internal"] }
+#   requires = { audience = { contains = ["internal"] }, attention = ["databricks-review"] }
 
 [policy]
 version = 2
