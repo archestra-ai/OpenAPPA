@@ -56,9 +56,14 @@ marketplace/batteries/
 
 `appa-package.toml` is the package manifest: the battery's name and
 description, the policy file, the hosts it is composed with, and the helper
-scripts its bindings name. Run `bash scripts/appa-marketplace.sh` to generate
-the catalog entry and content digest, then commit `marketplace/marketplace.toml`
-with the package. CI checks that the generated catalog is current.
+scripts its bindings name. An optional `setup` line says what the person
+has to do after the install that the policy cannot: the scopes a token
+needs, or a login the helpers fall back to. `appa battery install` prints
+it after the battery is included, beside every `token_env` variable the
+policy's bindings name, so a battery never restates its own variables. Run
+`bash scripts/appa-marketplace.sh` to generate the catalog entry and content
+digest, then commit `marketplace/marketplace.toml` with the package. CI
+checks that the generated catalog is current.
 
 `appa.toml` contains the tool contracts. An annotator determines contracts that static rules cannot express. An audience source supplies the members of the provider's collections: the viewer, the full membership, groups, and per-resource readers such as one channel's members. The battery binds it under `[externals.audience.<provider>]` with `command`, `token_env`, and the `selectors` it serves. Contracts in the battery may then name those collections with selector placeholders, such as `@slack:channel/$channel_id`.
 

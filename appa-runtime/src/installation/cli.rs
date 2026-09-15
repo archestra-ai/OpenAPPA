@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use appa_package::generation::{ArtifactDigest, Commit, Generation, Platform};
-use appa_package::{Marketplace, Namespace, PackageKind, PackageName, Role};
+use appa_package::{Battery, Marketplace, Namespace, PackageKind, PackageName, Role};
 use clap::Args;
 use serde::Serialize;
 
@@ -275,12 +275,65 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
         eprintln!("appa: validating and activating the selected policy...");
         installation.commit_installation(Some(&before), text.as_bytes(), &selection)?;
         let prepared = prepared_directory(&installation)?;
-        Ok((
-            Some(Version::of(selection.generation())),
-            battery_result(&args.names, "installed", prepared),
-        ))
+        let mut result = battery_result(&args.names, "installed", prepared);
+        result["setup"] = setup_notices(args.names.iter().zip(&batteries), |variable| {
+            std::env::var_os(variable).is_some_and(|value| !value.is_empty())
+        });
+        Ok((Some(Version::of(selection.generation())), result))
     })();
     finish(&args.target, "battery.install".into(), result)
+}
+
+/// What a person has to do after a battery is included that the include itself
+/// does not: set the credential variables its helpers read, or whatever else its
+/// manifest's `setup` says. `is_set` looks a variable up where this command
+/// runs; the runtime may run elsewhere, so the answer is information, never a
+/// refusal. Batteries with nothing to say are absent.
+fn setup_notices<'a>(
+    batteries: impl IntoIterator<Item = (&'a PackageName, &'a Battery)>,
+    is_set: impl Fn(&str) -> bool,
+) -> serde_json::Value {
+    let notices: Vec<serde_json::Value> = batteries
+        .into_iter()
+        .filter(|(_, battery)| !battery.credentials.is_empty() || battery.setup.is_some())
+        .map(|(name, battery)| {
+            let credentials: Vec<serde_json::Value> = battery
+                .credentials
+                .iter()
+                .map(|variable| serde_json::json!({"variable": variable, "set": is_set(variable)}))
+                .collect();
+            serde_json::json!({"battery": name.as_str(), "credentials": credentials, "note": battery.setup})
+        })
+        .collect();
+    serde_json::Value::from(notices)
+}
+
+/// One line per battery with something to set up, after the install or
+/// suggestion line it belongs to.
+fn render_setup(output: &mut impl Write, result: &serde_json::Value) -> io::Result<()> {
+    for notice in result["setup"].as_array().into_iter().flatten() {
+        let reads: Vec<String> = notice["credentials"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|credential| {
+                let variable = credential["variable"].as_str().unwrap_or_default();
+                match credential["set"] == true {
+                    true => format!("{variable} (set in this shell)"),
+                    false => format!("{variable} (not set in this shell)"),
+                }
+            })
+            .collect();
+        let battery = notice["battery"].as_str().unwrap_or_default();
+        let note = notice["note"].as_str().unwrap_or_default();
+        let line = match (reads.is_empty(), note.is_empty()) {
+            (false, false) => format!("  {battery} reads {}. {note}", reads.join(", ")),
+            (false, true) => format!("  {battery} reads {}.", reads.join(", ")),
+            (true, _) => format!("  {battery}: {note}"),
+        };
+        writeln!(output, "{line}")?;
+    }
+    Ok(())
 }
 
 pub fn remove_battery(args: BatteryRemove) -> ExitCode {
@@ -615,15 +668,28 @@ pub fn install(args: Install) -> ExitCode {
             .unwrap_or_default();
         // The install is committed; a suggestion that cannot be computed is
         // named, never a failure of the install.
-        let coverage = match servers.is_empty() {
-            true => discover::Coverage::default(),
-            false => discover::batteries(acquired.marketplace(), &catalog, plugin.host())
-                .map(|batteries| discover::coverage(&servers, &batteries, &included_now, &bindings))
-                .unwrap_or_else(|error| {
-                    eprintln!("appa: warning: battery suggestions were not computed: {error}");
-                    discover::Coverage::default()
-                }),
+        let available = match servers.is_empty() {
+            true => Vec::new(),
+            false => discover::batteries(acquired.marketplace(), &catalog, plugin.host()).unwrap_or_else(|error| {
+                eprintln!("appa: warning: battery suggestions were not computed: {error}");
+                Vec::new()
+            }),
         };
+        let coverage = discover::coverage(&servers, &available, &included_now, &bindings);
+        // A suggested battery's setup is named beside the command that includes
+        // it, so the person knows what it takes before running the command.
+        let setup = setup_notices(
+            coverage.suggestions.iter().filter_map(|suggestion| {
+                let suggested = match suggestion {
+                    discover::Suggestion::Plain(battery) | discover::Suggestion::Bound { battery, .. } => battery,
+                };
+                available
+                    .iter()
+                    .find(|(name, _)| name == suggested)
+                    .map(|(name, battery)| (name, battery))
+            }),
+            |variable| std::env::var_os(variable).is_some_and(|value| !value.is_empty()),
+        );
         let suggestions: Vec<serde_json::Value> = coverage
             .suggestions
             .iter()
@@ -649,6 +715,7 @@ pub fn install(args: Install) -> ExitCode {
         };
         result["suggestions"] = serde_json::Value::from(suggestions);
         result["commands"] = serde_json::Value::from(commands);
+        result["setup"] = setup;
         result["uncovered_servers"] = serde_json::Value::from(uncovered);
         if let Some(warning) = warning {
             result["warning"] = serde_json::Value::from(warning);
@@ -906,6 +973,7 @@ fn render_coverage(output: &mut impl Write, result: &serde_json::Value) -> io::R
         for command in commands {
             writeln!(output, "  {command}")?;
         }
+        render_setup(output, result)?;
     }
     let uncovered: Vec<&str> = result["uncovered_servers"]
         .as_array()
@@ -1166,6 +1234,7 @@ fn finish(
                 result["state"].as_str().unwrap_or_default(),
                 receipt.deployment.display()
             )?;
+            render_setup(&mut output, result)?;
             if let Some(directory) = result.get("directory").and_then(serde_json::Value::as_str) {
                 writeln!(
                     output,
@@ -1227,6 +1296,45 @@ mod tests {
         assert_eq!(lines[2], "  appa battery install slack --server slack");
         assert_eq!(lines.len(), 4);
         assert!(lines[3].contains("fetch"));
+    }
+
+    /// A battery whose helpers read a credential, or whose manifest has a
+    /// setup note, gets one line naming both and whether the variable is set
+    /// where the command ran; a battery with neither gets none.
+    #[test]
+    fn setup_notices_name_each_credential_and_the_manifest_note() {
+        let battery = |credentials: &[&str], setup: Option<&str>| Battery {
+            policy: appa_package::RelativePath::parse("appa.toml").unwrap(),
+            hosts: vec![appa_package::Host::ClaudeCode],
+            namespaces: vec![],
+            helpers: vec![],
+            audiences: vec![],
+            credentials: credentials.iter().map(|variable| variable.to_string()).collect(),
+            setup: setup.map(str::to_owned),
+        };
+        let github = PackageName::parse("github").unwrap();
+        let linear = PackageName::parse("linear").unwrap();
+        let notion = PackageName::parse("notion").unwrap();
+        let batteries = [
+            (
+                &github,
+                battery(&["APPA_PROVIDER_GITHUB_TOKEN"], Some("Uses your gh login when unset.")),
+            ),
+            (&linear, battery(&["APPA_PROVIDER_LINEAR_TOKEN"], None)),
+            (&notion, battery(&[], None)),
+        ];
+
+        let setup = setup_notices(batteries.iter().map(|(name, battery)| (*name, battery)), |variable| {
+            variable == "APPA_PROVIDER_LINEAR_TOKEN"
+        });
+        let mut rendered = Vec::new();
+        render_setup(&mut rendered, &serde_json::json!({"setup": setup})).unwrap();
+
+        assert_eq!(
+            String::from_utf8(rendered).unwrap(),
+            "  github reads APPA_PROVIDER_GITHUB_TOKEN (not set in this shell). Uses your gh login when unset.\n\
+             \x20 linear reads APPA_PROVIDER_LINEAR_TOKEN (set in this shell).\n"
+        );
     }
 
     /// Every battery without a binding goes in one command, so the person

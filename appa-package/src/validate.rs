@@ -109,7 +109,9 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
             for helper in &battery.helpers {
                 contained.resolve(helper, "battery.helpers", EntryKind::File)?;
             }
-            battery.audiences = check_policy(&policy, &package.name, battery)?;
+            let bindings = check_policy(&policy, &package.name, battery)?;
+            battery.audiences = bindings.audiences;
+            battery.credentials = bindings.credentials;
         }
         Role::Plugin(plugin) => {
             contained.resolve(plugin.default_policy(), "plugin.default_policy", EntryKind::File)?;
@@ -187,9 +189,10 @@ const DECLARATION_ARRAYS: [&str; 4] = ["tool", "annotator", "authority", "saniti
 /// A battery is a fragment a deployment includes, not a deployment: it neither
 /// includes further files nor sets the root-only externals, it runs only its own
 /// declared helpers, and it names only contracts in the namespaces it declares.
-/// Returns the audience source providers it binds, which a marketplace gives one
-/// owner each.
-fn check_policy(policy: &Path, name: &PackageName, battery: &Battery) -> Result<Vec<String>, PackageError> {
+/// Returns what the policy binds that the manifest alone cannot say: the audience
+/// source providers, which a marketplace gives one owner each, and the credential
+/// variables its helpers read, which an install names to the person.
+fn check_policy(policy: &Path, name: &PackageName, battery: &Battery) -> Result<PolicyBindings, PackageError> {
     let namespaces = &battery.namespaces;
     let helpers = &battery.helpers;
     let text = std::fs::read_to_string(policy).map_err(|source| PackageError::PolicyRead {
@@ -252,9 +255,10 @@ fn check_policy(policy: &Path, name: &PackageName, battery: &Battery) -> Result<
         }
     }
 
-    if let Some(externals) = document.get("externals") {
-        check_externals(policy, externals, name, helpers)?;
-    }
+    let credentials = match document.get("externals") {
+        Some(externals) => check_externals(policy, externals, name, helpers)?,
+        None => Vec::new(),
+    };
     let audiences: Vec<String> = document
         .get("externals")
         .and_then(|externals| externals.get("audience"))
@@ -283,15 +287,22 @@ fn check_policy(policy: &Path, name: &PackageName, battery: &Battery) -> Result<
             });
         }
     }
-    Ok(audiences)
+    Ok(PolicyBindings { audiences, credentials })
 }
 
+/// What `check_policy` reads out of a battery policy for its manifest.
+struct PolicyBindings {
+    audiences: Vec<String>,
+    credentials: Vec<String>,
+}
+
+/// Returns the credential variables the bindings name, each once, in name order.
 fn check_externals(
     policy: &Path,
     externals: &Value,
     name: &PackageName,
     helpers: &[RelativePath],
-) -> Result<(), PackageError> {
+) -> Result<Vec<String>, PackageError> {
     let root_setting = |key: &str| PackageError::PolicyRootSetting {
         policy: policy.to_path_buf(),
         key: key.to_owned(),
@@ -299,6 +310,7 @@ fn check_externals(
     let Some(table) = externals.as_table() else {
         return Err(root_setting(""));
     };
+    let mut credentials = std::collections::BTreeSet::new();
     for (kind, value) in table {
         // A deployment's own settings (`timeout_ms`, `max_body_bytes`, …) sit
         // directly under `[externals]`, and so do the sections only a root
@@ -311,10 +323,10 @@ fn check_externals(
             return Err(root_setting(kind));
         };
         for (id, binding) in bindings {
-            check_binding(policy, binding, &format!("{kind}.{id}"), name, helpers)?;
+            credentials.extend(check_binding(policy, binding, &format!("{kind}.{id}"), name, helpers)?);
         }
     }
-    Ok(())
+    Ok(credentials.into_iter().collect())
 }
 
 /// The external kinds an included file may bind. A battery is an included
@@ -326,13 +338,14 @@ pub const BINDABLE_KINDS: [&str; 4] = ["authorities", "sanitizers", "annotators"
 /// it may bind. The `url` shape would reach the network from inside a fragment
 /// the deployment merely included, and the `builtin` shape would name a runtime
 /// module the deployment did not choose — both are the root's to bind.
+/// Returns the credential variable the binding names, if any.
 fn check_binding(
     policy: &Path,
     binding: &Value,
     external: &str,
     name: &PackageName,
     helpers: &[RelativePath],
-) -> Result<(), PackageError> {
+) -> Result<Option<String>, PackageError> {
     let prefix = name.credential_prefix();
     let refuse = || PackageError::PolicyExternalCommand {
         policy: policy.to_path_buf(),
@@ -342,6 +355,7 @@ fn check_binding(
         return Err(refuse());
     };
     let mut runs_a_helper = false;
+    let mut credential = None;
     for (key, value) in table {
         match key.as_str() {
             "command" if runs_a_declared_helper(value, helpers) => runs_a_helper = true,
@@ -350,7 +364,9 @@ fn check_binding(
             // the credentials it owns: outside its own prefix it would read
             // another package's, and outside the provider namespace entirely it
             // would read the deployment's own environment and fail to load.
-            "token_env" if value.as_str().is_some_and(|variable| prefix.owns(variable)) => {}
+            "token_env" if value.as_str().is_some_and(|variable| prefix.owns(variable)) => {
+                credential = value.as_str().map(str::to_owned);
+            }
             "token_env" => {
                 return Err(PackageError::PolicyForeignCredential {
                     policy: policy.to_path_buf(),
@@ -366,7 +382,7 @@ fn check_binding(
         }
     }
     match runs_a_helper {
-        true => Ok(()),
+        true => Ok(credential),
         false => Err(refuse()),
     }
 }
@@ -568,6 +584,24 @@ mod tests {
         assert_eq!(package.battery().unwrap().hosts, vec![Host::ClaudeCode]);
         // The providers the policy binds are read from it, for the marketplace's ownership check.
         assert_eq!(package.battery().unwrap().audiences, vec!["github"]);
+        assert!(package.battery().unwrap().credentials.is_empty());
+    }
+
+    /// The variables a battery's helpers read come from its bindings, one entry
+    /// per variable however many bindings name it, so an install can tell the
+    /// person what to set without the manifest restating the policy.
+    #[test]
+    fn a_battery_credentials_are_read_from_its_bindings() {
+        let bound = BATTERY_POLICY.replace("selectors", "token_env = \"APPA_PROVIDER_GITHUB_TOKEN\"\nselectors")
+            + "[externals.annotators.\"github.visibility\"]\ncommand = [\"python3\", \"audience-source.py\"]\n\
+             token_env = \"APPA_PROVIDER_GITHUB_TOKEN\"\n";
+
+        let package = validate_package(battery(&bound).path()).unwrap();
+
+        assert_eq!(
+            package.battery().unwrap().credentials,
+            vec!["APPA_PROVIDER_GITHUB_TOKEN"]
+        );
     }
 
     #[test]

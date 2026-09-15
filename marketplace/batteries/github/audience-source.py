@@ -23,14 +23,14 @@ there, so a published profile email is attested. An account that
 publishes none stays `github:<login>` and merges with no other
 provider's reader.
 
-Credentials come from APPA_PROVIDER_GITHUB_TOKEN (read:org and user:email
-scopes; listing a repository's collaborators needs push access to it,
-which the repo scope grants for repositories the token's owner may push
-to); the API root is GITHUB_API_URL when set (a GitHub Enterprise
-Server's /api/v3), else api.github.com. Any GitHub error or missing
-answer exits nonzero: the runtime
-treats that as no answer and refuses the operation, so an API hiccup
-never becomes a policy decision.
+Credentials come from APPA_PROVIDER_GITHUB_TOKEN, else the GitHub CLI's
+login (see github_token.py). The token needs read:org and user:email;
+listing a repository's collaborators needs push access to it, which the
+repo scope grants for repositories the token's owner may push to. The
+API root is GITHUB_API_URL when set (a GitHub Enterprise Server's
+/api/v3), else api.github.com. Any GitHub error or missing answer exits
+nonzero: the runtime treats that as no answer and refuses the
+operation, so an API hiccup never becomes a policy decision.
 """
 
 import concurrent.futures
@@ -41,9 +41,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from github_token import resolve_token
+
 
 API_ROOT = (os.environ.get("GITHUB_API_URL") or "https://api.github.com").rstrip("/")
-TOKEN_VAR = "APPA_PROVIDER_GITHUB_TOKEN"
 SOURCE_NAME = "github"
 SERVED_TEMPLATES = [
     "viewer",
@@ -222,11 +223,7 @@ def main():
         raise ValueError("unexpected source name")
     check_declaration(request)
 
-    token = os.environ.get(TOKEN_VAR)
-    if not token:
-        raise RuntimeError(f"{TOKEN_VAR} is not set")
-
-    json.dump({"version": 1, "answer": answer(rest_api(token), request.get("artifact"))}, sys.stdout)
+    json.dump({"version": 1, "answer": answer(rest_api(resolve_token()), request.get("artifact"))}, sys.stdout)
     sys.stdout.write("\n")
 
 

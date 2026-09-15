@@ -26,11 +26,12 @@ source resolves. The policy's mandate for each call names exactly that
 spelling; the script refuses a consult whose mandate does not (exit
 status 2) before it reads a token.
 
-Credentials come from APPA_PROVIDER_GITHUB_TOKEN; the API root is
-GITHUB_API_URL when set (a GitHub Enterprise Server's /api/v3), else
-api.github.com. A repository the token cannot see, or any GitHub error,
-exits nonzero: the runtime treats that as no answer and refuses the
-operation, so nothing is guessed public.
+Credentials come from APPA_PROVIDER_GITHUB_TOKEN, else the GitHub CLI's
+login (see github_token.py); the API root is GITHUB_API_URL when set (a
+GitHub Enterprise Server's /api/v3), else api.github.com. A repository
+the token cannot see, or any GitHub error, exits nonzero: the runtime
+treats that as no answer and refuses the operation, so nothing is
+guessed public.
 """
 
 import json
@@ -40,9 +41,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from github_token import resolve_token
+
 
 API_ROOT = (os.environ.get("GITHUB_API_URL") or "https://api.github.com").rstrip("/")
-TOKEN_VAR = "APPA_PROVIDER_GITHUB_TOKEN"
 CONTENT = "github.repository-visibility"
 READERS = "github.repository-readers"
 TIMEOUT_SECONDS = 30
@@ -182,11 +184,7 @@ def main():
     name, owner, repo = repository_of(consult)
     check_declaration(consult, owner, repo)
 
-    token = os.environ.get(TOKEN_VAR)
-    if not token:
-        raise RuntimeError(f"{TOKEN_VAR} is not set")
-
-    visibility = repository_visibility(rest_api(token), owner, repo)
+    visibility = repository_visibility(rest_api(resolve_token()), owner, repo)
     json.dump({"version": 1, "answer": annotation(name, visibility, owner, repo)}, sys.stdout)
     sys.stdout.write("\n")
 
