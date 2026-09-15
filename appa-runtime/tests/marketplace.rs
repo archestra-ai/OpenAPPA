@@ -231,15 +231,29 @@ fn every_battery_composes_into_each_host_it_declares() {
     }
 }
 
+/// Where the test process's own PATH resolves `program`.
+fn on_path(program: &str) -> PathBuf {
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|directory| directory.join(program))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| panic!("{program} is on the PATH"))
+}
+
 /// Every audience source a battery binds refuses a consult whose declared
 /// templates are not the ones it serves, and does so before it reads a
-/// credential: with no `APPA_PROVIDER_*` variable set, the matching
-/// declaration reaches the token check (exit 1) and a foreign one stops at
-/// the declaration check (exit 2). A policy and a script of different
-/// versions never answer each other, whatever the policy declares.
+/// credential: with no `APPA_PROVIDER_*` variable set and no CLI login on the
+/// `PATH` to fall back to, the matching declaration reaches the token check
+/// (exit 1) and a foreign one stops at the declaration check (exit 2). A
+/// policy and a script of different versions never answer each other,
+/// whatever the policy declares.
 #[test]
 fn every_bound_audience_source_checks_its_declaration_before_its_credential() {
     let root = marketplace_root();
+    // The interpreter is run by its resolved path so the helper's PATH can be
+    // empty: a `gh` on the developer's PATH would supply the credential.
+    let no_path = tempfile::tempdir().expect("a temp dir is creatable");
     let mut checked = 0;
     for entry in &manifest().packages {
         let directory = root.join(entry.path.as_str());
@@ -275,11 +289,11 @@ fn every_bound_audience_source_checks_its_declaration_before_its_credential() {
                     "declaration": { "templates": templates },
                     "artifact": { "selector": "viewer" },
                 });
-                let mut child = Command::new(argv[0])
+                let mut child = Command::new(on_path(argv[0]))
                     .args(&argv[1..])
                     .current_dir(installed.path())
                     .env_clear()
-                    .env("PATH", std::env::var("PATH").unwrap_or_default())
+                    .env("PATH", no_path.path())
                     .stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())

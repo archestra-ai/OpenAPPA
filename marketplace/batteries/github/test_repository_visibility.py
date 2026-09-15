@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 
@@ -143,7 +144,9 @@ class EnvelopeTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["answer"]["delta"], {"trust": "suspicious", "audience": [COLLABORATORS]})
 
     def test_a_missing_token_is_a_failure_before_any_network(self):
-        result = self.run_script(consult(), {"PATH": "/usr/bin:/bin"})
+        # A PATH with no gh on it: neither the variable nor a CLI login answers.
+        with tempfile.TemporaryDirectory() as empty:
+            result = self.run_script(consult(), {"PATH": empty})
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("APPA_PROVIDER_GITHUB_TOKEN", result.stderr)
         self.assertEqual(result.stdout, "")
