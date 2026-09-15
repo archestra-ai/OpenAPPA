@@ -155,24 +155,27 @@ enum Match<'a> {
 
 /// Matching is exact, never by substring: a server key equal to a namespace a
 /// battery declares is that battery's, as is one a namespace is already
-/// bound to in `bindings` (namespace to server key), and one equal to the
+/// bound to in `bindings` (namespace to server keys), and one equal to the
 /// name of a battery over one namespace, bound to it. A battery already
 /// included covers the servers it matches natively or through a binding;
 /// those are not suggested again. A binding moves the battery's rules to the
-/// bound key, so a bound battery serves one server: a battery is suggested
-/// once, with the binding when a server needs it, and a server its own
-/// namespace names is then uncovered.
+/// bound keys, so a bound battery serves exactly those servers: a battery is
+/// suggested once, with the binding when a server needs it, and a server its
+/// own namespace names is then uncovered unless the binding lists it too.
 pub(crate) fn coverage(
     servers: &BTreeSet<Namespace>,
     batteries: &[(PackageName, Battery)],
     included: &BTreeSet<String>,
-    bindings: &BTreeMap<String, String>,
+    bindings: &BTreeMap<String, Vec<String>>,
 ) -> Coverage {
-    let bound_to = |namespace: &Namespace| bindings.get(namespace.as_str()).map(String::as_str);
-    // A binding in the config already sends the battery's rules to another
-    // key, included or not; one to the key itself changes nothing.
+    let bound_to = |namespace: &Namespace| bindings.get(namespace.as_str()).map(Vec::as_slice);
+    let bound_to_server = |namespace: &Namespace, server: &Namespace| {
+        bound_to(namespace).is_some_and(|bound| bound.iter().any(|key| key == server.as_str()))
+    };
+    // A binding in the config already sends the battery's rules to other
+    // keys, included or not; one listing the key itself keeps it covered.
     let redirected = |server: &Namespace, matched: Match<'_>| match matched {
-        Match::Native => bound_to(server).is_some_and(|bound| bound != server.as_str()),
+        Match::Native => bound_to(server).is_some() && !bound_to_server(server, server),
         Match::Named(namespace) => bound_to(namespace).is_some(),
         Match::Bound => false,
     };
@@ -189,7 +192,7 @@ pub(crate) fn coverage(
                     battery
                         .namespaces
                         .iter()
-                        .any(|namespace| bound_to(namespace) == Some(server.as_str()))
+                        .any(|namespace| bound_to_server(namespace, server))
                 })
                 .map(|(name, _)| (name, Match::Bound));
             let by_name = batteries
@@ -311,11 +314,15 @@ mod tests {
         names.iter().map(|name| (*name).to_owned()).collect()
     }
 
-    fn bindings(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs
-            .iter()
-            .map(|(namespace, server)| ((*namespace).to_owned(), (*server).to_owned()))
-            .collect()
+    fn bindings(pairs: &[(&str, &str)]) -> BTreeMap<String, Vec<String>> {
+        let mut bindings: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (namespace, server) in pairs {
+            bindings
+                .entry((*namespace).to_owned())
+                .or_default()
+                .push((*server).to_owned());
+        }
+        bindings
     }
 
     /// The three places Claude Code reads servers from are read together, the
@@ -542,5 +549,31 @@ mod tests {
             assert_eq!(redirected.uncovered, vec![namespace("github")]);
             assert_eq!(redirected.suggestions.len(), included.is_empty() as usize);
         }
+    }
+
+    /// A namespace bound to several servers covers each of them with the one
+    /// include, and its own key too when the binding lists it.
+    #[test]
+    fn a_namespace_bound_to_several_servers_covers_each_of_them() {
+        let batteries = vec![battery("databricks", &["databricks"])];
+        let bound = bindings(&[("databricks", "genie"), ("databricks", "sql")]);
+        let servers = BTreeSet::from([namespace("genie"), namespace("sql")]);
+
+        let suggested_once = coverage(&servers, &batteries, &BTreeSet::new(), &bound);
+        assert_eq!(suggested_once.suggestions, vec![suggested("databricks")]);
+        assert_eq!(suggested_once.uncovered, vec![]);
+        assert_eq!(
+            coverage(&servers, &batteries, &included(&["databricks"]), &bound),
+            Coverage::default()
+        );
+
+        let with_own_key = BTreeSet::from([namespace("databricks"), namespace("genie")]);
+        let redirected = coverage(&with_own_key, &batteries, &included(&["databricks"]), &bound);
+        assert_eq!(redirected.uncovered, vec![namespace("databricks")]);
+        let listed = bindings(&[("databricks", "databricks"), ("databricks", "genie")]);
+        assert_eq!(
+            coverage(&with_own_key, &batteries, &included(&["databricks"]), &listed),
+            Coverage::default()
+        );
     }
 }

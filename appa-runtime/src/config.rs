@@ -13,7 +13,8 @@ use serde::Deserialize;
 #[derive(Debug, Clone)]
 pub struct Config {
     policy: PolicyFile,
-    pub(crate) server_aliases: BTreeMap<String, String>,
+    /// Each policy namespace bound to the connection identities the host reports for it.
+    pub(crate) server_aliases: BTreeMap<String, Vec<String>>,
     pub(crate) inventory: appa_runtime_api::inventory::ToolInventory,
     pub externals: Externals,
     /// Deployment knobs that describe this machine's reporting posture, not its policy.
@@ -623,7 +624,7 @@ struct RawConfig {
     #[serde(default)]
     bundle: RawBundle,
     #[serde(default)]
-    server_aliases: BTreeMap<String, String>,
+    server_aliases: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     appa_inventory: appa_runtime_api::inventory::ToolInventory,
 }

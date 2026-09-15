@@ -1275,10 +1275,10 @@ mod tests {
         let base = "# authored deployment\n[policy]\nversion=2\n[externals]\ntimeout_ms=100\nmax_body_bytes=1024\n";
         let store = crate::batteries::store_dir(install.config_path());
         let with_include = includes::add(base, &includes::battery_include(&github)).unwrap();
-        let with_alias = includes::bind_server(
+        let with_alias = includes::bind_servers(
             &with_include,
             &appa_package::Namespace::parse("github").unwrap(),
-            "work-github",
+            &["work-github".to_owned()],
         )
         .unwrap();
         let stray = includes::add(&with_alias, "batteries/stray/appa.toml").unwrap();
@@ -1287,7 +1287,7 @@ mod tests {
         install.commit_config(None, with_alias.as_bytes(), &selected).unwrap();
         assert!(store.join("github/appa.toml").is_file(), "the commit fills the store");
         let effective = crate::config::Config::load(install.config_path()).unwrap();
-        assert_eq!(effective.server_aliases["github"], "work-github");
+        assert_eq!(effective.server_aliases["github"], vec!["work-github"]);
         assert_eq!(
             effective.policy_file().value()["tool"][0]["name"].as_str(),
             Some("mcp/github/read")

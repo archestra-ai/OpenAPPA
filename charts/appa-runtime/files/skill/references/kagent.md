@@ -307,7 +307,7 @@ with that exact battery name and the policy key from the proposal's
 updates only the runtime-owned ConfigMap, waits for kubelet sync, reloads,
 and rolls back on failure. Never synthesize a ConfigMap or invoke a separate
 reload. If the binding is absent, propose the include and
-`server_aliases.<battery-namespace> = "<returned server>"` together in one
+`server_aliases.<battery-namespace> = ["<returned server>"]` together in one
 complete `appa_update_policy`. Never overwrite a binding to a different
 server without explicit approval for that change. A blocked delegation
 under **Exceptions** is not part of a battery
