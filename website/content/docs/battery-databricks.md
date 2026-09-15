@@ -21,7 +21,7 @@ The battery also ships the `databricks` audience source, which reads the workspa
 
 - Genie answers a question with SQL it generates and the rows that SQL returns from the workspace's tables. The four Genie reads return untrusted `internal` data, and the question must be sharable with `internal`.
 - `execute_sql` runs any statement. The Claude Code model classifies each one before it runs, inside a fixed mandate: a read-only statement returns untrusted `internal` data; `INSERT`, `UPDATE`, `DELETE`, `MERGE`, and `COPY INTO` need trusted internal input and record `databricks.changed`; DDL, grants, several statements, or anything unclear need the `databricks-review` mark and record `databricks.sensitive`.
-- An answer outside that mandate is refused with the call.
+- An answer outside that mandate is refused with the call. The answer inside it is the model's reading of the statement, not a parse: prose hidden in a SQL comment can steer it, so a workspace that must not take that risk sets `disallow_writes` on the warehouse or overrides the rule to send every statement to a person.
 
 The Claude Code plugin default permits every mark, so the person running the session reviews `databricks-review`; another root config must define an Authority permitting it.
 
