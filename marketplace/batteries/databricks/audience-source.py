@@ -208,9 +208,27 @@ def group_members(workspace, name):
     return readers_of(group_users(workspace, group_by_name(workspace, name)))
 
 
-def user_by_name(workspace, user_name):
-    listing = workspace.call(f"{SCIM}/Users", filter=f'userName eq "{user_name}"', attributes="id,userName,active")
-    return sole_match(listing, "userName", user_name, "users")
+def users_by_name(workspace, user_names):
+    """The directory entries for exactly these logins: a filtered listing each
+    up to DIRECT_LOOKUPS, then one directory pass; a login the workspace does
+    not report is a failure, never a reader silently dropped."""
+    if len(user_names) <= DIRECT_LOOKUPS:
+        users = []
+        for user_name in user_names:
+            listing = workspace.call(f"{SCIM}/Users", filter=f'userName eq "{user_name}"', attributes="id,userName,active")
+            users.append(sole_match(listing, "userName", user_name, "users"))
+        return users
+    by_name = {}
+    for user in workspace.directory().values():
+        by_name.setdefault(user.get("userName"), []).append(user)
+    users = []
+    for user_name in user_names:
+        match by_name.get(user_name, []):
+            case [user]:
+                users.append(user)
+            case found:
+                raise RuntimeError(f"{len(found)} users are named {user_name!r}")
+    return users
 
 
 def genie_space_readers(workspace, space_id):
@@ -220,6 +238,7 @@ def genie_space_readers(workspace, space_id):
     acl = workspace.call(f"/api/2.0/permissions/genie/{urllib.parse.quote(space_id, safe='')}").get("access_control_list")
     if not isinstance(acl, list):
         raise RuntimeError("the space permissions report no access control list")
+    user_names = []
     users = []
     principals = []
     for entry in acl:
@@ -227,14 +246,14 @@ def genie_space_readers(workspace, space_id):
             continue
         match entry:
             case {"user_name": str() as user_name}:
-                users.append(user_by_name(workspace, user_name))
+                user_names.append(user_name)
             case {"group_name": str() as group_name}:
                 users.extend(group_users(workspace, group_by_name(workspace, group_name)))
             case {"service_principal_name": str() as application_id}:
                 principals.append(qualified(application_id))
             case _:
                 raise RuntimeError("a permission entry names no principal")
-    return distinct(principals + readers_of(users))
+    return distinct(principals + readers_of(users_by_name(workspace, user_names) + users))
 
 
 def member_principal(workspace, member):

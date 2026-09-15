@@ -188,6 +188,36 @@ class SelectorTests(unittest.TestCase):
         members = AUDIENCE_SOURCE.answer(call, {"selector": "genie-space/space-1/readers"})["members"]
         self.assertEqual(members, ["databricks:app-uuid", "alice@corp.com", "bob@corp.com"])
 
+    def test_a_space_shared_with_many_users_reads_the_directory_once(self):
+        acl = {
+            "access_control_list": [
+                {"user_name": f"u{i}@corp.com", "all_permissions": [{"permission_level": "CAN_VIEW"}]} for i in range(21)
+            ]
+        }
+        call = fixture_api(
+            [
+                ("/api/2.0/permissions/genie/space-1", {}, acl),
+                (*users_listing(), user_page([user(str(i), f"u{i}@corp.com") for i in range(30)])),
+            ]
+        )
+        members = AUDIENCE_SOURCE.answer(call, {"selector": "genie-space/space-1/readers"})["members"]
+        self.assertEqual(members, [f"u{i}@corp.com" for i in range(21)])
+
+    def test_a_space_user_the_directory_does_not_report_is_a_failure(self):
+        acl = {
+            "access_control_list": [
+                {"user_name": f"u{i}@corp.com", "all_permissions": [{"permission_level": "CAN_VIEW"}]} for i in range(21)
+            ]
+        }
+        call = fixture_api(
+            [
+                ("/api/2.0/permissions/genie/space-1", {}, acl),
+                (*users_listing(), user_page([user(str(i), f"u{i}@corp.com") for i in range(20)])),
+            ]
+        )
+        with self.assertRaises(RuntimeError):
+            AUDIENCE_SOURCE.answer(call, {"selector": "genie-space/space-1/readers"})
+
     def test_a_permission_entry_without_a_principal_is_a_failure(self):
         acl = {"access_control_list": [{"all_permissions": [{"permission_level": "CAN_VIEW"}]}]}
         call = fixture_api([("/api/2.0/permissions/genie/space-1", {}, acl)])

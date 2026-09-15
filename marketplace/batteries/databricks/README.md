@@ -104,8 +104,9 @@ Every consult carries the declared templates, and the script refuses one
 whose declaration differs from what it serves (exit status 2), so a
 policy and a script of different versions never answer each other. A
 workspace of more than 5,000 users is refused rather than paged; map
-such audiences from a source that lists them in bulk. A group's users
-are looked up one by one up to 20 members, then in one directory pass.
+such audiences from a source that lists them in bulk. A group's users,
+and a space's users, are looked up one by one up to 20 of them, then in
+one directory pass shared by the whole consult.
 
 **`databricks_token.py`** — where the source finds the workspace and
 its token. The workspace is `APPA_PROVIDER_DATABRICKS_HOST`, else
