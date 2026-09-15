@@ -223,15 +223,6 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
         HookDecision::Ack
     );
 
-    // An ordinary command runs and its result is kept as the tool returned it, although
-    // the battery confines Bash results.
-    let listing = call("host/claude-code/Bash", "command", "ls -la");
-    assert_eq!(
-        propose(&runtime, listing.clone()).await,
-        HookDecision::AllowCall { spawn: None }
-    );
-    ran(&runtime, listing).await;
-
     // A credential read is `self` data: the block offers the masker beside the plain
     // narrowing and consults no person; the masked output is what reaches the model.
     for command in [
@@ -307,6 +298,15 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
         HookDecision::AllowCall { spawn: None }
     );
     ran(&runtime, read).await;
+
+    // With the trajectory at `self`, a credential command needs no masker: it runs, and
+    // its confined result is kept as the tool returned it.
+    let settled = call("host/claude-code/Bash", "command", "cat ~/.npmrc");
+    assert_eq!(
+        propose(&runtime, settled.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, settled).await;
 
     let publication = propose(&runtime, call("host/claude-code/Artifact", "file_path", "page.html")).await;
     let HookDecision::DenyCall {
