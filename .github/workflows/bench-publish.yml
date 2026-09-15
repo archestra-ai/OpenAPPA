@@ -1,0 +1,180 @@
+name: Publish benchmark archive
+
+# Uploads one published run's full trajectory archive to the private
+# `archestra-appa-bench-archive` bucket. The layout, the identity, and the
+# create-only guarantee are in archestra-ai/infra
+# `gcp/workload_identity/README.md` and `appa-bench-publish.tf`.
+#
+# Why the archives arrive as release assets: `appa-bench-publish` is mintable
+# only by workflows in this repository (its Workload Identity binding names the
+# repository, not a workflow file), so a run produced in an orb cannot upload
+# directly. Committing the archives to relay them through Actions would put
+# into git exactly the bloat the archive bucket exists to keep out, and the
+# workflow itself is small enough to belong in the repository that publishes
+# its results.
+#
+# The relay release is a draft: the bucket is private, and a published release
+# would serve the archives to anyone holding the link while the run is in
+# flight. Nothing is committed back by this workflow.
+#
+# Relay procedure, one draft release per run prefix:
+#
+#   gh release create bench-relay-<run-id> --draft --title bench-relay-<run-id>
+#   gh release upload bench-relay-<run-id> <run-id>-<sha256>.tar.zst index.json
+#   gh workflow run bench-publish.yml \
+#     -f bench=corp -f commit=<git-sha> -f run_id=<run-id> \
+#     -f relay_tag=bench-relay-<run-id>
+#
+# The workflow verifies the archive, index, and requested destination agree,
+# uploads with --no-clobber, and deletes the relay release only after the upload
+# succeeds. A failed run leaves the bytes where a retry finds them.
+#
+# If the download step cannot see the draft — draft visibility to GITHUB_TOKEN
+# has regressed before (cli/cli#3037) — fetch the assets by id from the upload
+# response instead:
+#   gh api -H 'Accept: application/octet-stream' \
+#     "/repos/$GITHUB_REPOSITORY/releases/assets/<asset-id>" > <name>
+#
+# Required repository configuration (from the infra outputs):
+#   variable APPA_BENCH_GCS_BUCKET        — the archive bucket name
+#   secret   APPA_BENCH_GCP_SERVICE_ACCOUNT — appa-bench-publish's email
+#   secret   APPA_GCP_WORKLOAD_IDENTITY_PROVIDER — shared with every other
+#            OpenAPPA workflow and already set
+
+on:
+  workflow_dispatch:
+    inputs:
+      bench:
+        description: Bench directory name, the <bench> segment of the archive path
+        required: true
+        type: string
+      commit:
+        description: Full commit SHA the run was produced at, the <git-commit> segment
+        required: true
+        type: string
+      run_id:
+        description: Run id, the <run-id> segment of the archive path
+        required: true
+        type: string
+      relay_tag:
+        description: Draft release tag holding this run's archives
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  publish:
+    name: Upload to the benchmark archive
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # read the draft release's assets, delete it afterwards
+      id-token: write # Workload Identity Federation for appa-bench-publish
+    steps:
+      - name: Download the relay release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.relay_tag }}
+        run: |
+          [ "$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = true ] || {
+            echo "::error::$TAG must identify a draft release"
+            exit 1
+          }
+          mkdir -p relay
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir relay
+
+      - name: Verify archive and index
+        env:
+          BENCH: ${{ inputs.bench }}
+          COMMIT: ${{ inputs.commit }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          cd relay
+
+          [[ "$BENCH" =~ ^[a-z0-9][a-z0-9-]*$ ]] || {
+            echo "::error::bench must contain lowercase letters, digits, or hyphens"
+            exit 1
+          }
+          [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::commit must be a full lowercase Git SHA"
+            exit 1
+          }
+          [[ "$RUN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+            echo "::error::run_id contains unsupported characters"
+            exit 1
+          }
+
+          archives=(*.tar.zst)
+          if [ ${#archives[@]} -ne 1 ] || [ ! -f index.json ] || [ "$(find . -maxdepth 1 -type f | wc -l)" -ne 2 ]; then
+            echo "::error::the relay release must contain exactly one .tar.zst and index.json"
+            exit 1
+          fi
+
+          archive=${archives[0]}
+          digest=$(sha256sum "$archive" | cut -d' ' -f1)
+          expected="$RUN_ID-$digest.tar.zst"
+          [ "$archive" = "$expected" ] || {
+            echo "::error::$archive must be named $expected"
+            exit 1
+          }
+
+          jq -e \
+            --arg benchmark "$BENCH" \
+            --arg commit "$COMMIT" \
+            --arg run_id "$RUN_ID" \
+            --arg archive "$archive" \
+            --arg sha256 "$digest" \
+            '.format_version == 1
+             and .benchmark == $benchmark
+             and .git_commit == $commit
+             and .run_id == $run_id
+             and .archive == $archive
+             and .sha256 == $sha256' \
+            index.json >/dev/null || {
+              echo "::error::index.json does not describe the requested archive and destination"
+              exit 1
+            }
+
+          echo "$archive matches index.json and SHA-256 $digest"
+
+      - name: Validate repository configuration
+        env:
+          BUCKET: ${{ vars.APPA_BENCH_GCS_BUCKET }}
+          SERVICE_ACCOUNT: ${{ secrets.APPA_BENCH_GCP_SERVICE_ACCOUNT }}
+        run: |
+          [ -n "$BUCKET" ] || {
+            echo "::error::APPA_BENCH_GCS_BUCKET is not set for this repository"
+            exit 1
+          }
+          [ -n "$SERVICE_ACCOUNT" ] || {
+            echo "::error::APPA_BENCH_GCP_SERVICE_ACCOUNT is not set for this repository"
+            exit 1
+          }
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          service_account: ${{ secrets.APPA_BENCH_GCP_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+
+      - name: Set up Google Cloud
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Upload the archives
+        env:
+          BUCKET: ${{ vars.APPA_BENCH_GCS_BUCKET }}
+          PREFIX: bench/${{ inputs.bench }}/${{ inputs.commit }}/${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          archive=$(jq -r .archive relay/index.json)
+          gcloud storage cp --no-clobber \
+            "relay/$archive" relay/index.json "gs://$BUCKET/$PREFIX/"
+
+      - name: Delete the relay release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.relay_tag }}
+        run: gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes
