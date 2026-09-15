@@ -2,7 +2,7 @@
 title: What is OpenAPPA
 category: Get started
 order: 1
-description: OpenAPPA is open-source, deterministic security for real-world agentic applications.
+description: OpenAPPA is an open-source, deterministic security engine for real-world agentic applications.
 ---
 
 The more tools and data sources an agent is connected to, the more it can do. Capability, however, arrives together with risk — the risk of data exfiltration. Put plainly, an agent can pick up something sensitive and publish it, whether through a hallucination or an outright prompt injection.
