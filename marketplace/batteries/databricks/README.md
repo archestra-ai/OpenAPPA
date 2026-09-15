@@ -114,7 +114,9 @@ its token. The workspace is `APPA_PROVIDER_DATABRICKS_HOST`, else
 (`databricks auth describe`). The token is
 `APPA_PROVIDER_DATABRICKS_TOKEN`, which the binding's `token_env`
 forwards, else the CLI's cached login for that host (`databricks auth
-token`), which refreshes itself. `DATABRICKS_TOKEN` is never read: the
+token`), which refreshes itself. Each consult is its own process, and
+with the variables unset it runs those two CLI commands first, so set
+the variables where consult latency matters. `DATABRICKS_TOKEN` is never read: the
 SDK's own variable is the host's credential, not this source's. The
 token needs to read SCIM users and groups, and Genie space permissions
 for `genie-space/<id>/readers`. Any API error or missing answer stops

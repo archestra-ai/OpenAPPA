@@ -107,11 +107,32 @@ class SelectorTests(unittest.TestCase):
                 user_lookup("2", user("2", "gone@corp.com", active=False)),
                 (f"{SCIM}/Groups/g2", GROUP_ATTRIBUTES, group("g2", "controllers", users=["3", "1"])),
                 user_lookup("3", user("3", "carol@corp.com")),
-                user_lookup("1", user("1", "alice@corp.com")),
             ]
         )
         members = AUDIENCE_SOURCE.answer(call, {"selector": "group/finance"})["members"]
         self.assertEqual(members, ["alice@corp.com", "carol@corp.com"])
+
+    def test_nested_groups_are_read_in_one_directory_pass_past_the_direct_bound(self):
+        nested = [f"g{i}" for i in range(1, 6)]
+        call = fixture_api(
+            [
+                (*group_listing("all"), {"Resources": [group("g0", "all", groups=nested)]}),
+                *[(f"{SCIM}/Groups/{g}", GROUP_ATTRIBUTES, group(g, g, users=[f"{g}-{i}" for i in range(5)])) for g in nested],
+                (*users_listing(), user_page([user(f"{g}-{i}", f"{g}-{i}@corp.com") for g in nested for i in range(5)])),
+            ]
+        )
+        members = AUDIENCE_SOURCE.answer(call, {"selector": "group/all"})["members"]
+        self.assertEqual(members, [f"{g}-{i}@corp.com" for g in nested for i in range(5)])
+
+    def test_a_name_with_quotes_is_escaped_in_the_filter(self):
+        call = fixture_api(
+            [
+                (f"{SCIM}/Groups", {"filter": 'displayName eq "a\\"b\\\\c"', **GROUP_ATTRIBUTES}, {"Resources": [group("g1", 'a"b\\c', users=["1"])]}),
+                user_lookup("1", user("1", "alice@corp.com")),
+            ]
+        )
+        members = AUDIENCE_SOURCE.answer(call, {"selector": 'group/a"b\\c'})["members"]
+        self.assertEqual(members, ["alice@corp.com"])
 
     def test_a_large_group_reads_the_directory_once(self):
         ids = [str(i) for i in range(21)]

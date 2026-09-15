@@ -167,6 +167,12 @@ def users_by_id(workspace, user_ids):
     return {user_id: directory[user_id] for user_id in user_ids}
 
 
+def scim_string(value):
+    """A SCIM filter string literal: backslash and double quote escaped."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def sole_match(listing, attribute, value, what):
     """The one listed resource whose attribute is exactly the value."""
     matches = [resource for resource in listing.get("Resources", []) if resource.get(attribute) == value]
@@ -176,7 +182,7 @@ def sole_match(listing, attribute, value, what):
 
 
 def group_by_name(workspace, name):
-    listing = workspace.call(f"{SCIM}/Groups", filter=f'displayName eq "{name}"', attributes="id,displayName,members")
+    listing = workspace.call(f"{SCIM}/Groups", filter=f"displayName eq {scim_string(name)}", attributes="id,displayName,members")
     return sole_match(listing, "displayName", name, "groups")
 
 
@@ -191,21 +197,23 @@ def is_group_member(member):
     return "/Groups/" in str(member.get("$ref", "")) or member.get("type") == "Group"
 
 
-def group_users(workspace, group, depth=0):
-    """The users of one group, its nested groups expanded, in listing order."""
+def group_user_ids(workspace, group, depth=0):
+    """The user ids of one group, its nested groups expanded, in listing order;
+    the users themselves are read once for the whole expansion."""
     if depth > MAX_GROUP_DEPTH:
         raise RuntimeError(f"group {group.get('displayName')!r} nests deeper than {MAX_GROUP_DEPTH} groups")
-    members = group.get("members", [])
-    user_ids = [member["value"] for member in members if not is_group_member(member)]
-    users = list(users_by_id(workspace, user_ids).values())
-    for member in members:
+    user_ids = []
+    for member in group.get("members", []):
         if is_group_member(member):
-            users.extend(group_users(workspace, group_by_id(workspace, member["value"]), depth + 1))
-    return users
+            user_ids.extend(group_user_ids(workspace, group_by_id(workspace, member["value"]), depth + 1))
+        else:
+            user_ids.append(member["value"])
+    return user_ids
 
 
 def group_members(workspace, name):
-    return readers_of(group_users(workspace, group_by_name(workspace, name)))
+    user_ids = distinct(group_user_ids(workspace, group_by_name(workspace, name)))
+    return readers_of(users_by_id(workspace, user_ids).values())
 
 
 def users_by_name(workspace, user_names):
@@ -215,7 +223,7 @@ def users_by_name(workspace, user_names):
     if len(user_names) <= DIRECT_LOOKUPS:
         users = []
         for user_name in user_names:
-            listing = workspace.call(f"{SCIM}/Users", filter=f'userName eq "{user_name}"', attributes="id,userName,active")
+            listing = workspace.call(f"{SCIM}/Users", filter=f"userName eq {scim_string(user_name)}", attributes="id,userName,active")
             users.append(sole_match(listing, "userName", user_name, "users"))
         return users
     by_name = {}
@@ -239,7 +247,7 @@ def genie_space_readers(workspace, space_id):
     if not isinstance(acl, list):
         raise RuntimeError("the space permissions report no access control list")
     user_names = []
-    users = []
+    user_ids = []
     principals = []
     for entry in acl:
         if not entry.get("all_permissions"):
@@ -248,12 +256,13 @@ def genie_space_readers(workspace, space_id):
             case {"user_name": str() as user_name}:
                 user_names.append(user_name)
             case {"group_name": str() as group_name}:
-                users.extend(group_users(workspace, group_by_name(workspace, group_name)))
+                user_ids.extend(group_user_ids(workspace, group_by_name(workspace, group_name)))
             case {"service_principal_name": str() as application_id}:
                 principals.append(qualified(application_id))
             case _:
                 raise RuntimeError("a permission entry names no principal")
-    return distinct(principals + readers_of(users_by_name(workspace, user_names) + users))
+    users = users_by_name(workspace, user_names) + list(users_by_id(workspace, distinct(user_ids)).values())
+    return distinct(principals + readers_of(users))
 
 
 def member_principal(workspace, member):
