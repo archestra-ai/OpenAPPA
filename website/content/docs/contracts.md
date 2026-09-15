@@ -850,6 +850,7 @@ You can also select a built-in implementation with `builtin` under `[externals.s
 | Configuration | Behavior |
 |---|---|
 | `builtin = "redact-email"` | Replaces email addresses with a fixed placeholder. It does not remove other private information. |
+| `builtin = "redact-secrets"` | Replaces credentials with a fixed placeholder: private-key blocks, tokens of well-known shapes (AWS, GitHub, Anthropic, OpenAI, Slack, Google, GitLab, npm, JWT), the password in a URL's `user:password@host`, the value of an assignment whose key names a password, passphrase, secret, token, credential, authorization, key or auth (quoted JSON keys, `Bearer` values and netrc `password` lines included), and any run of 20 or more characters with high entropy. It is a detector, not a proof that no secret remains. |
 | `builtin = "claude-code"` | Uses Claude Code to transform data according to the sanitizer's `hint`, `on`, and `permits`. |
 | `builtin = "llm"` | Uses the model configured under `[externals.llm]` to transform data according to the sanitizer's `hint`, `on`, and `permits`. |
 
@@ -1132,7 +1133,7 @@ max_body_bytes = 65536
 OpenAPPA checks declarations in the root file first, then declarations from included files in the order listed by `include`. The following rules apply:
 
 - An included file cannot include another file.
-- An included file cannot replace settings that apply to the whole deployment.
+- An included file cannot replace settings that apply to the whole deployment. The one exception is `confined_results` under `[policy.deployment]`: an included file can list tools it declares itself, and the names join the root's list.
 - A root `[[policy.annotator]]` replaces an included annotator with the same name. Fields omitted from the replacement are not inherited.
 - Two included files cannot declare the same annotator.
 - Two files cannot configure the same external component name within the same kind, such as two `[externals.sanitizers.clean]` sections.
