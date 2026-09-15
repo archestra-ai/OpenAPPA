@@ -16,10 +16,14 @@ TOKEN_VAR = "APPA_PROVIDER_GITHUB_TOKEN"
 GH_TIMEOUT_SECONDS = 5
 
 
+def api_root(environ):
+    """The REST root the helpers call: GITHUB_API_URL when set, else api.github.com."""
+    return (environ.get("GITHUB_API_URL") or "https://api.github.com").rstrip("/")
+
+
 def api_hostname(environ):
     """The host `gh` is logged in to for the configured API root."""
-    root = environ.get("GITHUB_API_URL") or "https://api.github.com"
-    host = urlparse(root).hostname or "api.github.com"
+    host = urlparse(api_root(environ)).hostname or "api.github.com"
     return "github.com" if host == "api.github.com" else host
 
 

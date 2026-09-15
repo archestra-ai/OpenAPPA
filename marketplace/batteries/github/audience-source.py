@@ -41,10 +41,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from github_token import resolve_token
+from github_token import api_root, resolve_token
 
 
-API_ROOT = (os.environ.get("GITHUB_API_URL") or "https://api.github.com").rstrip("/")
+API_ROOT = api_root(os.environ)
 SOURCE_NAME = "github"
 SERVED_TEMPLATES = [
     "viewer",

@@ -276,12 +276,16 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
         installation.commit_installation(Some(&before), text.as_bytes(), &selection)?;
         let prepared = prepared_directory(&installation)?;
         let mut result = battery_result(&args.names, "installed", prepared);
-        result["setup"] = setup_notices(args.names.iter().zip(&batteries), |variable| {
-            std::env::var_os(variable).is_some_and(|value| !value.is_empty())
-        });
+        result["setup"] = setup_notices(args.names.iter().zip(&batteries), credential_is_set);
         Ok((Some(Version::of(selection.generation())), result))
     })();
     finish(&args.target, "battery.install".into(), result)
+}
+
+/// Whether a credential variable holds a value in this command's environment;
+/// an empty one counts as unset, as the helpers that read it treat it.
+fn credential_is_set(variable: &str) -> bool {
+    std::env::var_os(variable).is_some_and(|value| !value.is_empty())
 }
 
 /// What a person has to do after a battery is included that the include itself
@@ -688,7 +692,7 @@ pub fn install(args: Install) -> ExitCode {
                     .find(|(name, _)| name == suggested)
                     .map(|(name, battery)| (name, battery))
             }),
-            |variable| std::env::var_os(variable).is_some_and(|value| !value.is_empty()),
+            credential_is_set,
         );
         let suggestions: Vec<serde_json::Value> = coverage
             .suggestions
