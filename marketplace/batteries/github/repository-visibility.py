@@ -41,7 +41,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from github_token import api_root, resolve_token
+# The sibling module is found beside this file however the file is loaded:
+# run by the runtime from its own directory, or imported by path from another.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from github_token import api_root, resolve_token  # noqa: E402
 
 
 API_ROOT = api_root(os.environ)
