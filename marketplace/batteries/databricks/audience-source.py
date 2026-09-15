@@ -21,8 +21,8 @@ verification the audience contract asks of a provider. Any other user is
 neither merges with another provider's reader. An inactive user reads
 nothing and is left out.
 
-The workspace and token come from databricks_token.py: the
-APPA_PROVIDER_DATABRICKS_* variables, else the Databricks CLI's login. The
+The workspace and token come from databricks_token.py: DATABRICKS_HOST
+and APPA_PROVIDER_DATABRICKS_TOKEN, else the Databricks CLI's login. The
 token needs to read SCIM users and groups and Genie space permissions.
 Any API error, missing answer, or malformed response exits nonzero: the
 runtime treats that as no answer and refuses the operation, so a

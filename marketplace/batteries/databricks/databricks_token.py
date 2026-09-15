@@ -1,14 +1,15 @@
 """Where the Databricks battery's helper gets its workspace and token.
 
-The workspace is APPA_PROVIDER_DATABRICKS_HOST when the deployment sets
-it, else DATABRICKS_HOST, the Databricks SDK's own variable, else the
-host the Databricks CLI resolves for its login (`databricks auth
-describe`). The token is APPA_PROVIDER_DATABRICKS_TOKEN when set, else
-the CLI's cached login for that host (`databricks auth token`), which
-refreshes an expiring token itself. The runtime forwards the helper its
-own binding's variable and the rest of the process environment, so the
-CLI runs with the PATH and HOME it needs. Neither present, the helper
-stops with the two ways to fix it; nothing is guessed.
+The workspace is DATABRICKS_HOST, the Databricks SDK's own variable, when
+set, else the host the Databricks CLI resolves for its login
+(`databricks auth describe`). The token is APPA_PROVIDER_DATABRICKS_TOKEN
+when set, else the CLI's cached login for that host (`databricks auth
+token`), which refreshes an expiring token itself. The runtime forwards
+the helper its own binding's variable and the rest of the process
+environment, and no other APPA_* variable, so the workspace cannot be
+named under the APPA prefix; the CLI runs with the PATH and HOME it
+needs. Neither present, the helper stops with the two ways to fix it;
+nothing is guessed.
 """
 
 import json
@@ -17,8 +18,7 @@ import subprocess
 from urllib.parse import urlparse
 
 TOKEN_VAR = "APPA_PROVIDER_DATABRICKS_TOKEN"
-HOST_VAR = "APPA_PROVIDER_DATABRICKS_HOST"
-SDK_HOST_VAR = "DATABRICKS_HOST"
+HOST_VAR = "DATABRICKS_HOST"
 CLI_TIMEOUT_SECONDS = 5
 
 
@@ -59,15 +59,13 @@ def cli_json(environ, arguments):
 
 
 def resolve_host(environ):
-    """The workspace a set variable names, else the CLI's; a variable that is set
-    to something unusable is refused, never skipped for the next source."""
-    for variable in (HOST_VAR, SDK_HOST_VAR):
-        value = (environ.get(variable) or "").strip()
-        if not value:
-            continue
+    """The workspace the variable names, else the CLI's; a variable that is set
+    to something unusable is refused, never skipped for the CLI's workspace."""
+    value = (environ.get(HOST_VAR) or "").strip()
+    if value:
         host = workspace_url(value)
         if not host:
-            raise RuntimeError(f"{variable} is {value!r}, not a workspace URL such as https://<workspace>.cloud.databricks.com")
+            raise RuntimeError(f"{HOST_VAR} is {value!r}, not a workspace URL such as https://<workspace>.cloud.databricks.com")
         return host
     described = cli_json(environ, ["auth", "describe", "-o", "json"]) or {}
     details = described.get("details")

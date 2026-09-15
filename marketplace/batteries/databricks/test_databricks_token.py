@@ -54,22 +54,12 @@ class ResolveTests(unittest.TestCase):
 
         resolved = DATABRICKS_TOKEN.resolve(
             cli.environ(
-                APPA_PROVIDER_DATABRICKS_HOST="https://var.cloud.databricks.com/",
+                DATABRICKS_HOST="https://var.cloud.databricks.com/",
                 APPA_PROVIDER_DATABRICKS_TOKEN=" dapi-fixture\n",
             )
         )
 
         self.assertEqual(resolved, ("https://var.cloud.databricks.com", "dapi-fixture"))
-        self.assertEqual(cli.argv(), [])
-
-    def test_the_sdk_host_variable_is_read_after_the_battery_one(self):
-        cli = self.cli(describe=DESCRIBE, token=TOKEN)
-
-        resolved = DATABRICKS_TOKEN.resolve(
-            cli.environ(DATABRICKS_HOST="sdk.cloud.databricks.com", APPA_PROVIDER_DATABRICKS_TOKEN="dapi-fixture")
-        )
-
-        self.assertEqual(resolved, ("https://sdk.cloud.databricks.com", "dapi-fixture"))
         self.assertEqual(cli.argv(), [])
 
     def test_the_cli_login_answers_host_and_token_when_the_variables_are_unset(self):
@@ -87,7 +77,7 @@ class ResolveTests(unittest.TestCase):
         cli = self.cli(describe=DESCRIBE, token=TOKEN)
 
         resolved = DATABRICKS_TOKEN.resolve(
-            cli.environ(APPA_PROVIDER_DATABRICKS_HOST="var.cloud.databricks.com", APPA_PROVIDER_DATABRICKS_TOKEN="  ")
+            cli.environ(DATABRICKS_HOST="var.cloud.databricks.com", APPA_PROVIDER_DATABRICKS_TOKEN="  ")
         )
 
         self.assertEqual(resolved, ("https://var.cloud.databricks.com", "cli-token"))
@@ -111,16 +101,16 @@ class ResolveTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as refused:
             DATABRICKS_TOKEN.resolve({"PATH": empty.name})
 
-        self.assertIn("APPA_PROVIDER_DATABRICKS_HOST", str(refused.exception))
+        self.assertIn("DATABRICKS_HOST", str(refused.exception))
         self.assertIn("databricks auth login", str(refused.exception))
 
     def test_an_unusable_host_variable_is_refused_not_skipped(self):
         cli = self.cli(describe=DESCRIBE, token=TOKEN)
 
-        for variable in ["APPA_PROVIDER_DATABRICKS_HOST", "DATABRICKS_HOST"]:
-            with self.assertRaises(RuntimeError) as refused:
-                DATABRICKS_TOKEN.resolve(cli.environ(**{variable: "http://plain.cloud.databricks.com"}))
-            self.assertIn(variable, str(refused.exception))
+        with self.assertRaises(RuntimeError) as refused:
+            DATABRICKS_TOKEN.resolve(cli.environ(DATABRICKS_HOST="http://plain.cloud.databricks.com"))
+
+        self.assertIn("DATABRICKS_HOST", str(refused.exception))
         self.assertEqual(cli.argv(), [])
 
     def test_a_cli_answer_that_is_not_json_is_no_host(self):
@@ -129,7 +119,7 @@ class ResolveTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as refused:
             DATABRICKS_TOKEN.resolve(cli.environ(APPA_PROVIDER_DATABRICKS_TOKEN="dapi-fixture"))
 
-        self.assertIn("APPA_PROVIDER_DATABRICKS_HOST", str(refused.exception))
+        self.assertIn("DATABRICKS_HOST", str(refused.exception))
 
     def test_the_sdk_token_variable_is_never_read(self):
         cli = self.cli(describe=DESCRIBE, token="")

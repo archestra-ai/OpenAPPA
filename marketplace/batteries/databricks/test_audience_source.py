@@ -354,7 +354,7 @@ class EnvelopeTests(unittest.TestCase):
     def test_a_missing_workspace_is_a_failure_before_any_network(self):
         result = self.run_script(self.envelope(), {"PATH": "/usr/bin:/bin"})
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("APPA_PROVIDER_DATABRICKS_HOST", result.stderr)
+        self.assertIn("DATABRICKS_HOST", result.stderr)
 
     def test_a_foreign_declaration_is_refused_before_the_token_is_read(self):
         declared = self.envelope()["declaration"]["templates"]

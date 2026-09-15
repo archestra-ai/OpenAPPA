@@ -27,6 +27,6 @@ The Claude Code plugin default permits every mark, so the person running the ses
 
 ## Audience source
 
-A reader is an active user's login address, which Databricks verifies at every sign-in; any other user is `databricks:<id>`. The source serves `viewer` for `self`, `members` for `internal`, `group/<name>` for groups, and `genie-space/<id>/readers` for root rules over a per-space Genie Agent server. It reads the workspace and token from `APPA_PROVIDER_DATABRICKS_HOST` and `APPA_PROVIDER_DATABRICKS_TOKEN`, else from the Databricks CLI's login.
+A reader is an active user's login address, which Databricks verifies at every sign-in; any other user is `databricks:<id>`. The source serves `viewer` for `self`, `members` for `internal`, `group/<name>` for groups, and `genie-space/<id>/readers` for root rules over a per-space Genie Agent server. It reads the workspace from `DATABRICKS_HOST` and the token from `APPA_PROVIDER_DATABRICKS_TOKEN`, else both from the Databricks CLI's login.
 
 Genie One holds no space id in any call, so every Genie read is `internal`; narrow a per-space Genie Agent server's tool in the root policy with `@databricks:genie-space/<id>/readers`.

@@ -109,14 +109,17 @@ and a space's users, are looked up one by one up to 20 of them, then in
 one directory pass shared by the whole consult.
 
 **`databricks_token.py`** — where the source finds the workspace and
-its token. The workspace is `APPA_PROVIDER_DATABRICKS_HOST`, else
-`DATABRICKS_HOST`, else the host the Databricks CLI is logged in to
-(`databricks auth describe`). The token is
-`APPA_PROVIDER_DATABRICKS_TOKEN`, which the binding's `token_env`
-forwards, else the CLI's cached login for that host (`databricks auth
-token`), which refreshes itself. Each consult is its own process, and
-with the variables unset it runs those two CLI commands first, so set
-the variables where consult latency matters. `DATABRICKS_TOKEN` is never read: the
+its token. The workspace is `DATABRICKS_HOST`, the SDK's own variable,
+else the host the Databricks CLI is logged in to (`databricks auth
+describe`). The token is `APPA_PROVIDER_DATABRICKS_TOKEN`, which the
+binding's `token_env` forwards, else the CLI's cached login for that
+host (`databricks auth token`), which refreshes itself. A command
+inherits no other `APPA_*` variable, so the workspace has no
+`APPA_PROVIDER_` spelling; set `DATABRICKS_HOST` beside the token to pin
+the workspace the token is sent to, since the CLI's login is otherwise
+what names it. Each consult is its own process, and with the variables
+unset it runs those two CLI commands first, so set both where consult
+latency matters. `DATABRICKS_TOKEN` is never read: the
 SDK's own variable is the host's credential, not this source's. The
 token needs to read SCIM users and groups, and Genie space permissions
 for `genie-space/<id>/readers`. Any API error or missing answer stops
