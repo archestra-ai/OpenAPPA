@@ -69,6 +69,16 @@ _FAILED_TERMINAL_STATUSES = {
     "cancelled",
     "budget_exhausted",
 }
+_COMMAND_PATH_OPTIONS = {
+    "--data-root",
+    "--policy",
+    "--profile",
+    "--server-bin",
+    "--settings",
+    "--sink-root",
+    "--status-file",
+    "--usage-file",
+}
 
 
 def _count(pattern: re.Pattern[str], text: str) -> int:
@@ -77,6 +87,18 @@ def _count(pattern: re.Pattern[str], text: str) -> int:
 
 def _provider_retries(text: str) -> int:
     return sum(max(0, int(match.group(1)) - 1) for match in _PROVIDER_ATTEMPTS.finditer(text))
+
+
+def _recorded_command(command: list[str], episode_dir: Path) -> list[str]:
+    """Make machine-local argv paths relative without changing execution."""
+    recorded = list(command)
+    path_indexes = {0}
+    path_indexes.update(index + 1 for index, argument in enumerate(command) if argument in _COMMAND_PATH_OPTIONS)
+    for index in path_indexes:
+        path = Path(command[index])
+        if path.is_absolute():
+            recorded[index] = os.path.relpath(path, episode_dir)
+    return recorded
 
 
 @dataclass(frozen=True)
@@ -445,7 +467,7 @@ def run_episode(
             {
                 **episode_record(result),
                 "checks": [check.__dict__ for check in results],
-                "command": command,
+                "command": _recorded_command(command, episode_dir),
             },
             indent=2,
         )

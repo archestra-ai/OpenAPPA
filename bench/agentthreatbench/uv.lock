@@ -275,11 +275,15 @@ name = "appa-bench-publish"
 version = "0.1.0"
 source = { directory = "../publish" }
 dependencies = [
+    { name = "zipfile-zstd" },
     { name = "zstandard" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "zstandard", specifier = ">=0.23" }]
+requires-dist = [
+    { name = "zipfile-zstd", marker = "python_full_version < '3.14'", specifier = "==0.0.4" },
+    { name = "zstandard", specifier = ">=0.23" },
+]
 
 [package.metadata.requires-dev]
 dev = [

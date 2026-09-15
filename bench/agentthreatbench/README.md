@@ -124,6 +124,8 @@ two assets, dispatches `.github/workflows/bench-publish.yml`, and prints the
 workflow run URL. The workflow verifies the bundle, publishes it to
 `bench/agentthreatbench/<commit>/<run-id>/`, reads it back, and then deletes
 the relay.
+Rerunning accepts an unchanged local bundle and reuses its draft relay. A
+changed run or index requires a new `--output-dir` or removal of the old one.
 
 To inspect the bundle or relay it manually, stop before any GitHub operation:
 

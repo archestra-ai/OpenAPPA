@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -18,6 +19,9 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
 import zstandard
+
+if sys.version_info < (3, 14):
+    import zipfile_zstd  # type: ignore[import-not-found, import-untyped]  # noqa: F401
 
 REPOSITORY = "archestra-ai/OpenAPPA"
 WORKFLOW = "bench-publish.yml"
@@ -93,8 +97,7 @@ def prepare_bundle(run_dir: Path, benchmark: str, git_commit: str, output_dir: P
     if destination == run_dir or run_dir in destination.parents:
         raise PublishError("output directory must be outside the run directory")
     destination.mkdir(parents=True, exist_ok=True)
-    if any(destination.iterdir()):
-        raise PublishError(f"output directory must be empty: {destination}")
+    existing = list(destination.iterdir())
 
     entries = list(_run_entries(run_dir))
     if not entries:
@@ -106,27 +109,28 @@ def prepare_bundle(run_dir: Path, benchmark: str, git_commit: str, output_dir: P
         _scan_archive(temporary)
         digest = _sha256(temporary)
         archive = destination / f"{run_id}-{digest}.tar.zst"
-        temporary.replace(archive)
+        payload = {
+            "format_version": 1,
+            "benchmark": benchmark,
+            "git_commit": git_commit,
+            "run_id": run_id,
+            "archive": archive.name,
+            "sha256": digest,
+        }
         index = destination / "index.json"
-        index.write_text(
-            json.dumps(
-                {
-                    "format_version": 1,
-                    "benchmark": benchmark,
-                    "git_commit": git_commit,
-                    "run_id": run_id,
-                    "archive": archive.name,
-                    "sha256": digest,
-                },
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
+        if existing:
+            bundle = Bundle(archive, index, benchmark, git_commit, run_id, digest)
+            _verify_existing_bundle(bundle, payload, existing)
+            temporary.unlink()
+            return bundle
+
+        temporary.replace(archive)
+        index.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     except Exception:
         temporary.unlink(missing_ok=True)
-        for child in destination.iterdir():
-            child.unlink()
+        if not existing:
+            for child in destination.iterdir():
+                child.unlink()
         raise
 
     return Bundle(archive, index, benchmark, git_commit, run_id, digest)
@@ -136,9 +140,17 @@ def relay_bundle(bundle: Bundle) -> str:
     tag = f"bench-relay-{bundle.benchmark}-{bundle.run_id}-{bundle.sha256[:12]}"
     title = f"Benchmark relay: {bundle.benchmark}/{bundle.run_id}"
     _gh("workflow", "view", WORKFLOW, "--repo", REPOSITORY)
-    _gh("release", "create", tag, "--repo", REPOSITORY, "--draft", "--title", title, "--notes", "")
     try:
-        _gh("release", "upload", tag, str(bundle.archive), str(bundle.index), "--repo", REPOSITORY)
+        release_state = _gh("release", "view", tag, "--repo", REPOSITORY, "--json", "isDraft", "--jq", ".isDraft")
+    except PublishError as error:
+        if "not found" not in str(error).lower() and "404" not in str(error):
+            raise
+        _gh("release", "create", tag, "--repo", REPOSITORY, "--draft", "--title", title, "--notes", "")
+    else:
+        if release_state != "true":
+            raise PublishError(f"relay tag {tag} identifies a published release and cannot be reused")
+    try:
+        _gh("release", "upload", tag, str(bundle.archive), str(bundle.index), "--repo", REPOSITORY, "--clobber")
         dispatched_after = time.time() - 5
         output = _gh(
             "workflow",
@@ -156,12 +168,36 @@ def relay_bundle(bundle: Bundle) -> str:
             f"relay_tag={tag}",
         )
     except Exception as error:
-        raise PublishError(f"relay release {tag} was left in place after publication failed: {error}") from error
+        raise PublishError(
+            f"relay release {tag} was left in place after publication failed; rerun to reuse it, "
+            f"or delete it with `gh release delete {tag} --yes`: {error}"
+        ) from error
 
     match = re.search(r"https://github\.com/[^\s]+/actions/runs/\d+", output)
     if match:
         return match.group(0)
-    return _find_workflow_url(dispatched_after)
+    try:
+        return _find_workflow_url(dispatched_after)
+    except PublishError as error:
+        raise PublishError(
+            f"workflow was dispatched for relay {tag}, but its run URL lookup failed: {error}"
+        ) from error
+
+
+def _verify_existing_bundle(bundle: Bundle, payload: dict[str, object], existing: list[Path]) -> None:
+    expected = {bundle.archive, bundle.index}
+    if set(existing) != expected or not bundle.archive.is_file() or not bundle.index.is_file():
+        raise PublishError(
+            f"existing output is not this run's bundle; remove it or choose --output-dir: {bundle.index.parent}"
+        )
+    try:
+        current_index = json.loads(bundle.index.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise PublishError(f"existing bundle has an unreadable index: {bundle.index}") from error
+    if current_index != payload or _sha256(bundle.archive) != bundle.sha256:
+        raise PublishError(
+            f"existing output does not match this run; remove it or choose --output-dir: {bundle.index.parent}"
+        )
 
 
 def _git_head() -> str:

@@ -47,6 +47,21 @@ def test_prepares_reproducible_contract_bundle(tmp_path: Path) -> None:
         "sha256": first.sha256,
     }
 
+    reused = prepare_bundle(run, "corp", COMMIT, tmp_path / "first")
+    assert reused == first
+
+
+def test_refuses_to_replace_bundle_when_run_changed(tmp_path: Path) -> None:
+    run = tmp_path / "run-1"
+    run.mkdir()
+    record = run / "summary.json"
+    record.write_text('{"score": 1}\n')
+    prepare_bundle(run, "corp", COMMIT, tmp_path / "bundle")
+    record.write_text('{"score": 0}\n')
+
+    with pytest.raises(PublishError, match="not this run"):
+        prepare_bundle(run, "corp", COMMIT, tmp_path / "bundle")
+
 
 @pytest.mark.parametrize(
     ("contents", "message"),
@@ -72,7 +87,7 @@ def test_refuses_absolute_path_inside_nested_eval_zip(tmp_path: Path) -> None:
 
     run = tmp_path / "unsafe-eval"
     run.mkdir()
-    with zipfile.ZipFile(run / "result.eval", "w") as nested:
+    with zipfile.ZipFile(run / "result.eval", "w", compression=zipfile.ZIP_ZSTANDARD) as nested:
         nested.writestr("samples/1.json", '{"working_dir":"C:\\\\Users\\\\alice\\\\OpenAPPA"}')
 
     with pytest.raises(PublishError, match="absolute local path"):
@@ -89,6 +104,8 @@ def test_relay_uses_draft_release_and_workflow_contract(tmp_path: Path, monkeypa
 
     def fake_gh(*args: str) -> str:
         calls.append(args)
+        if args[:2] == ("release", "view"):
+            raise PublishError("gh release view failed: HTTP 404: release not found")
         if args[:2] == ("workflow", "run"):
             return "https://github.com/archestra-ai/OpenAPPA/actions/runs/123456"
         return ""
@@ -98,6 +115,17 @@ def test_relay_uses_draft_release_and_workflow_contract(tmp_path: Path, monkeypa
     assert relay_bundle(bundle).endswith("/actions/runs/123456")
     assert calls == [
         ("workflow", "view", "bench-publish.yml", "--repo", "archestra-ai/OpenAPPA"),
+        (
+            "release",
+            "view",
+            "bench-relay-corp-run-1-bbbbbbbbbbbb",
+            "--repo",
+            "archestra-ai/OpenAPPA",
+            "--json",
+            "isDraft",
+            "--jq",
+            ".isDraft",
+        ),
         (
             "release",
             "create",
@@ -118,6 +146,7 @@ def test_relay_uses_draft_release_and_workflow_contract(tmp_path: Path, monkeypa
             str(index),
             "--repo",
             "archestra-ai/OpenAPPA",
+            "--clobber",
         ),
         (
             "workflow",
@@ -135,3 +164,41 @@ def test_relay_uses_draft_release_and_workflow_contract(tmp_path: Path, monkeypa
             "relay_tag=bench-relay-corp-run-1-bbbbbbbbbbbb",
         ),
     ]
+
+
+def test_relay_reuses_existing_draft(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    archive = tmp_path / f"run-1-{'b' * 64}.tar.zst"
+    index = tmp_path / "index.json"
+    bundle = Bundle(archive, index, "corp", COMMIT, "run-1", "b" * 64)
+    calls: list[tuple[str, ...]] = []
+
+    def fake_gh(*args: str) -> str:
+        calls.append(args)
+        if args[:2] == ("release", "view"):
+            return "true"
+        if args[:2] == ("workflow", "run"):
+            return "https://github.com/archestra-ai/OpenAPPA/actions/runs/123456"
+        return ""
+
+    monkeypatch.setattr(publisher, "_gh", fake_gh)
+
+    relay_bundle(bundle)
+
+    assert not any(call[:2] == ("release", "create") for call in calls)
+    upload = next(call for call in calls if call[:2] == ("release", "upload"))
+    assert upload[-1] == "--clobber"
+
+
+def test_url_lookup_failure_says_dispatch_succeeded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bundle = Bundle(tmp_path / "archive.tar.zst", tmp_path / "index.json", "corp", COMMIT, "run-1", "b" * 64)
+
+    def fake_gh(*args: str) -> str:
+        if args[:2] == ("release", "view"):
+            return "true"
+        return ""
+
+    monkeypatch.setattr(publisher, "_gh", fake_gh)
+    monkeypatch.setattr(publisher, "_find_workflow_url", lambda _: (_ for _ in ()).throw(PublishError("not found")))
+
+    with pytest.raises(PublishError, match="workflow was dispatched.*run URL lookup failed"):
+        relay_bundle(bundle)

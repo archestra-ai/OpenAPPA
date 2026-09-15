@@ -400,6 +400,8 @@ It creates a deterministic `<run-id>-<sha256>.tar.zst` and `index.json` under
 two assets, dispatches `.github/workflows/bench-publish.yml`, and prints the
 workflow run URL. The workflow verifies the bundle, publishes it to
 `bench/corp/<commit>/<run-id>/`, reads it back, and then deletes the relay.
+Rerunning accepts an unchanged local bundle and reuses its draft relay. A
+changed run or index requires a new `--output-dir` or removal of the old one.
 
 To inspect the bundle or relay it manually, stop before any GitHub operation:
 
@@ -516,7 +518,9 @@ Each test episode creates an isolated log directory under `runs/<run-id>/<agent>
 - `stdout.txt` / `stderr.txt`: Process execution output logs.
 - `agent-status.json`: APPA's typed terminal status (`completed`, `budget_finalized`, or a failure class).
 - `policies/`: Pruned active policy rules.
-- `result.json`: Validation check outcomes plus terminal status and recovered provider-retry count.
+- `result.json`: Validation check outcomes, terminal status, recovered
+  provider-retry count, and executed argv with paths relative to the episode
+  directory.
 - `external-requests.jsonl`: Annotator, sanitizer, and authority fixture consults — each a `{version, kind, name, declaration, artifact}` envelope (when applicable).
 
 The run root contains `summary.json` (aggregated evaluation matrix) and `config.json` (run metadata, git commit SHA, model settings).

@@ -3,7 +3,10 @@ name = "appa-bench-publish"
 version = "0.1.0"
 description = "Package and relay OpenAPPA benchmark run archives"
 requires-python = ">=3.11"
-dependencies = ["zstandard>=0.23"]
+dependencies = [
+    "zipfile-zstd==0.0.4; python_version < '3.14'",
+    "zstandard>=0.23",
+]
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.16"]
