@@ -16,8 +16,9 @@ and `host/claude-code/Read`:
   assignment whose key names a secret, and long high-entropy runs, then
   returns the masked output to `public`: the model reads the masked text and
   the session keeps its label.
-  The sanitizer applies only to these credential rules, never to other
-  results or a subagent's return. Before any other command runs, the
+  The sanitizer carries no tags: it is offered for any withheld Bash result
+  the session cannot read as it is, including one the Annotator narrowed to
+  `self`, and for a subagent's return. Before any other command runs, the
   Claude Code model decides what trust and fresh attention it requires and
   labels its output for trust and audience, inside the vocabulary static rules
   write: a command that visibly reads the requester's or the organization's
