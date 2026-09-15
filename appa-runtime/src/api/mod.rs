@@ -1308,7 +1308,7 @@ impl Runtime {
         struct Rules {
             policy: toml::Value,
             #[serde(default)]
-            server_aliases: std::collections::BTreeMap<String, Vec<String>>,
+            server_aliases: crate::config::ServerBindings,
         }
         let source = std::str::from_utf8(log.policy_file())
             .map_err(|_| EventError::PolicyUnavailable("stored policy is not UTF-8".into()))?;
@@ -2120,7 +2120,7 @@ fn resolve_served_policy(
     policy: &toml::Value,
     naming: ToolNaming,
     inventory: &appa_runtime_api::inventory::ToolInventory,
-    aliases: &std::collections::BTreeMap<String, Vec<String>>,
+    aliases: &crate::config::ServerBindings,
 ) -> Result<toml::Value, String> {
     match naming {
         ToolNaming::AsAuthored => Ok(policy.clone()),

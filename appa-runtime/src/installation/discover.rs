@@ -166,7 +166,7 @@ pub(crate) fn coverage(
     servers: &BTreeSet<Namespace>,
     batteries: &[(PackageName, Battery)],
     included: &BTreeSet<String>,
-    bindings: &BTreeMap<String, Vec<String>>,
+    bindings: &crate::config::ServerBindings,
 ) -> Coverage {
     let bound_to = |namespace: &Namespace| bindings.get(namespace.as_str()).map(Vec::as_slice);
     let bound_to_server = |namespace: &Namespace, server: &Namespace| {
@@ -314,8 +314,8 @@ mod tests {
         names.iter().map(|name| (*name).to_owned()).collect()
     }
 
-    fn bindings(pairs: &[(&str, &str)]) -> BTreeMap<String, Vec<String>> {
-        let mut bindings: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    fn bindings(pairs: &[(&str, &str)]) -> crate::config::ServerBindings {
+        let mut bindings = crate::config::ServerBindings::new();
         for (namespace, server) in pairs {
             bindings
                 .entry((*namespace).to_owned())

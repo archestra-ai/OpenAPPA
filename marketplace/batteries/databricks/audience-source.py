@@ -51,8 +51,6 @@ PAGE_SIZE = 100
 MAX_DIRECTORY = 5000
 # Members looked up one by one before a directory pass is cheaper.
 DIRECT_LOOKUPS = 20
-# Groups nested inside groups, before the expansion is refused as a cycle.
-MAX_GROUP_DEPTH = 5
 
 
 class NotFound(Exception):
@@ -78,12 +76,14 @@ def rest_api(host, token):
 
 
 class Workspace:
-    """One consult's view of the workspace: the REST call, and the directory
-    read at most once however many groups the consult expands."""
+    """One consult's view of the workspace: the REST call, every group read
+    at most once, and the directory read at most once however many groups
+    the consult expands."""
 
     def __init__(self, call):
         self.call = call
         self.users = None
+        self.groups = {}
 
     def directory(self):
         if self.users is None:
@@ -187,27 +187,32 @@ def group_by_name(workspace, name):
 
 
 def group_by_id(workspace, group_id):
-    try:
-        return workspace.call(f"{SCIM}/Groups/{urllib.parse.quote(group_id, safe='')}", attributes="id,displayName,members")
-    except NotFound:
-        raise RuntimeError(f"the directory does not report group {group_id}") from None
+    if group_id not in workspace.groups:
+        try:
+            workspace.groups[group_id] = workspace.call(
+                f"{SCIM}/Groups/{urllib.parse.quote(group_id, safe='')}", attributes="id,displayName,members"
+            )
+        except NotFound:
+            raise RuntimeError(f"the directory does not report group {group_id}") from None
+    return workspace.groups[group_id]
 
 
 def is_group_member(member):
     return "/Groups/" in str(member.get("$ref", "")) or member.get("type") == "Group"
 
 
-def group_user_ids(workspace, group, depth=0):
-    """The user ids of one group, its nested groups expanded, in listing order;
-    the users themselves are read once for the whole expansion."""
-    if depth > MAX_GROUP_DEPTH:
-        raise RuntimeError(f"group {group.get('displayName')!r} nests deeper than {MAX_GROUP_DEPTH} groups")
+def group_user_ids(workspace, group, expanded=None):
+    """The user ids of one group, its nested groups expanded, in listing order.
+    A group already expanded in this walk, a cycle included, adds nothing
+    twice; the users themselves are read once for the whole expansion."""
+    expanded = {group["id"]} if expanded is None else expanded
     user_ids = []
     for member in group.get("members", []):
-        if is_group_member(member):
-            user_ids.extend(group_user_ids(workspace, group_by_id(workspace, member["value"]), depth + 1))
-        else:
+        if not is_group_member(member):
             user_ids.append(member["value"])
+        elif member["value"] not in expanded:
+            expanded.add(member["value"])
+            user_ids.extend(group_user_ids(workspace, group_by_id(workspace, member["value"]), expanded))
     return user_ids
 
 
@@ -278,7 +283,7 @@ def member_principal(workspace, member):
     # Without an address the member is the reader as written, in the
     # queried spelling; an inactive user stays as written too.
     reader = reader_of(user)
-    return reader if reader is not None and reader != qualified(user["id"]) else member
+    return reader if reader is not None and is_address(reader) else member
 
 
 def answer(call, artifact):

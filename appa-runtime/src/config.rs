@@ -10,11 +10,14 @@ use appa_engine::audience::{DeclaredTemplate, SourceRegistration, well_formed_re
 use appa_engine::label::ReaderId;
 use serde::Deserialize;
 
+/// Each policy namespace bound to the connection identities the host reports for it.
+pub(crate) type ServerBindings = BTreeMap<String, Vec<String>>;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     policy: PolicyFile,
     /// Each policy namespace bound to the connection identities the host reports for it.
-    pub(crate) server_aliases: BTreeMap<String, Vec<String>>,
+    pub(crate) server_aliases: ServerBindings,
     pub(crate) inventory: appa_runtime_api::inventory::ToolInventory,
     pub externals: Externals,
     /// Deployment knobs that describe this machine's reporting posture, not its policy.
@@ -624,7 +627,7 @@ struct RawConfig {
     #[serde(default)]
     bundle: RawBundle,
     #[serde(default)]
-    server_aliases: BTreeMap<String, Vec<String>>,
+    server_aliases: ServerBindings,
     #[serde(default)]
     appa_inventory: appa_runtime_api::inventory::ToolInventory,
 }

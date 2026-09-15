@@ -181,11 +181,39 @@ class SelectorTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 AUDIENCE_SOURCE.answer(call, {"selector": "group/finance"})
 
-    def test_a_group_cycle_is_refused(self):
-        listing = (*group_listing("loop"), {"Resources": [group("g1", "loop", groups=["g1"])]})
-        nested = [(f"{SCIM}/Groups/g1", GROUP_ATTRIBUTES, group("g1", "loop", groups=["g1"])) for _ in range(10)]
-        with self.assertRaises(RuntimeError):
-            AUDIENCE_SOURCE.answer(fixture_api([listing, *nested]), {"selector": "group/loop"})
+    def test_a_shared_or_cyclic_subgroup_is_read_and_expanded_once(self):
+        call = fixture_api(
+            [
+                (*group_listing("loop"), {"Resources": [group("g1", "loop", users=["1"], groups=["g2", "g3"])]}),
+                (f"{SCIM}/Groups/g2", GROUP_ATTRIBUTES, group("g2", "left", users=["2"], groups=["g4", "g1"])),
+                (f"{SCIM}/Groups/g3", GROUP_ATTRIBUTES, group("g3", "right", groups=["g4"])),
+                (f"{SCIM}/Groups/g4", GROUP_ATTRIBUTES, group("g4", "shared", users=["3"])),
+                user_lookup("1", user("1", "alice@corp.com")),
+                user_lookup("2", user("2", "bob@corp.com")),
+                user_lookup("3", user("3", "carol@corp.com")),
+            ]
+        )
+        members = AUDIENCE_SOURCE.answer(call, {"selector": "group/loop"})["members"]
+        self.assertEqual(members, ["alice@corp.com", "bob@corp.com", "carol@corp.com"])
+
+    def test_a_space_whose_groups_share_a_subgroup_reads_it_once(self):
+        acl = {
+            "access_control_list": [
+                {"group_name": "east", "all_permissions": [{"permission_level": "CAN_VIEW"}]},
+                {"group_name": "west", "all_permissions": [{"permission_level": "CAN_VIEW"}]},
+            ]
+        }
+        call = fixture_api(
+            [
+                ("/api/2.0/permissions/genie/space-1", {}, acl),
+                (*group_listing("east"), {"Resources": [group("g1", "east", groups=["g3"])]}),
+                (*group_listing("west"), {"Resources": [group("g2", "west", groups=["g3"])]}),
+                (f"{SCIM}/Groups/g3", GROUP_ATTRIBUTES, group("g3", "shared", users=["1"])),
+                user_lookup("1", user("1", "alice@corp.com")),
+            ]
+        )
+        members = AUDIENCE_SOURCE.answer(call, {"selector": "genie-space/space-1/readers"})["members"]
+        self.assertEqual(members, ["alice@corp.com"])
 
     def test_a_genie_space_collects_users_groups_and_service_principals(self):
         acl = {

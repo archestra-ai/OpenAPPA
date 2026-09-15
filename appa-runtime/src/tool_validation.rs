@@ -181,7 +181,7 @@ pub fn resolve(
     policy: &toml::Value,
     adapter: Adapter,
     inventory: &ToolInventory,
-    server_aliases: &BTreeMap<String, Vec<String>>,
+    server_aliases: &crate::config::ServerBindings,
 ) -> ResolvedPolicy {
     let mut policy = policy.clone();
     let mut report = ValidationReport {

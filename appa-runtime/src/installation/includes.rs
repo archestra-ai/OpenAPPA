@@ -5,7 +5,7 @@
 //! it wrote and a line the person wrote read the same, and an edit changes
 //! exactly the entry it names.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use appa_package::{Namespace, PackageName};
@@ -129,12 +129,9 @@ pub(crate) fn included(text: &str) -> Result<BTreeSet<String>, InstallError> {
     Ok(included_in(&document(text)?))
 }
 
-/// Each namespace bound to the server keys the host reports for it.
-pub(crate) type ServerBindings = BTreeMap<String, Vec<String>>;
-
 /// The batteries the config includes, and its `server_aliases` table. A
 /// binding that is not an array of strings is refused, as the loader refuses it.
-pub(crate) fn batteries(text: &str) -> Result<(BTreeSet<String>, ServerBindings), InstallError> {
+pub(crate) fn batteries(text: &str) -> Result<(BTreeSet<String>, crate::config::ServerBindings), InstallError> {
     let document = document(text)?;
     let bindings = document
         .get("server_aliases")
@@ -207,7 +204,7 @@ mod tests {
         assert_eq!(bind_servers(&bound, &github, &servers(&["work-github"])).unwrap(), bound);
         assert_eq!(
             batteries(&bound).unwrap().1,
-            BTreeMap::from([("github".to_owned(), servers(&["work-github"]))])
+            crate::config::ServerBindings::from([("github".to_owned(), servers(&["work-github"]))])
         );
         let rebound = bind_servers(&bound, &github, &servers(&["home-github", "lab-github"])).unwrap();
         assert!(rebound.contains("home-github") && !rebound.contains("work-github"));
