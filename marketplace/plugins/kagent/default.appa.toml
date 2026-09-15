@@ -103,7 +103,10 @@ delta = {}
 [policy.deployment]
 context_control = true
 
-# The human behind `human-approval`. On kagent the plugin asks the
+# The human behind every attention mark, `human-approval` and the
+# batteries' review marks alike (`*` — every mark but the reserved
+# `blocked`), and the one who may vouch data below `trusted` or an
+# audience up to `public` for one call. On kagent the plugin asks the
 # person through the stock approval flow (Approve/Reject) and returns
 # the ruling with the control call; no answer grants nothing, and the
 # offer stands.
@@ -112,7 +115,9 @@ name = "oncall"
 hint = "Ask the on-call lead through the kagent approval flow."
 
 [policy.authority.permits]
-attention = ["human-approval"]
+trust_below = "trusted"
+audience_missing = ["public"]
+attention = ["*"]
 
 [externals]
 timeout_ms = 5000

@@ -10,10 +10,10 @@ and `host/claude-code/Read`:
 
 - **Bash** — A command that names a credential path (`.env`, `.ssh/`, `.netrc`,
   `.claude.json`, `.aws/credentials`, a private key, ...) requires the
-  `token-exposed` mark: we have no token sanitizer yet, and no authority
-  permits `token-exposed`, so the command is refused outright before secrets
-  reach the model context. In the future, a token sanitizer can permit
-  `token-exposed` by redacting values. Before any other command runs, the
+  reserved `blocked` mark, which no authority may permit, so the command is
+  refused outright before secrets reach the model context. A token sanitizer,
+  when one ships, replaces the mark with a narrowing to `self` and an output
+  sanitizer that masks the values. Before any other command runs, the
   Claude Code model decides what trust and fresh attention it requires and
   labels its output for trust and audience, inside the vocabulary static rules
   write: a command that visibly reads the requester's or the organization's

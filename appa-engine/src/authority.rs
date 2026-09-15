@@ -27,6 +27,55 @@ impl Hint {
     }
 }
 
+/// The attention marks an authority's ruling may attend. A catch-all covers every mark the
+/// policy declares except the reserved denial, [`MarkName::BLOCKED`]: one human authority
+/// serves a single-reviewer deployment without naming each battery's mark, and a contract
+/// requiring `blocked` stays unremediable under it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Attends {
+    Named(Vec<MarkName>),
+    Any,
+}
+
+impl Default for Attends {
+    fn default() -> Self {
+        Attends::Named(Vec::new())
+    }
+}
+
+impl Attends {
+    /// The one spelling of a catch-all in policy and on the wire.
+    pub const WILDCARD: &'static str = "*";
+
+    pub fn covers(&self, mark: &MarkName) -> bool {
+        match self {
+            Attends::Named(marks) => marks.contains(mark),
+            Attends::Any => !mark.is_blocked(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        matches!(self, Attends::Named(marks) if marks.is_empty())
+    }
+
+    /// The marks this mandate names — its contribution to the policy's mark vocabulary. A
+    /// catch-all names none: it attends whatever the rest of the policy declares.
+    pub fn named(&self) -> &[MarkName] {
+        match self {
+            Attends::Named(marks) => marks,
+            Attends::Any => &[],
+        }
+    }
+
+    /// The mandate as policy spells it: the names, or the wildcard alone.
+    pub fn spellings(&self) -> Vec<String> {
+        match self {
+            Attends::Named(marks) => marks.iter().map(|mark| mark.as_str().to_string()).collect(),
+            Attends::Any => vec![Self::WILDCARD.to_string()],
+        }
+    }
+}
+
 /// What an authority's ruling may cover. Each power names its currency; a mandate covering nothing
 /// is a loud load error (the empty-remedy proof depends on it — see [`Mandate::is_empty`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,7 +86,7 @@ pub struct Mandate {
     /// the comparison needs.
     pub reader_ceiling: Option<DeclaredAudience>,
     pub waivers: Vec<EffectKind>,
-    pub attends: Vec<MarkName>,
+    pub attends: Attends,
 }
 
 impl Mandate {

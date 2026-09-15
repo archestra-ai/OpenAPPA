@@ -90,7 +90,7 @@ const TERMS = {
   audiences:
     "Audiences an annotator may use in its answer. public is always allowed and must not be listed here. An empty list allows only public; omitting the field allows audiences declared in the policy. A selector placeholder entry is instantiated per call, so the answer may name only the resource the call's arguments spell.",
   marks:
-    "Attention marks an annotator may require. An empty list allows none. If omitted, it may use every mark declared in an authority's permits.attention.",
+    "Attention marks an annotator may require. An empty list allows none. If omitted, it may use every mark the policy declares in a tool's requires.attention, an authority's permits.attention, or another annotator's marks.",
   "$tool_call":
     "The only source an annotator input reads. Its five forms are the complete call (name, description when declared, arguments), its name, its description, its arguments, and one top-level argument. Only $tool_call.description requires a declared description.",
   "[externals.annotators.<name>]":
@@ -134,7 +134,9 @@ const TERMS = {
   attention:
     "Named approvals required for each tool call. An earlier approval does not satisfy a later call. Authorities can give the approvals listed in their permits.attention, regardless of their tags.",
   "permits.attention":
-    "The named approvals an authority can give for a call. Annotators can require only marks declared by authorities in the policy.",
+    "The named approvals an authority can give for a call. [\"*\"] alone means every mark the policy declares except blocked. Annotators can require only marks the policy declares.",
+  blocked:
+    "The reserved attention mark that denies a call outright. No authority can permit it and a [\"*\"] permit does not cover it, so a tool that requires it has no remedy.",
   'builtin = "hitl"':
     "Asks a person to approve or deny the call through the agent integration.",
   'builtin = "approve"':

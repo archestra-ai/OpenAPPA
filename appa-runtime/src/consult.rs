@@ -241,7 +241,7 @@ impl AuthorityDeclaration {
                 trust_below: mandate.trust_ceiling.map(|ceiling| rank_name(chain, ceiling)),
                 audience_missing: mandate.reader_ceiling.as_ref().map(WireAudience::declared),
                 effects_containing: mandate.waivers.iter().map(|kind| kind.as_str().to_string()).collect(),
-                attention: mandate.attends.iter().map(|mark| mark.as_str().to_string()).collect(),
+                attention: mandate.attends.spellings(),
             },
         }
     }
