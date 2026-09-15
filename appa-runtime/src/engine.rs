@@ -859,21 +859,12 @@ impl RuntimeEngine {
             .offer_consults(view, &engine_id(trajectory), &engine_offer)
             .ok()?
         {
-            // A call-stage settlement that binds an output sanitizer executes as an
-            // acceptance; whom it involves is the sanitizer the feedback names.
-            OfferConsult::Accept => Some(
-                match self
-                    .engine
-                    .offer_plan(view, &engine_id(trajectory), &engine_offer)
-                    .as_ref()
-                    .and_then(appa_engine::plan::ExecutableRemedyPlan::sanitizer)
-                {
-                    Some(sanitizer) => crate::api::OfferKind::Sanitizer {
-                        name: sanitizer.as_str().to_string(),
-                    },
-                    None => crate::api::OfferKind::Accept,
-                },
-            ),
+            OfferConsult::Accept { sanitizer: None } => Some(crate::api::OfferKind::Accept),
+            OfferConsult::Accept {
+                sanitizer: Some(sanitizer),
+            } => Some(crate::api::OfferKind::Sanitizer {
+                name: sanitizer.as_str().to_string(),
+            }),
             OfferConsult::Authorities { required, .. } => {
                 let mut names: Vec<String> = required
                     .iter()
@@ -1458,7 +1449,7 @@ impl RuntimeEngine {
                 ));
             }
             OfferConsult::Replay(outcome) => outcome,
-            OfferConsult::Accept => OfferOutcome::Approved(Vec::new()),
+            OfferConsult::Accept { .. } => OfferOutcome::Approved(Vec::new()),
             OfferConsult::Rewrite { sanitizer, call } => {
                 let arguments = call.canonical_arguments();
                 let source = RawResultDigest::of(arguments.canonical_bytes());

@@ -141,7 +141,11 @@ pub struct OfferExecution {
 /// What the runtime must resolve before it can execute one live offer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OfferConsult {
-    Accept,
+    /// A plain acceptance: nobody is consulted. A call-stage settlement that binds an output
+    /// sanitizer names it, so the runtime can say whom taking the offer involves.
+    Accept {
+        sanitizer: Option<SanitizerName>,
+    },
     Authorities {
         call: ResolvedCall,
         required: Vec<crate::plan::RequiredRuling>,

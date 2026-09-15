@@ -340,7 +340,9 @@ impl Engine {
                     sanitizer: sanitizer.clone(),
                     call: self.offer_call(&views, recorded),
                 }),
-                None if recorded.plan.required.is_empty() => Ok(OfferConsult::Accept),
+                None if recorded.plan.required.is_empty() => Ok(OfferConsult::Accept {
+                    sanitizer: recorded.plan.sanitizer().cloned(),
+                }),
                 None => Ok(OfferConsult::Authorities {
                     call: self.offer_call(&views, recorded),
                     required: recorded.plan.required.clone(),
@@ -364,7 +366,7 @@ impl Engine {
                         tool: views.dispatch_tool(dispatch).cloned(),
                     })
                 }
-                None => Ok(OfferConsult::Accept),
+                None => Ok(OfferConsult::Accept { sanitizer: None }),
             },
             crate::basis::SubjectKey::Approval(_) => Ok(OfferConsult::Stale),
         }
@@ -4856,7 +4858,7 @@ mod tests {
         );
         assert_eq!(
             e.offer_consults(&viewing(&e, &log), &traj(), &accept),
-            Ok(OfferConsult::Accept),
+            Ok(OfferConsult::Accept { sanitizer: None }),
         );
 
         let crossed = [
