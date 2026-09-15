@@ -414,6 +414,28 @@ fn a_battery_that_validates_loads() {
             yes,
             body("[[policy.tool]]\ndelta = {}\n", ""),
         ),
+        (
+            "a stock sanitizer bound by name",
+            yes,
+            yes,
+            body(
+                &format!("{tool}\n[[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\n"),
+                "[externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\n",
+            ),
+        ),
+        // Stricter than the loader again: the loader lets an operator's own
+        // file bind the stock approving authority; a battery may not.
+        (
+            "a stock authority bound by name",
+            no,
+            yes,
+            body(
+                &format!(
+                    "{tool}\n[[policy.authority]]\nname = \"nod\"\n[policy.authority.permits]\nattention = [\"hitl\"]\n"
+                ),
+                "[externals.authorities.nod]\nbuiltin = \"approve\"\n",
+            ),
+        ),
         // Refused by both, each for its own reason: neither crate reads the
         // other, so agreeing here is the thing worth holding.
         (
@@ -439,6 +461,35 @@ fn a_battery_that_validates_loads() {
             no,
             no,
             body(&format!("{tool}\n[policy.audience]\nteam = []\n"), ""),
+        ),
+        (
+            "a battery confining the results of its own tool",
+            yes,
+            yes,
+            body(
+                &format!("{tool}\n[policy.deployment]\nconfined_results = [\"mcp/probe/read\"]\n"),
+                "",
+            ),
+        ),
+        (
+            "a battery confining the results of a tool it does not declare",
+            no,
+            no,
+            body(
+                &format!("{tool}\n[policy.deployment]\nconfined_results = [\"mcp/probe/write\"]\n"),
+                "",
+            ),
+        ),
+        (
+            "a deployment setting beside the confinement",
+            no,
+            no,
+            body(
+                &format!(
+                    "{tool}\n[policy.deployment]\nconfined_results = [\"mcp/probe/read\"]\nstarting_label = {{ audience = [\"internal\"] }}\n"
+                ),
+                "",
+            ),
         ),
         (
             "a top-level table only a root carries",
@@ -549,6 +600,17 @@ fn every_field_and_binding_a_package_may_carry_loads() {
         assert!(
             probe_loads(&fragment, true),
             "a package may bind `externals.{kind}` and a deployment will not load it"
+        );
+    }
+
+    for stock in appa_package::BINDABLE_STOCK_SANITIZERS {
+        let fragment = format!(
+            "[policy]\nversion = 2\n\n[[policy.sanitizer]]\nname = \"probe\"\non = [\"tool_output\"]\n\n\
+             [externals.sanitizers.probe]\nbuiltin = \"{stock}\"\n"
+        );
+        assert!(
+            probe_loads(&fragment, false),
+            "a package may bind the stock sanitizer {stock} and a deployment will not load it"
         );
     }
 }
