@@ -26,8 +26,11 @@ name: Publish benchmark archive
 #     -f relay_tag=bench-relay-<run-id>
 #
 # The workflow verifies the archive, index, and requested destination agree,
-# uploads with --no-clobber, and deletes the relay release only after the upload
-# succeeds. A failed run leaves the bytes where a retry finds them.
+# uploads with --no-clobber, then reads both objects back out of the bucket.
+# The read-back is what the delete depends on: --no-clobber skips an object
+# that is already there and still exits zero, so a successful copy is not
+# evidence that the published object is the one this run carried. A failed run
+# leaves the bytes where a retry finds them.
 #
 # If the download step cannot see the draft — draft visibility to GITHUB_TOKEN
 # has regressed before (cli/cli#3037) — fetch the assets by id from the upload
@@ -172,6 +175,29 @@ jobs:
           archive=$(jq -r .archive relay/index.json)
           gcloud storage cp --no-clobber \
             "relay/$archive" relay/index.json "gs://$BUCKET/$PREFIX/"
+
+      - name: Verify the upload
+        env:
+          BUCKET: ${{ vars.APPA_BENCH_GCS_BUCKET }}
+          PREFIX: bench/${{ inputs.bench }}/${{ inputs.commit }}/${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          archive=$(jq -r .archive relay/index.json)
+          digest=$(sha256sum "relay/$archive" | cut -d' ' -f1)
+
+          gcloud storage cp "gs://$BUCKET/$PREFIX/$archive" /tmp/published.tar.zst
+          echo "$digest  /tmp/published.tar.zst" | sha256sum --check --strict || {
+            echo "::error::the published archive is not the archive in the relay release"
+            exit 1
+          }
+
+          gcloud storage cat "gs://$BUCKET/$PREFIX/index.json" > /tmp/published-index.json
+          cmp /tmp/published-index.json relay/index.json || {
+            echo "::error::the published index.json is not the index in the relay release"
+            exit 1
+          }
+
+          echo "gs://$BUCKET/$PREFIX/ holds $archive and this relay release's index.json"
 
       - name: Delete the relay release
         env:
