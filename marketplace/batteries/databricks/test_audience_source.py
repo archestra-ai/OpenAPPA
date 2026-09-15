@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import threading
 from pathlib import Path
 import subprocess
 import sys
@@ -20,15 +21,20 @@ def fixture_api(responses):
     """A call answering from recorded Databricks REST payloads, in order."""
 
     remaining = list(responses)
+    # The source looks members up from several threads at once.
+    taking = threading.Lock()
 
     def call(path, **params):
-        for index, (fixture_path, fixture_params, response) in enumerate(remaining):
-            if fixture_path == path and fixture_params == params:
-                remaining.pop(index)
-                if isinstance(response, Exception):
-                    raise response
-                return response
-        raise AssertionError(f"unexpected call {path} {params}")
+        with taking:
+            for index, (fixture_path, fixture_params, response) in enumerate(remaining):
+                if fixture_path == path and fixture_params == params:
+                    remaining.pop(index)
+                    break
+            else:
+                raise AssertionError(f"unexpected call {path} {params}")
+        if isinstance(response, Exception):
+            raise response
+        return response
 
     return call
 

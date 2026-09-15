@@ -31,6 +31,7 @@ directory hiccup never becomes a policy decision.
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 import sys
 import urllib.error
 import urllib.parse
@@ -49,8 +50,10 @@ PAGE_SIZE = 100
 # Users a directory pass may hold: a larger workspace cannot answer inside
 # the runtime's consult budget and is refused instead of timing out halfway.
 MAX_DIRECTORY = 5000
-# Members looked up one by one before a directory pass is cheaper.
+# Members looked up singly, at most LOOKUP_WORKERS at a time, before a
+# directory pass is cheaper.
 DIRECT_LOOKUPS = 20
+LOOKUP_WORKERS = 8
 
 
 class NotFound(Exception):
@@ -150,17 +153,25 @@ def workspace_members(workspace):
     return readers_of(paged_users(workspace.call, filter="active eq true"))
 
 
+def looked_up(lookup, keys):
+    """One lookup per key, the independent calls in flight together, the
+    results in key order; the first failure is the consult's."""
+    with ThreadPoolExecutor(max_workers=max(1, min(LOOKUP_WORKERS, len(keys)))) as workers:
+        return list(workers.map(lookup, keys))
+
+
+def user_by_id(workspace, user_id):
+    try:
+        return workspace.call(f"{SCIM}/Users/{urllib.parse.quote(user_id, safe='')}")
+    except NotFound:
+        raise RuntimeError(f"the directory does not report member {user_id}") from None
+
+
 def users_by_id(workspace, user_ids):
     """The directory entries for exactly these ids; an id the workspace does
     not report is a failure, never a member silently dropped."""
     if len(user_ids) <= DIRECT_LOOKUPS:
-        users = {}
-        for user_id in user_ids:
-            try:
-                users[user_id] = workspace.call(f"{SCIM}/Users/{urllib.parse.quote(user_id, safe='')}")
-            except NotFound:
-                raise RuntimeError(f"the directory does not report member {user_id}") from None
-        return users
+        return dict(zip(user_ids, looked_up(lambda user_id: user_by_id(workspace, user_id), user_ids)))
     directory = workspace.directory()
     missing = [user_id for user_id in user_ids if user_id not in directory]
     if missing:
@@ -222,16 +233,18 @@ def group_members(workspace, name):
     return readers_of(users_by_id(workspace, user_ids).values())
 
 
+def user_by_name(workspace, user_name):
+    listing = workspace.call(f"{SCIM}/Users", filter=f"userName eq {scim_string(user_name)}", attributes="id,userName,active")
+    return sole_match(listing, "userName", user_name, "users")
+
+
 def users_by_name(workspace, user_names):
     """The directory entries for exactly these logins: a filtered listing each
-    up to DIRECT_LOOKUPS, then one directory pass; a login the workspace does
-    not report is a failure, never a reader silently dropped."""
+    up to DIRECT_LOOKUPS, in flight together, then one directory pass; a login
+    the workspace does not report is a failure, never a reader silently
+    dropped."""
     if len(user_names) <= DIRECT_LOOKUPS:
-        users = []
-        for user_name in user_names:
-            listing = workspace.call(f"{SCIM}/Users", filter=f"userName eq {scim_string(user_name)}", attributes="id,userName,active")
-            users.append(sole_match(listing, "userName", user_name, "users"))
-        return users
+        return looked_up(lambda user_name: user_by_name(workspace, user_name), user_names)
     by_name = {}
     for user in workspace.directory().values():
         by_name.setdefault(user.get("userName"), []).append(user)
