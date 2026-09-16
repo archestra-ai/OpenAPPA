@@ -5,6 +5,7 @@ import importlib.metadata
 import json
 import os
 import re
+import subprocess
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -44,6 +45,7 @@ from appa_agentthreatbench.tasks import (
 )
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = PACKAGE_ROOT.parents[3]
 EXPECTED_BINDING_IDENTITY = "appa-agent-python-v7"
 EXPECTED_FIDES_VERSION = "1.13.0"
 EXPECTED_UPSTREAM_SAMPLES = sum(UPSTREAM_SAMPLE_COUNTS.values())
@@ -89,6 +91,17 @@ def implementation_digest() -> str:
         digest.update(path.read_bytes())
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _git_state() -> dict[str, object]:
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True, check=False)
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=REPO_ROOT, capture_output=True, text=True, check=False
+    )
+    git_sha = commit.stdout.strip()
+    if commit.returncode or status.returncode or not re.fullmatch(r"[0-9a-f]{40}", git_sha):
+        raise RuntimeError("cannot record the OpenAPPA Git state")
+    return {"git_sha": git_sha, "git_dirty": bool(status.stdout.strip())}
 
 
 def _distribution_revision(name: str) -> str | None:
@@ -269,6 +282,7 @@ def run_manifest(
         if samples[sample_id].metadata.get("appa_arm") in {"auto", "auto-ifc"}
     }
     config = {
+        **_git_state(),
         "model": model,
         "reasoning_effort": reasoning_effort,
         "seed": seed,

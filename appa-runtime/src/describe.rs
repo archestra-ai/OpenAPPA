@@ -9,13 +9,13 @@ use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::config::{Config, Externals, Implementation, Section};
+use crate::config::{Config, ConfigError, Externals, Implementation, Section};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ConfigDescription {
     path: PathBuf,
     state: ConfigState,
-    diagnostic: Option<&'static str>,
+    diagnostic: Option<String>,
     batteries: Vec<String>,
 }
 
@@ -269,11 +269,45 @@ fn audience_description(compiled: &appa_policy::Config, bindings: Bindings<'_>) 
     }
 }
 
+/// Where a TOML error is and what it says, without the source line the error's
+/// own rendering quotes: a configuration file may hold a credential.
+fn toml_diagnostic(error: &toml::de::Error, text: &str) -> String {
+    let message = one_line(error.message());
+    match error.span() {
+        Some(span) => {
+            let before = &text[..span.start.min(text.len())];
+            let line = before.matches('\n').count() + 1;
+            let column = before.rsplit('\n').next().map_or(0, |last| last.chars().count()) + 1;
+            format!("line {line}, column {column}: {message}")
+        }
+        None => message,
+    }
+}
+
+fn one_line(message: &str) -> String {
+    message.lines().collect::<Vec<_>>().join(", ")
+}
+
+/// A load error as the description prints it. The two parse variants render
+/// their TOML error's message only, for the reason `toml_diagnostic` gives;
+/// every other variant names fields and paths, never file contents.
+fn load_diagnostic(error: &ConfigError) -> String {
+    match error {
+        ConfigError::Unparsable { path, source } => {
+            format!("cannot parse {path}: {}", one_line(source.message()))
+        }
+        ConfigError::UnparsablePolicy { source } => {
+            format!("cannot parse the composed policy: {}", one_line(source.message()))
+        }
+        other => other.to_string(),
+    }
+}
+
 fn inspect(path: &Path, battery_dirs: &[PathBuf]) -> (ConfigDescription, PolicyDescription, Option<Config>) {
     let mut config = ConfigDescription {
         path: path.to_path_buf(),
         state: ConfigState::Missing,
-        diagnostic: Some("configuration file does not exist"),
+        diagnostic: Some("configuration file does not exist".to_owned()),
         batteries: Vec::new(),
     };
     let mut policy = PolicyDescription::default();
@@ -281,18 +315,21 @@ fn inspect(path: &Path, battery_dirs: &[PathBuf]) -> (ConfigDescription, PolicyD
 
     match std::fs::read_to_string(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(_) => {
+        Err(error) => {
             config.state = ConfigState::Unreadable;
-            config.diagnostic = Some("configuration file cannot be read");
+            config.diagnostic = Some(format!("configuration file cannot be read: {error}"));
         }
         Ok(text) => match toml::from_str::<toml::Value>(&text) {
-            Err(_) => {
+            Err(error) => {
                 config.state = ConfigState::Unparsable;
-                config.diagnostic = Some("configuration is not valid TOML");
+                config.diagnostic = Some(format!(
+                    "configuration is not valid TOML: {}",
+                    toml_diagnostic(&error, &text)
+                ));
             }
             Ok(root) => {
                 config.state = ConfigState::Invalid;
-                config.diagnostic = Some("configuration is incomplete or does not validate");
+                config.diagnostic = Some("configuration is incomplete or does not validate".to_owned());
                 let includes: Vec<_> = root
                     .get("include")
                     .and_then(toml::Value::as_array)
@@ -314,15 +351,20 @@ fn inspect(path: &Path, battery_dirs: &[PathBuf]) -> (ConfigDescription, PolicyD
                     describe_policy_value(root_policy, Bindings::Raw(&root), &mut policy);
                 }
 
-                if let Ok(loaded) = Config::load_from(path, battery_dirs) {
-                    config.state = ConfigState::Loadable;
-                    config.diagnostic = None;
-                    describe_policy_value(
-                        loaded.policy_file().value(),
-                        Bindings::Loaded(&loaded.externals),
-                        &mut policy,
-                    );
-                    loaded_config = Some(loaded);
+                match Config::load_from(path, battery_dirs) {
+                    Ok(loaded) => {
+                        config.state = ConfigState::Loadable;
+                        config.diagnostic = None;
+                        describe_policy_value(
+                            loaded.policy_file().value(),
+                            Bindings::Loaded(&loaded.externals),
+                            &mut policy,
+                        );
+                        loaded_config = Some(loaded);
+                    }
+                    Err(error) => {
+                        config.diagnostic = Some(format!("configuration does not load: {}", load_diagnostic(&error)));
+                    }
                 }
             }
         },
@@ -400,7 +442,7 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: &'static str) -> D
     let _ = writeln!(output, "OpenAPPA world");
     let _ = writeln!(output, "Adapter: {adapter}");
     let _ = writeln!(output, "Config: {} ({})", config.path.display(), config.state.as_str());
-    if let Some(diagnostic) = config.diagnostic {
+    if let Some(diagnostic) = &config.diagnostic {
         let _ = writeln!(output, "  {diagnostic}");
     }
     let _ = writeln!(output, "Batteries: {}", list_or_none(&config.batteries));
@@ -490,16 +532,28 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: &'static str) -> D
     match validation {
         Ok(report) => {
             let _ = writeln!(output, "Validation: {}", report.summary());
+            // Without a host inventory every declared tool is unknown for the
+            // same reason, so one line says so instead of one per tool.
+            let mut unobserved = 0usize;
             for check in &report.tools {
                 match &check.status {
                     crate::tool_validation::ToolStatus::Valid => {}
                     crate::tool_validation::ToolStatus::Invalid { reason } => {
                         let _ = writeln!(output, "  invalid {}: {reason}", check.tool);
                     }
+                    crate::tool_validation::ToolStatus::Unknown { .. } if !report.inventory_complete => {
+                        unobserved += 1;
+                    }
                     crate::tool_validation::ToolStatus::Unknown { reason } => {
                         let _ = writeln!(output, "  unknown {}: {reason}", check.tool);
                     }
                 }
+            }
+            if unobserved > 0 {
+                let _ = writeln!(
+                    output,
+                    "  {unobserved} declared tools have no host observation to compare against; run inside a protected session to check them"
+                );
             }
             for diagnostic in report.diagnostics {
                 let _ = writeln!(output, "  {diagnostic}");
@@ -556,7 +610,12 @@ mod tests {
         ));
         let description = render(&path, &[], "kagent");
         assert!(description.valid);
-        assert!(description.text.contains("unknown read_secret:"));
+        assert!(
+            description.text.contains("1 declared tools have no host observation"),
+            "{}",
+            description.text
+        );
+        assert!(!description.text.contains("unknown read_secret:"));
 
         std::fs::write(
             &path,
@@ -675,6 +734,21 @@ mod tests {
 
         assert_eq!(config.state, ConfigState::Unparsable);
         assert!(!output.contains(secret));
+        assert!(output.contains("line 1, column"), "{output}");
+    }
+
+    #[test]
+    fn a_config_that_parses_but_does_not_load_names_the_reason() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("appa.toml");
+        std::fs::write(&path, "[policy]\nversion = 2\n[externals]\nmax_body_bytes = 65536\n").expect("config");
+
+        let (config, _, _) = inspect(&path, &[]);
+        let output = render(&path, &[], "claude-code").text;
+
+        assert_eq!(config.state, ConfigState::Invalid);
+        assert!(output.contains("configuration does not load: "), "{output}");
+        assert!(output.contains("timeout_ms"), "{output}");
     }
 
     #[test]

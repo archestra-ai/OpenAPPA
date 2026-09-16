@@ -385,6 +385,53 @@ uv sync
 uv run bench-corp run
 ```
 
+### Publish a completed run
+
+Package and publish one completed run through the repository's private draft
+release relay:
+
+```bash
+uv run bench-corp publish runs/<run-id>
+```
+
+The command uses the full Git commit recorded when the run started. An
+optional `--commit <sha>` must match that recorded commit.
+Runs produced from a dirty Git worktree cannot be published.
+It creates a deterministic `<run-id>-<sha256>.tar.zst` and `index.json` under
+`runs/publish/<run-id>/`, creates a draft relay release, uploads exactly those
+two assets, dispatches `.github/workflows/bench-publish.yml`, and prints the
+workflow run URL. The workflow verifies the bundle, publishes it to
+`bench/corp/<commit>/<run-id>/`, reads it back, and then deletes the relay.
+Rerunning accepts an unchanged local bundle and reuses its draft relay. A
+changed run or index requires a new `--output-dir` or removal of the old one.
+
+To inspect the bundle or relay it manually, stop before any GitHub operation:
+
+```bash
+uv run bench-corp publish runs/<run-id> --prepare-only
+```
+
+Packaging refuses symlinks, recognizable provider tokens, non-redacted values
+assigned to provider-key fields, and local absolute paths rooted at `/home`,
+`/Users`, `/workspace`, `/tmp`, `/var/tmp`, `/root`, or a Windows drive. It
+checks ordinary files and files nested inside ZIP-based `.eval` logs. The
+command does not redact or rewrite run evidence.
+
+Full publication depends on `bench-publish.yml` landing on the default branch;
+it is currently proposed by [PR #333](https://github.com/archestra-ai/OpenAPPA/pull/333).
+Until then, use `--prepare-only`. After the workflow lands, the equivalent
+manual relay is:
+
+```bash
+bundle=runs/publish/<run-id>
+archive=$(jq -r .archive "$bundle/index.json")
+tag=bench-relay-corp-<run-id>
+gh release create "$tag" --draft --title "$tag"
+gh release upload "$tag" "$bundle/$archive" "$bundle/index.json"
+gh workflow run bench-publish.yml \
+  -f bench=corp -f commit=<git-sha> -f run_id=<run-id> -f relay_tag="$tag"
+```
+
 #### Common CLI Flags
 
 ```bash
@@ -473,7 +520,9 @@ Each test episode creates an isolated log directory under `runs/<run-id>/<agent>
 - `stdout.txt` / `stderr.txt`: Process execution output logs.
 - `agent-status.json`: APPA's typed terminal status (`completed`, `budget_finalized`, or a failure class).
 - `policies/`: Pruned active policy rules.
-- `result.json`: Validation check outcomes plus terminal status and recovered provider-retry count.
+- `result.json`: Validation check outcomes, terminal status, recovered
+  provider-retry count, and executed argv with paths relative to the episode
+  directory.
 - `external-requests.jsonl`: Annotator, sanitizer, and authority fixture consults — each a `{version, kind, name, declaration, artifact}` envelope (when applicable).
 
 The run root contains `summary.json` (aggregated evaluation matrix) and `config.json` (run metadata, git commit SHA, model settings).

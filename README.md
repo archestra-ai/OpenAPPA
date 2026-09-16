@@ -71,7 +71,7 @@ curl -fsSL https://openappa.com/install.sh | sh
 The installer verifies the checksum of the release binary for Linux or macOS
 and places it in `~/.local/bin`. Windows users unpack the zip from the
 [releases page](https://github.com/archestra-ai/OpenAPPA/releases). From a
-checkout, `cargo install --path appa-runtime --force` builds the binary
+checkout, `cargo install --locked --path appa-runtime --force` builds the binary
 instead, and the same install command installs that build's own version.
 
 A release binary installs the version published for its tag; a checkout build

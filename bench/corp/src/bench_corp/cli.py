@@ -16,6 +16,8 @@ from pathlib import Path
 
 from joblib import Parallel, delayed
 
+from appa_bench_publish import PublishError, add_publish_parser, publish_from_args
+
 from . import AGENT_PROMPT_PROFILES, CHAOS_SCREEN_SCENARIOS
 from .agents import AGENTS, DEFAULT_MODEL, REPO_ROOT, Agent, build_binaries
 from .canary import (
@@ -304,7 +306,15 @@ def main(argv: list[str] | None = None) -> int:
     canary_parser.add_argument(
         "--skip-build", action="store_true", help="Skip the up-front cargo builds."
     )
+    add_publish_parser(sub)
     args = parser.parse_args(argv)
+
+    if args.command == "publish":
+        try:
+            publish_from_args(args, "corp")
+        except PublishError as error:
+            parser.error(str(error))
+        return 0
 
     if args.command == "canary":
         if args.jobs == 0:
