@@ -26,7 +26,7 @@ use crate::elicit::Elicitation;
 use crate::engine::{EngineRefusal, Liveness, PolicyEngine, RuntimeEngine};
 use crate::external::{ConsultGates, ExternalServices};
 use crate::yell;
-use appa_eventlog::{Backend, HostObservation, HostStream, Log, LogStore};
+use appa_eventlog::{Backend, HostObservation, HostRecord, Log, LogStore};
 use appa_runtime_api::{Adapter, AdapterName};
 use host::{HostState, host_actor, inventory_at};
 
@@ -977,29 +977,6 @@ impl Inner {
             .map_err(read_refused)
     }
 
-    /// This family's host records alone, at the position they stand at. The reducer reads no
-    /// facts, so the paths that only ask it something — who stands behind a key, what is
-    /// executing — pay for neither the engine's stream nor its policy file.
-    pub(super) fn host_stream(&self, root: &TrajectoryId) -> Result<HostStream, EventError> {
-        self.store
-            .host_records_of(&crate::engine::engine_id(root))
-            .inspect_err(|error| self.note_store_error(Some(root), crate::events::StoreOperation::Read, error))
-            .map_err(read_refused)
-    }
-
-    /// The newest of this family's host records that `matches`. The question a caller asks
-    /// when the answer is one record and not a reduction of the stream.
-    pub(super) fn latest_host_record(
-        &self,
-        root: &TrajectoryId,
-        matches: impl Fn(&HostObservation) -> bool,
-    ) -> Result<Option<appa_eventlog::HostRecord>, EventError> {
-        self.store
-            .latest_host_record_of(&crate::engine::engine_id(root), matches)
-            .inspect_err(|error| self.note_store_error(Some(root), crate::events::StoreOperation::Read, error))
-            .map_err(read_refused)
-    }
-
     /// Record one host observation in this root's log, at the position the append is tried
     /// at. Every host write that needs no engine fact goes through here.
     fn append_host(&self, root: &TrajectoryId, observation: &HostObservation) -> Result<(), EventError> {
@@ -1011,58 +988,29 @@ impl Inner {
     /// replaying a decision the log has moved past. `None` means there is nothing left to
     /// record.
     ///
-    /// The derivation is the enforcement point for every rule the host stream carries: it
+    /// The derivation is the enforcement point for every rule the host records carry: it
     /// sees only what is durable at the position it writes at, so a standing another writer
     /// ended between the read and the write is ended for this writer too.
     ///
     /// The error is the caller's, so a derivation that refuses — an offer already executing,
     /// a standing that is no longer the one being spent — says so in its own vocabulary
     /// instead of through this one.
+    ///
+    /// Read, derive, append; on a lost compare-and-swap, read again and derive again. The
+    /// answer handed back is the one the derivation that landed produced, so a caller learns
+    /// what was true where its record went and not what an earlier read showed it.
     fn append_host_with<Refusal: From<EventError>, Answer>(
-        &self,
-        root: &TrajectoryId,
-        derive: impl Fn(&HostStream) -> Result<(Option<HostObservation>, Answer), Refusal>,
-    ) -> Result<Answer, Refusal> {
-        self.compare_and_append(
-            root,
-            || self.host_stream(root),
-            |stream, observation| self.store.append_host_stream(stream, observation),
-            derive,
-        )
-    }
-
-    /// The same, over the whole log, for the one derivation that needs the policy file the
-    /// root opened under: an inventory is validated against it.
-    fn append_host_over_log<Refusal: From<EventError>, Answer>(
         &self,
         root: &TrajectoryId,
         derive: impl Fn(&Log) -> Result<(Option<HostObservation>, Answer), Refusal>,
     ) -> Result<Answer, Refusal> {
-        self.compare_and_append(
-            root,
-            || self.log(root),
-            |log, observation| self.store.append_host(log, &[], observation),
-            derive,
-        )
-    }
-
-    /// Read, derive, append; on a lost compare-and-swap, read again and derive again. The
-    /// answer handed back is the one the derivation that landed produced, so a caller learns
-    /// what was true where its record went and not what an earlier read showed it.
-    fn compare_and_append<Position, Refusal: From<EventError>, Answer>(
-        &self,
-        root: &TrajectoryId,
-        read: impl Fn() -> Result<Position, EventError>,
-        append: impl Fn(&Position, &HostObservation) -> Result<(), appa_eventlog::AppendError>,
-        derive: impl Fn(&Position) -> Result<(Option<HostObservation>, Answer), Refusal>,
-    ) -> Result<Answer, Refusal> {
         for _ in 0..HOST_ATTEMPTS {
-            let position = read()?;
-            let (observation, answer) = derive(&position)?;
+            let log = self.log(root)?;
+            let (observation, answer) = derive(&log)?;
             let Some(observation) = observation else {
                 return Ok(answer);
             };
-            match append(&position, &observation) {
+            match self.store.append_host(&log, &[], &observation) {
                 Ok(()) => return Ok(answer),
                 Err(appa_eventlog::AppendError::Conflict { .. }) => continue,
                 Err(error) => {
@@ -1086,8 +1034,8 @@ const HOST_ATTEMPTS: u32 = 8;
 /// What this family's records say right now. Read at the position the answer is about: a
 /// claim's bound and a turn's end are both about when, so a reduction is only true of the
 /// moment it was taken at.
-fn reduced(stream: &HostStream) -> HostState {
-    HostState::fold(stream.records(), std::time::SystemTime::now())
+fn reduced(log: &Log) -> HostState {
+    HostState::fold(log.host_records(), std::time::SystemTime::now())
 }
 
 fn read_refused(error: appa_eventlog::ReadError) -> EventError {
@@ -1389,7 +1337,7 @@ impl Runtime {
         use appa_runtime_api::inventory::ToolInventory;
         candidate.validate(adapter).map_err(inventory_refused)?;
         let scope = crate::engine::engine_id(actor.child.as_ref().unwrap_or(&actor.root));
-        self.inner.append_host_over_log(&actor.root, |log| {
+        self.inner.append_host_with(&actor.root, |log| {
             let previous = inventory_at(log, actor, adapter)?;
             let combined = previous.extending(candidate, adapter).map_err(inventory_refused)?;
             let previous_tools: std::collections::BTreeMap<_, _> =
@@ -1833,7 +1781,7 @@ impl Runtime {
         // writer that loses the compare-and-swap sees the winner's claim and refuses.
         if let Err(refused) =
             self.inner
-                .append_host_with::<RemedyOutcome, _>(&root, |stream| match reduced(stream).claimed(&claimed) {
+                .append_host_with::<RemedyOutcome, _>(&root, |log| match reduced(log).claimed(&claimed) {
                     true => Err(RemedyOutcome::Refused {
                         detail: "this offer is already being executed".to_string(),
                     }),
@@ -1951,7 +1899,7 @@ impl Runtime {
     /// attached.
     ///
     /// The request naming no session is the whole problem: the caller is found by asking the
-    /// store which families named this key at all, and reducing each one's host stream. The
+    /// store which families named this key at all, and reducing each one's host records. The
     /// runtime remembers nothing between the vouch and the take, so a standing another
     /// process recorded reads the same as one this process did.
     ///
@@ -1985,13 +1933,13 @@ impl Runtime {
         // through. The log records both, so the next take reads the ambiguity; and it is a
         // strictly narrower window than the in-memory map this replaced, which was one
         // process's mutex and never saw another process's vouch at any moment at all.
-        let consumed = self.inner.append_host_with::<Unvouched, _>(&root, |stream| {
+        let consumed = self.inner.append_host_with::<Unvouched, _>(&root, |log| {
             // What this root holds where the release will land, and then that no sibling has
             // taken up the key since: one live holder in one family is the whole condition.
             // The loop already read this root at the position it writes at, so the re-read
             // is the siblings only — and where the key names no sibling, which is every
             // offer and every ticket only one session quoted, there is nothing to read.
-            let (actor, ruling) = reduced(stream).vouched(key)?;
+            let (actor, ruling) = reduced(log).vouched(key)?;
             if self.live_holder(key, Some(&root))?.is_some() {
                 return Err(Unvouched::Ambiguous);
             }
@@ -2014,7 +1962,7 @@ impl Runtime {
     }
 
     /// Which family holds a live standing behind this key, found by asking the store which
-    /// families named it and reducing each one's host stream, and leaving out the one the
+    /// families named it and reducing each one's host records, and leaving out the one the
     /// caller has already folded for itself.
     ///
     /// Nothing held is nothing; two — in one family or across two — are `Ambiguous`, because
@@ -2041,16 +1989,16 @@ impl Runtime {
             if folded == Some(&root) {
                 continue;
             }
-            // The whole host stream, not the rows that name the key: a turn's end releases
+            // Every host record, not the rows that name the key: a turn's end releases
             // every standing its actor held and says so without naming one.
-            let stream = match self.inner.host_stream(&root) {
-                Ok(stream) => stream,
+            let log = match self.inner.log(&root) {
+                Ok(log) => log,
                 Err(error) => {
                     tracing::warn!(root = %root.0, %error, "this family's records did not read, so nothing stands");
                     return Err(Unvouched::Nobody);
                 }
             };
-            match reduced(&stream).vouched(key) {
+            match reduced(&log).vouched(key) {
                 Ok(_) if held.is_none() => held = Some(root),
                 Ok(_) | Err(Unvouched::Ambiguous) => return Err(Unvouched::Ambiguous),
                 Err(Unvouched::Nobody) => {}
@@ -2096,20 +2044,23 @@ impl Runtime {
 
     /// Whether a prompt reached this actor and nothing has settled what it left behind.
     ///
-    /// The mark is the latest record about it and nothing else, so this asks the store for
-    /// that one record rather than reducing the family: every tool call asks, and a long
-    /// session's answer is in its last few rows. A family with no log, or one the store
+    /// The mark is the last record about this actor and nothing else, so the answer is that
+    /// record rather than a reduction of the family. A family with no log, or one the store
     /// cannot read, has been reached by nothing.
     pub(crate) fn prompted(&self, acting: &Actor) -> bool {
         let marked = crate::engine::engine_id(acting_trajectory(acting));
-        self.inner
-            .latest_host_record(&acting.root, |observation| host::marks(observation, &marked))
-            .is_ok_and(|latest| {
-                matches!(
-                    latest.map(|record| record.observation),
-                    Some(HostObservation::PromptSeen { .. })
-                )
-            })
+        self.inner.log(&acting.root).is_ok_and(|log| {
+            matches!(
+                log.host_records()
+                    .iter()
+                    .rev()
+                    .find(|record| host::marks(&record.observation, &marked)),
+                Some(HostRecord {
+                    observation: HostObservation::PromptSeen { .. },
+                    ..
+                })
+            )
+        })
     }
 
     /// One root's rebuilt view and the engine that decides for it, for
@@ -3931,9 +3882,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     fn released(runtime: &Runtime, root: &TrajectoryId) -> bool {
         runtime
             .store()
-            .host_records_of(&crate::engine::engine_id(root))
+            .log(&crate::engine::engine_id(root))
             .expect("the family reads")
-            .records()
+            .host_records()
             .iter()
             .any(|record| matches!(&record.observation, HostObservation::Released { .. }))
     }
@@ -4062,9 +4013,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let engine_root = crate::engine::engine_id(&damaged);
         let at = runtime
             .store()
-            .host_records_of(&engine_root)
+            .log(&engine_root)
             .expect("the family's host records read")
-            .records()
+            .host_records()
             .iter()
             .find(|record| matches!(&record.observation, HostObservation::PromptSeen { .. }))
             .expect("the prompt mark landed")

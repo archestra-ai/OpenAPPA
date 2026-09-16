@@ -617,17 +617,11 @@ impl Session {
             return Err(EventError::CallIdReused);
         }
         let trajectory = crate::engine::engine_id(&self.trajectory);
-        self.inner.append_host_with(&self.root, |stream| {
-            if stream.records().iter().any(|record| {
-                matches!(
-                    &record.observation,
-                    appa_eventlog::HostObservation::CallBound {
-                        trajectory: bound,
-                        call_id: bound_id,
-                        ..
-                    } if *bound == trajectory && *bound_id == call_id
-                )
-            }) {
+        self.inner.append_host_with(&self.root, |log| {
+            if log
+                .call_bindings()
+                .any(|binding| *binding.trajectory == trajectory && binding.call_id == call_id)
+            {
                 return Err(EventError::CallIdReused);
             }
             Ok((
