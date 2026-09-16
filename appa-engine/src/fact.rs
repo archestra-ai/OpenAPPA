@@ -21,7 +21,7 @@ use crate::value::{
 /// stands below it is refused at the child's stop. `sanitizer` names the derivation every return
 /// crosses through; the dimension it raises is the one the floor does not bind, so the child may
 /// descend freely there. The submission path is **derived from this binding**, never selected by
-/// the child, so no engine client can route a return through a transformer the fork did not
+/// the child, so no engine client can route a return through a sanitizer the fork did not
 /// declare — that would be a trust-laundering selector.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReturnPolicy {

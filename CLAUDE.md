@@ -6,7 +6,7 @@ between the agent and its tools/inference and answers one question before
 every proposed flow: *can this value, derived from these sources, legally flow
 into this sink?* It is declarative and algebraic — no guardrails, no prompt
 filtering, no bespoke `if`s; any imperative judgment lives in registered
-external authorities and transformers, never in the engine.
+external authorities and sanitizers, never in the engine.
 
 ## IMPORTANT
 The golden set is `website/content/docs/how-it-works.md`,
@@ -30,7 +30,7 @@ close; do not cite rule ids here.
   `baton`-named
   identifiers: `baton` was the earlier name and can happen only in stale spots.
 - "Engine", "Trajectory", "Value", "Label", "Dimension", "Authority",
-  "Transformer", "Remedy plan" are defined terms — use them as
+  "Sanitizer", "Remedy plan" are defined terms — use them as
   `appa-engine/src/lib.rs` defines them, not colloquially.
 - **Agentic terminology first.** In comments, docs, and identifiers, lead with
   the agentic vocabulary: *trajectory* (not execution trace or session
@@ -206,7 +206,7 @@ Mechanics:
   unchecked failure on recoverable paths or external input; a documented
   `expect` on an invariant already established by prevalidation is house
   style in core (the message names the invariant, e.g. "plans reference only
-  registered transformers"). Free `unwrap` belongs in CLI entrypoints and
+  registered sanitizers"). Free `unwrap` belongs in CLI entrypoints and
   tests only.
 - Never hold a lock across `.await` inside a critical section — the store's
   methods are synchronous and never await under their mutexes. The

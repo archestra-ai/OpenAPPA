@@ -5,8 +5,9 @@ mode, proposal and approval rules. It routes to one host reference:
 
 - `references/claude-code.md` — Claude Code tool discovery, installed
   batteries and local runtime reload.
-- `references/kagent.md` — kagent CR discovery, policy ConfigMap apply
-  and in-cluster runtime reload.
+- `references/kagent.md` — kagent CR discovery, and policy changes through
+  the runtime-owned `appa_update_policy` and `appa_include_battery` tools,
+  which validate, publish and reload.
 
 [`PARITY.md`](PARITY.md) defines the behavior both hosts must preserve
 and the limited platform-specific differences they may expose.
@@ -15,8 +16,11 @@ kagent attaches this directory directly through `skills.gitRefs`.
 The `appa` binary compiles `SKILL.md` with the Claude reference appended,
 and `appa plugin install claude-code` writes that text to the user's
 Claude Code skills directory beside the policy-review guide. Claude
-therefore needs no gated `Read` call to bootstrap the guide. There is no
-second source copy.
+therefore needs no gated `Read` call to bootstrap the guide. The runtime
+chart mounts a ConfigMap copy of `SKILL.md` and `references/kagent.md`
+from `charts/appa-runtime/files/skill/` over the git checkout;
+`appa-runtime/tests/guide_skill.rs` keeps that copy byte-identical to this
+directory.
 
 The `appa-runtime` chart installs a pre-configured kagent Agent around the skill.
 The Agent supplies the kagent tool server's Kubernetes and Helm tools and sets
