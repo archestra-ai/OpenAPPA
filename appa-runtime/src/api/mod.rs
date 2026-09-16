@@ -987,7 +987,7 @@ impl Inner {
     /// Record one host observation in this root's log, at the position the append is tried
     /// at. Every host write that needs no engine fact goes through here.
     fn append_host(&self, root: &TrajectoryId, observation: &HostObservation) -> Result<(), EventError> {
-        self.append_host_with(root, |_| Ok(Some(observation.clone())))
+        self.append_host_with(root, |_| Ok((Some(observation.clone()), ())))
     }
 
     /// Record one host observation derived from the very position it will be written at, so
@@ -1002,45 +1002,52 @@ impl Inner {
     /// The error is the caller's, so a derivation that refuses — an offer already executing,
     /// a standing that is no longer the one being spent — says so in its own vocabulary
     /// instead of through this one.
-    fn append_host_with<Refusal: From<EventError>>(
+    fn append_host_with<Refusal: From<EventError>, Answer>(
         &self,
         root: &TrajectoryId,
-        derive: impl Fn(&HostStream) -> Result<Option<HostObservation>, Refusal>,
-    ) -> Result<(), Refusal> {
-        for _ in 0..HOST_ATTEMPTS {
-            let stream = self.host_stream(root)?;
-            let Some(observation) = derive(&stream)? else {
-                return Ok(());
-            };
-            match self.store.append_host_stream(&stream, &observation) {
-                Ok(()) => return Ok(()),
-                Err(appa_eventlog::AppendError::Conflict { .. }) => continue,
-                Err(error) => {
-                    self.note_store_error(Some(root), crate::events::StoreOperation::Append, &error);
-                    return Err(EventError::Storage(error.to_string()).into());
-                }
-            }
-        }
-        Err(EventError::Contended {
-            attempts: HOST_ATTEMPTS,
-        }
-        .into())
+        derive: impl Fn(&HostStream) -> Result<(Option<HostObservation>, Answer), Refusal>,
+    ) -> Result<Answer, Refusal> {
+        self.compare_and_append(
+            root,
+            || self.host_stream(root),
+            |stream, observation| self.store.append_host_stream(stream, observation),
+            derive,
+        )
     }
 
-    /// The same loop over the whole log, for the one derivation that needs the policy file
-    /// the root opened under: an inventory is validated against it.
-    fn append_host_over_log<Refusal: From<EventError>>(
+    /// The same, over the whole log, for the one derivation that needs the policy file the
+    /// root opened under: an inventory is validated against it.
+    fn append_host_over_log<Refusal: From<EventError>, Answer>(
         &self,
         root: &TrajectoryId,
-        derive: impl Fn(&Log) -> Result<Option<HostObservation>, Refusal>,
-    ) -> Result<(), Refusal> {
+        derive: impl Fn(&Log) -> Result<(Option<HostObservation>, Answer), Refusal>,
+    ) -> Result<Answer, Refusal> {
+        self.compare_and_append(
+            root,
+            || self.log(root),
+            |log, observation| self.store.append_host(log, &[], observation),
+            derive,
+        )
+    }
+
+    /// Read, derive, append; on a lost compare-and-swap, read again and derive again. The
+    /// answer handed back is the one the derivation that landed produced, so a caller learns
+    /// what was true where its record went and not what an earlier read showed it.
+    fn compare_and_append<Position, Refusal: From<EventError>, Answer>(
+        &self,
+        root: &TrajectoryId,
+        read: impl Fn() -> Result<Position, EventError>,
+        append: impl Fn(&Position, &HostObservation) -> Result<(), appa_eventlog::AppendError>,
+        derive: impl Fn(&Position) -> Result<(Option<HostObservation>, Answer), Refusal>,
+    ) -> Result<Answer, Refusal> {
         for _ in 0..HOST_ATTEMPTS {
-            let log = self.log(root)?;
-            let Some(observation) = derive(&log)? else {
-                return Ok(());
+            let position = read()?;
+            let (observation, answer) = derive(&position)?;
+            let Some(observation) = observation else {
+                return Ok(answer);
             };
-            match self.store.append_host(&log, &[], &observation) {
-                Ok(()) => return Ok(()),
+            match append(&position, &observation) {
+                Ok(()) => return Ok(answer),
                 Err(appa_eventlog::AppendError::Conflict { .. }) => continue,
                 Err(error) => {
                     self.note_store_error(Some(root), crate::events::StoreOperation::Append, &error);
@@ -1273,14 +1280,17 @@ impl Runtime {
                     .collect(),
             };
             if delta.tools.is_empty() && delta.sources.is_empty() {
-                return Ok(None);
+                return Ok((None, ()));
             }
-            Ok(Some(HostObservation::Inventory {
-                actor: scope.clone(),
-                adapter: adapter.name,
-                // Persist only the new evidence, not another full copy of history.
-                inventory: delta,
-            }))
+            Ok((
+                Some(HostObservation::Inventory {
+                    actor: scope.clone(),
+                    adapter: adapter.name,
+                    // Persist only the new evidence, not another full copy of history.
+                    inventory: delta,
+                }),
+                (),
+            ))
         })
     }
 
@@ -1691,15 +1701,18 @@ impl Runtime {
         // writer that loses the compare-and-swap sees the winner's claim and refuses.
         if let Err(refused) =
             self.inner
-                .append_host_with::<RemedyOutcome>(&root, |stream| match reduced(stream).claimed(&claimed) {
+                .append_host_with::<RemedyOutcome, _>(&root, |stream| match reduced(stream).claimed(&claimed) {
                     true => Err(RemedyOutcome::Refused {
                         detail: "this offer is already being executed".to_string(),
                     }),
-                    false => Ok(Some(HostObservation::Claimed {
-                        actor: actor.clone(),
-                        key: claimed.wire(),
-                        until,
-                    })),
+                    false => Ok((
+                        Some(HostObservation::Claimed {
+                            actor: actor.clone(),
+                            key: claimed.wire(),
+                            until,
+                        }),
+                        (),
+                    )),
                 })
         {
             return refused;
@@ -1820,6 +1833,49 @@ impl Runtime {
     /// tell a lone holder from one of two, so authorizing from it would answer the ambiguous
     /// case with one session's standing.
     pub(crate) fn take_vouched(&self, key: &PermitKey) -> Result<(Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
+        let (root, _, _) = self.sole_holder(key)?;
+        // Taking is one-shot, and the consumption is what makes it one: the answer is
+        // whatever stood where the release landed, not what an earlier read showed. A turn
+        // that ended in between ended this standing, and a sibling that vouched in between
+        // made the key ambiguous; both refuse here with nothing written.
+        //
+        // The compare-and-swap is this root's alone — the release lands on its log — while
+        // ambiguity is a fact about every root, so the re-discovery is a read and not a
+        // second position to swap on. What that leaves is one window: a sibling's vouch that
+        // lands after this re-read and before this append is not seen, and the release goes
+        // through. The log records both, so the next take reads the ambiguity; and it is a
+        // strictly narrower window than the in-memory map this replaced, which was one
+        // process's mutex and never saw another process's vouch at any moment at all.
+        let consumed = self.inner.append_host_with::<Unvouched, _>(&root, |stream| {
+            // What this root holds where the release will land, and then that no sibling has
+            // taken up the key since: one live holder in one family is the whole condition.
+            let (actor, ruling) = reduced(stream).vouched(key)?;
+            if self.sole_holder(key)?.0 != root {
+                return Err(Unvouched::Ambiguous);
+            }
+            let release = HostObservation::Released {
+                actor: host_actor(&actor),
+                key: key.wire(),
+            };
+            Ok((Some(release), (actor, ruling)))
+        });
+        if consumed.is_err() {
+            tracing::warn!(root = %root.0, "the standing behind this call was not consumed, so it is not spent");
+        }
+        consumed
+    }
+
+    /// The one root holding the one live standing behind this key, found by asking the store
+    /// which families named it and reducing each one's host stream.
+    ///
+    /// Anything else refuses: no holder is nobody, and two — in one family or across two —
+    /// mean the key does not identify a caller. A read that fails answers nobody, because a
+    /// partial view cannot tell a lone holder from one of two and would answer the ambiguous
+    /// case with one session's standing.
+    fn sole_holder(
+        &self,
+        key: &PermitKey,
+    ) -> Result<(TrajectoryId, Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
         let candidates = match self
             .inner
             .store
@@ -1833,7 +1889,7 @@ impl Runtime {
                 return Err(Unvouched::Nobody);
             }
         };
-        let mut taken: Option<TrajectoryId> = None;
+        let mut held: Option<(TrajectoryId, Actor, Option<appa_runtime_api::Ruling>)> = None;
         for candidate in candidates {
             let root = TrajectoryId(candidate.as_str().to_string());
             // The whole host stream, not the rows that name the key: a turn's end releases
@@ -1846,36 +1902,12 @@ impl Runtime {
                 }
             };
             match reduced(&stream).vouched(key) {
-                Ok(_) if taken.is_none() => taken = Some(root),
+                Ok((actor, ruling)) if held.is_none() => held = Some((root, actor, ruling)),
                 Ok(_) | Err(Unvouched::Ambiguous) => return Err(Unvouched::Ambiguous),
                 Err(Unvouched::Nobody) => {}
             }
         }
-        let Some(root) = taken else {
-            return Err(Unvouched::Nobody);
-        };
-        // Taking is one-shot, and the consumption is what makes it one: the answer is
-        // whatever stood at the position the release landed at, not what an earlier read
-        // saw. A turn that ended in between ended this standing, and the take says so.
-        let held = std::cell::RefCell::new(None);
-        let consumed = self.inner.append_host_with::<Unvouched>(&root, |stream| {
-            let (actor, ruling) = reduced(stream).vouched(key)?;
-            let release = HostObservation::Released {
-                actor: host_actor(&actor),
-                key: key.wire(),
-            };
-            *held.borrow_mut() = Some((actor, ruling));
-            Ok(Some(release))
-        });
-        match consumed {
-            Ok(()) => Ok(held
-                .into_inner()
-                .expect("a release that landed was derived, and the derivation names whose it was")),
-            Err(refusal) => {
-                tracing::warn!(root = %root.0, "the standing behind this call was not consumed, so it is not spent");
-                Err(refusal)
-            }
-        }
+        held.ok_or(Unvouched::Nobody)
     }
 
     /// A prompt reached this actor, which is the sign that its previous turn is over
@@ -3676,8 +3708,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
 
         // The writer that wins the consume's first compare-and-swap ends this actor's turn,
         // so the position the release would have landed at no longer has a standing to spend.
+        let engine_root = crate::engine::engine_id(&root);
         runtime.store().contend_next_append_with(
-            &crate::engine::engine_id(&root),
+            &engine_root,
+            &engine_root,
             &HostObservation::TurnEnded {
                 actor: host_actor(&actor),
             },
@@ -3688,15 +3722,71 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             "the standing the take looked at was gone where it would have consumed it"
         );
         assert!(
-            !runtime
-                .store()
-                .host_records_of(&crate::engine::engine_id(&root))
-                .expect("the family reads")
-                .records()
-                .iter()
-                .any(|record| matches!(&record.observation, HostObservation::Released { .. })),
+            !released(&runtime, &root),
             "and a take that answered nobody consumed nothing"
         );
+    }
+
+    /// The key names one caller or it names none. A second family standing behind the same
+    /// ticket after the take chose the first is exactly the case that does not identify a
+    /// caller, and consuming the first would hand this call one session's standing while
+    /// another session was also waiting behind it.
+    #[tokio::test]
+    async fn a_sibling_that_vouches_under_a_take_makes_the_key_ambiguous() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = std::sync::Arc::new(
+            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens"),
+        );
+        let ticket = crate::yell::YellArgs {
+            message: "the hook blocked".to_string(),
+            with_trajectory: true,
+        }
+        .ticket();
+        let mut actors = Vec::new();
+        for id in ["cc:first", "cc:second"] {
+            let root = TrajectoryId(id.to_string());
+            crate::hooks::handle(
+                &runtime,
+                appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+            )
+            .await;
+            actors.push(Actor { root, child: None });
+        }
+        runtime.vouch(&ticket, &actors[0], None);
+
+        // The writer that wins the consume's first compare-and-swap puts the second family
+        // behind the same ticket, so the re-derivation meets two holders where one stood.
+        runtime.store().contend_next_append_with(
+            &crate::engine::engine_id(&actors[0].root),
+            &crate::engine::engine_id(&actors[1].root),
+            &HostObservation::Vouched {
+                actor: host_actor(&actors[1]),
+                key: ticket.wire(),
+                ruling: None,
+            },
+        );
+        assert_eq!(
+            runtime.take_vouched(&ticket),
+            Err(Unvouched::Ambiguous),
+            "a key two families stand behind names no caller"
+        );
+        for actor in &actors {
+            assert!(
+                !released(&runtime, &actor.root),
+                "and an ambiguous take consumes neither standing"
+            );
+        }
+    }
+
+    /// Whether this family's log holds a spent standing.
+    fn released(runtime: &Runtime, root: &TrajectoryId) -> bool {
+        runtime
+            .store()
+            .host_records_of(&crate::engine::engine_id(root))
+            .expect("the family reads")
+            .records()
+            .iter()
+            .any(|record| matches!(&record.observation, HostObservation::Released { .. }))
     }
 
     /// The mark is the latest record about it, and every other actor's records are not about

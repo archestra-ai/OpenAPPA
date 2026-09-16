@@ -458,11 +458,14 @@ impl Session {
             }) {
                 return Err(EventError::CallIdReused);
             }
-            Ok(Some(appa_eventlog::HostObservation::CallBound {
-                trajectory: trajectory.clone(),
-                call_id: call_id.clone(),
-                dispatch: dispatch.clone(),
-            }))
+            Ok((
+                Some(appa_eventlog::HostObservation::CallBound {
+                    trajectory: trajectory.clone(),
+                    call_id: call_id.clone(),
+                    dispatch: dispatch.clone(),
+                }),
+                (),
+            ))
         })
     }
 

@@ -54,6 +54,26 @@ pub mod postgres;
 
 const SCHEMA_VERSION: i64 = 1;
 
+/// How many host rows a newest-first walk fetches at a time. Small, because the answer it
+/// looks for is normally in the first page and a bigger one would be read to be discarded.
+const HOST_PAGE: u64 = 16;
+
+/// One root's host rows and the position of its whole log, in one statement so that one
+/// snapshot answers both. The left join is what makes the position arrive even for a family
+/// that has recorded no observation: without it, no rows means no answer rather than none.
+const HOST_STREAM_SQLITE: &str = "SELECT (SELECT COUNT(*) FROM logs WHERE root = ?1), stream.seq, stream.facts \
+     FROM (SELECT 1) AS one \
+     LEFT JOIN logs AS stream ON stream.root = ?1 AND substr(stream.facts, 1, 1) = x'7b' \
+     ORDER BY stream.seq ASC";
+
+/// The same read on PostgreSQL, and the same reason: one statement, one snapshot.
+#[cfg(feature = "postgres")]
+const HOST_STREAM_POSTGRES: &str = "SELECT (SELECT COUNT(*) FROM openappa_events WHERE root = $1), stream.seq, stream.payload \
+     FROM (SELECT 1) AS one \
+     LEFT JOIN openappa_events AS stream \
+     ON stream.root = $1 AND substring(stream.payload from 1 for 1) = '\\x7b'::bytea \
+     ORDER BY stream.seq ASC";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Backend {
     Sqlite {
@@ -80,7 +100,7 @@ pub struct LogStore {
     /// What the next foreign writer records rather than nothing, so a caller's re-derivation
     /// meets a changed state and not only a moved position.
     #[cfg(feature = "fault-injection")]
-    contending_record: Mutex<Option<(TrajectoryId, HostObservation)>>,
+    contending_record: Mutex<Option<(TrajectoryId, TrajectoryId, HostObservation)>>,
 }
 
 /// The records of one read, and the position they were read at.
@@ -151,12 +171,8 @@ impl HostObservation {
     /// changes moves the query that finds it. Pass the result to
     /// [`LogStore::roots_mentioning`].
     pub fn names_key(key: &str) -> String {
-        #[derive(serde::Serialize)]
-        struct Named<'a> {
-            key: &'a str,
-        }
-        let object = serde_json::to_string(&Named { key }).expect("one string field serializes");
-        object.trim_start_matches('{').trim_end_matches('}').trim().to_string()
+        let quoted = serde_json::to_string(key).expect("a string serializes");
+        format!("\"key\":{quoted}")
     }
 }
 
@@ -618,19 +634,23 @@ impl LogStore {
         if let Some(pg) = &self.postgres {
             return pg.host_records_of(root);
         }
-        let mut connection = self.lock();
-        let transaction = connection.transaction()?;
-        let rows = {
-            let mut statement = transaction.prepare(
-                "SELECT seq, facts FROM logs WHERE root = ?1 AND substr(facts, 1, 1) = x'7b' ORDER BY seq ASC",
-            )?;
-            statement
+        let (basis, rows) = {
+            let connection = self.lock();
+            let mut statement = connection.prepare(HOST_STREAM_SQLITE)?;
+            let rows = statement
                 .query_map(params![root.as_str()], |row| {
-                    Ok((row.get::<_, i64>(0)? as u64, row.get::<_, Vec<u8>>(1)?))
+                    Ok((
+                        row.get::<_, i64>(0)? as u64,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<Vec<u8>>>(2)?,
+                    ))
                 })?
-                .collect::<Result<Vec<_>, _>>()?
+                .collect::<Result<Vec<_>, _>>()?;
+            // The left join always answers, so the basis is on the one row a family with no
+            // observations comes back as.
+            let basis = rows.first().map(|(basis, _, _)| *basis).unwrap_or_default();
+            (basis, rows)
         };
-        let basis = position(&transaction, root)?;
         if basis == 0 {
             return Err(ReadError::UnknownRoot {
                 root: root.as_str().to_string(),
@@ -638,6 +658,7 @@ impl LogStore {
         }
         let records = rows
             .into_iter()
+            .filter_map(|(_, seq, bytes)| Some((seq? as u64, bytes?)))
             .map(|(seq, bytes)| decode_host_record(root.as_str(), seq, &bytes))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(HostStream {
@@ -650,9 +671,14 @@ impl LogStore {
     /// The newest of this root's host records that `matches`, or nothing where none does.
     ///
     /// A question about the latest mark is not a question about the stream: the rows are
-    /// walked newest first and decoded one at a time, so an answer near the end of a long
-    /// family costs the rows after it and no more. A root with no log at all has no latest
-    /// anything, which is the same answer as a root that recorded none.
+    /// walked newest first a page at a time and decoded until one matches, so an answer near
+    /// the end of a long family costs the rows after it and no more. A root with no log at
+    /// all has no latest anything, which is the same answer as a root that recorded none.
+    ///
+    /// The pages are separate reads, so the family may grow under the walk. Rows are only
+    /// appended, and the walk runs newest first, so a later page can repeat a row an earlier
+    /// one showed but can never step over one: the answer is the newest match as of the page
+    /// it was found in, which is what asking without a position means.
     pub fn latest_host_record_of(
         &self,
         root: &TrajectoryId,
@@ -662,17 +688,31 @@ impl LogStore {
         if let Some(pg) = &self.postgres {
             return pg.latest_host_record_of(root, matches);
         }
-        let connection = self.lock();
-        let mut statement = connection
-            .prepare("SELECT seq, facts FROM logs WHERE root = ?1 AND substr(facts, 1, 1) = x'7b' ORDER BY seq DESC")?;
-        let mut rows = statement.query(params![root.as_str()])?;
-        while let Some(row) = rows.next()? {
-            let record = decode_host_record(root.as_str(), row.get::<_, i64>(0)? as u64, &row.get::<_, Vec<u8>>(1)?)?;
-            if matches(&record.observation) {
-                return Ok(Some(record));
+        let mut skip = 0u64;
+        loop {
+            let page = {
+                let connection = self.lock();
+                let mut statement = connection.prepare(
+                    "SELECT seq, facts FROM logs WHERE root = ?1 AND substr(facts, 1, 1) = x'7b' \
+                     ORDER BY seq DESC LIMIT ?2 OFFSET ?3",
+                )?;
+                statement
+                    .query_map(params![root.as_str(), HOST_PAGE as i64, skip as i64], |row| {
+                        Ok((row.get::<_, i64>(0)? as u64, row.get::<_, Vec<u8>>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            if page.is_empty() {
+                return Ok(None);
+            }
+            skip += page.len() as u64;
+            for (seq, bytes) in page {
+                let record = decode_host_record(root.as_str(), seq, &bytes)?;
+                if matches(&record.observation) {
+                    return Ok(Some(record));
+                }
             }
         }
-        Ok(None)
     }
 
     /// Every root whose host stream contains `needle`, and nothing of what they recorded.
@@ -722,21 +762,35 @@ impl LogStore {
             // second process would. It takes the position and records nothing, so this caller's
             // append conflicts on position and replays, and an assertion reads whose write landed
             // from the position rather than from records a later read would have to accept.
-            let foreign = match self
+            //
+            // Where the injection names an observation, the winner records that instead, and
+            // where it names another family it records there and still takes this one's
+            // position: a foreign writer that changed a sibling's log is the race a reader of
+            // several families has to survive.
+            let armed = self
                 .contending_record
                 .lock()
                 .expect("the injection mutex is never poisoned")
                 .take()
-            {
-                Some((armed, observation)) if armed == *root => encode(&[], Some(&observation)),
-                _ => encode(&[], None),
-            };
+                .filter(|(racing, _, _)| racing == root);
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let at = position(&transaction, root)?;
-            transaction.execute(
-                "INSERT INTO logs (root, seq, facts) VALUES (?1, ?2, ?3)",
-                params![root.as_str(), at as i64, foreign],
-            )?;
+            let write = |into: &TrajectoryId, bytes: Vec<u8>| -> Result<(), rusqlite::Error> {
+                let at = position(&transaction, into)?;
+                transaction.execute(
+                    "INSERT INTO logs (root, seq, facts) VALUES (?1, ?2, ?3)",
+                    params![into.as_str(), at as i64, bytes],
+                )?;
+                Ok(())
+            };
+            match &armed {
+                Some((_, recorded_in, observation)) => {
+                    write(recorded_in, encode(&[], Some(observation)))?;
+                    if recorded_in != root {
+                        write(root, encode(&[], None))?;
+                    }
+                }
+                None => write(root, encode(&[], None))?,
+            }
             transaction.commit()?;
         }
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -775,11 +829,17 @@ impl LogStore {
     /// loses to a writer that put `observation` in the log, so the caller's next derivation
     /// answers to a state another writer changed rather than to a position it only moved.
     #[cfg(feature = "fault-injection")]
-    pub fn contend_next_append_with(&self, root: &TrajectoryId, observation: &HostObservation) {
+    pub fn contend_next_append_with(
+        &self,
+        racing: &TrajectoryId,
+        recorded_in: &TrajectoryId,
+        observation: &HostObservation,
+    ) {
         *self
             .contending_record
             .lock()
-            .expect("the injection mutex is never poisoned") = Some((root.clone(), observation.clone()));
+            .expect("the injection mutex is never poisoned") =
+            Some((racing.clone(), recorded_in.clone(), observation.clone()));
         self.contend_next_appends(1);
     }
 
@@ -1642,10 +1702,16 @@ mod tests {
             second.create_root(opening(&id), POLICY.as_bytes()),
             Err(CreateError::AlreadyExists { .. })
         ));
+        let empty = first.host_records_of(&id).unwrap();
         assert_eq!(
-            first.host_records_of(&id).unwrap().records(),
+            empty.records(),
             Vec::new(),
             "an opened root that recorded nothing has no host records"
+        );
+        assert_eq!(
+            empty.basis(),
+            first.log(&id).unwrap().basis(),
+            "and the one statement still answers where the whole log stands"
         );
         assert!(matches!(
             first.host_records_of(&TrajectoryId::new("pg-test:ghost")),
@@ -1684,7 +1750,7 @@ mod tests {
         assert_eq!(
             first.host_records_of(&id).unwrap(),
             sqlite.host_records_of(&id).unwrap(),
-            "one root's host stream reads the same on both backends"
+            "one root's host stream, and the position it stands at, read the same on both backends"
         );
 
         let vouched = HostObservation::Vouched {

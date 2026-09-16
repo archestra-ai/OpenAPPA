@@ -112,9 +112,12 @@ impl PostgresStore {
         })
     }
 
-    fn mutate<T: Send + 'static>(
+    /// Run `operation` in a transaction, serialized against other writers of `lock_root`
+    /// where one is named. The host's own transaction is the one used when it holds one: a
+    /// transaction opened inside that one would end the host's on the way out.
+    fn with_tx<T: Send + 'static>(
         &self,
-        root: String,
+        lock_root: Option<String>,
         operation: impl FnOnce(&mut Client) -> Result<T, PostgresError> + Send + 'static,
     ) -> Result<T, PostgresError> {
         self.run(move |state| {
@@ -123,33 +126,13 @@ impl PostgresStore {
                 state.client.batch_execute("BEGIN")?;
             }
             let result = (|| {
-                state
-                    .client
-                    .query_one("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", &[&root])?;
+                if let Some(root) = lock_root {
+                    state
+                        .client
+                        .query_one("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", &[&root])?;
+                }
                 operation(&mut state.client)
             })();
-            if !outer {
-                state
-                    .client
-                    .batch_execute(if result.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
-            }
-            result
-        })
-    }
-
-    /// Run several reads that must agree with each other. The host's own transaction is one
-    /// when it holds one, exactly as [`PostgresStore::mutate`] defers to it: a read that
-    /// opened its own inside that one would end the host's on the way out.
-    fn snapshot<T: Send + 'static>(
-        &self,
-        operation: impl FnOnce(&mut Client) -> Result<T, PostgresError> + Send + 'static,
-    ) -> Result<T, PostgresError> {
-        self.run(move |state| {
-            let outer = state.transaction;
-            if !outer {
-                state.client.batch_execute("BEGIN")?;
-            }
-            let result = operation(&mut state.client);
             if !outer {
                 state
                     .client
@@ -178,7 +161,7 @@ impl PostgresStore {
         let id = root.as_str().to_owned();
         let hash = key.as_str().to_owned();
         let policy = policy.to_vec();
-        let created = self.mutate(id.clone(), move |client| {
+        let created = self.with_tx(Some(id.clone()), move |client| {
             if client
                 .query_opt("SELECT 1 FROM openappa_events WHERE root = $1 LIMIT 1", &[&id])?
                 .is_some()
@@ -240,27 +223,28 @@ impl PostgresStore {
         decoded(root, batches, policy)
     }
 
-    /// See [`LogStore::host_records_of`]. The rows and the position are one transaction, so
-    /// the basis belongs to the records it comes back with.
+    /// See [`LogStore::host_records_of`]. One statement is one snapshot under READ
+    /// COMMITTED, so the position belongs to the records it comes back with; two would let a
+    /// commit land between them and hand the caller a basis its records never stood at.
     pub(super) fn host_records_of(&self, root: &TrajectoryId) -> Result<HostStream, ReadError> {
         let id = root.as_str().to_owned();
         let known = id.clone();
-        let (basis, rows) = self.snapshot(move |client| {
-            let rows = client.query(
-                "SELECT seq, payload FROM openappa_events \
-                 WHERE root = $1 AND substring(payload from 1 for 1) = '\\x7b'::bytea ORDER BY seq",
-                &[&id],
-            )?;
-            let basis = client
-                .query_one("SELECT count(*) FROM openappa_events WHERE root = $1", &[&id])?
-                .get::<_, i64>(0) as u64;
-            Ok((
-                basis,
-                rows.into_iter()
-                    .map(|row| (row.get::<_, i64>(0) as u64, row.get::<_, Vec<u8>>(1)))
-                    .collect::<Vec<_>>(),
-            ))
+        let rows = self.with_client(move |client| {
+            Ok(client
+                .query(HOST_STREAM_POSTGRES, &[&id])?
+                .into_iter()
+                .map(|row| {
+                    (
+                        row.get::<_, i64>(0) as u64,
+                        row.get::<_, Option<i64>>(1),
+                        row.get::<_, Option<Vec<u8>>>(2),
+                    )
+                })
+                .collect::<Vec<_>>())
         })?;
+        // The left join always answers, so the basis is on the one row a family with no
+        // observations comes back as.
+        let basis = rows.first().map(|(basis, _, _)| *basis).unwrap_or_default();
         if basis == 0 {
             return Err(ReadError::UnknownRoot { root: known });
         }
@@ -269,38 +253,47 @@ impl PostgresStore {
             basis,
             records: rows
                 .into_iter()
+                .filter_map(|(_, seq, bytes)| Some((seq? as u64, bytes?)))
                 .map(|(seq, bytes)| decode_host_record(&known, seq, &bytes))
                 .collect::<Result<Vec<_>, _>>()?,
         })
     }
 
-    /// See [`LogStore::latest_host_record_of`]. The rows arrive newest first and are decoded
-    /// one at a time, so the walk still stops at the first match.
+    /// See [`LogStore::latest_host_record_of`]. Fetched newest first a page at a time and
+    /// decoded per page, so the early exit holds here too: a family's whole history is never
+    /// pulled across the connection to answer about its last few rows.
     pub(super) fn latest_host_record_of(
         &self,
         root: &TrajectoryId,
         matches: impl Fn(&HostObservation) -> bool,
     ) -> Result<Option<HostRecord>, ReadError> {
-        let id = root.as_str().to_owned();
-        let known = id.clone();
-        let rows = self.with_client(move |client| {
-            Ok(client
-                .query(
-                    "SELECT seq, payload FROM openappa_events \
-                     WHERE root = $1 AND substring(payload from 1 for 1) = '\\x7b'::bytea ORDER BY seq DESC",
-                    &[&id],
-                )?
-                .into_iter()
-                .map(|row| (row.get::<_, i64>(0) as u64, row.get::<_, Vec<u8>>(1)))
-                .collect::<Vec<_>>())
-        })?;
-        for (seq, bytes) in rows {
-            let record = decode_host_record(&known, seq, &bytes)?;
-            if matches(&record.observation) {
-                return Ok(Some(record));
+        let known = root.as_str().to_owned();
+        let mut skip = 0i64;
+        loop {
+            let id = known.clone();
+            let page = self.with_client(move |client| {
+                Ok(client
+                    .query(
+                        "SELECT seq, payload FROM openappa_events \
+                         WHERE root = $1 AND substring(payload from 1 for 1) = '\\x7b'::bytea \
+                         ORDER BY seq DESC LIMIT $2 OFFSET $3",
+                        &[&id, &(HOST_PAGE as i64), &skip],
+                    )?
+                    .into_iter()
+                    .map(|row| (row.get::<_, i64>(0) as u64, row.get::<_, Vec<u8>>(1)))
+                    .collect::<Vec<_>>())
+            })?;
+            if page.is_empty() {
+                return Ok(None);
+            }
+            skip += page.len() as i64;
+            for (seq, bytes) in page {
+                let record = decode_host_record(&known, seq, &bytes)?;
+                if matches(&record.observation) {
+                    return Ok(Some(record));
+                }
             }
         }
-        Ok(None)
     }
 
     /// See [`LogStore::roots_mentioning`].
@@ -323,7 +316,7 @@ impl PostgresStore {
 
     pub(super) fn append(&self, root: &TrajectoryId, basis: u64, bytes: Vec<u8>) -> Result<(), AppendError> {
         let root = root.as_str().to_owned();
-        let conflict = self.mutate(root.clone(), move |client| {
+        let conflict = self.with_tx(Some(root.clone()), move |client| {
             let current = client
                 .query_one("SELECT count(*) FROM openappa_events WHERE root = $1", &[&root])?
                 .get::<_, i64>(0) as u64;
