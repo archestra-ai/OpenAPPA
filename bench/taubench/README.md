@@ -8,10 +8,10 @@ The interpreter is Python 3.12 (`.python-version`): Tau at this pin imports `aud
 
 ## The token overhead is measured on an ordinary workload
 
-AgentThreatBench samples attack scenarios, where OpenAPPA intervenes in nearly every episode, so its token overhead answers "what does mediation cost when the policy fires". Tau's normal profile answers the other question: what does it cost across 97 ordinary banking tasks, where the published run triggered no policy block at all in 8,151 checked calls. The matched summary reports both, per simulation:
+AgentThreatBench samples attack scenarios, where OpenAPPA intervenes in nearly every episode, so its token overhead answers "what does mediation cost when the policy fires". Tau's normal profile answers the other question: what does it cost across 97 ordinary banking tasks, where the [2026-09-15 evaluation](results/full-2026-09-15/README.md) triggered no policy block in 7,914 checked calls. The matched summary reports these differences per simulation:
 
-- `guarded_minus_permissive` is the policy's own cost: the same scaffold, the same tools, the same prompts, only the contract differs.
-- `permissive_minus_stock` is the scaffold's cost: the extra system-prompt addendum, the one-call-per-completion rule, and the tool schemas. The scaffold's cost is a joint property of the scaffold and the model that ran it, so it is reported next to the model and effort that produced it.
+- `guarded_minus_permissive` compares policy modes: the same scaffold, the same tools, the same prompts, only the contract differs. The observed token difference includes stochastic trajectory variation, not just permission-checking overhead.
+- `permissive_minus_stock` compares scaffolds: the extra system-prompt addendum, the one-call-per-completion rule, and the tool schemas. The observed difference includes changes in agent behavior and is reported next to the model and effort that produced it.
 - `hidden_agent_total_per_simulation` is the discarded work: completions a policy block or the one-call rule threw away and the model paid for anyway. Tau's trajectory omits them; the `appa-audit/` record includes them, and the totals here use it.
 
 `runs/<name>-matched-summary.json` carries `token_overhead.per_arm`, `.deltas`, and `.ratios`; `run-summary.json` per arm carries the raw cumulative counts and the per-simulation means they come from.

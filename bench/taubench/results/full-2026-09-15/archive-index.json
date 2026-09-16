@@ -1,0 +1,20 @@
+{
+  "format_version": 1,
+  "benchmark": "taubench",
+  "git_commit": "7f79ccc4d2273d235bdf871d86ed5e6c005ce36f",
+  "run_id": "tau-knowledge-full-2026-09-15",
+  "archive": "tau-knowledge-full-2026-09-15-00ab1e8555a5a7c2721c7ed5afc09a5686bcc8a6c6e5052aacc86174a32fba10.tar.zst",
+  "sha256": "00ab1e8555a5a7c2721c7ed5afc09a5686bcc8a6c6e5052aacc86174a32fba10",
+  "archive_bytes": 1132609986,
+  "source_file_count": 28014,
+  "local_path_redacted_file_count": 183,
+  "manifest": "tau-knowledge-full-2026-09-15/archive-manifest.json",
+  "contents": [
+    "results/full-2026-09-15",
+    "runs/tau-knowledge-full-2026-09-15-guarded-0f493de93907",
+    "runs/tau-knowledge-full-2026-09-15-permissive-9f37dff14da6",
+    "runs/tau-knowledge-full-2026-09-15-stock-d44bfc9b085c",
+    "runs/full-2026-09-15-control",
+    "runs/tau-knowledge-full-2026-09-15-matched-summary.json"
+  ]
+}

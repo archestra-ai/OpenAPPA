@@ -10,7 +10,7 @@ This run covers all 97 `banking_knowledge` base-split tasks with four trials in 
 | Permissive | 134/388 | 34.54% | 893,405 | $30.50 |
 | Stock | 156/388 | 40.21% | 1,254,821 | $35.62 |
 
-Agent tokens include prompt and completion tokens, repeated prompts across calls, and hidden completions within scored simulations. They exclude infrastructure-failed attempts. Matched tasks and seeds do not equate stochastic trajectories, so these differences do not establish causation or statistical equivalence.
+Agent tokens include prompt and completion tokens, repeated prompts across calls, cached prompt tokens, and hidden completions within scored simulations. They exclude infrastructure-failed attempts. Matched tasks and seeds do not equate stochastic trajectories, so these differences do not establish causation or statistical equivalence.
 
 The token gap reflects less retrieval and slower context growth, not policy blocking. It persists in the 108 matched simulations where both guarded and stock succeeded: guarded used 32.92% fewer agent tokens. Matching on success does not hold the work performed constant or isolate a policy effect.
 
@@ -47,6 +47,30 @@ The reviewer flagged critical user-simulator errors in 158 guarded, 137 permissi
 
 ## Artifacts and cost coverage
 
-[summary.json](summary.json) contains aggregate metrics, matched outcomes and simulation IDs, retry counts, and retention checks. Full trajectories, audits, and pre-resume snapshots remain in the ignored `runs/` directory, at the paths recorded in the summary.
+[summary.json](summary.json) contains aggregate metrics, matched outcomes and simulation IDs, retry counts, and retention checks. The [archive index](archive-index.json) identifies the full trajectories, APPA and evaluator audits, provider responses, debug artifacts, pre-resume snapshots, and retry logs prepared for the private GCP bucket.
+
+The archive contains 28,014 evidence files plus `archive-manifest.json`. Local filesystem paths in 183 files are replaced with `[LOCAL_PATH]`; no files or model calls are omitted. The manifest records original and archived hashes for every evidence file. Original local files remain unchanged. All three recorded implementation hashes were verified against the measured Git revision before packaging.
+
+**GCP publication is pending repository configuration.** The [publishing workflow](https://github.com/archestra-ai/OpenAPPA/actions/runs/35089893136) downloaded the complete archive and verified its hash and index, then stopped before authentication because both `APPA_BENCH_GCS_BUCKET` and `APPA_BENCH_GCP_SERVICE_ACCOUNT` were unset. The private draft release `bench-relay-taubench-tau-knowledge-full-2026-09-15-00ab1e8555a5` retains the verified archive and index. The intended GCP destination is not yet populated by this workflow.
+
+An administrator can configure the repository and retry without this orb:
+
+```sh
+gh variable set APPA_BENCH_GCS_BUCKET --repo archestra-ai/OpenAPPA \
+  --body archestra-appa-bench-archive
+gh secret set APPA_BENCH_GCP_SERVICE_ACCOUNT --repo archestra-ai/OpenAPPA \
+  --body appa-bench-publish@friendly-path-465518-r6.iam.gserviceaccount.com
+gh run rerun 35089893136 --repo archestra-ai/OpenAPPA
+```
+
+The workflow also requires the shared `APPA_GCP_WORKLOAD_IDENTITY_PROVIDER` secret. It deletes the draft relay only after reading the archive and index back from GCP and verifying both. After publication succeeds, download from this directory with project credentials:
+
+```sh
+prefix=gs://archestra-appa-bench-archive/bench/taubench/7f79ccc4d2273d235bdf871d86ed5e6c005ce36f/tau-knowledge-full-2026-09-15
+archive=$(jq -r .archive archive-index.json)
+gcloud storage cp "$prefix/$archive" "$archive"
+jq -r '"\(.sha256)  \(.archive)"' archive-index.json | sha256sum --check -
+tar --zstd -xf "$archive"
+```
 
 The recorded total is $96.45, not an exact provider bill: embedding usage and some failed-attempt usage are unavailable. The separate diagnostic request is not part of scored results.
