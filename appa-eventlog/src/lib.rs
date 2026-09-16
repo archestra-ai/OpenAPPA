@@ -140,6 +140,22 @@ pub enum HostObservation {
     TurnEnded { actor: HostActor },
 }
 
+impl HostObservation {
+    /// The text a stored row contains exactly when its observation names this key.
+    ///
+    /// Derived from the encoding rather than spelled beside it, so a key whose wire form
+    /// changes moves the query that finds it. Pass the result to
+    /// [`LogStore::host_records_mentioning`].
+    pub fn names_key(key: &str) -> String {
+        #[derive(serde::Serialize)]
+        struct Named<'a> {
+            key: &'a str,
+        }
+        let object = serde_json::to_string(&Named { key }).expect("one string field serializes");
+        object.trim_start_matches('{').trim_end_matches('}').trim().to_string()
+    }
+}
+
 /// Whose observation this is: the family's root, and the child where the harness named one.
 /// The exact actor, so a parent's turn end never settles what its subagent left standing.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
@@ -567,42 +583,43 @@ impl LogStore {
         let connection = self.lock();
         let mut statement = connection
             .prepare("SELECT seq, facts FROM logs WHERE root = ?1 AND substr(facts, 1, 1) = x'7b' ORDER BY seq ASC")?;
-        let rows = statement
+        let records = statement
             .query_map(params![root.as_str()], |row| {
-                Ok((
-                    root.as_str().to_string(),
-                    row.get::<_, i64>(0)? as u64,
-                    row.get::<_, Vec<u8>>(1)?,
-                ))
+                Ok((row.get::<_, i64>(0)? as u64, row.get::<_, Vec<u8>>(1)?))
             })?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|(seq, bytes)| decode_host_record(root.as_str(), seq, &bytes))
             .collect::<Result<Vec<_>, _>>()?;
         // Only an empty answer needs the second question: a root that recorded an
         // observation plainly exists.
-        if rows.is_empty() && position(&connection, root)? == 0 {
+        if records.is_empty() && position(&connection, root)? == 0 {
             return Err(ReadError::UnknownRoot {
                 root: root.as_str().to_string(),
             });
         }
-        Ok(grouped_by_root(rows)?
-            .pop()
-            .map(|(_, records)| records)
-            .unwrap_or_default())
+        Ok(records)
     }
 
-    /// Every root's host records, for a reader that knows the observation it needs but not
-    /// the family that wrote it. Engine batches are never decoded: the stored shape says
-    /// which rows carry an observation, and only those are read.
-    pub fn host_records(&self) -> Result<Vec<(TrajectoryId, Vec<HostRecord>)>, ReadError> {
+    /// Every root whose host stream contains `needle`, with that root's matching records.
+    ///
+    /// The store answers "which families may have recorded this" without the caller naming
+    /// them, and the needle rules out the observations that name something else, so nothing
+    /// that cannot be an answer is decoded. Build the needle with
+    /// [`HostObservation::names_key`] so the query and the encoding can never disagree about
+    /// how a key is spelled.
+    pub fn host_records_mentioning(&self, needle: &str) -> Result<Vec<(TrajectoryId, Vec<HostRecord>)>, ReadError> {
         #[cfg(feature = "postgres")]
         if let Some(pg) = &self.postgres {
-            return pg.host_records();
+            return pg.host_records_mentioning(needle);
         }
         let connection = self.lock();
         let mut statement = connection.prepare(
-            "SELECT root, seq, facts FROM logs WHERE substr(facts, 1, 1) = x'7b' ORDER BY root ASC, seq ASC",
+            "SELECT root, seq, facts FROM logs \
+             WHERE substr(facts, 1, 1) = x'7b' AND instr(facts, ?1) > 0 ORDER BY root ASC, seq ASC",
         )?;
         let rows = statement
-            .query_map([], |row| {
+            .query_map(params![needle.as_bytes()], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)? as u64,
@@ -831,17 +848,22 @@ fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: Vec<u8>) -> 
     })
 }
 
-/// The scanned rows, grouped by the root that wrote them. Every row handed here already
-/// carries a host observation, so a row that does not decode is a refused log, not a skip.
+/// One stored row a shape query selected, as the record it must be. The query already said
+/// this row carries an observation, so a row that does not is a log this build cannot trust.
+fn decode_host_record(root: &str, seq: u64, bytes: &[u8]) -> Result<HostRecord, ReadError> {
+    match decode(bytes)?.host {
+        Some(observation) => Ok(HostRecord { seq, observation }),
+        None => Err(ReadError::Undecodable(format!(
+            "the batch at {seq} of {root} carries no host observation"
+        ))),
+    }
+}
+
+/// Rows a multi-root query returned in root order, split into the families that wrote them.
 fn grouped_by_root(rows: Vec<(String, u64, Vec<u8>)>) -> Result<Vec<(TrajectoryId, Vec<HostRecord>)>, ReadError> {
     let mut roots: Vec<(TrajectoryId, Vec<HostRecord>)> = Vec::new();
     for (root, seq, bytes) in rows {
-        let Some(observation) = decode(&bytes)?.host else {
-            return Err(ReadError::Undecodable(format!(
-                "the batch at {seq} of {root} carries no host observation"
-            )));
-        };
-        let record = HostRecord { seq, observation };
+        let record = decode_host_record(&root, seq, &bytes)?;
         match roots.last_mut() {
             Some((last, records)) if last.as_str() == root => records.push(record),
             _ => roots.push((TrajectoryId::new(root), vec![record])),
@@ -1200,10 +1222,10 @@ mod tests {
         store.log(root).unwrap().host_records().to_vec()
     }
 
-    /// The scan a reader uses when it knows the observation but not the family that wrote
-    /// it: every root, host rows only, in append order.
+    /// The query a reader uses when it knows the key but not the family that recorded it:
+    /// every root that names the key, host rows only, and nothing that names another.
     #[test]
-    fn the_scan_answers_every_root_and_reads_no_engine_batch() {
+    fn the_needle_finds_the_roots_that_name_a_key_and_no_others() {
         let store = opened();
         let second = TrajectoryId::new("cc:second");
         store.create_root(opening(&second), POLICY.as_bytes()).unwrap();
@@ -1217,31 +1239,56 @@ mod tests {
         };
         store.append(&store.log(&root()).unwrap(), &punctuation()).unwrap();
         store
-            .append_host(&store.log(&root()).unwrap(), &[], &vouched(&root(), "one"))
+            .append_host(&store.log(&root()).unwrap(), &[], &vouched(&root(), "offer:one"))
             .unwrap();
         store
-            .append_host(&store.log(&second).unwrap(), &[], &vouched(&second, "two"))
+            .append_host(&store.log(&second).unwrap(), &[], &vouched(&second, "offer:one"))
+            .unwrap();
+        store
+            .append_host(&store.log(&second).unwrap(), &[], &vouched(&second, "offer:two"))
             .unwrap();
         store.append(&store.log(&second).unwrap(), &punctuation()).unwrap();
 
         assert_eq!(
-            store.host_records().unwrap(),
+            store
+                .host_records_mentioning(&HostObservation::names_key("offer:one"))
+                .unwrap(),
             vec![
                 (
                     root(),
                     vec![HostRecord {
                         seq: 2,
-                        observation: vouched(&root(), "one")
+                        observation: vouched(&root(), "offer:one")
                     }]
                 ),
                 (
                     second.clone(),
                     vec![HostRecord {
                         seq: 1,
-                        observation: vouched(&second, "two")
+                        observation: vouched(&second, "offer:one")
                     }]
                 ),
             ]
+        );
+        assert_eq!(
+            store
+                .host_records_mentioning(&HostObservation::names_key("offer:two"))
+                .unwrap(),
+            vec![(
+                second.clone(),
+                vec![HostRecord {
+                    seq: 2,
+                    observation: vouched(&second, "offer:two")
+                }]
+            )],
+            "a key nothing else names answers with the one root that does"
+        );
+        assert_eq!(
+            store
+                .host_records_mentioning(&HostObservation::names_key("offer:on"))
+                .unwrap(),
+            Vec::new(),
+            "the needle carries the closing quote, so one key is never a prefix of another"
         );
     }
 
@@ -1464,22 +1511,39 @@ mod tests {
             .unwrap();
         assert_eq!(second.log(&id).unwrap(), sqlite.log(&id).unwrap());
         assert_eq!(
+            first.host_records_of(&id).unwrap(),
+            sqlite.host_records_of(&id).unwrap(),
+            "one root's host stream reads the same on both backends"
+        );
+
+        let vouched = HostObservation::Vouched {
+            actor: HostActor {
+                root: id.clone(),
+                child: None,
+            },
+            key: "offer:one".to_string(),
+            ruling: None,
+        };
+        first.append_host(&first.log(&id).unwrap(), &[], &vouched).unwrap();
+        assert_eq!(
             second
-                .host_records()
+                .host_records_mentioning(&HostObservation::names_key("offer:one"))
                 .unwrap()
                 .into_iter()
                 .find(|(root, _)| root == &id)
                 .map(|(_, records)| records),
             Some(vec![HostRecord {
-                seq: 3,
-                observation: observation.clone(),
+                seq: 4,
+                observation: vouched,
             }]),
-            "the scan reads the host rows of every root and no engine batch"
+            "the needle reads the rows naming the key and no engine batch"
         );
         assert_eq!(
-            first.host_records_of(&id).unwrap(),
-            sqlite.host_records_of(&id).unwrap(),
-            "one root's host stream reads the same on both backends"
+            second
+                .host_records_mentioning(&HostObservation::names_key("offer:two"))
+                .unwrap(),
+            Vec::new(),
+            "and nothing for a key no row names"
         );
 
         let stale = first.log(&id).unwrap();

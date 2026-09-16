@@ -751,7 +751,6 @@ impl Prepared {
                 retired: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 store,
                 modules: self.modules,
-                routing: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 events: std::sync::Mutex::new(crate::events::EventLog::default()),
                 gates: self.gates,
                 naming: self.naming,
@@ -765,14 +764,6 @@ struct Inner {
     retired: std::sync::Mutex<std::collections::BTreeMap<String, Arc<RuntimeEngine>>>,
     store: Arc<LogStore>,
     modules: crate::builtins::ModuleRegistry,
-    /// Which roots have recorded a vouch under a key, so a tool this runtime serves — whose
-    /// MCP request names no session — knows whose log to read. A memo and no authority: the
-    /// records decide who vouched, and a miss is answered by scanning every root's host
-    /// records, so a restarted runtime finds a vouch this process never saw.
-    ///
-    /// Keyed by the root's spelling, as [`crate::events::EventLog`] is: `TrajectoryId` is a
-    /// public wire type and this is not a reason to widen its derives.
-    routing: std::sync::Mutex<std::collections::BTreeMap<PermitKey, std::collections::BTreeSet<String>>>,
     /// What this runtime did, as opposed to what the engine decided: bounded, in this
     /// process, and gone on restart. A diagnostic only — see [`crate::events`].
     events: std::sync::Mutex<crate::events::EventLog>,
@@ -972,13 +963,20 @@ impl Inner {
             .map_err(read_refused)
     }
 
-    /// See [`Runtime::append_host`]. Lives here so the claim guard, which outlives the
-    /// borrow of a `Runtime`, releases through the same one path.
+    /// Record one host observation in this root's log, at the position the append is tried
+    /// at. Every host write goes through here.
     fn append_host(&self, root: &TrajectoryId, observation: &HostObservation) -> Result<(), EventError> {
         self.append_host_with(root, |_| Ok(Some(observation.clone())))
     }
 
-    /// See [`Runtime::append_host_with`].
+    /// Record one host observation derived from the very position it will be written at, so
+    /// a writer that loses the compare-and-swap decides again against what won rather than
+    /// replaying a decision the log has moved past. `None` means there is nothing left to
+    /// record.
+    ///
+    /// The error is the caller's, so a derivation that refuses — an offer already executing,
+    /// a call id this trajectory already bound — says so in its own vocabulary instead of
+    /// through this one.
     fn append_host_with<Refusal: From<EventError>>(
         &self,
         root: &TrajectoryId,
@@ -1175,28 +1173,6 @@ impl Runtime {
         self.create_session_under(id, Arc::new(deployment))
     }
 
-    /// Record one host observation in this root's log, at the position the append is tried
-    /// at. Every host write goes through here.
-    pub(crate) fn append_host(&self, root: &TrajectoryId, observation: &HostObservation) -> Result<(), EventError> {
-        self.inner.append_host(root, observation)
-    }
-
-    /// Record one host observation derived from the very position it will be written at, so
-    /// a writer that loses the compare-and-swap decides again against what won rather than
-    /// replaying a decision the log has moved past. `None` means there is nothing left to
-    /// record.
-    ///
-    /// The error is the caller's, so a derivation that refuses — an offer already executing,
-    /// an inventory that contradicts what this actor already reported — says so in its own
-    /// vocabulary instead of through this one.
-    pub(crate) fn append_host_with<Refusal: From<EventError>>(
-        &self,
-        root: &TrajectoryId,
-        derive: impl Fn(&Log) -> Result<Option<HostObservation>, Refusal>,
-    ) -> Result<(), Refusal> {
-        self.inner.append_host_with(root, derive)
-    }
-
     /// Reserve identities in the actor's own scope, independently of the immutable
     /// policy registry. The same log CAS as tool admission makes a concurrent
     /// discovery retry before it can authorize a call under stale evidence.
@@ -1209,7 +1185,7 @@ impl Runtime {
         use appa_runtime_api::inventory::ToolInventory;
         candidate.validate(adapter).map_err(inventory_refused)?;
         let scope = crate::engine::engine_id(actor.child.as_ref().unwrap_or(&actor.root));
-        self.append_host_with(&actor.root, |log| {
+        self.inner.append_host_with(&actor.root, |log| {
             let previous = inventory_at(log, actor, adapter)?;
             let combined = previous.extending(candidate, adapter).map_err(inventory_refused)?;
             let previous_tools: std::collections::BTreeMap<_, _> =
@@ -1647,7 +1623,7 @@ impl Runtime {
         // holds its call open for minutes, and a second dialog for one decision is the
         // thing this refuses. The claim is derived at the position it is written at, so a
         // writer that loses the compare-and-swap sees the winner's claim and refuses.
-        if let Err(refused) = self.append_host_with::<RemedyOutcome>(&root, |log| {
+        if let Err(refused) = self.inner.append_host_with::<RemedyOutcome>(&root, |log| {
             match HostState::fold(log.host_records(), std::time::SystemTime::now()).claimed(&claimed) {
                 true => Err(RemedyOutcome::Refused {
                     detail: "this offer is already being executed".to_string(),
@@ -1747,7 +1723,7 @@ impl Runtime {
     /// A standing that does not land is no standing: the tool then finds nothing vouched
     /// and says so, which is the same answer a hook that never ran would leave.
     pub(crate) fn vouch(&self, key: &PermitKey, acting: &Actor, ruling: Option<appa_runtime_api::Ruling>) {
-        if let Err(error) = self.append_host(
+        if let Err(error) = self.inner.append_host(
             &acting.root,
             &HostObservation::Vouched {
                 actor: host_actor(acting),
@@ -1756,35 +1732,52 @@ impl Runtime {
             },
         ) {
             tracing::warn!(root = %acting.root.0, %error, "this trajectory's standing was not recorded");
-            return;
         }
-        self.inner
-            .routing
-            .lock()
-            .expect("the routing mutex is never poisoned: no panic runs while it is held")
-            .entry(key.clone())
-            .or_default()
-            .insert(acting.root.0.clone());
     }
 
     /// The trajectory vouched for this key, taken once, with the ruling its harness
     /// attached.
     ///
-    /// The request naming no session is the whole problem: the caller is found by reading
-    /// the logs of the roots that recorded a vouch under this key — the ones this process
-    /// saw, or, when it saw none, every root the store holds.
+    /// The request naming no session is the whole problem: the caller is found by asking the
+    /// store which families named this key at all, and reducing each one's host stream. The
+    /// runtime remembers nothing between the vouch and the take, so a standing another
+    /// process recorded reads the same as one this process did.
     ///
     /// Two trajectories standing behind one key is not a tie to break: it means the key does
     /// not identify a caller, and answering either one would put one session's standing
     /// behind another session's call. That case keeps the record rather than consuming it —
     /// destroying it would make the *next* identical call look like one nothing vouched for,
     /// and the two need different answers. The turn's end releases it either way.
+    ///
+    /// A read that fails answers nobody. A partial view of who stands behind a key cannot
+    /// tell a lone holder from one of two, so authorizing from it would answer the ambiguous
+    /// case with one session's standing.
     pub(crate) fn take_vouched(&self, key: &PermitKey) -> Result<(Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
         let now = std::time::SystemTime::now();
+        let candidates = match self
+            .inner
+            .store
+            .host_records_mentioning(&HostObservation::names_key(&key.wire()))
+        {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                tracing::warn!(%error, "the families standing behind this key did not read, so nothing stands");
+                self.inner
+                    .note_store_error(None, crate::events::StoreOperation::Read, &error);
+                return Err(Unvouched::Nobody);
+            }
+        };
         let mut taken: Option<(TrajectoryId, Actor, Option<appa_runtime_api::Ruling>)> = None;
-        for root in self.vouching_roots(key) {
-            let Ok(records) = self.inner.host_records(&root) else {
-                continue;
+        for (candidate, _) in candidates {
+            let root = TrajectoryId(candidate.as_str().to_string());
+            // The whole host stream, not the rows that name the key: a turn's end releases
+            // every standing its actor held and says so without naming one.
+            let records = match self.inner.host_records(&root) {
+                Ok(records) => records,
+                Err(error) => {
+                    tracing::warn!(root = %root.0, %error, "this family's records did not read, so nothing stands");
+                    return Err(Unvouched::Nobody);
+                }
             };
             match HostState::fold(&records, now).vouched(key) {
                 Ok((actor, ruling)) if taken.is_none() => taken = Some((root, actor, ruling)),
@@ -1797,7 +1790,7 @@ impl Runtime {
         };
         // Taking is one-shot, and the consumption is what makes it one: a take whose
         // release did not land must not answer the call it would have authorized.
-        if let Err(error) = self.append_host(
+        if let Err(error) = self.inner.append_host(
             &root,
             &HostObservation::Released {
                 actor: host_actor(&actor),
@@ -1807,69 +1800,13 @@ impl Runtime {
             tracing::warn!(root = %root.0, %error, "the standing behind this call was not consumed, so it is not spent");
             return Err(Unvouched::Nobody);
         }
-        let mut routing = self
-            .inner
-            .routing
-            .lock()
-            .expect("the routing mutex is never poisoned: no panic runs while it is held");
-        if let Some(roots) = routing.get_mut(key) {
-            roots.remove(&root.0);
-            if roots.is_empty() {
-                routing.remove(key);
-            }
-        }
         Ok((actor, ruling))
-    }
-
-    /// Whose logs can hold a live vouch for this key: the memo, or — when this process
-    /// recorded none, because another one did or because it has restarted since — every
-    /// root whose host records name the key.
-    fn vouching_roots(&self, key: &PermitKey) -> Vec<TrajectoryId> {
-        let remembered: Vec<TrajectoryId> = self
-            .inner
-            .routing
-            .lock()
-            .expect("the routing mutex is never poisoned: no panic runs while it is held")
-            .get(key)
-            .map(|roots| roots.iter().cloned().map(TrajectoryId).collect())
-            .unwrap_or_default();
-        if !remembered.is_empty() {
-            return remembered;
-        }
-        let scanned = match self.inner.store.host_records() {
-            Ok(scanned) => scanned,
-            Err(error) => {
-                self.inner
-                    .note_store_error(None, crate::events::StoreOperation::Read, &error);
-                return Vec::new();
-            }
-        };
-        let wire = key.wire();
-        let found: Vec<TrajectoryId> = scanned
-            .into_iter()
-            .filter(|(_, records)| {
-                records
-                    .iter()
-                    .any(|record| matches!(&record.observation, HostObservation::Vouched { key, .. } if *key == wire))
-            })
-            .map(|(root, _)| TrajectoryId(root.as_str().to_string()))
-            .collect();
-        if !found.is_empty() {
-            self.inner
-                .routing
-                .lock()
-                .expect("the routing mutex is never poisoned: no panic runs while it is held")
-                .entry(key.clone())
-                .or_default()
-                .extend(found.iter().map(|root| root.0.clone()));
-        }
-        found
     }
 
     /// A prompt reached this actor, which is the sign that its previous turn is over
     /// however it ended.
     pub(crate) fn record_prompt(&self, acting: &Actor) -> Result<(), EventError> {
-        self.append_host(
+        self.inner.append_host(
             &acting.root,
             &HostObservation::PromptSeen {
                 actor: host_actor(acting),
@@ -1879,7 +1816,7 @@ impl Runtime {
 
     /// What the prompt left open is settled, and this actor's standing survives it.
     pub(crate) fn record_prompt_settled(&self, acting: &Actor) -> Result<(), EventError> {
-        self.append_host(
+        self.inner.append_host(
             &acting.root,
             &HostObservation::PromptSettled {
                 actor: host_actor(acting),
@@ -1893,7 +1830,7 @@ impl Runtime {
     /// turn's end was never spent — the harness declined the call, or the tool never ran —
     /// and nothing later can spend it.
     pub(crate) fn record_turn_end(&self, acting: &Actor) -> Result<(), EventError> {
-        self.append_host(
+        self.inner.append_host(
             &acting.root,
             &HostObservation::TurnEnded {
                 actor: host_actor(acting),
@@ -2015,15 +1952,16 @@ impl Runtime {
     /// that pin how one is read back.
     #[cfg(test)]
     pub(crate) fn claim_until(&self, acting: &Actor, offer: &OfferId, until: std::time::SystemTime) {
-        self.append_host(
-            &acting.root,
-            &HostObservation::Claimed {
-                actor: host_actor(acting),
-                key: PermitKey::offer(offer).wire(),
-                until,
-            },
-        )
-        .expect("the claim lands");
+        self.inner
+            .append_host(
+                &acting.root,
+                &HostObservation::Claimed {
+                    actor: host_actor(acting),
+                    key: PermitKey::offer(offer).wire(),
+                    until,
+                },
+            )
+            .expect("the claim lands");
     }
 
     #[cfg(test)]
@@ -2054,8 +1992,8 @@ impl Runtime {
 /// The release is a record, so it is written here rather than left to the claim's bound:
 /// the bound is the hard-crash backstop, and a dropped request is not a crash. Appending in
 /// `Drop` is what the log allows — every store operation is synchronous and none awaits —
-/// and a release that cannot be written is logged and let go, exactly as a destructor that
-/// could not fail behaved.
+/// and a release that cannot be written is logged and let go, because a destructor has
+/// nowhere to report it.
 struct Claimed {
     inner: Arc<Inner>,
     root: TrajectoryId,
@@ -3625,8 +3563,75 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert_eq!(runtime.take_vouched(&ticket), Ok((actors[0].clone(), None)));
     }
 
-    /// The vouch is in the log, so a runtime that never saw the hook still finds it: the
-    /// memo that routes a take is only a memo, and a miss reads the store.
+    /// A take reads every family that named the key, and a family it cannot read is not a
+    /// family that vouched for nobody: answering the readable one would hand this call one
+    /// session's standing while the other's is unread.
+    #[tokio::test]
+    async fn a_family_whose_records_do_not_read_refuses_the_take_it_could_have_answered() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = std::sync::Arc::new(
+            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens"),
+        );
+        let ticket = crate::yell::YellArgs {
+            message: "the hook blocked".to_string(),
+            with_trajectory: true,
+        }
+        .ticket();
+        for id in ["cc:first", "cc:second"] {
+            let root = TrajectoryId(id.to_string());
+            crate::hooks::handle(
+                &runtime,
+                appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+            )
+            .await;
+            runtime.vouch(&ticket, &Actor { root, child: None }, None);
+        }
+
+        // A host row that names no key, so the query that finds the families still hands
+        // this one over, and the damage is met where its whole stream is read.
+        let damaged = TrajectoryId("cc:second".to_string());
+        let actor = Actor {
+            root: damaged.clone(),
+            child: None,
+        };
+        crate::hooks::handle(
+            &runtime,
+            appa_runtime_api::HookEvent::Prompt {
+                actor,
+                text: "go on".to_string(),
+            },
+        )
+        .await;
+        let engine_root = crate::engine::engine_id(&damaged);
+        let at = runtime
+            .store()
+            .host_records_of(&engine_root)
+            .expect("the family's host records read")
+            .iter()
+            .find(|record| matches!(&record.observation, HostObservation::PromptSeen { .. }))
+            .expect("the prompt mark landed")
+            .seq;
+        runtime
+            .store()
+            .corrupt_batch(&engine_root, at, br#"{"kind":"prompt_seen""#);
+        assert!(
+            !runtime
+                .store()
+                .host_records_mentioning(&HostObservation::names_key(&ticket.wire()))
+                .expect("the families that named the key still read")
+                .is_empty(),
+            "the damaged row names no key, so this family is still a candidate"
+        );
+
+        assert_eq!(
+            runtime.take_vouched(&ticket),
+            Err(Unvouched::Nobody),
+            "an unreadable family is not an absent one"
+        );
+    }
+
+    /// The vouch is in the log, so a runtime that never saw the hook still finds it: nothing
+    /// routes a take but the records.
     #[tokio::test]
     async fn a_vouch_outlives_the_runtime_that_recorded_it() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");

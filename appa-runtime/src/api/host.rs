@@ -105,11 +105,8 @@ impl HostState {
         state
     }
 
-    /// The trajectory vouched for this key, with the ruling its harness attached.
-    ///
-    /// Two trajectories standing behind one key is not a tie to break: it means the key does
-    /// not identify a caller, and answering either one would put one session's standing
-    /// behind another session's call.
+    /// The trajectory vouched for this key, with the ruling its harness attached, or why no
+    /// one answer names a caller.
     pub(crate) fn vouched(&self, key: &PermitKey) -> Result<(Actor, Option<Ruling>), Unvouched> {
         match self.vouches.get(key).map(Vec::as_slice) {
             Some([only]) => Ok((only.actor.clone(), only.ruling)),

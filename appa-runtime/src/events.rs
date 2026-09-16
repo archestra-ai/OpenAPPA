@@ -336,9 +336,8 @@ impl RootEvents {
 /// belongs to no trajectory — reloads, store failures, hooks refused before an actor exists.
 #[derive(Debug, Default)]
 pub(crate) struct EventLog {
-    /// Keyed by the trajectory's spelling, as the runtime's one other in-memory map is (the
-    /// `routing` memo): `TrajectoryId` is a public wire type and this is not a reason to
-    /// widen its derives.
+    /// Keyed by the trajectory's spelling: `TrajectoryId` is a public wire type and this is
+    /// not a reason to widen its derives.
     roots: BTreeMap<String, RootEvents>,
     deployment: RootEvents,
     /// Allocated under the same lock as the insert. An atomic outside the lock would let a

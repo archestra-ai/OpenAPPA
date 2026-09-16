@@ -444,31 +444,20 @@ impl Session {
         if call_id.is_empty() {
             return Err(EventError::CallIdReused);
         }
-        for _ in 0..REPLAY_LIMIT {
-            let log = self.inner.log(&self.root)?;
-            let trajectory = crate::engine::engine_id(&self.trajectory);
+        let trajectory = crate::engine::engine_id(&self.trajectory);
+        self.inner.append_host_with(&self.root, |log| {
             if log
                 .call_bindings()
                 .any(|binding| *binding.trajectory == trajectory && binding.call_id == call_id)
             {
                 return Err(EventError::CallIdReused);
             }
-            let binding = appa_eventlog::HostObservation::CallBound {
+            Ok(Some(appa_eventlog::HostObservation::CallBound {
                 trajectory: trajectory.clone(),
                 call_id: call_id.clone(),
                 dispatch: dispatch.clone(),
-            };
-            match self.inner.store.append_host(&log, &[], &binding) {
-                Ok(()) => return Ok(()),
-                Err(appa_eventlog::AppendError::Conflict { .. }) => continue,
-                Err(error) => {
-                    self.inner
-                        .note_store_error(Some(&self.root), crate::events::StoreOperation::Append, &error);
-                    return Err(EventError::Storage(error.to_string()));
-                }
-            }
-        }
-        Err(EventError::Contended { attempts: REPLAY_LIMIT })
+            }))
+        })
     }
 
     /// Close the call this trajectory has open as one that did not run.

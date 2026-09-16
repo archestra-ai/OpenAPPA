@@ -218,8 +218,7 @@ impl PostgresStore {
         decoded(root, batches, policy)
     }
 
-    /// One root's host records, without reading its facts. An existing root that recorded
-    /// nothing reads as no records; a root with no rows at all is unknown.
+    /// See [`LogStore::host_records_of`].
     pub(super) fn host_records_of(&self, root: &TrajectoryId) -> Result<Vec<HostRecord>, ReadError> {
         let id = root.as_str().to_owned();
         let known = id.clone();
@@ -238,27 +237,30 @@ impl PostgresStore {
             }
             Ok(Some(
                 rows.into_iter()
-                    .map(|row| (id.clone(), row.get::<_, i64>(0) as u64, row.get::<_, Vec<u8>>(1)))
+                    .map(|row| (row.get::<_, i64>(0) as u64, row.get::<_, Vec<u8>>(1)))
                     .collect::<Vec<_>>(),
             ))
         })?;
         let Some(rows) = rows else {
             return Err(ReadError::UnknownRoot { root: known });
         };
-        Ok(grouped_by_root(rows)?
-            .pop()
-            .map(|(_, records)| records)
-            .unwrap_or_default())
+        rows.into_iter()
+            .map(|(seq, bytes)| decode_host_record(&known, seq, &bytes))
+            .collect()
     }
 
-    /// Every root's host records. The stored shape decides which rows carry one, so the
-    /// engine's payloads are never fetched or decoded.
-    pub(super) fn host_records(&self) -> Result<Vec<(TrajectoryId, Vec<HostRecord>)>, ReadError> {
-        let rows = self.with_client(|client| {
+    /// See [`LogStore::host_records_mentioning`].
+    pub(super) fn host_records_mentioning(
+        &self,
+        needle: &str,
+    ) -> Result<Vec<(TrajectoryId, Vec<HostRecord>)>, ReadError> {
+        let needle = needle.as_bytes().to_vec();
+        let rows = self.with_client(move |client| {
             let rows = client.query(
                 "SELECT root, seq, payload FROM openappa_events \
-                 WHERE substring(payload from 1 for 1) = '\\x7b'::bytea ORDER BY root, seq",
-                &[],
+                 WHERE substring(payload from 1 for 1) = '\\x7b'::bytea AND position($1::bytea in payload) > 0 \
+                 ORDER BY root, seq",
+                &[&needle],
             )?;
             Ok(rows
                 .into_iter()
