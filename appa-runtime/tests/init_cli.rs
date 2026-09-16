@@ -226,6 +226,7 @@ fn a_first_activation_writes_the_profile_and_arms_the_launcher() {
             "Stop",
             "StopFailure",
             "SubagentStart",
+            "SubagentStart",
             "SubagentStop",
             "UserPromptSubmit",
         ]
