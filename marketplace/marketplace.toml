@@ -4,7 +4,7 @@ name = "appa"
 
 [packages.battery.claude-code]
 path = "batteries/claude-code"
-digest = "sha256:b6f30c6b209f61beb4b603687583504307811c1c70c4d7e1818b227492d5f540"
+digest = "sha256:3c62a665b23328ce79f7cb5fa40d50d69231977391a41da30470071f9253a652"
 
 [packages.battery.cloudflare-docs]
 path = "batteries/cloudflare-docs"

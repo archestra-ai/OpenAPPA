@@ -213,8 +213,9 @@ async fn a_cli_change_records_its_effect_and_sql_from_a_file_needs_the_reviewer(
     );
 }
 
-/// The CLI's credential commands are the battery's credential rules: the session narrows to
-/// `self` by a static rule, and no classifier is asked.
+/// The CLI's credential commands are the battery's credential rules, with the CLI's global
+/// flags anywhere before the verb: the session narrows to `self` by a static rule, and no
+/// classifier is asked.
 #[tokio::test]
 async fn a_credential_command_narrows_to_self_without_a_classifier() {
     let dir = tempfile::tempdir().unwrap();
@@ -222,8 +223,8 @@ async fn a_credential_command_narrows_to_self_without_a_classifier() {
 
     for command in [
         "databricks auth token --host https://dbc-1.cloud.databricks.com",
-        "databricks auth env --profile dev",
-        "databricks secrets get-secret scope key",
+        "databricks --profile dev auth env",
+        "databricks -p dev secrets get-secret scope key",
         "databricks configure --token",
         "cat ~/.databrickscfg",
     ] {
