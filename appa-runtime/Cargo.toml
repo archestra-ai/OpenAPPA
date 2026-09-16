@@ -40,7 +40,7 @@ rand = "0.10"
 reqwest = { workspace = true }
 # `server` carries the tool macros' schema derive; `transport-streamable-http-server`
 # is the HTTP transport Claude Code's MCP client speaks.
-rmcp = { version = "3", features = ["server", "macros", "transport-streamable-http-server", "elicitation"] }
+rmcp = { version = "3", features = ["server", "macros", "transport-streamable-http-server", "transport-io", "elicitation"] }
 # Must stay 1.x to match rmcp's `#[tool]` schema derive.
 schemars = "1"
 serde = { workspace = true }

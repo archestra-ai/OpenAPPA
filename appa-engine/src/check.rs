@@ -146,16 +146,29 @@ pub(crate) fn evaluate_state(
     stage: &CallStage,
     context: &MembershipContext<'_>,
 ) -> Result<RawBlock, MembershipNeeded> {
-    let committed = committed_label(annotation, current);
+    let committed = match reads {
+        CallReads::Resolved(call) => current.combine(&call.output_label(annotation, current)),
+        CallReads::Static => committed_label(annotation, current),
+    };
 
     let narrowing = (&committed != current).then(|| Narrowing {
         from: current.clone(),
         to: committed.clone(),
     });
 
+    // File-to-file operations return only an acknowledgement to the trajectory. Requirements
+    // still check the content that flows to the destination, without narrowing the trajectory by
+    // that content. Combining with `committed` preserves predecessor-sensitive mutation checks.
+    let checked = match reads {
+        CallReads::Resolved(call) => call
+            .file_output_label(annotation, current)
+            .map_or_else(|| committed.clone(), |file| committed.combine(&file)),
+        CallReads::Static => committed.clone(),
+    };
+
     let mut gaps = Vec::new();
     let mut needed = Vec::new();
-    label_gaps(annotation, &committed, reads, stage, context, &mut gaps, &mut needed);
+    label_gaps(annotation, &checked, reads, stage, context, &mut gaps, &mut needed);
     if !needed.is_empty() {
         // An undecided comparison keeps the whole check open: gaps drive remedy planning,
         // and a requirement that is neither held nor refuted cannot be planned over yet.
@@ -420,11 +433,11 @@ mod tests {
     use super::*;
     use crate::contract::{Delta, LabelRequirements, PinnedAnnotation, ProducedAnnotation, Requires, ToolAnnotation};
     use crate::fact::{EffectKind, EffectSet};
-    use crate::label::GroupRef;
+    use crate::label::{Audience, GroupRef, TestContext};
     use crate::names::GroupName;
     use crate::params::ToolParameters;
     use crate::registry::{AnnotatorDeclaration, AudienceVocabulary, Registry, RegistryConfig, TrustChain};
-    use crate::value::ToolName;
+    use crate::value::{FileBasis, FileSource, ToolName};
 
     fn annotation(name: &str) -> ToolAnnotation {
         ToolAnnotation {
@@ -526,6 +539,59 @@ mod tests {
             emits: annotation.emits,
             requires: annotation.requires,
         }
+    }
+
+    #[test]
+    fn copy_source_is_checked_without_narrowing_the_trajectory() {
+        let annotation = ToolAnnotation {
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(Trust::new(1)),
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                        DeclaredAudience::Public,
+                    ))],
+                },
+                ..Requires::default()
+            },
+            ..annotation("copy")
+        };
+        let current = Label::new(Trust::new(1), Audience::public());
+        let source = FileSource {
+            version: "source-v1".into(),
+            digest: "source-digest".into(),
+            label: Label::new(Trust::new(0), Audience::restricted([ReaderId::new("source-reader")])),
+        };
+        let call = call("copy").with_file_basis(Some(FileBasis::Copy { source, replaced: None }));
+        let context = TestContext::default();
+
+        let block = evaluate_state(
+            &annotation,
+            &current,
+            &|_| false,
+            &|_| false,
+            CallReads::Resolved(&call),
+            &CallStage::default(),
+            &context.context(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            block.narrowing, None,
+            "the acknowledgement does not carry source content"
+        );
+        assert_eq!(
+            block.requirement_gaps,
+            vec![
+                Gap::TrustFloor {
+                    required: Trust::new(1),
+                    actual: Trust::new(0),
+                },
+                Gap::Includes {
+                    recipients: DeclaredAudience::Public
+                }
+            ],
+            "destination requirements still inspect copied content"
+        );
     }
 
     fn pinned_by_classifier(produced: ToolAnnotation) -> ResolvedCall {

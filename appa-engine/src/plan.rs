@@ -2702,6 +2702,7 @@ mod tests {
             receiving: established(TRUSTED, Audience::public()),
             proposed_effects: annotation.emits.clone(),
             annotation: None,
+            file_basis: None,
             subject: crate::basis::fixture_subject(&traj()),
             evidence: crate::audience::AudienceEvidence::default(),
         }

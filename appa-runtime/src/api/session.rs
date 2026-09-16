@@ -68,6 +68,27 @@ fn is_open_call(call: &ProposedCall, canonical: impl FnOnce() -> Option<Vec<u8>>
     call.tool == open.tool && canonical().as_deref() == Some(open.bytes.as_slice())
 }
 
+/// Run one ledger operation on the blocking pool.
+///
+/// Every one of them hashes whole files or writes rows under a synchronous connection, and
+/// this executor also serves the harness's hooks and MCP requests. `bind`, `cancel` and
+/// `abandon` stay inline: each is one indexed row, with no file read behind it.
+async fn ledger<T: Send + 'static>(
+    inner: std::sync::Arc<super::Inner>,
+    work: impl FnOnce(&super::files::FileTracking) -> Result<T, appa_eventlog::files::FileStoreError> + Send + 'static,
+) -> Result<T, EventError> {
+    let joined = tokio::task::spawn_blocking(move || {
+        let files = inner
+            .files
+            .as_ref()
+            .ok_or_else(|| appa_eventlog::files::FileStoreError::Corrupt("file tools are not enabled".into()))?;
+        work(files)
+    })
+    .await
+    .map_err(|error| super::files::refused(format!("the file ledger task failed: {error}")))?;
+    joined.map_err(super::files::refused)
+}
+
 /// Which dispatch a reported outcome belongs to, or why none can take
 /// it. Total over everything the log shows: the reported call in the
 /// engine's canonical domain and the dispatches this
@@ -272,6 +293,7 @@ impl Session {
                 .await
             {
                 Ok(_) => {
+                    self.release_file_reservation(&dispatch.id).await;
                     tracing::debug!(
                         trajectory = %self.trajectory.0,
                         dispatch = ?dispatch.id,
@@ -284,6 +306,47 @@ impl Session {
             }
         }
         Ok(())
+    }
+
+    /// Give back the ledger reservation of a released file call the harness never ran.
+    ///
+    /// The ledger releases it only while the workspace still shows the pinned state, which is
+    /// what an unrun call leaves behind. A workspace that moved keeps its reservation: the
+    /// runtime cannot tell an unrun call from one whose report was lost, and guessing would
+    /// publish bytes whose Label nobody recorded. That case is an operator's, so it is
+    /// reported loudly rather than resolved here.
+    ///
+    /// A ledger failure never turns a turn end into a refusal: the session would then be
+    /// blocked by bookkeeping rather than by a policy decision, and the reservation it could
+    /// not read stays exactly as it was.
+    async fn release_file_reservation(&self, dispatch: &appa_engine::value::DispatchId) {
+        if self.inner.files.is_none() {
+            return;
+        }
+        let key = match super::files::key(dispatch) {
+            Ok(key) => key,
+            Err(error) => {
+                tracing::warn!(%error, "a file reservation key could not be rendered");
+                return;
+            }
+        };
+        let released = ledger(self.inner.clone(), {
+            let (actor, key) = (self.trajectory.0.clone(), key);
+            move |files| files.store.abandon(&actor, &key)
+        })
+        .await;
+        match released {
+            Ok(appa_eventlog::files::AbandonOutcome::Absent) => {}
+            Ok(appa_eventlog::files::AbandonOutcome::Released) => tracing::info!(
+                trajectory = %self.trajectory.0,
+                "released the reservation of a file call the harness never ran"
+            ),
+            Ok(appa_eventlog::files::AbandonOutcome::Quarantined) => tracing::warn!(
+                trajectory = %self.trajectory.0,
+                "a released file call left the workspace inconsistent; the reservation stands and file calls stay refused"
+            ),
+            Err(error) => tracing::warn!(%error, "a file reservation could not be released"),
+        }
     }
 
     /// The calls a turn end closes. A trajectory that has ended or never
@@ -318,6 +381,112 @@ impl Session {
         call_id: Option<String>,
         spawn: bool,
     ) -> Result<ToolCallDecision, EventError> {
+        let Some(files) = &self.inner.files else {
+            return self.propose_tool_call(call, call_id, spawn, None).await;
+        };
+        let (operation, path) = super::files::operation(&call)?;
+        let log = self.inner.log(&self.root)?;
+        if crate::engine::policy_file_key(log.policy_file()) != files.policy_key
+            || crate::engine::policy_file_key(self.deployment.config.policy_file().bytes()) != files.policy_key
+        {
+            return Err(super::files::refused(
+                "the workspace ledger and trajectory must use the same policy",
+            ));
+        }
+        let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+        let view = policy.engine().rebuild_view(&log)?;
+        let expected = policy.engine().file_dispatch(&view, &self.trajectory, &call)?;
+        let key = super::files::key(&expected)?;
+        let pin = match operation {
+            appa_eventlog::files::FileOperation::Process => {
+                if files.process_backend.is_none() {
+                    return Err(super::files::refused("isolated processing is not enabled"));
+                }
+                let args: super::files::ProcessArgs =
+                    serde_json::from_str(call.arguments.get()).map_err(super::files::refused)?;
+                ledger(self.inner.clone(), {
+                    let (actor, key, path, inputs) =
+                        (self.trajectory.0.clone(), key.clone(), path.clone(), args.input_paths);
+                    move |files| files.store.prepare_process(&actor, &key, &inputs, &path)
+                })
+                .await?
+            }
+            appa_eventlog::files::FileOperation::Copy | appa_eventlog::files::FileOperation::Move => {
+                let args: super::files::FileTransferArgs =
+                    serde_json::from_str(call.arguments.get()).map_err(super::files::refused)?;
+                ledger(self.inner.clone(), {
+                    let (actor, key, path, source) =
+                        (self.trajectory.0.clone(), key.clone(), path.clone(), args.source_path);
+                    move |files| files.store.prepare_transfer(&actor, &key, operation, &source, &path)
+                })
+                .await?
+            }
+            _ => {
+                ledger(self.inner.clone(), {
+                    let (actor, key, path) = (self.trajectory.0.clone(), key.clone(), path.clone());
+                    move |files| files.store.prepare(&actor, &key, operation, &path)
+                })
+                .await?
+            }
+        };
+        // Managed writes must not reconfigure Claude Code, Git hooks, or MCP execution.
+        // Claude loads instruction files implicitly, outside the file-tool observation path.
+        if operation != appa_eventlog::files::FileOperation::Read
+            && std::iter::once(pin.path.as_str())
+                .chain(
+                    pin.source
+                        .as_ref()
+                        .filter(|_| operation == appa_eventlog::files::FileOperation::Move)
+                        .map(|source| source.path.as_str()),
+                )
+                .flat_map(|path| path.split('/'))
+                .any(|part| {
+                    matches!(
+                        part,
+                        ".claude" | ".git" | ".mcp.json" | ".appa" | "CLAUDE.md" | "CLAUDE.local.md"
+                    )
+                })
+        {
+            files
+                .store
+                .cancel(&self.trajectory.0, &key)
+                .map_err(super::files::refused)?;
+            return Err(super::files::refused(
+                "execution-control files are not writable in file-tracking mode",
+            ));
+        }
+        let basis = super::files::basis(pin)?;
+        let decision = self.propose_tool_call(call, call_id, spawn, Some(basis)).await;
+        match &decision {
+            Ok(ToolCallDecision::Allow { dispatch, .. }) => {
+                if dispatch != &expected {
+                    return Err(super::files::refused("dispatch changed while reserving the file"));
+                }
+                let log = self.inner.log(&self.root)?;
+                let view = policy.engine().rebuild_view(&log)?;
+                let label = policy.engine().file_output_label(&view, dispatch)?;
+                files
+                    .store
+                    .bind(&self.trajectory.0, &key, &key, &label)
+                    .map_err(super::files::refused)?;
+            }
+            _ => {
+                files
+                    .store
+                    .cancel(&self.trajectory.0, &key)
+                    .map_err(super::files::refused)?;
+            }
+        }
+        decision
+    }
+
+    async fn propose_tool_call(
+        &self,
+        call: ProposedCall,
+        call_id: Option<String>,
+        spawn: bool,
+        file_basis: Option<appa_engine::value::FileBasis>,
+    ) -> Result<ToolCallDecision, EventError> {
         if let Some(open) = self.substituted_release(&call)? {
             return self.claim_or_abandon(call, call_id, open).await;
         }
@@ -332,7 +501,10 @@ impl Session {
         }
         let decision = self
             .drive_with_evidence(
-                |_, evidence| {
+                |_, mut evidence| {
+                    if let Some(basis) = &file_basis {
+                        evidence.push(ExternalEvidence::File { basis: basis.clone() });
+                    }
                     Ok(EngineEvent::ModelResponse {
                         call: call.clone(),
                         evidence,
@@ -502,6 +674,66 @@ impl Session {
         .await
     }
 
+    /// Execute only the exact released runtime-owned call. Content-dependent checks happen
+    /// here, never during proposal parsing or in Claude Code's native validation.
+    ///
+    /// The file work runs on the blocking pool: it reads and hashes files, and a Process call
+    /// may run a sandboxed command for two minutes. The runtime serves hooks and MCP on this
+    /// executor, so none of that belongs on an async worker.
+    pub(super) async fn execute_file(&self, call: ProposedCall) -> Result<super::files::FileReply, EventError> {
+        if self.inner.files.is_none() {
+            return Err(super::files::refused("file tools are not enabled"));
+        }
+        let open = self.carried_calls()?;
+        let [open] = open.as_slice() else {
+            return Err(EventError::UnknownDispatch);
+        };
+        let log = self.inner.log(&self.root)?;
+        let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+        if !is_open_call(&call, || policy.engine().canonical_bytes(&call), open) {
+            return Err(EventError::OutcomeMismatch);
+        }
+        let key = super::files::key(&open.id)?;
+        let pin = ledger(self.inner.clone(), {
+            let (actor, key) = (self.trajectory.0.clone(), key.clone());
+            move |files| files.store.pin_for(&actor, &key)
+        })
+        .await?
+        .ok_or_else(|| super::files::refused("the released call holds no file reservation"))?;
+        let result = {
+            let inner = self.inner.clone();
+            let (call, pin) = (call.clone(), pin.clone());
+            tokio::task::spawn_blocking(move || match inner.files.as_ref() {
+                Some(files) => super::files::perform(files, &call, &pin),
+                None => Err("file tools are not enabled".to_string()),
+            })
+            .await
+            .map_err(|error| super::files::refused(format!("the file operation did not complete: {error}")))?
+        };
+        let outcome = match &result {
+            Ok(value) => ToolOutcome::Success {
+                body: OutcomeBody::Available(value.clone()),
+            },
+            Err(message) => ToolOutcome::Failure {
+                message: message.clone(),
+            },
+        };
+        // No bytes reach the MCP caller until the engine admits the observation and the
+        // ledger reconciles the mutation. A failed commit returns no file-derived detail.
+        let decision = self.on_tool_result_identified(call, None, outcome).await?;
+        let succeeded = result.is_ok();
+        let value = match decision {
+            ToolResultDecision::Keep => result.unwrap_or_else(|error| error),
+            ToolResultDecision::Deliver { value } => value,
+            ToolResultDecision::Replace { placeholder } => return Ok(super::files::FileReply::Failure(placeholder)),
+        };
+        Ok(if succeeded {
+            super::files::FileReply::Value(value)
+        } else {
+            super::files::FileReply::Failure(value)
+        })
+    }
+
     #[cfg(test)]
     pub async fn on_tool_result(&self, call: ProposedCall, o: ToolOutcome) -> Result<ToolResultDecision, EventError> {
         self.on_tool_result_identified(call, None, o).await
@@ -513,6 +745,59 @@ impl Session {
         call_id: Option<String>,
         o: ToolOutcome,
     ) -> Result<ToolResultDecision, EventError> {
+        if self.inner.files.is_some() {
+            super::files::operation(&call)?;
+            let log = self.inner.log(&self.root)?;
+            let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+            let open = self.carried_calls()?;
+            let dispatch = classify_report_identified(
+                &call,
+                call_id.as_deref(),
+                || policy.engine().canonical_bytes(&call),
+                &open,
+                log.call_bindings(),
+                &crate::engine::engine_id(&self.trajectory),
+            )
+            .map_err(UnreportableOutcome::refusal)?;
+            let key = super::files::key(&dispatch)?;
+            // Preserve actual failure text: the native failure hook cannot reliably replace it.
+            // A missing observation keeps the reservation; no later file call may proceed.
+            let o = match o {
+                ToolOutcome::Success {
+                    body: OutcomeBody::Unavailable,
+                } => ToolOutcome::Success {
+                    body: OutcomeBody::Available(String::new()),
+                },
+                other => other,
+            };
+            if matches!(o, ToolOutcome::Success { .. }) {
+                // Verify the physical version before admitting a successful result. The
+                // dispatch was durably released; an append failure afterward cannot erase
+                // this already-published file's Label.
+                ledger(self.inner.clone(), {
+                    let (actor, key) = (self.trajectory.0.clone(), key.clone());
+                    move |files| files.store.finish(&actor, &key, true)
+                })
+                .await?;
+            }
+            let decision = self.report_outcome(&call, call_id.as_deref(), &o).await?;
+            match &o {
+                ToolOutcome::Indeterminate => {
+                    return Err(super::files::refused(
+                        "missing outcome; workspace requires operator reconciliation",
+                    ));
+                }
+                ToolOutcome::Failure { .. } => {
+                    ledger(self.inner.clone(), {
+                        let (actor, key) = (self.trajectory.0.clone(), key.clone());
+                        move |files| files.store.finish(&actor, &key, false)
+                    })
+                    .await?;
+                }
+                ToolOutcome::Success { .. } => {}
+            }
+            return outcome_decision(decision);
+        }
         let o = self.cap_outcome(o);
         outcome_decision(self.report_outcome(&call, call_id.as_deref(), &o).await?)
     }
@@ -892,6 +1177,7 @@ impl Session {
     ) -> Result<(), EventError> {
         if let Some(open) = policy.engine().substituted_release(view, &self.trajectory) {
             self.abandon_dispatch(open.id.clone(), &unrun_substitution()).await?;
+            self.release_file_reservation(&open.id).await;
             tracing::debug!(
                 trajectory = %self.trajectory.0,
                 dispatch = ?open.id,
@@ -906,6 +1192,7 @@ impl Session {
                 .await
             {
                 Ok(_) => {
+                    self.release_file_reservation(&open.id).await;
                     tracing::debug!(
                         trajectory = %self.trajectory.0,
                         dispatch = ?open.id,

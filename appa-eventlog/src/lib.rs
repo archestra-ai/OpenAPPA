@@ -46,6 +46,7 @@ use appa_engine::profile::PolicyFileKey;
 use appa_engine::value::{DispatchId, TrajectoryId};
 use appa_runtime_api::{AdapterName, inventory::ToolInventory};
 
+pub mod files;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 

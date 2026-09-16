@@ -211,6 +211,7 @@ pub enum ObservedResult {
 pub enum CloseOutcome {
     Success { effects: EffectSet },
     Failure,
+    FailureWithBody { observed: RawResultDigest },
     Indeterminate,
 }
 
@@ -250,6 +251,8 @@ pub enum Fact {
         /// the registry at replay, which the opening's policy identity already fixes
         /// byte-for-byte.
         annotation: Option<crate::contract::PinnedAnnotation>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_basis: Option<crate::value::FileBasis>,
         #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
         evidence: crate::audience::AudienceEvidence,
         subject: crate::basis::SubjectKey,

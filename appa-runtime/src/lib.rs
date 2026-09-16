@@ -3,14 +3,17 @@
 mod agent_scan;
 pub mod api;
 pub mod batteries;
+pub mod claude_files;
 pub mod config;
 mod default_config;
 pub mod describe;
+pub mod file_ledger;
 pub mod hook_client;
 pub mod hooks;
 pub mod init;
 pub mod installation;
 mod loopback_http;
+pub mod managed_files;
 mod management;
 pub mod mcp;
 pub mod replay;
