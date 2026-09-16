@@ -276,6 +276,81 @@ async fn an_unconfigured_group_argument_fails_operationally() {
     assert_eq!(audit_len(&runtime), before);
 }
 
+/// Embedded hosts can accept symbolic restrictions without configuring a directory.
+#[tokio::test]
+async fn embedded_acceptance_keeps_builtin_audiences_symbolic() {
+    for requirement in ["", "requires = { audience = { contains = [\"internal\"] } }"] {
+        let policy = format!(
+            r#"
+version = 2
+[[tool]]
+name = "read_internal"
+delta = {{ audience = ["internal"] }}
+{requirement}
+[[tool]]
+name = "send_public"
+delta = {{}}
+requires = {{ audience = {{ contains = ["public"] }} }}
+[[tool]]
+name = "send_person"
+delta = {{}}
+requires = {{ audience = {{ contains = ["alice@example.com"] }} }}
+"#
+        );
+        let config = Config::embedded(
+            policy,
+            appa_runtime::config::ExternalBindings::new(std::time::Duration::from_secs(1), 4096),
+        )
+        .expect("symbolic audiences need no source configuration");
+        let store = Arc::new(appa_eventlog::LogStore::open(appa_eventlog::Backend::Memory).unwrap());
+        let runtime = Arc::new(Runtime::open_with_store(config, store, None).unwrap());
+        assert_eq!(
+            hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
+            HookDecision::Ack
+        );
+        let call = |tool: &str| ProposedCall {
+            tool: tool.into(),
+            arguments: raw(serde_json::json!({})),
+        };
+        let HookDecision::DenyCall { feedback, .. } = propose(&runtime, call("read_internal")).await else {
+            panic!("the read must first offer acceptance");
+        };
+        let args = serde_json::json!({"offer_id": last_offer(&feedback).0});
+        assert_eq!(
+            propose(
+                &runtime,
+                ProposedCall {
+                    tool: appa_runtime_api::CONTROL_TOOL.into(),
+                    arguments: raw(args.clone()),
+                }
+            )
+            .await,
+            HookDecision::PassControl
+        );
+        let result =
+            appa_runtime::mcp::execute_embedded_remedy(&runtime, &actor(), serde_json::from_value(args).unwrap()).await;
+        assert_ne!(result.is_error, Some(true), "{requirement}: {result:?}");
+        assert!(
+            format!("{:?}", result.content).contains("Authorized"),
+            "{requirement}: {result:?}"
+        );
+        assert_eq!(
+            propose(&runtime, call("read_internal")).await,
+            HookDecision::AllowCall { spawn: None }
+        );
+        ran(&runtime, call("read_internal")).await;
+        assert!(matches!(
+            propose(&runtime, call("send_public")).await,
+            HookDecision::DenyCall { .. }
+        ));
+        let HookDecision::DenyCall { feedback, offers, .. } = propose(&runtime, call("send_person")).await else {
+            panic!("individual membership needs a configured source");
+        };
+        assert!(feedback.contains("[policy.audience] internal"), "{feedback}");
+        assert!(offers.is_empty());
+    }
+}
+
 /// A policy that maps `internal` to no sources loads, and a contract can still require
 /// it. Once the trajectory narrows to `self`, that requirement needs the members of
 /// `internal` and can never obtain them: a static policy gap, denied as one — the same

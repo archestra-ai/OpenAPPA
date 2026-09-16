@@ -116,18 +116,6 @@ pub enum AudienceRequirement {
     Cap(DeclaredAudience),
 }
 
-impl AudienceRequirement {
-    /// The audience this requirement writes: a static recipient set or a cap. A
-    /// placeholder's audience is the call's, read when its argument is.
-    pub(crate) fn declared(&self) -> Option<&DeclaredAudience> {
-        match self {
-            AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => Some(recipients),
-            AudienceRequirement::Cap(cap) => Some(cap),
-            AudienceRequirement::Includes(RecipientSpec::Placeholder(_) | RecipientSpec::Selector(_)) => None,
-        }
-    }
-}
-
 /// One segment of a selector placeholder: text written as is, or the name of the call argument
 /// whose value fills it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -419,35 +407,6 @@ impl ToolAnnotation {
                         | AudienceRequirement::Cap(_) => None,
                     }),
             )
-    }
-
-    /// Every atom evaluating this annotation may ask for beyond a placeholder's: the atoms of
-    /// its audience requirements, and — only where a requirement compares the committed label
-    /// extensionally — its delta's, plus each written reader whose provider prefix names a
-    /// registered source (see [`crate::label::Clause::needed_atoms`]). A delta with no
-    /// `requires` over it narrows symbolically and reads no membership, so its atoms are not
-    /// demanded. Operation gathering reads this.
-    pub(crate) fn needed_atoms<'a>(
-        &'a self,
-        providers: &'a std::collections::BTreeSet<String>,
-    ) -> impl Iterator<Item = SymbolicAtom> + 'a {
-        let requirements = self.requires.audience_requirements();
-        let delta = (!requirements.is_empty())
-            .then(|| {
-                self.delta
-                    .audience
-                    .iter()
-                    .filter_map(DeltaAudience::declared)
-                    .flat_map(move |audience| audience.needed_atoms(providers))
-            })
-            .into_iter()
-            .flatten();
-        delta.chain(
-            requirements
-                .iter()
-                .filter_map(AudienceRequirement::declared)
-                .flat_map(move |declared| declared.needed_atoms(providers)),
-        )
     }
 }
 
