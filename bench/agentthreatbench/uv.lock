@@ -237,6 +237,7 @@ dependencies = [
     { name = "agent-framework-core" },
     { name = "anthropic" },
     { name = "appa-agent-python" },
+    { name = "appa-bench-publish" },
     { name = "claude-agent-sdk" },
     { name = "inspect-ai" },
     { name = "inspect-evals" },
@@ -255,6 +256,7 @@ requires-dist = [
     { name = "agent-framework-core", specifier = "==1.13.0" },
     { name = "anthropic", specifier = "==0.115.0" },
     { name = "appa-agent-python", directory = "../../appa-agent-python" },
+    { name = "appa-bench-publish", directory = "../publish" },
     { name = "claude-agent-sdk", specifier = "==0.2.152" },
     { name = "inspect-ai", specifier = "==0.3.252" },
     { name = "inspect-evals", git = "https://github.com/UKGovernmentBEIS/inspect_evals.git?rev=0c737b01627b772db84aa223f68775c31199fdc9" },
@@ -265,6 +267,27 @@ requires-dist = [
 dev = [
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-asyncio", specifier = ">=1" },
+    { name = "ruff", specifier = ">=0.16" },
+]
+
+[[package]]
+name = "appa-bench-publish"
+version = "0.1.0"
+source = { directory = "../publish" }
+dependencies = [
+    { name = "zipfile-zstd" },
+    { name = "zstandard" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "zipfile-zstd", marker = "python_full_version < '3.14'", specifier = "==0.0.4" },
+    { name = "zstandard", specifier = ">=0.23" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8" },
     { name = "ruff", specifier = ">=0.16" },
 ]
 

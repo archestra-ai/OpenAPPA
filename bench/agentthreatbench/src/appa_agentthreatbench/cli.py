@@ -2,6 +2,8 @@
 
 import argparse
 
+from appa_bench_publish import add_publish_parser, publish_from_args
+
 from appa_agentthreatbench.runner import SMOKE_SAMPLE_IDS, preflight, run_complete
 from appa_agentthreatbench.tasks import AGENT_PROMPT_PROFILES, ARMS, TASK_TYPES, complete_dataset
 
@@ -75,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["all", *TASK_TYPES],
         help="filter tasks by type",
     )
+    add_publish_parser(commands)
     return parser
 
 
@@ -109,6 +112,9 @@ def main() -> None:
                 task_type_filter=args.task_type,
             )
             print(f"Trajectory report rendered: {out_file}")
+            return
+        if args.command == "publish":
+            publish_from_args(args, "agentthreatbench")
             return
 
         sample_ids = resolve_samples(

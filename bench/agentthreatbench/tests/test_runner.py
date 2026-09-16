@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -182,6 +183,8 @@ def test_prompt_profile_changes_and_is_pinned_by_the_run_digest() -> None:
         agent_prompt_profile="agent-threat-chaos",
     )
     assert standard["run_digest"] != chaos["run_digest"]
+    assert re.fullmatch(r"[0-9a-f]{40}", standard["config"]["git_sha"])
+    assert isinstance(standard["config"]["git_dirty"], bool)
     assert chaos["config"]["agent_prompt_profile"] == "agent-threat-chaos"
     assert chaos["config"]["binding_identities"]["fides"] == "agent-framework-fides-agentthreatbench-v1"
     assert chaos["config"]["binding_identities"]["fides-native"] == FIDES_NATIVE_BINDING_IDENTITY
