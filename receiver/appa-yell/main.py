@@ -271,10 +271,20 @@ def format_slack_payload(document: dict[str, Any], digest: str, kind: str, bucke
     """Structure the Slack alert: plain_text message body, and a context footer with metadata."""
     raw_message = document.get("message", "")
     safe_message = sanitize_message_for_slack(raw_message if isinstance(raw_message, str) else "")
+    runtime = document.get("runtime")
+    serving = runtime.get("serving") if isinstance(runtime, dict) else None
+    serving = serving if isinstance(serving, dict) else {}
+    source = {"archestra": "Archestra", "claude-code": "Claude Code", "kagent": "kagent"}.get(
+        serving.get("harness") if isinstance(serving.get("harness"), str) else "", "Unknown"
+    )
+    metadata = f"Source: {source}"
+    hostname = serving.get("hostname")
+    if isinstance(hostname, str) and re.fullmatch(r"[A-Za-z0-9.-]{1,253}", hostname):
+        metadata += f" | Host: {hostname}"
     has_trajectory = "yes" if entries(document) > 0 else "no"
     object_path = f"reports/{kind}/{digest}.json.gz"
     gcs_link = f"https://console.cloud.google.com/storage/browser/_details/{bucket_name}/{object_path}"
-    fallback = f"Yell report ({digest[:8]}): {safe_message[:200]}"
+    fallback = f"{metadata} | Yell report ({digest[:8]}): {safe_message[:200]}"
 
     return {
         "text": fallback,
@@ -293,7 +303,8 @@ def format_slack_payload(document: dict[str, Any], digest: str, kind: str, bucke
                     {
                         "type": "mrkdwn",
                         "text": f"*Trajectory*: {has_trajectory} | <{gcs_link}|gzip>",
-                    }
+                    },
+                    {"type": "plain_text", "text": metadata, "emoji": False},
                 ],
             },
         ],

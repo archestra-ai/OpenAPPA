@@ -255,6 +255,19 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
     match event {
         HookEvent::SessionStart { root } => match open_or_reopen(runtime, &root) {
             Ok(_) => match runtime.live(&root, &root) {
+                Ok(()) if runtime.file_tracking_enabled() => HookDecision::Context {
+                    text: "APPA file-only mode: use appa_read_file(file_path), appa_write_file(file_path, content), \
+                           appa_edit_file(file_path, old_string, new_string), and \
+                           appa_copy_file/appa_move_file(source_path, destination_path) from this plugin's MCP server. \
+                           Paths resolve within the host-configured workspace. ToolSearch and native tools are \
+                           not supported in this mode. Native pre-hook observations are not tracked."
+                        .to_owned()
+                        + if runtime.file_process_enabled() {
+                            " appa_process_files(input_paths, output_path, command) runs in isolation: read inputs/<path> and write output/result."
+                        } else {
+                            ""
+                        },
+                },
                 Ok(()) => HookDecision::Ack,
                 Err(error) => refuse(error.to_string()),
             },
@@ -378,6 +391,11 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
         } => {
             if is_control_tool(&call.tool) {
                 tracing::debug!(trajectory = %actor.root.0, "control tool outcome absorbed");
+                return HookDecision::Ack;
+            }
+            if runtime.file_tracking_enabled() && crate::api::files::owns(&call) {
+                // The runtime-owned tool admitted its observation before returning via MCP.
+                // A transport/argument failure before execution leaves its reservation intact.
                 return HookDecision::Ack;
             }
             match on_actor(runtime, &actor, MissingStart::Refuse, |session| {

@@ -104,7 +104,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "appa"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "appa-adapter-claude-code",
  "appa-adapter-kagent",
@@ -151,7 +151,7 @@ dependencies = [
 
 [[package]]
 name = "appa-adapter-claude-code"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "appa-runtime-api",
  "proptest",
@@ -162,7 +162,7 @@ dependencies = [
 
 [[package]]
 name = "appa-adapter-kagent"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "appa-runtime-api",
  "proptest",
@@ -171,7 +171,7 @@ dependencies = [
 
 [[package]]
 name = "appa-agent-python"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "appa",
  "appa-runtime-api",
@@ -186,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "appa-builtin"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -195,7 +195,7 @@ dependencies = [
 
 [[package]]
 name = "appa-engine"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "proptest",
  "serde",
@@ -208,7 +208,7 @@ dependencies = [
 
 [[package]]
 name = "appa-eventlog"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "appa-engine",
  "appa-policy",
@@ -219,13 +219,14 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror",
 ]
 
 [[package]]
 name = "appa-example-agent"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "appa",
  "appa-runtime-api",
@@ -255,7 +256,7 @@ version = "0.0.0"
 
 [[package]]
 name = "appa-package"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "appa-runtime-api",
  "serde",
@@ -268,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "appa-policy"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "appa-engine",
  "appa-runtime-api",
@@ -280,7 +281,7 @@ dependencies = [
 
 [[package]]
 name = "appa-runtime-api"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3120,7 +3121,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -3739,7 +3740,7 @@ dependencies = [
  "appa-policy",
  "axum",
  "clap",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "http-body-util",
  "serde",
  "serde_json",

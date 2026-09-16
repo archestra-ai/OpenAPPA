@@ -49,6 +49,7 @@ use appa_engine::profile::PolicyFileKey;
 use appa_engine::value::{DispatchId, TrajectoryId};
 use appa_runtime_api::{AdapterName, Ruling, inventory::ToolInventory};
 
+pub mod files;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 
@@ -1861,6 +1862,41 @@ mod tests {
             1
         );
         assert_eq!(second.log(&id).unwrap().basis(), 4);
+
+        let bound = HostObservation::CallBound {
+            trajectory: id.clone(),
+            call_id: "host-call-1".into(),
+            dispatch: DispatchId::new(
+                id.clone(),
+                serde_json::from_value(serde_json::json!("00".repeat(32))).unwrap(),
+                0,
+            ),
+        };
+        let bindings = |log: &Log| {
+            log.call_bindings()
+                .map(|binding| (binding.call_id.to_string(), binding.dispatch.clone()))
+                .collect::<Vec<_>>()
+        };
+        let HostObservation::CallBound { call_id, dispatch, .. } = &bound else {
+            unreachable!("built above");
+        };
+        let expected = vec![(call_id.clone(), dispatch.clone())];
+        let before = first.log(&id).unwrap();
+        let tx = first.postgres().unwrap().begin().unwrap();
+        first.append_host(&before, &facts, &bound).unwrap();
+        assert_eq!(bindings(&first.log(&id).unwrap()), expected);
+        assert_eq!(second.log(&id).unwrap(), before);
+        drop(tx);
+        assert_eq!(first.log(&id).unwrap(), before, "binding and facts roll back together");
+
+        first.append_host(&before, &facts, &bound).unwrap();
+        let restored = second.log(&id).unwrap();
+        assert_eq!(bindings(&restored), expected);
+        assert_eq!(restored.facts().len(), before.facts().len() + facts.len());
+        assert!(matches!(
+            second.append_host(&before, &facts, &bound),
+            Err(AppendError::Conflict { current: 5 })
+        ));
 
         first
             .postgres()

@@ -12,8 +12,8 @@ use crate::fact::{
 use crate::label::Label;
 use crate::names::{AuthorityName, SanitizerName};
 use crate::value::{
-    CanonicalDigest, ChildReturnId, DispatchId, ForkId, LabeledValue, Provenance, ResolvedCall, ToolName, TrajectoryId,
-    ValueId,
+    CanonicalDigest, ChildReturnId, DispatchId, ForkId, LabeledValue, Provenance, RawResultDigest, ResolvedCall,
+    ToolName, TrajectoryId, ValueId,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,6 +38,7 @@ static MISSING_SOURCE: std::sync::LazyLock<Label> = std::sync::LazyLock::new(Lab
 enum CloseKind {
     Success,
     Failure,
+    FailureWithBody(RawResultDigest),
     Indeterminate,
 }
 
@@ -417,6 +418,7 @@ impl Projection {
                     receiving,
                     proposed_effects,
                     annotation,
+                    file_basis,
                     subject,
                     evidence,
                     proposed_label: _,
@@ -424,7 +426,8 @@ impl Projection {
                     dispatch_calls.insert(
                         dispatch.clone(),
                         ResolvedCall::new_keyed(tool.clone(), *declaration, arguments.clone())
-                            .with_annotation(annotation.clone()),
+                            .with_annotation(annotation.clone())
+                            .with_file_basis(file_basis.clone()),
                     );
                     receiving_bounds.insert(dispatch.clone(), receiving.clone());
                     dispatch_evidence.insert(dispatch.clone(), evidence.clone());
@@ -450,6 +453,7 @@ impl Projection {
                         match outcome {
                             CloseOutcome::Success { .. } => CloseKind::Success,
                             CloseOutcome::Failure => CloseKind::Failure,
+                            CloseOutcome::FailureWithBody { observed } => CloseKind::FailureWithBody(*observed),
                             CloseOutcome::Indeterminate => CloseKind::Indeterminate,
                         },
                     );
@@ -459,6 +463,9 @@ impl Projection {
                             effects.extend(committed.iter().cloned());
                         }
                         CloseOutcome::Failure => {
+                            reservations.remove(dispatch);
+                        }
+                        CloseOutcome::FailureWithBody { .. } => {
                             reservations.remove(dispatch);
                         }
                         CloseOutcome::Indeterminate => {}
@@ -1027,7 +1034,7 @@ impl Views<'_> {
 
     /// How many dispatches of this digest this branch has already opened — the occurrence of the
     /// next one (a repeat identical call is a new dispatch, not a re-issue).
-    pub(crate) fn dispatch_count(&self, digest: &CanonicalDigest) -> u32 {
+    pub fn dispatch_count(&self, digest: &CanonicalDigest) -> u32 {
         self.projection
             .occurrences
             .get(&(self.trajectory.clone(), *digest))
@@ -1084,7 +1091,24 @@ impl Views<'_> {
     }
 
     pub(crate) fn dispatch_failed(&self, dispatch: &DispatchId) -> bool {
-        matches!(self.projection.closed.get(dispatch), Some(CloseKind::Failure))
+        matches!(
+            self.projection.closed.get(dispatch),
+            Some(CloseKind::Failure | CloseKind::FailureWithBody(_))
+        )
+    }
+
+    pub(crate) fn failed_with_body(&self, dispatch: &DispatchId) -> bool {
+        matches!(
+            self.projection.closed.get(dispatch),
+            Some(CloseKind::FailureWithBody(_))
+        )
+    }
+
+    pub(crate) fn failure_body_digest(&self, dispatch: &DispatchId) -> Option<RawResultDigest> {
+        match self.projection.closed.get(dispatch) {
+            Some(CloseKind::FailureWithBody(digest)) => Some(*digest),
+            _ => None,
+        }
     }
 
     /// Did this dispatch close as indeterminate with nothing observed? The reservation
@@ -1425,6 +1449,7 @@ mod tests {
                 receiving: Label::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 annotation: None,
+                file_basis: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
                 evidence: crate::audience::AudienceEvidence::default(),
             },
@@ -1455,6 +1480,7 @@ mod tests {
                 receiving: Label::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 annotation: None,
+                file_basis: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
                 evidence: crate::audience::AudienceEvidence::default(),
             },
@@ -1484,6 +1510,7 @@ mod tests {
                 receiving: Label::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 annotation: None,
+                file_basis: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
                 evidence: crate::audience::AudienceEvidence::default(),
             },
@@ -1592,6 +1619,7 @@ mod tests {
                 receiving: Label::top(),
                 proposed_effects: EffectSet::new([]).unwrap(),
                 annotation: None,
+                file_basis: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
                 evidence: crate::audience::AudienceEvidence::default(),
             },

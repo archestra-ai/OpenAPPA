@@ -391,6 +391,8 @@ struct WireEvent {
     #[serde(default)]
     tool_response: Option<serde_json::Value>,
     #[serde(default)]
+    error: Option<serde_json::Value>,
+    #[serde(default)]
     agent_type: Option<String>,
     #[serde(default)]
     last_assistant_message: Option<String>,
@@ -545,7 +547,14 @@ fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
                 call,
                 call_id: event.tool_use_id.clone(),
                 outcome: ToolOutcome::Failure {
-                    message: "the tool run failed".to_string(),
+                    message: event
+                        .error
+                        .as_ref()
+                        .map(|error| match error {
+                            serde_json::Value::String(text) => text.clone(),
+                            other => other.to_string(),
+                        })
+                        .unwrap_or_else(|| "the tool run failed".to_string()),
                 },
             })),
             None => Err(malformed("a tool outcome without its tool call")),
@@ -621,6 +630,12 @@ fn render(event: &HookEvent, decision: &HookDecision) -> serde_json::Value {
         // Context reaches an actor at its start only; every other event
         // has no slot for it and is acknowledged.
         HookDecision::Context { text } => match event {
+            HookEvent::SessionStart { .. } => serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": text,
+                }
+            }),
             HookEvent::ChildStart { .. } => serde_json::json!({
                 "hookSpecificOutput": {
                     "hookEventName": "SubagentStart",
@@ -1682,6 +1697,20 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_edit_preserves_the_native_error_observation() {
+        let event = serde_json::json!({
+            "hook_event_name": "PostToolUseFailure",
+            "session_id": "s1",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "/work/secret.txt"},
+            "error": "old_string matched private content twice",
+        });
+        assert!(matches!(parse_value(&event), Ok(Some(HookEvent::ToolResult {
+            outcome: ToolOutcome::Failure { message }, ..
+        })) if message == "old_string matched private content twice"));
+    }
+
+    #[test]
     fn a_post_tool_use_maps_its_response_shape_onto_one_outcome() {
         let post = |response: Option<serde_json::Value>| {
             let mut event = serde_json::json!({
@@ -2298,6 +2327,21 @@ mod tests {
             ),
             Some(serde_json::json!({"decision": "block", "reason": "unreadable"})),
             "a post-use hook naming no response carries the reason alone",
+        );
+    }
+
+    #[test]
+    fn session_start_context_reaches_the_root_actor() {
+        assert_eq!(
+            render(
+                &HookEvent::SessionStart { root: root() },
+                &HookDecision::Context {
+                    text: "available file tools".into()
+                },
+            ),
+            serde_json::json!({"hookSpecificOutput": {
+                "hookEventName": "SessionStart", "additionalContext": "available file tools"
+            }}),
         );
     }
 

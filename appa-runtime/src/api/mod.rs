@@ -1,6 +1,7 @@
 //! The runtime API: `Runtime` and `Session` — the harness-agnostic
 //! event model this crate declares.
 
+pub(crate) mod files;
 mod host;
 mod session;
 
@@ -133,7 +134,7 @@ pub(crate) fn call_key(call: &ProposedCall) -> Option<PermitKey> {
     if bare == "yell" {
         return crate::yell::YellArgs::parse(&call.arguments).map(|args| args.ticket());
     }
-    if !MANAGEMENT_TOOLS.contains(&bare) {
+    if !MANAGEMENT_TOOLS.contains(&bare) && !files::owns(call) {
         return None;
     }
     let mut arguments = serde_json::from_str::<serde_json::Value>(call.arguments.get()).ok()?;
@@ -750,15 +751,20 @@ impl Prepared {
     }
 
     fn assemble(self, backend: Backend) -> Result<Runtime, OpenError> {
+        let state_path = if let Backend::Sqlite { path } = &backend {
+            Some(path.clone())
+        } else {
+            None
+        };
         let store = LogStore::open(backend).map_err(|error| match error {
             appa_eventlog::OpenError::Damaged { path, detail } => OpenError::Damaged(format!("{path}: {detail}")),
             error @ appa_eventlog::OpenError::ForeignSchema { .. } => OpenError::Damaged(error.to_string()),
             error => OpenError::Storage(error.to_string()),
         })?;
-        Ok(self.with_store(Arc::new(store)))
+        Ok(self.with_store(Arc::new(store), state_path))
     }
 
-    fn with_store(self, store: Arc<LogStore>) -> Runtime {
+    fn with_store(self, store: Arc<LogStore>, state_path: Option<PathBuf>) -> Runtime {
         Runtime {
             inner: Arc::new(Inner {
                 deployment: std::sync::RwLock::new(Arc::new(self.deployment)),
@@ -768,12 +774,16 @@ impl Prepared {
                 events: std::sync::Mutex::new(crate::events::EventLog::default()),
                 gates: self.gates,
                 naming: self.naming,
+                files: None,
+                state_path,
             }),
         }
     }
 }
 
 struct Inner {
+    files: Option<files::FileTracking>,
+    state_path: Option<PathBuf>,
     deployment: std::sync::RwLock<Arc<Deployment>>,
     retired: std::sync::Mutex<std::collections::BTreeMap<String, Arc<RuntimeEngine>>>,
     store: Arc<LogStore>,
@@ -809,7 +819,7 @@ impl Runtime {
         store: Arc<LogStore>,
         modules: Option<PathBuf>,
     ) -> Result<Runtime, OpenError> {
-        Ok(Prepared::new(config, modules, ToolNaming::AsAuthored)?.with_store(store))
+        Ok(Prepared::new(config, modules, ToolNaming::AsAuthored)?.with_store(store, None))
     }
 
     /// Run the serving load checks without opening a store, making network requests,
@@ -1090,6 +1100,121 @@ fn read_refused(error: appa_eventlog::ReadError) -> EventError {
 }
 
 impl Runtime {
+    pub(crate) fn file_initial_label(
+        &self,
+        trust: &str,
+        audience: appa_engine::label::DeclaredAudience,
+    ) -> Result<appa_engine::label::Label, OpenError> {
+        let deployment = self.inner.deployment();
+        let rank = deployment
+            .resident
+            .registry()
+            .trust_chain()
+            .rank_of(trust)
+            .ok_or_else(|| OpenError::UnsupportedPolicy(format!("unknown initial file trust rank: {trust}")))?;
+        Ok(appa_engine::label::Label::new(
+            rank,
+            appa_engine::label::Audience::of_declared(&audience),
+        ))
+    }
+
+    /// Enable experimental Read/Write/Edit tracking, not a supported security boundary.
+    /// Runtime-owned tools require native alternatives and implicit reads disabled.
+    /// Inference and final responses remain unmediated. Use disposable fixtures only.
+    /// Configure this before sharing the runtime. `Some(initial)`
+    /// explicitly initializes all existing files with the operator's source Label; `None`
+    /// requires an existing ledger. Never initialize again to recover a lost ledger.
+    /// Only exclusively owned Unix workspaces are supported. The host must also keep its
+    /// configuration, plugins, credentials and other execution-control files outside the root.
+    pub fn with_file_tracking(
+        mut self,
+        workspace: PathBuf,
+        ledger: PathBuf,
+        initial: Option<appa_engine::label::Label>,
+    ) -> Result<Self, OpenError> {
+        let inner = Arc::get_mut(&mut self.inner)
+            .ok_or_else(|| OpenError::Storage("enable file tracking before sharing the runtime".into()))?;
+        if !matches!(inner.naming, ToolNaming::Canonical { adapter } if adapter.name == AdapterName::ClaudeCode) {
+            return Err(OpenError::Storage(
+                "file tracking requires the Claude Code adapter".into(),
+            ));
+        }
+        let workspace = std::fs::canonicalize(workspace).map_err(|error| OpenError::Storage(error.to_string()))?;
+        if let Some(path) = &inner.state_path
+            && std::fs::canonicalize(path)
+                .map_err(|error| OpenError::Storage(error.to_string()))?
+                .starts_with(&workspace)
+        {
+            return Err(OpenError::Storage(
+                "the runtime database must be outside the tracked workspace".into(),
+            ));
+        }
+        let deployment = inner.deployment();
+        if deployment.resident.registry().sanitizers().next().is_some() {
+            return Err(OpenError::Storage(
+                "file tracking does not support sanitizer or rewrite routes".into(),
+            ));
+        }
+        let policy_key = crate::engine::policy_file_key(deployment.config.policy_file().bytes());
+        if let Some(label) = &initial
+            && deployment
+                .resident
+                .registry()
+                .trust_chain()
+                .name_of(label.trust)
+                .is_none()
+        {
+            return Err(OpenError::Storage(
+                "initial file trust must be a configured policy rank".into(),
+            ));
+        }
+        let store = match initial {
+            Some(label) => appa_eventlog::files::FileStore::initialize(&ledger, &workspace, &policy_key, &label),
+            None => appa_eventlog::files::FileStore::open(
+                &ledger,
+                &workspace,
+                &policy_key,
+                &appa_engine::label::Label::top(),
+            ),
+        }
+        .map_err(|error| OpenError::Storage(error.to_string()))?;
+        inner.files = Some(files::FileTracking {
+            store,
+            policy_key,
+            workspace,
+            ledger,
+            process_backend: None,
+        });
+        tracing::warn!(
+            "experimental file tools require Claude Code launched with native tools and implicit filesystem reads disabled"
+        );
+        Ok(self)
+    }
+
+    /// Enable the host-installed, pinned agentsh runner for declared-input processing.
+    /// The backend and system toolchain are trusted host code, outside the managed workspace.
+    pub fn with_file_process_backend(mut self, backend: PathBuf) -> Result<Self, OpenError> {
+        let inner = Arc::get_mut(&mut self.inner)
+            .ok_or_else(|| OpenError::Storage("enable processing before sharing the runtime".into()))?;
+        let files = inner
+            .files
+            .as_mut()
+            .ok_or_else(|| OpenError::Storage("processing requires file tracking".into()))?;
+        let backend = std::fs::canonicalize(backend).map_err(|error| OpenError::Storage(error.to_string()))?;
+        if backend.starts_with(&files.workspace)
+            || ["agentsh", "agentsh-unixwrap", "run.py"].iter().any(|name| {
+                std::fs::canonicalize(backend.join(name))
+                    .map_or(true, |path| !path.is_file() || path.starts_with(&files.workspace))
+            })
+        {
+            return Err(OpenError::Storage(
+                "processing requires a complete backend outside the workspace".into(),
+            ));
+        }
+        files.process_backend = Some(backend);
+        Ok(self)
+    }
+
     /// Opens the modules, the engine, and the store. The `[policy]`
     /// table compiles through the documented dialect into the engine's
     /// registry — every surface and algebraic load lint runs here, and
@@ -1558,7 +1683,8 @@ impl Runtime {
                 request.message.clone(),
                 request.harness,
                 projection,
-            );
+            )
+            .with_hostname(request.hostname.clone());
             match report.finalize() {
                 Ok(finished) => return Ok(finished),
                 // Nothing left to drop: the message, the build and the policy are the whole

@@ -12,6 +12,7 @@ pub(crate) mod agent;
 pub mod cli;
 pub(crate) mod client;
 pub(crate) mod diagnostic;
+pub mod embedded;
 pub(crate) mod policy;
 pub(crate) mod report;
 pub(crate) mod strip;
