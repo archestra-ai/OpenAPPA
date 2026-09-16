@@ -96,10 +96,7 @@ async fn public_reads_run_until_the_workers_logs_narrow_the_trajectory() {
     ran(&runtime, docs).await;
 
     // Still public, so the migration guide runs outright.
-    let guide = call(
-        "migrate_pages_to_workers_guide",
-        serde_json::json!({}),
-    );
+    let guide = call("migrate_pages_to_workers_guide", serde_json::json!({}));
     assert_eq!(
         propose(&runtime, guide.clone()).await,
         HookDecision::AllowCall { spawn: None }
