@@ -431,6 +431,9 @@ def test_scenario_policies_are_staged_before_launch(tmp_path: Path) -> None:
         assert command[command.index("--sink-root") + 1] == "sink"
         assert all(not Path(argument).is_absolute() for argument in command)
 
+    (tmp_path / "episode-fides-native" / "config.json").write_text(
+        json.dumps({"git_sha": "a" * 40, "git_dirty": False})
+    )
     bundle = prepare_bundle(
         tmp_path / "episode-fides-native",
         "corp",

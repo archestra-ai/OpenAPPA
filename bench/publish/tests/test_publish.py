@@ -12,6 +12,14 @@ from appa_bench_publish.publish import Bundle, PublishError, prepare_bundle, rel
 COMMIT = "a" * 40
 
 
+def write_provenance(run: Path, benchmark: str = "corp", *, commit: str = COMMIT, dirty: bool = False) -> None:
+    provenance = {"git_sha": commit, "git_dirty": dirty}
+    if benchmark == "corp":
+        (run / "config.json").write_text(json.dumps(provenance))
+    else:
+        (run / "run-config.json").write_text(json.dumps({"config": provenance}))
+
+
 def archive_names(path: Path) -> list[str]:
     with path.open("rb") as raw, zstandard.ZstdDecompressor().stream_reader(raw) as decompressed:
         with tarfile.open(fileobj=decompressed, mode="r|") as archive:
@@ -21,12 +29,13 @@ def archive_names(path: Path) -> list[str]:
 def test_prepares_reproducible_contract_bundle(tmp_path: Path) -> None:
     run = tmp_path / "run-20260915"
     run.mkdir()
+    write_provenance(run)
     (run / "summary.json").write_text('{"score": 1, "endpoint": "https://example.com/tmp/results"}\n')
     records = run / "records"
     records.mkdir()
     (records / "trajectory.jsonl").write_text('{"message": "safe"}\n')
 
-    first = prepare_bundle(run, "corp", COMMIT, tmp_path / "first")
+    first = prepare_bundle(run, "corp", None, tmp_path / "first")
     second = prepare_bundle(run, "corp", COMMIT, tmp_path / "second")
 
     assert first.sha256 == second.sha256
@@ -34,6 +43,7 @@ def test_prepares_reproducible_contract_bundle(tmp_path: Path) -> None:
     assert hashlib.sha256(first.archive.read_bytes()).hexdigest() == first.sha256
     assert archive_names(first.archive) == [
         "run-20260915",
+        "run-20260915/config.json",
         "run-20260915/records",
         "run-20260915/records/trajectory.jsonl",
         "run-20260915/summary.json",
@@ -54,6 +64,7 @@ def test_prepares_reproducible_contract_bundle(tmp_path: Path) -> None:
 def test_refuses_to_replace_bundle_when_run_changed(tmp_path: Path) -> None:
     run = tmp_path / "run-1"
     run.mkdir()
+    write_provenance(run)
     record = run / "summary.json"
     record.write_text('{"score": 1}\n')
     prepare_bundle(run, "corp", COMMIT, tmp_path / "bundle")
@@ -61,6 +72,24 @@ def test_refuses_to_replace_bundle_when_run_changed(tmp_path: Path) -> None:
 
     with pytest.raises(PublishError, match="not this run"):
         prepare_bundle(run, "corp", COMMIT, tmp_path / "bundle")
+
+
+def test_refuses_commit_that_does_not_match_run_provenance(tmp_path: Path) -> None:
+    run = tmp_path / "run-1"
+    run.mkdir()
+    write_provenance(run)
+
+    with pytest.raises(PublishError, match="does not match the run's recorded commit"):
+        prepare_bundle(run, "corp", "b" * 40, tmp_path / "bundle")
+
+
+def test_refuses_run_produced_from_dirty_worktree(tmp_path: Path) -> None:
+    run = tmp_path / "run-1"
+    run.mkdir()
+    write_provenance(run, dirty=True)
+
+    with pytest.raises(PublishError, match="dirty Git worktree"):
+        prepare_bundle(run, "corp", None, tmp_path / "bundle")
 
 
 @pytest.mark.parametrize(
@@ -73,6 +102,7 @@ def test_refuses_to_replace_bundle_when_run_changed(tmp_path: Path) -> None:
 def test_refuses_sensitive_run_contents(tmp_path: Path, contents: str, message: str) -> None:
     run = tmp_path / "unsafe-run"
     run.mkdir()
+    write_provenance(run)
     (run / "record.json").write_text(contents)
     output = tmp_path / "bundle"
 
@@ -87,6 +117,7 @@ def test_refuses_absolute_path_inside_nested_eval_zip(tmp_path: Path) -> None:
 
     run = tmp_path / "unsafe-eval"
     run.mkdir()
+    write_provenance(run, "agentthreatbench")
     with zipfile.ZipFile(run / "result.eval", "w", compression=zipfile.ZIP_ZSTANDARD) as nested:
         nested.writestr("samples/1.json", '{"working_dir":"C:\\\\Users\\\\alice\\\\OpenAPPA"}')
 

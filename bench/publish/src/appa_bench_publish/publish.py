@@ -59,7 +59,7 @@ class Bundle:
 def add_publish_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = commands.add_parser("publish", help="package a completed run and publish it through GitHub Actions")
     parser.add_argument("run_dir", type=Path, help="completed benchmark run directory")
-    parser.add_argument("--commit", help="full lowercase Git commit for the run (default: current HEAD)")
+    parser.add_argument("--commit", help="full lowercase Git commit for the run (default: recorded run commit)")
     parser.add_argument("--output-dir", type=Path, help="bundle directory (default: RUN_DIR.parent/publish/RUN_ID)")
     parser.add_argument(
         "--prepare-only",
@@ -69,8 +69,7 @@ def add_publish_parser(commands: argparse._SubParsersAction[argparse.ArgumentPar
 
 
 def publish_from_args(args: argparse.Namespace, benchmark: str) -> Bundle:
-    commit = args.commit or _git_head()
-    bundle = prepare_bundle(args.run_dir, benchmark, commit, args.output_dir)
+    bundle = prepare_bundle(args.run_dir, benchmark, args.commit, args.output_dir)
     if args.prepare_only:
         print(f"Prepared {bundle.archive}")
         print(f"Prepared {bundle.index}")
@@ -81,14 +80,18 @@ def publish_from_args(args: argparse.Namespace, benchmark: str) -> Bundle:
     return bundle
 
 
-def prepare_bundle(run_dir: Path, benchmark: str, git_commit: str, output_dir: Path | None = None) -> Bundle:
+def prepare_bundle(run_dir: Path, benchmark: str, git_commit: str | None, output_dir: Path | None = None) -> Bundle:
     run_dir = run_dir.resolve()
     if not run_dir.is_dir():
         raise PublishError(f"run directory does not exist: {run_dir}")
     if not BENCH_RE.fullmatch(benchmark):
         raise PublishError("benchmark must contain lowercase letters, digits, or hyphens")
-    if not COMMIT_RE.fullmatch(git_commit):
+    if git_commit is not None and not COMMIT_RE.fullmatch(git_commit):
         raise PublishError("commit must be a full lowercase Git SHA")
+    recorded_commit = _recorded_commit(run_dir, benchmark)
+    if git_commit is not None and git_commit != recorded_commit:
+        raise PublishError(f"requested commit {git_commit} does not match the run's recorded commit {recorded_commit}")
+    git_commit = recorded_commit
     run_id = run_dir.name
     if not RUN_ID_RE.fullmatch(run_id):
         raise PublishError("run directory name contains unsupported run-id characters")
@@ -200,11 +203,33 @@ def _verify_existing_bundle(bundle: Bundle, payload: dict[str, object], existing
         )
 
 
-def _git_head() -> str:
-    result = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False)
-    commit = result.stdout.strip()
-    if result.returncode or not COMMIT_RE.fullmatch(commit):
-        raise PublishError("cannot resolve the current full Git commit; pass --commit")
+def _recorded_commit(run_dir: Path, benchmark: str) -> str:
+    match benchmark:
+        case "corp":
+            path = run_dir / "config.json"
+            provenance_path: tuple[str, ...] = ()
+        case "agentthreatbench":
+            path = run_dir / "run-config.json"
+            provenance_path = ("config",)
+        case _:
+            raise PublishError(f"unsupported benchmark: {benchmark}")
+
+    try:
+        provenance: object = json.loads(path.read_text(encoding="utf-8"))
+        for key in provenance_path:
+            if not isinstance(provenance, dict):
+                raise KeyError(key)
+            provenance = provenance[key]
+        if not isinstance(provenance, dict):
+            raise KeyError("git_sha")
+        commit = provenance["git_sha"]
+        dirty = provenance["git_dirty"]
+    except (OSError, KeyError, json.JSONDecodeError) as error:
+        raise PublishError(f"run does not contain readable Git provenance: {path}") from error
+    if not isinstance(commit, str) or not COMMIT_RE.fullmatch(commit) or not isinstance(dirty, bool):
+        raise PublishError(f"run contains an invalid recorded Git commit: {path}")
+    if dirty:
+        raise PublishError(f"run was produced from a dirty Git worktree and cannot be attributed to {commit}")
     return commit
 
 

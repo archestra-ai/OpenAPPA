@@ -71,6 +71,9 @@ jobs:
     name: Upload to the benchmark archive
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    concurrency:
+      group: benchmark-archive-publish
+      cancel-in-progress: false
     permissions:
       contents: write # read the draft release's assets, delete it afterwards
       id-token: write # Workload Identity Federation for appa-bench-publish

@@ -394,7 +394,9 @@ release relay:
 uv run bench-corp publish runs/<run-id>
 ```
 
-The command uses the current full Git commit unless `--commit <sha>` is set.
+The command uses the full Git commit recorded when the run started. An
+optional `--commit <sha>` must match that recorded commit.
+Runs produced from a dirty Git worktree cannot be published.
 It creates a deterministic `<run-id>-<sha256>.tar.zst` and `index.json` under
 `runs/publish/<run-id>/`, creates a draft relay release, uploads exactly those
 two assets, dispatches `.github/workflows/bench-publish.yml`, and prints the
