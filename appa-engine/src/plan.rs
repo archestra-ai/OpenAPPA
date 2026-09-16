@@ -1208,16 +1208,13 @@ pub(crate) fn block_atoms(registry: &Registry, contract: &ToolAnnotation, raw: &
     atoms
 }
 
-/// The atoms executing one offered plan reads: the call's own contract and the mandate of
-/// every assigned authority as far as the gaps it covers consult it. A step's sanitizer
-/// reads its transition against the value when it applies, as [`block_atoms`] explains.
-pub(crate) fn plan_atoms(
-    registry: &Registry,
-    contract: &ToolAnnotation,
-    plan: &ExecutableRemedyPlan,
-) -> Vec<SymbolicAtom> {
+/// The atoms executing one offered plan reads beyond the call check: the mandate of
+/// every assigned authority as far as the gaps it covers consult it. The call check
+/// requests membership only when a comparison cannot be established symbolically.
+/// A step's sanitizer reads its transition when it applies, as [`block_atoms`] explains.
+pub(crate) fn plan_atoms(registry: &Registry, plan: &ExecutableRemedyPlan) -> Vec<SymbolicAtom> {
     let providers = registry.audience().providers();
-    let mut atoms: Vec<SymbolicAtom> = contract.needed_atoms(providers).collect();
+    let mut atoms: Vec<SymbolicAtom> = Vec::new();
     for required in &plan.required {
         if let Some(authority) = registry.authority(&required.authority) {
             atoms.extend(authority.mandate.reads(&required.covers, providers));
@@ -2295,8 +2292,7 @@ mod tests {
         let log = vec![opened(known(Trust::new(0), Audience::public()))];
         let planned = plan_of(&registry, &log, &call("send", json!({})));
         assert_eq!(assigned(&planned), vec![vec!["desk"]]);
-        let contract = registry.tool(&ToolName::new("send")).unwrap().declared().unwrap();
-        assert!(plan_atoms(&registry, contract, exec(&planned.plans[0])).is_empty());
+        assert!(plan_atoms(&registry, exec(&planned.plans[0])).is_empty());
     }
 
     /// The four gathering collectors, each against the scope rule its enumeration mirrors:
@@ -2493,14 +2489,13 @@ mod tests {
         #[test]
         fn a_plan_reads_its_rulings_as_far_as_their_gaps_consult_the_mandate() {
             let registry = registry(&[]);
-            let contract = send(&registry);
             let collect = |required: Vec<RequiredRuling>, steps: Vec<RemedyStep>| -> BTreeSet<SymbolicAtom> {
                 let plan = ExecutableRemedyPlan {
                     id: PlanId::new(0),
                     steps,
                     required,
                 };
-                plan_atoms(&registry, &contract, &plan).into_iter().collect()
+                plan_atoms(&registry, &plan).into_iter().collect()
             };
             let desk = |covers: Vec<Gap>| RequiredRuling {
                 authority: AuthorityName::new("desk"),
