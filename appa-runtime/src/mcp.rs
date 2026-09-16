@@ -18,7 +18,7 @@ use std::sync::{Arc, RwLock};
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig};
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
@@ -657,8 +657,8 @@ fn render(runtime: &Runtime, outcome: RemedyOutcome) -> CallToolResult {
 
 #[tool_handler]
 impl ServerHandler for RuntimeToolService {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::default();
         info.server_info.name = "appa-runtime".to_string();
         info.server_info.version = RUNTIME_VERSION.to_string();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
@@ -675,8 +675,8 @@ impl ServerHandler for RuntimeToolService {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for RuntimeTools {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::default();
         info.server_info.name = "appa-runtime".to_string();
         info.server_info.version = RUNTIME_VERSION.to_string();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
