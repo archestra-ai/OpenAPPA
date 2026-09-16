@@ -18,6 +18,28 @@ concurrency:
   cancel-in-progress: ${{ github.event.action != 'labeled' }}
 
 jobs:
+  cargo-release-age:
+    name: Cargo Release Age
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Test release age checker
+        run: python3 -m unittest discover -s .github/scripts -p 'test_check_cargo_release_age.py'
+
+      - name: Check new Cargo dependency release ages
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          python3 .github/scripts/check-cargo-release-age.py --base-ref "$BASE_SHA" --lockfile Cargo.lock --lockfile bench/corp-systems/Cargo.lock
+
   # Each job runs only when its own inputs change. Skipped required
   # checks still pass, so a docs-only pull request does not wait on
   # Rust, macOS, Windows, or image builds.
@@ -355,7 +377,7 @@ jobs:
   # restore.
   rust-lint:
     name: Rust Lint
-    needs: changes
+    needs: [changes, cargo-release-age]
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -383,7 +405,7 @@ jobs:
 
   rust-tests:
     name: Rust Tests
-    needs: changes
+    needs: [changes, cargo-release-age]
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -418,16 +440,21 @@ jobs:
     name: Rust Checks
     runs-on: ubuntu-latest
     if: always() && !cancelled()
-    needs: [changes, rust-lint, rust-tests]
+    needs: [changes, cargo-release-age, rust-lint, rust-tests]
     timeout-minutes: 5
     permissions: {}
     steps:
       - name: Check rust job results
         env:
+          RELEASE_AGE_RESULT: ${{ needs.cargo-release-age.result }}
           CHANGES_RESULT: ${{ needs.changes.result }}
           LINT_RESULT: ${{ needs.rust-lint.result }}
           TESTS_RESULT: ${{ needs.rust-tests.result }}
         run: |
+          if [ "$RELEASE_AGE_RESULT" != "success" ]; then
+            echo "::error::Cargo release age check failed ($RELEASE_AGE_RESULT)."
+            exit 1
+          fi
           if [ "$CHANGES_RESULT" != "success" ]; then
             echo "::error::Changed Paths failed ($CHANGES_RESULT)."
             exit 1

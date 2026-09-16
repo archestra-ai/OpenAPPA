@@ -152,3 +152,26 @@ issue — or come argue in the [Discord](https://discord.gg/B5fmSxHKZ7).
 
 [MIT](LICENSE.md) · [Contributors](CONTRIBUTORS.md) ·
 [Brand assets](https://openappa.com/branding)
+
+## Dependency Release Age
+
+The website's pnpm workspace requires registry versions to be at least seven days
+old and disables automatic install scripts. Cargo Dependabot updates also have a
+seven-day cooldown.
+
+CI checks new crates.io versions in the root and `bench/corp-systems` lockfiles,
+including transitive dependencies, before the Rust lint and test jobs. Versions
+must be at least seven days old. Registry errors, missing publication metadata,
+and unsupported registries fail the check. Versions already in the base commit
+are grandfathered; local and git dependencies are outside this registry-age check.
+
+Stable Cargo does not enforce release ages during local installs. Before building
+an update, fetch the target branch and run from the repository root:
+
+```sh
+python3 .github/scripts/check-cargo-release-age.py --base-ref origin/main --lockfile Cargo.lock --lockfile bench/corp-systems/Cargo.lock
+```
+
+Python 3.11 or newer is required. Cargo's native
+[minimum publish age](https://doc.rust-lang.org/cargo/reference/unstable.html#min-publish-age)
+currently requires nightly and `-Zmin-publish-age`.
