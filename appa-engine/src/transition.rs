@@ -1671,7 +1671,7 @@ impl<'a> Sequence<'a> {
         {
             self.audit_atoms(crate::plan::block_atoms(self.engine.registry(), &contract, &raw));
         }
-        self.audit_atoms(crate::plan::plan_atoms(self.engine.registry(), &contract, offered));
+        self.audit_atoms(crate::plan::plan_atoms(self.engine.registry(), offered));
         self.audit_reads(&expansions);
         Ok(())
     }

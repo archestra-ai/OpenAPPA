@@ -89,11 +89,8 @@ async fn linear_write_requires_review_and_records_its_effect() {
         let decision = propose(&runtime, write.clone()).await;
         assert!(!matches!(decision, HookDecision::AllowCall { .. }));
         let outcome = runtime.execute_remedy(&actor(), offer_of(&decision)).await;
-        if tool == "save_issue" {
-            // The unscoped default requires internal sources, absent in this example.
-            assert!(matches!(outcome, RemedyOutcome::NoAnswer { .. }));
-            continue;
-        }
+        // A public trajectory covers either destination symbolically. Reviewing the
+        // write must not require a directory lookup before accepting its restriction.
         assert!(matches!(outcome, RemedyOutcome::Authorized { .. }), "{outcome:?}");
         assert_eq!(
             propose(&runtime, write.clone()).await,
