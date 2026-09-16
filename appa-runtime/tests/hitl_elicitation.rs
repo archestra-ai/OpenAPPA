@@ -546,6 +546,7 @@ async fn an_embedded_host_ruling_survives_without_any_mcp_request_context() {
                 tool: appa_runtime_api::CONTROL_TOOL.into(),
                 arguments: raw(args.clone()),
             },
+            call_id: None,
             spawn: false,
             ruling: Some(Ruling::Approve),
         },

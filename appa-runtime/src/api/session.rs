@@ -549,9 +549,10 @@ impl Session {
     pub fn on_spawn_resume(&self, call: ProposedCall, child: TrajectoryId) -> Result<(), EventError> {
         let opened = self.inner.log(&self.root)?;
         let policy = self.inner.resolve_policy(&self.deployment, &opened)?;
-        let decision = self.drive(&policy, Some(opened), true, |context| {
+        let decision = self.drive(&policy, Some(opened), true, None, |context| {
             let open = context.open_dispatches();
-            let dispatch = classify_report(&call, || context.canonical_bytes(&call), &open)
+            let dispatch = context
+                .classify_report(&call, None, &open)
                 .map_err(|case| self.refuse_report(case, &call, &open))?;
             let fork = appa_engine::value::ForkId::of(&dispatch);
             match context.fork_status(&fork) {
