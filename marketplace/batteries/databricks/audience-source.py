@@ -221,23 +221,29 @@ def is_group_member(member):
     return "/Groups/" in str(member.get("$ref", "")) or member.get("type") == "Group"
 
 
-def group_user_ids(workspace, group, expanded=None):
-    """The user ids of one group, its nested groups expanded, in listing order.
+def group_user_ids(workspace, groups):
+    """The user ids of these groups, their nested groups expanded breadth
+    first, in listing order: each level's unread groups are read together.
     A group already expanded in this walk, a cycle included, adds nothing
     twice; the users themselves are read once for the whole expansion."""
-    expanded = {group["id"]} if expanded is None else expanded
+    expanded = {group["id"] for group in groups}
     user_ids = []
-    for member in group.get("members", []):
-        if not is_group_member(member):
-            user_ids.append(member["value"])
-        elif member["value"] not in expanded:
-            expanded.add(member["value"])
-            user_ids.extend(group_user_ids(workspace, group_by_id(workspace, member["value"]), expanded))
+    frontier = list(groups)
+    while frontier:
+        unread = []
+        for group in frontier:
+            for member in group.get("members", []):
+                if not is_group_member(member):
+                    user_ids.append(member["value"])
+                elif member["value"] not in expanded:
+                    expanded.add(member["value"])
+                    unread.append(member["value"])
+        frontier = looked_up(lambda group_id: group_by_id(workspace, group_id), unread)
     return user_ids
 
 
 def group_members(workspace, name):
-    user_ids = distinct(group_user_ids(workspace, group_by_name(workspace, name)))
+    user_ids = distinct(group_user_ids(workspace, [group_by_name(workspace, name)]))
     return readers_of(users_by_id(workspace, user_ids).values())
 
 
@@ -269,12 +275,12 @@ def users_by_name(workspace, user_names):
 def genie_space_readers(workspace, space_id):
     """Everyone holding any permission level on the space, as the Permissions
     API lists them: service principals by application id, users by login,
-    groups by name."""
+    groups by name. The groups are read together and expanded as one walk."""
     acl = workspace.run("permissions", "get", "genie", space_id).get("access_control_list")
     if not isinstance(acl, list):
         raise RuntimeError("the space permissions report no access control list")
     user_names = []
-    user_ids = []
+    group_names = []
     principals = []
     for entry in acl:
         if not entry.get("all_permissions"):
@@ -283,12 +289,14 @@ def genie_space_readers(workspace, space_id):
             case {"user_name": str() as user_name}:
                 user_names.append(user_name)
             case {"group_name": str() as group_name}:
-                user_ids.extend(group_user_ids(workspace, group_by_name(workspace, group_name)))
+                group_names.append(group_name)
             case {"service_principal_name": str() as application_id}:
                 principals.append(qualified(application_id))
             case _:
                 raise RuntimeError("a permission entry names no principal")
-    users = users_by_name(workspace, user_names) + list(users_by_id(workspace, distinct(user_ids)).values())
+    groups = looked_up(lambda group_name: group_by_name(workspace, group_name), group_names)
+    user_ids = distinct(group_user_ids(workspace, groups))
+    users = users_by_name(workspace, user_names) + list(users_by_id(workspace, user_ids).values())
     return distinct(principals + readers_of(users))
 
 

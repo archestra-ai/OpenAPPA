@@ -105,9 +105,10 @@ Every consult carries the declared templates, and the script refuses one
 whose declaration differs from what it serves (exit status 2), so a
 policy and a script of different versions never answer each other. A
 listing of more than 5,000 users is refused; map such audiences from a
-source that lists them in bulk. A group's users, and a space's users,
-are looked up singly up to 20 of them, eight lookups in flight at a
-time, then in one directory listing shared by the whole consult. Each
+source that lists them in bulk. Nested groups are read level by level,
+each level's groups together; a group's users, and a space's users, are
+looked up singly up to 20 of them, eight lookups in flight at a time,
+then in one directory listing shared by the whole consult. Each
 CLI call has 30 seconds.
 
 The CLI owns the workspace and the credential, exactly as it does for
