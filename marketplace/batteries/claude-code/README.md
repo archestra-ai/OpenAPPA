@@ -25,6 +25,18 @@ and `host/claude-code/Edit`:
   write: a command that visibly reads the requester's or the organization's
   data narrows to `self` or `internal`, and one that shares with a reader the
   policy names requires that reader.
+- **Bash, credential commands** — A command that prints or writes a
+  credential is a credential path too: the Databricks CLI's `auth token`,
+  `auth env`, `secrets get-secret`, and `configure`, with the CLI's global
+  flags anywhere before the verb, and its profile file `.databrickscfg`. A
+  selector is a substring of the command line, so a spelling these miss
+  (the command inside `$(...)`, a heredoc, an alias) is classified by the
+  Bash annotator like any other command; the rules narrow what they match
+  and promise no full recall. Every other `databricks` command, the SQL of
+  `databricks experimental aitools tools query` included, is classified by
+  the Bash annotator under the root's hint; a deployment that wants a
+  fixed contract for one command writes a root rule for it, as the
+  `kubectl` example below does.
 - **Read** — Reading a hidden path, a credential file, a private key, or a
   system secret location narrows the session to `self`, the requester: nothing
   built from it reaches a sink that requires `internal` or `public`. The rules

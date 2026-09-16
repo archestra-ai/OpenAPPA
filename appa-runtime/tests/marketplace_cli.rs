@@ -767,6 +767,53 @@ fn several_batteries_install_together_and_a_server_binding_takes_exactly_one() {
     assert_eq!(tools, vec!["Custom", "mcp/github/read", "mcp/linear/read"]);
 }
 
+/// `--server` repeated binds the battery's namespace to every named connection,
+/// as one array the loader reads back; the same connection twice is refused.
+#[test]
+fn a_battery_binds_to_several_servers_with_repeated_server_flags() {
+    let root = tempfile::tempdir().unwrap();
+    let config = deployment(root.path());
+    let original = std::fs::read_to_string(&config).unwrap();
+
+    let refused = run(
+        root.path(),
+        &[
+            "battery", "install", "github", "--server", "work", "--server", "work", "--json",
+        ],
+    );
+    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), original);
+
+    let installed = run(
+        root.path(),
+        &[
+            "battery", "install", "github", "--server", "work", "--server", "lab", "--json",
+        ],
+    );
+    assert!(
+        installed.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&installed.stdout),
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let bound = |config: &Path| -> toml::Value {
+        assert!(appa_runtime::config::Config::load(config).is_ok());
+        toml::from_str::<toml::Value>(&std::fs::read_to_string(config).unwrap()).unwrap()["server_aliases"]["github"]
+            .clone()
+    };
+    assert_eq!(bound(&config), toml::Value::Array(vec!["work".into(), "lab".into()]));
+    let rebound = run(
+        root.path(),
+        &["battery", "install", "github", "--server", "lab", "--json"],
+    );
+    assert!(rebound.status.success());
+    assert_eq!(bound(&config), toml::Value::Array(vec!["lab".into()]));
+    let removed = run(root.path(), &["battery", "remove", "github", "--json"]);
+    assert!(removed.status.success());
+    assert!(std::fs::read_to_string(&config).unwrap().contains(&original));
+    assert!(!std::fs::read_to_string(&config).unwrap().contains("server_aliases"));
+}
+
 #[test]
 fn human_battery_and_bundle_results_are_text_with_copyable_identifiers() {
     let root = tempfile::tempdir().unwrap();

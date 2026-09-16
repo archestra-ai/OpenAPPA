@@ -2,6 +2,8 @@
 //! executable behind the command override, a real store, the real hook path.
 
 mod common;
+#[cfg(unix)]
+use common::fake_claude;
 use common::{actor, audit_len, offer_of, propose, ran, raw, root, serve};
 
 use std::sync::{Arc, Mutex};
@@ -435,15 +437,6 @@ async fn every_annotation_failure_refuses_the_hook_and_appends_nothing() {
         HookDecision::AllowCall { spawn: None }
     );
     assert!(audit_len(&runtime) > baseline);
-}
-
-#[cfg(unix)]
-fn fake_claude(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let path = dir.join("fake-claude");
-    std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("the fake claude writes");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("the fake claude is executable");
-    path
 }
 
 #[cfg(unix)]

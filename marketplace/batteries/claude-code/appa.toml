@@ -97,6 +97,38 @@ name = "host/claude-code/Bash(command:*.pypirc*)"
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
+# The Databricks CLI prints the login's own credential on request, and its
+# profile file holds tokens; `configure` writes one there. The CLI takes its
+# global flags anywhere (`databricks --profile dev auth token`), so the
+# verb is matched after `databricks` with anything between. A selector is a
+# substring of the command line, so a spelling these miss (the command
+# inside `$(...)`, a heredoc, an alias) is classified by the Bash annotator
+# below like any other command; nothing here promises full recall.
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*.databrickscfg*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*databricks*auth token*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*databricks*auth env*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*databricks*secrets get-secret*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*databricks*configure*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
 # The stock `redact-secrets` sanitizer masks private-key blocks, tokens of
 # well-known shapes, the value of any assignment whose key names a secret, and
 # long high-entropy runs. It carries no tags, so it is offered for every
@@ -253,6 +285,14 @@ delta = { audience = ["self"] }
 
 [[policy.tool]]
 name = "host/claude-code/Read(file_path:.pypirc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Read(file_path:*/.databrickscfg)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Read(file_path:.databrickscfg)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
@@ -481,6 +521,14 @@ delta = { audience = ["self"] }
 
 [[policy.tool]]
 name = "host/claude-code/Grep(path:.pypirc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*/.databrickscfg)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:.databrickscfg)"
 delta = { audience = ["self"] }
 
 [[policy.tool]]
@@ -761,6 +809,16 @@ requires = { trust = "trusted" }
 delta = {}
 
 [[policy.tool]]
+name = "host/claude-code/Write(file_path:*/.databrickscfg)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:.databrickscfg)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
 name = "host/claude-code/Write(file_path:*/.vault-token)"
 requires = { trust = "trusted" }
 delta = {}
@@ -1037,6 +1095,16 @@ delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Edit(file_path:.pypirc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/.databrickscfg)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:.databrickscfg)"
 requires = { trust = "trusted" }
 delta = {}
 

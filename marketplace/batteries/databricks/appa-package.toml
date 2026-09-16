@@ -1,0 +1,10 @@
+schema = 1
+name = "databricks"
+description = "Rules for Databricks' managed MCP servers: Genie One's five tools and Databricks SQL's execute_sql, with internal reads, each SQL statement classified before it runs, and the databricks audience source."
+
+[battery]
+policy = "appa.toml"
+hosts = ["claude-code"]
+namespaces = ["databricks"]
+helpers = ["audience-source.py"]
+setup = "Bind both managed servers: appa battery install databricks --server <genie-server> --server <sql-server>. The audience source runs the Databricks CLI: install it where the runtime runs and log in with `databricks auth login`, or set APPA_PROVIDER_DATABRICKS_TOKEN beside DATABRICKS_HOST; the login needs to read SCIM users and groups and Genie space permissions."
