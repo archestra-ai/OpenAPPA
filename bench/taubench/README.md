@@ -6,7 +6,7 @@ The harness pins Tau 1.0.1 at commit `93ee97b8303ce0e89e0ad17e6207591a1846f84b`.
 
 The interpreter is Python 3.12 (`.python-version`): Tau at this pin imports `audioop`, which 3.13 removed.
 
-## The token overhead is measured on an ordinary workload
+## Token totals compare complete trajectories, not marginal APPA overhead
 
 AgentThreatBench samples attack scenarios, where OpenAPPA intervenes in nearly every episode, so its token overhead answers "what does mediation cost when the policy fires". Tau's normal profile answers the other question: what does it cost across 97 ordinary banking tasks, where the [2026-09-15 evaluation](results/full-2026-09-15/README.md) triggered no policy block in 7,914 checked calls. The matched summary reports these differences per simulation:
 
@@ -15,6 +15,8 @@ AgentThreatBench samples attack scenarios, where OpenAPPA intervenes in nearly e
 - `hidden_agent_total_per_simulation` is the discarded work: completions a policy block or the one-call rule threw away and the model paid for anyway. Tau's trajectory omits them; the `appa-audit/` record includes them, and the totals here use it.
 
 `runs/<name>-matched-summary.json` carries `token_overhead.per_arm`, `.deltas`, and `.ratios`; `run-summary.json` per arm carries the raw cumulative counts and the per-simulation means they come from.
+
+**Known measurement limitation:** the one-tool-per-completion rule adds inference rounds and repeated full-context prompts while also changing retrieval behavior. These totals do not isolate APPA's algebra or marginal mediation overhead. The [result report](results/full-2026-09-15/README.md#known-limitation-these-totals-do-not-isolate-appas-token-overhead) records the fixed-prompt serialization estimate and the controlled comparisons deferred to future PRs; this PR does not change the accounting or scaffold to address it.
 
 ## Setup pins code, data, and retrieval dependencies
 

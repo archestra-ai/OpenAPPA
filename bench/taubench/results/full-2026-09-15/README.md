@@ -14,6 +14,16 @@ Agent tokens include prompt and completion tokens, repeated prompts across calls
 
 The token gap reflects less retrieval and slower context growth, not policy blocking. It persists in the 108 matched simulations where both guarded and stock succeeded: guarded used 32.92% fewer agent tokens. Matching on success does not hold the work performed constant or isolate a policy effect.
 
+## Known limitation: these totals do not isolate APPA's token overhead
+
+The `token_overhead` totals and deltas compare complete trajectories, not the marginal token cost of APPA's algebra or mediation. Including every provider-reported completion, including hidden ones, does not resolve this measurement problem.
+
+The custom scaffold forces one tool call per model completion and resends full history; stock can batch tool calls. Serializing stock's 2,526 observed multi-tool completions would require 5,429 additional model calls. Holding each batch's original prompt fixed, repeating it once per extra call yields 326,040,129 additional prompt tokens: **66.97% of stock's 486,870,569 total agent tokens**, before intermediate tool results or changes in completion output. This is a counterfactual reconstruction, not a measured serialized run or a dollar-cost estimate.
+
+The observed 25.53% reduction is a net, implementation-specific trajectory result. It mixes serialization overhead with changed retrieval and context growth; these interacting effects cannot be separated by subtracting the reconstruction from the observed delta. Shared-success comparisons do not fix this limitation.
+
+**Resolution is deferred to future PRs:** measure prompt/schema overhead on identical payloads, compare allowed flows with stock-equivalent batching, and measure replanning after actual policy blocks separately. Randomized or interleaved repetitions, including a stock-plus-one-tool-rule ablation, are needed for causal claims. This PR records the limitation without changing the harness, token accounting, or measured results.
+
 ## Configuration
 
 The agent was `openrouter/openai/gpt-5.6-luna` at `reasoning_effort=max`, with `alltools-qwen` retrieval and binding `appa-agent-python-v7`. The user simulator was GPT-5.2/low; GPT-4.1 at temperature zero performed judgment and user review. The arms ran sequentially at concurrency 20, with matching task/trial/seed identities and identical common settings.
