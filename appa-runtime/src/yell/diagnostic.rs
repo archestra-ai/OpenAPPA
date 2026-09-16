@@ -748,6 +748,7 @@ mod tests {
                 mode: Mode::Pseudonymized,
                 selection: Selection::Vouched(root),
                 harness: crate::runtime_cli::Adapter::ClaudeCode.into(),
+                hostname: None,
             })
             .expect("a recorded session fits a report");
 

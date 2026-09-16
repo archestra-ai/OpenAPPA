@@ -156,6 +156,8 @@ pub(crate) enum RuntimeSection {
     Serving {
         /// The harness whose hooks this runtime serves.
         harness: Harness,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hostname: Option<String>,
         /// The rules in force, stripped against [`super::policy`]. `None` when the runtime
         /// could not resolve one, which is itself the interesting case.
         policy: Option<Policy>,
@@ -214,6 +216,7 @@ pub(crate) struct ReportRequest {
     pub(crate) mode: Mode,
     pub(crate) selection: super::Selection,
     pub(crate) harness: Harness,
+    pub(crate) hostname: Option<String>,
 }
 
 /// The document itself, in the order a reader reads it.
@@ -246,11 +249,19 @@ impl Report {
             message,
             RuntimeSection::Serving {
                 harness,
+                hostname: None,
                 policy: projection.policy,
             },
             projection.trajectory,
             projection.unclassified,
         )
+    }
+
+    pub(crate) fn with_hostname(mut self, hostname: Option<String>) -> Self {
+        if let RuntimeSection::Serving { hostname: target, .. } = &mut self.runtime {
+            *target = hostname;
+        }
+        self
     }
 
     /// A report about a runtime that did not. Worth sending: "it is not running" is a common

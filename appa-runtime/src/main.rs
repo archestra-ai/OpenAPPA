@@ -405,6 +405,7 @@ async fn report(
         // someone else's session on this machine, and loopback is the only thing between them.
         selection: crate::yell::Selection::Recent,
         harness: state.adapter.name.into(),
+        hostname: None,
     };
     state
         .runtime

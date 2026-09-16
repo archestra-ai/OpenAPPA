@@ -1488,7 +1488,8 @@ impl Runtime {
                 request.message.clone(),
                 request.harness,
                 projection,
-            );
+            )
+            .with_hostname(request.hostname.clone());
             match report.finalize() {
                 Ok(finished) => return Ok(finished),
                 // Nothing left to drop: the message, the build and the policy are the whole

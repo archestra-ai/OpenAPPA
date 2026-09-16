@@ -12,6 +12,8 @@ use crate::api::{Actor, Runtime};
 pub struct Request {
     pub actor: Actor,
     pub endpoint: String,
+    /// Public deployment hostname. Do not supply a machine name or a full URL.
+    pub hostname: Option<String>,
     pub message: String,
     pub with_trajectory: bool,
 }
@@ -22,6 +24,15 @@ pub struct Request {
 pub async fn send(runtime: &Arc<Runtime>, request: Request) -> Result<String, String> {
     if !runtime.agent_yell() {
         return Err("Agent reporting is disabled".into());
+    }
+    if request.hostname.as_ref().is_some_and(|host| {
+        host.is_empty()
+            || host.len() > 253
+            || !host
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-'))
+    }) {
+        return Err("Invalid reporting hostname".into());
     }
     let args = YellArgs {
         message: request.message,
@@ -46,6 +57,7 @@ pub async fn send(runtime: &Arc<Runtime>, request: Request) -> Result<String, St
             Selection::RulesOnly
         },
         harness: Harness::Archestra,
+        hostname: request.hostname,
     };
     let finished = runtime
         .report_off_thread(report)
@@ -85,6 +97,7 @@ mod tests {
                 child: None,
             },
             endpoint: "http://127.0.0.1:1".into(),
+            hostname: Some("platform.example.com".into()),
             message: "The feedback is confusing".into(),
             with_trajectory: true,
         }
@@ -119,6 +132,9 @@ mod tests {
     async fn refuses_disabled_unvouched_and_cross_session_reports() {
         assert!(send(&runtime(false), request()).await.unwrap_err().contains("disabled"));
         let runtime = runtime(true);
+        let mut invalid = request();
+        invalid.hostname = Some("https://user:secret@example.com/path".into());
+        assert!(send(&runtime, invalid).await.unwrap_err().contains("hostname"));
         assert!(send(&runtime, request()).await.unwrap_err().contains("released"));
         let mut request = request();
         release(&runtime, &request).await;
@@ -156,6 +172,7 @@ mod tests {
         let document: serde_json::Value = serde_json::from_str(&plain).unwrap();
         assert_eq!(document["runtime"]["serving"]["harness"], "archestra");
         assert_eq!(document["schema"], "openappa.yell.v1");
+        assert_eq!(document["runtime"]["serving"]["hostname"], "platform.example.com");
         assert!(!plain.contains("private-session-id"));
         assert!(
             send(&runtime, super::tests::request())
