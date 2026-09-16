@@ -13,10 +13,10 @@ version = 2
 
 # A command naming a credential path narrows the session to `self`, the
 # requester. The battery withholds the command's result (`confined_results`
-# below) and the `redact-secrets` sanitizer, scoped to these `credentials`
-# rules, masks every token before the output reaches the model and returns the
-# value to `public`: the session keeps its label and the masked text is what
-# the model reads.
+# below) and the `redact-secrets` sanitizer masks every token before the
+# output reaches the model and returns the value to `public`: the session
+# keeps its label and the masked text is what the model reads. The `credentials`
+# tag records why a rule is here; the sanitizer is not scoped to it.
 [[policy.tool]]
 name = "host/claude-code/Bash(command:*.env*)"
 delta = { audience = ["self"] }
@@ -131,12 +131,14 @@ tags = ["credentials"]
 
 # The stock `redact-secrets` sanitizer masks private-key blocks, tokens of
 # well-known shapes, the value of any assignment whose key names a secret, and
-# long high-entropy runs. It applies only to results of the `credentials` rules
-# above, never to other confined results or a subagent's return.
+# long high-entropy runs. It carries no tags, so it is offered for every
+# withheld Bash result the session cannot read as it is, whether a static
+# `credentials` rule or the Annotator narrowed it: an Annotator's answer cannot
+# tag a call, so a tagged sanitizer would never reach a command the static
+# rules do not name. Without tags it is also offered for a subagent's return.
 [[policy.sanitizer]]
 name = "redact-secrets"
 on = ["tool_output"]
-tags = ["credentials"]
 
 [policy.sanitizer.permits]
 audience = { from = ["self"], to = ["public"] }
@@ -400,4 +402,838 @@ delta = { audience = ["self"] }
 [[policy.tool]]
 name = "host/claude-code/Read"
 description = "Reads a file and returns its contents."
+delta = {}
+
+# --- Grep: the content of the requester's secrets is `self` data ---
+
+# Grep returns matching lines when asked for content, and which files match
+# otherwise, so a search inside a credential path is a read of it: the same
+# paths as the Read rules narrow the session to `self`. A search over a
+# directory that happens to hold one of these files is not matched; only the
+# path as written is.
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*/.env*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:.env*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*/.ssh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:.ssh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*/.aws/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:.aws/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*/.azure/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:.azure/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*/.kube/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:.kube/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*/.gnupg/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:.gnupg/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*/.docker/config.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:.docker/config.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*/.config/gh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:.config/gh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*/.config/gcloud/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:.config/gcloud/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*/.password-store/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:.password-store/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*/.netrc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:.netrc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*/.git-credentials)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:.git-credentials)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*/.npmrc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:.npmrc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*/.pypirc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:.pypirc)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*/.databrickscfg)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:.databrickscfg)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*/.vault-token)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:.vault-token)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*/.claude.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:.claude.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*/.claude/settings*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:.claude/settings*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*_history)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*credentials*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*secrets*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*auth.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*token)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*token.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*service*account.json)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*shadow)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*/id_*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:id_*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*.jks)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*.key)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*.keystore)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*.p12)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*.pem)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*.pfx)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:/etc/ssh/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:/etc/sudoers*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:/proc/*/environ)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep(path:*/Library/Keychains/*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "host/claude-code/Grep"
+description = "Searches file contents and returns the matching lines or file names."
+delta = {}
+
+# --- Write and Edit: the requester's secrets and the harness are sinks ---
+
+# Writing into a credential path requires a `trusted` session: content that
+# arrived at `suspicious`, from a web page or an unvetted command, reaches a
+# file the next process trusts only when the person running the session
+# approves the exact call. The harness's own settings, where the protecting
+# hooks are registered, and the deployment's policy ask that person every
+# time. Every other path takes the session's label as it is.
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/.claude/settings*)"
+requires = { attention = ["hitl"] }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:.claude/settings*)"
+requires = { attention = ["hitl"] }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/appa/appa.toml)"
+requires = { attention = ["hitl"] }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/appa/batteries/*)"
+requires = { attention = ["hitl"] }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/.env*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:.env*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/.ssh/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:.ssh/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/.aws/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:.aws/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/.azure/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:.azure/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/.kube/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:.kube/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/.gnupg/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:.gnupg/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/.docker/config.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:.docker/config.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/.config/gh/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:.config/gh/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/.config/gcloud/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:.config/gcloud/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/.password-store/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:.password-store/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/.netrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:.netrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/.git-credentials)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:.git-credentials)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/.npmrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:.npmrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/.pypirc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:.pypirc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/.databrickscfg)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:.databrickscfg)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/.vault-token)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:.vault-token)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/.claude.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:.claude.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*_history)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*credentials*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*secrets*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*auth.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*token)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*token.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*service*account.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*shadow)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/id_*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:id_*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*.jks)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*.key)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*.keystore)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*.p12)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*.pem)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*.pfx)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:/etc/ssh/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:/etc/sudoers*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:/proc/*/environ)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write(file_path:*/Library/Keychains/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/.claude/settings*)"
+requires = { attention = ["hitl"] }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:.claude/settings*)"
+requires = { attention = ["hitl"] }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/appa/appa.toml)"
+requires = { attention = ["hitl"] }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/appa/batteries/*)"
+requires = { attention = ["hitl"] }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/.env*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:.env*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/.ssh/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:.ssh/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/.aws/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:.aws/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/.azure/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:.azure/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/.kube/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:.kube/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/.gnupg/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:.gnupg/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/.docker/config.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:.docker/config.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/.config/gh/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:.config/gh/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/.config/gcloud/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:.config/gcloud/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/.password-store/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:.password-store/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/.netrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:.netrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/.git-credentials)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:.git-credentials)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/.npmrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:.npmrc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/.pypirc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:.pypirc)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/.databrickscfg)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:.databrickscfg)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/.vault-token)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:.vault-token)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/.claude.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:.claude.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*_history)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*credentials*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*secrets*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*auth.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*token)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*token.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*service*account.json)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*shadow)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/id_*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:id_*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*.jks)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*.key)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*.keystore)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*.p12)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*.pem)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*.pfx)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:/etc/ssh/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:/etc/sudoers*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:/proc/*/environ)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit(file_path:*/Library/Keychains/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Write"
+description = "Writes a file."
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/Edit"
+description = "Replaces text in a file."
 delta = {}

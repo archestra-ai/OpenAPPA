@@ -86,6 +86,12 @@ const BATTERIES = [
     logo: "/images/batteries/pagerduty.svg",
   },
   {
+    name: "Hugging Face",
+    description: "Rules for 11 account, search, repository, Space, job, and sandbox tools; each repository's Hub visibility decides its readers.",
+    href: "/battery-huggingface",
+    logo: "/images/batteries/huggingface.svg",
+  },
+  {
     name: "Databricks",
     description: "Rules for the Genie One and Databricks SQL managed servers; internal reads, every SQL statement classified before it runs.",
     href: "/battery-databricks",

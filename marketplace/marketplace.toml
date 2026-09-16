@@ -4,7 +4,7 @@ name = "appa"
 
 [packages.battery.claude-code]
 path = "batteries/claude-code"
-digest = "sha256:d5a3cffa8da66d1d7371051181325151de4ac184010fad86c8a541b7da86b7b7"
+digest = "sha256:4a5ee87de4541d24f8a60038170bf729e38fe243b8e0cc7bf0aab3a09bf58559"
 
 [packages.battery.cloudflare-docs]
 path = "batteries/cloudflare-docs"
@@ -16,7 +16,7 @@ digest = "sha256:f92118f4b234d267ebea72a7e0cedcbb55e002f706d80345fd69ba2c011ad7a
 
 [packages.battery.databricks]
 path = "batteries/databricks"
-digest = "sha256:726ce5785ecc231c75a02abc6e8f00bb7aace39d841156d15da37b8197b85ecf"
+digest = "sha256:1b7cc1e35b9f955b0c24cf9da9208fd6d003c8c90244131c92057609b1a0ec69"
 
 [packages.battery.github]
 path = "batteries/github"
@@ -29,6 +29,10 @@ digest = "sha256:c7edf486f349404e5fb43b69484f5b6d555455efe8bcf43dfea7b875430a473
 [packages.battery.grain]
 path = "batteries/grain"
 digest = "sha256:de05f7e62a2cdd36fcc3d646866e4815030f70fdca8ab03ab2939169060a57be"
+
+[packages.battery.huggingface]
+path = "batteries/huggingface"
+digest = "sha256:f7d8f289003dc5d69d5373c6997975db1f57febe02fbc3183b9cde32447f3a8c"
 
 [packages.battery.launchdarkly]
 path = "batteries/launchdarkly"
@@ -64,7 +68,7 @@ digest = "sha256:05683c96e66f8e8afcb66e9bfa0535bed1a226467241399aec082b687a947ed
 
 [packages.plugin.claude-code]
 path = "plugins/claude-code"
-digest = "sha256:e26651ff89f5114764918bca5d4e8d849dbcc635fdbc9ea0e9333e207f0fa164"
+digest = "sha256:6165fde53699b727a32bc052a437893ada8414ab240db33fd20b35677e95b0ac"
 
 [packages.plugin.kagent]
 path = "plugins/kagent"

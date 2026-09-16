@@ -7,6 +7,7 @@ dependencies = [
     "agent-framework-core==1.13.0",
     "anthropic==0.115.0",
     "appa-agent-python==0.1.0",
+    "appa-bench-publish==0.1.0",
     "claude-agent-sdk==0.2.152",
     "inspect-ai==0.3.252",
     "inspect-evals @ git+https://github.com/UKGovernmentBEIS/inspect_evals.git@0c737b01627b772db84aa223f68775c31199fdc9",
@@ -31,6 +32,7 @@ allow-direct-references = true
 
 [tool.uv.sources]
 appa-agent-python = { path = "../../appa-agent-python" }
+appa-bench-publish = { path = "../publish" }
 
 [tool.ruff]
 line-length = 120

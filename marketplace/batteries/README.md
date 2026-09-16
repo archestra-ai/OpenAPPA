@@ -22,6 +22,7 @@ so a deployment can customize its hint without editing the battery.
 | `launchdarkly/` | LaunchDarkly's official MCP server, all 20 tools: feature flags, environments, AI Configs, code references, audit log; internal reads, every write reviewed | none |
 | `posthog/` | PostHog's MCP server, all 44 registry tools: analytics, insights, dashboards, error tracking, flags, experiments, surveys, docs; internal reads, public documentation input, reviewed writes | none |
 | `pagerduty/` | the PagerDuty-hosted MCP server, all 18 tools: 11 `browse_*` reads of incidents, schedules, teams, status pages and activity, 7 `manage_*` writes; internal reads, every write reviewed | none |
+| `huggingface/` | the hosted Hugging Face MCP server, all 11 built-in tools: account, search, repository reads and writes, Spaces, Jobs, sandbox; each repository's Hub visibility decides its readers, code run with the token reviewed | two annotators asking the Hub for each named repository's visibility and resource group; the `huggingface` audience source: viewer, one resource group's members |
 | `databricks/` | Databricks' managed MCP servers Genie One (5 tools) and Databricks SQL (`execute_sql`), one namespace bound to both host servers; internal Genie reads, each SQL statement classified before it runs | the Claude Code model classifies each statement; the `databricks` audience source: viewer, active users, a group with nested groups expanded, a Genie space's readers |
 
 Include a battery with a path relative to the root config:

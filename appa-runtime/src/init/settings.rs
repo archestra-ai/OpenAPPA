@@ -36,6 +36,9 @@ struct Event {
     name: &'static str,
     matcher: Option<&'static str>,
     turn_end: bool,
+    /// The event opens a model context of its own, so the session context is
+    /// printed beside the post: a subagent starts without the parent's.
+    opens_context: bool,
 }
 
 /// The events a protected session posts, after SessionStart. Stop and
@@ -46,41 +49,49 @@ const EVENTS: [Event; 8] = [
         name: "UserPromptSubmit",
         matcher: None,
         turn_end: false,
+        opens_context: false,
     },
     Event {
         name: "PreToolUse",
         matcher: Some("*"),
         turn_end: false,
+        opens_context: false,
     },
     Event {
         name: "PostToolUse",
         matcher: Some("*"),
         turn_end: false,
+        opens_context: false,
     },
     Event {
         name: "PostToolUseFailure",
         matcher: Some("*"),
         turn_end: false,
+        opens_context: false,
     },
     Event {
         name: "Stop",
         matcher: None,
         turn_end: true,
+        opens_context: false,
     },
     Event {
         name: "StopFailure",
         matcher: None,
         turn_end: true,
+        opens_context: false,
     },
     Event {
         name: "SubagentStart",
         matcher: None,
         turn_end: false,
+        opens_context: true,
     },
     Event {
         name: "SubagentStop",
         matcher: None,
         turn_end: false,
+        opens_context: false,
     },
 ];
 
@@ -244,6 +255,7 @@ pub(crate) fn ps_literal(value: &str) -> String {
 fn groups(target: &HookTarget<'_>, binary: &str) -> Result<Vec<(&'static str, Value)>, InitError> {
     let url = target.url;
     let entry = |args: Vec<String>, timeout: Duration| json!({"type": "command", "command": binary, "args": args, "timeout": timeout.as_secs()});
+    let context = |args: &[&str]| json!({"type": "command", "command": binary, "args": args});
     let mut groups = Vec::with_capacity(EVENTS.len() + 1);
     // The start of the deployed runtime and the first post share one process:
     // Claude Code runs an event's entries in parallel, so a separate start
@@ -263,7 +275,7 @@ fn groups(target: &HookTarget<'_>, binary: &str) -> Result<Vec<(&'static str, Va
             ],
             SESSION_START_TIMEOUT,
         ),
-        json!({"type": "command", "command": binary, "args": ["session-context"]}),
+        context(&["session-context"]),
     ]});
     groups.push(("SessionStart", session_start));
     for event in EVENTS {
@@ -278,7 +290,11 @@ fn groups(target: &HookTarget<'_>, binary: &str) -> Result<Vec<(&'static str, Va
         if let Some(matcher) = event.matcher {
             group.insert("matcher".to_owned(), Value::String(matcher.to_owned()));
         }
-        group.insert("hooks".to_owned(), json!([entry(args, timeout)]));
+        let mut hooks = vec![entry(args, timeout)];
+        if event.opens_context {
+            hooks.push(context(&["session-context", "--subagent"]));
+        }
+        group.insert("hooks".to_owned(), Value::Array(hooks));
         groups.push((event.name, Value::Object(group)));
     }
     Ok(groups)
@@ -447,6 +463,10 @@ mod tests {
         let session_start = &installed["hooks"]["SessionStart"][0]["hooks"];
         assert_eq!(session_start[0]["args"][3], "--ensure-runtime");
         assert_eq!(session_start[1]["args"], json!(["session-context"]));
+        let subagent_start = &installed["hooks"]["SubagentStart"][0]["hooks"];
+        assert_eq!(subagent_start[0]["args"][0], "hook");
+        assert_eq!(subagent_start[1]["args"], json!(["session-context", "--subagent"]));
+        assert!(installed["hooks"]["SubagentStop"][0]["hooks"].as_array().unwrap().len() == 1);
 
         // The same install again changes nothing and records nothing.
         let bytes = fs::read(path(&paths)).unwrap();

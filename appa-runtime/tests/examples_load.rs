@@ -1,7 +1,7 @@
 mod common;
 use common::repo_root;
 #[cfg(unix)]
-use common::{actor, last_offer, propose, ran, raw, root};
+use common::{actor, last_offer, offer_of, propose, ran, raw, root};
 
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
@@ -409,5 +409,166 @@ async fn the_slack_battery_allows_public_writes_and_blocks_leaking_self_secrets(
     assert!(
         offers.is_empty(),
         "slack write cannot leak self secrets: no remedy plan"
+    );
+}
+
+/// The battery's masker is not scoped to the static credential rules: a command the
+/// Annotator narrows to `self` is blocked with the same masker offered, and its masked
+/// output is what reaches the model. An Annotator's answer cannot tag a call, so a
+/// tagged sanitizer would never reach a command the static rules do not name.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_masker_is_offered_for_a_command_the_annotator_narrows_to_self() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let battery_dir = dir.path().join("batteries/claude-code");
+    std::fs::create_dir_all(&battery_dir).expect("the battery directory is created");
+    std::fs::copy(
+        repo_root().join("marketplace/batteries/claude-code/appa.toml"),
+        battery_dir.join("appa.toml"),
+    )
+    .expect("the battery file is copied");
+    std::fs::write(
+        dir.path().join("annotator.sh"),
+        "cat > /dev/null\nprintf '%s' '{\"version\":1,\"answer\":{\"delta\":{\"audience\":[\"self\"]},\"requires\":{\"history\":[],\"attention\":[]},\"emits\":[]}}'",
+    )
+    .expect("the annotator script writes");
+    let root_path = dir.path().join("appa.toml");
+    std::fs::write(
+        &root_path,
+        r#"include = ["batteries/claude-code/appa.toml"]
+
+[policy]
+version = 2
+
+[[policy.annotator]]
+name = "claude-code.bash-requirements"
+
+[externals]
+timeout_ms = 5000
+max_body_bytes = 65536
+
+[externals.annotators."claude-code.bash-requirements"]
+command = ["/bin/sh", "annotator.sh"]
+"#,
+    )
+    .expect("the root replaces the battery Annotator with a script");
+    let config = Config::load(&root_path).expect("the root and battery compose");
+    let runtime =
+        Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the composed deployment opens"));
+    assert_eq!(
+        hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
+        HookDecision::Ack
+    );
+
+    let read = call("host/claude-code/Bash", "command", "cat ~/.bashrc");
+    let blocked = propose(&runtime, read.clone()).await;
+    let HookDecision::DenyCall { feedback, offers, .. } = blocked else {
+        panic!("an annotated `self` command is blocked with the masker offered, got {blocked:?}");
+    };
+    assert_eq!(offers.len(), 2, "the narrowing and the masker are offered");
+    assert!(matches!(
+        runtime.execute_remedy(&actor(), masker_offer(&feedback)).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    assert_eq!(
+        propose(&runtime, read.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    let delivered = hooks::handle(
+        &runtime,
+        HookEvent::ToolResult {
+            actor: actor(),
+            call: read,
+            outcome: ToolOutcome::Success {
+                body: OutcomeBody::Available(
+                    "export OPENAI_API_KEY=sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789\nalias ll='ls -l'\n"
+                        .to_string(),
+                ),
+            },
+        },
+    )
+    .await;
+    let HookDecision::DeliverValue { value } = delivered else {
+        panic!("the output crosses through the masker, got {delivered:?}");
+    };
+    assert_eq!(value, "export OPENAI_API_KEY=[redacted-secret]\nalias ll='ls -l'\n");
+}
+
+/// A search inside a credential path is a read of it and narrows the session like the
+/// Read rules do. Writing into one needs a `trusted` session, so it runs before untrusted
+/// content arrives and is refused after. The harness's own settings ask the person for
+/// each exact call.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_battery_covers_grep_write_and_edit_of_the_requesters_secrets() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let config = composed_with_the_battery(&dir);
+    let runtime =
+        Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the composed deployment opens"));
+    assert_eq!(
+        hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
+        HookDecision::Ack
+    );
+
+    let ordinary = call("host/claude-code/Grep", "path", "src");
+    assert_eq!(
+        propose(&runtime, ordinary.clone()).await,
+        HookDecision::AllowCall { spawn: None },
+        "a search over ordinary paths keeps the session's label"
+    );
+    ran(&runtime, ordinary).await;
+    let inside = call("host/claude-code/Grep", "path", "/home/me/.aws/credentials");
+    let narrowing = propose(&runtime, inside).await;
+    let HookDecision::DenyCall { offers, review, .. } = narrowing else {
+        panic!("a search inside a credential path is offered as a narrowing to `self`, got {narrowing:?}");
+    };
+    assert_eq!(offers.len(), 1, "the narrowing is the one offer");
+    assert!(review.is_empty(), "no person is consulted");
+
+    let credential = call("host/claude-code/Write", "file_path", ".env");
+    assert_eq!(
+        propose(&runtime, credential.clone()).await,
+        HookDecision::AllowCall { spawn: None },
+        "a trusted session writes a credential path"
+    );
+    ran(&runtime, credential.clone()).await;
+
+    let settings = call("host/claude-code/Edit", "file_path", "/home/me/.claude/settings.json");
+    let asked = propose(&runtime, settings).await;
+    let HookDecision::DenyCall { review, .. } = asked else {
+        panic!("editing the harness's settings asks the person, got {asked:?}");
+    };
+    assert_eq!(review.len(), 1, "the exact call is shown to the person");
+    assert!(review[0].text.contains("settings.json"));
+
+    // Reading a web page is offered as the drop to `suspicious`; the session accepts it.
+    let page = call("host/claude-code/WebFetch", "url", "https://docs.example/page");
+    let drop = propose(&runtime, page.clone()).await;
+    assert!(matches!(
+        runtime.execute_remedy(&actor(), offer_of(&drop)).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    assert_eq!(
+        propose(&runtime, page.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, page).await;
+    let refused = propose(&runtime, credential).await;
+    let HookDecision::DenyCall {
+        feedback,
+        offers,
+        review,
+    } = refused
+    else {
+        panic!("a session that read untrusted content does not write a credential path, got {refused:?}");
+    };
+    assert_eq!(offers.len(), 1, "the person can approve the exact call: {feedback}");
+    assert_eq!(review.len(), 1);
+    assert!(review[0].text.contains(".env"), "the review shows the exact call");
+    let note = call("host/claude-code/Write", "file_path", "notes.md");
+    assert_eq!(
+        propose(&runtime, note).await,
+        HookDecision::AllowCall { spawn: None },
+        "an ordinary path takes the session's label as it is"
     );
 }
