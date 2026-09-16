@@ -1,5 +1,5 @@
-//! The two Cloudflare batteries composed together: public documentation reads and
-//! internal Workers logs, with no writes on either server.
+//! Cloudflare battery: public documentation reads and internal Workers logs under one
+//! namespace, with no writes.
 mod common;
 
 use appa_runtime::{
@@ -12,11 +12,9 @@ use axum::{Router, routing::post};
 use common::{actor, offer_of, propose, ran, raw, repo_root, root, serve};
 use std::sync::Arc;
 
-const BATTERIES: [&str; 2] = ["cloudflare-docs", "cloudflare-observability"];
-
-fn call(namespace: &str, tool: &str, args: serde_json::Value) -> ProposedCall {
+fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
     ProposedCall {
-        tool: format!("mcp/{namespace}/{tool}"),
+        tool: format!("mcp/cloudflare/{tool}"),
         arguments: raw(args),
     }
 }
@@ -34,26 +32,19 @@ async fn members_source() -> String {
 }
 
 async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
-    let mut includes = String::new();
-    for battery in BATTERIES {
-        let target = dir.path().join("marketplace/batteries").join(battery);
-        std::fs::create_dir_all(&target).unwrap();
-        std::fs::copy(
-            repo_root()
-                .join("marketplace/batteries")
-                .join(battery)
-                .join("appa.toml"),
-            target.join("appa.toml"),
-        )
-        .unwrap();
-        includes.push_str(&format!("\"marketplace/batteries/{battery}/appa.toml\", "));
-    }
+    let target = dir.path().join("marketplace/batteries/cloudflare");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::copy(
+        repo_root().join("marketplace/batteries/cloudflare/appa.toml"),
+        target.join("appa.toml"),
+    )
+    .unwrap();
     let path = dir.path().join("appa.toml");
     let source = members_source().await;
     std::fs::write(
         &path,
         format!(
-            r#"include = [{includes}]
+            r#"include = ["marketplace/batteries/cloudflare/appa.toml"]
 
 [policy]
 version = 2
@@ -81,8 +72,8 @@ selectors = [{{ template = "members", feeds = "internal" }}]
 }
 
 /// Documentation reads stay public, so they run outright. Reading Workers logs
-/// narrows the trajectory to internal, and the documentation search on either server
-/// then refuses that input.
+/// narrows the trajectory to internal, and the documentation search then refuses that
+/// input.
 #[tokio::test]
 async fn public_reads_run_until_the_workers_logs_narrow_the_trajectory() {
     let dir = tempfile::tempdir().unwrap();
@@ -90,7 +81,6 @@ async fn public_reads_run_until_the_workers_logs_narrow_the_trajectory() {
 
     // The first read admits the trust fall to `suspicious`; the trajectory stays public.
     let docs = call(
-        "cloudflare-docs",
         "search_cloudflare_documentation",
         serde_json::json!({ "query": "durable objects alarms" }),
     );
@@ -107,7 +97,6 @@ async fn public_reads_run_until_the_workers_logs_narrow_the_trajectory() {
 
     // Still public, so the migration guide runs outright.
     let guide = call(
-        "cloudflare-docs",
         "migrate_pages_to_workers_guide",
         serde_json::json!({}),
     );
@@ -118,7 +107,6 @@ async fn public_reads_run_until_the_workers_logs_narrow_the_trajectory() {
     ran(&runtime, guide).await;
 
     let logs = call(
-        "cloudflare-observability",
         "query_worker_observability",
         serde_json::json!({ "query": { "view": "events", "limit": 5 } }),
     );
@@ -135,7 +123,6 @@ async fn public_reads_run_until_the_workers_logs_narrow_the_trajectory() {
 
     // Internal already: another account-scoped read runs outright.
     let code = call(
-        "cloudflare-observability",
         "workers_get_worker_code",
         serde_json::json!({ "scriptName": "payments-api" }),
     );
@@ -145,28 +132,15 @@ async fn public_reads_run_until_the_workers_logs_narrow_the_trajectory() {
     );
     ran(&runtime, code).await;
 
-    // The public-input rules refuse internal input, on either server carrying them.
-    for public_input in [
-        call(
-            "cloudflare-docs",
-            "search_cloudflare_documentation",
-            serde_json::json!({ "query": "workers logs" }),
-        ),
-        call(
-            "cloudflare-observability",
-            "search_cloudflare_documentation",
-            serde_json::json!({ "query": "workers logs" }),
-        ),
-    ] {
-        assert!(
-            !matches!(
-                propose(&runtime, public_input.clone()).await,
-                HookDecision::AllowCall { .. }
-            ),
-            "{}",
-            public_input.tool
-        );
-    }
+    // The public-input rule refuses internal input.
+    let search = call(
+        "search_cloudflare_documentation",
+        serde_json::json!({ "query": "workers logs" }),
+    );
+    assert!(!matches!(
+        propose(&runtime, search).await,
+        HookDecision::AllowCall { .. }
+    ));
 
     // Every tool that ran here reads: none of them recorded an effect.
     let effects: Vec<Vec<String>> = runtime
@@ -174,7 +148,7 @@ async fn public_reads_run_until_the_workers_logs_narrow_the_trajectory() {
         .unwrap()
         .into_iter()
         .filter_map(|entry| match entry.event {
-            AuditEvent::Released { tool, effects, .. } if tool.starts_with("mcp/cloudflare-") => Some(effects),
+            AuditEvent::Released { tool, effects, .. } if tool.starts_with("mcp/cloudflare/") => Some(effects),
             _ => None,
         })
         .collect();

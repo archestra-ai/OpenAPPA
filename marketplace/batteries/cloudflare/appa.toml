@@ -1,0 +1,77 @@
+# Cloudflare battery: Cloudflare's hosted MCP servers from
+# `cloudflare/mcp-server-cloudflare`, one namespace bound to each of them.
+#
+# - documentation (`https://docs.mcp.cloudflare.com/mcp`), the `docs-ai-search`
+#   app at tag `docs-ai-search@0.4.13`: two tools, no credential, no account;
+# - Workers Observability (`https://observability.mcp.cloudflare.com/mcp`), the
+#   `workers-observability` app at tag `workers-observability@0.5.5`: eight
+#   tools, the two documentation tools among them.
+#
+# Both servers register the documentation tools from the same code in
+# `packages/mcp-common`, so a tool name means one thing on every server that
+# lists it, and one rule per name covers each bound server.
+#
+# Workers logs carry whatever the account's Workers wrote and whatever their
+# callers sent - request paths, headers, bodies, error strings - so this data
+# is attacker reachable and enters `suspicious`. A Cloudflare account shows its
+# members the same logs, so the audience is `internal`, and a query's input
+# must be sharable with `internal`. Worker source code is also `suspicious`:
+# the download is the deployed bundle, which carries third-party dependencies
+# the policy cannot vouch for.
+#
+# The documentation tools return public pages of developers.cloudflare.com, so
+# they leave the audience alone. `search_cloudflare_documentation` sends the
+# agent's `query` to Cloudflare's public documentation index, so the query must
+# be sharable with `public`. `migrate_pages_to_workers_guide` takes no argument
+# and needs no bound.
+#
+# No tool changes anything. The battery has no write, no effect, and no review
+# mark.
+
+[policy]
+version = 2
+
+# --- Workers logs and telemetry: the account's own, attacker reachable ---
+
+[[policy.tool]]
+name = "mcp/cloudflare/query_worker_observability"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/cloudflare/observability_keys"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/cloudflare/observability_values"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+# --- the Workers themselves ---
+
+[[policy.tool]]
+name = "mcp/cloudflare/workers_list"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/cloudflare/workers_get_worker"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/cloudflare/workers_get_worker_code"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+# --- the public documentation tools, on both servers ---
+
+[[policy.tool]]
+name = "mcp/cloudflare/search_cloudflare_documentation"
+delta = { trust = "suspicious" }
+requires = { audience = { contains = ["public"] } }
+
+[[policy.tool]]
+name = "mcp/cloudflare/migrate_pages_to_workers_guide"
+delta = { trust = "suspicious" }

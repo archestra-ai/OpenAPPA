@@ -56,15 +56,9 @@ const BATTERIES = [
     logo: "/images/batteries/microsoft-learn.svg",
   },
   {
-    name: "Cloudflare docs",
-    description: "Public developer documentation search and guide fetches.",
-    href: "/battery-cloudflare-docs",
-    logo: "/images/batteries/cloudflare.svg",
-  },
-  {
-    name: "Cloudflare Observability",
-    description: "Read-only coverage for Workers logs, metrics, telemetry, and bundle downloads.",
-    href: "/battery-cloudflare-observability",
+    name: "Cloudflare",
+    description: "Read-only rules for the documentation and Workers Observability servers: public docs, internal logs and Workers.",
+    href: "/battery-cloudflare",
     logo: "/images/batteries/cloudflare.svg",
   },
   {

@@ -17,8 +17,7 @@ so a deployment can customize its hint without editing the battery.
 | `sentry/` | the Sentry MCP server: 9 listed tools and the 55 catalog tools behind `execute_sentry_tool`; internal reads, reviewed writes | none |
 | `notion/` | the hosted Notion MCP server, all 36 tools; internal reads (Notion exposes no page permissions), reviewed structural changes | none |
 | `microsoft-learn/` | the Microsoft Learn MCP Server, all 3 read-only tools; suspicious public results, and every query must be sharable with `public` | none |
-| `cloudflare-docs/` | Cloudflare's documentation MCP server, both tools; public results, and the search query must be sharable with `public` | none |
-| `cloudflare-observability/` | Cloudflare's Workers Observability MCP server, all 8 tools; internal logs, telemetry and Worker reads, plus two public documentation reads, no writes | none |
+| `cloudflare/` | Cloudflare's documentation (2 tools) and Workers Observability (8 tools) MCP servers, one namespace bound to both; internal logs, telemetry and Worker reads, public documentation reads whose query must be sharable with `public`, no writes | none |
 | `launchdarkly/` | LaunchDarkly's official MCP server, all 20 tools: feature flags, environments, AI Configs, code references, audit log; internal reads, every write reviewed | none |
 | `posthog/` | PostHog's MCP server, all 44 registry tools: analytics, insights, dashboards, error tracking, flags, experiments, surveys, docs; internal reads, public documentation input, reviewed writes | none |
 | `pagerduty/` | the PagerDuty-hosted MCP server, all 18 tools: 11 `browse_*` reads of incidents, schedules, teams, status pages and activity, 7 `manage_*` writes; internal reads, every write reviewed | none |
