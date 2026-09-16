@@ -245,9 +245,20 @@ pub async fn serve(router: axum::Router) -> String {
     format!("http://{addr}")
 }
 
-/// A fake `claude` for the built-in Claude Code annotator: it reads its next answer from
-/// `answer.json` and keeps the prompt it was asked in `prompt.txt`. The presets are the
-/// Databricks batteries' mandate: a read, a change, and a statement sent to review.
+/// A fake `claude` executable running `script` in place of the model, for the built-in
+/// Claude Code annotator's `[externals.claude_code] command`.
+#[cfg(unix)]
+pub fn fake_claude(dir: &Path, script: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("fake-claude");
+    std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("the fake claude writes");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("the fake claude is executable");
+    path
+}
+
+/// A fake `claude` that answers from a file: it reads its next structured answer from
+/// `answer.json` and keeps the prompt it was asked in `prompt.txt`, so a suite sets the
+/// answer before a call and reads what the annotator was asked after it.
 #[cfg(unix)]
 pub struct Classifier {
     answer: PathBuf,
@@ -258,23 +269,18 @@ pub struct Classifier {
 impl Classifier {
     /// Write the fake `claude` into `dir` and answer its path beside the classifier.
     pub fn install(dir: &Path) -> (PathBuf, Classifier) {
-        use std::os::unix::fs::PermissionsExt;
         let classifier = Classifier {
             answer: dir.join("answer.json"),
             prompt: dir.join("prompt.txt"),
         };
-        let command = dir.join("fake-claude");
-        std::fs::write(
-            &command,
-            format!(
-                "#!/bin/sh\ncat > {prompt}\ncat {answer}\n",
+        let command = fake_claude(
+            dir,
+            &format!(
+                "cat > {prompt}\ncat {answer}",
                 prompt = classifier.prompt.display(),
                 answer = classifier.answer.display(),
             ),
-        )
-        .expect("the fake claude is written");
-        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755))
-            .expect("the fake claude is executable");
+        );
         (command, classifier)
     }
 
@@ -286,33 +292,6 @@ impl Classifier {
             serde_json::json!({ "structured_output": structured }).to_string(),
         )
         .expect("the answer is written");
-    }
-
-    /// A read: suspicious internal data, from input sharable with internal.
-    pub fn reads(&self) {
-        self.answers(
-            serde_json::json!({ "trust": "suspicious", "audience": ["internal"] }),
-            serde_json::json!({ "audience": { "contains": ["internal"] }, "history": [], "attention": [] }),
-            &[],
-        );
-    }
-
-    /// A change: trusted internal input, recording `databricks.changed`.
-    pub fn changes(&self) {
-        self.answers(
-            serde_json::json!({}),
-            serde_json::json!({ "trust": "trusted", "audience": { "contains": ["internal"] }, "history": [], "attention": [] }),
-            &["databricks.changed"],
-        );
-    }
-
-    /// A statement for a person: the `databricks-review` mark, recording `databricks.sensitive`.
-    pub fn needs_review(&self) {
-        self.answers(
-            serde_json::json!({}),
-            serde_json::json!({ "attention": ["databricks-review"], "history": [] }),
-            &["databricks.sensitive"],
-        );
     }
 
     /// What the classifier was last asked, empty when it never ran.

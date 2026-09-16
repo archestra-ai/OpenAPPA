@@ -33,6 +33,34 @@ async fn directory_source() -> String {
     format!("{}/audience", serve(router).await)
 }
 
+/// The Databricks mandate's three answers: a read of suspicious internal data from input
+/// sharable with internal; a change on trusted internal input recording `databricks.changed`;
+/// a statement for a person, under the `databricks-review` mark, recording
+/// `databricks.sensitive`.
+fn reads(classifier: &Classifier) {
+    classifier.answers(
+        serde_json::json!({ "trust": "suspicious", "audience": ["internal"] }),
+        serde_json::json!({ "audience": { "contains": ["internal"] }, "history": [], "attention": [] }),
+        &[],
+    );
+}
+
+fn changes(classifier: &Classifier) {
+    classifier.answers(
+        serde_json::json!({}),
+        serde_json::json!({ "trust": "trusted", "audience": { "contains": ["internal"] }, "history": [], "attention": [] }),
+        &["databricks.changed"],
+    );
+}
+
+fn needs_review(classifier: &Classifier) {
+    classifier.answers(
+        serde_json::json!({}),
+        serde_json::json!({ "attention": ["databricks-review"], "history": [] }),
+        &["databricks.sensitive"],
+    );
+}
+
 /// The shipped battery under a root that maps the audiences, permits the review mark, and
 /// runs the fake `claude`.
 async fn runtime(dir: &tempfile::TempDir) -> (Arc<Runtime>, Classifier) {
@@ -108,7 +136,7 @@ async fn a_cli_read_narrows_once_and_its_sql_reaches_the_statement_classifier() 
     let dir = tempfile::tempdir().unwrap();
     let (runtime, classifier) = runtime(&dir).await;
 
-    classifier.reads();
+    reads(&classifier);
     let list = bash("databricks catalogs list --profile dev");
     let offer = offer_of(&propose(&runtime, list.clone()).await);
     assert!(
@@ -136,7 +164,7 @@ async fn a_cli_read_narrows_once_and_its_sql_reaches_the_statement_classifier() 
     );
     ran(&runtime, select).await;
 
-    classifier.changes();
+    changes(&classifier);
     assert!(!matches!(
         propose(
             &runtime,
@@ -154,7 +182,7 @@ async fn a_cli_change_records_its_effect_and_sql_from_a_file_needs_the_reviewer(
     let dir = tempfile::tempdir().unwrap();
     let (runtime, classifier) = runtime(&dir).await;
 
-    classifier.changes();
+    changes(&classifier);
     let run_now = bash("databricks jobs run-now --job-id 42 --profile dev");
     assert_eq!(
         propose(&runtime, run_now.clone()).await,
@@ -162,7 +190,7 @@ async fn a_cli_change_records_its_effect_and_sql_from_a_file_needs_the_reviewer(
     );
     ran(&runtime, run_now).await;
 
-    classifier.needs_review();
+    needs_review(&classifier);
     let from_file = bash("databricks experimental aitools tools query --file report.sql --profile dev");
     let decision = propose(&runtime, from_file.clone()).await;
     assert!(matches!(decision, HookDecision::DenyCall { .. }), "{decision:?}");

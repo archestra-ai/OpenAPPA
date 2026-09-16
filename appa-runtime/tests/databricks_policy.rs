@@ -37,6 +37,34 @@ async fn members_source() -> String {
     format!("{}/audience", serve(router).await)
 }
 
+/// The Databricks mandate's three answers: a read of suspicious internal data from input
+/// sharable with internal; a change on trusted internal input recording `databricks.changed`;
+/// a statement for a person, under the `databricks-review` mark, recording
+/// `databricks.sensitive`.
+fn reads(classifier: &Classifier) {
+    classifier.answers(
+        serde_json::json!({ "trust": "suspicious", "audience": ["internal"] }),
+        serde_json::json!({ "audience": { "contains": ["internal"] }, "history": [], "attention": [] }),
+        &[],
+    );
+}
+
+fn changes(classifier: &Classifier) {
+    classifier.answers(
+        serde_json::json!({}),
+        serde_json::json!({ "trust": "trusted", "audience": { "contains": ["internal"] }, "history": [], "attention": [] }),
+        &["databricks.changed"],
+    );
+}
+
+fn needs_review(classifier: &Classifier) {
+    classifier.answers(
+        serde_json::json!({}),
+        serde_json::json!({ "attention": ["databricks-review"], "history": [] }),
+        &["databricks.sensitive"],
+    );
+}
+
 /// The shipped battery with its audience source swapped for the loopback.
 async fn install_battery(dir: &tempfile::TempDir) {
     let target = dir.path().join("marketplace/batteries/databricks");
@@ -156,7 +184,7 @@ async fn genie_reads_narrow_once_and_a_read_only_statement_follows() {
         ran(&runtime, read).await;
     }
 
-    classifier.reads();
+    reads(&classifier);
     let select = statement("SELECT region, sum(amount) FROM sales GROUP BY region");
     assert_eq!(
         propose(&runtime, select.clone()).await,
@@ -168,7 +196,7 @@ async fn genie_reads_narrow_once_and_a_read_only_statement_follows() {
     );
     ran(&runtime, select).await;
 
-    classifier.changes();
+    changes(&classifier);
     assert!(!matches!(
         propose(&runtime, statement("INSERT INTO sales VALUES (1)")).await,
         HookDecision::AllowCall { .. }
@@ -182,7 +210,7 @@ async fn a_write_records_its_effect_and_a_reviewed_statement_needs_the_reviewer(
     let dir = tempfile::tempdir().unwrap();
     let (runtime, classifier) = runtime(&dir).await;
 
-    classifier.changes();
+    changes(&classifier);
     let insert = statement("INSERT INTO sales VALUES (1)");
     assert_eq!(
         propose(&runtime, insert.clone()).await,
@@ -190,7 +218,7 @@ async fn a_write_records_its_effect_and_a_reviewed_statement_needs_the_reviewer(
     );
     ran(&runtime, insert).await;
 
-    classifier.needs_review();
+    needs_review(&classifier);
     let grant = statement("GRANT SELECT ON TABLE sales TO `analysts`");
     let decision = propose(&runtime, grant.clone()).await;
     assert!(matches!(decision, HookDecision::DenyCall { .. }), "{decision:?}");
@@ -279,7 +307,7 @@ async fn the_namespace_covers_each_bound_server_under_the_host() {
     let dir = tempfile::tempdir().unwrap();
     install_battery(&dir).await;
     let (command, classifier) = Classifier::install(dir.path());
-    classifier.reads();
+    reads(&classifier);
     let config = root_config(
         &dir,
         &command,
