@@ -72,7 +72,7 @@ impl Receiver {
     }
 
     /// HTTPS anywhere, or plain HTTP only to this machine, and credentials nowhere.
-    fn parse(url: &str) -> Option<Self> {
+    pub(super) fn parse(url: &str) -> Option<Self> {
         let parsed = reqwest::Url::parse(url).ok()?;
         if !parsed.username().is_empty() || parsed.password().is_some() {
             return None;

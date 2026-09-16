@@ -156,6 +156,8 @@ pub(crate) enum RuntimeSection {
     Serving {
         /// The harness whose hooks this runtime serves.
         harness: Harness,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hostname: Option<String>,
         /// The rules in force, stripped against [`super::policy`]. `None` when the runtime
         /// could not resolve one, which is itself the interesting case.
         policy: Option<Policy>,
@@ -167,15 +169,14 @@ pub(crate) enum RuntimeSection {
 
 /// The harness a report is about, in the schema's own vocabulary.
 ///
-/// Deliberately not [`Adapter`] itself, though the two agree today: `Adapter` also picks a
-/// codec and a spawn coverage, and a rename there is a refactor, while a rename here is a new
-/// schema version. The conversion is exhaustive, so a new adapter has to decide what it is
-/// called on the wire.
+/// Separate from [`Adapter`]: embedded hosts also report without installing a
+/// standalone adapter. Adapter names are converted exhaustively into this vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Harness {
     ClaudeCode,
     Kagent,
+    Archestra,
 }
 
 impl From<Adapter> for Harness {
@@ -214,7 +215,8 @@ pub(crate) struct ReportRequest {
     pub(crate) author: Author,
     pub(crate) mode: Mode,
     pub(crate) selection: super::Selection,
-    pub(crate) harness: Adapter,
+    pub(crate) harness: Harness,
+    pub(crate) hostname: Option<String>,
 }
 
 /// The document itself, in the order a reader reads it.
@@ -238,7 +240,7 @@ impl Report {
         report_id: ReportId,
         origin: Origin,
         message: YellMessage,
-        harness: Adapter,
+        harness: Harness,
         projection: Projection,
     ) -> Self {
         Self::new(
@@ -246,12 +248,20 @@ impl Report {
             origin,
             message,
             RuntimeSection::Serving {
-                harness: harness.into(),
+                harness,
+                hostname: None,
                 policy: projection.policy,
             },
             projection.trajectory,
             projection.unclassified,
         )
+    }
+
+    pub(crate) fn with_hostname(mut self, hostname: Option<String>) -> Self {
+        if let RuntimeSection::Serving { hostname: target, .. } = &mut self.runtime {
+            *target = hostname;
+        }
+        self
     }
 
     /// A report about a runtime that did not. Worth sending: "it is not running" is a common
@@ -475,7 +485,7 @@ mod tests {
             ReportId::generate(),
             Origin::new(Author::Cli, Mode::Pseudonymized),
             YellMessage::new("x").expect("valid"),
-            Adapter::ClaudeCode,
+            Adapter::ClaudeCode.into(),
             Projection::rules_only(None, Mode::Pseudonymized, OmittedReason::NoRecentTrajectory),
         );
         let finished = report.finalize().expect("the report fits");

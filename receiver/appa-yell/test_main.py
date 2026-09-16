@@ -400,3 +400,35 @@ def test_receive_skips_slack_on_duplicate(monkeypatch):
     assert status == 200
     assert body["duplicate"] is True
     assert dispatched == []
+
+
+@pytest.mark.parametrize(
+    ("serving", "expected"),
+    [
+        (
+            {"harness": "archestra", "hostname": "frontend.example.com"},
+            "Source: Archestra | Host: frontend.example.com",
+        ),
+        ({"harness": "claude-code"}, "Source: Claude Code"),
+        ({"harness": "kagent"}, "Source: kagent"),
+        ({"harness": "future-client"}, "Source: Unknown"),
+        ({"harness": ["archestra"]}, "Source: Unknown"),
+        ({"harness": "archestra", "hostname": "<https://evil.example|@channel>"}, "Source: Archestra"),
+        ({"harness": "archestra", "hostname": "user:secret@example.com"}, "Source: Archestra"),
+        ({"harness": "archestra", "hostname": "x" * 254}, "Source: Archestra"),
+    ],
+)
+def test_slack_source_metadata_is_bounded_plain_text(serving, expected):
+    doc = one_report()
+    doc["runtime"] = {"serving": serving}
+    payload = main.format_slack_payload(doc, "digest", "commit", "test-bucket")
+    assert payload["blocks"][1]["elements"][1] == {"type": "plain_text", "text": expected, "emoji": False}
+    assert payload["text"].startswith(expected + " | ")
+
+
+@pytest.mark.parametrize("runtime", [None, [], {"unreachable": {"class": "no_runtime"}}, {"serving": []}])
+def test_slack_source_handles_old_or_malformed_runtime_metadata(runtime):
+    doc = one_report()
+    doc["runtime"] = runtime
+    payload = main.format_slack_payload(doc, "digest", "local", "test-bucket")
+    assert payload["blocks"][1]["elements"][1]["text"] == "Source: Unknown"
