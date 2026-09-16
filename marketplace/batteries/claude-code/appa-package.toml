@@ -1,6 +1,6 @@
 schema = 1
 name = "claude-code"
-description = "Rules for the Claude Code built-in tools host/claude-code/Bash and host/claude-code/Read: credential paths are refused, and the model Annotator writes every other command's contract."
+description = "Rules for the Claude Code built-in tools host/claude-code/Bash and host/claude-code/Read: credential paths narrow to self, Databricks CLI commands and their SQL are classified in the databricks battery's vocabulary, and the model Annotator writes every other command's contract."
 
 [battery]
 policy = "appa.toml"

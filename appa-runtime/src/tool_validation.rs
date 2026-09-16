@@ -628,18 +628,20 @@ mod tests {
             ])
         );
         assert!(
-            !resolved.report.tools.iter().any(|tool| tool.tool == "mcp/databricks/genie_ask"),
+            !resolved
+                .report
+                .tools
+                .iter()
+                .any(|tool| tool.tool == "mcp/databricks/genie_ask"),
             "a rule observed on one bound server is not reported unknown"
         );
 
         let unseen = inventory(&[("other", "mcp:other/other")]);
         let unresolved = resolve(&authored, appa_adapter_kagent::adapter(), &unseen, &aliases);
         assert!(
-            unresolved
-                .report
-                .tools
-                .iter()
-                .any(|tool| tool.tool == "mcp/databricks/genie_ask" && matches!(tool.status, ToolStatus::Unknown { .. }))
+            unresolved.report.tools.iter().any(
+                |tool| tool.tool == "mcp/databricks/genie_ask" && matches!(tool.status, ToolStatus::Unknown { .. })
+            )
         );
 
         for broken in [

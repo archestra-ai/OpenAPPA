@@ -201,7 +201,10 @@ mod tests {
         let github = Namespace::parse("github").unwrap();
         let bound = bind_servers(AUTHORED, &github, &servers(&["work-github"])).unwrap();
         assert!(bound.contains(AUTHORED));
-        assert_eq!(bind_servers(&bound, &github, &servers(&["work-github"])).unwrap(), bound);
+        assert_eq!(
+            bind_servers(&bound, &github, &servers(&["work-github"])).unwrap(),
+            bound
+        );
         assert_eq!(
             batteries(&bound).unwrap().1,
             crate::config::ServerBindings::from([("github".to_owned(), servers(&["work-github"]))])

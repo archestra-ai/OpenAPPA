@@ -23,6 +23,25 @@ and `host/claude-code/Read`:
   write: a command that visibly reads the requester's or the organization's
   data narrows to `self` or `internal`, and one that shares with a reader the
   policy names requires that reader.
+- **Bash, Databricks CLI** — Databricks' own agent skills route data work
+  through the CLI in Bash, so two rules route `databricks` commands to
+  classifiers with the same vocabulary the `databricks` battery writes for
+  the managed MCP servers. `databricks experimental aitools tools query
+  "<SQL>"` is classified by its statement: a single read returns
+  `suspicious` `internal` data; `INSERT`, `UPDATE`, `DELETE`, `MERGE`, and
+  `COPY INTO` need `trusted` `internal` input and record
+  `databricks.changed`; DDL, grants, several statements, `--file`, stdin, a
+  comment, or anything unclear need the `databricks-review` mark and record
+  `databricks.sensitive`. Every other `databricks` command is classified the
+  same way by what it does: `list`, `get`, and `discover-schema` read,
+  `create`, `update`, `delete`, `run-now`, and `api post` change, and
+  `permissions`, `grants`, `secrets`, and `configure` need review. A selector
+  matches the command line as a substring, so these rules only route: the
+  model reads the whole line, chained commands included. The credential
+  rules above cover `.databrickscfg`, `auth token`, `auth env`,
+  `secrets get-secret`, and `configure` before either classifier runs.
+  Root rules over the two effects see one history whether a statement ran
+  through the CLI or the managed server.
 - **Read** — Reading a hidden path, a credential file, a private key, or a
   system secret location narrows the session to `self`, the requester: nothing
   built from it reaches a sink that requires `internal` or `public`. The rules

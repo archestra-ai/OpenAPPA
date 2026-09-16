@@ -193,13 +193,25 @@ async fn genie_reads_narrow_once_and_a_read_only_statement_follows() {
         runtime.execute_remedy(&actor(), offer).await,
         RemedyOutcome::Authorized { .. }
     ));
-    assert_eq!(propose(&runtime, ask.clone()).await, HookDecision::AllowCall { spawn: None });
+    assert_eq!(
+        propose(&runtime, ask.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
     ran(&runtime, ask).await;
 
     for read in [
-        call("genie_poll_response", serde_json::json!({ "conversation_id": "c1", "message_id": "m1" })),
-        call("genie_get_query_result", serde_json::json!({ "conversation_id": "c1", "message_id": "m1" })),
-        call("genie_cancel_response", serde_json::json!({ "conversation_id": "c1", "message_id": "m1" })),
+        call(
+            "genie_poll_response",
+            serde_json::json!({ "conversation_id": "c1", "message_id": "m1" }),
+        ),
+        call(
+            "genie_get_query_result",
+            serde_json::json!({ "conversation_id": "c1", "message_id": "m1" }),
+        ),
+        call(
+            "genie_cancel_response",
+            serde_json::json!({ "conversation_id": "c1", "message_id": "m1" }),
+        ),
     ] {
         assert_eq!(
             propose(&runtime, read.clone()).await,
@@ -212,8 +224,14 @@ async fn genie_reads_narrow_once_and_a_read_only_statement_follows() {
 
     classifier.reads_only();
     let select = statement("SELECT region, sum(amount) FROM sales GROUP BY region");
-    assert_eq!(propose(&runtime, select.clone()).await, HookDecision::AllowCall { spawn: None });
-    assert!(classifier.prompt().contains("FROM sales GROUP BY region"), "the statement reached the classifier");
+    assert_eq!(
+        propose(&runtime, select.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert!(
+        classifier.prompt().contains("FROM sales GROUP BY region"),
+        "the statement reached the classifier"
+    );
     ran(&runtime, select).await;
 
     classifier.writes();
@@ -232,7 +250,10 @@ async fn a_write_records_its_effect_and_a_reviewed_statement_needs_the_reviewer(
 
     classifier.writes();
     let insert = statement("INSERT INTO sales VALUES (1)");
-    assert_eq!(propose(&runtime, insert.clone()).await, HookDecision::AllowCall { spawn: None });
+    assert_eq!(
+        propose(&runtime, insert.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
     ran(&runtime, insert).await;
 
     classifier.needs_review();
@@ -243,12 +264,18 @@ async fn a_write_records_its_effect_and_a_reviewed_statement_needs_the_reviewer(
         runtime.execute_remedy(&actor(), offer_of(&decision)).await,
         RemedyOutcome::Authorized { .. }
     ));
-    assert_eq!(propose(&runtime, grant.clone()).await, HookDecision::AllowCall { spawn: None });
+    assert_eq!(
+        propose(&runtime, grant.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
     ran(&runtime, grant).await;
 
     assert_eq!(
         effects_of(&runtime),
-        vec![vec!["databricks.changed".to_string()], vec!["databricks.sensitive".to_string()]]
+        vec![
+            vec!["databricks.changed".to_string()],
+            vec!["databricks.sensitive".to_string()]
+        ]
     );
 }
 
@@ -319,7 +346,11 @@ async fn the_namespace_covers_each_bound_server_under_the_host() {
     install_battery(&dir).await;
     let (command, classifier) = Classifier::install(dir.path());
     classifier.reads_only();
-    let config = root_config(&dir, &command, "\n[server_aliases]\ndatabricks = [\"genie\", \"sql\"]\n");
+    let config = root_config(
+        &dir,
+        &command,
+        "\n[server_aliases]\ndatabricks = [\"genie\", \"sql\"]\n",
+    );
     let served = serve_runtime(&config, &dir.path().join("served.db"));
 
     for (server, tool) in [("genie", "genie_ask"), ("sql", "execute_sql"), ("genie", "execute_sql")] {

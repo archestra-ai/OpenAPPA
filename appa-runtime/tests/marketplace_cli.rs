@@ -777,14 +777,18 @@ fn a_battery_binds_to_several_servers_with_repeated_server_flags() {
 
     let refused = run(
         root.path(),
-        &["battery", "install", "github", "--server", "work", "--server", "work", "--json"],
+        &[
+            "battery", "install", "github", "--server", "work", "--server", "work", "--json",
+        ],
     );
     assert_eq!(refused.status.code(), Some(1));
     assert_eq!(std::fs::read_to_string(&config).unwrap(), original);
 
     let installed = run(
         root.path(),
-        &["battery", "install", "github", "--server", "work", "--server", "lab", "--json"],
+        &[
+            "battery", "install", "github", "--server", "work", "--server", "lab", "--json",
+        ],
     );
     assert!(
         installed.status.success(),
@@ -798,7 +802,10 @@ fn a_battery_binds_to_several_servers_with_repeated_server_flags() {
             .clone()
     };
     assert_eq!(bound(&config), toml::Value::Array(vec!["work".into(), "lab".into()]));
-    let rebound = run(root.path(), &["battery", "install", "github", "--server", "lab", "--json"]);
+    let rebound = run(
+        root.path(),
+        &["battery", "install", "github", "--server", "lab", "--json"],
+    );
     assert!(rebound.status.success());
     assert_eq!(bound(&config), toml::Value::Array(vec!["lab".into()]));
     let removed = run(root.path(), &["battery", "remove", "github", "--json"]);

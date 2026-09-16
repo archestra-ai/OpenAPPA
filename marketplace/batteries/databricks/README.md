@@ -168,6 +168,13 @@ and its `trusted` requirement on a write then guards nothing the server
 would not refuse. Unity Catalog enforces the caller's own permissions on
 every statement either way.
 
+Databricks' own agent skills route data work through the Databricks CLI
+in Bash rather than the managed servers. That path is `host/claude-code/Bash`,
+which the `claude-code` battery owns: its Databricks section classifies
+`databricks` commands, and the SQL of `databricks experimental aitools
+tools query`, in this battery's vocabulary, so `databricks.changed` and
+`databricks.sensitive` are one history whichever way a statement ran.
+
 The classification is a model's reading of the statement, checked
 against the mandate but not against the warehouse. Text that reaches
 `query` from an untrusted place, such as rows a Genie answer returned,
