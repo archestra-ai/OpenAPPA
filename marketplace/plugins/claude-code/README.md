@@ -89,7 +89,7 @@ is the commit it was built from, exported from that checkout without the
 network, and its binary is the one running the command.
 
 ```sh
-cargo install --path appa-runtime --force
+cargo install --locked --path appa-runtime --force
 appa plugin install claude-code
 ```
 
@@ -210,7 +210,7 @@ APPA_GATE=1 APPA_RUNTIME_URL=http://127.0.0.1:8788 claude
 ```
 
 That runs the checkout's runtime behind the installed binary's hooks. To run
-the checkout's hook client as well, install the build (`cargo install --path
+the checkout's hook client as well, install the build (`cargo install --locked --path
 appa-runtime --force && appa plugin install claude-code`), or run
 `live-gate-check.py`, which launches the harness with `--settings` entries
 naming the built binary.

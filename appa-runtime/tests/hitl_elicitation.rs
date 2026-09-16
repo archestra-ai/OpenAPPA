@@ -63,8 +63,8 @@ impl Reviewer {
 }
 
 impl ClientHandler for Reviewer {
-    fn get_info(&self) -> rmcp::model::ClientInfo {
-        let mut info = rmcp::model::ClientInfo::default();
+    fn get_info(&self) -> rmcp::model::ClientConfig {
+        let mut info = rmcp::model::ClientConfig::default();
         info.capabilities.elicitation = Some(Default::default());
         info
     }
@@ -88,8 +88,8 @@ impl ClientHandler for Reviewer {
 struct Absent;
 
 impl ClientHandler for Absent {
-    fn get_info(&self) -> rmcp::model::ClientInfo {
-        rmcp::model::ClientInfo::default()
+    fn get_info(&self) -> rmcp::model::ClientConfig {
+        rmcp::model::ClientConfig::default()
     }
 }
 
@@ -97,8 +97,8 @@ impl ClientHandler for Absent {
 struct Silent;
 
 impl ClientHandler for Silent {
-    fn get_info(&self) -> rmcp::model::ClientInfo {
-        let mut info = rmcp::model::ClientInfo::default();
+    fn get_info(&self) -> rmcp::model::ClientConfig {
+        let mut info = rmcp::model::ClientConfig::default();
         info.capabilities.elicitation = Some(Default::default());
         info
     }
