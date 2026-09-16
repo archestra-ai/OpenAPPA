@@ -3326,7 +3326,7 @@ fn fork_heading(advice: ForkAdvice) -> &'static str {
         ForkAdvice::Narrowing {
             standing: FloorStanding::Below,
             ..
-        } => "Raw result exceeds the parent's limit:",
+        } => "Refused by the parent's declaration:",
     }
 }
 
@@ -3411,7 +3411,7 @@ mod tests {
                 standing: super::FloorStanding::Below,
                 sanitized_return,
             };
-            assert_eq!(super::fork_heading(advice), "Raw result exceeds the parent's limit:");
+            assert_eq!(super::fork_heading(advice), "Refused by the parent's declaration:");
             let text = super::fork_advice_text(advice, false);
             assert!(text.contains("does not allow this session to admit the raw result"));
             assert!(text.contains("does not forbid an output sanitizer offered under Continue"));
