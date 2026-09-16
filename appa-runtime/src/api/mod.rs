@@ -713,9 +713,10 @@ impl Prepared {
     }
 
     fn assemble(self, backend: Backend) -> Result<Runtime, OpenError> {
-        let state_path = match &backend {
-            Backend::Sqlite { path } => Some(path.clone()),
-            Backend::Memory => None,
+        let state_path = if let Backend::Sqlite { path } = &backend {
+            Some(path.clone())
+        } else {
+            None
         };
         let store = LogStore::open(backend).map_err(|error| match error {
             appa_eventlog::OpenError::Damaged { path, detail } => OpenError::Damaged(format!("{path}: {detail}")),
