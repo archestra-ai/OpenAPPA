@@ -1138,6 +1138,32 @@ mod tests {
         );
         assert_eq!(second.log(&id).unwrap().basis(), 4);
 
+        let binding = CallBinding {
+            trajectory: id.clone(),
+            call_id: "host-call-1".into(),
+            dispatch: DispatchId::new(
+                id.clone(),
+                serde_json::from_value(serde_json::json!("00".repeat(32))).unwrap(),
+                0,
+            ),
+        };
+        let before = first.log(&id).unwrap();
+        let tx = first.postgres().unwrap().begin().unwrap();
+        first.append_bound(&before, &facts, binding.clone()).unwrap();
+        assert_eq!(first.log(&id).unwrap().call_bindings(), std::slice::from_ref(&binding));
+        assert_eq!(second.log(&id).unwrap(), before);
+        drop(tx);
+        assert_eq!(first.log(&id).unwrap(), before, "binding and facts roll back together");
+
+        first.append_bound(&before, &facts, binding.clone()).unwrap();
+        let restored = second.log(&id).unwrap();
+        assert_eq!(restored.call_bindings(), &[binding]);
+        assert_eq!(restored.facts().len(), before.facts().len() + facts.len());
+        assert!(matches!(
+            second.append_bound(&before, &facts, restored.call_bindings()[0].clone()),
+            Err(AppendError::Conflict { current: 5 })
+        ));
+
         first
             .postgres()
             .unwrap()
