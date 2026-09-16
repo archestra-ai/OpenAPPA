@@ -409,7 +409,7 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Rust lint
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --features appa-eventlog/postgres --locked -- -D warnings
 
   rust-tests:
     name: Rust Tests
@@ -439,7 +439,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Rust tests
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --features appa-eventlog/postgres --locked
 
   # Stable-named gate so a required check named "Rust Checks" still
   # covers the split jobs. Both jobs skipped is success: their paths

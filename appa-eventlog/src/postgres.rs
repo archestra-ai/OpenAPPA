@@ -204,7 +204,7 @@ impl PostgresStore {
         };
         let opening = match decode(first)? {
             Batch::Facts(facts) => facts,
-            Batch::Inventory(_) => Vec::new(),
+            Batch::Inventory(_) | Batch::BoundFacts(_) => Vec::new(),
         };
         let Some(Fact::TrajectoryOpened { policy_file_key, .. }) = opening.first() else {
             return Err(ReadError::Undecodable("log does not begin with an opening".into()));
