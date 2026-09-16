@@ -1,9 +1,0 @@
-schema = 1
-name = "cloudflare-docs"
-description = "Rules for Cloudflare's documentation MCP server: two public documentation reads whose query must be sharable with public."
-
-[battery]
-policy = "appa.toml"
-hosts = ["claude-code", "kagent"]
-namespaces = ["cloudflare-docs"]
-helpers = []
