@@ -51,19 +51,19 @@ const BATTERIES = [
   },
   {
     name: "Microsoft Learn",
-    description: "Rules for 3 read-only documentation tools; queries must be sharable with public.",
+    description: "Public documentation search and page fetches with untrusted result labeling.",
     href: "/battery-microsoft-learn",
     logo: "/images/batteries/microsoft-learn.svg",
   },
   {
     name: "Cloudflare docs",
-    description: "Rules for 2 documentation tools; results are public and the query must be sharable with public.",
+    description: "Public developer documentation search and guide fetches.",
     href: "/battery-cloudflare-docs",
     logo: "/images/batteries/cloudflare.svg",
   },
   {
     name: "Cloudflare Observability",
-    description: "Rules for 8 Workers logs, telemetry, and documentation tools; every one of them reads.",
+    description: "Read-only coverage for Workers logs, metrics, telemetry, and bundle downloads.",
     href: "/battery-cloudflare-observability",
     logo: "/images/batteries/cloudflare.svg",
   },
@@ -78,6 +78,18 @@ const BATTERIES = [
     description: "Rules for 44 analytics, flag, experiment, and survey tools; internal reads and reviewed writes.",
     href: "/battery-posthog",
     logo: "/images/batteries/posthog.svg",
+  },
+  {
+    name: "PagerDuty",
+    description: "Rules for 18 incident, schedule, team, and status page tools; internal reads and every write reviewed.",
+    href: "/battery-pagerduty",
+    logo: "/images/batteries/pagerduty.svg",
+  },
+  {
+    name: "Hugging Face",
+    description: "Rules for 11 account, search, repository, Space, job, and sandbox tools; each repository's Hub visibility decides its readers.",
+    href: "/battery-huggingface",
+    logo: "/images/batteries/huggingface.svg",
   },
   {
     name: "Add your own",

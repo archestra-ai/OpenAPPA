@@ -30,7 +30,7 @@ A build from a checkout carries its exact Git commit, so the same command
 installs that build's own version, without the network:
 
 ```sh
-cargo install --path appa-runtime --force
+cargo install --locked --path appa-runtime --force
 appa plugin install claude-code
 ```
 

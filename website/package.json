@@ -27,7 +27,7 @@
     "lucide-react": "^1.28.0",
     "mcp-handler": "^2.1.0",
     "nanoid": "^6.0.1",
-    "next": "^15.5.0",
+    "next": "^15.5.25",
     "posthog-js": "^1.417.3",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",

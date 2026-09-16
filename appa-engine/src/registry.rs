@@ -581,6 +581,8 @@ pub enum LoadError {
     DuplicateSanitizer(String),
     #[error("authority {0} has an empty mandate (covers nothing)")]
     EmptyMandate(String),
+    #[error("authority {0} permits `blocked`, the reserved mark no authority may attend")]
+    ReservedMark(String),
     #[error("trust rank {rank} out of the chain (length {len}) in {context}")]
     RankOutOfChain { rank: u8, len: usize, context: String },
     #[error(
@@ -693,18 +695,30 @@ impl Default for PlannerCap {
 /// intended shape.
 pub const MAX_HINT_CHARS: usize = 512;
 
+/// The remedy components the planner-cap lint counts against: every registered authority and
+/// sanitizer, and the policy's whole mark vocabulary, which is what a catch-all authority attends.
+struct Remedies<'a> {
+    authorities: &'a [Authority],
+    sanitizers: &'a [Sanitizer],
+    attention_marks: &'a BTreeSet<MarkName>,
+}
+
 fn worst_case_plan_alternatives(
     declaration: &ToolDeclaration,
     confined: bool,
     context_control: bool,
     tools: &[&ToolDeclaration],
-    authorities: &[Authority],
-    sanitizers: &[Sanitizer],
+    remedies: &Remedies<'_>,
     context: &MembershipContext<'_>,
 ) -> u128 {
     use crate::check::Gap;
     use crate::plan::{covers_gap, gap_cover};
 
+    let Remedies {
+        authorities,
+        sanitizers,
+        attention_marks,
+    } = *remedies;
     let tags = declaration.tags();
     let mut count: u128 = 1;
     let mut multiply = |competent: usize| count = count.saturating_mul(competent.max(1) as u128);
@@ -744,13 +758,18 @@ fn worst_case_plan_alternatives(
     match declaration {
         // An Annotated declaration's requirements exist only per call: the Annotator may answer
         // any slot its mandate allows, so the lint takes the worst case on every slot at once —
-        // a produced trust floor, a produced `contains`, and any mark an authority can attend.
+        // a produced trust floor, a produced `contains`, and any declared mark an authority
+        // covers — under a catch-all, the whole vocabulary but the reserved denial.
         ToolDeclaration::Annotated { .. } => {
             multiply(trust_cap_competent());
             multiply(reader_cap_competent());
-            let dynamic_marks: BTreeSet<_> = authorities
+            let dynamic_marks: Vec<MarkName> = attention_marks
                 .iter()
-                .flat_map(|authority| authority.mandate.attends.iter())
+                .filter(|mark| {
+                    authorities
+                        .iter()
+                        .any(|authority| authority.mandate.attends.covers(mark))
+                })
                 .cloned()
                 .collect();
             for mark in dynamic_marks {
@@ -1195,6 +1214,9 @@ impl Registry {
             if authority.mandate.is_empty() {
                 return Err(LoadError::EmptyMandate(authority.name.as_str().to_string()));
             }
+            if authority.mandate.attends.named().iter().any(MarkName::is_blocked) {
+                return Err(LoadError::ReservedMark(authority.name.as_str().to_string()));
+            }
             check_rank(&config.trust_chain, authority.mandate.trust_ceiling, || {
                 format!("authority {} trust ceiling", authority.name.as_str())
             })?;
@@ -1210,6 +1232,31 @@ impl Registry {
                 return Err(LoadError::DuplicateAuthority(authority.name.as_str().to_string()));
             }
         }
+
+        // Attention names are a policy vocabulary, not an authority vocabulary. A policy may
+        // deliberately use the reserved `blocked` as an unremediable denial while registering
+        // no authority at all. An Annotator must be able to produce those marks, but still
+        // remains confined to names the policy declares somewhere — and an annotator's own
+        // explicit mark bound is itself such a declaration. A catch-all mandate names
+        // nothing: it attends whatever the rest of the policy declares.
+        let attention_marks: BTreeSet<MarkName> = tools
+            .values()
+            .flatten()
+            .filter_map(|(_, d)| d.declared())
+            .chain(provider_run.values())
+            .flat_map(|tool| tool.requires.attention_marks().iter().cloned())
+            .chain(
+                config
+                    .authorities
+                    .iter()
+                    .flat_map(|authority| authority.mandate.attends.named().iter().cloned()),
+            )
+            .chain(
+                annotator_declarations
+                    .values()
+                    .flat_map(|annotator| annotator.marks.iter().flatten().cloned()),
+            )
+            .collect();
 
         // The planner-cap lint runs the same cover evaluation planning runs, against the
         // policy facts alone: the declared `within` assertions and no directory answers.
@@ -1230,8 +1277,11 @@ impl Registry {
                 profile.confines_result(declaration.name()),
                 profile.context_control(),
                 &checkable_tools,
-                &config.authorities,
-                &sanitizer_list,
+                &Remedies {
+                    authorities: &config.authorities,
+                    sanitizers: &sanitizer_list,
+                    attention_marks: &attention_marks,
+                },
                 &membership_context,
             );
             if count > planner_cap.0 {
@@ -1242,29 +1292,6 @@ impl Registry {
                 });
             }
         }
-        // Attention names are a policy vocabulary, not an authority vocabulary. A policy may
-        // deliberately use a mark as an unremediable denial (for example `blocked`) while
-        // registering no authority at all. An Annotator must be able to produce those marks,
-        // but still remains confined to names the policy declares somewhere — and an
-        // annotator's own explicit mark bound is itself such a declaration.
-        let attention_marks: BTreeSet<MarkName> = tools
-            .values()
-            .flatten()
-            .filter_map(|(_, d)| d.declared())
-            .chain(provider_run.values())
-            .flat_map(|tool| tool.requires.attention_marks().iter().cloned())
-            .chain(
-                config
-                    .authorities
-                    .iter()
-                    .flat_map(|authority| authority.mandate.attends.iter().cloned()),
-            )
-            .chain(
-                annotator_declarations
-                    .values()
-                    .flat_map(|annotator| annotator.marks.iter().flatten().cloned()),
-            )
-            .collect();
 
         // The policy's whole effect vocabulary: every kind a declaration emits or requires, and
         // every kind an annotator's explicit bound names.
@@ -1927,7 +1954,7 @@ mod tests {
 
     use super::*;
     use crate::authority::SanitizerPoints;
-    use crate::authority::{Mandate, Scope};
+    use crate::authority::{Attends, Mandate, Scope};
     use crate::contract::{AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, Requires};
     use crate::fact::{EffectKind, EffectSet};
     use crate::label::{Audience, ReaderId, Trust};
@@ -2015,7 +2042,7 @@ mod tests {
         Authority {
             name: AuthorityName::new(name),
             mandate: Mandate {
-                attends: vec![MarkName::new("signoff")],
+                attends: Attends::Named(vec![MarkName::new("signoff")]),
                 ..Mandate::default()
             },
             scope: Scope::default(),
@@ -2036,6 +2063,57 @@ mod tests {
             registry.attention_marks().map(MarkName::as_str).collect::<Vec<_>>(),
             ["blocked"]
         );
+    }
+
+    #[test]
+    fn a_catch_all_authority_covers_every_declared_mark_but_the_reserved_denial() {
+        let mut review = tool("review");
+        review.requires.attention = vec![MarkName::new("sentry-review")];
+        let mut denied = tool("denied");
+        denied.requires.attention = vec![MarkName::new(MarkName::BLOCKED)];
+        let mut cfg = base();
+        cfg.tools = declared(vec![review, denied]);
+        cfg.authorities = vec![Authority {
+            name: AuthorityName::new("anyone"),
+            mandate: Mandate {
+                attends: Attends::Any,
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        }];
+
+        let registry = Registry::build_covered(cfg).expect("a catch-all mandate is valid policy");
+        let anyone = registry
+            .authority(&AuthorityName::new("anyone"))
+            .expect("the catch-all registers");
+
+        assert!(anyone.mandate.attends.covers(&MarkName::new("sentry-review")));
+        assert!(!anyone.mandate.attends.covers(&MarkName::new(MarkName::BLOCKED)));
+        assert_eq!(
+            registry.attention_marks().map(MarkName::as_str).collect::<Vec<_>>(),
+            ["blocked", "sentry-review"],
+            "a catch-all names nothing; the vocabulary is the tools' marks"
+        );
+    }
+
+    #[test]
+    fn an_authority_naming_the_reserved_denial_is_refused() {
+        let mut cfg = base();
+        cfg.authorities = vec![Authority {
+            name: AuthorityName::new("overreach"),
+            mandate: Mandate {
+                attends: Attends::Named(vec![MarkName::new("signoff"), MarkName::new(MarkName::BLOCKED)]),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        }];
+
+        assert!(matches!(
+            Registry::build_covered(cfg),
+            Err(LoadError::ReservedMark(name)) if name == "overreach"
+        ));
     }
 
     #[test]
@@ -3104,7 +3182,7 @@ mod tests {
         let attester = |name: String| Authority {
             name: AuthorityName::new(name),
             mandate: Mandate {
-                attends: vec![MarkName::new("m1"), MarkName::new("m2")],
+                attends: Attends::Named(vec![MarkName::new("m1"), MarkName::new("m2")]),
                 ..Mandate::default()
             },
             scope: Scope::default(),
@@ -3162,7 +3240,7 @@ mod tests {
                 mandate: Mandate {
                     trust_ceiling: Some(Trust::new(1)),
                     reader_ceiling: Some(DeclaredAudience::literal(Audience::public())),
-                    attends: vec![MarkName::new("signoff")],
+                    attends: Attends::Named(vec![MarkName::new("signoff")]),
                     ..Mandate::default()
                 },
                 scope: Scope::default(),

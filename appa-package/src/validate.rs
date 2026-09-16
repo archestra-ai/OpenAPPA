@@ -60,6 +60,8 @@ pub enum PackageError {
     PolicyTopLevel { policy: PathBuf, field: String },
     #[error("{policy} declares `policy.{field}`, which an included fragment does not carry")]
     PolicyField { policy: PathBuf, field: String },
+    #[error("{policy} confines the results of `{tool}`, a tool it does not declare")]
+    PolicyConfinesForeignTool { policy: PathBuf, tool: String },
     #[error("{policy} declares a `policy.{kind}` without a name")]
     PolicyUnnamedDeclaration { policy: PathBuf, kind: &'static str },
     #[error(
@@ -109,7 +111,9 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
             for helper in &battery.helpers {
                 contained.resolve(helper, "battery.helpers", EntryKind::File)?;
             }
-            battery.audiences = check_policy(&policy, &package.name, battery)?;
+            let bindings = check_policy(&policy, &package.name, battery)?;
+            battery.audiences = bindings.audiences;
+            battery.credentials = bindings.credentials;
         }
         Role::Plugin(plugin) => {
             contained.resolve(plugin.default_policy(), "plugin.default_policy", EntryKind::File)?;
@@ -178,7 +182,9 @@ impl Contained {
 /// The top-level tables an included fragment may carry, and the `[policy]`
 /// fields it may declare. Both sets are the config loader's (`compose_include`):
 /// a package that validates here must load there, so a fragment refused at
-/// someone's deployment is refused at the package instead.
+/// someone's deployment is refused at the package instead. Beside these, a
+/// fragment may carry `policy.deployment.confined_results` naming its own tools
+/// (`check_confinement`).
 const INCLUDABLE_TABLES: [&str; 2] = ["policy", "externals"];
 pub const INCLUDABLE_POLICY_FIELDS: [&str; 5] = ["version", "tool", "annotator", "authority", "sanitizer"];
 /// Those of them that are arrays of named declarations.
@@ -187,9 +193,10 @@ const DECLARATION_ARRAYS: [&str; 4] = ["tool", "annotator", "authority", "saniti
 /// A battery is a fragment a deployment includes, not a deployment: it neither
 /// includes further files nor sets the root-only externals, it runs only its own
 /// declared helpers, and it names only contracts in the namespaces it declares.
-/// Returns the audience source providers it binds, which a marketplace gives one
-/// owner each.
-fn check_policy(policy: &Path, name: &PackageName, battery: &Battery) -> Result<Vec<String>, PackageError> {
+/// Returns what the policy binds that the manifest alone cannot say: the audience
+/// source providers, which a marketplace gives one owner each, and the credential
+/// variables its helpers read, which an install names to the person.
+fn check_policy(policy: &Path, name: &PackageName, battery: &Battery) -> Result<PolicyBindings, PackageError> {
     let namespaces = &battery.namespaces;
     let helpers = &battery.helpers;
     let text = std::fs::read_to_string(policy).map_err(|source| PackageError::PolicyRead {
@@ -237,6 +244,10 @@ fn check_policy(policy: &Path, name: &PackageName, battery: &Battery) -> Result<
         });
     }
     for (field, value) in declared {
+        if field == "deployment" {
+            check_confinement(policy, declared, value)?;
+            continue;
+        }
         if !INCLUDABLE_POLICY_FIELDS.contains(&field.as_str()) {
             return Err(PackageError::PolicyField {
                 policy: policy.to_path_buf(),
@@ -252,9 +263,10 @@ fn check_policy(policy: &Path, name: &PackageName, battery: &Battery) -> Result<
         }
     }
 
-    if let Some(externals) = document.get("externals") {
-        check_externals(policy, externals, name, helpers)?;
-    }
+    let credentials = match document.get("externals") {
+        Some(externals) => check_externals(policy, externals, name, helpers)?,
+        None => Vec::new(),
+    };
     let audiences: Vec<String> = document
         .get("externals")
         .and_then(|externals| externals.get("audience"))
@@ -283,15 +295,22 @@ fn check_policy(policy: &Path, name: &PackageName, battery: &Battery) -> Result<
             });
         }
     }
-    Ok(audiences)
+    Ok(PolicyBindings { audiences, credentials })
 }
 
+/// What `check_policy` reads out of a battery policy for its manifest.
+struct PolicyBindings {
+    audiences: Vec<String>,
+    credentials: Vec<String>,
+}
+
+/// Returns the credential variables the bindings name, each once, in name order.
 fn check_externals(
     policy: &Path,
     externals: &Value,
     name: &PackageName,
     helpers: &[RelativePath],
-) -> Result<(), PackageError> {
+) -> Result<Vec<String>, PackageError> {
     let root_setting = |key: &str| PackageError::PolicyRootSetting {
         policy: policy.to_path_buf(),
         key: key.to_owned(),
@@ -299,6 +318,7 @@ fn check_externals(
     let Some(table) = externals.as_table() else {
         return Err(root_setting(""));
     };
+    let mut credentials = std::collections::BTreeSet::new();
     for (kind, value) in table {
         // A deployment's own settings (`timeout_ms`, `max_body_bytes`, …) sit
         // directly under `[externals]`, and so do the sections only a root
@@ -311,28 +331,35 @@ fn check_externals(
             return Err(root_setting(kind));
         };
         for (id, binding) in bindings {
-            check_binding(policy, binding, &format!("{kind}.{id}"), name, helpers)?;
+            credentials.extend(check_binding(policy, binding, &format!("{kind}.{id}"), name, helpers)?);
         }
     }
-    Ok(())
+    Ok(credentials.into_iter().collect())
 }
 
 /// The external kinds an included file may bind. A battery is an included
 /// fragment, so this is exactly the set the config loader accepts from one.
 pub const BINDABLE_KINDS: [&str; 4] = ["authorities", "sanitizers", "annotators", "audience"];
 
+/// The stock sanitizers a battery may bind by `builtin` name: pure rewrites the
+/// runtime ships, which reach nothing outside the process. The loader's stock
+/// names for its sanitizer section (`builtins::Stock::for_section`).
+pub const BINDABLE_STOCK_SANITIZERS: [&str; 2] = ["redact-email", "redact-secrets"];
+
 /// One binding of one external. A battery runs the programs it ships and
-/// nothing else: the `command` shape naming a declared helper is the only one
-/// it may bind. The `url` shape would reach the network from inside a fragment
-/// the deployment merely included, and the `builtin` shape would name a runtime
-/// module the deployment did not choose — both are the root's to bind.
+/// nothing else: the `command` shape naming a declared helper is the one
+/// program it may bind. The `url` shape would reach the network from inside a
+/// fragment the deployment merely included, and a `builtin` other than a stock
+/// sanitizer would name a runtime module, or a model, the deployment did not
+/// choose — those are the root's to bind.
+/// Returns the credential variable the binding names, if any.
 fn check_binding(
     policy: &Path,
     binding: &Value,
     external: &str,
     name: &PackageName,
     helpers: &[RelativePath],
-) -> Result<(), PackageError> {
+) -> Result<Option<String>, PackageError> {
     let prefix = name.credential_prefix();
     let refuse = || PackageError::PolicyExternalCommand {
         policy: policy.to_path_buf(),
@@ -341,16 +368,26 @@ fn check_binding(
     let Some(table) = binding.as_table() else {
         return Err(refuse());
     };
-    let mut runs_a_helper = false;
+    // The loader takes exactly one transport per binding, and a credential
+    // only beside a program that could receive it.
+    let mut transports = 0;
+    let mut stock = false;
+    let mut credential = None;
     for (key, value) in table {
         match key.as_str() {
-            "command" if runs_a_declared_helper(value, helpers) => runs_a_helper = true,
+            "command" if runs_a_declared_helper(value, helpers) => transports += 1,
+            "builtin" if external.starts_with("sanitizers.") && names_a_stock_sanitizer(value) => {
+                transports += 1;
+                stock = true;
+            }
             // The runtime injects this variable into the helper process, so
             // whatever a package names here it receives. A package names only
             // the credentials it owns: outside its own prefix it would read
             // another package's, and outside the provider namespace entirely it
             // would read the deployment's own environment and fail to load.
-            "token_env" if value.as_str().is_some_and(|variable| prefix.owns(variable)) => {}
+            "token_env" if value.as_str().is_some_and(|variable| prefix.owns(variable)) => {
+                credential = value.as_str().map(str::to_owned);
+            }
             "token_env" => {
                 return Err(PackageError::PolicyForeignCredential {
                     policy: policy.to_path_buf(),
@@ -365,10 +402,16 @@ fn check_binding(
             _ => return Err(refuse()),
         }
     }
-    match runs_a_helper {
-        true => Ok(()),
-        false => Err(refuse()),
+    match (transports, stock && credential.is_some()) {
+        (1, false) => Ok(credential),
+        _ => Err(refuse()),
     }
+}
+
+fn names_a_stock_sanitizer(builtin: &Value) -> bool {
+    builtin
+        .as_str()
+        .is_some_and(|name| BINDABLE_STOCK_SANITIZERS.contains(&name))
 }
 
 /// A `selectors` array as the config loader reads it: a non-empty list of
@@ -419,6 +462,43 @@ fn runs_a_declared_helper(command: &Value, helpers: &[RelativePath]) -> bool {
         Some(["python3", helper]) => helpers.iter().any(|declared| declared.as_str() == *helper),
         _ => false,
     }
+}
+
+/// The one deployment setting a fragment carries: `confined_results` naming
+/// tools the fragment itself declares, so an output sanitizer it ships has a
+/// result to run on. The loader (`compose_included_confinement`) unions the
+/// names into the root's list and refuses every other `policy.deployment` key.
+fn check_confinement(policy: &Path, declared: &toml::Table, deployment: &Value) -> Result<(), PackageError> {
+    let refused = |field: &str| PackageError::PolicyField {
+        policy: policy.to_path_buf(),
+        field: format!("deployment.{field}"),
+    };
+    let deployment = deployment.as_table().ok_or_else(|| refused(""))?;
+    if let Some(field) = deployment.keys().find(|field| field.as_str() != "confined_results") {
+        return Err(refused(field));
+    }
+    let confined = deployment
+        .get("confined_results")
+        .and_then(Value::as_array)
+        .ok_or_else(|| refused("confined_results"))?;
+    let tools: Vec<&str> = declared
+        .get("tool")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .map(|name| name.split('(').next().unwrap_or(name))
+        .collect();
+    for entry in confined {
+        let tool = entry.as_str().ok_or_else(|| refused("confined_results"))?;
+        if !tools.contains(&tool) {
+            return Err(PackageError::PolicyConfinesForeignTool {
+                policy: policy.to_path_buf(),
+                tool: tool.to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Every declaration in the fragment carries a name.
@@ -568,6 +648,24 @@ mod tests {
         assert_eq!(package.battery().unwrap().hosts, vec![Host::ClaudeCode]);
         // The providers the policy binds are read from it, for the marketplace's ownership check.
         assert_eq!(package.battery().unwrap().audiences, vec!["github"]);
+        assert!(package.battery().unwrap().credentials.is_empty());
+    }
+
+    /// The variables a battery's helpers read come from its bindings, one entry
+    /// per variable however many bindings name it, so an install can tell the
+    /// person what to set without the manifest restating the policy.
+    #[test]
+    fn a_battery_credentials_are_read_from_its_bindings() {
+        let bound = BATTERY_POLICY.replace("selectors", "token_env = \"APPA_PROVIDER_GITHUB_TOKEN\"\nselectors")
+            + "[externals.annotators.\"github.visibility\"]\ncommand = [\"python3\", \"audience-source.py\"]\n\
+             token_env = \"APPA_PROVIDER_GITHUB_TOKEN\"\n";
+
+        let package = validate_package(battery(&bound).path()).unwrap();
+
+        assert_eq!(
+            package.battery().unwrap().credentials,
+            vec!["APPA_PROVIDER_GITHUB_TOKEN"]
+        );
     }
 
     #[test]
@@ -672,6 +770,10 @@ mod tests {
             "[externals.audience.github]\nurl = \"https://elsewhere.example/audience\"\n",
             "[externals.audience.github]\nbuiltin = \"llm\"\n",
             "[externals.authorities.review]\nurl = \"https://elsewhere.example/review\"\n",
+            // Stock names bind only sanitizers: an authority that approves on
+            // its own, or a model, is the root's choice.
+            "[externals.authorities.review]\nbuiltin = \"approve\"\n",
+            "[externals.sanitizers.mask]\nbuiltin = \"llm\"\n",
             // A command beside a url is still a url binding on the wire.
             "[externals.audience.github]\ncommand = [\"python3\", \"audience-source.py\"]\n             url = \"https://elsewhere.example/audience\"\n",
             // An external kind only a root config binds.
@@ -685,6 +787,40 @@ mod tests {
                     Err(PackageError::PolicyExternalCommand { .. } | PackageError::PolicyRootSetting { .. })
                 ),
                 "accepted {replacement}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_battery_binds_a_stock_sanitizer_by_name() {
+        for stock in BINDABLE_STOCK_SANITIZERS {
+            let directory = battery(&format!(
+                "{BATTERY_POLICY}\n[[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\n\n\
+                 [externals.sanitizers.mask]\nbuiltin = \"{stock}\"\n"
+            ));
+            assert!(
+                validate_package(directory.path()).is_ok(),
+                "refused the stock sanitizer {stock}"
+            );
+        }
+
+        // The loader takes one transport per binding and hands a credential
+        // only to a program; either beside a stock name would validate here
+        // and refuse to load there.
+        for extra in [
+            "command = [\"python3\", \"audience-source.py\"]\n",
+            "token_env = \"APPA_PROVIDER_GITHUB\"\n",
+        ] {
+            let directory = battery(&format!(
+                "{BATTERY_POLICY}\n[[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\n\n\
+                 [externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\n{extra}"
+            ));
+            assert!(
+                matches!(
+                    validate_package(directory.path()),
+                    Err(PackageError::PolicyExternalCommand { .. })
+                ),
+                "accepted a stock sanitizer beside {extra}"
             );
         }
     }
@@ -878,5 +1014,44 @@ mod tests {
         .unwrap();
 
         assert!(validate_package(directory.path()).is_ok());
+    }
+
+    /// A battery confines the results of its own tools and nothing else: another
+    /// tool's name, another deployment setting, or a shape that is not a list of
+    /// names is refused before a deployment includes it.
+    #[test]
+    fn a_battery_confines_only_the_results_of_its_own_tools() {
+        let head = "[policy]\nversion = 2\n\n";
+        let own = "[policy.deployment]\nconfined_results = [\"mcp/github/get_me\"]\n\n";
+        assert!(validate_package(battery(&BATTERY_POLICY.replace(head, &format!("{head}{own}"))).path()).is_ok());
+
+        let foreign = "[policy.deployment]\nconfined_results = [\"mcp/github/list_repos\"]\n\n";
+        assert!(matches!(
+            validate_package(battery(&BATTERY_POLICY.replace(head, &format!("{head}{foreign}"))).path()),
+            Err(PackageError::PolicyConfinesForeignTool { tool, .. }) if tool == "mcp/github/list_repos"
+        ));
+
+        for (body, what) in [
+            (
+                "[policy.deployment]\nconfined_results = [\"mcp/github/get_me\"]\nstarting_label = { audience = [\"internal\"] }\n\n",
+                "a deployment setting beside the confinement",
+            ),
+            (
+                "[policy.deployment]\nconfined_results = \"mcp/github/get_me\"\n\n",
+                "a confinement that is not a list",
+            ),
+            (
+                "[policy.deployment]\nconfined_results = [1]\n\n",
+                "a confinement entry that is not a name",
+            ),
+        ] {
+            assert!(
+                matches!(
+                    validate_package(battery(&BATTERY_POLICY.replace(head, &format!("{head}{body}"))).path()),
+                    Err(PackageError::PolicyField { field, .. }) if field.starts_with("deployment")
+                ),
+                "accepted {what}"
+            );
+        }
     }
 }

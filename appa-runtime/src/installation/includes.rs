@@ -5,7 +5,7 @@
 //! it wrote and a line the person wrote read the same, and an edit changes
 //! exactly the entry it names.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use appa_package::{Namespace, PackageName};
@@ -111,15 +111,32 @@ pub(crate) fn unbind_servers(text: &str, namespaces: &[Namespace]) -> Result<Str
 /// The batteries the include list names: the entries spelled
 /// `batteries/<name>/appa.toml`.
 pub(crate) fn included(text: &str) -> Result<BTreeSet<String>, InstallError> {
+    Ok(included_in(&document(text)?))
+}
+
+/// The batteries the config includes, and its `server_aliases` table: each
+/// namespace bound to the server key the host reports for it.
+pub(crate) fn batteries(text: &str) -> Result<(BTreeSet<String>, BTreeMap<String, String>), InstallError> {
     let document = document(text)?;
-    Ok(document
+    let bindings = document
+        .get("server_aliases")
+        .and_then(Item::as_table_like)
+        .into_iter()
+        .flat_map(|aliases| aliases.iter())
+        .filter_map(|(namespace, server)| Some((namespace.to_owned(), server.as_str()?.to_owned())))
+        .collect();
+    Ok((included_in(&document), bindings))
+}
+
+fn included_in(document: &DocumentMut) -> BTreeSet<String> {
+    document
         .get("include")
         .and_then(Item::as_array)
         .into_iter()
         .flatten()
         .filter_map(toml_edit::Value::as_str)
         .filter_map(|entry| crate::batteries::name_from_include(Path::new(entry)))
-        .collect())
+        .collect()
 }
 
 #[cfg(test)]

@@ -2,8 +2,9 @@
 
 Rules for the Grain MCP server (meeting recordings, notes, transcripts,
 deals, and workspace settings). Add it to your root config with
-`include`. The root config must define an authority named `hitl`; see
-[`examples/README.md`](../../../examples/README.md).
+`include`. Admin actions carry the `hitl` mark, which the Claude Code and
+kagent plugin defaults' human authority permits; another root config must
+permit it itself, see [`examples/README.md`](../../../examples/README.md).
 
 ## Files
 

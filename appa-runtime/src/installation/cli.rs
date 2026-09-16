@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use appa_package::generation::{ArtifactDigest, Commit, Generation, Platform};
-use appa_package::{Marketplace, PackageKind, PackageName, Role};
+use appa_package::{Battery, Marketplace, Namespace, PackageKind, PackageName, Role};
 use clap::Args;
 use serde::Serialize;
 
-use super::{Acquired, InstallError, Installation, Requirements, Selection, includes};
+use super::{Acquired, InstallError, Installation, Requirements, Selection, discover, includes};
 
 #[derive(Debug, Args)]
 pub struct Target {
@@ -75,18 +75,18 @@ pub struct Install {
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  appa battery install github\n  appa battery install github --config ./deployment/appa.toml --server work-github\n\nAdds the policy include in this operation. Does not create an MCP connection,\nenable tools, acquire credentials, or activate optional authority bindings."
+    after_help = "Examples:\n  appa battery install github\n  appa battery install github linear sentry\n  appa battery install github --config ./deployment/appa.toml --server work-github\n\nAdds the policy includes in this operation. Does not create an MCP connection,\nenable tools, acquire credentials, or activate optional authority bindings."
 )]
 pub struct BatteryInstall {
-    /// Policy battery to add to this deployment. Omitted, the catalog is listed instead.
+    /// Policy batteries to add to this deployment. Omitted, the catalog is listed instead.
     #[arg(value_parser = package_name)]
-    name: Option<PackageName>,
+    names: Vec<PackageName>,
     #[command(flatten)]
     target: Target,
     #[command(flatten)]
     source: Source,
-    /// Existing connection identity for a single-namespace battery.
-    #[arg(long, value_parser = server_name)]
+    /// Existing connection identity for one single-namespace battery.
+    #[arg(long, value_parser = server_name, requires = "names", allow_hyphen_values = true)]
     server: Option<String>,
 }
 
@@ -196,11 +196,19 @@ fn server_name(value: &str) -> Result<String, String> {
     Ok(value.to_owned())
 }
 
-pub fn install_battery(args: BatteryInstall) -> ExitCode {
-    let Some(name) = args.name.clone() else {
+pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
+    if args.names.is_empty() {
         return orient(PackageKind::Battery, &args.target);
-    };
+    }
+    // A battery named twice is one battery: the include is one line either way.
+    let mut seen = std::collections::BTreeSet::new();
+    args.names.retain(|name| seen.insert(name.clone()));
     let result = (|| {
+        if args.server.is_some() && args.names.len() != 1 {
+            return Err(InstallError::Invalid(
+                "--server binds one battery's namespace; install that battery on its own".into(),
+            ));
+        }
         let path = args.target.path();
         if !path.exists() {
             return Err(InstallError::Invalid(format!(
@@ -221,14 +229,23 @@ pub fn install_battery(args: BatteryInstall) -> ExitCode {
         let acquired = args
             .source
             .acquire(&installation, Some(&current), current.requirements())?;
+        let catalog = Marketplace::read(&acquired.marketplace().join("marketplace.toml"))
+            .map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let mut batteries = Vec::new();
+        for name in &args.names {
+            batteries.push(super::battery_package_in(acquired.marketplace(), &catalog, name.as_str())?.1);
+        }
         installation.retain(&acquired)?;
-        let (_, battery) = super::battery_package(acquired.marketplace(), name.as_str())?;
         let (mut selection, text) = match acquired.imported() {
             Some(imported) => {
-                if !imported.selection().batteries.contains(name.as_str()) {
-                    return Err(InstallError::Invalid(
-                        "bundle does not select the requested battery".into(),
-                    ));
+                if let Some(name) = args
+                    .names
+                    .iter()
+                    .find(|name| !imported.selection().batteries.contains(name.as_str()))
+                {
+                    return Err(InstallError::Invalid(format!(
+                        "bundle does not select the requested battery {name}"
+                    )));
                 }
                 imported.configuration(&installation)?
             }
@@ -237,24 +254,90 @@ pub fn install_battery(args: BatteryInstall) -> ExitCode {
                 String::from_utf8(before.clone()).map_err(|error| InstallError::Invalid(error.to_string()))?,
             ),
         };
-        selection.select(PackageKind::Battery, &name);
         selection.set_generation(acquired.generation().clone());
-        let mut text = includes::add(&text, &includes::battery_include(&name))?;
+        let mut text = text;
+        for name in &args.names {
+            selection.select(PackageKind::Battery, name);
+            text = includes::add(&text, &includes::battery_include(name))?;
+        }
         if let Some(server) = &args.server {
+            let battery = &batteries[0];
             if battery.namespaces.len() != 1 {
                 return Err(InstallError::Invalid("this battery has multiple namespaces; configure server_aliases explicitly in the deployment config".into()));
+            }
+            if battery.namespaces[0].as_str() == server {
+                return Err(InstallError::Invalid(format!(
+                    "{server} is the namespace this battery already names; no --server binding is needed"
+                )));
             }
             text = includes::bind_server(&text, &battery.namespaces[0], server)?;
         }
         eprintln!("appa: validating and activating the selected policy...");
         installation.commit_installation(Some(&before), text.as_bytes(), &selection)?;
         let prepared = prepared_directory(&installation)?;
-        Ok((
-            Some(Version::of(selection.generation())),
-            battery_result(name.as_str(), "installed", prepared),
-        ))
+        let mut result = battery_result(&args.names, "installed", prepared);
+        result["setup"] = setup_notices(args.names.iter().zip(&batteries), credential_is_set);
+        Ok((Some(Version::of(selection.generation())), result))
     })();
     finish(&args.target, "battery.install".into(), result)
+}
+
+/// Whether a credential variable holds a value in this command's environment;
+/// an empty one counts as unset, as the helpers that read it treat it.
+fn credential_is_set(variable: &str) -> bool {
+    std::env::var_os(variable).is_some_and(|value| !value.is_empty())
+}
+
+/// What a person has to do after a battery is included that the include itself
+/// does not: set the credential variables its helpers read, or whatever else its
+/// manifest's `setup` says. `is_set` looks a variable up where this command
+/// runs; the runtime may run elsewhere, so the answer is information, never a
+/// refusal. Batteries with nothing to say are absent.
+fn setup_notices<'a>(
+    batteries: impl IntoIterator<Item = (&'a PackageName, &'a Battery)>,
+    is_set: impl Fn(&str) -> bool,
+) -> serde_json::Value {
+    let notices: Vec<serde_json::Value> = batteries
+        .into_iter()
+        .filter(|(_, battery)| !battery.credentials.is_empty() || battery.setup.is_some())
+        .map(|(name, battery)| {
+            let credentials: Vec<serde_json::Value> = battery
+                .credentials
+                .iter()
+                .map(|variable| serde_json::json!({"variable": variable, "set": is_set(variable)}))
+                .collect();
+            serde_json::json!({"battery": name.as_str(), "credentials": credentials, "note": battery.setup})
+        })
+        .collect();
+    serde_json::Value::from(notices)
+}
+
+/// One line per battery with something to set up, after the install or
+/// suggestion line it belongs to.
+fn render_setup(output: &mut impl Write, result: &serde_json::Value) -> io::Result<()> {
+    for notice in result["setup"].as_array().into_iter().flatten() {
+        let reads: Vec<String> = notice["credentials"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|credential| {
+                let variable = credential["variable"].as_str().unwrap_or_default();
+                match credential["set"] == true {
+                    true => format!("{variable} (set in this shell)"),
+                    false => format!("{variable} (not set in this shell)"),
+                }
+            })
+            .collect();
+        let battery = notice["battery"].as_str().unwrap_or_default();
+        let note = notice["note"].as_str().unwrap_or_default();
+        let line = match (reads.is_empty(), note.is_empty()) {
+            (false, false) => format!("  {battery} reads {}. {note}", reads.join(", ")),
+            (false, true) => format!("  {battery} reads {}.", reads.join(", ")),
+            (true, _) => format!("  {battery}: {note}"),
+        };
+        writeln!(output, "{line}")?;
+    }
+    Ok(())
 }
 
 pub fn remove_battery(args: BatteryRemove) -> ExitCode {
@@ -269,10 +352,18 @@ pub fn remove_battery(args: BatteryRemove) -> ExitCode {
             .ok_or_else(|| InstallError::Invalid("no installed selection for this config".into()))?;
         let text = String::from_utf8(before.clone()).map_err(|error| InstallError::Invalid(error.to_string()))?;
         let without = includes::remove(&text, &includes::battery_include(&args.name))?;
+        // Another spelling of the include is the person's line; it stays,
+        // and so does the battery until they take it out.
+        if includes::included(&without)?.contains(args.name.as_str()) {
+            return Err(InstallError::Invalid(format!(
+                "{} is still included by a line this command does not edit; remove that include yourself",
+                args.name
+            )));
+        }
         if without == text && !selection.batteries.contains(args.name.as_str()) {
             return Ok((
                 Some(Version::of(selection.generation())),
-                serde_json::json!({"battery": args.name.as_str(), "state": "unchanged"}),
+                serde_json::json!({"batteries": [args.name.as_str()], "state": "unchanged"}),
             ));
         }
         let acquired = Acquired::retained(&installation, &selection, Requirements::Packages)?;
@@ -284,7 +375,7 @@ pub fn remove_battery(args: BatteryRemove) -> ExitCode {
         let prepared = prepared_directory(&installation)?;
         Ok((
             Some(Version::of(selection.generation())),
-            battery_result(args.name.as_str(), "removed", prepared),
+            battery_result(std::slice::from_ref(&args.name), "removed", prepared),
         ))
     })();
     finish(&args.target, "battery.remove".into(), result)
@@ -500,9 +591,22 @@ pub fn install(args: Install) -> ExitCode {
         installation.retain(&acquired)?;
         let package = PackageName::parse(&name).map_err(|error| InstallError::Invalid(error.to_string()))?;
         // A bundle restores its own selection and a reinstall keeps the
-        // person's battery choices; only the plugin's first install brings its
-        // batteries along.
+        // person's battery choices; only the plugin's first install brings the
+        // batteries its manifest requires.
         let mut included = Vec::new();
+        let catalog = Marketplace::read(&acquired.marketplace().join("marketplace.toml"))
+            .map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let entry = catalog
+            .packages
+            .iter()
+            .find(|entry| entry.kind == PackageKind::Plugin && entry.name == package)
+            .ok_or_else(|| InstallError::Invalid("plugin is absent from this version".into()))?;
+        let root = acquired.marketplace().join(entry.path.as_str());
+        let manifest = appa_package::Package::read(&root.join(appa_package::MANIFEST_FILE))
+            .map_err(|error| InstallError::Invalid(error.to_string()))?;
+        let Role::Plugin(plugin) = manifest.role else {
+            return Err(InstallError::Invalid("selected package is not a plugin".into()));
+        };
         let (mut selection, text) = if let Some(imported) = acquired.imported() {
             if !imported.selection().plugins.contains(&name) {
                 return Err(InstallError::Invalid(
@@ -511,24 +615,11 @@ pub fn install(args: Install) -> ExitCode {
             }
             imported.configuration(&installation)?
         } else {
-            let catalog = Marketplace::read(&acquired.marketplace().join("marketplace.toml"))
-                .map_err(|error| InstallError::Invalid(error.to_string()))?;
-            let entry = catalog
-                .packages
-                .iter()
-                .find(|entry| entry.kind == PackageKind::Plugin && entry.name == package)
-                .ok_or_else(|| InstallError::Invalid("plugin is absent from this version".into()))?;
-            let root = acquired.marketplace().join(entry.path.as_str());
-            let manifest = appa_package::Package::read(&root.join(appa_package::MANIFEST_FILE))
-                .map_err(|error| InstallError::Invalid(error.to_string()))?;
-            let Role::Plugin(plugin) = manifest.role else {
-                return Err(InstallError::Invalid("selected package is not a plugin".into()));
-            };
             let first_install = !current
                 .as_ref()
                 .is_some_and(|selection| selection.plugins.contains(&name));
             if first_install {
-                included = super::host_batteries(acquired.marketplace(), plugin.host())?;
+                included = plugin.batteries().to_vec();
             }
             let selected = current.unwrap_or_else(|| Selection::empty(acquired.generation().clone(), platform));
             let text = match before.as_deref() {
@@ -560,9 +651,10 @@ pub fn install(args: Install) -> ExitCode {
         eprintln!("appa: verifying artifacts and preparing selected plugins...");
         installation.commit_installation(before.as_deref(), text.as_bytes(), &selection)?;
         let batteries: Vec<&str> = included.iter().map(PackageName::as_str).collect();
+        let (included_now, bindings) = includes::batteries(&text)?;
         // An existing config is the person's and is not edited; one without the
         // host's own battery gates nothing a Claude session does, so the gap is named.
-        let warning = (name == "claude-code" && !includes::included(&text)?.contains("claude-code")).then(|| {
+        let warning = (name == "claude-code" && !included_now.contains("claude-code")).then(|| {
             format!(
                 "{} does not include the claude-code battery: add \"{}\" to its include list, or {}",
                 installation.config_path().display(),
@@ -573,6 +665,47 @@ pub fn install(args: Install) -> ExitCode {
         if let Some(warning) = &warning {
             eprintln!("appa: warning: {warning}");
         }
+        // The servers the host has connected here, and the batteries of this
+        // version that would cover them: suggested, never included unasked.
+        let servers = std::env::current_dir()
+            .map(|cwd| discover::servers(plugin.host(), &cwd))
+            .unwrap_or_default();
+        // The install is committed; a suggestion that cannot be computed is
+        // named, never a failure of the install.
+        let available = match servers.is_empty() {
+            true => Vec::new(),
+            false => discover::batteries(acquired.marketplace(), &catalog, plugin.host()).unwrap_or_else(|error| {
+                eprintln!("appa: warning: battery suggestions were not computed: {error}");
+                Vec::new()
+            }),
+        };
+        let coverage = discover::coverage(&servers, &available, &included_now, &bindings);
+        // A suggested battery's setup is named beside the command that includes
+        // it, so the person knows what it takes before running the command.
+        let setup = setup_notices(
+            coverage.suggestions.iter().filter_map(|suggestion| {
+                let suggested = match suggestion {
+                    discover::Suggestion::Plain(battery) | discover::Suggestion::Bound { battery, .. } => battery,
+                };
+                available
+                    .iter()
+                    .find(|(name, _)| name == suggested)
+                    .map(|(name, battery)| (name, battery))
+            }),
+            credential_is_set,
+        );
+        let suggestions: Vec<serde_json::Value> = coverage
+            .suggestions
+            .iter()
+            .map(|suggestion| match suggestion {
+                discover::Suggestion::Plain(battery) => serde_json::json!({"battery": battery.as_str()}),
+                discover::Suggestion::Bound { battery, server } => {
+                    serde_json::json!({"battery": battery.as_str(), "server": server.as_str()})
+                }
+            })
+            .collect();
+        let commands = suggestion_commands(&coverage, args.target.config.as_deref());
+        let uncovered: Vec<&str> = coverage.uncovered.iter().map(Namespace::as_str).collect();
         let mut result = if name == "kagent" {
             let installed = installation
                 .selection()?
@@ -584,6 +717,10 @@ pub fn install(args: Install) -> ExitCode {
         } else {
             serde_json::json!({"plugin": name, "state": "registered", "batteries": batteries, "runtime": "verified"})
         };
+        result["suggestions"] = serde_json::Value::from(suggestions);
+        result["commands"] = serde_json::Value::from(commands);
+        result["setup"] = setup;
+        result["uncovered_servers"] = serde_json::Value::from(uncovered);
         if let Some(warning) = warning {
             result["warning"] = serde_json::Value::from(warning);
         }
@@ -614,8 +751,9 @@ fn prepared_directory(installation: &Installation) -> Result<Option<PathBuf>, In
         .map(|digest| installation.state.join("kagent").join(digest.hex())))
 }
 
-fn battery_result(name: &str, state: &str, prepared: Option<PathBuf>) -> serde_json::Value {
-    let mut result = serde_json::json!({"battery":name,"state":state});
+fn battery_result(names: &[PackageName], state: &str, prepared: Option<PathBuf>) -> serde_json::Value {
+    let names: Vec<&str> = names.iter().map(PackageName::as_str).collect();
+    let mut result = serde_json::json!({"batteries":names,"state":state});
     if let Some(directory) = prepared {
         result["directory"] = serde_json::json!(directory);
         result["cluster"] = serde_json::json!("unchanged");
@@ -780,8 +918,83 @@ fn orient(kind: PackageKind, target: &Target) -> ExitCode {
     ExitCode::from(2)
 }
 
-/// The catalog as a table, then the deployment's state when nothing is installed
-/// yet, so the next command is on the screen.
+/// The commands that include the suggested batteries: every battery without
+/// a binding in one `appa battery install`, and one command per binding,
+/// since a binding names one battery.
+fn suggestion_commands(coverage: &discover::Coverage, config: Option<&Path>) -> Vec<String> {
+    let target = config
+        .map(|config| format!(" --config {}", shell_word(&config.to_string_lossy())))
+        .unwrap_or_default();
+    let plain: Vec<&str> = coverage
+        .suggestions
+        .iter()
+        .filter_map(|suggestion| match suggestion {
+            discover::Suggestion::Plain(battery) => Some(battery.as_str()),
+            discover::Suggestion::Bound { .. } => None,
+        })
+        .collect();
+    let mut commands = Vec::new();
+    if !plain.is_empty() {
+        commands.push(format!("appa battery install {}{target}", plain.join(" ")));
+    }
+    for suggestion in &coverage.suggestions {
+        if let discover::Suggestion::Bound { battery, server } = suggestion {
+            commands.push(format!(
+                "appa battery install {battery} --server {}{target}",
+                server.as_str()
+            ));
+        }
+    }
+    commands
+}
+
+/// `text` as one word of a POSIX shell command line: as it is when every
+/// character is one a shell passes through, single-quoted otherwise.
+fn shell_word(text: &str) -> String {
+    let plain = !text.is_empty()
+        && !text.starts_with('-')
+        && text
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "/._~+:@,-".contains(character));
+    match plain {
+        true => text.to_owned(),
+        false => format!("'{}'", text.replace('\'', "'\\''")),
+    }
+}
+
+/// The batteries an install found servers for, as the commands that include
+/// them, and the servers no battery covers. Nothing when there is nothing to
+/// say: a host without discovery, or one whose servers are all covered.
+fn render_coverage(output: &mut impl Write, result: &serde_json::Value) -> io::Result<()> {
+    let commands: Vec<&str> = result["commands"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    if !commands.is_empty() {
+        writeln!(output, "MCP servers configured here have batteries; include them with:")?;
+        for command in commands {
+            writeln!(output, "  {command}")?;
+        }
+        render_setup(output, result)?;
+    }
+    let uncovered: Vec<&str> = result["uncovered_servers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    if !uncovered.is_empty() {
+        writeln!(
+            output,
+            "MCP servers without a battery: {}. Their tools are annotated call by call until the appa-guide skill writes rules for them.",
+            uncovered.join(", ")
+        )?;
+    }
+    Ok(())
+}
+
 /// " with battery x" / " with batteries x and y" for a plugin receipt, empty when
 /// the install included none.
 fn with_batteries(result: &serde_json::Value) -> String {
@@ -992,6 +1205,7 @@ fn finish(
                 receipt.deployment.display(),
                 result["directory"].as_str().unwrap_or_default()
             )
+            .and_then(|()| render_coverage(&mut output, result))
         } else {
             let result = receipt.result.as_ref().expect("plugin result is present");
             writeln!(
@@ -1005,17 +1219,26 @@ fn finish(
                     .map(Version::label)
                     .unwrap_or_else(|| "unknown version".to_owned())
             )
+            .and_then(|()| render_coverage(&mut output, result))
         }
-    } else if let Some(battery) = receipt.result.as_ref().and_then(|result| result.get("battery")) {
+    } else if let Some(batteries) = receipt.result.as_ref().and_then(|result| result.get("batteries")) {
         (|| {
             let result = receipt.result.as_ref().expect("battery results are present");
+            let names: Vec<&str> = batteries
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .collect();
             writeln!(
                 output,
-                "Battery {}: {} for {}.",
-                battery.as_str().unwrap_or_default(),
+                "{} {}: {} for {}.",
+                if names.len() == 1 { "Battery" } else { "Batteries" },
+                names.join(", "),
                 result["state"].as_str().unwrap_or_default(),
                 receipt.deployment.display()
             )?;
+            render_setup(&mut output, result)?;
             if let Some(directory) = result.get("directory").and_then(serde_json::Value::as_str) {
                 writeln!(
                     output,
@@ -1049,6 +1272,110 @@ fn finish(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A receipt with nothing discovered adds no lines; one with suggestions
+    /// prints each command on its own line, and uncovered servers are named.
+    #[test]
+    fn coverage_renders_only_what_was_found() {
+        let mut quiet = Vec::new();
+        render_coverage(
+            &mut quiet,
+            &serde_json::json!({"commands": [], "uncovered_servers": []}),
+        )
+        .unwrap();
+        assert!(quiet.is_empty());
+
+        let mut found = Vec::new();
+        render_coverage(
+            &mut found,
+            &serde_json::json!({
+                "commands": ["appa battery install github linear", "appa battery install slack --server slack"],
+                "uncovered_servers": ["fetch"],
+            }),
+        )
+        .unwrap();
+        let text = String::from_utf8(found).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[1], "  appa battery install github linear");
+        assert_eq!(lines[2], "  appa battery install slack --server slack");
+        assert_eq!(lines.len(), 4);
+        assert!(lines[3].contains("fetch"));
+    }
+
+    /// A battery whose helpers read a credential, or whose manifest has a
+    /// setup note, gets one line naming both and whether the variable is set
+    /// where the command ran; a battery with neither gets none.
+    #[test]
+    fn setup_notices_name_each_credential_and_the_manifest_note() {
+        let battery = |credentials: &[&str], setup: Option<&str>| Battery {
+            policy: appa_package::RelativePath::parse("appa.toml").unwrap(),
+            hosts: vec![appa_package::Host::ClaudeCode],
+            namespaces: vec![],
+            helpers: vec![],
+            audiences: vec![],
+            credentials: credentials.iter().map(|variable| variable.to_string()).collect(),
+            setup: setup.map(str::to_owned),
+        };
+        let github = PackageName::parse("github").unwrap();
+        let linear = PackageName::parse("linear").unwrap();
+        let notion = PackageName::parse("notion").unwrap();
+        let batteries = [
+            (
+                &github,
+                battery(&["APPA_PROVIDER_GITHUB_TOKEN"], Some("Uses your gh login when unset.")),
+            ),
+            (&linear, battery(&["APPA_PROVIDER_LINEAR_TOKEN"], None)),
+            (&notion, battery(&[], None)),
+        ];
+
+        let setup = setup_notices(batteries.iter().map(|(name, battery)| (*name, battery)), |variable| {
+            variable == "APPA_PROVIDER_LINEAR_TOKEN"
+        });
+        let mut rendered = Vec::new();
+        render_setup(&mut rendered, &serde_json::json!({"setup": setup})).unwrap();
+
+        assert_eq!(
+            String::from_utf8(rendered).unwrap(),
+            "  github reads APPA_PROVIDER_GITHUB_TOKEN (not set in this shell). Uses your gh login when unset.\n\
+             \x20 linear reads APPA_PROVIDER_LINEAR_TOKEN (set in this shell).\n"
+        );
+    }
+
+    /// Every battery without a binding goes in one command, so the person
+    /// runs one line; each binding is its own, as the command takes one. A
+    /// config path a shell would split is quoted.
+    #[test]
+    fn suggestion_commands_batch_plain_batteries_and_separate_bindings() {
+        let plain = |battery: &str| discover::Suggestion::Plain(PackageName::parse(battery).unwrap());
+        let coverage = discover::Coverage {
+            suggestions: vec![
+                plain("github"),
+                plain("linear"),
+                discover::Suggestion::Bound {
+                    battery: PackageName::parse("slack").unwrap(),
+                    server: appa_package::Namespace::parse("slack").unwrap(),
+                },
+            ],
+            uncovered: vec![],
+        };
+
+        assert_eq!(
+            suggestion_commands(&coverage, Some(Path::new("./deployment/appa.toml"))),
+            vec![
+                "appa battery install github linear --config ./deployment/appa.toml",
+                "appa battery install slack --server slack --config ./deployment/appa.toml"
+            ]
+        );
+        assert_eq!(
+            suggestion_commands(&coverage, Some(Path::new("/Users/me/my deployment/it's.toml")))[0],
+            "appa battery install github linear --config '/Users/me/my deployment/it'\\''s.toml'"
+        );
+        assert_eq!(shell_word("-deploy/appa.toml"), "'-deploy/appa.toml'");
+        assert_eq!(
+            suggestion_commands(&discover::Coverage::default(), None),
+            Vec::<String>::new()
+        );
+    }
 
     /// The answer works by replacing the one line the shipped policy carries, so the
     /// policy has to carry exactly one of it. Two, or none, and a yes silently does nothing.

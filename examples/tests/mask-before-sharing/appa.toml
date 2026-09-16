@@ -1,0 +1,43 @@
+# The session is the organisation's: it starts at `internal`. A credential
+# read is the requester's own data and narrows it to `self`. The masker is the
+# declared way back from `self` to `internal`, applied to the command's output
+# before the trajectory takes it, so the session keeps its label.
+#
+# No `[policy.audience]` source is bound. `self` and `internal` are built-in
+# levels of one chain, so the masker's `from = ["self"]` derives from the
+# narrowed label without a member list.
+
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "mcp/shell/bash(command:*.env*)"
+delta = { audience = ["self"] }
+
+[[policy.tool]]
+name = "mcp/shell/bash"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/mail/send"
+requires = { audience = { contains = ["internal"] } }
+delta = {}
+
+# Masks the command's output and moves the value from `self` to `internal`.
+[[policy.sanitizer]]
+name = "mask-secrets"
+on = ["tool_output"]
+
+[policy.sanitizer.permits]
+audience = { from = ["self"], to = ["internal"] }
+
+[policy.deployment]
+starting_label = { audience = ["internal"] }
+confined_results = ["mcp/shell/bash"]
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+
+[externals.sanitizers.mask-secrets]
+builtin = "redact-email"

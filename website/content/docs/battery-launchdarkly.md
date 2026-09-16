@@ -9,7 +9,7 @@ breadcrumb: LaunchDarkly
 
 The LaunchDarkly battery covers all 20 tools that LaunchDarkly's official MCP server registers: feature flags, environments, AI Configs, code references, and the audit log.
 
-Your root config must define an Authority permitting `launchdarkly-review` for writes.
+Writes need `launchdarkly-review`. The Claude Code and kagent plugin defaults permit every mark, so the person running the session reviews them; another root config must define an Authority permitting the mark.
 
 [View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/launchdarkly).
 
@@ -21,6 +21,6 @@ Your root config must define an Authority permitting `launchdarkly-review` for w
 
 ## Limit
 
-LaunchDarkly scopes API access by project, environment, and custom role, but no tool reports who may read a project or an environment. Every read is therefore `internal`. Map it to the people who may see everything the token can reach, and narrow one project in the root config by argument. Root rules run before battery rules.
+LaunchDarkly tokens grant access across projects and environments without exposing per-resource ACLs. All reads default to `internal`. To confine an agent to specific projects, scope them in your root `appa.toml` using argument selectors.
 
 This version exposes no project or environment write tool, so the battery names none.

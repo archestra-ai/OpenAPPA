@@ -7,9 +7,9 @@ sidebar: false
 breadcrumb: Sentry
 ---
 
-The Sentry battery covers the Sentry MCP server: the nine tools it lists and the 55 catalog tools behind `execute_sentry_tool`, each named through the `name` argument, so the inner tool decides what a call is.
+The Sentry battery covers the Sentry MCP server: the nine primary tools plus 55 catalog tools dispatched dynamically through `execute_sentry_tool`.
 
-Your root config must define an Authority permitting `sentry-review` for writes.
+Writes need `sentry-review`. The Claude Code and kagent plugin defaults permit every mark, so the person running the session reviews them; another root config must define an Authority permitting the mark.
 
 [View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/sentry).
 
@@ -21,4 +21,4 @@ Your root config must define an Authority permitting `sentry-review` for writes.
 - Creating or changing a team, project, DSN, or uptime monitor records `sentry.sensitive`.
 - A catalog name the policy does not know needs a person.
 
-Sentry exposes no per-project readers to a policy, so every read is `internal`. Map it to the people who may see everything the token can list, and narrow one project in the root config by argument. Root rules run before battery rules.
+Sentry tokens do not expose per-project reader boundaries to policy, so all reads default to `internal`. To restrict an agent to specific projects, scope them in your root policy using argument selectors.

@@ -83,6 +83,14 @@ pub struct Battery {
     /// `validate_package` and empty from the manifest alone. A marketplace
     /// gives each provider one owner, as it does each namespace.
     pub audiences: Vec<String>,
+    /// The environment variables the policy's bindings name as `token_env`,
+    /// read from the policy by `validate_package` like `audiences`, so the
+    /// manifest cannot disagree with the policy about what its helpers read.
+    /// An install names each one to the person who then has to set it.
+    pub credentials: Vec<String>,
+    /// What the manifest tells the person after an install and the variable
+    /// names cannot: the token's scopes, or a login the helpers fall back to.
+    pub setup: Option<String>,
 }
 
 /// A plugin package, with installation fields specific to its host.
@@ -90,9 +98,11 @@ pub struct Battery {
 pub enum Plugin {
     ClaudeCode {
         default_policy: RelativePath,
+        batteries: Vec<PackageName>,
     },
     Kagent {
         default_policy: RelativePath,
+        batteries: Vec<PackageName>,
         images: BTreeMap<ImageName, ImageReference>,
     },
 }
@@ -110,6 +120,15 @@ impl Plugin {
     pub fn default_policy(&self) -> &RelativePath {
         match self {
             Self::ClaudeCode { default_policy, .. } | Self::Kagent { default_policy, .. } => default_policy,
+        }
+    }
+
+    /// The batteries the plugin's host cannot be gated without: a first
+    /// install includes each of them. Every other battery is the person's
+    /// choice.
+    pub fn batteries(&self) -> &[PackageName] {
+        match self {
+            Self::ClaudeCode { batteries, .. } | Self::Kagent { batteries, .. } => batteries,
         }
     }
 }
@@ -216,6 +235,7 @@ struct RawBattery {
     namespaces: Vec<String>,
     #[serde(default)]
     helpers: Vec<String>,
+    setup: Option<String>,
 }
 
 impl RawBattery {
@@ -254,12 +274,25 @@ impl RawBattery {
         for helper in &self.helpers {
             helpers.push(relative(helper, "battery.helpers", path)?);
         }
+        // One line the install prints verbatim: a blank or multi-line note is
+        // a manifest mistake, refused where it is read rather than tidied.
+        let setup = match self.setup.as_deref().map(str::trim) {
+            None => None,
+            Some(note) if !note.is_empty() && !note.contains(['\n', '\r']) => Some(note.to_owned()),
+            Some(_) => {
+                return Err(ManifestError::Setup {
+                    path: path.to_path_buf(),
+                });
+            }
+        };
         Ok(Battery {
             policy,
             hosts,
             namespaces,
             helpers,
             audiences: Vec::new(),
+            credentials: Vec::new(),
+            setup,
         })
     }
 }
@@ -272,6 +305,8 @@ struct RawPlugin {
     host: String,
     protocol: u32,
     default_policy: String,
+    #[serde(default)]
+    batteries: Vec<String>,
     images: Option<BTreeMap<String, String>>,
 }
 
@@ -288,6 +323,21 @@ impl RawPlugin {
             });
         }
         let default_policy = relative(&self.default_policy, "plugin.default_policy", path)?;
+        let mut batteries: Vec<PackageName> = Vec::new();
+        for battery in &self.batteries {
+            let battery = PackageName::parse(battery).map_err(|source| ManifestError::Name {
+                path: path.to_path_buf(),
+                field: "plugin.batteries".to_owned(),
+                source,
+            })?;
+            if batteries.contains(&battery) {
+                return Err(ManifestError::RepeatedBattery {
+                    path: path.to_path_buf(),
+                    battery: battery.to_string(),
+                });
+            }
+            batteries.push(battery);
+        }
         let absent = |present: bool, field: &'static str| match present {
             true => Err(ManifestError::FieldNotForHost {
                 path: path.to_path_buf(),
@@ -305,7 +355,10 @@ impl RawPlugin {
         match host {
             Host::ClaudeCode => {
                 absent(self.images.is_some(), "images")?;
-                Ok(Plugin::ClaudeCode { default_policy })
+                Ok(Plugin::ClaudeCode {
+                    default_policy,
+                    batteries,
+                })
             }
             Host::Kagent => {
                 let declared = self.images.ok_or_else(|| missing("images"))?;
@@ -322,7 +375,11 @@ impl RawPlugin {
                     })?;
                     images.insert(name, reference);
                 }
-                Ok(Plugin::Kagent { default_policy, images })
+                Ok(Plugin::Kagent {
+                    default_policy,
+                    batteries,
+                    images,
+                })
             }
         }
     }
@@ -366,9 +423,30 @@ mod tests {
                 hosts: vec![Host::ClaudeCode],
                 namespaces: vec![Namespace::parse("github").unwrap()],
                 audiences: vec![],
+                credentials: vec![],
+                setup: None,
                 helpers: vec![RelativePath::parse("audience-source.py").unwrap()],
             }
         );
+    }
+
+    /// `setup` is one line the install prints verbatim, so a blank or
+    /// multi-line note is refused where it is read.
+    #[test]
+    fn a_battery_setup_note_is_one_non_empty_line() {
+        let with = |note: &str| manifest(&BATTERY.replace("helpers", &format!("setup = {note:?}\nhelpers")));
+        assert_eq!(
+            with("Uses your gh login when unset.")
+                .unwrap()
+                .battery()
+                .unwrap()
+                .setup
+                .as_deref(),
+            Some("Uses your gh login when unset.")
+        );
+        assert!(matches!(with("  "), Err(ManifestError::Setup { .. })));
+        assert!(matches!(with("one\ntwo"), Err(ManifestError::Setup { .. })));
+        assert!(matches!(with("one\rtwo"), Err(ManifestError::Setup { .. })));
     }
 
     /// A battery covers the namespace its own name spells until it says
@@ -418,8 +496,30 @@ mod tests {
             package.plugin().unwrap(),
             &Plugin::ClaudeCode {
                 default_policy: RelativePath::parse("default.appa.toml").unwrap(),
+                batteries: vec![],
             }
         );
+    }
+
+    /// A plugin names the batteries its host cannot be gated without; a
+    /// plugin that names none has no required battery.
+    #[test]
+    fn a_plugin_parses_the_batteries_it_requires() {
+        let declared = manifest(&format!("{CLAUDE_CODE}batteries = [\"claude-code\", \"github\"]\n")).unwrap();
+        assert_eq!(
+            declared.plugin().unwrap().batteries(),
+            &[
+                PackageName::parse("claude-code").unwrap(),
+                PackageName::parse("github").unwrap()
+            ]
+        );
+        assert!(manifest(KAGENT).unwrap().plugin().unwrap().batteries().is_empty());
+
+        let refused = manifest(&format!("{CLAUDE_CODE}batteries = [\"Claude Code\"]\n"));
+        assert!(matches!(refused, Err(ManifestError::Name { .. })));
+
+        let repeated = manifest(&format!("{CLAUDE_CODE}batteries = [\"github\", \"github\"]\n"));
+        assert!(matches!(repeated, Err(ManifestError::RepeatedBattery { .. })));
     }
 
     #[test]

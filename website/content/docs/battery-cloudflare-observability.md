@@ -21,6 +21,6 @@ Your root config needs no Authority for it: every tool on this server reads, so 
 
 ## Limits
 
-Cloudflare exposes no per-Worker or per-dataset readers to a policy. An API token can be scoped to fewer permissions, but no tool reports which people may read a given Worker's logs. Every account-scoped read is therefore `internal`. Map it to the people who may see everything this token can reach, and narrow one Worker in the root config by argument. Root rules run before battery rules.
+Cloudflare API tokens grant account-wide log access without exposing per-Worker reader boundaries. All reads default to `internal`. To restrict an agent to specific Workers, scope them in your root `appa.toml` using argument selectors.
 
 Log content is unsanitized. An attacker who can reach one of the account's Workers can write text into the logs the agent reads. The battery labels that text untrusted, which stops it from reaching a tool that needs trusted input, but no Sanitizer strips it.

@@ -120,22 +120,30 @@ Every consult carries the declared templates, and the script refuses
 one whose declaration differs from what it serves (exit status 2), so a
 policy and a script of different versions never answer each other.
 
-Both scripts read their token from `APPA_PROVIDER_GITHUB_TOKEN`, which
-each binding's `token_env` forwards, and call `https://api.github.com`
+**`github_token.py`** — where both scripts get their token. They read
+`APPA_PROVIDER_GITHUB_TOKEN`, which each binding's `token_env` forwards;
+when it is unset they ask the GitHub CLI with `gh auth token` for the
+API host, so a machine where `gh auth login` has run needs no variable.
+The install names the variable and this fallback after it includes the
+battery. A token needs the `read:org` and `user:email` scopes, and
+`repo` for the private repositories it reads and lists collaborators of;
+a `gh` login's default scopes cover them, and `user:email` is optional
+(the viewer then stays `github:<login>`). Neither present, the script
+stops and names both fixes. The scripts call `https://api.github.com`
 unless `GITHUB_API_URL` names another root, as it does for a GitHub
-Enterprise Server (`https://<host>/api/v3`). The token needs the `read:org` and
-`user:email` scopes, and `repo` for the private repositories it reads
-and lists collaborators of. A command inherits none of the runtime's
-`APPA_*` namespace — not its wiring, not a bearer token it sends, not
-another command's credential — only the one `APPA_PROVIDER_*` variable
-its own binding names. Any GitHub error or missing answer stops the
-operation without recording a decision; nothing is guessed.
+Enterprise Server (`https://<host>/api/v3`), and ask `gh` for that host.
+A command inherits none of the runtime's `APPA_*` namespace — not its
+wiring, not a bearer token it sends, not another command's credential —
+only the one `APPA_PROVIDER_*` variable its own binding names, with the
+rest of the environment `gh` needs. Any GitHub error or missing answer
+stops the operation without recording a decision; nothing is guessed.
 
-**`test_audience_source.py`**, **`test_repository_visibility.py`** —
-tests without network: recorded GitHub REST payloads for the selectors,
-answer shaping and consult refusals for the annotators, and the envelope
-and declaration checks. Run with `python3 -m unittest discover -s . -p
-'test_*.py'`.
+**`test_audience_source.py`**, **`test_repository_visibility.py`**,
+**`test_github_token.py`** — tests without network: recorded GitHub
+REST payloads for the selectors, answer shaping and consult refusals for
+the annotators, the envelope and declaration checks, and the token
+lookup against a stand-in `gh` on its own `PATH`. Run with `python3 -m
+unittest discover -s . -p 'test_*.py'`.
 
 ## Try it against GitHub
 

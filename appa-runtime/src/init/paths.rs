@@ -66,6 +66,16 @@ pub(crate) fn claude_config_dir() -> Result<Option<PathBuf>, InitError> {
     }
 }
 
+/// Where Claude Code keeps this user's `.claude.json`, the file the `claude`
+/// command writes MCP registrations to: inside `CLAUDE_CONFIG_DIR` when that
+/// is set, otherwise directly under the home directory.
+pub(crate) fn claude_config_file() -> Result<Option<PathBuf>, InitError> {
+    match env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(path) => absolute_directory(PathBuf::from(path)).map(|directory| Some(directory.join(".claude.json"))),
+        None => Ok(user_home().map(|home| home.join(".claude.json"))),
+    }
+}
+
 pub(super) fn user_home() -> Option<PathBuf> {
     env::var_os("HOME").map(PathBuf::from).or({
         #[cfg(windows)]
