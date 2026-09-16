@@ -137,6 +137,28 @@ impl PostgresStore {
         })
     }
 
+    /// Run several reads that must agree with each other. The host's own transaction is one
+    /// when it holds one, exactly as [`PostgresStore::mutate`] defers to it: a read that
+    /// opened its own inside that one would end the host's on the way out.
+    fn snapshot<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut Client) -> Result<T, PostgresError> + Send + 'static,
+    ) -> Result<T, PostgresError> {
+        self.run(move |state| {
+            let outer = state.transaction;
+            if !outer {
+                state.client.batch_execute("BEGIN")?;
+            }
+            let result = operation(&mut state.client);
+            if !outer {
+                state
+                    .client
+                    .batch_execute(if result.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
+            }
+            result
+        })
+    }
+
     pub(super) fn has_root(&self, root: &TrajectoryId) -> Result<bool, PostgresError> {
         let root = root.as_str().to_owned();
         self.with_client(move |client| {
@@ -218,67 +240,89 @@ impl PostgresStore {
         decoded(root, batches, policy)
     }
 
-    /// See [`LogStore::host_records_of`].
-    pub(super) fn host_records_of(&self, root: &TrajectoryId) -> Result<Vec<HostRecord>, ReadError> {
+    /// See [`LogStore::host_records_of`]. The rows and the position are one transaction, so
+    /// the basis belongs to the records it comes back with.
+    pub(super) fn host_records_of(&self, root: &TrajectoryId) -> Result<HostStream, ReadError> {
         let id = root.as_str().to_owned();
         let known = id.clone();
-        let rows = self.with_client(move |client| {
+        let (basis, rows) = self.snapshot(move |client| {
             let rows = client.query(
                 "SELECT seq, payload FROM openappa_events \
                  WHERE root = $1 AND substring(payload from 1 for 1) = '\\x7b'::bytea ORDER BY seq",
                 &[&id],
             )?;
-            if rows.is_empty()
-                && client
-                    .query_opt("SELECT 1 FROM openappa_events WHERE root = $1 LIMIT 1", &[&id])?
-                    .is_none()
-            {
-                return Ok(None);
-            }
-            Ok(Some(
+            let basis = client
+                .query_one("SELECT count(*) FROM openappa_events WHERE root = $1", &[&id])?
+                .get::<_, i64>(0) as u64;
+            Ok((
+                basis,
                 rows.into_iter()
                     .map(|row| (row.get::<_, i64>(0) as u64, row.get::<_, Vec<u8>>(1)))
                     .collect::<Vec<_>>(),
             ))
         })?;
-        let Some(rows) = rows else {
+        if basis == 0 {
             return Err(ReadError::UnknownRoot { root: known });
-        };
-        rows.into_iter()
-            .map(|(seq, bytes)| decode_host_record(&known, seq, &bytes))
-            .collect()
+        }
+        Ok(HostStream {
+            root: root.clone(),
+            basis,
+            records: rows
+                .into_iter()
+                .map(|(seq, bytes)| decode_host_record(&known, seq, &bytes))
+                .collect::<Result<Vec<_>, _>>()?,
+        })
     }
 
-    /// See [`LogStore::host_records_mentioning`].
-    pub(super) fn host_records_mentioning(
+    /// See [`LogStore::latest_host_record_of`]. The rows arrive newest first and are decoded
+    /// one at a time, so the walk still stops at the first match.
+    pub(super) fn latest_host_record_of(
         &self,
-        needle: &str,
-    ) -> Result<Vec<(TrajectoryId, Vec<HostRecord>)>, ReadError> {
-        let needle = needle.as_bytes().to_vec();
+        root: &TrajectoryId,
+        matches: impl Fn(&HostObservation) -> bool,
+    ) -> Result<Option<HostRecord>, ReadError> {
+        let id = root.as_str().to_owned();
+        let known = id.clone();
         let rows = self.with_client(move |client| {
-            let rows = client.query(
-                "SELECT root, seq, payload FROM openappa_events \
-                 WHERE substring(payload from 1 for 1) = '\\x7b'::bytea AND position($1::bytea in payload) > 0 \
-                 ORDER BY root, seq",
-                &[&needle],
-            )?;
-            Ok(rows
+            Ok(client
+                .query(
+                    "SELECT seq, payload FROM openappa_events \
+                     WHERE root = $1 AND substring(payload from 1 for 1) = '\\x7b'::bytea ORDER BY seq DESC",
+                    &[&id],
+                )?
                 .into_iter()
-                .map(|row| {
-                    (
-                        row.get::<_, String>(0),
-                        row.get::<_, i64>(1) as u64,
-                        row.get::<_, Vec<u8>>(2),
-                    )
-                })
+                .map(|row| (row.get::<_, i64>(0) as u64, row.get::<_, Vec<u8>>(1)))
                 .collect::<Vec<_>>())
         })?;
-        grouped_by_root(rows)
+        for (seq, bytes) in rows {
+            let record = decode_host_record(&known, seq, &bytes)?;
+            if matches(&record.observation) {
+                return Ok(Some(record));
+            }
+        }
+        Ok(None)
     }
 
-    pub(super) fn append(&self, based_on: &Log, bytes: Vec<u8>) -> Result<(), AppendError> {
-        let root = based_on.root.as_str().to_owned();
-        let basis = based_on.basis;
+    /// See [`LogStore::roots_mentioning`].
+    pub(super) fn roots_mentioning(&self, needle: &str) -> Result<Vec<TrajectoryId>, ReadError> {
+        let needle = needle.as_bytes().to_vec();
+        let roots = self.with_client(move |client| {
+            Ok(client
+                .query(
+                    "SELECT DISTINCT root FROM openappa_events \
+                     WHERE substring(payload from 1 for 1) = '\\x7b'::bytea AND position($1::bytea in payload) > 0 \
+                     ORDER BY root",
+                    &[&needle],
+                )?
+                .into_iter()
+                .map(|row| row.get::<_, String>(0))
+                .collect::<Vec<_>>())
+        })?;
+        Ok(roots.into_iter().map(TrajectoryId::new).collect())
+    }
+
+    pub(super) fn append(&self, root: &TrajectoryId, basis: u64, bytes: Vec<u8>) -> Result<(), AppendError> {
+        let root = root.as_str().to_owned();
         let conflict = self.mutate(root.clone(), move |client| {
             let current = client
                 .query_one("SELECT count(*) FROM openappa_events WHERE root = $1", &[&root])?

@@ -438,18 +438,24 @@ impl Session {
     }
 
     /// Bind a host call identity to a dispatch that a remedy opened before
-    /// the harness received the substituted call. The empty fact batch makes
-    /// only the integration binding durable at the log's CAS position.
+    /// the harness received the substituted call. Only the binding is durable, at the log's
+    /// CAS position, and the identity is checked against the position it is written at.
     fn bind_existing_call(&self, call_id: String, dispatch: appa_engine::value::DispatchId) -> Result<(), EventError> {
         if call_id.is_empty() {
             return Err(EventError::CallIdReused);
         }
         let trajectory = crate::engine::engine_id(&self.trajectory);
-        self.inner.append_host_with(&self.root, |log| {
-            if log
-                .call_bindings()
-                .any(|binding| *binding.trajectory == trajectory && binding.call_id == call_id)
-            {
+        self.inner.append_host_with(&self.root, |stream| {
+            if stream.records().iter().any(|record| {
+                matches!(
+                    &record.observation,
+                    appa_eventlog::HostObservation::CallBound {
+                        trajectory: bound,
+                        call_id: bound_id,
+                        ..
+                    } if *bound == trajectory && *bound_id == call_id
+                )
+            }) {
                 return Err(EventError::CallIdReused);
             }
             Ok(Some(appa_eventlog::HostObservation::CallBound {

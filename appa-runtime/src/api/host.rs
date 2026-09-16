@@ -9,7 +9,7 @@
 //! Every rule here is about *liveness*: a record is not a state, and the state is what the
 //! records that follow it have not ended.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use appa_eventlog::{HostActor, HostObservation, HostRecord, Log};
@@ -38,8 +38,6 @@ struct Claim {
 pub(crate) struct HostState {
     vouches: BTreeMap<PermitKey, Vec<LiveVouch>>,
     claims: BTreeMap<PermitKey, Claim>,
-    /// The acting trajectory's spelling, which is what a prompt mark is about.
-    prompted: BTreeSet<String>,
 }
 
 impl HostState {
@@ -52,8 +50,13 @@ impl HostState {
         let mut state = HostState::default();
         for record in records {
             match &record.observation {
-                // Evidence, not standing: read where it is needed, never folded.
-                HostObservation::Inventory { .. } | HostObservation::CallBound { .. } => {}
+                // Evidence, not standing: read where it is needed, never folded. A prompt
+                // mark is the latest record about it, which is a question the store answers
+                // without reducing anything.
+                HostObservation::Inventory { .. }
+                | HostObservation::CallBound { .. }
+                | HostObservation::PromptSeen { .. }
+                | HostObservation::PromptSettled { .. } => {}
                 HostObservation::Vouched { actor, key, ruling } => {
                     let (Some(key), actor) = (recorded_key(key), actor_of(actor)) else {
                         continue;
@@ -85,15 +88,8 @@ impl HostState {
                     state.end(&actor, &key);
                     state.claims.insert(key, Claim { actor, until: *until });
                 }
-                HostObservation::PromptSeen { actor } => {
-                    state.prompted.insert(marked(actor));
-                }
-                HostObservation::PromptSettled { actor } => {
-                    state.prompted.remove(&marked(actor));
-                }
                 HostObservation::TurnEnded { actor } => {
                     let ended = actor_of(actor);
-                    state.prompted.remove(&marked(actor));
                     state.vouches.retain(|_, holders| {
                         holders.retain(|holder| holder.actor != ended);
                         !holders.is_empty()
@@ -118,11 +114,6 @@ impl HostState {
     /// Whether what this key names is being executed right now.
     pub(crate) fn claimed(&self, key: &PermitKey) -> bool {
         self.claims.contains_key(key)
-    }
-
-    /// Whether a prompt reached this actor and nothing has settled what it left behind.
-    pub(crate) fn prompted(&self, actor: &Actor) -> bool {
-        self.prompted.contains(&acting_trajectory(actor).0)
     }
 
     fn end(&mut self, actor: &Actor, key: &PermitKey) {
@@ -165,10 +156,20 @@ pub(crate) fn host_actor(actor: &Actor) -> HostActor {
     }
 }
 
-/// What a prompt mark is about: the acting trajectory, which is the child where the harness
-/// named one.
-fn marked(actor: &HostActor) -> String {
-    actor.child.as_ref().unwrap_or(&actor.root).as_str().to_string()
+/// Whether this observation is about the prompt mark of `acting`, which is the spelling of
+/// the acting trajectory — the child where the harness named one.
+///
+/// The mark is the latest of these three and nothing else: a prompt raises it, settling it
+/// and the turn's end lower it, and no other record says anything about it.
+pub(crate) fn marks(observation: &HostObservation, acting: &appa_engine::value::TrajectoryId) -> bool {
+    match observation {
+        HostObservation::PromptSeen { actor }
+        | HostObservation::PromptSettled { actor }
+        | HostObservation::TurnEnded { actor } => {
+            actor.child.as_ref().unwrap_or(&actor.root).as_str() == acting.as_str()
+        }
+        _ => false,
+    }
 }
 
 /// Every tool this actor's host has reported, under the opening's own snapshot.

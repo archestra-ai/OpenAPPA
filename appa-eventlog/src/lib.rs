@@ -77,6 +77,10 @@ pub struct LogStore {
     commits_until_failure: std::sync::atomic::AtomicU64,
     #[cfg(feature = "fault-injection")]
     contended_appends: std::sync::atomic::AtomicU64,
+    /// What the next foreign writer records rather than nothing, so a caller's re-derivation
+    /// meets a changed state and not only a moved position.
+    #[cfg(feature = "fault-injection")]
+    contending_record: Mutex<Option<(TrajectoryId, HostObservation)>>,
 }
 
 /// The records of one read, and the position they were read at.
@@ -145,7 +149,7 @@ impl HostObservation {
     ///
     /// Derived from the encoding rather than spelled beside it, so a key whose wire form
     /// changes moves the query that finds it. Pass the result to
-    /// [`LogStore::host_records_mentioning`].
+    /// [`LogStore::roots_mentioning`].
     pub fn names_key(key: &str) -> String {
         #[derive(serde::Serialize)]
         struct Named<'a> {
@@ -171,6 +175,35 @@ pub struct HostActor {
 pub struct HostRecord {
     pub seq: u64,
     pub observation: HostObservation,
+}
+
+/// One root's host records, and the position the whole log stood at when they were read.
+///
+/// The host stream is read alone but appended at the log's one position, so this carries a
+/// basis of the same kind [`Log`] does and for the same reason: a decision reached over these
+/// records is written only where they were read. It has no public constructor either, so a
+/// basis cannot be forged, and [`LogStore::append_host_stream`] takes the value itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostStream {
+    root: TrajectoryId,
+    basis: u64,
+    records: Vec<HostRecord>,
+}
+
+impl HostStream {
+    pub fn root(&self) -> &TrajectoryId {
+        &self.root
+    }
+
+    /// The count of accepted batches this read stands at, engine batches included: the host
+    /// stream is a view of one log, not a log of its own.
+    pub fn basis(&self) -> u64 {
+        self.basis
+    }
+
+    pub fn records(&self) -> &[HostRecord] {
+        &self.records
+    }
 }
 
 /// One recorded call identity, as [`Log::call_bindings`] reads it back.
@@ -406,6 +439,8 @@ impl LogStore {
                 commits_until_failure: std::sync::atomic::AtomicU64::new(0),
                 #[cfg(feature = "fault-injection")]
                 contended_appends: std::sync::atomic::AtomicU64::new(0),
+                #[cfg(feature = "fault-injection")]
+                contending_record: Mutex::new(None),
             });
         }
         let (mut connection, path) = match &backend {
@@ -473,6 +508,8 @@ impl LogStore {
             commits_until_failure: std::sync::atomic::AtomicU64::new(0),
             #[cfg(feature = "fault-injection")]
             contended_appends: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(feature = "fault-injection")]
+            contending_record: Mutex::new(None),
         })
     }
 
@@ -567,73 +604,116 @@ impl LogStore {
         self.append_bytes(based_on, encode(facts, Some(observation)))
     }
 
-    /// One root's host records, without reading its facts.
+    /// One root's host records, and the position they stand at, without reading its facts.
     ///
     /// What the host recorded is a stream of its own, and a reader that wants only that
     /// stream should not pay for the engine's: the stored shape says which rows carry an
-    /// observation, so the rest are never fetched or decoded. A root that exists and has
-    /// recorded nothing reads as no records; a root with no log at all is still
-    /// [`ReadError::UnknownRoot`], which is the difference between "nothing happened" and
-    /// "this family is not here".
-    pub fn host_records_of(&self, root: &TrajectoryId) -> Result<Vec<HostRecord>, ReadError> {
+    /// observation, so the rest are never fetched, decoded, or joined to their policy file.
+    /// The records and the position are read together, so the value can be appended against.
+    /// A root that exists and has recorded nothing reads as no records; a root with no log at
+    /// all is still [`ReadError::UnknownRoot`], which is the difference between "nothing
+    /// happened" and "this family is not here".
+    pub fn host_records_of(&self, root: &TrajectoryId) -> Result<HostStream, ReadError> {
         #[cfg(feature = "postgres")]
         if let Some(pg) = &self.postgres {
             return pg.host_records_of(root);
         }
-        let connection = self.lock();
-        let mut statement = connection
-            .prepare("SELECT seq, facts FROM logs WHERE root = ?1 AND substr(facts, 1, 1) = x'7b' ORDER BY seq ASC")?;
-        let records = statement
-            .query_map(params![root.as_str()], |row| {
-                Ok((row.get::<_, i64>(0)? as u64, row.get::<_, Vec<u8>>(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .map(|(seq, bytes)| decode_host_record(root.as_str(), seq, &bytes))
-            .collect::<Result<Vec<_>, _>>()?;
-        // Only an empty answer needs the second question: a root that recorded an
-        // observation plainly exists.
-        if records.is_empty() && position(&connection, root)? == 0 {
+        let mut connection = self.lock();
+        let transaction = connection.transaction()?;
+        let rows = {
+            let mut statement = transaction.prepare(
+                "SELECT seq, facts FROM logs WHERE root = ?1 AND substr(facts, 1, 1) = x'7b' ORDER BY seq ASC",
+            )?;
+            statement
+                .query_map(params![root.as_str()], |row| {
+                    Ok((row.get::<_, i64>(0)? as u64, row.get::<_, Vec<u8>>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let basis = position(&transaction, root)?;
+        if basis == 0 {
             return Err(ReadError::UnknownRoot {
                 root: root.as_str().to_string(),
             });
         }
-        Ok(records)
+        let records = rows
+            .into_iter()
+            .map(|(seq, bytes)| decode_host_record(root.as_str(), seq, &bytes))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(HostStream {
+            root: root.clone(),
+            basis,
+            records,
+        })
     }
 
-    /// Every root whose host stream contains `needle`, with that root's matching records.
+    /// The newest of this root's host records that `matches`, or nothing where none does.
     ///
-    /// The store answers "which families may have recorded this" without the caller naming
-    /// them, and the needle rules out the observations that name something else, so nothing
-    /// that cannot be an answer is decoded. Build the needle with
-    /// [`HostObservation::names_key`] so the query and the encoding can never disagree about
-    /// how a key is spelled.
-    pub fn host_records_mentioning(&self, needle: &str) -> Result<Vec<(TrajectoryId, Vec<HostRecord>)>, ReadError> {
+    /// A question about the latest mark is not a question about the stream: the rows are
+    /// walked newest first and decoded one at a time, so an answer near the end of a long
+    /// family costs the rows after it and no more. A root with no log at all has no latest
+    /// anything, which is the same answer as a root that recorded none.
+    pub fn latest_host_record_of(
+        &self,
+        root: &TrajectoryId,
+        matches: impl Fn(&HostObservation) -> bool,
+    ) -> Result<Option<HostRecord>, ReadError> {
         #[cfg(feature = "postgres")]
         if let Some(pg) = &self.postgres {
-            return pg.host_records_mentioning(needle);
+            return pg.latest_host_record_of(root, matches);
+        }
+        let connection = self.lock();
+        let mut statement = connection
+            .prepare("SELECT seq, facts FROM logs WHERE root = ?1 AND substr(facts, 1, 1) = x'7b' ORDER BY seq DESC")?;
+        let mut rows = statement.query(params![root.as_str()])?;
+        while let Some(row) = rows.next()? {
+            let record = decode_host_record(root.as_str(), row.get::<_, i64>(0)? as u64, &row.get::<_, Vec<u8>>(1)?)?;
+            if matches(&record.observation) {
+                return Ok(Some(record));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Every root whose host stream contains `needle`, and nothing of what they recorded.
+    ///
+    /// The store answers "which families may have recorded this" without the caller naming
+    /// them and without decoding a single row: the caller reads the families it gets back.
+    /// The answer stays small by what a needle is for — a root is here only if it once
+    /// recorded this exact key, which is at most one root for an offer, and one root per
+    /// session that quoted an identical ticket. Build the needle with
+    /// [`HostObservation::names_key`] so the query and the encoding can never disagree about
+    /// how a key is spelled.
+    pub fn roots_mentioning(&self, needle: &str) -> Result<Vec<TrajectoryId>, ReadError> {
+        #[cfg(feature = "postgres")]
+        if let Some(pg) = &self.postgres {
+            return pg.roots_mentioning(needle);
         }
         let connection = self.lock();
         let mut statement = connection.prepare(
-            "SELECT root, seq, facts FROM logs \
-             WHERE substr(facts, 1, 1) = x'7b' AND instr(facts, ?1) > 0 ORDER BY root ASC, seq ASC",
+            "SELECT DISTINCT root FROM logs \
+             WHERE substr(facts, 1, 1) = x'7b' AND instr(facts, ?1) > 0 ORDER BY root ASC",
         )?;
-        let rows = statement
-            .query_map(params![needle.as_bytes()], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)? as u64,
-                    row.get::<_, Vec<u8>>(2)?,
-                ))
-            })?
+        let roots = statement
+            .query_map(params![needle.as_bytes()], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
-        grouped_by_root(rows)
+        Ok(roots.into_iter().map(TrajectoryId::new).collect())
+    }
+
+    /// Append one host observation where this read of the host stream still stands. The same
+    /// compare-and-swap [`LogStore::append`] makes, over the position the whole log is at.
+    pub fn append_host_stream(&self, based_on: &HostStream, observation: &HostObservation) -> Result<(), AppendError> {
+        self.append_at(&based_on.root, based_on.basis, encode(&[], Some(observation)))
     }
 
     fn append_bytes(&self, based_on: &Log, bytes: Vec<u8>) -> Result<(), AppendError> {
+        self.append_at(&based_on.root, based_on.basis, bytes)
+    }
+
+    fn append_at(&self, root: &TrajectoryId, basis: u64, bytes: Vec<u8>) -> Result<(), AppendError> {
         #[cfg(feature = "postgres")]
         if let Some(pg) = &self.postgres {
-            return pg.append(based_on, bytes);
+            return pg.append(root, basis, bytes);
         }
         let mut connection = self.lock();
         #[cfg(feature = "fault-injection")]
@@ -642,23 +722,31 @@ impl LogStore {
             // second process would. It takes the position and records nothing, so this caller's
             // append conflicts on position and replays, and an assertion reads whose write landed
             // from the position rather than from records a later read would have to accept.
-            let foreign = encode(&[], None);
+            let foreign = match self
+                .contending_record
+                .lock()
+                .expect("the injection mutex is never poisoned")
+                .take()
+            {
+                Some((armed, observation)) if armed == *root => encode(&[], Some(&observation)),
+                _ => encode(&[], None),
+            };
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let at = position(&transaction, &based_on.root)?;
+            let at = position(&transaction, root)?;
             transaction.execute(
                 "INSERT INTO logs (root, seq, facts) VALUES (?1, ?2, ?3)",
-                params![based_on.root.as_str(), at as i64, foreign],
+                params![root.as_str(), at as i64, foreign],
             )?;
             transaction.commit()?;
         }
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current = position(&transaction, &based_on.root)?;
-        if current != based_on.basis {
+        let current = position(&transaction, root)?;
+        if current != basis {
             return Err(AppendError::Conflict { current });
         }
         transaction.execute(
             "INSERT INTO logs (root, seq, facts) VALUES (?1, ?2, ?3)",
-            params![based_on.root.as_str(), current as i64, bytes],
+            params![root.as_str(), current as i64, bytes],
         )?;
         #[cfg(feature = "fault-injection")]
         if self.failure_fires() {
@@ -681,6 +769,18 @@ impl LogStore {
     #[cfg(feature = "fault-injection")]
     pub fn contend_next_appends(&self, count: u64) {
         self.contended_appends.store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Arm the contention point once, with what the winner records. The next append to `root`
+    /// loses to a writer that put `observation` in the log, so the caller's next derivation
+    /// answers to a state another writer changed rather than to a position it only moved.
+    #[cfg(feature = "fault-injection")]
+    pub fn contend_next_append_with(&self, root: &TrajectoryId, observation: &HostObservation) {
+        *self
+            .contending_record
+            .lock()
+            .expect("the injection mutex is never poisoned") = Some((root.clone(), observation.clone()));
+        self.contend_next_appends(1);
     }
 
     /// Forget every stored policy file, leaving each root's opening naming a
@@ -857,19 +957,6 @@ fn decode_host_record(root: &str, seq: u64, bytes: &[u8]) -> Result<HostRecord, 
             "the batch at {seq} of {root} carries no host observation"
         ))),
     }
-}
-
-/// Rows a multi-root query returned in root order, split into the families that wrote them.
-fn grouped_by_root(rows: Vec<(String, u64, Vec<u8>)>) -> Result<Vec<(TrajectoryId, Vec<HostRecord>)>, ReadError> {
-    let mut roots: Vec<(TrajectoryId, Vec<HostRecord>)> = Vec::new();
-    for (root, seq, bytes) in rows {
-        let record = decode_host_record(&root, seq, &bytes)?;
-        match roots.last_mut() {
-            Some((last, records)) if last.as_str() == root => records.push(record),
-            _ => roots.push((TrajectoryId::new(root), vec![record])),
-        }
-    }
-    Ok(roots)
 }
 
 fn encode(facts: &[Fact], host: Option<&HostObservation>) -> Vec<u8> {
@@ -1175,46 +1262,148 @@ mod tests {
         assert_eq!(log.policy_file(), POLICY.as_bytes());
     }
 
-    /// One family's host stream, read without its facts. "Nothing was recorded" and "this
-    /// family is not here" are different answers, and a reader that acts on the first must
-    /// not be given it for the second.
+    /// One family's host stream, read without its facts, standing where the whole log does.
+    /// "Nothing was recorded" and "this family is not here" are different answers, and a
+    /// reader that acts on the first must not be given it for the second.
     #[test]
     fn one_roots_host_records_read_without_its_facts() {
         let store = opened();
+        let stream = store.host_records_of(&root()).unwrap();
         assert_eq!(
-            store.host_records_of(&root()).unwrap(),
+            stream.records(),
             Vec::new(),
             "an opened root that recorded nothing has no host records"
         );
+        assert_eq!(stream.basis(), 1, "and stands at the opening it does have");
         store.append(&store.log(&root()).unwrap(), &punctuation()).unwrap();
-        assert_eq!(
-            store.host_records_of(&root()).unwrap(),
-            Vec::new(),
-            "and engine batches add none"
-        );
+        let stream = store.host_records_of(&root()).unwrap();
+        assert_eq!(stream.records(), Vec::new(), "and engine batches add none");
+        assert_eq!(stream.basis(), 2, "but do move the position it stands at");
 
         let observation = observed(root().as_str(), "demo");
         store
             .append_host(&store.log(&root()).unwrap(), &[], &observation)
             .unwrap();
         store.append(&store.log(&root()).unwrap(), &punctuation()).unwrap();
+        let stream = store.host_records_of(&root()).unwrap();
         assert_eq!(
-            store.host_records_of(&root()).unwrap(),
+            stream.records(),
             vec![HostRecord {
                 seq: 2,
                 observation: observation.clone()
             }],
             "the record keeps the position it landed at"
         );
-        assert_eq!(
-            store.host_records_of(&root()).unwrap(),
-            observations_at(&store, &root())
-        );
+        assert_eq!(stream.basis(), 4);
+        assert_eq!(stream.records(), observations_at(&store, &root()));
 
         assert!(matches!(
             store.host_records_of(&TrajectoryId::new("cc:ghost")),
             Err(ReadError::UnknownRoot { .. }),
         ));
+    }
+
+    /// The host stream is appended against exactly as the log is: a decision reached over
+    /// records that have since moved is not written, and one that lands moves the position
+    /// every other reader sees.
+    #[test]
+    fn a_host_append_on_a_stale_stream_conflicts_and_writes_nothing() {
+        let store = opened();
+        let stale = store.host_records_of(&root()).unwrap();
+        let observation = observed(root().as_str(), "demo");
+        store.append(&store.log(&root()).unwrap(), &punctuation()).unwrap();
+
+        assert!(matches!(
+            store.append_host_stream(&stale, &observation),
+            Err(AppendError::Conflict { current: 2 })
+        ));
+        assert_eq!(
+            store.log(&root()).unwrap().basis(),
+            2,
+            "the refused append wrote nothing"
+        );
+
+        let fresh = store.host_records_of(&root()).unwrap();
+        store.append_host_stream(&fresh, &observation).unwrap();
+        assert_eq!(
+            store.log(&root()).unwrap().basis(),
+            3,
+            "and the one that lands is a batch of the same log"
+        );
+        assert_eq!(
+            store.host_records_of(&root()).unwrap().records(),
+            vec![HostRecord { seq: 2, observation }]
+        );
+    }
+
+    /// The latest mark, answered without reducing the stream: the walk is newest first, so a
+    /// mark a later record settled is not the answer.
+    #[test]
+    fn the_latest_matching_record_is_the_one_a_reader_gets() {
+        let store = opened();
+        let marks = |actor: &str| HostActor {
+            root: TrajectoryId::new(actor),
+            child: None,
+        };
+        let seen = HostObservation::PromptSeen {
+            actor: marks("cc:root"),
+        };
+        let ended = HostObservation::TurnEnded {
+            actor: marks("cc:root"),
+        };
+        let other = HostObservation::TurnEnded {
+            actor: marks("cc:other"),
+        };
+        let about_the_mark = |observation: &HostObservation| {
+            matches!(
+                observation,
+                HostObservation::PromptSeen { .. }
+                    | HostObservation::PromptSettled { .. }
+                    | HostObservation::TurnEnded { .. }
+            )
+        };
+
+        assert_eq!(store.latest_host_record_of(&root(), about_the_mark).unwrap(), None);
+        for observation in [&seen, &other] {
+            let stream = store.host_records_of(&root()).unwrap();
+            store.append_host_stream(&stream, observation).unwrap();
+        }
+        assert_eq!(
+            store
+                .latest_host_record_of(&root(), about_the_mark)
+                .unwrap()
+                .map(|record| record.observation),
+            Some(other.clone()),
+            "another actor's turn end is still the latest record about a mark"
+        );
+        assert_eq!(
+            store
+                .latest_host_record_of(&root(), |observation| matches!(
+                    observation,
+                    HostObservation::PromptSeen { .. }
+                ))
+                .unwrap()
+                .map(|record| record.seq),
+            Some(1),
+            "and the narrower question finds the mark itself"
+        );
+
+        let stream = store.host_records_of(&root()).unwrap();
+        store.append_host_stream(&stream, &ended).unwrap();
+        assert_eq!(
+            store
+                .latest_host_record_of(&root(), about_the_mark)
+                .unwrap()
+                .map(|record| record.observation),
+            Some(ended)
+        );
+        assert_eq!(
+            store
+                .latest_host_record_of(&TrajectoryId::new("cc:ghost"), about_the_mark)
+                .unwrap(),
+            None,
+            "a family that is not here has no latest anything"
+        );
     }
 
     /// The same records the whole-log read carries, for the assertion above.
@@ -1223,7 +1412,7 @@ mod tests {
     }
 
     /// The query a reader uses when it knows the key but not the family that recorded it:
-    /// every root that names the key, host rows only, and nothing that names another.
+    /// the roots that named the key, and no root that named another.
     #[test]
     fn the_needle_finds_the_roots_that_name_a_key_and_no_others() {
         let store = opened();
@@ -1247,46 +1436,28 @@ mod tests {
         store
             .append_host(&store.log(&second).unwrap(), &[], &vouched(&second, "offer:two"))
             .unwrap();
+        // A second row naming the same key, so a root that recorded twice is named once.
+        store
+            .append_host(&store.log(&second).unwrap(), &[], &vouched(&second, "offer:one"))
+            .unwrap();
         store.append(&store.log(&second).unwrap(), &punctuation()).unwrap();
 
         assert_eq!(
             store
-                .host_records_mentioning(&HostObservation::names_key("offer:one"))
+                .roots_mentioning(&HostObservation::names_key("offer:one"))
                 .unwrap(),
-            vec![
-                (
-                    root(),
-                    vec![HostRecord {
-                        seq: 2,
-                        observation: vouched(&root(), "offer:one")
-                    }]
-                ),
-                (
-                    second.clone(),
-                    vec![HostRecord {
-                        seq: 1,
-                        observation: vouched(&second, "offer:one")
-                    }]
-                ),
-            ]
+            vec![root(), second.clone()],
+            "one entry per root, however many of its rows name the key"
         );
         assert_eq!(
             store
-                .host_records_mentioning(&HostObservation::names_key("offer:two"))
+                .roots_mentioning(&HostObservation::names_key("offer:two"))
                 .unwrap(),
-            vec![(
-                second.clone(),
-                vec![HostRecord {
-                    seq: 2,
-                    observation: vouched(&second, "offer:two")
-                }]
-            )],
+            vec![second.clone()],
             "a key nothing else names answers with the one root that does"
         );
         assert_eq!(
-            store
-                .host_records_mentioning(&HostObservation::names_key("offer:on"))
-                .unwrap(),
+            store.roots_mentioning(&HostObservation::names_key("offer:on")).unwrap(),
             Vec::new(),
             "the needle carries the closing quote, so one key is never a prefix of another"
         );
@@ -1472,7 +1643,7 @@ mod tests {
             Err(CreateError::AlreadyExists { .. })
         ));
         assert_eq!(
-            first.host_records_of(&id).unwrap(),
+            first.host_records_of(&id).unwrap().records(),
             Vec::new(),
             "an opened root that recorded nothing has no host records"
         );
@@ -1524,26 +1695,41 @@ mod tests {
             key: "offer:one".to_string(),
             ruling: None,
         };
-        first.append_host(&first.log(&id).unwrap(), &[], &vouched).unwrap();
-        assert_eq!(
+        let stream = first.host_records_of(&id).unwrap();
+        first.append_host_stream(&stream, &vouched).unwrap();
+        assert!(
+            matches!(
+                first.append_host_stream(&stream, &vouched),
+                Err(AppendError::Conflict { .. }),
+            ),
+            "the host stream is appended against on this backend too"
+        );
+        assert!(
             second
-                .host_records_mentioning(&HostObservation::names_key("offer:one"))
+                .roots_mentioning(&HostObservation::names_key("offer:one"))
                 .unwrap()
-                .into_iter()
-                .find(|(root, _)| root == &id)
-                .map(|(_, records)| records),
-            Some(vec![HostRecord {
-                seq: 4,
-                observation: vouched,
-            }]),
-            "the needle reads the rows naming the key and no engine batch"
+                .contains(&id),
+            "the needle names the root that recorded the key"
         );
         assert_eq!(
             second
-                .host_records_mentioning(&HostObservation::names_key("offer:two"))
+                .roots_mentioning(&HostObservation::names_key("offer:two"))
                 .unwrap(),
             Vec::new(),
             "and nothing for a key no row names"
+        );
+        assert_eq!(
+            second
+                .latest_host_record_of(&id, |observation| matches!(
+                    observation,
+                    HostObservation::Vouched { .. }
+                ))
+                .unwrap(),
+            Some(HostRecord {
+                seq: 4,
+                observation: vouched,
+            }),
+            "and the latest matching record reads the same through the connection thread"
         );
 
         let stale = first.log(&id).unwrap();
