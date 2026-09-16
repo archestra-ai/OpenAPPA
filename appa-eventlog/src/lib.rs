@@ -1,7 +1,9 @@
 //! # appa-eventlog — the trajectory log, and where it is kept
 //!
-//! A root trajectory and its branches append to one shared log. That log holds
-//! every lasting fact, host inventory observation, and host-call binding; the stored policy files are the only other durable state, and
+//! A root trajectory and its branches append to one shared log. That log holds two streams at
+//! one position: the engine's lasting facts, and the host's own observations — what a harness
+//! saw of its inventory, its calls, its turns and the standing it recorded for them. The stored
+//! policy files are the only other durable state, and
 //! everything else — a branch's parent, whether it has ended, which dispatch is open, whether an
 //! offer still stands — is read back from the log by the engine's projection.
 //!
@@ -38,13 +40,14 @@
 
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::SystemTime;
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 pub use appa_engine::fact::Fact;
 use appa_engine::profile::PolicyFileKey;
 use appa_engine::value::{DispatchId, TrajectoryId};
-use appa_runtime_api::{AdapterName, inventory::ToolInventory};
+use appa_runtime_api::{AdapterName, Ruling, inventory::ToolInventory};
 
 pub mod files;
 #[cfg(feature = "postgres")]
@@ -75,6 +78,12 @@ pub struct LogStore {
     commits_until_failure: std::sync::atomic::AtomicU64,
     #[cfg(feature = "fault-injection")]
     contended_appends: std::sync::atomic::AtomicU64,
+    #[cfg(feature = "fault-injection")]
+    failing_reads: std::sync::atomic::AtomicU64,
+    /// What the next foreign writer records rather than nothing, so a caller's re-derivation
+    /// meets a changed state and not only a moved position.
+    #[cfg(feature = "fault-injection")]
+    contending_record: Mutex<Option<(TrajectoryId, TrajectoryId, HostObservation)>>,
 }
 
 /// The records of one read, and the position they were read at.
@@ -84,46 +93,120 @@ pub struct Log {
     facts: Vec<Fact>,
     basis: u64,
     policy_file: Vec<u8>,
-    inventories: Vec<InventoryObservation>,
-    call_bindings: Vec<CallBinding>,
+    host: Vec<HostRecord>,
 }
 
-/// Identity evidence from one actor's host. This is not an engine fact or a
-/// policy update. It is appended at the same compare-and-swap position as facts,
-/// so admission cannot race past an uncommitted identity reservation.
+/// One thing a harness observed or did, recorded beside the engine's facts.
+///
+/// This is neither an engine fact nor a policy update: no observation here changes what the
+/// engine decided. It is written at the same compare-and-swap position as facts, so admission
+/// cannot race past an uncommitted observation, and it survives a restart, so a runtime holds
+/// no actor state of its own between calls.
+///
+/// A closed enum, and one wire spelling per variant: a reader that meets a shape this build
+/// does not know refuses the log rather than dropping the record.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InventoryObservation {
-    pub actor: TrajectoryId,
-    pub adapter: AdapterName,
-    pub inventory: ToolInventory,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HostObservation {
+    /// Identity evidence from one actor's host: the tools it reports, in that actor's own
+    /// scope.
+    Inventory {
+        actor: TrajectoryId,
+        adapter: AdapterName,
+        inventory: ToolInventory,
+    },
+    /// The host's opaque identity for one call, bound to the dispatch the engine opened for
+    /// it. Written in the same batch as the opening facts, so a restart cannot leave an open
+    /// dispatch whose result can no longer name it.
+    CallBound {
+        trajectory: TrajectoryId,
+        call_id: String,
+        dispatch: DispatchId,
+    },
+    /// This actor stands behind this key, with the ruling its harness attached where it
+    /// reviewed through a channel of its own.
+    Vouched {
+        actor: HostActor,
+        key: String,
+        ruling: Option<Ruling>,
+    },
+    /// This actor is executing what the key names, until at least `until`. The bound is the
+    /// hard-crash backstop: an execution that ends writes [`HostObservation::Released`].
+    Claimed {
+        actor: HostActor,
+        key: String,
+        until: SystemTime,
+    },
+    /// This actor's standing behind the key is spent or given up.
+    Released { actor: HostActor, key: String },
+    /// A prompt reached this actor, so its previous turn is over however it ended.
+    PromptSeen { actor: HostActor },
+    /// What the prompt left open is settled, and the actor's standing survives it.
+    PromptSettled { actor: HostActor },
+    /// This actor's turn ended: its prompt mark and every vouch it still held are over.
+    TurnEnded { actor: HostActor },
 }
 
-/// The host's opaque identity for one call, bound to the dispatch the Engine
-/// opened for it. This is integration state, not an Engine fact. It is stored
-/// in the same batch as the opening facts so a restart cannot leave an open
-/// dispatch whose result can no longer name it.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CallBinding {
-    pub trajectory: TrajectoryId,
-    pub call_id: String,
-    pub dispatch: DispatchId,
+impl HostObservation {
+    /// The text a stored row contains exactly when its observation names this key.
+    ///
+    /// Derived from the encoding rather than spelled beside it, so a key whose wire form
+    /// changes moves the query that finds it. Pass the result to
+    /// [`LogStore::roots_mentioning`].
+    pub fn names_key(key: &str) -> String {
+        let quoted = serde_json::to_string(key).expect("a string serializes");
+        format!("\"key\":{quoted}")
+    }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+/// Whose observation this is: the family's root, and the child where the harness named one.
+/// The exact actor, so a parent's turn end never settles what its subagent left standing.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BoundFacts {
+pub struct HostActor {
+    pub root: TrajectoryId,
+    pub child: Option<TrajectoryId>,
+}
+
+/// One host observation and the batch position it was appended at, so a reader can order it
+/// against the facts of the same read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostRecord {
+    pub seq: u64,
+    pub observation: HostObservation,
+}
+
+/// One recorded call identity, as [`Log::call_bindings`] reads it back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallBinding<'a> {
+    pub trajectory: &'a TrajectoryId,
+    pub call_id: &'a str,
+    pub dispatch: &'a DispatchId,
+}
+
+/// One stored batch. Both streams share a position, so an engine decision and the host
+/// observation it belongs with are durable together or not at all.
+///
+/// The encoding is the shape: a batch carrying no host observation is the bare JSON array of
+/// its facts, and one carrying an observation is an object with both fields. Nothing sniffs
+/// between unrelated payloads — the first token settles which of the two a stored row is.
+struct Record {
     facts: Vec<Fact>,
-    call_binding: CallBinding,
+    host: Option<HostObservation>,
 }
 
 #[derive(serde::Deserialize)]
-#[serde(untagged)]
-enum Batch {
-    Facts(Vec<Fact>),
-    Inventory(InventoryObservation),
-    BoundFacts(BoundFacts),
+#[serde(deny_unknown_fields)]
+struct HostRow {
+    #[serde(default)]
+    facts: Vec<Fact>,
+    host: HostObservation,
+}
+
+#[derive(serde::Serialize)]
+struct HostRowRef<'a> {
+    facts: &'a [Fact],
+    host: &'a HostObservation,
 }
 
 impl Log {
@@ -147,14 +230,25 @@ impl Log {
 
     /// Host observations in append order. Consumers validate them under the
     /// opening configuration; no later observation changes earlier engine facts.
-    pub fn inventories(&self) -> &[InventoryObservation] {
-        &self.inventories
+    pub fn host_records(&self) -> &[HostRecord] {
+        &self.host
     }
 
     /// Host call identities in append order. A binding remains after its
     /// dispatch closes so reuse of one host id can be refused after restart.
-    pub fn call_bindings(&self) -> &[CallBinding] {
-        &self.call_bindings
+    pub fn call_bindings(&self) -> impl Iterator<Item = CallBinding<'_>> {
+        self.host.iter().filter_map(|record| match &record.observation {
+            HostObservation::CallBound {
+                trajectory,
+                call_id,
+                dispatch,
+            } => Some(CallBinding {
+                trajectory,
+                call_id,
+                dispatch,
+            }),
+            _ => None,
+        })
     }
 }
 
@@ -215,6 +309,8 @@ impl From<&ReadError> for StoreErrorClass {
             ReadError::Storage(_) => StoreErrorClass::Storage,
             #[cfg(feature = "postgres")]
             ReadError::Postgres(_) => StoreErrorClass::Storage,
+            #[cfg(feature = "fault-injection")]
+            ReadError::Injected => StoreErrorClass::Storage,
         }
     }
 }
@@ -279,6 +375,9 @@ pub enum ReadError {
     #[cfg(feature = "postgres")]
     #[error("PostgreSQL storage failure: {0}")]
     Postgres(#[from] postgres::PostgresError),
+    #[cfg(feature = "fault-injection")]
+    #[error("injected read failure")]
+    Injected,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -315,6 +414,10 @@ impl LogStore {
                 commits_until_failure: std::sync::atomic::AtomicU64::new(0),
                 #[cfg(feature = "fault-injection")]
                 contended_appends: std::sync::atomic::AtomicU64::new(0),
+                #[cfg(feature = "fault-injection")]
+                failing_reads: std::sync::atomic::AtomicU64::new(0),
+                #[cfg(feature = "fault-injection")]
+                contending_record: Mutex::new(None),
             });
         }
         let (mut connection, path) = match &backend {
@@ -382,6 +485,10 @@ impl LogStore {
             commits_until_failure: std::sync::atomic::AtomicU64::new(0),
             #[cfg(feature = "fault-injection")]
             contended_appends: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(feature = "fault-injection")]
+            failing_reads: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(feature = "fault-injection")]
+            contending_record: Mutex::new(None),
         })
     }
 
@@ -393,7 +500,7 @@ impl LogStore {
         if PolicyFileKey::of(policy_file) != key {
             return Err(CreateError::PolicyFileMismatch);
         }
-        let bytes = encode(&opening);
+        let bytes = encode(&opening, None);
         #[cfg(feature = "postgres")]
         if let Some(pg) = &self.postgres {
             return pg.create(&root, &key, policy_file, bytes);
@@ -448,6 +555,8 @@ impl LogStore {
     /// Read one root's whole log, with the position it stands at and the policy file it opened
     /// under.
     pub fn log(&self, root: &TrajectoryId) -> Result<Log, ReadError> {
+        #[cfg(feature = "fault-injection")]
+        self.read_refused()?;
         #[cfg(feature = "postgres")]
         if let Some(pg) = &self.postgres {
             return pg.log(root);
@@ -462,31 +571,61 @@ impl LogStore {
     /// Append records to the log `based_on` was read from, only if it still stands where that
     /// read left it. A conflict writes nothing; the caller reads again and replays.
     pub fn append(&self, based_on: &Log, facts: &[Fact]) -> Result<(), AppendError> {
-        self.append_bytes(based_on, encode(facts))
+        self.append_bytes(based_on, encode(facts, None))
     }
 
-    /// Append Engine facts and the host identity of the dispatch they open in
-    /// one transaction. The binding is durable exactly when the opening is.
-    pub fn append_bound(&self, based_on: &Log, facts: &[Fact], call_binding: CallBinding) -> Result<(), AppendError> {
-        let bytes = serde_json::to_vec(&BoundFacts {
-            facts: facts.to_vec(),
-            call_binding,
-        })
-        .expect("bound facts contain only serializable fields");
-        self.append_bytes(based_on, bytes)
+    /// Append one host observation, and the engine facts it belongs with. The observation is
+    /// durable exactly when those facts are, and a stale read writes nothing, just as append.
+    pub fn append_host(
+        &self,
+        based_on: &Log,
+        facts: &[Fact],
+        observation: &HostObservation,
+    ) -> Result<(), AppendError> {
+        self.append_bytes(based_on, encode(facts, Some(observation)))
     }
 
-    /// Reserve host identity evidence without modifying the opening policy or
-    /// fabricating an engine fact. A stale read writes nothing, just as append.
-    pub fn append_inventory(&self, based_on: &Log, observation: &InventoryObservation) -> Result<(), AppendError> {
-        let bytes = serde_json::to_vec(observation).expect("inventory observations contain only serializable fields");
-        self.append_bytes(based_on, bytes)
+    /// Every root whose host records contain `needle`, and nothing of what they recorded.
+    ///
+    /// The store answers "which families may have recorded this" without the caller naming
+    /// them and without decoding a single row: the caller reads the families it gets back.
+    /// The answer stays small by what a needle is for — a root is here only if it once
+    /// recorded this exact key, which is at most one root for an offer, and one root per
+    /// session that quoted an identical ticket. Build the needle with
+    /// [`HostObservation::names_key`] so the query and the encoding can never disagree about
+    /// how a key is spelled.
+    ///
+    /// The scan itself is every family's host records: there is no index over what
+    /// a row holds, because this store owns no DDL a deployment's PostgreSQL would have to
+    /// be given. So a key that is spelled right and stands for nothing still costs one pass,
+    /// and a caller that can be asked about keys it never minted checks the spelling before
+    /// it asks here.
+    pub fn roots_mentioning(&self, needle: &str) -> Result<Vec<TrajectoryId>, ReadError> {
+        #[cfg(feature = "fault-injection")]
+        self.read_refused()?;
+        #[cfg(feature = "postgres")]
+        if let Some(pg) = &self.postgres {
+            return pg.roots_mentioning(needle);
+        }
+        let connection = self.lock();
+        let mut statement = connection.prepare(
+            "SELECT DISTINCT root FROM logs \
+             WHERE substr(facts, 1, 1) = x'7b' AND instr(facts, ?1) > 0 ORDER BY root ASC",
+        )?;
+        let roots = statement
+            .query_map(params![needle.as_bytes()], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(roots.into_iter().map(TrajectoryId::new).collect())
     }
 
     fn append_bytes(&self, based_on: &Log, bytes: Vec<u8>) -> Result<(), AppendError> {
+        self.append_at(&based_on.root, based_on.basis, bytes)
+    }
+
+    fn append_at(&self, root: &TrajectoryId, basis: u64, bytes: Vec<u8>) -> Result<(), AppendError> {
         #[cfg(feature = "postgres")]
         if let Some(pg) = &self.postgres {
-            return pg.append(based_on, bytes);
+            return pg.append(root, basis, bytes);
         }
         let mut connection = self.lock();
         #[cfg(feature = "fault-injection")]
@@ -495,23 +634,45 @@ impl LogStore {
             // second process would. It takes the position and records nothing, so this caller's
             // append conflicts on position and replays, and an assertion reads whose write landed
             // from the position rather than from records a later read would have to accept.
-            let foreign = encode(&[]);
+            //
+            // Where the injection names an observation, the winner records that instead, and
+            // where it names another family it records there and still takes this one's
+            // position: a foreign writer that changed a sibling's log is the race a reader of
+            // several families has to survive.
+            let armed = self
+                .contending_record
+                .lock()
+                .expect("the injection mutex is never poisoned")
+                .take()
+                .filter(|(racing, _, _)| racing == root);
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let at = position(&transaction, &based_on.root)?;
-            transaction.execute(
-                "INSERT INTO logs (root, seq, facts) VALUES (?1, ?2, ?3)",
-                params![based_on.root.as_str(), at as i64, foreign],
-            )?;
+            let write = |into: &TrajectoryId, bytes: Vec<u8>| -> Result<(), rusqlite::Error> {
+                let at = position(&transaction, into)?;
+                transaction.execute(
+                    "INSERT INTO logs (root, seq, facts) VALUES (?1, ?2, ?3)",
+                    params![into.as_str(), at as i64, bytes],
+                )?;
+                Ok(())
+            };
+            match &armed {
+                Some((_, recorded_in, observation)) => {
+                    write(recorded_in, encode(&[], Some(observation)))?;
+                    if recorded_in != root {
+                        write(root, encode(&[], None))?;
+                    }
+                }
+                None => write(root, encode(&[], None))?,
+            }
             transaction.commit()?;
         }
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current = position(&transaction, &based_on.root)?;
-        if current != based_on.basis {
+        let current = position(&transaction, root)?;
+        if current != basis {
             return Err(AppendError::Conflict { current });
         }
         transaction.execute(
             "INSERT INTO logs (root, seq, facts) VALUES (?1, ?2, ?3)",
-            params![based_on.root.as_str(), current as i64, bytes],
+            params![root.as_str(), current as i64, bytes],
         )?;
         #[cfg(feature = "fault-injection")]
         if self.failure_fires() {
@@ -529,11 +690,37 @@ impl LogStore {
             .store(skip + 1, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Arm the read fail point: the next `count` reads answer with a failure instead of the
+    /// store's rows. A caller that refuses without asking the store leaves the arming where
+    /// it was, so the read that comes after it still meets the failure.
+    #[cfg(feature = "fault-injection")]
+    pub fn fail_next_reads(&self, count: u64) {
+        self.failing_reads.store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Arm the contention point: the next `count` appends are raced by a foreign writer that
     /// wins, so each loses the compare-and-swap and its caller replays.
     #[cfg(feature = "fault-injection")]
     pub fn contend_next_appends(&self, count: u64) {
         self.contended_appends.store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Arm the contention point once, with what the winner records. The next append to `root`
+    /// loses to a writer that put `observation` in the log, so the caller's next derivation
+    /// answers to a state another writer changed rather than to a position it only moved.
+    #[cfg(feature = "fault-injection")]
+    pub fn contend_next_append_with(
+        &self,
+        racing: &TrajectoryId,
+        recorded_in: &TrajectoryId,
+        observation: &HostObservation,
+    ) {
+        *self
+            .contending_record
+            .lock()
+            .expect("the injection mutex is never poisoned") =
+            Some((racing.clone(), recorded_in.clone(), observation.clone()));
+        self.contend_next_appends(1);
     }
 
     /// Forget every stored policy file, leaving each root's opening naming a
@@ -579,6 +766,14 @@ impl LogStore {
     #[cfg(feature = "fault-injection")]
     fn contention_fires(&self) -> bool {
         consume(&self.contended_appends).is_some()
+    }
+
+    #[cfg(feature = "fault-injection")]
+    fn read_refused(&self) -> Result<(), ReadError> {
+        match consume(&self.failing_reads) {
+            Some(_) => Err(ReadError::Injected),
+            None => Ok(()),
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -654,13 +849,10 @@ fn stored(connection: &Connection, root: &TrajectoryId) -> Result<(Vec<Vec<u8>>,
             root: root.as_str().to_string(),
         });
     };
-    let opening = match decode(first)? {
-        Batch::Facts(facts) => facts,
-        Batch::Inventory(_) | Batch::BoundFacts(_) => Vec::new(),
-    };
+    let opening = decode(first)?;
     let Some(Fact::TrajectoryOpened {
         policy_file_key: key, ..
-    }) = opening.first()
+    }) = opening.facts.first()
     else {
         return Err(ReadError::Undecodable(
             "the log does not open with a TrajectoryOpened record".to_string(),
@@ -684,16 +876,15 @@ fn stored(connection: &Connection, root: &TrajectoryId) -> Result<(Vec<Vec<u8>>,
 fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: Vec<u8>) -> Result<Log, ReadError> {
     let basis = batches.len() as u64;
     let mut facts = Vec::new();
-    let mut inventories = Vec::new();
-    let mut call_bindings = Vec::new();
-    for batch in &batches {
-        match decode(batch)? {
-            Batch::Facts(batch) => facts.extend(batch),
-            Batch::Inventory(observation) => inventories.push(observation),
-            Batch::BoundFacts(bound) => {
-                facts.extend(bound.facts);
-                call_bindings.push(bound.call_binding);
-            }
+    let mut host = Vec::new();
+    for (seq, batch) in batches.iter().enumerate() {
+        let record = decode(batch)?;
+        facts.extend(record.facts);
+        if let Some(observation) = record.host {
+            host.push(HostRecord {
+                seq: seq as u64,
+                observation,
+            });
         }
     }
     Ok(Log {
@@ -701,17 +892,36 @@ fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: Vec<u8>) -> 
         facts,
         basis,
         policy_file,
-        inventories,
-        call_bindings,
+        host,
     })
 }
 
-fn encode(facts: &[Fact]) -> Vec<u8> {
-    serde_json::to_vec(facts).expect("engine records serialize: every field is a serde type with no float or map key")
+fn encode(facts: &[Fact], host: Option<&HostObservation>) -> Vec<u8> {
+    let expectation = "records serialize: every field is a serde type with no float or map key";
+    match host {
+        None => serde_json::to_vec(facts).expect(expectation),
+        Some(host) => serde_json::to_vec(&HostRowRef { facts, host }).expect(expectation),
+    }
 }
 
-fn decode(bytes: &[u8]) -> Result<Batch, ReadError> {
-    serde_json::from_slice(bytes).map_err(|error| ReadError::Undecodable(error.to_string()))
+/// Which of the two shapes a stored row is, from its first token. A row that is neither —
+/// an older encoding, or bytes this build cannot read — refuses the whole log.
+fn decode(bytes: &[u8]) -> Result<Record, ReadError> {
+    let undecodable = |error: serde_json::Error| ReadError::Undecodable(error.to_string());
+    match bytes.iter().find(|byte| !byte.is_ascii_whitespace()) {
+        Some(b'[') => serde_json::from_slice(bytes)
+            .map(|facts| Record { facts, host: None })
+            .map_err(undecodable),
+        Some(b'{') => serde_json::from_slice::<HostRow>(bytes)
+            .map(|row| Record {
+                facts: row.facts,
+                host: Some(row.host),
+            })
+            .map_err(undecodable),
+        _ => Err(ReadError::Undecodable(
+            "a stored batch is neither an engine batch nor a host record".to_string(),
+        )),
+    }
 }
 
 fn is_taken(error: &rusqlite::Error) -> bool {
@@ -844,8 +1054,8 @@ mod tests {
         assert_eq!(store.log(&root()).expect("the log reads").basis(), 2);
     }
 
-    fn observed(actor: &str, server: &str) -> InventoryObservation {
-        InventoryObservation {
+    fn observed(actor: &str, server: &str) -> HostObservation {
+        HostObservation::Inventory {
             actor: TrajectoryId::new(actor),
             adapter: AdapterName::Kagent,
             inventory: ToolInventory {
@@ -858,34 +1068,117 @@ mod tests {
         }
     }
 
+    fn observations(log: &Log) -> Vec<HostObservation> {
+        log.host_records()
+            .iter()
+            .map(|record| record.observation.clone())
+            .collect()
+    }
+
     #[test]
-    fn inventory_and_fact_appends_share_one_compare_and_swap() {
+    fn host_and_fact_appends_share_one_compare_and_swap() {
         let store = opened();
         let stale = store.log(&root()).unwrap();
         let observation = observed(root().as_str(), "demo");
-        store.append_inventory(&stale, &observation).unwrap();
+        store.append_host(&stale, &[], &observation).unwrap();
         assert!(matches!(
             store.append(&stale, &punctuation()),
             Err(AppendError::Conflict { .. })
         ));
         assert!(matches!(
-            store.append_inventory(&stale, &observation),
+            store.append_host(&stale, &[], &observation),
             Err(AppendError::Conflict { .. })
         ));
         let seen = store.log(&root()).unwrap();
-        assert_eq!(seen.inventories(), &[observation]);
+        assert_eq!(observations(&seen), vec![observation]);
+        assert_eq!(
+            seen.host_records()[0].seq,
+            1,
+            "the record names the position it landed at"
+        );
         assert_eq!(seen.facts(), stale.facts());
         assert_eq!(seen.policy_file(), stale.policy_file());
         store.append(&seen, &punctuation()).unwrap();
         assert!(matches!(
-            store.append_inventory(&seen, &observed("child", "other")),
+            store.append_host(&seen, &[], &observed("child", "other")),
             Err(AppendError::Conflict { .. })
         ));
-        assert_eq!(store.log(&root()).unwrap().inventories().len(), 1);
+        assert_eq!(store.log(&root()).unwrap().host_records().len(), 1);
+    }
+
+    /// An engine batch and a host observation can be one act: a binding is durable exactly
+    /// when the facts that opened the dispatch are.
+    #[test]
+    fn facts_and_an_observation_land_in_one_batch() {
+        let store = opened();
+        let log = store.log(&root()).unwrap();
+        let resolved = appa_policy::Config::from_toml_str("version = 2\n[[tool]]\nname = \"read\"\n")
+            .expect("the fixture policy compiles")
+            .engine()
+            .resolve_call(appa_engine::value::ToolName::new("read"), b"{}")
+            .expect("the fixture call resolves through the engine");
+        let dispatch = DispatchId::new(root(), resolved.digest(), 0);
+        let bound = HostObservation::CallBound {
+            trajectory: root(),
+            call_id: "toolu_1".to_string(),
+            dispatch: dispatch.clone(),
+        };
+        store.append_host(&log, &punctuation(), &bound).unwrap();
+
+        let seen = store.log(&root()).unwrap();
+        assert_eq!(seen.basis(), 2, "both streams took one position");
+        assert!(matches!(
+            seen.facts(),
+            [Fact::TrajectoryOpened { .. }, Fact::Boundary { .. }]
+        ));
+        let bindings: Vec<_> = seen.call_bindings().collect();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].call_id, "toolu_1");
+        assert_eq!(bindings[0].dispatch, &dispatch);
+        assert_eq!(bindings[0].trajectory, &root());
+    }
+
+    /// The encoding is the shape, and a batch with no observation is byte-for-byte what an
+    /// engine-only store wrote: nothing sniffs between two unrelated payloads.
+    #[test]
+    fn a_batch_without_an_observation_is_the_bare_array_of_its_facts() {
+        assert_eq!(
+            encode(&punctuation(), None),
+            serde_json::to_vec(&punctuation()).unwrap()
+        );
+        let host = observed(root().as_str(), "demo");
+        let object: serde_json::Value = serde_json::from_slice(&encode(&[], Some(&host))).unwrap();
+        assert_eq!(object["facts"], serde_json::json!([]));
+        assert_eq!(object["host"]["kind"], "inventory");
+    }
+
+    /// An object that is not this build's host record refuses the read rather than being
+    /// dropped: a log this build cannot fully read is not one to decide under.
+    #[test]
+    fn an_object_that_is_not_a_host_record_refuses_the_read() {
+        for row in [
+            br#"{"actor":"cc:root","adapter":"kagent","inventory":{}}"#.as_slice(),
+            br#"{"facts":[],"host":{"kind":"from_a_later_build"}}"#.as_slice(),
+            b"not json at all",
+        ] {
+            let store = opened();
+            store
+                .lock()
+                .execute(
+                    "INSERT INTO logs (root, seq, facts) VALUES (?1, 1, ?2)",
+                    params![root().as_str(), row],
+                )
+                .expect("the row lands");
+            assert!(
+                matches!(store.log(&root()), Err(ReadError::Undecodable(_))),
+                "{}",
+                String::from_utf8_lossy(row)
+            );
+        }
     }
 
     #[test]
-    fn inventory_scopes_survive_reopen_without_changing_the_policy_or_engine_facts() {
+    fn host_observations_survive_reopen_without_changing_the_policy_or_engine_facts() {
         let dir = tempfile::tempdir().unwrap();
         let backend = Backend::Sqlite {
             path: dir.path().join("inventory.db"),
@@ -895,15 +1188,67 @@ mod tests {
         {
             let store = LogStore::open(backend.clone()).unwrap();
             store.create_root(opening(&root()), POLICY.as_bytes()).unwrap();
-            store.append_inventory(&store.log(&root()).unwrap(), &parent).unwrap();
-            store.append_inventory(&store.log(&root()).unwrap(), &child).unwrap();
+            store.append_host(&store.log(&root()).unwrap(), &[], &parent).unwrap();
+            store.append_host(&store.log(&root()).unwrap(), &[], &child).unwrap();
         }
         let store = LogStore::open(backend).unwrap();
         let log = store.log(&root()).unwrap();
-        assert_eq!(log.inventories(), &[parent, child]);
+        assert_eq!(observations(&log), vec![parent, child]);
         assert_eq!(log.basis(), 3);
         assert_eq!(log.facts(), opening(&root()));
         assert_eq!(log.policy_file(), POLICY.as_bytes());
+    }
+
+    /// The query a reader uses when it knows the key but not the family that recorded it:
+    /// the roots that named the key, and no root that named another.
+    #[test]
+    fn the_needle_finds_the_roots_that_name_a_key_and_no_others() {
+        let store = opened();
+        let second = TrajectoryId::new("cc:second");
+        store.create_root(opening(&second), POLICY.as_bytes()).unwrap();
+        let vouched = |root: &TrajectoryId, key: &str| HostObservation::Vouched {
+            actor: HostActor {
+                root: root.clone(),
+                child: None,
+            },
+            key: key.to_string(),
+            ruling: None,
+        };
+        store.append(&store.log(&root()).unwrap(), &punctuation()).unwrap();
+        store
+            .append_host(&store.log(&root()).unwrap(), &[], &vouched(&root(), "offer:one"))
+            .unwrap();
+        store
+            .append_host(&store.log(&second).unwrap(), &[], &vouched(&second, "offer:one"))
+            .unwrap();
+        store
+            .append_host(&store.log(&second).unwrap(), &[], &vouched(&second, "offer:two"))
+            .unwrap();
+        // A second row naming the same key, so a root that recorded twice is named once.
+        store
+            .append_host(&store.log(&second).unwrap(), &[], &vouched(&second, "offer:one"))
+            .unwrap();
+        store.append(&store.log(&second).unwrap(), &punctuation()).unwrap();
+
+        assert_eq!(
+            store
+                .roots_mentioning(&HostObservation::names_key("offer:one"))
+                .unwrap(),
+            vec![root(), second.clone()],
+            "one entry per root, however many of its rows name the key"
+        );
+        assert_eq!(
+            store
+                .roots_mentioning(&HostObservation::names_key("offer:two"))
+                .unwrap(),
+            vec![second.clone()],
+            "a key nothing else names answers with the one root that does"
+        );
+        assert_eq!(
+            store.roots_mentioning(&HostObservation::names_key("offer:on")).unwrap(),
+            Vec::new(),
+            "the needle carries the closing quote, so one key is never a prefix of another"
+        );
     }
 
     #[test]
@@ -1085,6 +1430,10 @@ mod tests {
             second.create_root(opening(&id), POLICY.as_bytes()),
             Err(CreateError::AlreadyExists { .. })
         ));
+        assert!(matches!(
+            first.log(&TrajectoryId::new("pg-test:ghost")),
+            Err(ReadError::UnknownRoot { .. }),
+        ));
 
         let before = first.log(&id).unwrap();
         let tx = first.postgres().unwrap().begin().unwrap();
@@ -1110,11 +1459,62 @@ mod tests {
         assert_eq!(second.log(&id).unwrap(), sqlite.log(&id).unwrap());
 
         let observation = observed(id.as_str(), "demo");
-        first.append_inventory(&first.log(&id).unwrap(), &observation).unwrap();
+        first.append_host(&first.log(&id).unwrap(), &[], &observation).unwrap();
         sqlite
-            .append_inventory(&sqlite.log(&id).unwrap(), &observation)
+            .append_host(&sqlite.log(&id).unwrap(), &[], &observation)
             .unwrap();
         assert_eq!(second.log(&id).unwrap(), sqlite.log(&id).unwrap());
+        assert_eq!(
+            first.log(&id).unwrap().host_records(),
+            sqlite.log(&id).unwrap().host_records(),
+            "one root's host records read the same on both backends"
+        );
+
+        let vouched = HostObservation::Vouched {
+            actor: HostActor {
+                root: id.clone(),
+                child: None,
+            },
+            key: "offer:one".to_string(),
+            ruling: None,
+        };
+        let before_vouch = first.log(&id).unwrap();
+        first.append_host(&before_vouch, &[], &vouched).unwrap();
+        assert!(
+            matches!(
+                first.append_host(&before_vouch, &[], &vouched),
+                Err(AppendError::Conflict { .. }),
+            ),
+            "a host observation is appended against its read position on this backend too"
+        );
+        assert!(
+            second
+                .roots_mentioning(&HostObservation::names_key("offer:one"))
+                .unwrap()
+                .contains(&id),
+            "the needle names the root that recorded the key"
+        );
+        assert_eq!(
+            second
+                .roots_mentioning(&HostObservation::names_key("offer:two"))
+                .unwrap(),
+            Vec::new(),
+            "and nothing for a key no row names"
+        );
+        assert_eq!(
+            second
+                .log(&id)
+                .unwrap()
+                .host_records()
+                .iter()
+                .rev()
+                .find(|record| matches!(&record.observation, HostObservation::Vouched { .. })),
+            Some(&HostRecord {
+                seq: 4,
+                observation: vouched,
+            }),
+            "and the record reads the same through the connection thread"
+        );
 
         let stale = first.log(&id).unwrap();
         let barrier = std::sync::Barrier::new(2);
@@ -1139,7 +1539,7 @@ mod tests {
         );
         assert_eq!(second.log(&id).unwrap().basis(), 4);
 
-        let binding = CallBinding {
+        let bound = HostObservation::CallBound {
             trajectory: id.clone(),
             call_id: "host-call-1".into(),
             dispatch: DispatchId::new(
@@ -1148,20 +1548,29 @@ mod tests {
                 0,
             ),
         };
+        let bindings = |log: &Log| {
+            log.call_bindings()
+                .map(|binding| (binding.call_id.to_string(), binding.dispatch.clone()))
+                .collect::<Vec<_>>()
+        };
+        let HostObservation::CallBound { call_id, dispatch, .. } = &bound else {
+            unreachable!("built above");
+        };
+        let expected = vec![(call_id.clone(), dispatch.clone())];
         let before = first.log(&id).unwrap();
         let tx = first.postgres().unwrap().begin().unwrap();
-        first.append_bound(&before, &facts, binding.clone()).unwrap();
-        assert_eq!(first.log(&id).unwrap().call_bindings(), std::slice::from_ref(&binding));
+        first.append_host(&before, &facts, &bound).unwrap();
+        assert_eq!(bindings(&first.log(&id).unwrap()), expected);
         assert_eq!(second.log(&id).unwrap(), before);
         drop(tx);
         assert_eq!(first.log(&id).unwrap(), before, "binding and facts roll back together");
 
-        first.append_bound(&before, &facts, binding.clone()).unwrap();
+        first.append_host(&before, &facts, &bound).unwrap();
         let restored = second.log(&id).unwrap();
-        assert_eq!(restored.call_bindings(), &[binding]);
+        assert_eq!(bindings(&restored), expected);
         assert_eq!(restored.facts().len(), before.facts().len() + facts.len());
         assert!(matches!(
-            second.append_bound(&before, &facts, restored.call_bindings()[0].clone()),
+            second.append_host(&before, &facts, &bound),
             Err(AppendError::Conflict { current: 5 })
         ));
 

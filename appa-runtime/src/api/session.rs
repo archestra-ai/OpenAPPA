@@ -99,23 +99,23 @@ async fn ledger<T: Send + 'static>(
 /// A host call id selects one occurrence among parallel dispatches. A
 /// legacy event without an id can report only when exactly one dispatch
 /// is open; a byte match among several occurrences would be a guess.
-fn classify_report_identified(
+fn classify_report_identified<'a>(
     call: &ProposedCall,
     call_id: Option<&str>,
     canonical: impl FnOnce() -> Option<Vec<u8>>,
     open: &[OpenDispatch],
-    bindings: &[appa_eventlog::CallBinding],
+    bindings: impl Iterator<Item = appa_eventlog::CallBinding<'a>>,
     trajectory: &appa_engine::value::TrajectoryId,
 ) -> Result<appa_engine::value::DispatchId, UnreportableOutcome> {
     let open = match call_id {
         Some(call_id) => {
             let Some(binding) = bindings
-                .iter()
-                .find(|binding| binding.trajectory == *trajectory && binding.call_id == call_id)
+                .into_iter()
+                .find(|binding| binding.trajectory == trajectory && binding.call_id == call_id)
             else {
                 return Err(UnreportableOutcome::NoOpenDispatch);
             };
-            let Some(open) = open.iter().find(|open| open.id == binding.dispatch) else {
+            let Some(open) = open.iter().find(|open| open.id == *binding.dispatch) else {
                 return Err(UnreportableOutcome::NoOpenDispatch);
             };
             open
@@ -144,7 +144,7 @@ fn classify_report(
         None,
         canonical,
         open,
-        &[],
+        std::iter::empty(),
         &appa_engine::value::TrajectoryId::new("test"),
     )
 }
@@ -214,7 +214,7 @@ const REPLAY_LIMIT: u32 = 8;
 /// The most external-resolution rounds one invocation runs before refusing operationally.
 /// Gathering is designed to close at least one ask per round, so this cap never fires on a
 /// healthy deployment; it bounds the blast radius of a gathering bug or a hostile external.
-const RESOLUTION_ROUNDS: u32 = 8;
+pub(super) const RESOLUTION_ROUNDS: u32 = 8;
 
 /// The outcome that closes a substituted release the harness never ran:
 /// the child proposed past it, or ended without running it.
@@ -610,38 +610,29 @@ impl Session {
     }
 
     /// Bind a host call identity to a dispatch that a remedy opened before
-    /// the harness received the substituted call. The empty fact batch makes
-    /// only the integration binding durable at the log's CAS position.
+    /// the harness received the substituted call. Only the binding is durable, at the log's
+    /// CAS position, and the identity is checked against the position it is written at.
     fn bind_existing_call(&self, call_id: String, dispatch: appa_engine::value::DispatchId) -> Result<(), EventError> {
         if call_id.is_empty() {
             return Err(EventError::CallIdReused);
         }
-        for _ in 0..REPLAY_LIMIT {
-            let log = self.inner.log(&self.root)?;
-            let trajectory = crate::engine::engine_id(&self.trajectory);
+        let trajectory = crate::engine::engine_id(&self.trajectory);
+        self.inner.append_host_with(&self.root, |log| {
             if log
                 .call_bindings()
-                .iter()
-                .any(|binding| binding.trajectory == trajectory && binding.call_id == call_id)
+                .any(|binding| *binding.trajectory == trajectory && binding.call_id == call_id)
             {
                 return Err(EventError::CallIdReused);
             }
-            let binding = appa_eventlog::CallBinding {
-                trajectory: trajectory.clone(),
-                call_id: call_id.clone(),
-                dispatch: dispatch.clone(),
-            };
-            match self.inner.store.append_bound(&log, &[], binding) {
-                Ok(()) => return Ok(()),
-                Err(appa_eventlog::AppendError::Conflict { .. }) => continue,
-                Err(error) => {
-                    self.inner
-                        .note_store_error(Some(&self.root), crate::events::StoreOperation::Append, &error);
-                    return Err(EventError::Storage(error.to_string()));
-                }
-            }
-        }
-        Err(EventError::Contended { attempts: REPLAY_LIMIT })
+            Ok((
+                Some(appa_eventlog::HostObservation::CallBound {
+                    trajectory: trajectory.clone(),
+                    call_id: call_id.clone(),
+                    dispatch: dispatch.clone(),
+                }),
+                (),
+            ))
+        })
     }
 
     /// Close the call this trajectory has open as one that did not run.
@@ -1364,17 +1355,17 @@ impl Session {
             let appended = match (opening_call_id, opens_dispatch) {
                 (Some(call_id), Some(dispatch)) => {
                     if call_id.is_empty()
-                        || log.call_bindings().iter().any(|binding| {
-                            binding.trajectory == crate::engine::engine_id(&self.trajectory)
+                        || log.call_bindings().any(|binding| {
+                            *binding.trajectory == crate::engine::engine_id(&self.trajectory)
                                 && binding.call_id == call_id
                         })
                     {
                         return Err(EventError::CallIdReused);
                     }
-                    self.inner.store.append_bound(
+                    self.inner.store.append_host(
                         &log,
                         facts,
-                        appa_eventlog::CallBinding {
+                        &appa_eventlog::HostObservation::CallBound {
                             trajectory: crate::engine::engine_id(&self.trajectory),
                             call_id: call_id.to_string(),
                             dispatch,
@@ -1623,8 +1614,7 @@ impl Decided<'_> {
             !self
                 .log
                 .call_bindings()
-                .iter()
-                .any(|binding| binding.trajectory == trajectory && binding.dispatch == open.id)
+                .any(|binding| *binding.trajectory == trajectory && *binding.dispatch == open.id)
         })
     }
 

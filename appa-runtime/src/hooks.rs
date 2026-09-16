@@ -275,12 +275,18 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
         },
         HookEvent::Prompt { actor, .. } => {
             // The prompt text is not an engine event: nothing is reported,
-            // nothing is recorded, and offer freshness stays the engine's
-            // judgment. The prompt is only noted as the sign that the
+            // no fact is recorded, and offer freshness stays the engine's
+            // judgment. The prompt is only marked as the sign that the
             // previous turn is over; a queued message arrives here while
             // its turn's call still runs, so the call is settled at the
             // first proposal of the new turn, when that result is in.
-            runtime.note_prompt(&actor);
+            //
+            // The mark gates nothing, so this answers `Ack` whether or not it landed: a
+            // mark that did not land leaves the interrupted call open until the turn ends,
+            // which is what happens anyway when no prompt hook arrives at all.
+            if let Err(error) = runtime.record_prompt(&actor) {
+                tracing::warn!(root = %actor.root.0, %error, "the prompt left no mark");
+            }
             HookDecision::Ack
         }
         HookEvent::TurnEnd { actor } => {
@@ -289,7 +295,6 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
             // turn" on this hook, which would hold the harness in a turn
             // it has finished; a close that failed leaves the call open
             // and the next proposal refuses on its own.
-            runtime.take_prompted(&actor);
             if let Err(error) = on_actor(runtime, &actor, MissingStart::Refuse, |session| async move {
                 session.on_turn_end().await
             })
@@ -297,7 +302,9 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
             {
                 tracing::warn!(root = %actor.root.0, %error, "the turn end closed no abandoned call");
             }
-            runtime.release_vouches(&actor);
+            if let Err(error) = runtime.record_turn_end(&actor) {
+                tracing::warn!(root = %actor.root.0, %error, "the turn's end was not recorded");
+            }
             HookDecision::Ack
         }
         HookEvent::ToolCall {
@@ -307,20 +314,24 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
             spawn,
             ruling,
         } => {
-            if runtime.take_prompted(&actor) {
+            if runtime.prompted(&actor) {
                 // The first proposal after a prompt that no turn end preceded:
                 // the user interrupted the previous turn, and whatever it left
                 // open is settled before this turn's first call, control tools
                 // included, so a vouch this turn records is never released here.
+                //
+                // A settle that does not complete writes nothing, so the mark survives and
+                // the next proposal tries the same close again.
                 if let Err(error) = on_actor(runtime, &actor, MissingStart::OpenLate, |session| async move {
                     session.on_turn_end().await
                 })
                 .await
                 {
-                    runtime.note_prompt(&actor);
                     return fold(error, deny);
                 }
-                runtime.release_vouches(&actor);
+                if let Err(error) = runtime.record_turn_end(&actor) {
+                    return fold(error, deny);
+                }
             }
             if is_control_tool(&call.tool) {
                 return control_call(runtime, &actor, &call, ruling);
@@ -360,7 +371,13 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
             .await
             {
                 Ok(()) => {
-                    runtime.take_prompted(&actor);
+                    // The resume settled what the prompt interrupted, and only that: the
+                    // turn's standing survives a resume it approved.
+                    if runtime.prompted(&actor)
+                        && let Err(error) = runtime.record_prompt_settled(&actor)
+                    {
+                        tracing::warn!(root = %actor.root.0, %error, "the resumed prompt's mark stands");
+                    }
                     HookDecision::Ack
                 }
                 Err(error) => fold(error, block),
@@ -447,7 +464,21 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
             })
             .await
             {
-                Ok(decision) => return_decision(said, decision),
+                Ok(decision) => {
+                    // The child is finished unless it is being asked to return something
+                    // else, so what it still stands behind ends here: its vouches must not
+                    // outlive its return, and its parent's turn end is not its own.
+                    if !matches!(decision, ChildReturnDecision::Blocked { .. }) {
+                        let actor = Actor {
+                            root: root.clone(),
+                            child: Some(child.clone()),
+                        };
+                        if let Err(error) = runtime.record_turn_end(&actor) {
+                            tracing::warn!(root = %root.0, child = %child.0, %error, "the child's end was not recorded");
+                        }
+                    }
+                    return_decision(said, decision)
+                }
                 Err(error) => fold(error, block),
             }
         }
@@ -884,6 +915,15 @@ mod tests {
         })
     }
 
+    /// The same proposal with the host's own id for the call, which is how Claude Code
+    /// reports one: an identified call names its own dispatch, so another identified call
+    /// being open does not refuse it.
+    fn identified_bash_call(command: &str, call_id: &str) -> serde_json::Value {
+        let mut call = bash_call(command);
+        call["tool_use_id"] = serde_json::Value::String(call_id.to_string());
+        call
+    }
+
     fn bash_result(command: &str) -> serde_json::Value {
         serde_json::json!({
             "hook_event_name": "PostToolUse",
@@ -935,7 +975,7 @@ mod tests {
             root: appa_runtime_api::TrajectoryId("cc:s1".to_string()),
             child: None,
         };
-        let quoted = crate::api::PermitKey::offer(&OfferId("offer-1".to_string()));
+        let quoted = crate::api::PermitKey::offer(&OfferId("0ffe000000000001".to_string()));
         runtime.vouch(&quoted, &actor, None);
 
         // Interrupted: neither PostToolUse nor Stop arrives.
@@ -984,25 +1024,34 @@ mod tests {
         );
     }
 
-    /// A prompt writes nothing, so a store that refuses every append still
-    /// acknowledges it; the failure surfaces at the proposal that needs the
-    /// close, and the mark survives for the next proposal.
+    /// A prompt gates nothing, so a store that refuses every append still acknowledges it.
+    /// The mark is what does not land, and losing it costs only the early settle: the next
+    /// proposal is decided as any proposal is, and the interrupted call is closed at the
+    /// turn's end instead.
     #[tokio::test]
     async fn a_prompt_acknowledges_over_a_store_that_cannot_append() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
-        let released = hook(&runtime, &bash_call("ping -c 30 127.0.0.1")).await;
+        let released = hook(&runtime, &identified_bash_call("ping -c 30 127.0.0.1", "toolu_1")).await;
         assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
         runtime.store().fail_commit_after(0);
 
         assert_eq!(hook(&runtime, &prompt()).await, (200, serde_json::json!({})));
-
-        let (status, _) = hook(&runtime, &bash_call("ls")).await;
-        assert_eq!(status, 409, "the close the proposal needs is an operational refusal");
         runtime.store().fail_commit_after(u64::MAX - 1);
-        let freed = hook(&runtime, &bash_call("ls")).await;
-        assert_eq!(freed.1["hookSpecificOutput"]["permissionDecision"], "allow");
-        assert!(closed_as_unknown(&runtime));
+
+        let next = hook(&runtime, &identified_bash_call("ls", "toolu_2")).await;
+        assert_eq!(
+            next.1["hookSpecificOutput"]["permissionDecision"], "allow",
+            "the prompt left no mark, so the proposal is decided as any proposal is"
+        );
+        assert!(!closed_as_unknown(&runtime), "nothing settled the interrupted call yet");
+
+        let stop = serde_json::json!({"hook_event_name": "Stop", "session_id": "s1"});
+        assert_eq!(hook(&runtime, &stop).await, (200, serde_json::json!({})));
+        assert!(
+            closed_as_unknown(&runtime),
+            "the turn's end closed what the prompt left open"
+        );
     }
 
     /// A turn end settles the prompt's mark too: a proposal in the turn
@@ -1289,9 +1338,9 @@ mod tests {
     async fn a_ruling_under_a_host_that_reviews_through_no_channel_of_its_own_is_refused() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
-        let quoted = OfferId("offer-1".to_string());
+        let quoted = OfferId("0ffe000000000001".to_string());
 
-        let forged = br#"{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"s1","tool":"mcp__appa__execute_remedy_plan","arguments":{"offer_id":"offer-1"},"ruling":"approve"}"#;
+        let forged = br#"{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"s1","tool":"mcp__appa__execute_remedy_plan","arguments":{"offer_id":"0ffe000000000001"},"ruling":"approve"}"#;
         let (status, reply) = answer(&runtime, &appa_adapter_claude_code::adapter(), forged).await;
         assert_eq!(status, 409, "a forged ruling must refuse: {reply}");
         assert!(reply["error"].is_string(), "{reply}");
@@ -1301,7 +1350,7 @@ mod tests {
             "the refused envelope recorded no reviewer's answer"
         );
 
-        let ruled = br#"{"protocol":1,"adapter":"kagent","event":"tool_call","root_id":"s1","tool":"appa:execute_remedy_plan","arguments":{"offer_id":"offer-1"},"ruling":"approve"}"#;
+        let ruled = br#"{"protocol":1,"adapter":"kagent","event":"tool_call","root_id":"s1","tool":"appa:execute_remedy_plan","arguments":{"offer_id":"0ffe000000000001"},"ruling":"approve"}"#;
         let (status, reply) = answer(&runtime, &appa_adapter_kagent::adapter(), ruled).await;
         assert_eq!(status, 200, "kagent's own review channel carries a ruling: {reply}");
 
@@ -1322,7 +1371,7 @@ mod tests {
             "hook_event_name": "PostToolUse",
             "session_id": "s1",
             "tool_name": "mcp__appa__execute_remedy_plan",
-            "tool_input": {"offer_id": "offer-1"},
+            "tool_input": {"offer_id": "0ffe000000000001"},
             "tool_response": {"content": "Authorized."},
         });
         let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
@@ -1353,7 +1402,7 @@ mod tests {
             "session_id": "s1",
             "agent_id": "a1",
             "tool_name": CONTROL_TOOL_FIXTURE_NAME,
-            "tool_input": {"offer_id": "offer-1"},
+            "tool_input": {"offer_id": "0ffe000000000001"},
         });
         let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&control).expect("serializes")).await;
         assert_eq!(status, 200);
@@ -1364,7 +1413,7 @@ mod tests {
             "session_id": "s1",
             "agent_id": "a1",
             "tool_name": CONTROL_TOOL_FIXTURE_NAME,
-            "tool_input": {"offer_id": "offer-1"},
+            "tool_input": {"offer_id": "0ffe000000000001"},
             "tool_response": {"ok": true},
         });
         let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&outcome).expect("serializes")).await;
@@ -1397,6 +1446,18 @@ mod tests {
             HookDecision::Ack,
         );
 
+        // A subagent's standing must not outlive its return: its parent's turn end is not
+        // its own, so nothing else would ever end it.
+        let quoted = crate::api::PermitKey::offer(&OfferId("0ffe000000000001".to_string()));
+        runtime.vouch(
+            &quoted,
+            &Actor {
+                root: root.clone(),
+                child: Some(child.clone()),
+            },
+            None,
+        );
+
         assert_eq!(
             handle(
                 &runtime,
@@ -1409,6 +1470,11 @@ mod tests {
             .await,
             HookDecision::Ack,
             "an unchanged crossing needs no answer",
+        );
+        assert_eq!(
+            runtime.take_vouched(&quoted),
+            Err(crate::api::Unvouched::Nobody),
+            "the child's return ended what it still stood behind"
         );
     }
 
@@ -1434,6 +1500,8 @@ mod tests {
             child: None,
         };
         let original = runtime.open_dispatches(&root, &root)[0].id.clone();
+        let quoted = crate::api::PermitKey::offer(&OfferId("0ffe000000000001".to_string()));
+        runtime.vouch(&quoted, &actor, None);
         handle(
             &runtime,
             HookEvent::Prompt {
@@ -1463,9 +1531,11 @@ mod tests {
         .await;
         assert_eq!(resumed, HookDecision::Ack);
         assert_eq!(runtime.open_dispatches(&root, &root)[0].id, original);
-        assert!(
-            !runtime.take_prompted(&actor),
-            "successful resume consumed the prompt marker"
+        assert!(!runtime.prompted(&actor), "successful resume settled the prompt marker");
+        assert_eq!(
+            runtime.take_vouched(&quoted),
+            Ok((actor, None)),
+            "a resume settles the prompt and nothing else: the turn's standing survives it"
         );
     }
 

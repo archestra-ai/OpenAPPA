@@ -2,6 +2,7 @@
 //! event model this crate declares.
 
 pub(crate) mod files;
+mod host;
 mod session;
 
 /// The fixture-only `Value` → raw-bytes helper, shared with the other
@@ -25,8 +26,9 @@ use crate::elicit::Elicitation;
 use crate::engine::{EngineRefusal, Liveness, PolicyEngine, RuntimeEngine};
 use crate::external::{ConsultGates, ExternalServices};
 use crate::yell;
-use appa_eventlog::{Backend, Log, LogStore};
+use appa_eventlog::{Backend, HostObservation, Log, LogStore};
 use appa_runtime_api::{Adapter, AdapterName};
+use host::{HostState, host_actor, inventory_at};
 
 /// One remedy offer as it is quoted and carried.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -49,14 +51,6 @@ impl ExactCall {
                 .expect("canonical argument bytes are one JSON value"),
         }
     }
-}
-
-/// One trajectory's standing to run the offer it quoted at the control
-/// tool's hook, with the person's ruling its harness attached, if any.
-#[derive(Debug, Clone, PartialEq)]
-struct Vouch {
-    actor: Actor,
-    ruling: Option<appa_runtime_api::Ruling>,
 }
 
 /// What a vouch is *about*, and the reason a runtime-provided tool can trust the trajectory
@@ -94,7 +88,35 @@ impl PermitKey {
         hasher.update(appa_engine::params::canonical_bytes(arguments));
         Self::Call(format!("{:x}", hasher.finalize()))
     }
+
+    /// How a record spells this key. The two variants can never mean each other, so the
+    /// spelling carries which one it is.
+    pub(crate) fn wire(&self) -> String {
+        match self {
+            PermitKey::Offer(id) => format!("{OFFER_KEY}{id}"),
+            PermitKey::Call(digest) => format!("{CALL_KEY}{digest}"),
+        }
+    }
+
+    /// The key a recorded spelling names, or `None` for a spelling this build cannot read.
+    ///
+    /// An offer id is the one part of a key that reaches this runtime as a caller wrote it,
+    /// so the shape the runtime itself renders is the whole of what it will read: this is
+    /// the single place that rule is spelled, and a spelling that fails it names no offer
+    /// wherever it came from.
+    pub(crate) fn parse(recorded: &str) -> Option<PermitKey> {
+        if let Some(id) = recorded.strip_prefix(OFFER_KEY) {
+            let quoted = OfferId(id.to_string());
+            return crate::engine::renders_offer(&quoted).then_some(PermitKey::Offer(quoted.0));
+        }
+        recorded
+            .strip_prefix(CALL_KEY)
+            .map(|digest| PermitKey::Call(digest.to_string()))
+    }
 }
+
+const OFFER_KEY: &str = "offer:";
+const CALL_KEY: &str = "call:";
 
 /// The key a proposed call to a tool this runtime serves is vouched under, or `None` when
 /// the call is not one: a tool on another server under a matching name, or a shape the tool
@@ -138,6 +160,14 @@ fn bare_runtime_tool(tool: &str) -> &str {
 pub(crate) enum Unvouched {
     Nobody,
     Ambiguous,
+}
+
+/// A standing the store could not read or record is a standing this call does not have. The
+/// tool then answers as it does when no hook ran, which is the closed end.
+impl From<EventError> for Unvouched {
+    fn from(_: EventError) -> Unvouched {
+        Unvouched::Nobody
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -190,6 +220,14 @@ pub enum RemedyOutcome {
     Declined { feedback: String },
     NoAnswer { feedback: String },
     Refused { detail: String },
+}
+
+impl From<EventError> for RemedyOutcome {
+    fn from(error: EventError) -> RemedyOutcome {
+        RemedyOutcome::Refused {
+            detail: error.to_string(),
+        }
+    }
 }
 
 /// Whom taking an offer involves: nobody but the model (the plain narrowing acceptance), the
@@ -733,9 +771,6 @@ impl Prepared {
                 retired: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 store,
                 modules: self.modules,
-                executing: std::sync::Mutex::new(std::collections::BTreeSet::new()),
-                permits: std::sync::Mutex::new(std::collections::BTreeMap::new()),
-                prompted: std::sync::Mutex::new(std::collections::BTreeSet::new()),
                 events: std::sync::Mutex::new(crate::events::EventLog::default()),
                 gates: self.gates,
                 naming: self.naming,
@@ -753,12 +788,6 @@ struct Inner {
     retired: std::sync::Mutex<std::collections::BTreeMap<String, Arc<RuntimeEngine>>>,
     store: Arc<LogStore>,
     modules: crate::builtins::ModuleRegistry,
-    executing: std::sync::Mutex<std::collections::BTreeSet<String>>,
-    permits: std::sync::Mutex<std::collections::BTreeMap<PermitKey, Vec<Vouch>>>,
-    /// Trajectories a prompt reached since their turn last settled. Claude Code sends no
-    /// `Stop` hook for a turn the user interrupted, so the prompt is the only sign the
-    /// previous turn is over; the next tool call or turn end settles what it left behind.
-    prompted: std::sync::Mutex<std::collections::BTreeSet<String>>,
     /// What this runtime did, as opposed to what the engine decided: bounded, in this
     /// process, and gone on restart. A diagnostic only — see [`crate::events`].
     events: std::sync::Mutex<crate::events::EventLog>,
@@ -780,70 +809,6 @@ fn inventory_refused(error: appa_runtime_api::ParseRefusal) -> EventError {
     let (appa_runtime_api::ParseRefusal::Malformed { detail } | appa_runtime_api::ParseRefusal::Unreadable { detail }) =
         error;
     EventError::InventoryRefused(detail)
-}
-
-fn inventory_at(
-    log: &Log,
-    actor: &Actor,
-    adapter: Adapter,
-) -> Result<appa_runtime_api::inventory::ToolInventory, EventError> {
-    use appa_runtime_api::inventory::ToolInventory;
-    let mut previous = ToolInventory::default();
-    if actor.child.is_none() {
-        #[derive(serde::Deserialize)]
-        struct OpeningInventory {
-            #[serde(default)]
-            appa_inventory: ToolInventory,
-        }
-        let source = std::str::from_utf8(log.policy_file())
-            .map_err(|_| EventError::PolicyUnavailable("stored policy is not UTF-8".into()))?;
-        let opening: OpeningInventory = toml::from_str(source)
-            .map_err(|_| EventError::PolicyUnavailable("stored inventory does not decode".into()))?;
-        previous = opening.appa_inventory;
-    }
-    previous.validate(adapter).map_err(inventory_refused)?;
-    let mut tools: std::collections::BTreeMap<_, _> = previous
-        .tools
-        .into_iter()
-        .map(|tool| (tool.name.clone(), tool))
-        .collect();
-    let mut sources: std::collections::BTreeMap<_, _> = previous
-        .sources
-        .into_iter()
-        .map(|source| (source.server.clone(), source))
-        .collect();
-    let scope = crate::engine::engine_id(acting_trajectory(actor));
-    for observation in log
-        .inventories()
-        .iter()
-        .filter(|observation| observation.actor == scope)
-    {
-        if observation.adapter != adapter.name {
-            return Err(EventError::InventoryRefused(
-                "an actor cannot change its plugin adapter".into(),
-            ));
-        }
-        observation.inventory.validate(adapter).map_err(inventory_refused)?;
-        for tool in &observation.inventory.tools {
-            if let Some(old) = tools.get(&tool.name)
-                && old.tool != tool.tool
-            {
-                return Err(EventError::InventoryRefused(
-                    "a recorded tool changed identity within this actor".into(),
-                ));
-            }
-            tools.insert(tool.name.clone(), tool.clone());
-        }
-        for source in &observation.inventory.sources {
-            sources.insert(source.server.clone(), source.clone());
-        }
-    }
-    let previous = ToolInventory {
-        tools: tools.into_values().collect(),
-        sources: sources.into_values().collect(),
-    };
-    previous.validate(adapter).map_err(inventory_refused)?;
-    Ok(previous)
 }
 
 impl Runtime {
@@ -1009,14 +974,77 @@ impl Inner {
         self.store
             .log(&crate::engine::engine_id(root))
             .inspect_err(|error| self.note_store_error(Some(root), crate::events::StoreOperation::Read, error))
-            .map_err(|error| match error {
-                appa_eventlog::ReadError::UnknownRoot { .. } => EventError::UnknownTrajectory,
-                appa_eventlog::ReadError::Undecodable(detail) => EventError::UntrustedLog(detail),
-                error @ appa_eventlog::ReadError::PolicyFileMissing { .. } => {
-                    EventError::PolicyUnavailable(error.to_string())
+            .map_err(read_refused)
+    }
+
+    /// Record one host observation in this root's log, at the position the append is tried
+    /// at, unconditionally. A write that depends on what stands at that position derives it
+    /// through [`Inner::append_host_with`] instead.
+    fn append_host(&self, root: &TrajectoryId, observation: &HostObservation) -> Result<(), EventError> {
+        self.append_host_with(root, |_| Ok((Some(observation.clone()), ())))
+    }
+
+    /// Record one host observation derived from the very position it will be written at, so
+    /// a writer that loses the compare-and-swap decides again against what won rather than
+    /// replaying a decision the log has moved past. `None` means there is nothing left to
+    /// record.
+    ///
+    /// The derivation is the enforcement point for every rule the host records carry: it
+    /// sees only what is durable at the position it writes at, so a standing another writer
+    /// ended between the read and the write is ended for this writer too.
+    ///
+    /// The error is the caller's, so a derivation that refuses — an offer already executing,
+    /// a standing that is no longer the one being spent — says so in its own vocabulary
+    /// instead of through this one.
+    ///
+    /// Read, derive, append; on a lost compare-and-swap, read again and derive again. The
+    /// answer handed back is the one the derivation that landed produced, so a caller learns
+    /// what was true where its record went and not what an earlier read showed it.
+    fn append_host_with<Refusal: From<EventError>, Answer>(
+        &self,
+        root: &TrajectoryId,
+        derive: impl Fn(&Log) -> Result<(Option<HostObservation>, Answer), Refusal>,
+    ) -> Result<Answer, Refusal> {
+        for _ in 0..HOST_ATTEMPTS {
+            let log = self.log(root)?;
+            let (observation, answer) = derive(&log)?;
+            let Some(observation) = observation else {
+                return Ok(answer);
+            };
+            match self.store.append_host(&log, &[], &observation) {
+                Ok(()) => return Ok(answer),
+                Err(appa_eventlog::AppendError::Conflict { .. }) => continue,
+                Err(error) => {
+                    self.note_store_error(Some(root), crate::events::StoreOperation::Append, &error);
+                    return Err(EventError::Storage(error.to_string()).into());
                 }
-                error => EventError::Storage(error.to_string()),
-            })
+            }
+        }
+        Err(EventError::Contended {
+            attempts: HOST_ATTEMPTS,
+        }
+        .into())
+    }
+}
+
+/// How many times a host write re-derives against a position another writer took before it
+/// gives up. Every contender records one observation, so a family loses this many races only
+/// when it is being written by far more than it has actors.
+const HOST_ATTEMPTS: u32 = 8;
+
+/// What this family's records say right now. Read at the position the answer is about: a
+/// claim's bound and a turn's end are both about when, so a reduction is only true of the
+/// moment it was taken at.
+fn reduced(log: &Log) -> HostState {
+    HostState::fold(log.host_records(), std::time::SystemTime::now())
+}
+
+fn read_refused(error: appa_eventlog::ReadError) -> EventError {
+    match error {
+        appa_eventlog::ReadError::UnknownRoot { .. } => EventError::UnknownTrajectory,
+        appa_eventlog::ReadError::Undecodable(detail) => EventError::UntrustedLog(detail),
+        error @ appa_eventlog::ReadError::PolicyFileMissing { .. } => EventError::PolicyUnavailable(error.to_string()),
+        error => EventError::Storage(error.to_string()),
     }
 }
 
@@ -1310,10 +1338,8 @@ impl Runtime {
         use appa_runtime_api::inventory::ToolInventory;
         candidate.validate(adapter).map_err(inventory_refused)?;
         let scope = crate::engine::engine_id(actor.child.as_ref().unwrap_or(&actor.root));
-        const ATTEMPTS: u32 = 8;
-        for _ in 0..ATTEMPTS {
-            let log = self.inner.log(&actor.root)?;
-            let previous = inventory_at(&log, actor, adapter)?;
+        self.inner.append_host_with(&actor.root, |log| {
+            let previous = inventory_at(log, actor, adapter)?;
             let combined = previous.extending(candidate, adapter).map_err(inventory_refused)?;
             let previous_tools: std::collections::BTreeMap<_, _> =
                 previous.tools.iter().map(|tool| (&tool.name, &tool.tool)).collect();
@@ -1334,25 +1360,18 @@ impl Runtime {
                     .collect(),
             };
             if delta.tools.is_empty() && delta.sources.is_empty() {
-                return Ok(());
+                return Ok((None, ()));
             }
-            let observation = appa_eventlog::InventoryObservation {
-                actor: scope.clone(),
-                adapter: adapter.name,
-                // Persist only the new evidence, not another full copy of history.
-                inventory: delta,
-            };
-            match self.inner.store.append_inventory(&log, &observation) {
-                Ok(()) => return Ok(()),
-                Err(appa_eventlog::AppendError::Conflict { .. }) => continue,
-                Err(error) => {
-                    self.inner
-                        .note_store_error(Some(&actor.root), crate::events::StoreOperation::Append, &error);
-                    return Err(EventError::Storage(error.to_string()));
-                }
-            }
-        }
-        Err(EventError::Contended { attempts: ATTEMPTS })
+            Ok((
+                Some(HostObservation::Inventory {
+                    actor: scope.clone(),
+                    adapter: adapter.name,
+                    // Persist only the new evidence, not another full copy of history.
+                    inventory: delta,
+                }),
+                (),
+            ))
+        })
     }
 
     /// Read-only preflight against the policy this family opened under. Another
@@ -1752,13 +1771,57 @@ impl Runtime {
         if pursuer != trajectory {
             return unknown();
         }
-        self.spend_vouch(&PermitKey::offer(&quoted), acting);
-        let Some(_claim) = self.claim_offer(&offer) else {
-            return RemedyOutcome::Refused {
-                detail: "this offer is already being executed".to_string(),
-            };
+        // The id the model quoted, which is the one its vouch was recorded under: claiming
+        // spends that standing, and every quote that resolves at all is this one spelling.
+        let claimed = PermitKey::offer(&quoted);
+        let actor = host_actor(acting);
+        let until = std::time::SystemTime::now() + self.execution_bound(elicitation.is_some());
+        // Two calls naming one offer must not both reach its authorities: a human review
+        // holds its call open for minutes, and a second dialog for one decision is the
+        // thing this refuses. The claim is derived at the position it is written at, so a
+        // writer that loses the compare-and-swap sees the winner's claim and refuses.
+        if let Err(refused) =
+            self.inner
+                .append_host_with::<RemedyOutcome, _>(&root, |log| match reduced(log).claimed(&claimed) {
+                    true => Err(RemedyOutcome::Refused {
+                        detail: "this offer is already being executed".to_string(),
+                    }),
+                    false => Ok((
+                        Some(HostObservation::Claimed {
+                            actor: actor.clone(),
+                            key: claimed.wire(),
+                            until,
+                        }),
+                        (),
+                    )),
+                })
+        {
+            return refused;
+        }
+        let mut claim = Claimed {
+            inner: Arc::clone(&self.inner),
+            root: root.clone(),
+            actor,
+            key: claimed.wire(),
+            released: false,
         };
-        let session = match self.session(&root, &pursuer) {
+        let outcome = self
+            .run_remedy(&root, &pursuer, offer, arguments, elicitation, ruling)
+            .await;
+        claim.release();
+        outcome
+    }
+
+    async fn run_remedy(
+        &self,
+        root: &TrajectoryId,
+        pursuer: &TrajectoryId,
+        offer: OfferId,
+        arguments: RemedyArguments,
+        elicitation: Option<&Elicitation>,
+        ruling: Option<appa_runtime_api::Ruling>,
+    ) -> RemedyOutcome {
+        let session = match self.session(root, pursuer) {
             Ok(session) => session,
             Err(error) => {
                 return RemedyOutcome::Refused {
@@ -1776,6 +1839,17 @@ impl Runtime {
                 detail: error.to_string(),
             },
         }
+    }
+
+    /// How long one execution's claim stands without word from the execution itself: the
+    /// person's budget where a review reaches one, and the machine-consult budget — every
+    /// resolution round of it — otherwise. Only a hard crash ever reaches the bound.
+    fn execution_bound(&self, reviewed: bool) -> std::time::Duration {
+        if reviewed {
+            return self.review_timeout();
+        }
+        let externals = &self.inner.deployment().config.externals;
+        externals.timeout.max(externals.claude_code.timeout) * session::RESOLUTION_ROUNDS
     }
 
     /// What taking a quoted offer in this root's family would consult, or `None` for an
@@ -1806,105 +1880,176 @@ impl Runtime {
     /// that runs it. `ruling` is a person's answer the harness obtained
     /// through its own review channel; it rides the vouch and is spent
     /// with it, so it can answer exactly the execution it was given for.
+    ///
+    /// A standing that does not land is no standing: the tool then finds nothing vouched
+    /// and says so, which is the same answer a hook that never ran would leave.
     pub(crate) fn vouch(&self, key: &PermitKey, acting: &Actor, ruling: Option<appa_runtime_api::Ruling>) {
-        let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
-        let holders = permits.entry(key.clone()).or_default();
-        // An offer has one current pursuer: its new vouch replaces the former
-        // pursuer's. A yell ticket may be quoted by independent sessions, so
-        // retain those holders and refuse ambiguity when it is consumed.
-        if matches!(key, PermitKey::Offer(_)) {
-            holders.clear();
-        }
-        match holders.iter_mut().find(|holder| holder.actor == *acting) {
-            Some(holder) => holder.ruling = ruling,
-            None => holders.push(Vouch {
-                actor: acting.clone(),
+        if let Err(error) = self.inner.append_host(
+            &acting.root,
+            &HostObservation::Vouched {
+                actor: host_actor(acting),
+                key: key.wire(),
                 ruling,
-            }),
+            },
+        ) {
+            tracing::warn!(root = %acting.root.0, %error, "this trajectory's standing was not recorded");
         }
     }
 
     /// The trajectory vouched for this key, taken once, with the ruling its harness
     /// attached.
     ///
+    /// The request naming no session is the whole problem: the caller is found by asking the
+    /// store which families named this key at all, and reducing each one's host records. The
+    /// runtime remembers nothing between the vouch and the take, so a standing another
+    /// process recorded reads the same as one this process did.
+    ///
     /// Two trajectories standing behind one key is not a tie to break: it means the key does
     /// not identify a caller, and answering either one would put one session's standing
     /// behind another session's call. That case keeps the record rather than consuming it —
     /// destroying it would make the *next* identical call look like one nothing vouched for,
     /// and the two need different answers. The turn's end releases it either way.
+    ///
+    /// A read that fails answers nobody. A partial view of who stands behind a key cannot
+    /// tell a lone holder from one of two, so authorizing from it would answer the ambiguous
+    /// case with one session's standing.
     pub(crate) fn take_vouched(&self, key: &PermitKey) -> Result<(Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
-        let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
-        let holders = permits.get_mut(key).ok_or(Unvouched::Nobody)?;
-        if holders.len() != 1 {
-            return Err(Unvouched::Ambiguous);
+        // The spelling is read before the store is asked anything. An MCP request names the
+        // key, so a caller over a non-loopback listener can ask about ids this runtime never
+        // minted, and learning that no such offer exists must not cost a walk over every
+        // family's records.
+        if PermitKey::parse(&key.wire()).as_ref() != Some(key) {
+            return Err(Unvouched::Nobody);
         }
-        let vouch = holders.remove(0);
-        permits.remove(key);
-        Ok((vouch.actor, vouch.ruling))
-    }
-
-    /// Drop every vouch this actor still holds. A vouch is recorded when the actor
-    /// quotes an offer at the control tool's hook and taken when the tool itself
-    /// runs, both inside one turn. One still standing at the turn's end was never
-    /// spent — the harness declined the call, or the tool never ran — and nothing
-    /// later can spend it.
-    pub(crate) fn release_vouches(&self, acting: &Actor) {
-        let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
-        permits.retain(|_, holders| {
-            holders.retain(|holder| holder.actor != *acting);
-            !holders.is_empty()
+        let root = self.sole_holder(key)?;
+        // Taking is one-shot, and the consumption is what makes it one: the answer is
+        // whatever stood where the release landed, not what an earlier read showed. A turn
+        // that ended in between ended this standing, and a sibling that vouched in between
+        // made the key ambiguous; both refuse here with nothing written.
+        //
+        // The compare-and-swap is this root's alone — the release lands on its log — while
+        // ambiguity is a fact about every root, so the re-discovery is a read and not a
+        // second position to swap on. What that leaves is one window: a sibling's vouch that
+        // lands after this re-read and before this append is not seen, and the release goes
+        // through. The log records both, so the next take reads the ambiguity; and it is a
+        // strictly narrower window than the in-memory map this replaced, which was one
+        // process's mutex and never saw another process's vouch at any moment at all.
+        let consumed = self.inner.append_host_with::<Unvouched, _>(&root, |log| {
+            // What this root holds where the release will land, and then that no sibling has
+            // taken up the key since: one live holder in one family is the whole condition.
+            // The loop already read this root at the position it writes at, so the re-read
+            // is the siblings only — and where the key names no sibling, which is every
+            // offer and every ticket only one session quoted, there is nothing to read.
+            let (actor, ruling) = reduced(log).vouched(key)?;
+            if self.live_holder(key, Some(&root))?.is_some() {
+                return Err(Unvouched::Ambiguous);
+            }
+            let release = HostObservation::Released {
+                actor: host_actor(&actor),
+                key: key.wire(),
+            };
+            Ok((Some(release), (actor, ruling)))
         });
-    }
-
-    /// A prompt reached this actor. Nothing is recorded: the mark lives in memory and is
-    /// consumed by the actor's next tool call or turn end, whichever comes first. A
-    /// restarted runtime forgets it and the next proposal refuses until a turn end closes
-    /// the abandoned call.
-    pub(crate) fn note_prompt(&self, acting: &Actor) {
-        let mut prompted = self
-            .inner
-            .prompted
-            .lock()
-            .expect("the prompted mutex is never poisoned");
-        prompted.insert(acting_trajectory(acting).0.clone());
-    }
-
-    /// Whether a prompt reached this actor since its turn last settled. Consumed once.
-    pub(crate) fn take_prompted(&self, acting: &Actor) -> bool {
-        let mut prompted = self
-            .inner
-            .prompted
-            .lock()
-            .expect("the prompted mutex is never poisoned");
-        prompted.remove(acting_trajectory(acting).0.as_str())
-    }
-
-    fn spend_vouch(&self, key: &PermitKey, acting: &Actor) {
-        let mut permits = self.inner.permits.lock().expect("the permit mutex is never poisoned");
-        let Some(holders) = permits.get_mut(key) else {
-            return;
-        };
-        holders.retain(|holder| holder.actor != *acting);
-        if holders.is_empty() {
-            permits.remove(key);
+        if consumed.is_err() {
+            tracing::warn!(root = %root.0, "the standing behind this call was not consumed, so it is not spent");
         }
+        consumed
     }
 
-    /// Claim one offer for the length of its execution, so two calls
-    /// naming the same offer cannot both reach its authorities. A human
-    /// review holds its call open for minutes, and without this the
-    /// second call raises a second dialog for one decision.
-    pub(crate) fn claim_offer(&self, offer: &OfferId) -> Option<OfferClaim> {
-        let claimed = self
+    /// The one root holding the one live standing behind this key, which is the family whose
+    /// log the release will land on.
+    fn sole_holder(&self, key: &PermitKey) -> Result<TrajectoryId, Unvouched> {
+        self.live_holder(key, None)?.ok_or(Unvouched::Nobody)
+    }
+
+    /// Which family holds a live standing behind this key, found by asking the store which
+    /// families named it and reducing each one's host records, and leaving out the one the
+    /// caller has already folded for itself.
+    ///
+    /// Nothing held is nothing; two — in one family or across two — are `Ambiguous`, because
+    /// then the key does not identify a caller. A read that fails answers nobody, because a
+    /// partial view cannot tell a lone holder from one of two and would answer the ambiguous
+    /// case with one session's standing.
+    fn live_holder(&self, key: &PermitKey, folded: Option<&TrajectoryId>) -> Result<Option<TrajectoryId>, Unvouched> {
+        let candidates = match self
             .inner
-            .executing
-            .lock()
-            .expect("the executing-offer mutex is never poisoned")
-            .insert(offer.0.clone());
-        claimed.then(|| OfferClaim {
-            inner: Arc::clone(&self.inner),
-            offer: offer.0.clone(),
-        })
+            .store
+            .roots_mentioning(&HostObservation::names_key(&key.wire()))
+        {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                tracing::warn!(%error, "the families standing behind this key did not read, so nothing stands");
+                self.inner
+                    .note_store_error(None, crate::events::StoreOperation::Read, &error);
+                return Err(Unvouched::Nobody);
+            }
+        };
+        let mut held: Option<TrajectoryId> = None;
+        for candidate in candidates {
+            let root = TrajectoryId(candidate.as_str().to_string());
+            if folded == Some(&root) {
+                continue;
+            }
+            // Every host record, not the rows that name the key: a turn's end releases
+            // every standing its actor held and says so without naming one.
+            let log = match self.inner.log(&root) {
+                Ok(log) => log,
+                Err(error) => {
+                    tracing::warn!(root = %root.0, %error, "this family's records did not read, so nothing stands");
+                    return Err(Unvouched::Nobody);
+                }
+            };
+            match reduced(&log).vouched(key) {
+                Ok(_) if held.is_none() => held = Some(root),
+                Ok(_) | Err(Unvouched::Ambiguous) => return Err(Unvouched::Ambiguous),
+                Err(Unvouched::Nobody) => {}
+            }
+        }
+        Ok(held)
+    }
+
+    /// A prompt reached this actor, which is the sign that its previous turn is over
+    /// however it ended.
+    pub(crate) fn record_prompt(&self, acting: &Actor) -> Result<(), EventError> {
+        self.inner.append_host(
+            &acting.root,
+            &HostObservation::PromptSeen {
+                actor: host_actor(acting),
+            },
+        )
+    }
+
+    /// What the prompt left open is settled, and this actor's standing survives it.
+    pub(crate) fn record_prompt_settled(&self, acting: &Actor) -> Result<(), EventError> {
+        self.inner.append_host(
+            &acting.root,
+            &HostObservation::PromptSettled {
+                actor: host_actor(acting),
+            },
+        )
+    }
+
+    /// This actor's turn is over: its prompt mark and every vouch it still held end here.
+    /// A vouch is recorded when the actor quotes an offer at the control tool's hook and
+    /// taken when the tool itself runs, both inside one turn. One still standing at the
+    /// turn's end was never spent — the harness declined the call, or the tool never ran —
+    /// and nothing later can spend it.
+    pub(crate) fn record_turn_end(&self, acting: &Actor) -> Result<(), EventError> {
+        self.inner.append_host(
+            &acting.root,
+            &HostObservation::TurnEnded {
+                actor: host_actor(acting),
+            },
+        )
+    }
+
+    /// Whether a prompt reached this actor and nothing has settled what it left behind. A
+    /// family with no log, or one the store cannot read, has been reached by nothing.
+    pub(crate) fn prompted(&self, acting: &Actor) -> bool {
+        let marked = crate::engine::engine_id(acting_trajectory(acting));
+        self.inner
+            .log(&acting.root)
+            .is_ok_and(|log| host::prompted(log.host_records(), &marked))
     }
 
     /// One root's rebuilt view and the engine that decides for it, for
@@ -2009,6 +2154,22 @@ impl Runtime {
         &self.inner.store
     }
 
+    /// Leave the claim an execution that never returned would have left, for the tests
+    /// that pin how one is read back.
+    #[cfg(test)]
+    pub(crate) fn claim_until(&self, acting: &Actor, offer: &OfferId, until: std::time::SystemTime) {
+        self.inner
+            .append_host(
+                &acting.root,
+                &HostObservation::Claimed {
+                    actor: host_actor(acting),
+                    key: PermitKey::offer(offer).wire(),
+                    until,
+                },
+            )
+            .expect("the claim lands");
+    }
+
     #[cfg(test)]
     pub(crate) fn minted_offers(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Vec<OfferId> {
         crate::engine::minted_offers(&self.inner.log(root).expect("the log reads"), trajectory)
@@ -2030,20 +2191,43 @@ impl Runtime {
     }
 }
 
-/// One offer's execution, released when the call that took it ends —
-/// including by panic or by a client that walked away.
-pub(crate) struct OfferClaim {
+/// One offer's execution, released when the act that claimed it ends — including by a
+/// client that walked away, which drops the future between two awaits and reaches no exit
+/// of its own.
+///
+/// The release is a record, so it is written here rather than left to the claim's bound:
+/// the bound is the hard-crash backstop, and a dropped request is not a crash. Appending in
+/// `Drop` is what the log allows — every store operation is synchronous and none awaits —
+/// and a release that cannot be written is logged and let go, because a destructor has
+/// nowhere to report it.
+struct Claimed {
     inner: Arc<Inner>,
-    offer: String,
+    root: TrajectoryId,
+    actor: appa_eventlog::HostActor,
+    key: String,
+    released: bool,
 }
 
-impl Drop for OfferClaim {
+impl Claimed {
+    fn release(&mut self) {
+        if std::mem::replace(&mut self.released, true) {
+            return;
+        }
+        if let Err(error) = self.inner.append_host(
+            &self.root,
+            &HostObservation::Released {
+                actor: self.actor.clone(),
+                key: self.key.clone(),
+            },
+        ) {
+            tracing::warn!(root = %self.root.0, %error, "the executed offer's claim was not released; it stands until it expires");
+        }
+    }
+}
+
+impl Drop for Claimed {
     fn drop(&mut self) {
-        self.inner
-            .executing
-            .lock()
-            .expect("the executing-offer mutex is never poisoned")
-            .remove(&self.offer);
+        self.release();
     }
 }
 
@@ -3004,7 +3188,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let after = runtime.inner.log(&actor.root).unwrap();
         assert_eq!(after.facts(), before.facts());
         assert_eq!(after.policy_file(), before.policy_file());
-        assert_eq!(after.inventories().len(), 2);
+        assert_eq!(inventories(&after).len(), 2);
         drop(runtime);
 
         let runtime = Runtime::open_served(config(), db, None, adapter).unwrap();
@@ -3063,7 +3247,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             1
         );
         let log = runtime.inner.log(&actor.root).unwrap();
-        assert_eq!(log.inventories().len(), 1);
+        assert_eq!(inventories(&log).len(), 1);
         assert_eq!(log.basis(), 3, "opening, injected competing batch, accepted inventory");
     }
 
@@ -3111,7 +3295,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let after = runtime.inner.log(&root).unwrap();
         assert_eq!(before.basis(), after.basis());
         assert_eq!(before.policy_file(), after.policy_file());
-        assert!(after.inventories().is_empty());
+        assert!(inventories(&after).is_empty());
         let unknown = crate::tool_validation::answer(
             &runtime,
             adapter,
@@ -3281,7 +3465,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let after = reopened.inner.log(&root).unwrap();
         assert_eq!(after.facts(), before.facts());
         assert_eq!(after.policy_file(), before.policy_file());
-        assert_eq!(after.inventories(), before.inventories());
+        assert_eq!(inventories(&after), inventories(&before));
     }
 
     #[tokio::test]
@@ -3363,7 +3547,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let after = runtime.inner.log(&root).unwrap();
         assert_eq!(before.policy_file(), after.policy_file());
         assert_eq!(
-            after.inventories().len(),
+            inventories(&after).len(),
             1,
             "only the child adds observations beyond the root snapshot"
         );
@@ -3395,6 +3579,17 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             before,
             "a different policy answers under a different key, which is what makes the key a divergence signal"
         );
+    }
+
+    /// The inventory evidence one log holds, in append order.
+    fn inventories(log: &Log) -> Vec<&appa_runtime_api::inventory::ToolInventory> {
+        log.host_records()
+            .iter()
+            .filter_map(|record| match &record.observation {
+                HostObservation::Inventory { inventory, .. } => Some(inventory),
+                _ => None,
+            })
+            .collect()
     }
 
     fn retired_len(runtime: &Runtime) -> usize {
@@ -3436,7 +3631,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             root: root.clone(),
             child: Some(TrajectoryId(format!("{}:c1", root.0))),
         };
-        let quoted = PermitKey::offer(&OfferId("offer-1".to_string()));
+        let quoted = PermitKey::offer(&OfferId("0ffe000000000001".to_string()));
 
         runtime.vouch(&quoted, &child, Some(appa_runtime_api::Ruling::Approve));
         crate::hooks::handle(&runtime, appa_runtime_api::HookEvent::TurnEnd { actor: parent.clone() }).await;
@@ -3455,11 +3650,11 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         );
 
         runtime.vouch(&quoted, &parent, None);
-        runtime.release_vouches(&child);
+        crate::hooks::handle(&runtime, appa_runtime_api::HookEvent::TurnEnd { actor: child.clone() }).await;
         assert_eq!(
             runtime.take_vouched(&quoted),
             Ok((parent, None)),
-            "releasing the child's vouches takes away no vouch of the parent's"
+            "ending the child's turn takes away no vouch of the parent's"
         );
     }
 
@@ -3482,7 +3677,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             root: root.clone(),
             child: None,
         };
-        let quoted = PermitKey::offer(&OfferId("offer-1".to_string()));
+        let quoted = PermitKey::offer(&OfferId("0ffe000000000001".to_string()));
 
         runtime.vouch(&quoted, &actor, None);
         assert_eq!(
@@ -3506,17 +3701,21 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     #[tokio::test]
     async fn an_ambiguous_vouch_refuses_every_holder_and_says_so() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime =
-            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let runtime = std::sync::Arc::new(
+            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens"),
+        );
         let key = PermitKey::Call("same-call".to_string());
-        let one = Actor {
-            root: TrajectoryId("cc:one".to_string()),
-            child: None,
-        };
-        let other = Actor {
-            root: TrajectoryId("cc:other".to_string()),
-            child: None,
-        };
+        let mut actors = Vec::new();
+        for id in ["cc:one", "cc:other"] {
+            let root = TrajectoryId(id.to_string());
+            crate::hooks::handle(
+                &runtime,
+                appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+            )
+            .await;
+            actors.push(Actor { root, child: None });
+        }
+        let [one, other] = <[Actor; 2]>::try_from(actors).expect("two sessions");
         runtime.vouch(&key, &one, None);
         runtime.vouch(&key, &other, None);
 
@@ -3528,19 +3727,362 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         );
 
         // Once one of them is gone the key identifies a caller again.
-        runtime.release_vouches(&other);
+        crate::hooks::handle(&runtime, appa_runtime_api::HookEvent::TurnEnd { actor: other }).await;
         assert_eq!(runtime.take_vouched(&key), Ok((one, None)));
+    }
+
+    /// Two independent sessions standing behind one call key are two logs, and the take
+    /// reads both: a key that does not identify a caller is refused wherever the standing
+    /// was recorded, never answered from whichever log the runtime happened to look at.
+    #[tokio::test]
+    async fn two_families_behind_one_ticket_are_ambiguous_across_their_logs() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = std::sync::Arc::new(
+            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens"),
+        );
+        let ticket = crate::yell::YellArgs {
+            message: "the hook blocked".to_string(),
+            with_trajectory: true,
+        }
+        .ticket();
+        let mut actors = Vec::new();
+        for id in ["cc:first", "cc:second"] {
+            let root = TrajectoryId(id.to_string());
+            crate::hooks::handle(
+                &runtime,
+                appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+            )
+            .await;
+            let actor = Actor { root, child: None };
+            runtime.vouch(&ticket, &actor, None);
+            actors.push(actor);
+        }
+        assert_eq!(runtime.take_vouched(&ticket), Err(Unvouched::Ambiguous));
+
+        crate::hooks::handle(
+            &runtime,
+            appa_runtime_api::HookEvent::TurnEnd {
+                actor: actors[1].clone(),
+            },
+        )
+        .await;
+        assert_eq!(runtime.take_vouched(&ticket), Ok((actors[0].clone(), None)));
+    }
+
+    /// The take answers for the position it consumes at, not the one it looked at. A turn
+    /// that ends between the two ended this standing, and a take that answered anyway would
+    /// authorize a call for a turn that is over.
+    #[tokio::test]
+    async fn a_turn_that_ends_under_a_take_takes_the_standing_with_it() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = std::sync::Arc::new(
+            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens"),
+        );
+        let root = TrajectoryId("cc:raced".to_string());
+        let actor = Actor {
+            root: root.clone(),
+            child: None,
+        };
+        let ticket = crate::yell::YellArgs {
+            message: "the hook blocked".to_string(),
+            with_trajectory: true,
+        }
+        .ticket();
+        crate::hooks::handle(
+            &runtime,
+            appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+        )
+        .await;
+        runtime.vouch(&ticket, &actor, None);
+
+        // The writer that wins the consume's first compare-and-swap ends this actor's turn,
+        // so the position the release would have landed at no longer has a standing to spend.
+        let engine_root = crate::engine::engine_id(&root);
+        runtime.store().contend_next_append_with(
+            &engine_root,
+            &engine_root,
+            &HostObservation::TurnEnded {
+                actor: host_actor(&actor),
+            },
+        );
+        assert_eq!(
+            runtime.take_vouched(&ticket),
+            Err(Unvouched::Nobody),
+            "the standing the take looked at was gone where it would have consumed it"
+        );
+        assert!(
+            !released(&runtime, &root),
+            "and a take that answered nobody consumed nothing"
+        );
+    }
+
+    /// The key names one caller or it names none. A second family standing behind the same
+    /// ticket after the take chose the first is exactly the case that does not identify a
+    /// caller, and consuming the first would hand this call one session's standing while
+    /// another session was also waiting behind it.
+    #[tokio::test]
+    async fn a_sibling_that_vouches_under_a_take_makes_the_key_ambiguous() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = std::sync::Arc::new(
+            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens"),
+        );
+        let ticket = crate::yell::YellArgs {
+            message: "the hook blocked".to_string(),
+            with_trajectory: true,
+        }
+        .ticket();
+        let mut actors = Vec::new();
+        for id in ["cc:first", "cc:second"] {
+            let root = TrajectoryId(id.to_string());
+            crate::hooks::handle(
+                &runtime,
+                appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+            )
+            .await;
+            actors.push(Actor { root, child: None });
+        }
+        runtime.vouch(&ticket, &actors[0], None);
+
+        // The writer that wins the consume's first compare-and-swap puts the second family
+        // behind the same ticket, so the re-derivation meets two holders where one stood.
+        runtime.store().contend_next_append_with(
+            &crate::engine::engine_id(&actors[0].root),
+            &crate::engine::engine_id(&actors[1].root),
+            &HostObservation::Vouched {
+                actor: host_actor(&actors[1]),
+                key: ticket.wire(),
+                ruling: None,
+            },
+        );
+        assert_eq!(
+            runtime.take_vouched(&ticket),
+            Err(Unvouched::Ambiguous),
+            "a key two families stand behind names no caller"
+        );
+        for actor in &actors {
+            assert!(
+                !released(&runtime, &actor.root),
+                "and an ambiguous take consumes neither standing"
+            );
+        }
+    }
+
+    /// Whether this family's log holds a spent standing.
+    fn released(runtime: &Runtime, root: &TrajectoryId) -> bool {
+        runtime
+            .store()
+            .log(&crate::engine::engine_id(root))
+            .expect("the family reads")
+            .host_records()
+            .iter()
+            .any(|record| matches!(&record.observation, HostObservation::Released { .. }))
+    }
+
+    /// The mark is the latest record about it, and every other actor's records are not about
+    /// it. A family whose stream is long, and whose marks belong to several actors, answers
+    /// for the actor asked about and for its last word only.
+    #[tokio::test]
+    async fn a_prompt_mark_is_whatever_this_actors_last_record_about_it_said() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = std::sync::Arc::new(
+            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens"),
+        );
+        let root = TrajectoryId("cc:marked".to_string());
+        let parent = Actor {
+            root: root.clone(),
+            child: None,
+        };
+        let child = Actor {
+            root: root.clone(),
+            child: Some(TrajectoryId("cc:marked:a1".to_string())),
+        };
+        crate::hooks::handle(
+            &runtime,
+            appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+        )
+        .await;
+        assert!(!runtime.prompted(&parent), "a family nothing prompted has no mark");
+
+        runtime.record_prompt(&parent).expect("the mark records");
+        assert!(runtime.prompted(&parent));
+        assert!(!runtime.prompted(&child), "and it is not the child's mark");
+
+        // A long tail of records about other things, and about another actor's mark.
+        for _ in 0..8 {
+            runtime.vouch(&PermitKey::Call("deadbeef".to_string()), &parent, None);
+        }
+        runtime.record_prompt(&child).expect("the child's mark records");
+        runtime.record_turn_end(&child).expect("the child's turn ends");
+        assert!(
+            runtime.prompted(&parent),
+            "another actor's prompt and turn end say nothing about this one"
+        );
+        assert!(!runtime.prompted(&child));
+
+        runtime.record_prompt_settled(&parent).expect("the mark settles");
+        assert!(!runtime.prompted(&parent));
+        runtime.record_prompt(&parent).expect("a second prompt arrives");
+        runtime.record_turn_end(&parent).expect("and its turn ends");
+        assert!(!runtime.prompted(&parent), "the turn's end is the last word");
+    }
+
+    /// Losing the position is not losing the standing: a take raced by a writer that changed
+    /// nothing about it still consumes it, once.
+    #[tokio::test]
+    async fn a_take_that_loses_a_race_to_an_unrelated_writer_still_consumes_once() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = std::sync::Arc::new(
+            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens"),
+        );
+        let root = TrajectoryId("cc:raced".to_string());
+        let actor = Actor {
+            root: root.clone(),
+            child: None,
+        };
+        let ticket = crate::yell::YellArgs {
+            message: "the hook blocked".to_string(),
+            with_trajectory: true,
+        }
+        .ticket();
+        crate::hooks::handle(
+            &runtime,
+            appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+        )
+        .await;
+        runtime.vouch(&ticket, &actor, None);
+
+        runtime.store().contend_next_appends(1);
+        assert_eq!(runtime.take_vouched(&ticket), Ok((actor, None)));
+        assert_eq!(
+            runtime.take_vouched(&ticket),
+            Err(Unvouched::Nobody),
+            "and the replay spent it exactly once"
+        );
+    }
+
+    /// A take reads every family that named the key, and a family it cannot read is not a
+    /// family that vouched for nobody: answering the readable one would hand this call one
+    /// session's standing while the other's is unread.
+    #[tokio::test]
+    async fn a_family_whose_records_do_not_read_refuses_the_take_it_could_have_answered() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = std::sync::Arc::new(
+            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens"),
+        );
+        let ticket = crate::yell::YellArgs {
+            message: "the hook blocked".to_string(),
+            with_trajectory: true,
+        }
+        .ticket();
+        for id in ["cc:first", "cc:second"] {
+            let root = TrajectoryId(id.to_string());
+            crate::hooks::handle(
+                &runtime,
+                appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+            )
+            .await;
+            runtime.vouch(&ticket, &Actor { root, child: None }, None);
+        }
+
+        // A host row that names no key, so the query that finds the families still hands
+        // this one over, and the damage is met where its whole stream is read.
+        let damaged = TrajectoryId("cc:second".to_string());
+        let actor = Actor {
+            root: damaged.clone(),
+            child: None,
+        };
+        crate::hooks::handle(
+            &runtime,
+            appa_runtime_api::HookEvent::Prompt {
+                actor,
+                text: "go on".to_string(),
+            },
+        )
+        .await;
+        let engine_root = crate::engine::engine_id(&damaged);
+        let at = runtime
+            .store()
+            .log(&engine_root)
+            .expect("the family's host records read")
+            .host_records()
+            .iter()
+            .find(|record| matches!(&record.observation, HostObservation::PromptSeen { .. }))
+            .expect("the prompt mark landed")
+            .seq;
+        runtime
+            .store()
+            .corrupt_batch(&engine_root, at, br#"{"kind":"prompt_seen""#);
+        assert!(
+            !runtime
+                .store()
+                .roots_mentioning(&HostObservation::names_key(&ticket.wire()))
+                .expect("the families that named the key still read")
+                .is_empty(),
+            "the damaged row names no key, so this family is still a candidate"
+        );
+
+        assert_eq!(
+            runtime.take_vouched(&ticket),
+            Err(Unvouched::Nobody),
+            "an unreadable family is not an absent one"
+        );
+    }
+
+    /// The vouch is in the log, so a runtime that never saw the hook still finds it: nothing
+    /// routes a take but the records.
+    #[tokio::test]
+    async fn a_vouch_outlives_the_runtime_that_recorded_it() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let db = dir.path().join("appa.db");
+        let root = TrajectoryId("cc:reopened".to_string());
+        let actor = Actor {
+            root: root.clone(),
+            child: None,
+        };
+        let ticket = crate::yell::YellArgs {
+            message: "the hook blocked".to_string(),
+            with_trajectory: true,
+        }
+        .ticket();
+        {
+            let runtime = std::sync::Arc::new(
+                Runtime::open(versioned_policy("first"), db.clone(), None).expect("the deployment opens"),
+            );
+            crate::hooks::handle(
+                &runtime,
+                appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+            )
+            .await;
+            runtime.vouch(&ticket, &actor, None);
+        }
+
+        let reopened =
+            Runtime::open(versioned_policy("first"), db, None).expect("the deployment reopens over the same log");
+        assert_eq!(
+            reopened.take_vouched(&ticket),
+            Ok((actor, None)),
+            "a runtime that never saw the hook reads the standing the log holds"
+        );
+        assert_eq!(
+            reopened.take_vouched(&ticket),
+            Err(Unvouched::Nobody),
+            "and taking it is still one-shot"
+        );
     }
 
     #[tokio::test]
     async fn a_management_vouch_is_exact_one_shot_and_turn_bounded() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime =
-            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens");
-        let actor = Actor {
-            root: TrajectoryId("management-vouch".to_string()),
-            child: None,
-        };
+        let runtime = std::sync::Arc::new(
+            Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens"),
+        );
+        let root = TrajectoryId("management-vouch".to_string());
+        crate::hooks::handle(
+            &runtime,
+            appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+        )
+        .await;
+        let actor = Actor { root, child: None };
         let args = crate::mcp::IncludeBatteryArgs {
             actor: "management-vouch".to_string(),
             battery: "github".to_string(),
@@ -3571,7 +4113,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert_eq!(runtime.take_vouched(&key), Err(Unvouched::Nobody));
 
         runtime.vouch(&key, &actor, None);
-        runtime.release_vouches(&actor);
+        crate::hooks::handle(&runtime, appa_runtime_api::HookEvent::TurnEnd { actor: actor.clone() }).await;
         assert_eq!(runtime.take_vouched(&key), Err(Unvouched::Nobody));
     }
 

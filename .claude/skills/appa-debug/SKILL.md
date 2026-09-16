@@ -79,8 +79,10 @@ request text to match the session from step 0.
 ## 3. Decode the recorded trail
 
 The log rows are the actual record — inspect the encoding of the facts
-column (`appa-eventlog/src/lib.rs` says how a batch is serialized) and
-decode accordingly, one fact per line. For what each fact kind means,
+column (`appa-eventlog/src/lib.rs` says how a batch is serialized: an
+engine batch is a bare JSON array of facts, and a batch carrying a host
+observation is a JSON object with `facts` and `host`) and decode
+accordingly, one fact per line. For what each fact kind means,
 read the fact definitions in `appa-engine/src/fact.rs`; do not guess
 from names.
 

@@ -2702,6 +2702,17 @@ fn parse_offer(offer: &OfferId) -> Option<EngineOfferId> {
     EngineOfferId::from_hex(&offer.0).ok()
 }
 
+/// Whether an id is spelled the way [`offer_id`] renders one: the truncated lowercase hex
+/// the model is shown, which is the only spelling it can quote back. Anything else names no
+/// offer this runtime ever minted, and says so without asking the store.
+pub(crate) fn renders_offer(quoted: &OfferId) -> bool {
+    quoted.0.len() == RENDERED_OFFER_CHARS
+        && quoted
+            .0
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
 /// The canonical identity a quoted id names, resolved against the offers this
 /// log has opened.
 pub(crate) fn resolve_rendered(log: &Log, rendered: &OfferId) -> Option<OfferId> {

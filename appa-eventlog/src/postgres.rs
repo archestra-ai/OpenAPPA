@@ -112,9 +112,12 @@ impl PostgresStore {
         })
     }
 
-    fn mutate<T: Send + 'static>(
+    /// Run `operation` in a transaction, serialized against other writers of `lock_root`
+    /// where one is named. The host's own transaction is the one used when it holds one: a
+    /// transaction opened inside that one would end the host's on the way out.
+    fn with_tx<T: Send + 'static>(
         &self,
-        root: String,
+        lock_root: Option<String>,
         operation: impl FnOnce(&mut Client) -> Result<T, PostgresError> + Send + 'static,
     ) -> Result<T, PostgresError> {
         self.run(move |state| {
@@ -123,9 +126,11 @@ impl PostgresStore {
                 state.client.batch_execute("BEGIN")?;
             }
             let result = (|| {
-                state
-                    .client
-                    .query_one("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", &[&root])?;
+                if let Some(root) = lock_root {
+                    state
+                        .client
+                        .query_one("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", &[&root])?;
+                }
                 operation(&mut state.client)
             })();
             if !outer {
@@ -156,7 +161,7 @@ impl PostgresStore {
         let id = root.as_str().to_owned();
         let hash = key.as_str().to_owned();
         let policy = policy.to_vec();
-        let created = self.mutate(id.clone(), move |client| {
+        let created = self.with_tx(Some(id.clone()), move |client| {
             if client
                 .query_opt("SELECT 1 FROM openappa_events WHERE root = $1 LIMIT 1", &[&id])?
                 .is_some()
@@ -202,11 +207,8 @@ impl PostgresStore {
                 root: root.as_str().to_owned(),
             });
         };
-        let opening = match decode(first)? {
-            Batch::Facts(facts) => facts,
-            Batch::Inventory(_) | Batch::BoundFacts(_) => Vec::new(),
-        };
-        let Some(Fact::TrajectoryOpened { policy_file_key, .. }) = opening.first() else {
+        let opening = decode(first)?;
+        let Some(Fact::TrajectoryOpened { policy_file_key, .. }) = opening.facts.first() else {
             return Err(ReadError::Undecodable("log does not begin with an opening".into()));
         };
         let hash = policy_file_key.as_str().to_owned();
@@ -221,10 +223,27 @@ impl PostgresStore {
         decoded(root, batches, policy)
     }
 
-    pub(super) fn append(&self, based_on: &Log, bytes: Vec<u8>) -> Result<(), AppendError> {
-        let root = based_on.root.as_str().to_owned();
-        let basis = based_on.basis;
-        let conflict = self.mutate(root.clone(), move |client| {
+    /// See [`LogStore::roots_mentioning`].
+    pub(super) fn roots_mentioning(&self, needle: &str) -> Result<Vec<TrajectoryId>, ReadError> {
+        let needle = needle.as_bytes().to_vec();
+        let roots = self.with_client(move |client| {
+            Ok(client
+                .query(
+                    "SELECT DISTINCT root FROM openappa_events \
+                     WHERE substring(payload from 1 for 1) = '\\x7b'::bytea AND position($1::bytea in payload) > 0 \
+                     ORDER BY root",
+                    &[&needle],
+                )?
+                .into_iter()
+                .map(|row| row.get::<_, String>(0))
+                .collect::<Vec<_>>())
+        })?;
+        Ok(roots.into_iter().map(TrajectoryId::new).collect())
+    }
+
+    pub(super) fn append(&self, root: &TrajectoryId, basis: u64, bytes: Vec<u8>) -> Result<(), AppendError> {
+        let root = root.as_str().to_owned();
+        let conflict = self.with_tx(Some(root.clone()), move |client| {
             let current = client
                 .query_one("SELECT count(*) FROM openappa_events WHERE root = $1", &[&root])?
                 .get::<_, i64>(0) as u64;
