@@ -1,50 +1,49 @@
 import importlib.util
 import json
-import threading
-from pathlib import Path
+import os
+import stat
 import subprocess
 import sys
+import tempfile
+import threading
 import unittest
-
+from pathlib import Path
 
 SCRIPT = Path(__file__).with_name("audience-source.py")
 SPEC = importlib.util.spec_from_file_location("audience_source", SCRIPT)
 AUDIENCE_SOURCE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(AUDIENCE_SOURCE)
 
-SCIM = AUDIENCE_SOURCE.SCIM
-USER_ATTRIBUTES = {"attributes": "id,userName,active"}
-GROUP_ATTRIBUTES = {"attributes": "id,displayName,members"}
+USER_ATTRIBUTES = ("--attributes", "id,userName,active")
+GROUP_ATTRIBUTES = ("--attributes", "id,displayName,members")
 
 
-def fixture_api(responses):
-    """A call answering from recorded Databricks REST payloads, in order."""
+def fixture_cli(responses):
+    """A CLI runner answering recorded `databricks` outputs, each once, by
+    the exact arguments the source passes."""
 
     remaining = list(responses)
     # The source looks members up from several threads at once.
     taking = threading.Lock()
 
-    def call(path, **params):
+    def run(*args):
         with taking:
-            for index, (fixture_path, fixture_params, response) in enumerate(remaining):
-                if fixture_path == path and fixture_params == params:
+            for index, (fixture_args, response) in enumerate(remaining):
+                if fixture_args == args:
                     remaining.pop(index)
                     break
             else:
-                raise AssertionError(f"unexpected call {path} {params}")
+                raise AssertionError(f"unexpected command databricks {' '.join(args)}")
         if isinstance(response, Exception):
             raise response
         return response
 
-    return call
+    return run
 
 
 def user(id, user_name, active=True):
-    return {"id": id, "userName": user_name, "active": active}
-
-
-def user_page(users, start=1, total=None):
-    return {"totalResults": len(users) if total is None else total, "startIndex": start, "Resources": users}
+    # The CLI leaves a false `active` out, as the SDK renders it.
+    return {"id": id, "userName": user_name, "active": True} if active else {"id": id, "userName": user_name}
 
 
 def group(id, name, users=(), groups=()):
@@ -53,102 +52,101 @@ def group(id, name, users=(), groups=()):
     return {"id": id, "displayName": name, "members": members}
 
 
-def users_listing(**params):
-    return (f"{SCIM}/Users", {**USER_ATTRIBUTES, "count": 100, "startIndex": params.pop("startIndex", 1), **params})
+def users_listing(*filter_args):
+    return ("users", "list", *USER_ATTRIBUTES, *filter_args)
 
 
 def group_listing(name):
-    return (f"{SCIM}/Groups", {"filter": f'displayName eq "{name}"', **GROUP_ATTRIBUTES})
+    return ("groups", "list", "--filter", f'displayName eq "{name}"', *GROUP_ATTRIBUTES)
 
 
 def user_lookup(user_id, entry):
-    return (f"{SCIM}/Users/{user_id}", {}, entry)
+    return (("users", "get", user_id), entry)
+
+
+def space_permissions(space_id, acl):
+    return (("permissions", "get", "genie", space_id), acl)
+
+
+def not_found():
+    return AUDIENCE_SOURCE.NotFound("Error: User with id 9 not found.")
 
 
 class SelectorTests(unittest.TestCase):
-    def test_viewer_is_the_tokens_own_address(self):
-        call = fixture_api([(f"{SCIM}/Me", {}, user("1", "alice@corp.com"))])
-        self.assertEqual(AUDIENCE_SOURCE.answer(call, {"selector": "viewer"}), {"members": ["alice@corp.com"]})
+    def test_viewer_is_the_logins_own_address(self):
+        run = fixture_cli([(("current-user", "me"), user("1", "alice@corp.com"))])
+        self.assertEqual(AUDIENCE_SOURCE.answer(run, {"selector": "viewer"}), {"members": ["alice@corp.com"]})
 
     def test_a_viewer_without_an_address_is_the_qualified_id(self):
-        call = fixture_api([(f"{SCIM}/Me", {}, user("1", "svc-agent"))])
-        self.assertEqual(AUDIENCE_SOURCE.answer(call, {"selector": "viewer"}), {"members": ["databricks:1"]})
+        run = fixture_cli([(("current-user", "me"), user("1", "svc-agent"))])
+        self.assertEqual(AUDIENCE_SOURCE.answer(run, {"selector": "viewer"}), {"members": ["databricks:1"]})
 
     def test_an_inactive_viewer_reads_nothing(self):
-        call = fixture_api([(f"{SCIM}/Me", {}, user("1", "alice@corp.com", active=False))])
-        self.assertEqual(AUDIENCE_SOURCE.answer(call, {"selector": "viewer"}), {"members": []})
+        run = fixture_cli([(("current-user", "me"), user("1", "alice@corp.com", active=False))])
+        self.assertEqual(AUDIENCE_SOURCE.answer(run, {"selector": "viewer"}), {"members": []})
 
-    def test_members_pages_through_the_active_users(self):
-        first = [user(str(i), f"u{i}@corp.com") for i in range(100)]
-        second = [user("100", "bob@corp.com"), user("101", "bob@corp.com"), user("102", "svc-agent")]
-        call = fixture_api(
-            [
-                (*users_listing(filter="active eq true"), user_page(first, total=103)),
-                (*users_listing(filter="active eq true", startIndex=101), user_page(second, start=101, total=103)),
-            ]
-        )
-        members = AUDIENCE_SOURCE.answer(call, {"selector": "members"})["members"]
+    def test_members_are_the_active_users_once_each(self):
+        listed = [user(str(i), f"u{i}@corp.com") for i in range(100)]
+        listed += [user("100", "bob@corp.com"), user("101", "bob@corp.com"), user("102", "svc-agent")]
+        run = fixture_cli([(users_listing("--filter", "active eq true"), listed)])
+        members = AUDIENCE_SOURCE.answer(run, {"selector": "members"})["members"]
         self.assertEqual(members, [f"u{i}@corp.com" for i in range(100)] + ["bob@corp.com", "databricks:102"])
 
-    def test_a_directory_over_the_bound_is_refused_on_its_first_page(self):
-        call = fixture_api([(*users_listing(filter="active eq true"), user_page([user("1", "a@corp.com")], total=5001))])
+    def test_a_directory_over_the_bound_is_refused(self):
+        listed = [user(str(i), f"u{i}@corp.com") for i in range(5001)]
+        run = fixture_cli([(users_listing("--filter", "active eq true"), listed)])
         with self.assertRaises(RuntimeError):
-            AUDIENCE_SOURCE.answer(call, {"selector": "members"})
+            AUDIENCE_SOURCE.answer(run, {"selector": "members"})
 
-    def test_an_empty_page_before_the_total_is_a_failure_not_a_partial_answer(self):
-        call = fixture_api([(*users_listing(filter="active eq true"), user_page([], total=3))])
+    def test_a_listing_that_is_not_a_list_is_a_failure(self):
+        run = fixture_cli([(users_listing("--filter", "active eq true"), {"Resources": [user("1", "a@corp.com")]})])
         with self.assertRaises(RuntimeError):
-            AUDIENCE_SOURCE.answer(call, {"selector": "members"})
-
-    def test_a_listing_without_a_total_is_a_failure(self):
-        call = fixture_api([(*users_listing(filter="active eq true"), {"Resources": [user("1", "a@corp.com")]})])
-        with self.assertRaises(RuntimeError):
-            AUDIENCE_SOURCE.answer(call, {"selector": "members"})
+            AUDIENCE_SOURCE.answer(run, {"selector": "members"})
 
     def test_a_group_expands_its_users_and_nested_groups_leaving_inactive_ones_out(self):
-        call = fixture_api(
+        run = fixture_cli(
             [
-                (*group_listing("finance"), {"Resources": [group("g1", "finance", users=["1", "2"], groups=["g2"])]}),
+                (group_listing("finance"), [group("g1", "finance", users=["1", "2"], groups=["g2"])]),
                 user_lookup("1", user("1", "alice@corp.com")),
                 user_lookup("2", user("2", "gone@corp.com", active=False)),
-                (f"{SCIM}/Groups/g2", GROUP_ATTRIBUTES, group("g2", "controllers", users=["3", "1"])),
+                (("groups", "get", "g2"), group("g2", "controllers", users=["3", "1"])),
                 user_lookup("3", user("3", "carol@corp.com")),
             ]
         )
-        members = AUDIENCE_SOURCE.answer(call, {"selector": "group/finance"})["members"]
+        members = AUDIENCE_SOURCE.answer(run, {"selector": "group/finance"})["members"]
         self.assertEqual(members, ["alice@corp.com", "carol@corp.com"])
 
-    def test_nested_groups_are_read_in_one_directory_pass_past_the_direct_bound(self):
+    def test_nested_groups_are_read_in_one_directory_listing_past_the_direct_bound(self):
         nested = [f"g{i}" for i in range(1, 6)]
-        call = fixture_api(
+        run = fixture_cli(
             [
-                (*group_listing("all"), {"Resources": [group("g0", "all", groups=nested)]}),
-                *[(f"{SCIM}/Groups/{g}", GROUP_ATTRIBUTES, group(g, g, users=[f"{g}-{i}" for i in range(5)])) for g in nested],
-                (*users_listing(), user_page([user(f"{g}-{i}", f"{g}-{i}@corp.com") for g in nested for i in range(5)])),
+                (group_listing("all"), [group("g0", "all", groups=nested)]),
+                *[(("groups", "get", g), group(g, g, users=[f"{g}-{i}" for i in range(5)])) for g in nested],
+                (users_listing(), [user(f"{g}-{i}", f"{g}-{i}@corp.com") for g in nested for i in range(5)]),
             ]
         )
-        members = AUDIENCE_SOURCE.answer(call, {"selector": "group/all"})["members"]
+        members = AUDIENCE_SOURCE.answer(run, {"selector": "group/all"})["members"]
         self.assertEqual(members, [f"{g}-{i}@corp.com" for g in nested for i in range(5)])
 
     def test_a_name_with_quotes_is_escaped_in_the_filter(self):
-        call = fixture_api(
+        run = fixture_cli(
             [
-                (f"{SCIM}/Groups", {"filter": 'displayName eq "a\\"b\\\\c"', **GROUP_ATTRIBUTES}, {"Resources": [group("g1", 'a"b\\c', users=["1"])]}),
+                (("groups", "list", "--filter", 'displayName eq "a\\"b\\\\c"', *GROUP_ATTRIBUTES), [group("g1", 'a"b\\c', users=["1"])]),
                 user_lookup("1", user("1", "alice@corp.com")),
             ]
         )
-        members = AUDIENCE_SOURCE.answer(call, {"selector": 'group/a"b\\c'})["members"]
+        members = AUDIENCE_SOURCE.answer(run, {"selector": 'group/a"b\\c'})["members"]
         self.assertEqual(members, ["alice@corp.com"])
 
     def test_a_large_group_reads_the_directory_once(self):
         ids = [str(i) for i in range(21)]
-        call = fixture_api(
+        run = fixture_cli(
             [
-                (*group_listing("everyone"), {"Resources": [group("g1", "everyone", users=ids)]}),
-                (*users_listing(), user_page([user(i, f"u{i}@corp.com") for i in ids])),
+                (group_listing("everyone"), [group("g1", "everyone", users=ids)]),
+                (users_listing(), [user(i, f"u{i}@corp.com") for i in ids]),
             ]
         )
-        members = AUDIENCE_SOURCE.answer(call, {"selector": "group/everyone"})["members"]
+        members = AUDIENCE_SOURCE.answer(run, {"selector": "group/everyone"})["members"]
         self.assertEqual(members, [f"u{i}@corp.com" for i in ids])
 
     def test_a_space_shared_with_several_large_groups_reads_the_directory_once(self):
@@ -160,46 +158,46 @@ class SelectorTests(unittest.TestCase):
                 {"group_name": "west", "all_permissions": [{"permission_level": "CAN_VIEW"}]},
             ]
         }
-        call = fixture_api(
+        run = fixture_cli(
             [
-                ("/api/2.0/permissions/genie/space-1", {}, acl),
-                (*group_listing("east"), {"Resources": [group("g1", "east", users=first)]}),
-                (*group_listing("west"), {"Resources": [group("g2", "west", users=second)]}),
-                (*users_listing(), user_page([user(str(i), f"u{i}@corp.com") for i in range(31)])),
+                space_permissions("space-1", acl),
+                (group_listing("east"), [group("g1", "east", users=first)]),
+                (group_listing("west"), [group("g2", "west", users=second)]),
+                (users_listing(), [user(str(i), f"u{i}@corp.com") for i in range(31)]),
             ]
         )
-        members = AUDIENCE_SOURCE.answer(call, {"selector": "genie-space/space-1/readers"})["members"]
+        members = AUDIENCE_SOURCE.answer(run, {"selector": "genie-space/space-1/readers"})["members"]
         self.assertEqual(members, [f"u{i}@corp.com" for i in range(31)])
 
     def test_a_group_member_the_directory_does_not_report_is_a_failure(self):
-        call = fixture_api(
+        run = fixture_cli(
             [
-                (*group_listing("finance"), {"Resources": [group("g1", "finance", users=["1"])]}),
-                (f"{SCIM}/Users/1", {}, AUDIENCE_SOURCE.NotFound("/Users/1")),
+                (group_listing("finance"), [group("g1", "finance", users=["1"])]),
+                user_lookup("1", not_found()),
             ]
         )
         with self.assertRaises(RuntimeError):
-            AUDIENCE_SOURCE.answer(call, {"selector": "group/finance"})
+            AUDIENCE_SOURCE.answer(run, {"selector": "group/finance"})
 
     def test_a_group_name_matching_no_group_or_several_is_a_failure(self):
-        for resources in [[], [group("g1", "finance"), group("g2", "finance")]]:
-            call = fixture_api([(*group_listing("finance"), {"Resources": resources})])
+        for listed in [[], [group("g1", "finance"), group("g2", "finance")]]:
+            run = fixture_cli([(group_listing("finance"), listed)])
             with self.assertRaises(RuntimeError):
-                AUDIENCE_SOURCE.answer(call, {"selector": "group/finance"})
+                AUDIENCE_SOURCE.answer(run, {"selector": "group/finance"})
 
     def test_a_shared_or_cyclic_subgroup_is_read_and_expanded_once(self):
-        call = fixture_api(
+        run = fixture_cli(
             [
-                (*group_listing("loop"), {"Resources": [group("g1", "loop", users=["1"], groups=["g2", "g3"])]}),
-                (f"{SCIM}/Groups/g2", GROUP_ATTRIBUTES, group("g2", "left", users=["2"], groups=["g4", "g1"])),
-                (f"{SCIM}/Groups/g3", GROUP_ATTRIBUTES, group("g3", "right", groups=["g4"])),
-                (f"{SCIM}/Groups/g4", GROUP_ATTRIBUTES, group("g4", "shared", users=["3"])),
+                (group_listing("loop"), [group("g1", "loop", users=["1"], groups=["g2", "g3"])]),
+                (("groups", "get", "g2"), group("g2", "left", users=["2"], groups=["g4", "g1"])),
+                (("groups", "get", "g3"), group("g3", "right", groups=["g4"])),
+                (("groups", "get", "g4"), group("g4", "shared", users=["3"])),
                 user_lookup("1", user("1", "alice@corp.com")),
                 user_lookup("2", user("2", "bob@corp.com")),
                 user_lookup("3", user("3", "carol@corp.com")),
             ]
         )
-        members = AUDIENCE_SOURCE.answer(call, {"selector": "group/loop"})["members"]
+        members = AUDIENCE_SOURCE.answer(run, {"selector": "group/loop"})["members"]
         self.assertEqual(members, ["alice@corp.com", "bob@corp.com", "carol@corp.com"])
 
     def test_a_space_whose_groups_share_a_subgroup_reads_it_once(self):
@@ -209,16 +207,16 @@ class SelectorTests(unittest.TestCase):
                 {"group_name": "west", "all_permissions": [{"permission_level": "CAN_VIEW"}]},
             ]
         }
-        call = fixture_api(
+        run = fixture_cli(
             [
-                ("/api/2.0/permissions/genie/space-1", {}, acl),
-                (*group_listing("east"), {"Resources": [group("g1", "east", groups=["g3"])]}),
-                (*group_listing("west"), {"Resources": [group("g2", "west", groups=["g3"])]}),
-                (f"{SCIM}/Groups/g3", GROUP_ATTRIBUTES, group("g3", "shared", users=["1"])),
+                space_permissions("space-1", acl),
+                (group_listing("east"), [group("g1", "east", groups=["g3"])]),
+                (group_listing("west"), [group("g2", "west", groups=["g3"])]),
+                (("groups", "get", "g3"), group("g3", "shared", users=["1"])),
                 user_lookup("1", user("1", "alice@corp.com")),
             ]
         )
-        members = AUDIENCE_SOURCE.answer(call, {"selector": "genie-space/space-1/readers"})["members"]
+        members = AUDIENCE_SOURCE.answer(run, {"selector": "genie-space/space-1/readers"})["members"]
         self.assertEqual(members, ["alice@corp.com"])
 
     def test_a_genie_space_collects_users_groups_and_service_principals(self):
@@ -231,16 +229,16 @@ class SelectorTests(unittest.TestCase):
                 {"user_name": "nobody@corp.com", "all_permissions": []},
             ],
         }
-        call = fixture_api(
+        run = fixture_cli(
             [
-                ("/api/2.0/permissions/genie/space-1", {}, acl),
-                (f"{SCIM}/Users", {"filter": 'userName eq "alice@corp.com"', **USER_ATTRIBUTES}, {"Resources": [user("1", "alice@corp.com")]}),
-                (*group_listing("analysts"), {"Resources": [group("g1", "analysts", users=["1", "2"])]}),
+                space_permissions("space-1", acl),
+                (users_listing("--filter", 'userName eq "alice@corp.com"'), [user("1", "alice@corp.com")]),
+                (group_listing("analysts"), [group("g1", "analysts", users=["1", "2"])]),
                 user_lookup("1", user("1", "alice@corp.com")),
                 user_lookup("2", user("2", "bob@corp.com")),
             ]
         )
-        members = AUDIENCE_SOURCE.answer(call, {"selector": "genie-space/space-1/readers"})["members"]
+        members = AUDIENCE_SOURCE.answer(run, {"selector": "genie-space/space-1/readers"})["members"]
         self.assertEqual(members, ["databricks:app-uuid", "alice@corp.com", "bob@corp.com"])
 
     def test_a_space_shared_with_many_users_reads_the_directory_once(self):
@@ -249,13 +247,13 @@ class SelectorTests(unittest.TestCase):
                 {"user_name": f"u{i}@corp.com", "all_permissions": [{"permission_level": "CAN_VIEW"}]} for i in range(21)
             ]
         }
-        call = fixture_api(
+        run = fixture_cli(
             [
-                ("/api/2.0/permissions/genie/space-1", {}, acl),
-                (*users_listing(), user_page([user(str(i), f"u{i}@corp.com") for i in range(30)])),
+                space_permissions("space-1", acl),
+                (users_listing(), [user(str(i), f"u{i}@corp.com") for i in range(30)]),
             ]
         )
-        members = AUDIENCE_SOURCE.answer(call, {"selector": "genie-space/space-1/readers"})["members"]
+        members = AUDIENCE_SOURCE.answer(run, {"selector": "genie-space/space-1/readers"})["members"]
         self.assertEqual(members, [f"u{i}@corp.com" for i in range(21)])
 
     def test_a_space_user_the_directory_does_not_report_is_a_failure(self):
@@ -264,61 +262,61 @@ class SelectorTests(unittest.TestCase):
                 {"user_name": f"u{i}@corp.com", "all_permissions": [{"permission_level": "CAN_VIEW"}]} for i in range(21)
             ]
         }
-        call = fixture_api(
+        run = fixture_cli(
             [
-                ("/api/2.0/permissions/genie/space-1", {}, acl),
-                (*users_listing(), user_page([user(str(i), f"u{i}@corp.com") for i in range(20)])),
+                space_permissions("space-1", acl),
+                (users_listing(), [user(str(i), f"u{i}@corp.com") for i in range(20)]),
             ]
         )
         with self.assertRaises(RuntimeError):
-            AUDIENCE_SOURCE.answer(call, {"selector": "genie-space/space-1/readers"})
+            AUDIENCE_SOURCE.answer(run, {"selector": "genie-space/space-1/readers"})
 
     def test_a_permission_entry_without_a_principal_is_a_failure(self):
         acl = {"access_control_list": [{"all_permissions": [{"permission_level": "CAN_VIEW"}]}]}
-        call = fixture_api([("/api/2.0/permissions/genie/space-1", {}, acl)])
+        run = fixture_cli([space_permissions("space-1", acl)])
         with self.assertRaises(RuntimeError):
-            AUDIENCE_SOURCE.answer(call, {"selector": "genie-space/space-1/readers"})
+            AUDIENCE_SOURCE.answer(run, {"selector": "genie-space/space-1/readers"})
 
     def test_a_space_the_workspace_does_not_report_is_a_failure(self):
-        call = fixture_api([("/api/2.0/permissions/genie/space-1", {}, AUDIENCE_SOURCE.NotFound("/genie/space-1"))])
+        run = fixture_cli([space_permissions("space-1", not_found())])
         with self.assertRaises(AUDIENCE_SOURCE.NotFound):
-            AUDIENCE_SOURCE.answer(call, {"selector": "genie-space/space-1/readers"})
+            AUDIENCE_SOURCE.answer(run, {"selector": "genie-space/space-1/readers"})
 
-    def test_an_unserved_selector_is_refused_before_any_call(self):
-        call = fixture_api([])
+    def test_an_unserved_selector_is_refused_before_any_command(self):
+        run = fixture_cli([])
         for selector in ["", "group/", "genie-space//readers", "genie-space/a/b/readers", "genie-space/space-1", "channel/C1", 3]:
             with self.assertRaises(ValueError):
-                AUDIENCE_SOURCE.answer(call, {"selector": selector})
+                AUDIENCE_SOURCE.answer(run, {"selector": selector})
 
 
 class MemberTests(unittest.TestCase):
     def test_a_member_resolves_to_its_address(self):
-        call = fixture_api([user_lookup("1", user("1", "alice@corp.com"))])
-        self.assertEqual(AUDIENCE_SOURCE.answer(call, {"member": "databricks:1"}), {"principal": "alice@corp.com"})
+        run = fixture_cli([user_lookup("1", user("1", "alice@corp.com"))])
+        self.assertEqual(AUDIENCE_SOURCE.answer(run, {"member": "databricks:1"}), {"principal": "alice@corp.com"})
 
     def test_a_member_without_an_address_stays_as_written(self):
-        call = fixture_api([user_lookup("1", user("1", "svc-agent"))])
-        self.assertEqual(AUDIENCE_SOURCE.answer(call, {"member": "databricks:1"}), {"principal": "databricks:1"})
+        run = fixture_cli([user_lookup("1", user("1", "svc-agent"))])
+        self.assertEqual(AUDIENCE_SOURCE.answer(run, {"member": "databricks:1"}), {"principal": "databricks:1"})
 
     def test_an_inactive_member_stays_as_written(self):
-        call = fixture_api([user_lookup("1", user("1", "alice@corp.com", active=False))])
-        self.assertEqual(AUDIENCE_SOURCE.answer(call, {"member": "databricks:1"}), {"principal": "databricks:1"})
+        run = fixture_cli([user_lookup("1", user("1", "alice@corp.com", active=False))])
+        self.assertEqual(AUDIENCE_SOURCE.answer(run, {"member": "databricks:1"}), {"principal": "databricks:1"})
 
     def test_an_unknown_member_is_null(self):
-        call = fixture_api([(f"{SCIM}/Users/9", {}, AUDIENCE_SOURCE.NotFound("/Users/9"))])
-        self.assertEqual(AUDIENCE_SOURCE.answer(call, {"member": "databricks:9"}), {"principal": None})
+        run = fixture_cli([user_lookup("9", not_found())])
+        self.assertEqual(AUDIENCE_SOURCE.answer(run, {"member": "databricks:9"}), {"principal": None})
 
     def test_a_foreign_member_is_refused(self):
-        call = fixture_api([])
+        run = fixture_cli([])
         for member in ["slack:U1", "alice@corp.com", "databricks:"]:
             with self.assertRaises(ValueError):
-                AUDIENCE_SOURCE.answer(call, {"member": member})
+                AUDIENCE_SOURCE.answer(run, {"member": member})
 
     def test_an_artifact_that_is_not_one_selector_or_member_is_refused(self):
-        call = fixture_api([])
+        run = fixture_cli([])
         for artifact in [{}, {"selector": "viewer", "member": "databricks:1"}, {"other": 1}, "viewer", None]:
             with self.assertRaises(ValueError):
-                AUDIENCE_SOURCE.answer(call, artifact)
+                AUDIENCE_SOURCE.answer(run, artifact)
 
 
 class AddressTests(unittest.TestCase):
@@ -327,6 +325,65 @@ class AddressTests(unittest.TestCase):
             self.assertTrue(AUDIENCE_SOURCE.is_address(text))
         for text in ["svc-agent", "a@b@c", "@corp.com", "alice@", "alice @corp.com", "databricks:1@corp.com", "alice@corp.com:evil", None, 3]:
             self.assertFalse(AUDIENCE_SOURCE.is_address(text))
+
+
+class FakeDatabricks:
+    """A `databricks` executable on its own PATH entry: it records each
+    invocation's arguments and environment, and answers with the script's
+    stdout, stderr, and exit status."""
+
+    def __init__(self, script):
+        self.directory = tempfile.TemporaryDirectory()
+        self.log = Path(self.directory.name) / "calls.jsonl"
+        cli = Path(self.directory.name) / "databricks"
+        cli.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"$(python3 -c 'import json,os,sys; print(json.dumps({{\"args\": sys.argv[1:], \"token\": os.environ.get(\"DATABRICKS_TOKEN\")}}))' \"$@\")\" >> {self.log}\n"
+            f"{script}\n"
+        )
+        cli.chmod(cli.stat().st_mode | stat.S_IEXEC)
+
+    def environ(self, **extra):
+        return {"PATH": f"{self.directory.name}:/usr/bin:/bin", **extra}
+
+    def calls(self):
+        if not self.log.exists():
+            return []
+        return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+
+class CliTests(unittest.TestCase):
+    def run_cli(self, cli, *args, **extra):
+        return AUDIENCE_SOURCE.databricks_cli(cli.environ(**extra))(*args)
+
+    def test_a_command_is_run_with_json_output_and_its_answer_parsed(self):
+        cli = FakeDatabricks("echo '{\"id\": \"1\", \"userName\": \"alice@corp.com\", \"active\": true}'")
+        self.assertEqual(self.run_cli(cli, "current-user", "me"), user("1", "alice@corp.com"))
+        self.assertEqual(cli.calls(), [{"args": ["current-user", "me", "-o", "json"], "token": None}])
+
+    def test_the_bindings_token_reaches_the_cli_as_its_own_variable(self):
+        cli = FakeDatabricks("echo '[]'")
+        self.run_cli(cli, "users", "list", APPA_PROVIDER_DATABRICKS_TOKEN=" dapi-fixture\n")
+        self.assertEqual(cli.calls()[0]["token"], "dapi-fixture")
+
+    def test_a_missing_resource_is_not_found(self):
+        cli = FakeDatabricks("echo 'Error: User with id 9 not found.' >&2; exit 1")
+        with self.assertRaises(AUDIENCE_SOURCE.NotFound):
+            self.run_cli(cli, "users", "get", "9")
+
+    def test_any_other_failure_is_the_consults(self):
+        for script in [
+            "echo 'Error: default auth: cannot configure default credentials' >&2; exit 1",
+            "echo 'not json'",
+            "exit 3",
+        ]:
+            with self.assertRaises(RuntimeError):
+                self.run_cli(FakeDatabricks(script), "users", "get", "9")
+
+    def test_a_cli_missing_from_path_is_a_failure_naming_the_login(self):
+        with self.assertRaises(RuntimeError) as refused:
+            AUDIENCE_SOURCE.databricks_cli({"PATH": "/nonexistent"})("current-user", "me")
+        self.assertIn("databricks auth login", str(refused.exception))
 
 
 class EnvelopeTests(unittest.TestCase):
@@ -350,24 +407,34 @@ class EnvelopeTests(unittest.TestCase):
             **overrides,
         }
 
+    def test_a_consult_is_answered_through_the_cli(self):
+        cli = FakeDatabricks("echo '{\"id\": \"1\", \"userName\": \"alice@corp.com\", \"active\": true}'")
+        result = self.run_script(self.envelope(), cli.environ())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"version": 1, "answer": {"members": ["alice@corp.com"]}})
+
     def test_a_foreign_envelope_is_refused(self):
-        env = {"PATH": "/usr/bin:/bin", "APPA_PROVIDER_DATABRICKS_TOKEN": "dapi-fixture"}
+        cli = FakeDatabricks("echo '{}'")
         for request in [self.envelope(version=2), self.envelope(kind="annotation"), self.envelope(name="slack")]:
-            result = self.run_script(request, env)
+            result = self.run_script(request, cli.environ())
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertEqual(result.stdout, "")
+        self.assertEqual(cli.calls(), [])
 
-    def test_a_missing_workspace_is_a_failure_before_any_network(self):
-        result = self.run_script(self.envelope(), {"PATH": "/usr/bin:/bin"})
+    def test_a_failing_cli_is_a_failure_without_an_answer(self):
+        cli = FakeDatabricks("echo 'Error: default auth: cannot configure default credentials' >&2; exit 1")
+        result = self.run_script(self.envelope(), cli.environ())
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("DATABRICKS_HOST", result.stderr)
+        self.assertEqual(result.stdout, "")
 
-    def test_a_foreign_declaration_is_refused_before_the_token_is_read(self):
+    def test_a_foreign_declaration_is_refused_before_the_cli_runs(self):
+        cli = FakeDatabricks("echo '{}'")
         declared = self.envelope()["declaration"]["templates"]
         for templates in [declared + ["foreign/<x>"], declared[1:], [], list(reversed(declared))]:
-            result = self.run_script(self.envelope(declaration={"templates": templates}), {"PATH": "/usr/bin:/bin"})
+            result = self.run_script(self.envelope(declaration={"templates": templates}), cli.environ())
             self.assertEqual(result.returncode, 2, result.stderr)
             self.assertEqual(result.stdout, "")
+        self.assertEqual(cli.calls(), [])
 
 
 if __name__ == "__main__":

@@ -1,8 +1,9 @@
 """The databricks audience source: one consult in, one answer out.
 
-Serves these selector templates over one workspace's REST API:
+Serves these selector templates over one workspace, through the
+Databricks CLI:
 
-  viewer                      the token's own reader
+  viewer                      the login's own reader
   members                     every active user of the workspace
   group/<name>                one workspace group's active users, nested
                               groups included
@@ -21,76 +22,89 @@ verification the audience contract asks of a provider. Any other user is
 neither merges with another provider's reader. An inactive user reads
 nothing and is left out.
 
-The workspace and token come from databricks_token.py: DATABRICKS_HOST
-and APPA_PROVIDER_DATABRICKS_TOKEN, else the Databricks CLI's login. The
-token needs to read SCIM users and groups and Genie space permissions.
-Any API error, missing answer, or malformed response exits nonzero: the
-runtime treats that as no answer and refuses the operation, so a
-directory hiccup never becomes a policy decision.
+Every read is one `databricks <group> <command> -o json` process. The CLI
+owns the workspace and the credential: its default profile, or the one
+DATABRICKS_CONFIG_PROFILE names, or DATABRICKS_HOST with a token. When the
+deployment sets APPA_PROVIDER_DATABRICKS_TOKEN, the binding's variable, the
+source hands it to the CLI as DATABRICKS_TOKEN and nothing else changes.
+The login needs to read SCIM users and groups and Genie space
+permissions. A CLI failure, missing answer, or malformed response exits
+nonzero: the runtime treats that as no answer and refuses the operation,
+so a directory hiccup never becomes a policy decision.
 """
 
 import json
 import os
-from concurrent.futures import ThreadPoolExecutor
+import re
+import subprocess
 import sys
-import urllib.error
-import urllib.parse
-import urllib.request
-
-# The sibling module is found beside this file however the file is loaded:
-# run by the runtime from its own directory, or imported by path from another.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import databricks_token  # noqa: E402
+from concurrent.futures import ThreadPoolExecutor
 
 SOURCE_NAME = "databricks"
 SERVED_TEMPLATES = ["viewer", "members", "group/<name>", "genie-space/<id>/readers"]
-SCIM = "/api/2.0/preview/scim/v2"
+TOKEN_VAR = "APPA_PROVIDER_DATABRICKS_TOKEN"
+CLI_TOKEN_VAR = "DATABRICKS_TOKEN"
 TIMEOUT_SECONDS = 30
-PAGE_SIZE = 100
-# Users a directory pass may hold: a larger workspace cannot answer inside
-# the runtime's consult budget and is refused instead of timing out halfway.
+USER_ATTRIBUTES = "id,userName,active"
+GROUP_ATTRIBUTES = "id,displayName,members"
+# Users a directory listing may hold: a larger workspace cannot answer inside
+# the runtime's consult budget and is refused instead.
 MAX_DIRECTORY = 5000
 # Members looked up singly, at most LOOKUP_WORKERS at a time, before a
-# directory pass is cheaper.
+# directory listing is cheaper.
 DIRECT_LOOKUPS = 20
 LOOKUP_WORKERS = 8
+# How the CLI reports a resource the workspace does not have, as opposed to
+# a login, network, or permission failure.
+NOT_FOUND = re.compile(r"not found|does not exist|RESOURCE_DOES_NOT_EXIST|\b404\b", re.IGNORECASE)
 
 
 class NotFound(Exception):
     pass
 
 
-def rest_api(host, token):
-    def call(path, **params):
-        query = f"?{urllib.parse.urlencode(params)}" if params else ""
-        request = urllib.request.Request(
-            f"{host}{path}{query}",
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-                return json.load(response)
-        except urllib.error.HTTPError as error:
-            if error.code == 404:
-                raise NotFound(path) from error
-            raise RuntimeError(f"GET {path} failed: HTTP {error.code}") from error
+def databricks_cli(environ):
+    """A runner of `databricks <args> -o json` answering the parsed output."""
+    env = dict(environ)
+    token = (environ.get(TOKEN_VAR) or "").strip()
+    if token:
+        env[CLI_TOKEN_VAR] = token
 
-    return call
+    def run(*args):
+        command = ["databricks", *args, "-o", "json"]
+        spelled = f"`databricks {' '.join(args[:3])}`"
+        try:
+            completed = subprocess.run(command, capture_output=True, text=True, timeout=TIMEOUT_SECONDS, env=env, check=False)
+        except FileNotFoundError:
+            raise RuntimeError("the databricks CLI is not on PATH; install it where the runtime runs and log in with `databricks auth login`") from None
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"{spelled} gave no answer within {TIMEOUT_SECONDS}s") from None
+        if completed.returncode != 0:
+            message = completed.stderr.strip() or f"exit status {completed.returncode}"
+            if NOT_FOUND.search(message):
+                raise NotFound(message)
+            raise RuntimeError(f"{spelled} failed: {message}")
+        try:
+            return json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            raise RuntimeError(f"{spelled} printed no JSON") from None
+
+    return run
 
 
 class Workspace:
-    """One consult's view of the workspace: the REST call, every group read
-    at most once, and the directory read at most once however many groups
+    """One consult's view of the workspace: the CLI runner, every group read
+    at most once, and the directory listed at most once however many groups
     the consult expands."""
 
-    def __init__(self, call):
-        self.call = call
+    def __init__(self, run):
+        self.run = run
         self.users = None
         self.groups = {}
 
     def directory(self):
         if self.users is None:
-            self.users = {user["id"]: user for user in paged_users(self.call)}
+            self.users = {user["id"]: user for user in listed_users(self.run)}
         return self.users
 
 
@@ -125,32 +139,28 @@ def readers_of(users):
     return distinct(reader for user in users if (reader := reader_of(user)) is not None)
 
 
-def paged_users(call, **params):
-    """Every user of one SCIM listing, page by page, refused past the bound."""
-    start = 1
-    while True:
-        page = call(f"{SCIM}/Users", attributes="id,userName,active", count=PAGE_SIZE, startIndex=start, **params)
-        total = page.get("totalResults")
-        if not isinstance(total, int):
-            raise RuntimeError("the user listing reports no total")
-        if total > MAX_DIRECTORY:
-            raise RuntimeError(f"the workspace lists more than {MAX_DIRECTORY} users; map that audience from a bulk source")
-        resources = page.get("Resources", [])
-        if not resources and start <= total:
-            raise RuntimeError("the user listing returned an empty page before its total")
-        yield from resources
-        start += len(resources)
-        if start > total or not resources:
-            return
+def listing(run, *args):
+    """A list command's answer, which is every matching resource at once: the
+    CLI pages through the workspace itself."""
+    resources = run(*args)
+    if not isinstance(resources, list):
+        raise RuntimeError(f"`databricks {' '.join(args[:2])}` answered no list")
+    return resources
+
+
+def listed_users(run, *filter_args):
+    users = listing(run, "users", "list", "--attributes", USER_ATTRIBUTES, *filter_args)
+    if len(users) > MAX_DIRECTORY:
+        raise RuntimeError(f"the workspace lists more than {MAX_DIRECTORY} users; map that audience from a bulk source")
+    return users
 
 
 def viewer_members(workspace):
-    me = workspace.call(f"{SCIM}/Me")
-    return readers_of([me])
+    return readers_of([workspace.run("current-user", "me")])
 
 
 def workspace_members(workspace):
-    return readers_of(paged_users(workspace.call, filter="active eq true"))
+    return readers_of(listed_users(workspace.run, "--filter", "active eq true"))
 
 
 def looked_up(lookup, keys):
@@ -162,7 +172,7 @@ def looked_up(lookup, keys):
 
 def user_by_id(workspace, user_id):
     try:
-        return workspace.call(f"{SCIM}/Users/{urllib.parse.quote(user_id, safe='')}")
+        return workspace.run("users", "get", user_id)
     except NotFound:
         raise RuntimeError(f"the directory does not report member {user_id}") from None
 
@@ -185,25 +195,23 @@ def scim_string(value):
     return f'"{escaped}"'
 
 
-def sole_match(listing, attribute, value, what):
+def sole_match(resources, attribute, value, what):
     """The one listed resource whose attribute is exactly the value."""
-    matches = [resource for resource in listing.get("Resources", []) if resource.get(attribute) == value]
+    matches = [resource for resource in resources if resource.get(attribute) == value]
     if len(matches) != 1:
         raise RuntimeError(f"{len(matches)} {what} are named {value!r}")
     return matches[0]
 
 
 def group_by_name(workspace, name):
-    listing = workspace.call(f"{SCIM}/Groups", filter=f"displayName eq {scim_string(name)}", attributes="id,displayName,members")
-    return sole_match(listing, "displayName", name, "groups")
+    groups = listing(workspace.run, "groups", "list", "--filter", f"displayName eq {scim_string(name)}", "--attributes", GROUP_ATTRIBUTES)
+    return sole_match(groups, "displayName", name, "groups")
 
 
 def group_by_id(workspace, group_id):
     if group_id not in workspace.groups:
         try:
-            workspace.groups[group_id] = workspace.call(
-                f"{SCIM}/Groups/{urllib.parse.quote(group_id, safe='')}", attributes="id,displayName,members"
-            )
+            workspace.groups[group_id] = workspace.run("groups", "get", group_id)
         except NotFound:
             raise RuntimeError(f"the directory does not report group {group_id}") from None
     return workspace.groups[group_id]
@@ -234,14 +242,14 @@ def group_members(workspace, name):
 
 
 def user_by_name(workspace, user_name):
-    listing = workspace.call(f"{SCIM}/Users", filter=f"userName eq {scim_string(user_name)}", attributes="id,userName,active")
-    return sole_match(listing, "userName", user_name, "users")
+    users = listed_users(workspace.run, "--filter", f"userName eq {scim_string(user_name)}")
+    return sole_match(users, "userName", user_name, "users")
 
 
 def users_by_name(workspace, user_names):
     """The directory entries for exactly these logins: a filtered listing each
-    up to DIRECT_LOOKUPS, in flight together, then one directory pass; a login
-    the workspace does not report is a failure, never a reader silently
+    up to DIRECT_LOOKUPS, in flight together, then one directory listing; a
+    login the workspace does not report is a failure, never a reader silently
     dropped."""
     if len(user_names) <= DIRECT_LOOKUPS:
         return looked_up(lambda user_name: user_by_name(workspace, user_name), user_names)
@@ -262,7 +270,7 @@ def genie_space_readers(workspace, space_id):
     """Everyone holding any permission level on the space, as the Permissions
     API lists them: service principals by application id, users by login,
     groups by name."""
-    acl = workspace.call(f"/api/2.0/permissions/genie/{urllib.parse.quote(space_id, safe='')}").get("access_control_list")
+    acl = workspace.run("permissions", "get", "genie", space_id).get("access_control_list")
     if not isinstance(acl, list):
         raise RuntimeError("the space permissions report no access control list")
     user_names = []
@@ -289,7 +297,7 @@ def member_principal(workspace, member):
     if not member.startswith(prefix) or member == prefix:
         raise ValueError(f"{member!r} is not a databricks-qualified member")
     try:
-        user = workspace.call(f"{SCIM}/Users/{urllib.parse.quote(member[len(prefix) :], safe='')}")
+        user = workspace.run("users", "get", member[len(prefix) :])
     except NotFound:
         # The workspace definitively knows no such user, who stays the
         # reader as written.
@@ -300,10 +308,10 @@ def member_principal(workspace, member):
     return reader if reader is not None and is_address(reader) else member
 
 
-def answer(call, artifact):
+def answer(run, artifact):
     if not isinstance(artifact, dict):
         raise ValueError("the artifact must be an object")
-    workspace = Workspace(call)
+    workspace = Workspace(run)
     match sorted(artifact):
         case ["selector"]:
             selector = artifact["selector"]
@@ -333,8 +341,8 @@ def check_declaration(request):
 
     The binding beside this script declares them to the policy, and the
     runtime sends that declaration with every consult. A mismatch is a
-    version skew between policy and script, refused before any credential
-    is read; the exit status 2 tells it apart from a provider failure.
+    version skew between policy and script, refused before the CLI runs; the
+    exit status 2 tells it apart from a provider failure.
     """
     declared = request.get("declaration", {}).get("templates")
     if declared != SERVED_TEMPLATES:
@@ -356,9 +364,7 @@ def main():
         raise ValueError("unexpected source name")
     check_declaration(request)
 
-    host, token = databricks_token.resolve()
-
-    json.dump({"version": 1, "answer": answer(rest_api(host, token), request.get("artifact"))}, sys.stdout)
+    json.dump({"version": 1, "answer": answer(databricks_cli(os.environ), request.get("artifact"))}, sys.stdout)
     sys.stdout.write("\n")
 
 

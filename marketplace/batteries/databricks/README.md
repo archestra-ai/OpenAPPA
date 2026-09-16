@@ -64,10 +64,11 @@ shows one that sends every statement to a person.
 *Audience source* — `[externals.audience.databricks]`, below.
 
 **`audience-source.py`** — the `databricks` audience source, Python
-standard library only. It answers these selectors over the workspace's
-REST API:
+standard library over the Databricks CLI: every read is one
+`databricks <group> <command> -o json` process. It answers these
+selectors:
 
-- `databricks:viewer` — the token's own reader. Feeds `self`.
+- `databricks:viewer` — the login's own reader. Feeds `self`.
 - `databricks:members` — every active user of the workspace. Feeds
   `internal`.
 - `databricks:group/<name>` — one workspace group's active users,
@@ -103,33 +104,31 @@ from = ["databricks:group/finance"]
 Every consult carries the declared templates, and the script refuses one
 whose declaration differs from what it serves (exit status 2), so a
 policy and a script of different versions never answer each other. A
-workspace of more than 5,000 users is refused rather than paged; map
-such audiences from a source that lists them in bulk. A group's users,
-and a space's users, are looked up singly up to 20 of them, eight
-lookups in flight at a time, then in one directory pass shared by the
-whole consult.
+listing of more than 5,000 users is refused; map such audiences from a
+source that lists them in bulk. A group's users, and a space's users,
+are looked up singly up to 20 of them, eight lookups in flight at a
+time, then in one directory listing shared by the whole consult. Each
+CLI call has 30 seconds.
 
-**`databricks_token.py`** — where the source finds the workspace and
-its token. The workspace is `DATABRICKS_HOST`, the SDK's own variable,
-else the host the Databricks CLI is logged in to (`databricks auth
-describe`). The token is `APPA_PROVIDER_DATABRICKS_TOKEN`, which the
-binding's `token_env` forwards, else the CLI's cached login for that
-host (`databricks auth token`), which refreshes itself. A command
-inherits no other `APPA_*` variable, so the workspace has no
-`APPA_PROVIDER_` spelling; set `DATABRICKS_HOST` beside the token to pin
-the workspace the token is sent to, since the CLI's login is otherwise
-what names it. Each consult is its own process, and with the variables
-unset it runs those two CLI commands first, so set both where consult
-latency matters. `DATABRICKS_TOKEN` is never read: the
-SDK's own variable is the host's credential, not this source's. The
-token needs to read SCIM users and groups, and Genie space permissions
-for `genie-space/<id>/readers`. Any API error or missing answer stops
-the operation without recording a decision; nothing is guessed.
+The CLI owns the workspace and the credential, exactly as it does for
+the person at the keyboard: its default profile, the profile
+`DATABRICKS_CONFIG_PROFILE` names, or `DATABRICKS_HOST` with a token.
+When the deployment sets `APPA_PROVIDER_DATABRICKS_TOKEN`, which the
+binding's `token_env` forwards, the source hands it to the CLI as
+`DATABRICKS_TOKEN` and nothing else changes; a command inherits no other
+`APPA_*` variable, so there is no `APPA_PROVIDER_` spelling of the host.
+The login needs to read SCIM users and groups, and Genie space
+permissions for `genie-space/<id>/readers`. A CLI failure or missing
+answer stops the operation without recording a decision; nothing is
+guessed. A resource the CLI reports as not found is the one failure told
+apart, by the CLI's own message, so an unknown member answers `null`
+while a login or network failure refuses the consult.
 
-**`test_audience_source.py`**, **`test_databricks_token.py`** — tests
-without network: recorded REST payloads for every selector and the
-member lookup, the bounds and refusals, the envelope and declaration
-checks, and a fake `databricks` CLI on PATH for the credential order.
+**`test_audience_source.py`** — tests without network: recorded CLI
+outputs for every selector and the member lookup, the bounds and
+refusals, the envelope and declaration checks, and a fake `databricks`
+on PATH for the process boundary: the arguments, the token variable,
+and every failure shape.
 
 ## Root config
 
