@@ -1703,7 +1703,7 @@ impl Engine {
         let live = match check::evaluate(&contract, &views, &call, &stage, role, &self.context(act))? {
             CheckOutcome::Block(raw) => {
                 require_atoms(act, plan::block_atoms(&self.registry, &contract, &raw, role))?;
-                require_atoms(act, plan::plan_atoms(&self.registry, &contract, &recorded.plan))?;
+                require_atoms(act, plan::plan_atoms(&self.registry, &recorded.plan))?;
                 plan::plan(
                     &self.registry,
                     &views,
