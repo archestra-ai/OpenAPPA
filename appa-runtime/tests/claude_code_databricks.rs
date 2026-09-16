@@ -11,7 +11,7 @@ use appa_runtime::{
 };
 use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
 use axum::{Router, routing::post};
-use common::{actor, offer_of, propose, ran, raw, repo_root, root, serve};
+use common::{Classifier, actor, offer_of, propose, ran, raw, repo_root, root, serve};
 use std::sync::Arc;
 
 fn bash(command: &str) -> ProposedCall {
@@ -31,73 +31,6 @@ async fn directory_source() -> String {
         }),
     );
     format!("{}/audience", serve(router).await)
-}
-
-/// The classifier's next answer, and what it was asked; the fake `claude` reads its
-/// answer from `answer.json` and keeps its prompt in `prompt.txt`.
-struct Classifier {
-    answer: std::path::PathBuf,
-    prompt: std::path::PathBuf,
-}
-
-impl Classifier {
-    fn install(dir: &std::path::Path) -> (std::path::PathBuf, Classifier) {
-        use std::os::unix::fs::PermissionsExt;
-        let classifier = Classifier {
-            answer: dir.join("answer.json"),
-            prompt: dir.join("prompt.txt"),
-        };
-        let command = dir.join("fake-claude");
-        std::fs::write(
-            &command,
-            format!(
-                "#!/bin/sh\ncat > {prompt}\ncat {answer}\n",
-                prompt = classifier.prompt.display(),
-                answer = classifier.answer.display(),
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755)).unwrap();
-        (command, classifier)
-    }
-
-    fn answers(&self, delta: serde_json::Value, requires: serde_json::Value, emits: &[&str]) {
-        let structured = serde_json::json!({ "delta": delta, "requires": requires, "emits": emits });
-        std::fs::write(
-            &self.answer,
-            serde_json::json!({ "structured_output": structured }).to_string(),
-        )
-        .unwrap();
-    }
-
-    fn reads(&self) {
-        self.answers(
-            serde_json::json!({ "trust": "suspicious", "audience": ["internal"] }),
-            serde_json::json!({ "audience": { "contains": ["internal"] }, "history": [], "attention": [] }),
-            &[],
-        );
-    }
-
-    fn changes(&self) {
-        self.answers(
-            serde_json::json!({}),
-            serde_json::json!({ "trust": "trusted", "audience": { "contains": ["internal"] }, "history": [], "attention": [] }),
-            &["databricks.changed"],
-        );
-    }
-
-    fn needs_review(&self) {
-        self.answers(
-            serde_json::json!({}),
-            serde_json::json!({ "attention": ["databricks-review"], "history": [] }),
-            &["databricks.sensitive"],
-        );
-    }
-
-    /// What the classifier was last asked, empty when it never ran.
-    fn prompt(&self) -> String {
-        std::fs::read_to_string(&self.prompt).unwrap_or_default()
-    }
 }
 
 /// The shipped battery under a root that maps the audiences, permits the review mark, and

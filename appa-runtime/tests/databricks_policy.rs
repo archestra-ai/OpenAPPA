@@ -10,7 +10,7 @@ use appa_runtime::{
 };
 use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
 use axum::{Router, routing::post};
-use common::{actor, offer_of, propose, ran, raw, repo_root, root, serve, serve_runtime};
+use common::{Classifier, actor, offer_of, propose, ran, raw, repo_root, root, serve, serve_runtime};
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -35,72 +35,6 @@ async fn members_source() -> String {
         }),
     );
     format!("{}/audience", serve(router).await)
-}
-
-/// The classifier's next answer, and what it was asked; the fake `claude` reads its
-/// answer from `answer.json` and keeps its prompt in `prompt.txt`.
-struct Classifier {
-    answer: std::path::PathBuf,
-    prompt: std::path::PathBuf,
-}
-
-impl Classifier {
-    fn install(dir: &std::path::Path) -> (std::path::PathBuf, Classifier) {
-        use std::os::unix::fs::PermissionsExt;
-        let classifier = Classifier {
-            answer: dir.join("answer.json"),
-            prompt: dir.join("prompt.txt"),
-        };
-        let command = dir.join("fake-claude");
-        std::fs::write(
-            &command,
-            format!(
-                "#!/bin/sh\ncat > {prompt}\ncat {answer}\n",
-                prompt = classifier.prompt.display(),
-                answer = classifier.answer.display(),
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755)).unwrap();
-        (command, classifier)
-    }
-
-    fn answers(&self, delta: serde_json::Value, requires: serde_json::Value, emits: &[&str]) {
-        let structured = serde_json::json!({ "delta": delta, "requires": requires, "emits": emits });
-        std::fs::write(
-            &self.answer,
-            serde_json::json!({ "structured_output": structured }).to_string(),
-        )
-        .unwrap();
-    }
-
-    fn reads_only(&self) {
-        self.answers(
-            serde_json::json!({ "trust": "suspicious", "audience": ["internal"] }),
-            serde_json::json!({ "audience": { "contains": ["internal"] }, "history": [], "attention": [] }),
-            &[],
-        );
-    }
-
-    fn writes(&self) {
-        self.answers(
-            serde_json::json!({}),
-            serde_json::json!({ "trust": "trusted", "audience": { "contains": ["internal"] }, "history": [], "attention": [] }),
-            &["databricks.changed"],
-        );
-    }
-
-    fn needs_review(&self) {
-        self.answers(
-            serde_json::json!({}),
-            serde_json::json!({ "attention": ["databricks-review"], "history": [] }),
-            &["databricks.sensitive"],
-        );
-    }
-
-    fn prompt(&self) -> String {
-        std::fs::read_to_string(&self.prompt).unwrap_or_default()
-    }
 }
 
 /// The shipped battery with its audience source swapped for the loopback.
@@ -222,7 +156,7 @@ async fn genie_reads_narrow_once_and_a_read_only_statement_follows() {
         ran(&runtime, read).await;
     }
 
-    classifier.reads_only();
+    classifier.reads();
     let select = statement("SELECT region, sum(amount) FROM sales GROUP BY region");
     assert_eq!(
         propose(&runtime, select.clone()).await,
@@ -234,7 +168,7 @@ async fn genie_reads_narrow_once_and_a_read_only_statement_follows() {
     );
     ran(&runtime, select).await;
 
-    classifier.writes();
+    classifier.changes();
     assert!(!matches!(
         propose(&runtime, statement("INSERT INTO sales VALUES (1)")).await,
         HookDecision::AllowCall { .. }
@@ -248,7 +182,7 @@ async fn a_write_records_its_effect_and_a_reviewed_statement_needs_the_reviewer(
     let dir = tempfile::tempdir().unwrap();
     let (runtime, classifier) = runtime(&dir).await;
 
-    classifier.writes();
+    classifier.changes();
     let insert = statement("INSERT INTO sales VALUES (1)");
     assert_eq!(
         propose(&runtime, insert.clone()).await,
@@ -345,7 +279,7 @@ async fn the_namespace_covers_each_bound_server_under_the_host() {
     let dir = tempfile::tempdir().unwrap();
     install_battery(&dir).await;
     let (command, classifier) = Classifier::install(dir.path());
-    classifier.reads_only();
+    classifier.reads();
     let config = root_config(
         &dir,
         &command,
