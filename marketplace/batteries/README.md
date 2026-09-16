@@ -8,7 +8,7 @@ so a deployment can customize its hint without editing the battery.
 
 | Battery | Covers | Externals |
 | --- | --- | --- |
-| `claude-code/` | `host/claude-code/Bash` and `host/claude-code/Read` in a Claude Code session, Databricks CLI commands and their SQL classified in the `databricks` battery's vocabulary | The Claude Code model annotates Bash calls; static `Read` rules label the requester's secrets `self` |
+| `claude-code/` | `host/claude-code/Bash` and `host/claude-code/Read` in a Claude Code session | The Claude Code model annotates Bash calls; static rules label the requester's secrets `self`, the Databricks CLI's credential commands among them |
 | `slack/` | the claude.ai Slack connector, all 19 tools: read, search, send, canvases | the `slack` audience source: viewer, full members, user groups, one conversation's members |
 | `github/` | the GitHub MCP server's default tool sets: profile, repositories, issues, pull requests, users (44 tools) | two annotators asking GitHub for a repository's visibility; the `github` audience source: viewer, org members, teams, a repository's collaborators |
 | `google-workspace/` | no tools yet; audiences only | the `google-workspace` audience source: viewer, active Workspace users, a Workspace group with nested groups expanded |

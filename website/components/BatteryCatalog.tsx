@@ -9,7 +9,7 @@ const BATTERIES = [
   },
   {
     name: "Claude Code tools",
-    description: "Rules for Bash and Read, with a built-in Bash annotator and Databricks CLI classification.",
+    description: "Rules for Bash and Read, with a built-in Bash annotator.",
     href: "/battery-claude-code",
     logo: "/images/batteries/claude.svg",
   },

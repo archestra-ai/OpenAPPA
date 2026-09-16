@@ -171,10 +171,15 @@ every statement either way.
 
 Databricks' own agent skills route data work through the Databricks CLI
 in Bash rather than the managed servers. That path is `host/claude-code/Bash`,
-which the `claude-code` battery owns: its Databricks section classifies
-`databricks` commands, and the SQL of `databricks experimental aitools
-tools query`, in this battery's vocabulary, so `databricks.changed` and
-`databricks.sensitive` are one history whichever way a statement ran.
+which the `claude-code` battery owns, and this battery's rules do not
+reach it. The `claude-code` battery narrows the CLI's credential commands
+(`auth token`, `auth env`, `secrets get-secret`, `configure`) and its
+profile file to `self`; every other `databricks` command, the SQL of
+`databricks experimental aitools tools query` included, is classified by
+the generic Bash annotator under the root's hint. A Bash selector is a
+substring of a free-text command line, so no rule set can promise full
+recall over it; the statement classification above lives on the managed
+servers, where the tool and its `query` argument are exact.
 
 The classification is a model's reading of the statement, checked
 against the mandate but not against the warehouse. Text that reaches
