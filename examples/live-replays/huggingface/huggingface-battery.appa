@@ -1,0 +1,65 @@
+# Public and gated repositories on the Hub; any read token can replay
+# these. To replay a private repository, replace `your-name/your-private-repo`
+# in the last block with one the token can read and remove the leading `#`.
+
+# A write into a public repository, from a fresh trajectory: trusted data
+# everyone may see reaches everyone.
+mcp/huggingface/hf_fs_write {
+  cmd: "put"
+  args: ["hf://models/openai-community/gpt2/README.md"]
+  content: "hello"
+}
+expect allow
+
+# Public repository content is suspicious, and stays public.
+mcp/huggingface/hub_repo_details {
+  repo_ids: ["openai-community/gpt2"]
+  repo_type: "model"
+}
+expect allow
+
+# A gated repository's metadata is public too.
+mcp/huggingface/hub_repo_details {
+  repo_ids: ["meta-llama/Llama-3.1-8B"]
+  repo_type: "model"
+}
+expect allow
+
+# Suspicious content cannot enter a tool that requires trusted input.
+mcp/shell/run_command {
+  command: "deploy"
+}
+expect deny
+
+# Public repository content can go to a public destination.
+mcp/mail/send {
+  to: "public"
+}
+expect allow
+
+# Suspicious content cannot be written back, even into a public repository.
+mcp/huggingface/hf_fs_write {
+  cmd: "put"
+  args: ["hf://models/openai-community/gpt2/README.md"]
+  content: "summary"
+}
+expect deny
+
+# A search sends the token, so its results narrow the audience to the viewer.
+mcp/huggingface/hub_repo_search {
+  query: "gpt2"
+}
+expect allow
+
+# Narrowed content cannot go to a public destination.
+mcp/mail/send {
+  to: "public"
+}
+expect deny
+
+# Private repository content also narrows the audience to the viewer.
+# mcp/huggingface/hub_repo_details {
+#   repo_ids: ["your-name/your-private-repo"]
+#   repo_type: "model"
+# }
+# expect allow
