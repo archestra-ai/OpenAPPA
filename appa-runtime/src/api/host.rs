@@ -2,9 +2,9 @@
 //!
 //! The engine reads its facts back from the log, and so does everything the runtime knows
 //! about an actor: who stands behind a key, what is executing, which actor a prompt reached,
-//! and which tools a host has reported. This module is the reducer over the host stream —
-//! [`HostState::fold`] and the projections beside it — so the runtime holds no actor state
-//! between calls and a restart loses none of it.
+//! and which tools a host has reported. This module is the reducer over one family's host
+//! records — [`HostState::fold`] and the projections beside it — so the runtime holds no
+//! actor state between calls and a restart loses none of it.
 //!
 //! Every rule here is about *liveness*: a record is not a state, and the state is what the
 //! records that follow it have not ended.
@@ -51,8 +51,8 @@ impl HostState {
         for record in records {
             match &record.observation {
                 // Evidence, not standing: read where it is needed, never folded. A prompt
-                // mark is the latest record about it, which is a question the store answers
-                // without reducing anything.
+                // mark is the latest record about it, which [`prompted`] finds by walking
+                // the records back from the end.
                 HostObservation::Inventory { .. }
                 | HostObservation::CallBound { .. }
                 | HostObservation::PromptSeen { .. }
@@ -156,20 +156,28 @@ pub(crate) fn host_actor(actor: &Actor) -> HostActor {
     }
 }
 
-/// Whether this observation is about the prompt mark of `acting`, which is the spelling of
-/// the acting trajectory — the child where the harness named one.
+/// Whether a prompt reached `acting` — the spelling of the acting trajectory, the child where
+/// the harness named one — and nothing has settled what it left behind.
 ///
-/// The mark is the latest of these three and nothing else: a prompt raises it, settling it
-/// and the turn's end lower it, and no other record says anything about it.
-pub(crate) fn marks(observation: &HostObservation, acting: &appa_engine::value::TrajectoryId) -> bool {
-    match observation {
+/// The mark is the latest of three records and nothing else: a prompt raises it, settling it
+/// and the turn's end lower it, and no other record says anything about it. So the answer is
+/// that one record, found from the end, and not a reduction of the family.
+pub(crate) fn prompted(records: &[HostRecord], acting: &appa_engine::value::TrajectoryId) -> bool {
+    let marks = |observation: &HostObservation| match observation {
         HostObservation::PromptSeen { actor }
         | HostObservation::PromptSettled { actor }
         | HostObservation::TurnEnded { actor } => {
             actor.child.as_ref().unwrap_or(&actor.root).as_str() == acting.as_str()
         }
         _ => false,
-    }
+    };
+    matches!(
+        records.iter().rev().find(|record| marks(&record.observation)),
+        Some(HostRecord {
+            observation: HostObservation::PromptSeen { .. },
+            ..
+        })
+    )
 }
 
 /// Every tool this actor's host has reported, under the opening's own snapshot.

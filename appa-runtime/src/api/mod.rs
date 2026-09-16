@@ -26,7 +26,7 @@ use crate::elicit::Elicitation;
 use crate::engine::{EngineRefusal, Liveness, PolicyEngine, RuntimeEngine};
 use crate::external::{ConsultGates, ExternalServices};
 use crate::yell;
-use appa_eventlog::{Backend, HostObservation, HostRecord, Log, LogStore};
+use appa_eventlog::{Backend, HostObservation, Log, LogStore};
 use appa_runtime_api::{Adapter, AdapterName};
 use host::{HostState, host_actor, inventory_at};
 
@@ -978,7 +978,8 @@ impl Inner {
     }
 
     /// Record one host observation in this root's log, at the position the append is tried
-    /// at. Every host write that needs no engine fact goes through here.
+    /// at, unconditionally. A write that depends on what stands at that position derives it
+    /// through [`Inner::append_host_with`] instead.
     fn append_host(&self, root: &TrajectoryId, observation: &HostObservation) -> Result<(), EventError> {
         self.append_host_with(root, |_| Ok((Some(observation.clone()), ())))
     }
@@ -2042,25 +2043,13 @@ impl Runtime {
         )
     }
 
-    /// Whether a prompt reached this actor and nothing has settled what it left behind.
-    ///
-    /// The mark is the last record about this actor and nothing else, so the answer is that
-    /// record rather than a reduction of the family. A family with no log, or one the store
-    /// cannot read, has been reached by nothing.
+    /// Whether a prompt reached this actor and nothing has settled what it left behind. A
+    /// family with no log, or one the store cannot read, has been reached by nothing.
     pub(crate) fn prompted(&self, acting: &Actor) -> bool {
         let marked = crate::engine::engine_id(acting_trajectory(acting));
-        self.inner.log(&acting.root).is_ok_and(|log| {
-            matches!(
-                log.host_records()
-                    .iter()
-                    .rev()
-                    .find(|record| host::marks(&record.observation, &marked)),
-                Some(HostRecord {
-                    observation: HostObservation::PromptSeen { .. },
-                    ..
-                })
-            )
-        })
+        self.inner
+            .log(&acting.root)
+            .is_ok_and(|log| host::prompted(log.host_records(), &marked))
     }
 
     /// One root's rebuilt view and the engine that decides for it, for
