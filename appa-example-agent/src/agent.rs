@@ -442,6 +442,7 @@ impl Run<'_> {
         let event = HookEvent::ToolCall {
             actor: self.actor(frame),
             call: proposed.clone(),
+            call_id: Some(id.0.clone()),
             spawn: self.marks_spawn(&proposed),
             ruling: None,
         };
@@ -618,6 +619,7 @@ impl Run<'_> {
         let event = HookEvent::ToolResult {
             actor: self.actor(frame),
             call,
+            call_id: Some(id.0.clone()),
             outcome,
         };
         match hooks::handle(&self.agent.runtime, event).await {
@@ -755,6 +757,7 @@ impl Run<'_> {
         let event = HookEvent::ToolCall {
             actor: self.actor(frame),
             call: call.clone(),
+            call_id: Some(id.0.clone()),
             spawn: self.marks_spawn(&call),
             ruling: None,
         };

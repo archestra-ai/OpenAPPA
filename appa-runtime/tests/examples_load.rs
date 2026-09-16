@@ -256,6 +256,7 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
             HookEvent::ToolResult {
                 actor: actor(),
                 call: read,
+                call_id: None,
                 outcome: ToolOutcome::Success {
                     body: OutcomeBody::Available(
                         "GITHUB_TOKEN=ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789\nAWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nREGION=eu-west-1\n"
@@ -479,6 +480,7 @@ command = ["/bin/sh", "annotator.sh"]
         HookEvent::ToolResult {
             actor: actor(),
             call: read,
+            call_id: None,
             outcome: ToolOutcome::Success {
                 body: OutcomeBody::Available(
                     "export OPENAI_API_KEY=sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789\nalias ll='ls -l'\n"

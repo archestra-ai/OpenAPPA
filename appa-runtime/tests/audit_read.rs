@@ -107,6 +107,7 @@ async fn propose(runtime: &Arc<Runtime>, within: Option<&TrajectoryId>, call: Pr
         HookEvent::ToolCall {
             actor: actor(within),
             call,
+            call_id: None,
             spawn: false,
             ruling: None,
         },
@@ -127,6 +128,7 @@ async fn released(runtime: &Arc<Runtime>, within: Option<&TrajectoryId>, tool: &
         HookEvent::ToolResult {
             actor: actor(within),
             call,
+            call_id: None,
             outcome: ToolOutcome::Success {
                 body: OutcomeBody::Available(body.to_string()),
             },
@@ -150,6 +152,7 @@ async fn open_child(
             HookEvent::ToolCall {
                 actor: actor(None),
                 call,
+                call_id: None,
                 spawn: true,
                 ruling: None,
             },
