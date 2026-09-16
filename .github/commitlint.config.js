@@ -36,7 +36,6 @@ export default {
         'appa-agent',
         'appa-runtime',
         'appa-sdk',
-        'bench',
         'builtin',
         'demo',
         'engine',
