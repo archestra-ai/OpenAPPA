@@ -92,3 +92,14 @@ that Terraform owns, so a deploy cannot roll configuration backward. For the
 same reason in the other direction, the Terraform resource must ignore changes
 to its `build_config` source — otherwise the next apply would roll the
 deployed code back to whatever revision Terraform last recorded.
+
+## Slack Source Metadata
+
+Slack notifications label the report's harness as Archestra, Claude Code, or
+kagent. Existing clients already include this field. Archestra also supplies
+its configured public frontend hostname; standalone clients do not send personal
+machine names. Missing or unknown harnesses display as Unknown.
+
+Source and hostname are caller claims, not authenticated identity. The formatter
+uses fixed source labels and accepts only a bounded hostname without URLs,
+credentials, or Slack markup. It renders this metadata as plain text.
