@@ -374,6 +374,8 @@ class CliTests(unittest.TestCase):
     def test_any_other_failure_is_the_consults(self):
         for script in [
             "echo 'Error: default auth: cannot configure default credentials' >&2; exit 1",
+            "echo 'Error: 404 Not Found' >&2; exit 1",
+            "echo 'Error: RESOURCE_DOES_NOT_EXIST: no such space' >&2; exit 1",
             "echo 'not json'",
             "exit 3",
         ]:

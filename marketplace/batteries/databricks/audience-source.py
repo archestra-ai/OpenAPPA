@@ -54,9 +54,10 @@ MAX_DIRECTORY = 5000
 # directory listing is cheaper.
 DIRECT_LOOKUPS = 20
 LOOKUP_WORKERS = 8
-# How the CLI reports a resource the workspace does not have, as opposed to
-# a login, network, or permission failure.
-NOT_FOUND = re.compile(r"not found|does not exist|RESOURCE_DOES_NOT_EXIST|\b404\b", re.IGNORECASE)
+# How the CLI reports a SCIM user or group the workspace does not have, the
+# one definitive absence: a bare 404 from a wrong host or gateway, a missing
+# profile, and every other failure stay failures.
+NOT_FOUND = re.compile(r"\b(User|Group) with id \S+ not found")
 
 
 class NotFound(Exception):
