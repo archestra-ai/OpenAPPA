@@ -29,16 +29,14 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Test release age checker
-        run: python3 -m unittest discover -s .github/scripts -p 'test_check_cargo_release_age.py'
-
       - name: Check new Cargo dependency release ages
         if: github.event_name == 'pull_request' || github.event_name == 'push'
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          git fetch --no-tags --depth=1 origin "$BASE_SHA"
-          python3 .github/scripts/check-cargo-release-age.py --base-ref "$BASE_SHA" --lockfile Cargo.lock --lockfile bench/corp-systems/Cargo.lock
+        uses: archestra-ai/.github/actions/cargo-release-age@f9b82a1ae0c8d73088513454aa46cf5a4021df82
+        with:
+          base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
+          lockfiles: |
+            Cargo.lock
+            bench/corp-systems/Cargo.lock
 
   # Each job runs only when its own inputs change. Skipped required
   # checks still pass, so a docs-only pull request does not wait on

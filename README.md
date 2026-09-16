@@ -165,13 +165,11 @@ must be at least seven days old. Registry errors, missing publication metadata,
 and unsupported registries fail the check. Versions already in the base commit
 are grandfathered; local and git dependencies are outside this registry-age check.
 
-Stable Cargo does not enforce release ages during local installs. Before building
-an update, fetch the target branch and run from the repository root:
+The checker and its tests live in the shared
+[Cargo Release Age action](https://github.com/archestra-ai/.github/tree/f9b82a1ae0c8d73088513454aa46cf5a4021df82/actions/cargo-release-age).
+The workflow pins that action to a reviewed commit. Its README includes local-check
+instructions using Python 3.11 or newer and a freshly fetched target branch.
 
-```sh
-python3 .github/scripts/check-cargo-release-age.py --base-ref origin/main --lockfile Cargo.lock --lockfile bench/corp-systems/Cargo.lock
-```
-
-Python 3.11 or newer is required. Cargo's native
+Stable Cargo does not enforce release ages during local installs. Cargo's native
 [minimum publish age](https://doc.rust-lang.org/cargo/reference/unstable.html#min-publish-age)
 currently requires nightly and `-Zmin-publish-age`.
