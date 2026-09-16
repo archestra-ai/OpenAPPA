@@ -19,8 +19,9 @@
 //! Beside `handle` the boundary makes projection reads — which branch has ended,
 //! which dispatches it has open, what its label renders as. They gate nothing
 //! and append nothing. One of them is not a read at all:
-//! [`RuntimeEngine::opens_a_second_dispatch`] is this deployment's own host
-//! policy, which the engine deliberately does not enforce.
+//! [`RuntimeEngine::opens_a_second_dispatch`] supports the runtime's legacy
+//! host policy for events without call identities. The engine deliberately
+//! does not impose that policy.
 //!
 //! External evidence is typed before it reaches an engine input:
 //! an authority verdict, a sanitizer derivation, an annotation answer, or a
@@ -817,7 +818,8 @@ impl RuntimeEngine {
     }
 
     /// Would applying this batch leave the trajectory with more than one
-    /// dispatch open?
+    /// dispatch open? The runtime asks only when a host supplied no identity
+    /// for the new call or an older open call has no identity.
     pub(crate) fn opens_a_second_dispatch(&self, view: &EngineView, trajectory: &TrajectoryId, facts: &[Fact]) -> bool {
         let owner = engine_id(trajectory);
         let mut open: std::collections::BTreeSet<_> = view
@@ -861,7 +863,12 @@ impl RuntimeEngine {
             .offer_consults(view, &engine_id(trajectory), &engine_offer)
             .ok()?
         {
-            OfferConsult::Accept => Some(crate::api::OfferKind::Accept),
+            OfferConsult::Accept { sanitizer: None } => Some(crate::api::OfferKind::Accept),
+            OfferConsult::Accept {
+                sanitizer: Some(sanitizer),
+            } => Some(crate::api::OfferKind::Sanitizer {
+                name: sanitizer.as_str().to_string(),
+            }),
             OfferConsult::Authorities { required, .. } => {
                 let mut names: Vec<String> = required
                     .iter()
@@ -1497,7 +1504,7 @@ impl RuntimeEngine {
                 ));
             }
             OfferConsult::Replay(outcome) => outcome,
-            OfferConsult::Accept => OfferOutcome::Approved(Vec::new()),
+            OfferConsult::Accept { .. } => OfferOutcome::Approved(Vec::new()),
             OfferConsult::Rewrite { sanitizer, call } => {
                 let arguments = call.canonical_arguments();
                 let source = RawResultDigest::of(arguments.canonical_bytes());
@@ -3304,7 +3311,7 @@ fn block_feedback(
         appa_engine::check::Gap::Attention(mark) => registry
             .authorities()
             .iter()
-            .any(|authority| authority.mandate.attends.contains(mark)),
+            .any(|authority| authority.mandate.attends.covers(mark)),
         _ => false,
     });
     let public_expansion_reviewable = registry.authorities().iter().any(|authority| {
@@ -3372,7 +3379,7 @@ fn fork_heading(advice: ForkAdvice) -> &'static str {
         ForkAdvice::Narrowing {
             standing: FloorStanding::Below,
             ..
-        } => "Raw result exceeds the parent's limit:",
+        } => "Refused by the parent's declaration:",
     }
 }
 
@@ -3457,7 +3464,7 @@ mod tests {
                 standing: super::FloorStanding::Below,
                 sanitized_return,
             };
-            assert_eq!(super::fork_heading(advice), "Raw result exceeds the parent's limit:");
+            assert_eq!(super::fork_heading(advice), "Refused by the parent's declaration:");
             let text = super::fork_advice_text(advice, false);
             assert!(text.contains("does not allow this session to admit the raw result"));
             assert!(text.contains("does not forbid an output sanitizer offered under Continue"));

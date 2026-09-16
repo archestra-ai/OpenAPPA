@@ -21,7 +21,7 @@
 include = ["batteries/github/appa.toml"]
 
 [server_aliases]
-github = "@@GITHUB_SERVER@@"
+github = ["@@GITHUB_SERVER@@"]
 
 # `@@MOCK_PORT@@` is the loopback port the mock externals process took;
 # `conftest.py` renders it before the runtime starts.

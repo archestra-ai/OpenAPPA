@@ -44,6 +44,8 @@ OpenAPPA combines these files into one config.
 | Annotators | Each annotator name must be unique. |
 | Script path | A script path is relative to the config file that names it. |
 | Audience sources | A battery binds the membership service it ships and declares its selector templates. A root entry for the same provider is a duplicate. |
+| Confined results | A battery can list its own tools in `confined_results`, so an output sanitizer it ships has a result to run on. The names join the root's list. Other `[policy.deployment]` settings stay in the root. |
+| Bindings | A battery binds the helper scripts it ships, and a sanitizer to a stock `builtin` such as `redact-secrets`. A `url`, a model, or a stock authority is the root's to bind. |
 
 OpenAPPA checks the combined config before using it. If a reload fails, the current config keeps running.
 
@@ -224,7 +226,7 @@ annotator = "local.read-sensitivity"
 command = ["python3", "./local/read-sensitivity.py"]
 ```
 
-No authority permits `blocked`, so both `kubectl` contracts have no remedy.
+`blocked` is the reserved mark no authority can permit, so both `kubectl` contracts have no remedy, even under the plugin's catch-all `hitl` authority.
 Every other Bash call reaches the battery's model annotator. The root also
 replaces the battery's `host/claude-code/Read` rules with a local script.
 

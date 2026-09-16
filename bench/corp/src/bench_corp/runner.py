@@ -32,6 +32,7 @@ from typing import Iterator
 
 from . import AGENT_PROMPT_PROFILES
 from .agents import Agent, PolicyTarget, command_for
+from .auto_policy import settings_for
 from .checks import CheckResult, evaluate_check, parse_emails
 from .policy import apply_tool_requires, bind_external_urls, prune_policy
 from .scenario import AnnotatorAnswer, AuthorityAnswer, SanitizerAnswer, Scenario, canonical_args
@@ -68,6 +69,16 @@ _FAILED_TERMINAL_STATUSES = {
     "cancelled",
     "budget_exhausted",
 }
+_COMMAND_PATH_OPTIONS = {
+    "--data-root",
+    "--policy",
+    "--profile",
+    "--server-bin",
+    "--settings",
+    "--sink-root",
+    "--status-file",
+    "--usage-file",
+}
 
 
 def _count(pattern: re.Pattern[str], text: str) -> int:
@@ -76,6 +87,18 @@ def _count(pattern: re.Pattern[str], text: str) -> int:
 
 def _provider_retries(text: str) -> int:
     return sum(max(0, int(match.group(1)) - 1) for match in _PROVIDER_ATTEMPTS.finditer(text))
+
+
+def _recorded_command(command: list[str], episode_dir: Path) -> list[str]:
+    """Make machine-local argv paths relative without changing execution."""
+    recorded = list(command)
+    path_indexes = {0}
+    path_indexes.update(index + 1 for index, argument in enumerate(command) if argument in _COMMAND_PATH_OPTIONS)
+    for index in path_indexes:
+        path = Path(command[index])
+        if path.is_absolute():
+            recorded[index] = os.path.relpath(path, episode_dir)
+    return recorded
 
 
 @dataclass(frozen=True)
@@ -96,6 +119,7 @@ class EpisodeResult:
     provider_retries: int
     checks: list[CheckResult]
     model_usage: ModelUsage | None = None
+    auto_policy_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -290,6 +314,13 @@ def _stage_policy(
             destination = episode_dir / "fides.json"
             shutil.copyfile(scenario.policy_profile.fides, destination)
             return destination
+        case PolicyTarget.AUTO:
+            return None
+        case PolicyTarget.AUTO_IFC:
+            rendered, _ = settings_for(scenario.name)
+            destination = episode_dir / "auto-settings.json"
+            destination.write_text(rendered)
+            return destination
         case PolicyTarget.NONE:
             return None
 
@@ -387,6 +418,9 @@ def run_episode(
             model_usage = _read_model_usage(usage_path)
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             error = error or "invalid model usage"
+    auto_policy_sha256 = None
+    if agent.policy_target == PolicyTarget.AUTO_IFC:
+        _, auto_policy_sha256 = settings_for(scenario.name)
     emails = parse_emails(episode_dir / "sink")
     external_requests = (
         [json.loads(line) for line in external_request_log.read_text().splitlines()]
@@ -425,6 +459,7 @@ def run_episode(
         remedy_calls=_count(_REMEDY, stderr_text),
         provider_retries=_provider_retries(stderr_text),
         model_usage=model_usage,
+        auto_policy_sha256=auto_policy_sha256,
         checks=results,
     )
     (episode_dir / "result.json").write_text(
@@ -432,7 +467,7 @@ def run_episode(
             {
                 **episode_record(result),
                 "checks": [check.__dict__ for check in results],
-                "command": command,
+                "command": _recorded_command(command, episode_dir),
             },
             indent=2,
         )

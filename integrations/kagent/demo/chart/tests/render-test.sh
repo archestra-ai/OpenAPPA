@@ -106,7 +106,7 @@ expect 1 'The release manager approves or refuses version bumps for the shop nam
 expect 0 'agent the policy never names, so no delegation reaches it'
 expect 1 '^            - get_file_contents$'
 expect 1 '^            - issue_write$'
-expect 1 '^    github = "server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7"$'
+expect 1 '^    github = \["server-08e41db0f96ead55c0f5060212bbab69ea691ef7ca97123f038d72b7294acee7"\]$'
 
 # Every rendered Agent uses the one explicitly selected shared runtime.
 expect_env 3 APPA_ENABLED true
@@ -160,7 +160,7 @@ expect 2 'name: "null"$'
 expect 6 '^    modelConfig: "123"$'
 expect 1 '^    name = "agent/123/123"$'
 expect 1 '^    name = "agent/123/null"$'
-expect 1 '^    github = "server-630e71a0b1cacf82c364aa559d89341fc336c3ef082d555f0c85a1dbd9eab2e7"$'
+expect 1 '^    github = \["server-630e71a0b1cacf82c364aa559d89341fc336c3ef082d555f0c85a1dbd9eab2e7"\]$'
 
 # Required external references fail before Kubernetes sees an unusable Agent.
 must_refuse "missing property 'url'" kagent --set runtime.url=null

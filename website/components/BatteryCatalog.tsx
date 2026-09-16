@@ -50,6 +50,48 @@ const BATTERIES = [
     logo: "/images/batteries/notion.svg",
   },
   {
+    name: "Microsoft Learn",
+    description: "Public documentation search and page fetches with untrusted result labeling.",
+    href: "/battery-microsoft-learn",
+    logo: "/images/batteries/microsoft-learn.svg",
+  },
+  {
+    name: "Cloudflare",
+    description: "Read-only rules for the documentation and Workers Observability servers: public docs, internal logs and Workers.",
+    href: "/battery-cloudflare",
+    logo: "/images/batteries/cloudflare.svg",
+  },
+  {
+    name: "LaunchDarkly",
+    description: "Rules for 20 flag, environment, AI Config, and audit tools; every write is reviewed.",
+    href: "/battery-launchdarkly",
+    logo: "/images/batteries/launchdarkly.svg",
+  },
+  {
+    name: "PostHog",
+    description: "Rules for 44 analytics, flag, experiment, and survey tools; internal reads and reviewed writes.",
+    href: "/battery-posthog",
+    logo: "/images/batteries/posthog.svg",
+  },
+  {
+    name: "PagerDuty",
+    description: "Rules for 18 incident, schedule, team, and status page tools; internal reads and every write reviewed.",
+    href: "/battery-pagerduty",
+    logo: "/images/batteries/pagerduty.svg",
+  },
+  {
+    name: "Hugging Face",
+    description: "Rules for 11 account, search, repository, Space, job, and sandbox tools; each repository's Hub visibility decides its readers.",
+    href: "/battery-huggingface",
+    logo: "/images/batteries/huggingface.svg",
+  },
+  {
+    name: "Databricks",
+    description: "Rules for the Genie One and Databricks SQL managed servers; internal reads, every SQL statement classified before it runs.",
+    href: "/battery-databricks",
+    logo: "/images/batteries/databricks.svg",
+  },
+  {
     name: "Add your own",
     href: "/write-a-battery",
     add: true,

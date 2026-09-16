@@ -72,8 +72,9 @@ pub(crate) fn remove(text: &str, include: &str) -> Result<String, InstallError> 
     Ok(document.to_string())
 }
 
-/// The text with `server_aliases.<namespace>` naming `server`.
-pub(crate) fn bind_server(text: &str, namespace: &Namespace, server: &str) -> Result<String, InstallError> {
+/// The text with `server_aliases.<namespace>` naming exactly `servers`, in
+/// their order; a binding already spelled so is left as written.
+pub(crate) fn bind_servers(text: &str, namespace: &Namespace, servers: &[String]) -> Result<String, InstallError> {
     let mut document = document(text)?;
     if document.get("server_aliases").is_none() {
         document["server_aliases"] = toml_edit::table();
@@ -81,11 +82,25 @@ pub(crate) fn bind_server(text: &str, namespace: &Namespace, server: &str) -> Re
     let aliases = document["server_aliases"]
         .as_table_like_mut()
         .ok_or_else(|| InstallError::Invalid("server_aliases must be a table".into()))?;
-    if aliases.get(namespace.as_str()).and_then(Item::as_str) == Some(server) {
+    if aliases
+        .get(namespace.as_str())
+        .is_some_and(|bound| bound_servers(bound).as_deref() == Some(servers))
+    {
         return Ok(text.to_owned());
     }
-    aliases.insert(namespace.as_str(), toml_edit::value(server));
+    aliases.insert(
+        namespace.as_str(),
+        toml_edit::value(servers.iter().map(String::as_str).collect::<toml_edit::Array>()),
+    );
     Ok(document.to_string())
+}
+
+/// The servers one binding names: an array of strings, else nothing.
+fn bound_servers(item: &Item) -> Option<Vec<String>> {
+    item.as_array()?
+        .iter()
+        .map(|server| server.as_str().map(str::to_owned))
+        .collect()
 }
 
 /// The text without the aliases of `namespaces`: a battery's aliases mean
@@ -111,15 +126,36 @@ pub(crate) fn unbind_servers(text: &str, namespaces: &[Namespace]) -> Result<Str
 /// The batteries the include list names: the entries spelled
 /// `batteries/<name>/appa.toml`.
 pub(crate) fn included(text: &str) -> Result<BTreeSet<String>, InstallError> {
+    Ok(included_in(&document(text)?))
+}
+
+/// The batteries the config includes, and its `server_aliases` table. A
+/// binding that is not an array of strings is refused, as the loader refuses it.
+pub(crate) fn batteries(text: &str) -> Result<(BTreeSet<String>, crate::config::ServerBindings), InstallError> {
     let document = document(text)?;
-    Ok(document
+    let bindings = document
+        .get("server_aliases")
+        .and_then(Item::as_table_like)
+        .into_iter()
+        .flat_map(|aliases| aliases.iter())
+        .map(|(namespace, bound)| {
+            bound_servers(bound)
+                .map(|servers| (namespace.to_owned(), servers))
+                .ok_or_else(|| InstallError::Invalid(format!("server_aliases.{namespace} must be an array of strings")))
+        })
+        .collect::<Result<_, _>>()?;
+    Ok((included_in(&document), bindings))
+}
+
+fn included_in(document: &DocumentMut) -> BTreeSet<String> {
+    document
         .get("include")
         .and_then(Item::as_array)
         .into_iter()
         .flatten()
         .filter_map(toml_edit::Value::as_str)
         .filter_map(|entry| crate::batteries::name_from_include(Path::new(entry)))
-        .collect())
+        .collect()
 }
 
 #[cfg(test)]
@@ -161,14 +197,27 @@ mod tests {
 
     #[test]
     fn a_server_binding_replaces_the_namespaces_alias_and_unbinding_takes_only_the_named_ones() {
+        let servers = |names: &[&str]| names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>();
         let github = Namespace::parse("github").unwrap();
-        let bound = bind_server(AUTHORED, &github, "work-github").unwrap();
+        let bound = bind_servers(AUTHORED, &github, &servers(&["work-github"])).unwrap();
         assert!(bound.contains(AUTHORED));
-        assert_eq!(bind_server(&bound, &github, "work-github").unwrap(), bound);
-        let rebound = bind_server(&bound, &github, "home-github").unwrap();
+        assert_eq!(
+            bind_servers(&bound, &github, &servers(&["work-github"])).unwrap(),
+            bound
+        );
+        assert_eq!(
+            batteries(&bound).unwrap().1,
+            crate::config::ServerBindings::from([("github".to_owned(), servers(&["work-github"]))])
+        );
+        let rebound = bind_servers(&bound, &github, &servers(&["home-github", "lab-github"])).unwrap();
         assert!(rebound.contains("home-github") && !rebound.contains("work-github"));
+        assert_eq!(
+            batteries(&rebound).unwrap().1["github"],
+            servers(&["home-github", "lab-github"])
+        );
+        assert!(batteries("[server_aliases]\ngithub = 'work-github'\n").is_err());
         let slack = Namespace::parse("slack").unwrap();
-        let with_slack = bind_server(&rebound, &slack, "team-slack").unwrap();
+        let with_slack = bind_servers(&rebound, &slack, &servers(&["team-slack"])).unwrap();
         let unbound = unbind_servers(&with_slack, std::slice::from_ref(&github)).unwrap();
         assert!(!unbound.contains("home-github") && unbound.contains("team-slack"));
         assert_eq!(

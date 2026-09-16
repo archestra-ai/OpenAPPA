@@ -231,15 +231,29 @@ fn every_battery_composes_into_each_host_it_declares() {
     }
 }
 
+/// Where the test process's own PATH resolves `program`.
+fn on_path(program: &str) -> PathBuf {
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|directory| directory.join(program))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| panic!("{program} is on the PATH"))
+}
+
 /// Every audience source a battery binds refuses a consult whose declared
 /// templates are not the ones it serves, and does so before it reads a
-/// credential: with no `APPA_PROVIDER_*` variable set, the matching
-/// declaration reaches the token check (exit 1) and a foreign one stops at
-/// the declaration check (exit 2). A policy and a script of different
-/// versions never answer each other, whatever the policy declares.
+/// credential: with no `APPA_PROVIDER_*` variable set and no CLI login on the
+/// `PATH` to fall back to, the matching declaration reaches the token check
+/// (exit 1) and a foreign one stops at the declaration check (exit 2). A
+/// policy and a script of different versions never answer each other,
+/// whatever the policy declares.
 #[test]
 fn every_bound_audience_source_checks_its_declaration_before_its_credential() {
     let root = marketplace_root();
+    // The interpreter is run by its resolved path so the helper's PATH can be
+    // empty: a `gh` on the developer's PATH would supply the credential.
+    let no_path = tempfile::tempdir().expect("a temp dir is creatable");
     let mut checked = 0;
     for entry in &manifest().packages {
         let directory = root.join(entry.path.as_str());
@@ -275,11 +289,11 @@ fn every_bound_audience_source_checks_its_declaration_before_its_credential() {
                     "declaration": { "templates": templates },
                     "artifact": { "selector": "viewer" },
                 });
-                let mut child = Command::new(argv[0])
+                let mut child = Command::new(on_path(argv[0]))
                     .args(&argv[1..])
                     .current_dir(installed.path())
                     .env_clear()
-                    .env("PATH", std::env::var("PATH").unwrap_or_default())
+                    .env("PATH", no_path.path())
                     .stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
@@ -400,6 +414,28 @@ fn a_battery_that_validates_loads() {
             yes,
             body("[[policy.tool]]\ndelta = {}\n", ""),
         ),
+        (
+            "a stock sanitizer bound by name",
+            yes,
+            yes,
+            body(
+                &format!("{tool}\n[[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\n"),
+                "[externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\n",
+            ),
+        ),
+        // Stricter than the loader again: the loader lets an operator's own
+        // file bind the stock approving authority; a battery may not.
+        (
+            "a stock authority bound by name",
+            no,
+            yes,
+            body(
+                &format!(
+                    "{tool}\n[[policy.authority]]\nname = \"nod\"\n[policy.authority.permits]\nattention = [\"hitl\"]\n"
+                ),
+                "[externals.authorities.nod]\nbuiltin = \"approve\"\n",
+            ),
+        ),
         // Refused by both, each for its own reason: neither crate reads the
         // other, so agreeing here is the thing worth holding.
         (
@@ -425,6 +461,35 @@ fn a_battery_that_validates_loads() {
             no,
             no,
             body(&format!("{tool}\n[policy.audience]\nteam = []\n"), ""),
+        ),
+        (
+            "a battery confining the results of its own tool",
+            yes,
+            yes,
+            body(
+                &format!("{tool}\n[policy.deployment]\nconfined_results = [\"mcp/probe/read\"]\n"),
+                "",
+            ),
+        ),
+        (
+            "a battery confining the results of a tool it does not declare",
+            no,
+            no,
+            body(
+                &format!("{tool}\n[policy.deployment]\nconfined_results = [\"mcp/probe/write\"]\n"),
+                "",
+            ),
+        ),
+        (
+            "a deployment setting beside the confinement",
+            no,
+            no,
+            body(
+                &format!(
+                    "{tool}\n[policy.deployment]\nconfined_results = [\"mcp/probe/read\"]\nstarting_label = {{ audience = [\"internal\"] }}\n"
+                ),
+                "",
+            ),
         ),
         (
             "a top-level table only a root carries",
@@ -535,6 +600,17 @@ fn every_field_and_binding_a_package_may_carry_loads() {
         assert!(
             probe_loads(&fragment, true),
             "a package may bind `externals.{kind}` and a deployment will not load it"
+        );
+    }
+
+    for stock in appa_package::BINDABLE_STOCK_SANITIZERS {
+        let fragment = format!(
+            "[policy]\nversion = 2\n\n[[policy.sanitizer]]\nname = \"probe\"\non = [\"tool_output\"]\n\n\
+             [externals.sanitizers.probe]\nbuiltin = \"{stock}\"\n"
+        );
+        assert!(
+            probe_loads(&fragment, false),
+            "a package may bind the stock sanitizer {stock} and a deployment will not load it"
         );
     }
 }

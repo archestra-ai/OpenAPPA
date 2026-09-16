@@ -202,6 +202,7 @@ pub async fn propose(runtime: &Arc<Runtime>, call: ProposedCall) -> HookDecision
         HookEvent::ToolCall {
             actor: actor(),
             call,
+            call_id: None,
             spawn: false,
             ruling: None,
         },
@@ -218,6 +219,7 @@ pub async fn ran(runtime: &Arc<Runtime>, call: ProposedCall) {
             HookEvent::ToolResult {
                 actor: actor(),
                 call,
+                call_id: None,
                 outcome: ToolOutcome::Success {
                     body: OutcomeBody::Available("done".to_string()),
                 },
@@ -243,4 +245,59 @@ pub async fn serve(router: axum::Router) -> String {
         axum::serve(listener, router).await.expect("the stub serves");
     });
     format!("http://{addr}")
+}
+
+/// A fake `claude` executable running `script` in place of the model, for the built-in
+/// Claude Code annotator's `[externals.claude_code] command`.
+#[cfg(unix)]
+pub fn fake_claude(dir: &Path, script: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("fake-claude");
+    std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("the fake claude writes");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("the fake claude is executable");
+    path
+}
+
+/// A fake `claude` that answers from a file: it reads its next structured answer from
+/// `answer.json` and keeps the prompt it was asked in `prompt.txt`, so a suite sets the
+/// answer before a call and reads what the annotator was asked after it.
+#[cfg(unix)]
+pub struct Classifier {
+    answer: PathBuf,
+    prompt: PathBuf,
+}
+
+#[cfg(unix)]
+impl Classifier {
+    /// Write the fake `claude` into `dir` and answer its path beside the classifier.
+    pub fn install(dir: &Path) -> (PathBuf, Classifier) {
+        let classifier = Classifier {
+            answer: dir.join("answer.json"),
+            prompt: dir.join("prompt.txt"),
+        };
+        let command = fake_claude(
+            dir,
+            &format!(
+                "cat > {prompt}\ncat {answer}",
+                prompt = classifier.prompt.display(),
+                answer = classifier.answer.display(),
+            ),
+        );
+        (command, classifier)
+    }
+
+    /// The next structured answer: its delta, its requirements, and the effects it emits.
+    pub fn answers(&self, delta: serde_json::Value, requires: serde_json::Value, emits: &[&str]) {
+        let structured = serde_json::json!({ "delta": delta, "requires": requires, "emits": emits });
+        std::fs::write(
+            &self.answer,
+            serde_json::json!({ "structured_output": structured }).to_string(),
+        )
+        .expect("the answer is written");
+    }
+
+    /// What the classifier was last asked, empty when it never ran.
+    pub fn prompt(&self) -> String {
+        std::fs::read_to_string(&self.prompt).unwrap_or_default()
+    }
 }

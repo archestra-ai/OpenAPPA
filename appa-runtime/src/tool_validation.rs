@@ -174,12 +174,14 @@ pub fn precise_name(name: &str, adapter: Adapter) -> Option<CanonicalTool> {
 }
 
 /// `server_aliases` belongs to deployment configuration, never to a battery. Its values
-/// are configured connection identities, not DNS/provider guesses.
+/// are configured connection identities, not DNS/provider guesses. A namespace bound to
+/// several identities resolves each rule under it to one canonical id per identity: the
+/// rule covers every server the deployment bound it to.
 pub fn resolve(
     policy: &toml::Value,
     adapter: Adapter,
     inventory: &ToolInventory,
-    server_aliases: &BTreeMap<String, String>,
+    server_aliases: &crate::config::ServerBindings,
 ) -> ResolvedPolicy {
     let mut policy = policy.clone();
     let mut report = ValidationReport {
@@ -203,42 +205,74 @@ pub fn resolve(
             return ResolvedPolicy { policy, report };
         }
     };
-    for (alias, target) in server_aliases {
-        if CanonicalTool::of("mcp", alias, "tool").is_err() || CanonicalTool::of("mcp", target, "tool").is_err() {
-            report.errors.push(format!(
-                "server alias {alias:?} or its target is not a valid connection identity"
-            ));
+    for (alias, targets) in server_aliases {
+        if CanonicalTool::of("mcp", alias, "tool").is_err() {
+            report
+                .errors
+                .push(format!("server alias {alias:?} is not a valid connection identity"));
+        }
+        if targets.is_empty() {
+            report.errors.push(format!("server alias {alias:?} binds no server"));
+        }
+        let mut seen = BTreeSet::new();
+        for target in targets {
+            if CanonicalTool::of("mcp", target, "tool").is_err() {
+                report.errors.push(format!(
+                    "server alias {alias:?} target {target:?} is not a valid connection identity"
+                ));
+            }
+            if !seen.insert(target) {
+                report
+                    .errors
+                    .push(format!("server alias {alias:?} binds {target:?} twice"));
+            }
         }
     }
-    let resolve_name = |name: &str, server: Option<&str>| -> Result<Option<String>, String> {
+    // The servers a rule spelled `mcp/<namespace>/…` or `server = "<namespace>"` names: the
+    // namespace's bound identities, else the namespace itself.
+    let targets_of = |namespace: &str| -> Vec<String> {
+        match server_aliases.get(namespace) {
+            Some(targets) if !targets.is_empty() => targets.clone(),
+            _ => vec![namespace.to_owned()],
+        }
+    };
+    // The canonical ids one rule resolves to, `None` while its tool cannot be identified.
+    let resolve_name = |name: &str, server: Option<&str>| -> Result<Option<Vec<String>>, String> {
         let (name, selector) = bare(name);
         if name == "*" {
             return if server.is_some() {
                 Err("a wildcard annotator cannot select one server".into())
             } else {
-                Ok(Some("*".into()))
+                Ok(Some(vec!["*".into()]))
             };
         }
-        let target = server.map(|server| server_aliases.get(server).map(String::as_str).unwrap_or(server));
+        if let Some(server) = server {
+            if name.contains('/') || (adapter.name == AdapterName::ClaudeCode && name.starts_with("mcp__")) {
+                return Err(format!(
+                    "tool {name:?} conflicts with server selector {server:?}; use a short tool name with server"
+                ));
+            }
+            return targets_of(server)
+                .iter()
+                .map(|target| {
+                    CanonicalTool::of("mcp", target, name)
+                        .map(|id| format!("{id}{selector}"))
+                        .map_err(|error| error.to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Some);
+        }
         let qualified = precise_name(name, adapter).map(|id| {
             let parts: Vec<_> = id.as_str().split('/').collect();
             match parts.as_slice() {
-                ["mcp", namespace, tool] => server_aliases
-                    .get(*namespace)
-                    .and_then(|target| CanonicalTool::of("mcp", target, tool).ok())
-                    .unwrap_or(id),
-                _ => id,
+                ["mcp", namespace, tool] if server_aliases.contains_key(*namespace) => targets_of(namespace)
+                    .iter()
+                    .filter_map(|target| CanonicalTool::of("mcp", target, tool).ok())
+                    .map(|id| format!("{id}{selector}"))
+                    .collect(),
+                _ => vec![format!("{id}{selector}")],
             }
         });
-        if let Some(target) = target {
-            if name.contains('/') || (adapter.name == AdapterName::ClaudeCode && name.starts_with("mcp__")) {
-                return Err(format!(
-                    "tool {name:?} conflicts with server selector {target:?}; use a short tool name with server"
-                ));
-            }
-            let id = CanonicalTool::of("mcp", target, name).map_err(|error| error.to_string())?;
-            return Ok(Some(format!("{id}{selector}")));
-        }
         if qualified.is_none()
             && (name.contains('/') || (adapter.name == AdapterName::ClaudeCode && name.starts_with("mcp__")))
         {
@@ -246,9 +280,9 @@ pub fn resolve(
         }
         if qualified.is_none() && adapter.name == AdapterName::Kagent {
             CanonicalTool::of("mcp", "server", name).map_err(|error| error.to_string())?;
-            return Ok(Some(format!("mcp/*/{name}{selector}")));
+            return Ok(Some(vec![format!("mcp/*/{name}{selector}")]));
         }
-        Ok(qualified.map(|id| format!("{id}{selector}")))
+        Ok(qualified.filter(|ids| !ids.is_empty()))
     };
     let mut covered = BTreeSet::new();
     let mut declared_names: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -270,26 +304,27 @@ pub fn resolve(
             };
             match resolve_name(&name, server.as_ref().and_then(toml::Value::as_str)) {
                 Ok(Some(resolved)) => {
-                    report.wildcard |= resolved == "*";
-                    let names = native_variants(&resolved);
-                    if resolved != "*"
+                    let wildcard = resolved.iter().any(|id| id == "*");
+                    report.wildcard |= wildcard;
+                    let names: Vec<String> = resolved.iter().flat_map(|id| native_variants(id)).collect();
+                    // A rule bound to several servers is identified once any of them is observed.
+                    if !wildcard
                         && !observed
                             .iter()
                             .any(|(_, id, _)| names.iter().any(|name| rule_matches(bare(name).0, id.as_str())))
                     {
                         unresolved.insert(name.clone());
                     }
-                    for name in names {
-                        covered.insert(bare(&name).0.to_owned());
+                    for name in &names {
+                        covered.insert(bare(name).0.to_owned());
                         let mut variant = table.clone();
-                        variant.insert("name".into(), toml::Value::String(name));
+                        variant.insert("name".into(), toml::Value::String(name.clone()));
                         tools.push(toml::Value::Table(variant));
                     }
-                    declared_names.entry(bare(&name).0.to_owned()).or_default().extend(
-                        native_variants(&resolved)
-                            .into_iter()
-                            .map(|name| bare(&name).0.to_owned()),
-                    );
+                    declared_names
+                        .entry(bare(&name).0.to_owned())
+                        .or_default()
+                        .extend(names.iter().map(|name| bare(name).0.to_owned()));
                 }
                 Ok(None) => {
                     unresolved.insert(name.clone());
@@ -316,9 +351,12 @@ pub fn resolve(
                         continue;
                     }
                     match resolve_name(&name, None) {
-                        Ok(Some(resolved)) => {
-                            names.extend(native_variants(&resolved).into_iter().map(toml::Value::String))
-                        }
+                        Ok(Some(resolved)) => names.extend(
+                            resolved
+                                .iter()
+                                .flat_map(|id| native_variants(id))
+                                .map(toml::Value::String),
+                        ),
                         Ok(None) => {
                             report
                                 .diagnostics
@@ -552,6 +590,72 @@ mod tests {
                 .report
                 .is_valid()
         );
+    }
+
+    /// A namespace bound to several servers resolves each rule under it, spelled
+    /// canonically or through `server`, to one id per server; the rule is identified
+    /// once any of them is observed, and a deployment reference to it names them all.
+    #[test]
+    fn a_namespace_bound_to_several_servers_covers_each_of_them() {
+        let aliases = BTreeMap::from([("databricks".to_owned(), vec!["genie".to_owned(), "sql".to_owned()])]);
+        let authored: toml::Value = toml::from_str(
+            "version = 2\n[[tool]]\nname = 'mcp/databricks/genie_ask'\ndelta = {}\n[[tool]]\nname = 'execute_sql'\nserver = 'databricks'\ndelta = {}\n[deployment]\nconfined_results = ['mcp/databricks/genie_ask']\n",
+        )
+        .unwrap();
+        let facts = inventory(&[("genie_ask", "mcp:genie/genie_ask")]);
+        let resolved = resolve(&authored, appa_adapter_kagent::adapter(), &facts, &aliases);
+        assert!(resolved.report.is_valid(), "{:?}", resolved.report);
+        let names: Vec<_> = resolved.policy["tool"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "mcp/genie/genie_ask",
+                "mcp/sql/genie_ask",
+                "mcp/genie/execute_sql",
+                "mcp/sql/execute_sql"
+            ]
+        );
+        assert_eq!(
+            resolved.policy["deployment"]["confined_results"],
+            toml::Value::Array(vec![
+                toml::Value::String("mcp/genie/genie_ask".into()),
+                toml::Value::String("mcp/sql/genie_ask".into()),
+            ])
+        );
+        assert!(
+            !resolved
+                .report
+                .tools
+                .iter()
+                .any(|tool| tool.tool == "mcp/databricks/genie_ask"),
+            "a rule observed on one bound server is not reported unknown"
+        );
+
+        let unseen = inventory(&[("other", "mcp:other/other")]);
+        let unresolved = resolve(&authored, appa_adapter_kagent::adapter(), &unseen, &aliases);
+        assert!(
+            unresolved.report.tools.iter().any(
+                |tool| tool.tool == "mcp/databricks/genie_ask" && matches!(tool.status, ToolStatus::Unknown { .. })
+            )
+        );
+
+        for broken in [
+            BTreeMap::from([("databricks".to_owned(), vec![])]),
+            BTreeMap::from([("databricks".to_owned(), vec!["genie".to_owned(), "genie".to_owned()])]),
+            BTreeMap::from([("databricks".to_owned(), vec!["not a server".to_owned()])]),
+        ] {
+            assert!(
+                !resolve(&authored, appa_adapter_kagent::adapter(), &facts, &broken)
+                    .report
+                    .is_valid(),
+                "{broken:?}"
+            );
+        }
     }
 
     #[test]

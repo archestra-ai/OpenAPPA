@@ -24,6 +24,7 @@ FIDES_DIR = REPO_ROOT / "bench" / "corp-agent-fides"
 CORP_SYSTEMS_BIN = CORP_SYSTEMS_DIR / "target" / "debug" / "corp-systems-mcp"
 APPA_CORP_AGENT_BIN = CORP_AGENT_DIR / "target" / "debug" / "appa-corp-agent"
 FIDES_BIN = FIDES_DIR / ".venv" / "bin" / "corp-agent-fides"
+AUTO_BIN = Path(sys.executable)
 
 DEFAULT_MODEL = "openai/gpt-5.6-terra"
 
@@ -32,6 +33,8 @@ class PolicyTarget(Enum):
     APPA_GUARDED = "appa-guarded"
     APPA_OPEN = "appa-open"
     FIDES = "fides"
+    AUTO = "auto"
+    AUTO_IFC = "auto-ifc"
     NONE = "none"
 
 
@@ -54,7 +57,7 @@ class Agent:
             case PolicyTarget.APPA_GUARDED | PolicyTarget.APPA_OPEN:
                 if self.policy_file is None:
                     raise ValueError(f"{self.name}: APPA agents require a source policy")
-            case PolicyTarget.FIDES | PolicyTarget.NONE:
+            case PolicyTarget.FIDES | PolicyTarget.AUTO | PolicyTarget.AUTO_IFC | PolicyTarget.NONE:
                 if self.policy_file is not None:
                     raise ValueError(f"{self.name}: only APPA agents can declare policy_file")
 
@@ -103,6 +106,20 @@ AGENTS: dict[str, Agent] = {
         policy_target=PolicyTarget.FIDES,
         mcp_server=CORP_SYSTEMS_BIN,
         extra_args=("--mode", "unmediated"),
+    ),
+    "auto": Agent(
+        name="auto",
+        executable=AUTO_BIN,
+        policy_target=PolicyTarget.AUTO,
+        mcp_server=CORP_SYSTEMS_BIN,
+        extra_args=("-m", "bench_corp.auto_agent"),
+    ),
+    "auto-ifc": Agent(
+        name="auto-ifc",
+        executable=AUTO_BIN,
+        policy_target=PolicyTarget.AUTO_IFC,
+        mcp_server=CORP_SYSTEMS_BIN,
+        extra_args=("-m", "bench_corp.auto_agent"),
     ),
 }
 
@@ -153,6 +170,7 @@ def command_for(
     episode_dir = episode_dir.resolve()
     command = [
         str(agent.executable),
+        *agent.extra_args,
         prompt,
         "--model",
         model,
@@ -178,7 +196,10 @@ def command_for(
         case PolicyTarget.FIDES:
             if policy_path is not None:
                 command += ["--profile", str(policy_path.resolve())]
+        case PolicyTarget.AUTO | PolicyTarget.AUTO_IFC:
+            if policy_path is not None:
+                command += ["--settings", str(policy_path.resolve())]
         case PolicyTarget.NONE:
             if policy_path is not None:
                 raise ValueError(f"{agent.name}: policy-free agents cannot receive a staged policy")
-    return [*command, *agent.extra_args]
+    return command

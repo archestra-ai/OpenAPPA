@@ -356,6 +356,7 @@ impl SessionInner {
         match self.event(HookEvent::ToolCall {
             actor: self.actor(child),
             call: call.clone(),
+            call_id: None,
             spawn,
             ruling: None,
         })? {
@@ -471,6 +472,7 @@ impl SessionInner {
         let decision = self.event(HookEvent::ToolResult {
             actor: self.actor(child),
             call: pending.call.clone(),
+            call_id: None,
             outcome,
         })?;
         let (content, disposition) = match decision {
@@ -504,6 +506,7 @@ impl SessionInner {
         self.event(HookEvent::ToolResult {
             actor: self.actor(child),
             call: pending.call,
+            call_id: None,
             outcome: ToolOutcome::Indeterminate,
         })?;
         Ok(())
@@ -690,6 +693,7 @@ impl SessionInner {
         let decision = self.event(HookEvent::SpawnResult {
             actor: self.actor(None),
             call: spawn,
+            call_id: None,
             outcome: ToolOutcome::Success {
                 body: OutcomeBody::Unavailable,
             },

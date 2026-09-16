@@ -63,8 +63,8 @@ impl Reviewer {
 }
 
 impl ClientHandler for Reviewer {
-    fn get_info(&self) -> rmcp::model::ClientInfo {
-        let mut info = rmcp::model::ClientInfo::default();
+    fn get_info(&self) -> rmcp::model::ClientConfig {
+        let mut info = rmcp::model::ClientConfig::default();
         info.capabilities.elicitation = Some(Default::default());
         info
     }
@@ -88,8 +88,8 @@ impl ClientHandler for Reviewer {
 struct Absent;
 
 impl ClientHandler for Absent {
-    fn get_info(&self) -> rmcp::model::ClientInfo {
-        rmcp::model::ClientInfo::default()
+    fn get_info(&self) -> rmcp::model::ClientConfig {
+        rmcp::model::ClientConfig::default()
     }
 }
 
@@ -97,8 +97,8 @@ impl ClientHandler for Absent {
 struct Silent;
 
 impl ClientHandler for Silent {
-    fn get_info(&self) -> rmcp::model::ClientInfo {
-        let mut info = rmcp::model::ClientInfo::default();
+    fn get_info(&self) -> rmcp::model::ClientConfig {
+        let mut info = rmcp::model::ClientConfig::default();
         info.capabilities.elicitation = Some(Default::default());
         info
     }
@@ -146,6 +146,7 @@ async fn deployment_with(review_timeout_ms: u64) -> Deployment {
                 tool: "publish".to_string(),
                 arguments: raw(serde_json::json!({"body": "the quarterly figures"})),
             },
+            call_id: None,
             spawn: false,
             ruling: None,
         },
@@ -259,6 +260,7 @@ builtin = "hitl"
                 tool: "Bash".to_string(),
                 arguments: raw(serde_json::json!({"command": "cat .env"})),
             },
+            call_id: None,
             spawn: false,
             ruling: None,
         },
@@ -327,6 +329,7 @@ async fn execute_with<H: ClientHandler>(deployment: &Deployment, reviewer: H, ru
                 tool: appa_runtime_api::CONTROL_TOOL.to_string(),
                 arguments: raw(serde_json::json!({ "offer_id": deployment.offer })),
             },
+            call_id: None,
             spawn: false,
             ruling,
         },
@@ -484,6 +487,7 @@ async fn the_block_carries_the_review_for_the_hitl_authority() {
                 tool: "publish".to_string(),
                 arguments: raw(serde_json::json!({"body": "the quarterly figures"})),
             },
+            call_id: None,
             spawn: false,
             ruling: None,
         },
@@ -524,6 +528,35 @@ async fn a_harness_ruling_approves_with_no_elicitation_channel() {
         answer.contains("Authorized"),
         "the harness's own reviewer approved, so no elicitation was needed: {answer}"
     );
+}
+
+#[tokio::test]
+async fn an_embedded_host_ruling_survives_without_any_mcp_request_context() {
+    let deployment = deployment().await;
+    let actor = Actor {
+        root: deployment.root.clone(),
+        child: None,
+    };
+    let args = serde_json::json!({ "offer_id": deployment.offer });
+    let gate = hooks::handle(
+        &deployment.runtime,
+        HookEvent::ToolCall {
+            actor: actor.clone(),
+            call: ProposedCall {
+                tool: appa_runtime_api::CONTROL_TOOL.into(),
+                arguments: raw(args.clone()),
+            },
+            call_id: None,
+            spawn: false,
+            ruling: Some(Ruling::Approve),
+        },
+    )
+    .await;
+    assert!(matches!(gate, HookDecision::PassControl));
+    let result =
+        appa_runtime::mcp::execute_embedded_remedy(&deployment.runtime, &actor, serde_json::from_value(args).unwrap())
+            .await;
+    assert!(format!("{:?}", result.content).contains("Authorized"), "{result:?}");
 }
 
 #[tokio::test]

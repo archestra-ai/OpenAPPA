@@ -22,7 +22,7 @@ use std::sync::{Arc, RwLock};
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig};
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
@@ -195,17 +195,13 @@ impl From<ExecuteRemedyPlanArgs> for RemedyArguments {
 async fn execute_remedy(
     runtime: &Runtime,
     args: ExecuteRemedyPlanArgs,
-    request: RequestContext<RoleServer>,
-    bound_actor: Option<&appa_runtime_api::Actor>,
+    request: Option<RequestContext<RoleServer>>,
+    expected_actor: Option<&appa_runtime_api::Actor>,
 ) -> CallToolResult {
     let quoted = OfferId(args.offer_id.clone());
     let arguments = RemedyArguments::from(args);
     // Requires the vouched trajectory from the preceding hook.
-    let standing = match bound_actor {
-        Some(actor) => Ok((actor.clone(), None)),
-        None => runtime.take_vouched(&PermitKey::offer(&quoted)),
-    };
-    let Ok((acting, ruling)) = standing else {
+    let Ok((acting, ruling)) = runtime.take_vouched(&PermitKey::offer(&quoted)) else {
         return render(
             runtime,
             RemedyOutcome::Refused {
@@ -213,10 +209,18 @@ async fn execute_remedy(
             },
         );
     };
-    let elicitation = Elicitation::new(request, runtime.review_timeout());
+    if expected_actor.is_some_and(|expected| expected != &acting) {
+        return render(
+            runtime,
+            RemedyOutcome::Refused {
+                detail: "offer belongs to a different session".into(),
+            },
+        );
+    }
+    let elicitation = request.map(|request| Elicitation::new(request, runtime.review_timeout()));
     let started = std::time::Instant::now();
     let outcome = runtime
-        .remedy(&acting, quoted.clone(), arguments, Some(&elicitation), ruling)
+        .remedy(&acting, quoted.clone(), arguments, elicitation.as_ref(), ruling)
         .await;
     // Recorded from the typed outcome, before `render` turns it into the text the model
     // reads: a remedy that takes a minute and then declines is the shape of "APPA is in
@@ -234,6 +238,18 @@ async fn execute_remedy(
         },
     );
     render(runtime, outcome)
+}
+
+/// The existing MCP remedy implementation for an in-process gateway. The host
+/// first dispatches ToolCall and supplies its authenticated actor. Authorities
+/// bound in the policy still work; an interactive MCP elicitation without a
+/// request context returns NoAnswer through the existing consult mechanism.
+pub async fn execute_embedded_remedy(
+    runtime: &Runtime,
+    actor: &appa_runtime_api::Actor,
+    args: ExecuteRemedyPlanArgs,
+) -> CallToolResult {
+    execute_remedy(runtime, args, None, Some(actor)).await
 }
 
 #[tool_router]
@@ -273,7 +289,7 @@ impl RuntimeTools {
         Parameters(args): Parameters<ExecuteRemedyPlanArgs>,
         request: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        execute_remedy(&self.runtime, args, request, self.file_actor.as_ref()).await
+        execute_remedy(&self.runtime, args, Some(request), self.file_actor.as_ref()).await
     }
 
     #[tool(
@@ -443,7 +459,7 @@ impl RuntimeToolService {
         Parameters(args): Parameters<ExecuteRemedyPlanArgs>,
         request: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        execute_remedy(&self.runtime, args, request, None).await
+        execute_remedy(&self.runtime, args, Some(request), None).await
     }
 
     #[tool(
@@ -764,8 +780,8 @@ fn render(runtime: &Runtime, outcome: RemedyOutcome) -> CallToolResult {
 
 #[tool_handler]
 impl ServerHandler for RuntimeToolService {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::default();
         info.server_info.name = "appa-runtime".to_string();
         info.server_info.version = RUNTIME_VERSION.to_string();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
@@ -782,8 +798,8 @@ impl ServerHandler for RuntimeToolService {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for RuntimeTools {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::default();
         info.server_info.name = "appa-runtime".to_string();
         info.server_info.version = RUNTIME_VERSION.to_string();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
@@ -1113,7 +1129,7 @@ mod tests {
             format!(
                 r#"
             [server_aliases]
-            github = "{server}"
+            github = ["{server}"]
             [externals]
             timeout_ms = 1000
             max_body_bytes = 4096
@@ -1498,6 +1514,7 @@ mod tests {
                 tool: appa_runtime_api::CONTROL_TOOL.to_string(),
                 arguments: raw(serde_json::json!({ "offer_id": quoted.0 })),
             },
+            call_id: None,
             spawn: false,
             ruling: None,
         }

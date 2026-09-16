@@ -291,8 +291,12 @@ pub enum ProbeError {
 /// as a deny.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum EventError {
-    #[error("a call is already outstanding; propose one call at a time")]
+    #[error("a call without a host id is already outstanding; this host must propose one unidentified call at a time")]
     CallOutstanding,
+    #[error("a subagent spawn is already waiting to be bound; start one subagent at a time")]
+    SpawnOutstanding,
+    #[error("the host reused a call id")]
+    CallIdReused,
     #[error(
         "the substituted {tool} call did not run and is now closed; propose your call again (a substituted call needs a fresh offer)"
     )]
@@ -386,6 +390,8 @@ impl EventError {
             | EventError::UndeclaredTool { .. }
             | EventError::UnexpectedDecision => true,
             EventError::CallOutstanding
+            | EventError::SpawnOutstanding
+            | EventError::CallIdReused
             | EventError::SubstitutionAbandoned { .. }
             | EventError::TrajectoryEnded
             | EventError::ChildDispatchOpen
@@ -716,7 +722,11 @@ impl Prepared {
             error @ appa_eventlog::OpenError::ForeignSchema { .. } => OpenError::Damaged(error.to_string()),
             error => OpenError::Storage(error.to_string()),
         })?;
-        Ok(Runtime {
+        Ok(self.with_store(Arc::new(store), state_path))
+    }
+
+    fn with_store(self, store: Arc<LogStore>, state_path: Option<PathBuf>) -> Runtime {
+        Runtime {
             inner: Arc::new(Inner {
                 deployment: std::sync::RwLock::new(Arc::new(self.deployment)),
                 retired: std::sync::Mutex::new(std::collections::BTreeMap::new()),
@@ -731,7 +741,7 @@ impl Prepared {
                 files: None,
                 state_path,
             }),
-        })
+        }
     }
 }
 
@@ -740,7 +750,7 @@ struct Inner {
     state_path: Option<PathBuf>,
     deployment: std::sync::RwLock<Arc<Deployment>>,
     retired: std::sync::Mutex<std::collections::BTreeMap<String, Arc<RuntimeEngine>>>,
-    store: LogStore,
+    store: Arc<LogStore>,
     modules: crate::builtins::ModuleRegistry,
     executing: std::sync::Mutex<std::collections::BTreeSet<String>>,
     permits: std::sync::Mutex<std::collections::BTreeMap<PermitKey, Vec<Vouch>>>,
@@ -836,6 +846,16 @@ fn inventory_at(
 }
 
 impl Runtime {
+    /// Embed the existing runtime over host-managed storage without changing
+    /// policy naming, hook semantics, or starting an HTTP server.
+    pub fn open_with_store(
+        config: Config,
+        store: Arc<LogStore>,
+        modules: Option<PathBuf>,
+    ) -> Result<Runtime, OpenError> {
+        Ok(Prepared::new(config, modules, ToolNaming::AsAuthored)?.with_store(store, None))
+    }
+
     /// Run the serving load checks without opening a store, making network requests,
     /// or activating a deployment. Unknown inventory is reported, not rejected.
     pub(crate) fn validate_served(
@@ -1418,7 +1438,7 @@ impl Runtime {
         struct Rules {
             policy: toml::Value,
             #[serde(default)]
-            server_aliases: std::collections::BTreeMap<String, String>,
+            server_aliases: crate::config::ServerBindings,
         }
         let source = std::str::from_utf8(log.policy_file())
             .map_err(|_| EventError::PolicyUnavailable("stored policy is not UTF-8".into()))?;
@@ -2230,7 +2250,7 @@ fn resolve_served_policy(
     policy: &toml::Value,
     naming: ToolNaming,
     inventory: &appa_runtime_api::inventory::ToolInventory,
-    aliases: &std::collections::BTreeMap<String, String>,
+    aliases: &crate::config::ServerBindings,
 ) -> Result<toml::Value, String> {
     match naming {
         ToolNaming::AsAuthored => Ok(policy.clone()),
@@ -2841,6 +2861,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                         tool: "host/claude-code/Bash".to_string(),
                         arguments: raw(serde_json::json!({"command": "ls"})),
                     },
+                    call_id: None,
                     spawn: false,
                     ruling: None,
                 },
@@ -3696,6 +3717,7 @@ url = "{url}"
                     tool: tool.to_string(),
                     arguments: raw(serde_json::json!({ "request": "summarize the crash logs" })),
                 },
+                call_id: None,
                 spawn,
                 ruling: None,
             },

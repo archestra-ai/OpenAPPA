@@ -28,7 +28,9 @@ data that `internal` may see and the `sentry-review` mark, and record
 `sentry.changed`; creating or changing a team, project, DSN, or uptime
 monitor records `sentry.sensitive` instead.
 
-Your root config must define an authority permitting `sentry-review`:
+The Claude Code and kagent plugin defaults ship a human authority
+permitting every mark (`attention = ["*"]`), so `sentry-review` needs no
+wiring there. Another root config must permit it itself:
 
 ```toml
 [[policy.authority]]

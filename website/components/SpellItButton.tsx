@@ -8,11 +8,6 @@ import { useEffect, useRef, useState } from "react";
    and it sounds the same on every machine. */
 const AUDIO_SRC = "/brand/openappa-pronunciation.mp3";
 
-/* The play triangle, drawn on the same pixel grid as the wordmark: an 8-cell
-   column of 3px steps rather than a smooth hypotenuse. */
-const TRIANGLE =
-  "M6 0 L9 0 L9 3 L12 3 L12 6 L15 6 L15 9 L18 9 L18 15 L15 15 L15 18 L12 18 L12 21 L9 21 L9 24 L6 24 Z";
-
 export function SpellItButton() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -52,19 +47,19 @@ export function SpellItButton() {
     >
       <svg
         viewBox="0 0 24 24"
-        width="9"
-        height="9"
+        width="24"
+        height="24"
         aria-hidden="true"
-        shapeRendering="crispEdges"
         className="spell-it-glyph"
       >
+        <circle cx="12" cy="12" r="10.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
         {playing ? (
           <>
-            <rect x="6" y="3" width="4" height="18" fill="currentColor" />
-            <rect x="14" y="3" width="4" height="18" fill="currentColor" />
+            <rect x="8" y="8" width="3" height="8" fill="currentColor" />
+            <rect x="13" y="8" width="3" height="8" fill="currentColor" />
           </>
         ) : (
-          <path d={TRIANGLE} fill="currentColor" />
+          <path d="M10 7.5 L17 12 L10 16.5 Z" fill="currentColor" />
         )}
       </svg>
       <span className="spell-it-say">How to spell &ldquo;OpenAPPA&rdquo;</span>

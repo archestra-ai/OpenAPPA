@@ -25,7 +25,9 @@ a custom Agent session need the `notion-review` mark and record
 `notion.sensitive`. Creating an attachment from a URL makes Notion fetch
 that URL, so its input must be public and reviewed.
 
-Your root config must define an authority permitting `notion-review`:
+The Claude Code and kagent plugin defaults ship a human authority
+permitting every mark (`attention = ["*"]`), so `notion-review` needs no
+wiring there. Another root config must permit it itself:
 
 ```toml
 [[policy.authority]]

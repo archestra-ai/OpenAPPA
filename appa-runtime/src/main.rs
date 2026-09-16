@@ -698,9 +698,19 @@ mod tests {
     fn the_runtime_defaults_to_loopback_and_accepts_an_explicit_non_loopback_address() {
         let default = Args::try_parse_from(["appa runtime"]).expect("the default runtime command parses");
         assert_eq!(default.listen, "127.0.0.1:8787".parse().expect("the default parses"));
+        assert_eq!(default.file_workspace, None, "file tracking is opt-in");
+        assert_eq!(default.file_ledger, None, "file tracking is opt-in");
         assert_eq!(
             default.guide_listen, None,
             "Claude Code exposes no guide management listener"
+        );
+        assert!(
+            Args::try_parse_from(["appa runtime", "--file-workspace", "."]).is_err(),
+            "a workspace alone cannot activate file tracking"
+        );
+        assert!(
+            Args::try_parse_from(["appa runtime", "--file-ledger", "/tmp/files.db"]).is_err(),
+            "a ledger alone cannot activate file tracking"
         );
 
         let shared = Args::try_parse_from(["appa runtime", "--listen", "0.0.0.0:18787"])

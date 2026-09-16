@@ -125,9 +125,11 @@ matched battery covers.
   Flow Control (IFC) monoids (`trust` lattice and `self` ⊆ `internal` ⊆ `public`
   audience chain). Effects (`emits`, `requires.history`) are a hacky workaround
   for event sequencing, not the primary algebra; avoid them when label bounding
-  suffices. Do not use synthetic attention marks (`blocked`) or default `hitl`
-  to fake boundaries; keep autonomous execution unblocked for trusted data
-  flowing within its legitimate audience.
+  suffices. Do not add attention marks or default `hitl` to fake a boundary;
+  keep autonomous execution unblocked for trusted data flowing within its
+  legitimate audience. The reserved `blocked` mark denies a call outright and
+  no Authority can permit it; use it only where a sanitizer that would make
+  the flow safe does not exist.
 - The built-in audience chain is `self` ⊆ `internal` ⊆ `public`: `self` is the
   person running the session, `internal` their organization.
 - A tool that reads the requester's private data uses

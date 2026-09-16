@@ -574,6 +574,24 @@ fn the_session_context_entry_speaks_only_in_a_protected_session() {
     assert!(gated.status.success());
     assert!(!gated.stdout.is_empty(), "a protected session gets the advice");
 
+    // A subagent's context is opened by its own event, which hears a hook
+    // only through `additionalContext`.
+    let subagent = Command::new(built_binary())
+        .args(["session-context", "--subagent"])
+        .env("APPA_GATE", "1")
+        .output()
+        .expect("the binary runs");
+    assert!(subagent.status.success());
+    let heard: serde_json::Value = serde_json::from_slice(&subagent.stdout).expect("a subagent hears JSON");
+    assert_eq!(heard["hookSpecificOutput"]["hookEventName"], "SubagentStart");
+    assert_eq!(
+        heard["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .map(str::as_bytes),
+        Some(gated.stdout.as_slice()),
+        "a subagent hears the same advice as the session"
+    );
+
     let ungated = Command::new(built_binary())
         .arg("session-context")
         .env_remove("APPA_GATE")

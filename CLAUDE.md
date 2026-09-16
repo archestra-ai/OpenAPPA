@@ -6,7 +6,7 @@ between the agent and its tools/inference and answers one question before
 every proposed flow: *can this value, derived from these sources, legally flow
 into this sink?* It is declarative and algebraic — no guardrails, no prompt
 filtering, no bespoke `if`s; any imperative judgment lives in registered
-external authorities and transformers, never in the engine.
+external authorities and sanitizers, never in the engine.
 
 ## IMPORTANT
 The golden set is `website/content/docs/how-it-works.md`,
@@ -30,7 +30,7 @@ close; do not cite rule ids here.
   `baton`-named
   identifiers: `baton` was the earlier name and can happen only in stale spots.
 - "Engine", "Trajectory", "Value", "Label", "Dimension", "Authority",
-  "Transformer", "Remedy plan" are defined terms — use them as
+  "Sanitizer", "Remedy plan" are defined terms — use them as
   `appa-engine/src/lib.rs` defines them, not colloquially.
 - **Agentic terminology first.** In comments, docs, and identifiers, lead with
   the agentic vocabulary: *trajectory* (not execution trace or session
@@ -67,7 +67,7 @@ surfaces may break without shims or deprecation paths.
   the **checked monoid of labels** (`audience × trust`) and the **free monoid of events**.
   Always prefer Information Flow Control (IFC) monoids (`trust` lattice and `self ⊆ internal ⊆ public` audience chain) to express security invariants.
 - **Effects are a hacky workaround**: History/effect tracking (`emits`, `requires = { history = [...] }`) is an imperative state-machine escape hatch, not the primary algebra. Never reach for effects when information flow / label bounding can express the invariant.
-- **Autonomous execution over attention**: Do not use synthetic `attention` marks (such as `blocked`) to fake policy boundaries, and avoid default `hitl` requirements that stall autonomous agents. Data that is `trusted` and within the target `audience` boundary should flow without human interruption. Attention marks are reserved strictly for real human-in-the-loop decisions (opt-in overlays), or temporary placeholders (`token-exposed`) until a proper sanitizer is available.
+- **Autonomous execution over attention**: Do not use `attention` marks where trust or audience bounding can express the boundary, and avoid default `hitl` requirements that stall autonomous agents. The reserved `blocked` mark, which no authority can permit, is the one way to deny an action outright; use it only for that. Data that is `trusted` and within the target `audience` boundary should flow without human interruption. Attention marks are reserved strictly for real human-in-the-loop decisions (opt-in overlays), or `blocked` where a sanitizer that would make the flow safe does not exist yet.
 
 ## Collaboration
 
@@ -206,7 +206,7 @@ Mechanics:
   unchecked failure on recoverable paths or external input; a documented
   `expect` on an invariant already established by prevalidation is house
   style in core (the message names the invariant, e.g. "plans reference only
-  registered transformers"). Free `unwrap` belongs in CLI entrypoints and
+  registered sanitizers"). Free `unwrap` belongs in CLI entrypoints and
   tests only.
 - Never hold a lock across `.await` inside a critical section — the store's
   methods are synchronous and never await under their mutexes. The

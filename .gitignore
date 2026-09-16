@@ -15,6 +15,9 @@ bench/**/.venv/
 bench/**/__pycache__/
 bench/**/.pytest_cache/
 bench/**/.ruff_cache/
+# The Tau checkout the harness's setup script clones, and its embedding cache.
+bench/taubench/.tau2-bench/
+bench/taubench/data/.embeddings_cache/
 
 .venv/
 __pycache__/

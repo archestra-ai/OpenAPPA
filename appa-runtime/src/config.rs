@@ -10,10 +10,14 @@ use appa_engine::audience::{DeclaredTemplate, SourceRegistration, well_formed_re
 use appa_engine::label::ReaderId;
 use serde::Deserialize;
 
+/// Each policy namespace bound to the connection identities the host reports for it.
+pub(crate) type ServerBindings = BTreeMap<String, Vec<String>>;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     policy: PolicyFile,
-    pub(crate) server_aliases: BTreeMap<String, String>,
+    /// Each policy namespace bound to the connection identities the host reports for it.
+    pub(crate) server_aliases: ServerBindings,
     pub(crate) inventory: appa_runtime_api::inventory::ToolInventory,
     pub externals: Externals,
     /// Deployment knobs that describe this machine's reporting posture, not its policy.
@@ -425,6 +429,8 @@ pub enum ConfigError {
     IncludedTopLevel { path: String, field: String },
     #[error("included config {path} cannot set policy field {field:?}")]
     IncludedPolicyField { path: String, field: String },
+    #[error("included config {path} confines the results of {tool:?}, a tool it does not declare")]
+    IncludedConfinesForeignTool { path: String, tool: String },
     #[error("included config {path} cannot set externals field {field:?}")]
     IncludedExternalsField { path: String, field: String },
     #[error("[externals.audience] {0}")]
@@ -621,7 +627,7 @@ struct RawConfig {
     #[serde(default)]
     bundle: RawBundle,
     #[serde(default)]
-    server_aliases: BTreeMap<String, String>,
+    server_aliases: ServerBindings,
     #[serde(default)]
     appa_inventory: appa_runtime_api::inventory::ToolInventory,
 }
@@ -1294,6 +1300,10 @@ fn compose_include(
         .get_mut("policy")
         .and_then(toml::Value::as_table_mut)
         .expect("RawConfig requires a policy table");
+    let mut included_policy = included_policy;
+    if let Some(deployment) = included_policy.remove("deployment") {
+        compose_included_confinement(root_policy, &included_policy, deployment, include_path)?;
+    }
     for (field, value) in included_policy {
         if field == "version" {
             continue;
@@ -1377,6 +1387,67 @@ fn compose_include(
                 section.origin_key(name),
                 include_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf(),
             );
+        }
+    }
+    Ok(())
+}
+
+/// The one deployment setting a fragment may carry: `confined_results` over tools the
+/// fragment itself declares, so a battery that ships an output sanitizer also names the
+/// result it withholds. The names join the root's list; every other deployment key stays
+/// the root's alone.
+fn compose_included_confinement(
+    root_policy: &mut toml::map::Map<String, toml::Value>,
+    included_policy: &toml::map::Map<String, toml::Value>,
+    deployment: toml::Value,
+    include_path: &Path,
+) -> Result<(), ConfigError> {
+    let refused = |field: &str| ConfigError::IncludedPolicyField {
+        path: include_path.display().to_string(),
+        field: format!("deployment.{field}"),
+    };
+    let deployment = deployment.as_table().ok_or_else(|| refused(""))?;
+    if let Some(field) = deployment.keys().find(|field| field.as_str() != "confined_results") {
+        return Err(refused(field));
+    }
+    let confined: Vec<String> = deployment
+        .get("confined_results")
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| refused("confined_results"))?
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| refused("confined_results"))
+        })
+        .collect::<Result<_, _>>()?;
+    let declared: std::collections::BTreeSet<&str> = included_policy
+        .get("tool")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(declaration_name)
+        .map(|name| name.split('(').next().unwrap_or(name))
+        .collect();
+    if let Some(tool) = confined.iter().find(|tool| !declared.contains(tool.as_str())) {
+        return Err(ConfigError::IncludedConfinesForeignTool {
+            path: include_path.display().to_string(),
+            tool: tool.clone(),
+        });
+    }
+    let destination = root_policy
+        .entry("deployment".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+        .as_table_mut()
+        .ok_or_else(|| refused(""))?
+        .entry("confined_results".to_string())
+        .or_insert_with(|| toml::Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| refused("confined_results"))?;
+    for tool in confined {
+        if !destination.iter().any(|entry| entry.as_str() == Some(&tool)) {
+            destination.push(toml::Value::String(tool));
         }
     }
     Ok(())
@@ -2963,6 +3034,75 @@ mod tests {
         )
         .expect("the configuration is written");
         assert!(matches!(Config::load(&path), Err(ConfigError::Unparsable { .. })));
+    }
+
+    /// A fragment confines the results of tools it declares itself, and nothing else of the
+    /// deployment: the names join the root's list, a foreign tool is refused, and every
+    /// other deployment key stays the root's.
+    #[test]
+    fn a_fragment_confines_only_the_results_of_its_own_tools() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let root = dir.path().join("appa.toml");
+        let battery = dir.path().join("battery.toml");
+        let write_root = |deployment: &str| {
+            std::fs::write(
+                &root,
+                format!(
+                    "include = [\"battery.toml\"]\n[policy]\nversion = 2\n[[policy.tool]]\nname = \"root_read\"\n\
+                     delta = {{}}\n{deployment}[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n"
+                ),
+            )
+            .expect("write root config");
+        };
+        let confined = |config: &Config| -> Vec<String> {
+            config.policy_file().value()["deployment"]["confined_results"]
+                .as_array()
+                .expect("the composed deployment lists confined results")
+                .iter()
+                .map(|entry| entry.as_str().expect("a tool name").to_string())
+                .collect()
+        };
+
+        write_root("");
+        std::fs::write(
+            &battery,
+            "[policy]\nversion = 2\n[[policy.tool]]\nname = \"fetch(url:*)\"\ndelta = {}\n[[policy.tool]]\n\
+             name = \"fetch\"\ndelta = {}\n[policy.deployment]\nconfined_results = [\"fetch\"]\n",
+        )
+        .expect("write battery");
+        let config = Config::load(&root).expect("a fragment confines its own tool");
+        assert_eq!(confined(&config), vec!["fetch".to_string()]);
+
+        write_root("[policy.deployment]\nconfined_results = [\"root_read\", \"fetch\"]\n");
+        let config = Config::load(&root).expect("the lists join");
+        assert_eq!(confined(&config), vec!["root_read".to_string(), "fetch".to_string()]);
+
+        write_root("");
+        std::fs::write(
+            &battery,
+            "[policy]\nversion = 2\n[[policy.tool]]\nname = \"fetch\"\ndelta = {}\n[policy.deployment]\n\
+             confined_results = [\"root_read\"]\n",
+        )
+        .expect("write foreign confinement");
+        assert!(matches!(
+            Config::load(&root),
+            Err(ConfigError::IncludedConfinesForeignTool { tool, .. }) if tool == "root_read"
+        ));
+
+        for deployment in [
+            "[policy.deployment]\ncontext_control = true\n",
+            "[policy.deployment]\nconfined_results = \"fetch\"\n",
+        ] {
+            std::fs::write(
+                &battery,
+                format!("[policy]\nversion = 2\n[[policy.tool]]\nname = \"fetch\"\ndelta = {{}}\n{deployment}"),
+            )
+            .expect("write refused deployment key");
+            assert!(
+                matches!(Config::load(&root), Err(ConfigError::IncludedPolicyField { .. })),
+                "{deployment} is root-only"
+            );
+        }
     }
 
     #[test]

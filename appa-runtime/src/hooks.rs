@@ -303,6 +303,7 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
         HookEvent::ToolCall {
             actor,
             call,
+            call_id,
             spawn,
             ruling,
         } => {
@@ -326,7 +327,8 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
             }
             match on_actor(runtime, &actor, MissingStart::OpenLate, |session| {
                 let call = call.clone();
-                async move { session.on_tool_call(call, spawn).await }
+                let call_id = call_id.clone();
+                async move { session.on_tool_call_identified(call, call_id, spawn).await }
             })
             .await
             {
@@ -364,7 +366,12 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
                 Err(error) => fold(error, block),
             }
         }
-        HookEvent::ToolResult { actor, call, outcome } => {
+        HookEvent::ToolResult {
+            actor,
+            call,
+            call_id,
+            outcome,
+        } => {
             if is_control_tool(&call.tool) {
                 tracing::debug!(trajectory = %actor.root.0, "control tool outcome absorbed");
                 return HookDecision::Ack;
@@ -375,8 +382,8 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
                 return HookDecision::Ack;
             }
             match on_actor(runtime, &actor, MissingStart::Refuse, |session| {
-                let (call, outcome) = (call.clone(), outcome.clone());
-                async move { session.on_tool_result(call, outcome).await }
+                let (call, call_id, outcome) = (call.clone(), call_id.clone(), outcome.clone());
+                async move { session.on_tool_result_identified(call, call_id, outcome).await }
             })
             .await
             {
@@ -387,14 +394,25 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
         HookEvent::SpawnResult {
             actor,
             call,
+            call_id,
             outcome,
             child,
             value,
         } => {
             let said = value.clone();
             match on_actor(runtime, &actor, MissingStart::Refuse, |session| {
-                let (call, outcome, child, value) = (call.clone(), outcome.clone(), child.clone(), value.clone());
-                async move { session.on_spawn_result(call, outcome, child, value).await }
+                let (call, call_id, outcome, child, value) = (
+                    call.clone(),
+                    call_id.clone(),
+                    outcome.clone(),
+                    child.clone(),
+                    value.clone(),
+                );
+                async move {
+                    session
+                        .on_spawn_result_identified(call, call_id, outcome, child, value)
+                        .await
+                }
             })
             .await
             {
@@ -705,6 +723,7 @@ mod tests {
                 child: None,
             },
             call: spawn_call(),
+            call_id: None,
             spawn: true,
             ruling: None,
         };
@@ -1486,6 +1505,7 @@ mod tests {
                 child: None,
             },
             call: call(),
+            call_id: None,
             outcome: appa_runtime_api::ToolOutcome::Success {
                 body: appa_runtime_api::OutcomeBody::Available(r#"{"agentId":"a1"}"#.to_string()),
             },
@@ -1504,6 +1524,7 @@ mod tests {
                     child: None,
                 },
                 call: call(),
+                call_id: None,
                 spawn: false,
                 ruling: None,
             },
@@ -1532,6 +1553,7 @@ mod tests {
                     tool: "host/claude-code/Bash".to_string(),
                     arguments: crate::api::raw(serde_json::json!({"command": "ls"})),
                 },
+                call_id: None,
                 spawn: false,
                 ruling: None,
             },
@@ -1570,6 +1592,7 @@ mod tests {
                     tool: "host/claude-code/Bash".to_string(),
                     arguments: crate::api::raw(serde_json::json!({"command": "ls"})),
                 },
+                call_id: None,
                 spawn: false,
                 ruling: None,
             },

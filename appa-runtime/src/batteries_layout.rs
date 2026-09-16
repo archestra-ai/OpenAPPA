@@ -63,8 +63,13 @@ const PACKAGE_MANIFEST: &str = "appa-package.toml";
 /// excluding them keeps every staging path byte-identical.
 /// `appa-package.toml` is marketplace metadata — it describes the package to
 /// the marketplace, and a deployment reads the policy beside it, never the
-/// manifest.
+/// manifest. A battery's `test_*.py` suites exercise its scripts in the
+/// repository; a deployment runs the scripts, never the suites.
 fn excluded_from_staging(name: &std::ffi::OsStr) -> bool {
     let name = name.to_string_lossy();
-    name == "__pycache__" || name.ends_with(".pyc") || name.ends_with(".pyo") || name == PACKAGE_MANIFEST
+    name == "__pycache__"
+        || name.ends_with(".pyc")
+        || name.ends_with(".pyo")
+        || name == PACKAGE_MANIFEST
+        || (name.starts_with("test_") && name.ends_with(".py"))
 }

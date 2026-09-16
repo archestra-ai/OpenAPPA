@@ -490,11 +490,10 @@ impl<'a> Search<'a> {
             // enumeration may consult is answered, or the missing ones are the ask. Without
             // it, an unanswered mandate would silently drop this state's plans from the
             // advisory menu instead of refusing the search.
-            let mut unanswered: Vec<SymbolicAtom> =
-                plan::block_atoms(self.registry, &context.contract, &eval, context.role)
-                    .into_iter()
-                    .filter(|atom| !self.context.expansions.answered(atom))
-                    .collect();
+            let mut unanswered: Vec<SymbolicAtom> = plan::block_atoms(self.registry, &context.contract, &eval)
+                .into_iter()
+                .filter(|atom| !self.context.expansions.answered(atom))
+                .collect();
             if !unanswered.is_empty() {
                 unanswered.sort();
                 unanswered.dedup();

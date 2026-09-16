@@ -71,7 +71,7 @@ curl -fsSL https://openappa.com/install.sh | sh
 The installer verifies the checksum of the release binary for Linux or macOS
 and places it in `~/.local/bin`. Windows users unpack the zip from the
 [releases page](https://github.com/archestra-ai/OpenAPPA/releases). From a
-checkout, `cargo install --path appa-runtime --force` builds the binary
+checkout, `cargo install --locked --path appa-runtime --force` builds the binary
 instead, and the same install command installs that build's own version.
 
 A release binary installs the version published for its tag; a checkout build
@@ -152,3 +152,24 @@ issue — or come argue in the [Discord](https://discord.gg/B5fmSxHKZ7).
 
 [MIT](LICENSE.md) · [Contributors](CONTRIBUTORS.md) ·
 [Brand assets](https://openappa.com/branding)
+
+## Dependency Release Age
+
+The website's pnpm workspace requires registry versions to be at least seven days
+old and disables automatic install scripts. Cargo Dependabot updates also have a
+seven-day cooldown.
+
+CI checks new crates.io versions in the root and `bench/corp-systems` lockfiles,
+including transitive dependencies, before the Rust lint and test jobs. Versions
+must be at least seven days old. Registry errors, missing publication metadata,
+and unsupported registries fail the check. Versions already in the base commit
+are grandfathered; local and git dependencies are outside this registry-age check.
+
+The checker and its tests live in the shared
+[Cargo Release Age action](https://github.com/archestra-ai/.github/tree/f9b82a1ae0c8d73088513454aa46cf5a4021df82/actions/cargo-release-age).
+The workflow pins that action to a reviewed commit. Its README includes local-check
+instructions using Python 3.11 or newer and a freshly fetched target branch.
+
+Stable Cargo does not enforce release ages during local installs. Cargo's native
+[minimum publish age](https://doc.rust-lang.org/cargo/reference/unstable.html#min-publish-age)
+currently requires nightly and `-Zmin-publish-age`.

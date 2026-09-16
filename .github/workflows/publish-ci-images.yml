@@ -52,6 +52,13 @@ jobs:
               - 'appa-adapter-claude-code/**'
               - 'appa-example-agent/**'
               - 'appa-agent-python/**'
+              # Workspace members and compiled-in files the runtime image
+              # build reads; ci.yml's e2e filter lists the same set.
+              - 'bench/corp-agent/**'
+              - 'bench/corp-systems/**'
+              - 'website-chat-playground/**'
+              - 'website/content/docs/contracts.md'
+              - 'receiver/appa-yell/salt.txt'
               - 'integrations/kagent/**'
               - 'marketplace/plugins/claude-code/**'
               - 'integrations/appa-guide/**'

@@ -287,7 +287,7 @@ impl super::Runtime {
             arguments: serde_json::value::to_raw_value(&arguments).map_err(refused)?,
         };
         let session = self.session(&actor.root, super::acting_trajectory(actor))?;
-        match session.on_tool_call(call.clone(), false).await? {
+        match session.on_tool_call_identified(call.clone(), None, false).await? {
             super::ToolCallDecision::Deny { feedback, .. } => Ok(FileReply::Failure(feedback)),
             super::ToolCallDecision::Allow { .. } => session.execute_file(call).await,
         }

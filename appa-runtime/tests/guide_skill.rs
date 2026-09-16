@@ -164,6 +164,21 @@ fn the_kagent_reference_carries_the_full_flow() {
 }
 
 #[test]
+fn the_chart_ships_a_byte_identical_copy_of_the_skill() {
+    let root = repo_root();
+    let chart = root.join("charts/appa-runtime/files/skill");
+    let source = root.join("integrations/appa-guide");
+    for file in ["SKILL.md", "references/kagent.md"] {
+        let shipped = fs::read_to_string(chart.join(file)).expect("the chart ships the skill file");
+        let canonical = fs::read_to_string(source.join(file)).expect("the skill file exists");
+        assert!(
+            shipped == canonical,
+            "charts/appa-runtime/files/skill/{file} drifted from integrations/appa-guide/{file}"
+        );
+    }
+}
+
+#[test]
 fn only_the_runtime_chart_consumes_this_skill_package() {
     let root = repo_root();
     let chart = root.join("charts/appa-runtime");

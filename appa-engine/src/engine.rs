@@ -360,7 +360,9 @@ impl Engine {
                     sanitizer: sanitizer.clone(),
                     call: self.offer_call(&views, recorded),
                 }),
-                None if recorded.plan.required.is_empty() => Ok(OfferConsult::Accept),
+                None if recorded.plan.required.is_empty() => Ok(OfferConsult::Accept {
+                    sanitizer: recorded.plan.sanitizer().cloned(),
+                }),
                 None => Ok(OfferConsult::Authorities {
                     call: self.offer_call(&views, recorded),
                     required: recorded.plan.required.clone(),
@@ -384,7 +386,7 @@ impl Engine {
                         tool: views.dispatch_tool(dispatch).cloned(),
                     })
                 }
-                None => Ok(OfferConsult::Accept),
+                None => Ok(OfferConsult::Accept { sanitizer: None }),
             },
             crate::basis::SubjectKey::Approval(_) => Ok(OfferConsult::Stale),
         }
@@ -861,11 +863,6 @@ impl Engine {
                             });
                         };
                         let contract = self.validated_contract(&call)?;
-                        // The bound sanitizer's application reads its mandate: an undecided
-                        // atom is the runtime's ask, never an unapplicable sanitizer.
-                        if let Some(registered) = self.registry.sanitizer(&sanitizer) {
-                            require_atoms(act, registered.needed_atoms(self.registry.audience().providers()))?;
-                        }
                         let (candidate, lineage) = crate::admit::bound_candidate(
                             &self.registry,
                             &views,
@@ -968,7 +965,6 @@ impl Engine {
         lineage: &SanitizerLineage,
         act: &ActEvidence,
     ) -> Result<Vec<plan::ExecutableRemedyPlan>, TransitionError> {
-        require_atoms(act, plan::confined_stage_atoms(&self.registry, contract, lineage))?;
         let floor = plan::floor_of(&self.registry, views);
         Ok(plan::confined_stage(
             &self.registry,
@@ -1425,7 +1421,7 @@ impl Engine {
         }
         let block_stage: Vec<SymbolicAtom> = refused
             .iter()
-            .flat_map(|(_, _, contract, raw, role)| plan::block_atoms(&self.registry, contract, raw, *role))
+            .flat_map(|(_, _, contract, raw, _)| plan::block_atoms(&self.registry, contract, raw))
             .collect();
         require_atoms(act, block_stage)?;
         let mut blocked = Vec::new();
@@ -1665,7 +1661,7 @@ impl Engine {
                     let role = views.call_role(&subject);
                     match check::evaluate(&contract, views, &candidate, &stage, role, &self.context(under))? {
                         CheckOutcome::Block(raw) => {
-                            require_atoms(under, plan::block_atoms(&self.registry, &contract, &raw, role))?;
+                            require_atoms(under, plan::block_atoms(&self.registry, &contract, &raw))?;
                             let (block_id, offers) = views.pending_block(&subject).unwrap_or_else(|| {
                                 let block_id = crate::value::BlockId::of_proposal(
                                     &batch.offer_nonce,
@@ -1757,7 +1753,7 @@ impl Engine {
         let role = views.call_role(&recorded.subject);
         let live = match check::evaluate(&contract, &views, &call, &stage, role, &self.context(act))? {
             CheckOutcome::Block(raw) => {
-                require_atoms(act, plan::block_atoms(&self.registry, &contract, &raw, role))?;
+                require_atoms(act, plan::block_atoms(&self.registry, &contract, &raw))?;
                 require_atoms(act, plan::plan_atoms(&self.registry, &contract, &recorded.plan))?;
                 plan::plan(
                     &self.registry,
@@ -2112,7 +2108,7 @@ impl Engine {
             }
             CheckOutcome::Block(raw) => {
                 let role = views.call_role(&recorded.subject);
-                require_atoms(under, plan::block_atoms(&self.registry, &contract, &raw, role))?;
+                require_atoms(under, plan::block_atoms(&self.registry, &contract, &raw))?;
                 let (block, opened) = self.surface_call_block(
                     views,
                     Opening {
@@ -2304,7 +2300,7 @@ impl Engine {
         else {
             return Ok(None);
         };
-        require_atoms(act, plan::block_atoms(&self.registry, &contract, &raw, role))?;
+        require_atoms(act, plan::block_atoms(&self.registry, &contract, &raw))?;
         let (block_id, offers) = views
             .pending_block(&recorded.subject)
             .unwrap_or((offer_block(recorded, execution, &call), Vec::new()));
@@ -2983,19 +2979,15 @@ fn require_atoms(act: &ActEvidence, atoms: impl IntoIterator<Item = SymbolicAtom
 }
 
 /// The atoms a spent approval's consumption reads: each ruling's mandate over its covered
-/// gaps, and the bound output sanitizer's transition.
+/// gaps. The bound output sanitizer reads its transition against the result when it applies.
 fn approval_atoms(registry: &Registry, approval: &crate::projection::PreparedApproval) -> Vec<SymbolicAtom> {
     let providers = registry.audience().providers();
-    let mut atoms: Vec<SymbolicAtom> = approval
+    approval
         .rulings
         .iter()
         .filter_map(|given| registry.authority(&given.authority).map(|authority| (authority, given)))
         .flat_map(|(authority, given)| authority.mandate.reads(&given.covers, providers))
-        .collect();
-    if let Some(sanitizer) = approval.sanitizer.as_ref().and_then(|name| registry.sanitizer(name)) {
-        atoms.extend(sanitizer.needed_atoms(providers));
-    }
-    atoms
+        .collect()
 }
 
 /// The ordered in-batch composition, position by position: what each proposed sibling
@@ -4923,7 +4915,7 @@ mod tests {
         );
         assert_eq!(
             e.offer_consults(&viewing(&e, &log), &traj(), &accept),
-            Ok(OfferConsult::Accept),
+            Ok(OfferConsult::Accept { sanitizer: None }),
         );
 
         let crossed = [
@@ -10785,6 +10777,129 @@ mod tests {
 
     fn corp_reader(local: &str) -> ReaderId {
         ReaderId::new(format!("{local}@corp.com"))
+    }
+
+    fn chain_audience(level: crate::label::ChainAudience) -> DeclaredAudience {
+        DeclaredAudience::Union(crate::label::Clause::new([level], [], []).expect("a chain clause names no reader"))
+    }
+
+    /// A confined `read` narrowing to `self` beside the output sanitizer `mask` moving
+    /// `from` to `internal`; `groups` are the named audiences the policy declares.
+    fn masking_config(from: DeclaredAudience, groups: &[&str]) -> RegistryConfig {
+        let mut read = plain_tool("read");
+        read.delta = Delta {
+            trust: None,
+            audience: Some(crate::contract::DeltaAudience::Static(chain_audience(
+                crate::label::ChainAudience::Self_,
+            ))),
+        };
+        RegistryConfig {
+            annotators: vec![],
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: declared(vec![read]),
+            authorities: vec![],
+            sanitizers: vec![crate::authority::Sanitizer {
+                name: crate::names::SanitizerName::new("mask"),
+                on: crate::authority::SanitizerPoints {
+                    input: false,
+                    output: true,
+                },
+                transition: crate::authority::DeclaredTransition::Audience {
+                    from_includes: from,
+                    to: chain_audience(crate::label::ChainAudience::Internal),
+                },
+                scope: crate::authority::Scope::default(),
+                hint: None,
+            }],
+            audience: if groups.is_empty() {
+                crate::audience::AudienceConfig::default()
+            } else {
+                slack_groups(groups)
+            },
+        }
+    }
+
+    fn internal_session() -> Label {
+        known(
+            TRUSTED,
+            Audience::of_declared(&chain_audience(crate::label::ChainAudience::Internal)),
+        )
+    }
+
+    #[test]
+    fn a_chain_only_output_sanitizer_is_offered_and_admitted_without_membership() {
+        let e = open_engine_at(
+            masking_config(chain_audience(crate::label::ChainAudience::Self_), &[]),
+            internal_session(),
+        );
+        let call = call("read", json!({}));
+        // No audience source, no answers: the block offers the sanitize settlement, the offer
+        // executes and the release opens the dispatch.
+        let (log, dispatch) = released_under_output_sanitizer(&e, vec![opened(&e)], &call);
+
+        let raw = ValueBody::new("TOKEN=abc");
+        let source = crate::value::RawResultDigest::of(raw.as_str().as_bytes());
+        let report = |evidence: Vec<crate::transition::Evidence>| ToolReport {
+            dispatch: dispatch.clone(),
+            outcome: ToolOutcome::Success {
+                body: OutcomeBody::Available(raw.clone()),
+            },
+            evidence,
+            offer_nonce: nonce(),
+            audience: crate::audience::AudienceEvidence::default(),
+        };
+        let asked = e
+            .handle(&viewing(&e, &log), EngineEvent::Outcome(report(Vec::new())))
+            .expect("the bound sanitizer asks for its derivation, not for members");
+        let log = [log, asked.append.expect("the effects commit first").facts().to_vec()].concat();
+
+        let derived = ValueBody::new("TOKEN=***");
+        let crossed = e
+            .handle(
+                &viewing(&e, &log),
+                EngineEvent::Outcome(report(vec![crate::transition::Evidence::Sanitizer {
+                    sanitizer: crate::names::SanitizerName::new("mask"),
+                    source,
+                    derived: derived.clone(),
+                }])),
+            )
+            .expect("`self ⊇ self` derives from the chain: the derivation admits without a member list");
+        assert_eq!(
+            crossed.follow_up,
+            FollowUp::Outcome(OutcomeFollowUp::Closed {
+                admitted: Some(derived)
+            })
+        );
+        let log = [log, crossed.append.expect("the derivation appends").facts().to_vec()].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+    }
+
+    #[test]
+    fn a_group_from_output_sanitizer_still_asks_for_exactly_the_members_its_derivation_needs() {
+        let e = open_engine_at(masking_config(group_audience("team"), &["team"]), internal_session());
+        let call = call("read", json!({}));
+        let log = vec![opened(&e)];
+        assert_eq!(
+            proposed(&e, &log, "b1", nonce(), call.clone()),
+            Err(TransitionError::MembershipNeeded {
+                needed: vec![group_atom("team")]
+            }),
+            "`self ⊇ @team` derives from no declared fact, so the enumeration asks for the group"
+        );
+        assert_eq!(
+            e.handle(
+                &viewing(&e, &log),
+                evidenced_batch(
+                    "b2",
+                    vec![raw(&call)],
+                    source_evidence(vec![user_group("team", vec![])])
+                )
+            ),
+            Err(TransitionError::MembershipNeeded {
+                needed: vec![crate::label::SymbolicAtom::Chain(crate::label::ChainAudience::Self_)]
+            }),
+            "with the group answered, the exact comparison needs `self`'s members next — one ask at a time"
+        );
     }
 
     fn public_ceiling_officer() -> crate::authority::Authority {

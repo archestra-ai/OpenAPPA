@@ -272,7 +272,9 @@ async fn the_synchronous_recording_crosses_the_return_at_the_subagents_stop() {
         "the parent's Agent result repeats the return and crosses nothing new"
     );
 
-    let (status, answer) = call(&runtime, &hook(&events, "PreToolUse", Some("Bash"), true)).await;
+    let mut next_child_call = hook(&events, "PreToolUse", Some("Bash"), true);
+    next_child_call["tool_use_id"] = serde_json::json!("toolu_test_after_return");
+    let (status, answer) = call(&runtime, &next_child_call).await;
     assert_eq!(status, 200);
     assert_eq!(
         answer["hookSpecificOutput"]["permissionDecision"], "allow",

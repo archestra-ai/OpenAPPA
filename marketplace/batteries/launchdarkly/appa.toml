@@ -1,0 +1,153 @@
+# LaunchDarkly battery: LaunchDarkly's official MCP server
+# (`@launchdarkly/mcp-server`, https://github.com/launchdarkly/mcp-server),
+# version 0.6.2.
+#
+# The server is generated from LaunchDarkly's OpenAPI spec. Its registry,
+# `src/mcp-server/server.ts`, registers 20 tools over feature flags,
+# environments, AI Configs, code references, and the audit log: 10 carry
+# the `read` scope and 10 carry the `write` scope. Every tool declares one
+# argument, `request`, so a rule needs no argument matching.
+#
+# Flag and AI Config configuration is authored by the organization's own
+# engineers, but the same reads return data the organization does not
+# author. A flag's targeting carries context keys and attribute values
+# that identify the application's end users (`Target.values` and
+# `Clause.values` in `src/models/components`), `get-code-references`
+# returns source lines around each flag reference, and audit log entries
+# carry free-text `comment`, `description`, and `title` fields. All of it
+# reaches the agent as text, so every read enters `suspicious`,
+# restricted to the organization's members (`internal`), and a query's
+# input must be sharable with `internal`.
+#
+# Every write changes a live flag or AI Config, which changes what the
+# application serves in production. Writes need trusted data that
+# `internal` may see and the `launchdarkly-review` mark, and record
+# `launchdarkly.changed`. The three deletes destroy configuration and
+# record `launchdarkly.sensitive`. A create or update returns the changed
+# object, so it labels the trajectory like a read; a delete returns no
+# content. The root config supplies an authority permitting
+# `launchdarkly-review`.
+#
+# LaunchDarkly scopes API access by project, environment, and custom
+# role, but no tool reports who may read a project, so `internal` is the
+# coarsest honest audience: map it to the people who may see everything
+# this token can reach.
+
+[policy]
+version = 2
+
+# --- reads: configuration mixed with end-user context, internal readers ---
+
+[[policy.tool]]
+name = "mcp/launchdarkly/get-audit-log-entries"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/launchdarkly/get-code-references"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/launchdarkly/get-environments"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/launchdarkly/get-flag-status-across-environments"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/launchdarkly/list-feature-flags"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/launchdarkly/get-feature-flag"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/launchdarkly/list-ai-configs"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/launchdarkly/get-ai-config"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/launchdarkly/get-ai-config-variation"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/launchdarkly/get-ai-config-targeting"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+# --- writes: a production change, reviewed ---
+
+[[policy.tool]]
+name = "mcp/launchdarkly/create-feature-flag"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["launchdarkly-review"] }
+effects = ["launchdarkly.changed"]
+
+[[policy.tool]]
+name = "mcp/launchdarkly/update-feature-flag"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["launchdarkly-review"] }
+effects = ["launchdarkly.changed"]
+
+[[policy.tool]]
+name = "mcp/launchdarkly/create-ai-config"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["launchdarkly-review"] }
+effects = ["launchdarkly.changed"]
+
+[[policy.tool]]
+name = "mcp/launchdarkly/update-ai-config"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["launchdarkly-review"] }
+effects = ["launchdarkly.changed"]
+
+[[policy.tool]]
+name = "mcp/launchdarkly/update-ai-config-targeting"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["launchdarkly-review"] }
+effects = ["launchdarkly.changed"]
+
+[[policy.tool]]
+name = "mcp/launchdarkly/create-ai-config-variation"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["launchdarkly-review"] }
+effects = ["launchdarkly.changed"]
+
+[[policy.tool]]
+name = "mcp/launchdarkly/update-ai-config-variation"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["launchdarkly-review"] }
+effects = ["launchdarkly.changed"]
+
+# --- deletes: irreversible, reviewed, and they return no content ---
+
+[[policy.tool]]
+name = "mcp/launchdarkly/delete-feature-flag"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["launchdarkly-review"] }
+effects = ["launchdarkly.sensitive"]
+
+[[policy.tool]]
+name = "mcp/launchdarkly/delete-ai-config"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["launchdarkly-review"] }
+effects = ["launchdarkly.sensitive"]
+
+[[policy.tool]]
+name = "mcp/launchdarkly/delete-ai-config-variation"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["launchdarkly-review"] }
+effects = ["launchdarkly.sensitive"]
