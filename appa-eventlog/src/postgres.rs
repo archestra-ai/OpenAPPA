@@ -202,11 +202,8 @@ impl PostgresStore {
                 root: root.as_str().to_owned(),
             });
         };
-        let opening = match decode(first)? {
-            Batch::Facts(facts) => facts,
-            Batch::Inventory(_) => Vec::new(),
-        };
-        let Some(Fact::TrajectoryOpened { policy_file_key, .. }) = opening.first() else {
+        let opening = decode(first)?;
+        let Some(Fact::TrajectoryOpened { policy_file_key, .. }) = opening.facts.first() else {
             return Err(ReadError::Undecodable("log does not begin with an opening".into()));
         };
         let hash = policy_file_key.as_str().to_owned();
@@ -219,6 +216,62 @@ impl PostgresStore {
             })?
             .ok_or(ReadError::PolicyFileMissing { key: hash })?;
         decoded(root, batches, policy)
+    }
+
+    /// One root's host records, without reading its facts. An existing root that recorded
+    /// nothing reads as no records; a root with no rows at all is unknown.
+    pub(super) fn host_records_of(&self, root: &TrajectoryId) -> Result<Vec<HostRecord>, ReadError> {
+        let id = root.as_str().to_owned();
+        let known = id.clone();
+        let rows = self.with_client(move |client| {
+            let rows = client.query(
+                "SELECT seq, payload FROM openappa_events \
+                 WHERE root = $1 AND substring(payload from 1 for 1) = '\\x7b'::bytea ORDER BY seq",
+                &[&id],
+            )?;
+            if rows.is_empty()
+                && client
+                    .query_opt("SELECT 1 FROM openappa_events WHERE root = $1 LIMIT 1", &[&id])?
+                    .is_none()
+            {
+                return Ok(None);
+            }
+            Ok(Some(
+                rows.into_iter()
+                    .map(|row| (id.clone(), row.get::<_, i64>(0) as u64, row.get::<_, Vec<u8>>(1)))
+                    .collect::<Vec<_>>(),
+            ))
+        })?;
+        let Some(rows) = rows else {
+            return Err(ReadError::UnknownRoot { root: known });
+        };
+        Ok(grouped_by_root(rows)?
+            .pop()
+            .map(|(_, records)| records)
+            .unwrap_or_default())
+    }
+
+    /// Every root's host records. The stored shape decides which rows carry one, so the
+    /// engine's payloads are never fetched or decoded.
+    pub(super) fn host_records(&self) -> Result<Vec<(TrajectoryId, Vec<HostRecord>)>, ReadError> {
+        let rows = self.with_client(|client| {
+            let rows = client.query(
+                "SELECT root, seq, payload FROM openappa_events \
+                 WHERE substring(payload from 1 for 1) = '\\x7b'::bytea ORDER BY root, seq",
+                &[],
+            )?;
+            Ok(rows
+                .into_iter()
+                .map(|row| {
+                    (
+                        row.get::<_, String>(0),
+                        row.get::<_, i64>(1) as u64,
+                        row.get::<_, Vec<u8>>(2),
+                    )
+                })
+                .collect::<Vec<_>>())
+        })?;
+        grouped_by_root(rows)
     }
 
     pub(super) fn append(&self, based_on: &Log, bytes: Vec<u8>) -> Result<(), AppendError> {

@@ -1094,10 +1094,9 @@ mod tests {
     fn a_kagent_actor_can_consume_only_its_prefixed_management_vouch() {
         let dir = tempfile::tempdir().expect("a temp directory");
         let runtime = Runtime::open(config(), dir.path().join("appa.db"), None).expect("the runtime opens");
-        let actor = crate::api::Actor {
-            root: crate::api::TrajectoryId("kagent:s1".to_string()),
-            child: None,
-        };
+        let root = crate::api::TrajectoryId("kagent:s1".to_string());
+        runtime.create_session(root.clone()).expect("a fresh id opens");
+        let actor = crate::api::Actor { root, child: None };
         let args = IncludeBatteryArgs {
             actor: "s1".to_string(),
             battery: "github".to_string(),
@@ -1127,22 +1126,118 @@ mod tests {
         assert_eq!(render(&runtime, outcome).is_error, Some(true));
     }
 
+    /// One offer executes at a time, and what says so is a record: an execution that never
+    /// returned — a runtime killed mid-review — keeps the offer refused until its claim's
+    /// bound passes, and the offer answers again after it.
     #[tokio::test]
     async fn one_offer_is_claimed_once_at_a_time() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = Runtime::open(config(), dir.path().join("appa.db"), None).expect("the fixture deployment opens");
-        let offer = OfferId("offer-live".to_string());
+        let (runtime, root, quoted) = blocked_offer(&dir).await;
+        let actor = acting(root.0.as_str());
+        let already = RemedyOutcome::Refused {
+            detail: "this offer is already being executed".to_string(),
+        };
 
-        let claim = runtime.claim_offer(&offer).expect("a free offer is claimable");
-        assert!(
-            runtime.claim_offer(&offer).is_none(),
-            "a second execution of one offer is refused"
+        let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(600);
+        runtime.claim_until(&actor, &quoted, ahead);
+        assert_eq!(
+            runtime.execute_remedy(&actor, quoted.clone()).await,
+            already,
+            "a claim that still stands refuses the second execution"
         );
 
-        drop(claim);
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(1);
+        runtime.claim_until(&actor, &quoted, past);
+        let outcome = runtime.execute_remedy(&actor, quoted).await;
+        assert_ne!(outcome, already, "a claim past its bound holds nothing: {outcome:?}");
         assert!(
-            runtime.claim_offer(&offer).is_some(),
-            "the offer is claimable again once its execution ended"
+            matches!(outcome, RemedyOutcome::Authorized { .. }),
+            "the offer is executed: {outcome:?}"
+        );
+    }
+
+    /// A family with one offer standing: the narrowing acceptance a blocked proposal
+    /// surfaced, which the model can execute unaided.
+    async fn blocked_offer(dir: &tempfile::TempDir) -> (Runtime, crate::api::TrajectoryId, OfferId) {
+        let policy = r#"
+            [policy]
+            version = 2
+
+            [[policy.tool]]
+            name = "host/claude-code/Read"
+            delta = { audience = ["hr"] }
+
+            [externals]
+            timeout_ms = 1000
+            max_body_bytes = 4096
+        "#;
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, policy).expect("the fixture writes");
+        let runtime = Runtime::open_served(
+            Config::load(&path).expect("the fixture validates"),
+            dir.path().join("appa.db"),
+            None,
+            appa_adapter_claude_code::adapter(),
+        )
+        .expect("the served deployment opens");
+        let root = crate::api::TrajectoryId("cc:claimed".to_string());
+        let session = runtime.create_session(root.clone()).expect("a fresh id opens");
+        let denied = session
+            .on_tool_call(
+                ProposedCall {
+                    tool: "host/claude-code/Read".to_string(),
+                    arguments: raw(serde_json::json!({})),
+                },
+                false,
+            )
+            .await
+            .expect("the block is delivered");
+        assert!(matches!(denied, ToolCallDecision::Deny { .. }), "{denied:?}");
+        let offer = runtime
+            .minted_offers(&root, &root)
+            .into_iter()
+            .next()
+            .expect("the block surfaced an offer");
+        (runtime, root, offer)
+    }
+
+    /// An execution ends when the act that claimed the offer ends, and a client that walks
+    /// away ends it between two awaits, reaching no exit of its own. The claim's bound is
+    /// the hard-crash backstop, so a dropped request must not hold the offer for it.
+    #[tokio::test]
+    async fn a_dropped_execution_frees_the_offer_it_claimed() {
+        // An authority that accepts the connection and never answers, so the execution is
+        // still waiting when the caller goes away.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("an ephemeral loopback port binds");
+        let url = format!("http://{}/authority", listener.local_addr().expect("the address reads"));
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((connection, _)) = listener.accept().await {
+                held.push(connection);
+            }
+        });
+        let (runtime, root, quoted, _dir) = blocked_under(&url, "cc:mcp-dropped", 4000).await;
+        let actor = acting(root.0.as_str());
+        let already = RemedyOutcome::Refused {
+            detail: "this offer is already being executed".to_string(),
+        };
+
+        let mut executing = Box::pin(runtime.execute_remedy(&actor, quoted.clone()));
+        let waiting = tokio::time::timeout(std::time::Duration::from_millis(500), &mut executing).await;
+        assert!(waiting.is_err(), "the execution is still waiting on its authority");
+        assert_eq!(
+            runtime.execute_remedy(&actor, quoted.clone()).await,
+            already,
+            "while it runs, a second call naming the same offer is refused"
+        );
+
+        drop(executing);
+        let outcome = runtime.execute_remedy(&actor, quoted).await;
+        assert_ne!(
+            outcome, already,
+            "the abandoned execution released its claim: {outcome:?}"
         );
     }
 
@@ -1264,15 +1359,32 @@ mod tests {
         OfferId,
         tempfile::TempDir,
     ) {
-        let policy = r#"
+        // Nothing listens on port 1, so the authority answers nothing at once.
+        blocked_under("http://127.0.0.1:1/authority", "cc:mcp-test", 1000).await
+    }
+
+    /// The same family, under an authority this deployment consults at `url` with `timeout`
+    /// to bound it.
+    async fn blocked_under(
+        url: &str,
+        root: &str,
+        timeout_ms: u64,
+    ) -> (
+        crate::api::Runtime,
+        crate::api::TrajectoryId,
+        OfferId,
+        tempfile::TempDir,
+    ) {
+        let policy = format!(
+            r#"
             [policy]
             version = 2
 
             [[policy.tool]]
             name = "wire"
-            parameters = { type = "object", properties = { amount = { type = "integer" } } }
-            requires = { attention = ["irreversible"] }
-            delta = {}
+            parameters = {{ type = "object", properties = {{ amount = {{ type = "integer" }} }} }}
+            requires = {{ attention = ["irreversible"] }}
+            delta = {{}}
 
             [[policy.authority]]
             name = "approver"
@@ -1280,12 +1392,13 @@ mod tests {
             attention = ["irreversible"]
 
             [externals]
-            timeout_ms = 1000
+            timeout_ms = {timeout_ms}
             max_body_bytes = 4096
 
             [externals.authorities.approver]
-            url = "http://127.0.0.1:1/authority"
-        "#;
+            url = "{url}"
+        "#
+        );
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let path = dir.path().join("appa.toml");
         std::fs::write(&path, policy).expect("the fixture writes");
@@ -1293,7 +1406,7 @@ mod tests {
         let runtime =
             crate::api::Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
 
-        let root = crate::api::TrajectoryId("cc:mcp-test".to_string());
+        let root = crate::api::TrajectoryId(root.to_string());
         let session = runtime.create_session(root.clone()).expect("a fresh id opens");
         let denied = session
             .on_tool_call(
