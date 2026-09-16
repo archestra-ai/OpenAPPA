@@ -167,15 +167,14 @@ pub(crate) enum RuntimeSection {
 
 /// The harness a report is about, in the schema's own vocabulary.
 ///
-/// Deliberately not [`Adapter`] itself, though the two agree today: `Adapter` also picks a
-/// codec and a spawn coverage, and a rename there is a refactor, while a rename here is a new
-/// schema version. The conversion is exhaustive, so a new adapter has to decide what it is
-/// called on the wire.
+/// Separate from [`Adapter`]: embedded hosts also report without installing a
+/// standalone adapter. Adapter names are converted exhaustively into this vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Harness {
     ClaudeCode,
     Kagent,
+    Archestra,
 }
 
 impl From<Adapter> for Harness {
@@ -214,7 +213,7 @@ pub(crate) struct ReportRequest {
     pub(crate) author: Author,
     pub(crate) mode: Mode,
     pub(crate) selection: super::Selection,
-    pub(crate) harness: Adapter,
+    pub(crate) harness: Harness,
 }
 
 /// The document itself, in the order a reader reads it.
@@ -238,7 +237,7 @@ impl Report {
         report_id: ReportId,
         origin: Origin,
         message: YellMessage,
-        harness: Adapter,
+        harness: Harness,
         projection: Projection,
     ) -> Self {
         Self::new(
@@ -246,7 +245,7 @@ impl Report {
             origin,
             message,
             RuntimeSection::Serving {
-                harness: harness.into(),
+                harness,
                 policy: projection.policy,
             },
             projection.trajectory,
@@ -475,7 +474,7 @@ mod tests {
             ReportId::generate(),
             Origin::new(Author::Cli, Mode::Pseudonymized),
             YellMessage::new("x").expect("valid"),
-            Adapter::ClaudeCode,
+            Adapter::ClaudeCode.into(),
             Projection::rules_only(None, Mode::Pseudonymized, OmittedReason::NoRecentTrajectory),
         );
         let finished = report.finalize().expect("the report fits");

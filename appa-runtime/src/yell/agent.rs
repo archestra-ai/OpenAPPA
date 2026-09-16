@@ -79,7 +79,7 @@ pub(crate) async fn yell(runtime: &std::sync::Arc<Runtime>, harness: Adapter, ar
         author: Author::Agent,
         mode: Mode::Baseline,
         selection: selection(&acting, args.with_trajectory),
-        harness,
+        harness: harness.into(),
     };
     let Ok(finished) = runtime.report_off_thread(request).await else {
         return Outcome::Oversize;

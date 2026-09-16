@@ -404,7 +404,7 @@ async fn report(
         // making it a per-caller boundary. The recently active trajectory may well belong to
         // someone else's session on this machine, and loopback is the only thing between them.
         selection: crate::yell::Selection::Recent,
-        harness: state.adapter.name,
+        harness: state.adapter.name.into(),
     };
     state
         .runtime
