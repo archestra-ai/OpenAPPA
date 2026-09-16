@@ -60,6 +60,7 @@ jobs:
       corp: ${{ steps.filter.outputs.corp }}
       bench_publish: ${{ steps.filter.outputs.bench_publish }}
       agentthreatbench: ${{ steps.filter.outputs.agentthreatbench }}
+      taubench: ${{ steps.filter.outputs.taubench }}
       marketplace: ${{ steps.filter.outputs.marketplace }}
       receiver: ${{ steps.filter.outputs.receiver }}
     steps:
@@ -172,6 +173,9 @@ jobs:
               - *rust
               - 'bench/agentthreatbench/**'
               - 'bench/publish/**'
+            taubench:
+              - *rust
+              - 'bench/taubench/**'
             marketplace:
               - 'marketplace/**'
               - 'appa-package/**'
@@ -587,13 +591,13 @@ jobs:
             if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
           }
 
-  # AgentThreatBench depends on the appa-agent-python binding, so its tests
-  # share the job (and the Rust cache) that builds it. The agentthreatbench
-  # filter is the rust filter plus the harness tree.
+  # AgentThreatBench and TauBench both depend on the appa-agent-python binding,
+  # so their tests share the job (and the Rust cache) that builds it. Each
+  # harness's filter is the rust filter plus its own tree.
   python-binding-checks:
     name: Python Binding and AgentThreatBench Checks
     needs: changes
-    if: needs.changes.outputs.agentthreatbench == 'true'
+    if: needs.changes.outputs.agentthreatbench == 'true' || needs.changes.outputs.taubench == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -628,6 +632,18 @@ jobs:
 
       - name: AgentThreatBench tests
         run: uv run --project bench/agentthreatbench pytest bench/agentthreatbench/tests
+
+      # The TauBench suite exercises the pinned policy, the native session, and
+      # the reporting over Tau's tool schemas. The one test that reads Tau's
+      # task inventory skips without the `.tau2-bench` checkout the setup
+      # script clones; the golden-action replay runs there, not here.
+      - name: TauBench lint
+        run: |
+          uv run --project bench/taubench --only-group dev ruff check bench/taubench
+          uv run --project bench/taubench --only-group dev ruff format --check bench/taubench
+
+      - name: TauBench tests
+        run: uv run --project bench/taubench pytest bench/taubench/tests
 
   corp-benchmark-checks:
     name: Corporate Benchmark Checks
