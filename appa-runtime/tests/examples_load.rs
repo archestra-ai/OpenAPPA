@@ -411,3 +411,85 @@ async fn the_slack_battery_allows_public_writes_and_blocks_leaking_self_secrets(
         "slack write cannot leak self secrets: no remedy plan"
     );
 }
+
+/// The battery's masker is not scoped to the static credential rules: a command the
+/// Annotator narrows to `self` is blocked with the same masker offered, and its masked
+/// output is what reaches the model. An Annotator's answer cannot tag a call, so a
+/// tagged sanitizer would never reach a command the static rules do not name.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_masker_is_offered_for_a_command_the_annotator_narrows_to_self() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let battery_dir = dir.path().join("batteries/claude-code");
+    std::fs::create_dir_all(&battery_dir).expect("the battery directory is created");
+    std::fs::copy(
+        repo_root().join("marketplace/batteries/claude-code/appa.toml"),
+        battery_dir.join("appa.toml"),
+    )
+    .expect("the battery file is copied");
+    std::fs::write(
+        dir.path().join("annotator.sh"),
+        "cat > /dev/null\nprintf '%s' '{\"version\":1,\"answer\":{\"delta\":{\"audience\":[\"self\"]},\"requires\":{\"history\":[],\"attention\":[]},\"emits\":[]}}'",
+    )
+    .expect("the annotator script writes");
+    let root_path = dir.path().join("appa.toml");
+    std::fs::write(
+        &root_path,
+        r#"include = ["batteries/claude-code/appa.toml"]
+
+[policy]
+version = 2
+
+[[policy.annotator]]
+name = "claude-code.bash-requirements"
+
+[externals]
+timeout_ms = 5000
+max_body_bytes = 65536
+
+[externals.annotators."claude-code.bash-requirements"]
+command = ["/bin/sh", "annotator.sh"]
+"#,
+    )
+    .expect("the root replaces the battery Annotator with a script");
+    let config = Config::load(&root_path).expect("the root and battery compose");
+    let runtime =
+        Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the composed deployment opens"));
+    assert_eq!(
+        hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
+        HookDecision::Ack
+    );
+
+    let read = call("host/claude-code/Bash", "command", "cat ~/.bashrc");
+    let blocked = propose(&runtime, read.clone()).await;
+    let HookDecision::DenyCall { feedback, offers, .. } = blocked else {
+        panic!("an annotated `self` command is blocked with the masker offered, got {blocked:?}");
+    };
+    assert_eq!(offers.len(), 2, "the narrowing and the masker are offered");
+    assert!(matches!(
+        runtime.execute_remedy(&actor(), masker_offer(&feedback)).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    assert_eq!(
+        propose(&runtime, read.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    let delivered = hooks::handle(
+        &runtime,
+        HookEvent::ToolResult {
+            actor: actor(),
+            call: read,
+            outcome: ToolOutcome::Success {
+                body: OutcomeBody::Available(
+                    "export OPENAI_API_KEY=sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789\nalias ll='ls -l'\n"
+                        .to_string(),
+                ),
+            },
+        },
+    )
+    .await;
+    let HookDecision::DeliverValue { value } = delivered else {
+        panic!("the output crosses through the masker, got {delivered:?}");
+    };
+    assert_eq!(value, "export OPENAI_API_KEY=[redacted-secret]\nalias ll='ls -l'\n");
+}
