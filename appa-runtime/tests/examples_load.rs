@@ -481,7 +481,8 @@ command = ["/bin/sh", "annotator.sh"]
             call: read,
             outcome: ToolOutcome::Success {
                 body: OutcomeBody::Available(
-                    "export OPENAI_API_KEY=sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789\nalias ll='ls -l'\n".to_string(),
+                    "export OPENAI_API_KEY=sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789\nalias ll='ls -l'\n"
+                        .to_string(),
                 ),
             },
         },
