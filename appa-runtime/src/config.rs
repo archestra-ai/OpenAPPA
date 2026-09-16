@@ -1173,6 +1173,7 @@ fn policy_version(policy: &toml::Value) -> Option<i64> {
 
 /// Resolve root command origins without reading their working directories.
 /// The caller supplies the absolute directory of the declaring root config.
+#[cfg(feature = "daemon")]
 pub(crate) fn root_command_directories(
     text: &str,
     source_dir: &Path,
@@ -1886,6 +1887,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "daemon")]
     #[test]
     #[cfg(unix)]
     fn root_command_metadata_and_include_origins_compose() {

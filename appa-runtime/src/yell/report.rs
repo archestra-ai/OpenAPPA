@@ -20,7 +20,7 @@ use super::diagnostic::Policy;
 use super::strip::Drift;
 use super::tokens::Mode;
 use super::{Diagnostic, OmittedReason, Projection};
-use crate::runtime_cli::Adapter;
+use appa_runtime_api::AdapterName;
 
 /// The one schema this client writes. A receiver that does not know it refuses the document,
 /// and a caller that reads a document back checks this before believing any of it.
@@ -169,7 +169,7 @@ pub(crate) enum RuntimeSection {
 
 /// The harness a report is about, in the schema's own vocabulary.
 ///
-/// Separate from [`Adapter`]: embedded hosts also report without installing a
+/// Separate from [`AdapterName`]: embedded hosts also report without installing a
 /// standalone adapter. Adapter names are converted exhaustively into this vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -179,11 +179,11 @@ pub(crate) enum Harness {
     Archestra,
 }
 
-impl From<Adapter> for Harness {
-    fn from(adapter: Adapter) -> Self {
+impl From<AdapterName> for Harness {
+    fn from(adapter: AdapterName) -> Self {
         match adapter {
-            Adapter::ClaudeCode => Harness::ClaudeCode,
-            Adapter::Kagent => Harness::Kagent,
+            AdapterName::ClaudeCode => Harness::ClaudeCode,
+            AdapterName::Kagent => Harness::Kagent,
         }
     }
 }
@@ -485,7 +485,7 @@ mod tests {
             ReportId::generate(),
             Origin::new(Author::Cli, Mode::Pseudonymized),
             YellMessage::new("x").expect("valid"),
-            Adapter::ClaudeCode.into(),
+            AdapterName::ClaudeCode.into(),
             Projection::rules_only(None, Mode::Pseudonymized, OmittedReason::NoRecentTrajectory),
         );
         let finished = report.finalize().expect("the report fits");

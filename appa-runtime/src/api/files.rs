@@ -81,11 +81,15 @@
 
 use appa_engine::value::{FileBasis, FileSource};
 use appa_eventlog::files::{FileOperation, FilePin, FileStore};
+#[cfg(feature = "daemon")]
 use std::io::Write;
-use std::path::{Path, PathBuf};
+#[cfg(feature = "daemon")]
+use std::path::Path;
+use std::path::PathBuf;
 
 use super::{EventError, ProposedCall};
 
+#[cfg(feature = "daemon")]
 #[path = "process.rs"]
 mod process;
 
@@ -93,6 +97,8 @@ pub(super) struct FileTracking {
     pub store: FileStore,
     pub policy_key: String,
     pub workspace: PathBuf,
+    /// Kept for the deployment a constrained launcher is started against.
+    #[cfg(feature = "daemon")]
     pub ledger: PathBuf,
     pub process_backend: Option<PathBuf>,
 }
@@ -143,6 +149,7 @@ pub(crate) struct ProcessArgs {
     pub command: String,
 }
 
+#[cfg(feature = "daemon")]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum FileReply {
     Value(String),
@@ -186,6 +193,7 @@ pub(super) fn operation(call: &ProposedCall) -> Result<(FileOperation, String), 
 /// path the ledger pinned for it. The call's own argument bytes are read for content and
 /// commands; every path comes from `pin`, so the file this runs on is the file the ledger
 /// validated, hashed and reserved — never a second reading of what the model spelled.
+#[cfg(feature = "daemon")]
 pub(super) fn perform(
     files: &FileTracking,
     call: &ProposedCall,
@@ -241,6 +249,7 @@ pub(super) fn perform(
     }
 }
 
+#[cfg(feature = "daemon")]
 fn replace(path: &Path, content: &str) -> std::io::Result<()> {
     let parent = path
         .parent()
@@ -251,6 +260,19 @@ fn replace(path: &Path, content: &str) -> std::io::Result<()> {
     staged.as_file().sync_all()?;
     staged.persist(path).map_err(|error| error.error)?;
     Ok(())
+}
+
+/// Where one constrained file launcher's runtime lives: the paths a private
+/// stdio server is started against, and what the runtime answers `/file-tools`
+/// with.
+#[cfg(feature = "daemon")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Deployment {
+    pub config: PathBuf,
+    pub db: PathBuf,
+    pub workspace: PathBuf,
+    pub ledger: PathBuf,
+    pub process_backend: Option<PathBuf>,
 }
 
 impl super::Runtime {
@@ -265,9 +287,10 @@ impl super::Runtime {
             .is_some_and(|files| files.process_backend.is_some())
     }
 
-    pub(crate) fn file_deployment(&self, config: PathBuf) -> Option<crate::claude_files::Deployment> {
+    #[cfg(feature = "daemon")]
+    pub(crate) fn file_deployment(&self, config: PathBuf) -> Option<Deployment> {
         let files = self.inner.files.as_ref()?;
-        Some(crate::claude_files::Deployment {
+        Some(Deployment {
             config: std::fs::canonicalize(config).ok()?,
             db: std::fs::canonicalize(self.inner.state_path.as_ref()?).ok()?,
             workspace: files.workspace.clone(),
@@ -276,6 +299,7 @@ impl super::Runtime {
         })
     }
 
+    #[cfg(feature = "daemon")]
     pub(crate) async fn execute_bound_file(
         &self,
         actor: &appa_runtime_api::Actor,
@@ -293,6 +317,7 @@ impl super::Runtime {
         }
     }
 
+    #[cfg(feature = "daemon")]
     pub(crate) async fn execute_file(&self, tool: &str, arguments: serde_json::Value) -> Result<FileReply, EventError> {
         let (actor, _) = self
             .take_vouched(&super::PermitKey::call(tool, &arguments))
@@ -364,7 +389,7 @@ pub(super) fn key(dispatch: &appa_engine::value::DispatchId) -> Result<String, E
     serde_json::to_string(dispatch).map_err(refused)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, unix, feature = "daemon"))]
 mod tests {
     use super::*;
     use crate::api::{OutcomeBody, RemedyDecision, Runtime, ToolCallDecision, ToolOutcome, TrajectoryId};

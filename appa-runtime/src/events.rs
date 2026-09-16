@@ -28,6 +28,7 @@
 //! its own, which is more machinery than a diagnostic buffer earns.
 
 use std::collections::BTreeMap;
+#[cfg(feature = "daemon")]
 use std::time::SystemTime;
 
 use appa_engine::value::DispatchId;
@@ -160,8 +161,11 @@ pub(crate) enum ExternalOutcome {
 pub(crate) enum NoAnswerClass {
     Unregistered,
     Unreachable,
+    #[cfg(feature = "daemon")]
     Dismissed,
-    NonSuccess { status: u16 },
+    NonSuccess {
+        status: u16,
+    },
     Timeout,
     Transport,
     Malformed,
@@ -177,6 +181,7 @@ impl From<&crate::external::NoAnswerReason> for NoAnswerClass {
         match reason {
             Reason::Unregistered => NoAnswerClass::Unregistered,
             Reason::Unreachable => NoAnswerClass::Unreachable,
+            #[cfg(feature = "daemon")]
             Reason::Dismissed => NoAnswerClass::Dismissed,
             // The detail is what the command said on stderr, and it is not carried.
             Reason::NonSuccess { status, .. } => NoAnswerClass::NonSuccess { status: *status },
@@ -271,6 +276,7 @@ pub(crate) enum StoreOperation {
 #[derive(Debug, Clone)]
 pub(crate) struct RecordedEvent {
     pub(crate) seq: u64,
+    #[cfg(feature = "daemon")]
     pub(crate) at: SystemTime,
     pub(crate) event: RuntimeEvent,
 }
@@ -351,6 +357,7 @@ impl EventLog {
         self.next_seq += 1;
         let entry = RecordedEvent {
             seq,
+            #[cfg(feature = "daemon")]
             at: SystemTime::now(),
             event: clamp(event),
         };
@@ -420,6 +427,7 @@ impl EventLog {
 ///
 /// The two lists are reported separately because their truncation is separate: a reader must
 /// be able to tell "this trajectory's early hooks were evicted" from "a reload was evicted".
+#[cfg(feature = "daemon")]
 #[derive(Debug, Default)]
 pub(crate) struct Events {
     pub(crate) entries: Vec<RecordedEvent>,
@@ -431,6 +439,7 @@ pub(crate) struct Events {
 }
 
 /// Which trajectory a caller who named none meant.
+#[cfg(feature = "daemon")]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Recent {
     One {
@@ -448,6 +457,7 @@ impl EventLog {
     /// first retained sequence *through the log's current position* — not through the
     /// trajectory's own last entry. A reload that lands after a trajectory's final hook is
     /// exactly the kind of thing its report needs to show.
+    #[cfg(feature = "daemon")]
     pub(crate) fn events(&self, root: &TrajectoryId) -> Events {
         let Some(events) = self.roots.get(&root.0) else {
             return Events::default();
@@ -472,6 +482,7 @@ impl EventLog {
 
     /// The trajectory a caller who named none most likely means: the one that was active in
     /// the window, when there is exactly one.
+    #[cfg(feature = "daemon")]
     pub(crate) fn recent_root(&self, window: std::time::Duration) -> Recent {
         let now = SystemTime::now();
         let mut inside = self.roots.iter().filter_map(|(root, events)| {

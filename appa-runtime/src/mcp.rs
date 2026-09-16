@@ -28,10 +28,11 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 
-use crate::api::{LabelSpelling, OfferId, PermitKey, RemedyArguments, RemedyOutcome, Runtime};
+use appa_runtime_api::AdapterName;
+
+use crate::api::{ExecuteRemedyPlanArgs, PermitKey, RemedyReply, Runtime};
 use crate::batteries::{BatteriesResponse, BundledBattery};
 use crate::elicit::Elicitation;
-use crate::runtime_cli::Adapter;
 use crate::yell::YellArgs;
 
 /// The tools this runtime serves, and the router that decides which of them exist for this
@@ -46,7 +47,7 @@ pub struct RuntimeToolService {
 #[derive(Clone)]
 pub struct RuntimeTools {
     runtime: Arc<Runtime>,
-    harness: Adapter,
+    harness: AdapterName,
     tool_router: ToolRouter<Self>,
     file_actor: Option<appa_runtime_api::Actor>,
 }
@@ -56,27 +57,6 @@ pub struct BatteryState {
     pub catalog: BatteriesResponse,
     pub included: BTreeSet<String>,
     pub serving_tools: BTreeSet<String>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ExecuteRemedyPlanArgs {
-    pub offer_id: String,
-    /// For a plan that declares a subagent's return: the lowest label this session accepts
-    /// from the return, in the policy's `delta` spelling. An omitted dimension keeps this
-    /// session's current value.
-    #[serde(default)]
-    pub label: Option<LabelArgs>,
-    /// For a plan that attests a subagent's return: the JSON schema the return must match.
-    #[serde(default)]
-    pub return_schema: Option<serde_json::Value>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct LabelArgs {
-    #[serde(default)]
-    pub trust: Option<String>,
-    #[serde(default)]
-    pub audience: Option<Vec<String>>,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
@@ -180,76 +160,13 @@ struct ToolMatch {
     match_kind: &'static str,
 }
 
-impl From<ExecuteRemedyPlanArgs> for RemedyArguments {
-    fn from(args: ExecuteRemedyPlanArgs) -> RemedyArguments {
-        RemedyArguments {
-            label: args.label.map(|label| LabelSpelling {
-                trust: label.trust,
-                audience: label.audience,
-            }),
-            return_schema: args.return_schema,
-        }
+/// One control call's answer in this transport's shape.
+fn remedy_result(reply: RemedyReply) -> CallToolResult {
+    let content = vec![ContentBlock::text(reply.text)];
+    match reply.is_error {
+        true => CallToolResult::error(content),
+        false => CallToolResult::success(content),
     }
-}
-
-async fn execute_remedy(
-    runtime: &Runtime,
-    args: ExecuteRemedyPlanArgs,
-    request: Option<RequestContext<RoleServer>>,
-    expected_actor: Option<&appa_runtime_api::Actor>,
-) -> CallToolResult {
-    let quoted = OfferId(args.offer_id.clone());
-    let arguments = RemedyArguments::from(args);
-    // Requires the vouched trajectory from the preceding hook.
-    let Ok((acting, ruling)) = runtime.take_vouched(&PermitKey::offer(&quoted)) else {
-        return render(
-            runtime,
-            RemedyOutcome::Refused {
-                detail: "no live offer with this id exists".to_string(),
-            },
-        );
-    };
-    if expected_actor.is_some_and(|expected| expected != &acting) {
-        return render(
-            runtime,
-            RemedyOutcome::Refused {
-                detail: "offer belongs to a different session".into(),
-            },
-        );
-    }
-    let elicitation = request.map(|request| Elicitation::new(request, runtime.review_timeout()));
-    let started = std::time::Instant::now();
-    let outcome = runtime
-        .remedy(&acting, quoted.clone(), arguments, elicitation.as_ref(), ruling)
-        .await;
-    // Recorded from the typed outcome, before `render` turns it into the text the model
-    // reads: a remedy that takes a minute and then declines is the shape of "APPA is in
-    // the way", and neither the duration nor the offer it quoted is in the trajectory.
-    runtime.record(
-        // The family, never the acting trajectory: see `Session::timed_consult`.
-        Some(&acting.root),
-        crate::events::RuntimeEvent::Control {
-            call: crate::events::ControlCall::Remedy {
-                offer: quoted.0,
-                dispatch: None,
-            },
-            outcome: (&outcome).into(),
-            duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        },
-    );
-    render(runtime, outcome)
-}
-
-/// The existing MCP remedy implementation for an in-process gateway. The host
-/// first dispatches ToolCall and supplies its authenticated actor. Authorities
-/// bound in the policy still work; an interactive MCP elicitation without a
-/// request context returns NoAnswer through the existing consult mechanism.
-pub async fn execute_embedded_remedy(
-    runtime: &Runtime,
-    actor: &appa_runtime_api::Actor,
-    args: ExecuteRemedyPlanArgs,
-) -> CallToolResult {
-    execute_remedy(runtime, args, None, Some(actor)).await
 }
 
 #[tool_router]
@@ -257,7 +174,7 @@ impl RuntimeTools {
     /// The tools this deployment serves right now. `yell` is dropped from the router where
     /// the deployment has not turned agent reporting on, which is both how it stops being
     /// advertised and how a call to it stops being routed.
-    pub fn new(runtime: Arc<Runtime>, harness: Adapter) -> RuntimeTools {
+    pub fn new(runtime: Arc<Runtime>, harness: AdapterName) -> RuntimeTools {
         let mut tool_router = Self::tool_router();
         if !runtime.agent_yell() {
             tool_router.remove_route(YELL);
@@ -289,7 +206,12 @@ impl RuntimeTools {
         Parameters(args): Parameters<ExecuteRemedyPlanArgs>,
         request: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        execute_remedy(&self.runtime, args, Some(request), self.file_actor.as_ref()).await
+        let elicitation = Elicitation::new(request, self.runtime.review_timeout());
+        remedy_result(
+            self.runtime
+                .execute_remedy_plan(args, Some(&elicitation), self.file_actor.as_ref())
+                .await,
+        )
     }
 
     #[tool(
@@ -459,7 +381,8 @@ impl RuntimeToolService {
         Parameters(args): Parameters<ExecuteRemedyPlanArgs>,
         request: RequestContext<RoleServer>,
     ) -> CallToolResult {
-        execute_remedy(&self.runtime, args, Some(request), None).await
+        let elicitation = Elicitation::new(request, self.runtime.review_timeout());
+        remedy_result(self.runtime.execute_remedy_plan(args, Some(&elicitation), None).await)
     }
 
     #[tool(
@@ -754,30 +677,6 @@ fn observed_for_source(source: &str, observed: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// The runtime keys the released call on its canonical identity, which is not a name any
-/// host advertises. What the model is told to call is that identity spelled the way its own
-/// harness dispatches it ([`Runtime::model_spelling`]).
-fn render(runtime: &Runtime, outcome: RemedyOutcome) -> CallToolResult {
-    match outcome {
-        RemedyOutcome::Authorized { call } => CallToolResult::success(vec![ContentBlock::text(format!(
-            "[appa] Authorized. Call the {} tool again with exactly these arguments: {}",
-            runtime.model_spelling(&call.tool),
-            call.arguments.get(),
-        ))]),
-        RemedyOutcome::Substituted { call } => CallToolResult::success(vec![ContentBlock::text(format!(
-            "[appa] Substituted. The sanitizer replaced the arguments and the call is released. \
-             Call the {} tool with exactly these arguments to run it: {}",
-            runtime.model_spelling(&call.tool),
-            call.arguments.get(),
-        ))]),
-        RemedyOutcome::Returned { value } => CallToolResult::success(vec![ContentBlock::text(value)]),
-        RemedyOutcome::Declined { feedback } | RemedyOutcome::NoAnswer { feedback } => {
-            CallToolResult::success(vec![ContentBlock::text(feedback)])
-        }
-        RemedyOutcome::Refused { detail } => CallToolResult::error(vec![ContentBlock::text(detail)]),
-    }
-}
-
 #[tool_handler]
 impl ServerHandler for RuntimeToolService {
     fn get_info(&self) -> ServerConfig {
@@ -817,7 +716,7 @@ const SESSION_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
 /// Private stdio transport. The actor comes from the host's process arguments, never MCP.
 pub(crate) async fn serve_files(runtime: Arc<Runtime>, actor: appa_runtime_api::Actor) -> Result<(), String> {
     use rmcp::ServiceExt;
-    let mut tools = RuntimeTools::new(runtime, Adapter::ClaudeCode);
+    let mut tools = RuntimeTools::new(runtime, AdapterName::ClaudeCode);
     tools.file_actor = Some(actor);
     tools.tool_router.remove_route(YELL);
     let service = tools
@@ -829,14 +728,17 @@ pub(crate) async fn serve_files(runtime: Arc<Runtime>, actor: appa_runtime_api::
 }
 
 /// MCP service served at `/mcp`.
-pub fn service(runtime: Arc<Runtime>, harness: Adapter) -> StreamableHttpService<RuntimeTools, LocalSessionManager> {
+pub fn service(
+    runtime: Arc<Runtime>,
+    harness: AdapterName,
+) -> StreamableHttpService<RuntimeTools, LocalSessionManager> {
     service_with_allowed_hosts(runtime, &[], harness)
 }
 
 pub fn service_with_allowed_hosts(
     runtime: Arc<Runtime>,
     allowed_hosts: &[String],
-    harness: Adapter,
+    harness: AdapterName,
 ) -> StreamableHttpService<RuntimeTools, LocalSessionManager> {
     let mut sessions = LocalSessionManager::default();
     sessions.session_config.keep_alive = Some(runtime.review_timeout() + SESSION_GRACE);
@@ -880,7 +782,7 @@ fn server_config(allowed_hosts: &[String]) -> StreamableHttpServerConfig {
 mod tests {
     use super::*;
     use crate::api::raw;
-    use crate::api::{ProposedCall, Runtime, ToolCallDecision};
+    use crate::api::{OfferId, ProposedCall, RemedyOutcome, Runtime, ToolCallDecision};
     use crate::config::Config;
     use appa_runtime_api::HookDecision;
 
@@ -897,7 +799,7 @@ mod tests {
             )
             .expect("the deployment opens"),
         );
-        let service = RuntimeTools::new(Arc::clone(&runtime), Adapter::ClaudeCode);
+        let service = RuntimeTools::new(Arc::clone(&runtime), AdapterName::ClaudeCode);
         assert_eq!(service.get_info().server_info.version, env!("CARGO_PKG_VERSION"));
         // The instance's router, not the static one: `RuntimeTools` decides per session
         // whether `yell` exists, and this fixture leaves agent reporting off.
@@ -945,7 +847,7 @@ mod tests {
                 Runtime::open(config(), directory.path().join("appa.db"), None).expect("the deployment opens"),
             ),
             &["appa-runtime.appa.svc.cluster.local:18787".to_string()],
-            Adapter::ClaudeCode,
+            AdapterName::ClaudeCode,
         );
 
         let response = service
@@ -1007,7 +909,7 @@ mod tests {
         std::fs::write(&path, text).expect("the fixture writes");
         let config = Config::load(&path).expect("the fixture validates");
         let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
-        RuntimeTools::new(std::sync::Arc::new(runtime), Adapter::ClaudeCode)
+        RuntimeTools::new(std::sync::Arc::new(runtime), AdapterName::ClaudeCode)
     }
 
     /// A deployment that has not turned agent reporting on does not advertise the tool, and
@@ -1260,7 +1162,7 @@ mod tests {
                 detail: "no live offer with this id exists".to_string(),
             },
         );
-        assert_eq!(render(&runtime, outcome).is_error, Some(true));
+        assert_eq!(remedy_result(runtime.remedy_reply(outcome)).is_error, Some(true));
     }
 
     /// One offer executes at a time, and what says so is a record: an execution that never
@@ -1425,7 +1327,7 @@ mod tests {
             matches!(outcome, RemedyOutcome::Authorized { .. }),
             "accepting the narrowing releases the call: {outcome:?}"
         );
-        let rendered = render(&runtime, outcome);
+        let rendered = remedy_result(runtime.remedy_reply(outcome));
         rendered
             .content
             .first()

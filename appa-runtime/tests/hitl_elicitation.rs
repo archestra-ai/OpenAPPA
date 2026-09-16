@@ -166,7 +166,7 @@ async fn deployment_with(review_timeout_ms: u64) -> Deployment {
     );
     let app = axum::Router::new().nest_service(
         "/mcp",
-        mcp::service(Arc::clone(&runtime), appa_runtime::runtime_cli::Adapter::ClaudeCode),
+        mcp::service(Arc::clone(&runtime), appa_runtime_api::AdapterName::ClaudeCode),
     );
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
@@ -288,7 +288,7 @@ builtin = "hitl"
     );
     let app = axum::Router::new().nest_service(
         "/mcp",
-        mcp::service(Arc::clone(&runtime), appa_runtime::runtime_cli::Adapter::ClaudeCode),
+        mcp::service(Arc::clone(&runtime), appa_runtime_api::AdapterName::ClaudeCode),
     );
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
@@ -553,10 +553,11 @@ async fn an_embedded_host_ruling_survives_without_any_mcp_request_context() {
     )
     .await;
     assert!(matches!(gate, HookDecision::PassControl));
-    let result =
-        appa_runtime::mcp::execute_embedded_remedy(&deployment.runtime, &actor, serde_json::from_value(args).unwrap())
-            .await;
-    assert!(format!("{:?}", result.content).contains("Authorized"), "{result:?}");
+    let reply = deployment
+        .runtime
+        .execute_embedded_remedy(&actor, serde_json::from_value(args).unwrap())
+        .await;
+    assert!(reply.text.contains("Authorized"), "{reply:?}");
 }
 
 #[tokio::test]

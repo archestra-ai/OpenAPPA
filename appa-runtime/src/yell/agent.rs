@@ -9,12 +9,19 @@
 //! Nothing is written to disk here. `appa yell` keeps a file because a person is asked to
 //! read it before it leaves; nobody reads an agent's, so a report that does not send is gone.
 
-use crate::api::{Actor, PermitKey, Runtime};
-use crate::runtime_cli::Adapter;
+use crate::api::PermitKey;
 
+#[cfg(feature = "daemon")]
+use appa_runtime_api::AdapterName;
+
+#[cfg(feature = "daemon")]
 use super::client::{self, Receipt, SendFailure};
+#[cfg(feature = "daemon")]
 use super::report::{Author, ReportRequest, YellMessage};
+#[cfg(feature = "daemon")]
 use super::{Mode, Selection};
+#[cfg(feature = "daemon")]
+use crate::api::{Actor, Runtime};
 
 /// The arguments the `yell` tool takes.
 ///
@@ -47,6 +54,7 @@ impl YellArgs {
 }
 
 /// What one agent yell did, in the words the model is given back.
+#[cfg(feature = "daemon")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Outcome {
     Sent(Receipt),
@@ -65,7 +73,8 @@ pub(crate) enum Outcome {
 /// Always in the deployment's own names: nobody is here to be asked the pseudonymization
 /// question, and a deployment that turned agent reporting on has already answered it. What
 /// may leave is the same either way — the mode chooses only how the names are spelled.
-pub(crate) async fn yell(runtime: &std::sync::Arc<Runtime>, harness: Adapter, args: &YellArgs) -> Outcome {
+#[cfg(feature = "daemon")]
+pub(crate) async fn yell(runtime: &std::sync::Arc<Runtime>, harness: AdapterName, args: &YellArgs) -> Outcome {
     let acting = match runtime.take_vouched(&args.ticket()) {
         Ok((acting, _)) => acting,
         Err(refusal) => return Outcome::Unvouched(refusal),
@@ -96,6 +105,7 @@ pub(crate) async fn yell(runtime: &std::sync::Arc<Runtime>, harness: Adapter, ar
 
 /// The family, never the acting trajectory: a subagent's complaint is about the session it
 /// runs in, and the export is of the whole family either way.
+#[cfg(feature = "daemon")]
 fn selection(acting: &Actor, with_trajectory: bool) -> Selection {
     match with_trajectory {
         true => Selection::Vouched(acting.root.clone()),
@@ -168,6 +178,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "daemon")]
     #[test]
     fn the_rules_alone_name_no_trajectory() {
         let acting = Actor {
@@ -183,6 +194,7 @@ mod tests {
 
     /// A subagent reports on the family it runs in, not on itself: the export is of the
     /// whole family, and the child alone would name a log that holds part of the story.
+    #[cfg(feature = "daemon")]
     #[test]
     fn a_subagent_reports_on_its_family() {
         let acting = Actor {

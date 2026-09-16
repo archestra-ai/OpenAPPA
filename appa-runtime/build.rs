@@ -1,5 +1,7 @@
 #[path = "src/batteries_layout.rs"]
 mod batteries_layout;
+#[path = "src/batteries_staging.rs"]
+mod batteries_staging;
 
 use std::env;
 use std::fs;
@@ -15,7 +17,7 @@ fn main() {
     let repository = crate_root.parent().expect("appa-runtime is inside the repository");
     println!(
         "cargo:rerun-if-changed={}",
-        repository.join(batteries_layout::SOURCE).display()
+        repository.join(batteries_staging::SOURCE).display()
     );
     watch_git_identity(repository);
 
@@ -54,7 +56,7 @@ fn main() {
     } else {
         repository
     };
-    batteries_layout::stage_repository(identity_source, &staged)
+    batteries_staging::stage_repository(identity_source, &staged)
         .expect("stage the batteries source for build identity");
     let digest = appa_package::tree::canonical_tree_digest(&staged).expect("digest the staged batteries source");
     println!("cargo:rustc-env=APPA_BATTERIES_TREE_SHA256={}", hex(&digest));
@@ -146,7 +148,7 @@ fn batteries_are_dirty(repository: &Path) -> bool {
         "--porcelain=v1",
         "--untracked-files=all",
         "--",
-        batteries_layout::SOURCE,
+        batteries_staging::SOURCE,
     ];
     git(repository, &arguments).is_none_or(|output| !output.trim().is_empty())
 }
@@ -156,7 +158,7 @@ fn export_committed_repository(repository: &Path, destination: &Path) -> std::io
     command
         .arg("-C")
         .arg(repository)
-        .args(["archive", "--format=tar", "HEAD", "--", batteries_layout::SOURCE]);
+        .args(["archive", "--format=tar", "HEAD", "--", batteries_staging::SOURCE]);
     let output = command.output()?;
     if !output.status.success() {
         return Err(std::io::Error::other(

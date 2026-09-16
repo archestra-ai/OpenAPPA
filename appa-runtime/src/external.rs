@@ -32,6 +32,7 @@ const HITL: &str = "hitl";
 pub enum NoAnswerReason {
     Unregistered,
     Unreachable,
+    #[cfg(feature = "daemon")]
     Dismissed,
     /// A non-success exit or HTTP status. `detail` is the last line a command wrote to
     /// stderr — its own error, never its answer — where one was read.
@@ -57,6 +58,7 @@ impl NoAnswerReason {
             NoAnswerReason::MalformedAnswer(detail) => format!("malformed {detail}"),
             NoAnswerReason::Unregistered => "unregistered".to_string(),
             NoAnswerReason::Unreachable => "unreachable".to_string(),
+            #[cfg(feature = "daemon")]
             NoAnswerReason::Dismissed => "dismissed".to_string(),
             NoAnswerReason::NonSuccess { status, detail: None } => format!("non_success status={status}"),
             NoAnswerReason::NonSuccess {
