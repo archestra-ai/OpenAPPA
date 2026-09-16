@@ -97,6 +97,8 @@ pub struct LogStore {
     commits_until_failure: std::sync::atomic::AtomicU64,
     #[cfg(feature = "fault-injection")]
     contended_appends: std::sync::atomic::AtomicU64,
+    #[cfg(feature = "fault-injection")]
+    failing_reads: std::sync::atomic::AtomicU64,
     /// What the next foreign writer records rather than nothing, so a caller's re-derivation
     /// meets a changed state and not only a moved position.
     #[cfg(feature = "fault-injection")]
@@ -355,6 +357,8 @@ impl From<&ReadError> for StoreErrorClass {
             ReadError::Storage(_) => StoreErrorClass::Storage,
             #[cfg(feature = "postgres")]
             ReadError::Postgres(_) => StoreErrorClass::Storage,
+            #[cfg(feature = "fault-injection")]
+            ReadError::Injected => StoreErrorClass::Storage,
         }
     }
 }
@@ -419,6 +423,9 @@ pub enum ReadError {
     #[cfg(feature = "postgres")]
     #[error("PostgreSQL storage failure: {0}")]
     Postgres(#[from] postgres::PostgresError),
+    #[cfg(feature = "fault-injection")]
+    #[error("injected read failure")]
+    Injected,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -455,6 +462,8 @@ impl LogStore {
                 commits_until_failure: std::sync::atomic::AtomicU64::new(0),
                 #[cfg(feature = "fault-injection")]
                 contended_appends: std::sync::atomic::AtomicU64::new(0),
+                #[cfg(feature = "fault-injection")]
+                failing_reads: std::sync::atomic::AtomicU64::new(0),
                 #[cfg(feature = "fault-injection")]
                 contending_record: Mutex::new(None),
             });
@@ -525,6 +534,8 @@ impl LogStore {
             #[cfg(feature = "fault-injection")]
             contended_appends: std::sync::atomic::AtomicU64::new(0),
             #[cfg(feature = "fault-injection")]
+            failing_reads: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(feature = "fault-injection")]
             contending_record: Mutex::new(None),
         })
     }
@@ -592,6 +603,8 @@ impl LogStore {
     /// Read one root's whole log, with the position it stands at and the policy file it opened
     /// under.
     pub fn log(&self, root: &TrajectoryId) -> Result<Log, ReadError> {
+        #[cfg(feature = "fault-injection")]
+        self.read_refused()?;
         #[cfg(feature = "postgres")]
         if let Some(pg) = &self.postgres {
             return pg.log(root);
@@ -630,6 +643,8 @@ impl LogStore {
     /// all is still [`ReadError::UnknownRoot`], which is the difference between "nothing
     /// happened" and "this family is not here".
     pub fn host_records_of(&self, root: &TrajectoryId) -> Result<HostStream, ReadError> {
+        #[cfg(feature = "fault-injection")]
+        self.read_refused()?;
         #[cfg(feature = "postgres")]
         if let Some(pg) = &self.postgres {
             return pg.host_records_of(root);
@@ -684,6 +699,8 @@ impl LogStore {
         root: &TrajectoryId,
         matches: impl Fn(&HostObservation) -> bool,
     ) -> Result<Option<HostRecord>, ReadError> {
+        #[cfg(feature = "fault-injection")]
+        self.read_refused()?;
         #[cfg(feature = "postgres")]
         if let Some(pg) = &self.postgres {
             return pg.latest_host_record_of(root, matches);
@@ -724,7 +741,15 @@ impl LogStore {
     /// session that quoted an identical ticket. Build the needle with
     /// [`HostObservation::names_key`] so the query and the encoding can never disagree about
     /// how a key is spelled.
+    ///
+    /// The scan itself is the whole host stream of every family: there is no index over what
+    /// a row holds, because this store owns no DDL a deployment's PostgreSQL would have to
+    /// be given. So a key that is spelled right and stands for nothing still costs one pass,
+    /// and a caller that can be asked about keys it never minted checks the spelling before
+    /// it asks here.
     pub fn roots_mentioning(&self, needle: &str) -> Result<Vec<TrajectoryId>, ReadError> {
+        #[cfg(feature = "fault-injection")]
+        self.read_refused()?;
         #[cfg(feature = "postgres")]
         if let Some(pg) = &self.postgres {
             return pg.roots_mentioning(needle);
@@ -818,6 +843,14 @@ impl LogStore {
             .store(skip + 1, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Arm the read fail point: the next `count` reads answer with a failure instead of the
+    /// store's rows. A caller that refuses without asking the store leaves the arming where
+    /// it was, so the read that comes after it still meets the failure.
+    #[cfg(feature = "fault-injection")]
+    pub fn fail_next_reads(&self, count: u64) {
+        self.failing_reads.store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Arm the contention point: the next `count` appends are raced by a foreign writer that
     /// wins, so each loses the compare-and-swap and its caller replays.
     #[cfg(feature = "fault-injection")]
@@ -886,6 +919,14 @@ impl LogStore {
     #[cfg(feature = "fault-injection")]
     fn contention_fires(&self) -> bool {
         consume(&self.contended_appends).is_some()
+    }
+
+    #[cfg(feature = "fault-injection")]
+    fn read_refused(&self) -> Result<(), ReadError> {
+        match consume(&self.failing_reads) {
+            Some(_) => Err(ReadError::Injected),
+            None => Ok(()),
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {

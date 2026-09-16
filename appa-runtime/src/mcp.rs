@@ -1483,6 +1483,46 @@ mod tests {
         );
     }
 
+    /// A network caller names the offer id, so an id no minting could have produced is
+    /// refused on its spelling — before the store is searched for a key that cannot be in
+    /// it. The armed read failure is the evidence: a take that searched would spend it.
+    #[tokio::test]
+    async fn an_offer_id_this_runtime_never_renders_is_refused_without_asking_the_store() {
+        let (runtime, root, quoted, _dir) = blocked_deployment().await;
+        assert!(
+            crate::engine::renders_offer(&quoted),
+            "the id the model is shown is the shape the check admits: {}",
+            quoted.0,
+        );
+        let admitted = crate::hooks::handle(&runtime, control_act(&acting(root.0.as_str()), &quoted)).await;
+        assert!(matches!(admitted, HookDecision::PassControl), "got {admitted:?}");
+
+        runtime.store().fail_next_reads(1);
+        for spelling in [
+            "",
+            "not hex at all!",
+            "0123456789abcde",
+            "0123456789abcdef0",
+            "0123456789ABCDEF",
+        ] {
+            assert_eq!(
+                runtime.take_vouched(&PermitKey::offer(&OfferId(spelling.to_string()))),
+                Err(crate::api::Unvouched::Nobody),
+                "an id shaped like {spelling:?} names no offer",
+            );
+        }
+        assert_eq!(
+            runtime.take_vouched(&PermitKey::offer(&quoted)),
+            Err(crate::api::Unvouched::Nobody),
+            "the read that was armed to fail was still waiting for the first take that read at all",
+        );
+        assert_eq!(
+            runtime.take_vouched(&PermitKey::offer(&quoted)),
+            Ok((acting(root.0.as_str()), None)),
+            "and the standing none of the refused takes reached is still there to spend",
+        );
+    }
+
     fn control_act(actor: &crate::api::Actor, quoted: &OfferId) -> appa_runtime_api::HookEvent {
         appa_runtime_api::HookEvent::ToolCall {
             actor: actor.clone(),

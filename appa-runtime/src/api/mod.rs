@@ -98,9 +98,15 @@ impl PermitKey {
     }
 
     /// The key a recorded spelling names, or `None` for a spelling this build cannot read.
+    ///
+    /// An offer id is the one part of a key that reaches this runtime as a caller wrote it,
+    /// so the shape the runtime itself renders is the whole of what it will read: this is
+    /// the single place that rule is spelled, and a spelling that fails it names no offer
+    /// wherever it came from.
     pub(crate) fn parse(recorded: &str) -> Option<PermitKey> {
         if let Some(id) = recorded.strip_prefix(OFFER_KEY) {
-            return Some(PermitKey::Offer(id.to_string()));
+            let quoted = OfferId(id.to_string());
+            return crate::engine::renders_offer(&quoted).then_some(PermitKey::Offer(quoted.0));
         }
         recorded
             .strip_prefix(CALL_KEY)
@@ -1833,7 +1839,14 @@ impl Runtime {
     /// tell a lone holder from one of two, so authorizing from it would answer the ambiguous
     /// case with one session's standing.
     pub(crate) fn take_vouched(&self, key: &PermitKey) -> Result<(Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
-        let (root, _, _) = self.sole_holder(key)?;
+        // The spelling is read before the store is asked anything. An MCP request names the
+        // key, so a caller over a non-loopback listener can ask about ids this runtime never
+        // minted, and learning that no such offer exists must not cost a walk over every
+        // family's records.
+        if PermitKey::parse(&key.wire()).as_ref() != Some(key) {
+            return Err(Unvouched::Nobody);
+        }
+        let root = self.sole_holder(key)?;
         // Taking is one-shot, and the consumption is what makes it one: the answer is
         // whatever stood where the release landed, not what an earlier read showed. A turn
         // that ended in between ended this standing, and a sibling that vouched in between
@@ -1849,8 +1862,11 @@ impl Runtime {
         let consumed = self.inner.append_host_with::<Unvouched, _>(&root, |stream| {
             // What this root holds where the release will land, and then that no sibling has
             // taken up the key since: one live holder in one family is the whole condition.
+            // The loop already read this root at the position it writes at, so the re-read
+            // is the siblings only — and where the key names no sibling, which is every
+            // offer and every ticket only one session quoted, there is nothing to read.
             let (actor, ruling) = reduced(stream).vouched(key)?;
-            if self.sole_holder(key)?.0 != root {
+            if self.live_holder(key, Some(&root))?.is_some() {
                 return Err(Unvouched::Ambiguous);
             }
             let release = HostObservation::Released {
@@ -1865,17 +1881,21 @@ impl Runtime {
         consumed
     }
 
-    /// The one root holding the one live standing behind this key, found by asking the store
-    /// which families named it and reducing each one's host stream.
+    /// The one root holding the one live standing behind this key, which is the family whose
+    /// log the release will land on.
+    fn sole_holder(&self, key: &PermitKey) -> Result<TrajectoryId, Unvouched> {
+        self.live_holder(key, None)?.ok_or(Unvouched::Nobody)
+    }
+
+    /// Which family holds a live standing behind this key, found by asking the store which
+    /// families named it and reducing each one's host stream, and leaving out the one the
+    /// caller has already folded for itself.
     ///
-    /// Anything else refuses: no holder is nobody, and two — in one family or across two —
-    /// mean the key does not identify a caller. A read that fails answers nobody, because a
+    /// Nothing held is nothing; two — in one family or across two — are `Ambiguous`, because
+    /// then the key does not identify a caller. A read that fails answers nobody, because a
     /// partial view cannot tell a lone holder from one of two and would answer the ambiguous
     /// case with one session's standing.
-    fn sole_holder(
-        &self,
-        key: &PermitKey,
-    ) -> Result<(TrajectoryId, Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
+    fn live_holder(&self, key: &PermitKey, folded: Option<&TrajectoryId>) -> Result<Option<TrajectoryId>, Unvouched> {
         let candidates = match self
             .inner
             .store
@@ -1889,9 +1909,12 @@ impl Runtime {
                 return Err(Unvouched::Nobody);
             }
         };
-        let mut held: Option<(TrajectoryId, Actor, Option<appa_runtime_api::Ruling>)> = None;
+        let mut held: Option<TrajectoryId> = None;
         for candidate in candidates {
             let root = TrajectoryId(candidate.as_str().to_string());
+            if folded == Some(&root) {
+                continue;
+            }
             // The whole host stream, not the rows that name the key: a turn's end releases
             // every standing its actor held and says so without naming one.
             let stream = match self.inner.host_stream(&root) {
@@ -1902,12 +1925,12 @@ impl Runtime {
                 }
             };
             match reduced(&stream).vouched(key) {
-                Ok((actor, ruling)) if held.is_none() => held = Some((root, actor, ruling)),
+                Ok(_) if held.is_none() => held = Some(root),
                 Ok(_) | Err(Unvouched::Ambiguous) => return Err(Unvouched::Ambiguous),
                 Err(Unvouched::Nobody) => {}
             }
         }
-        held.ok_or(Unvouched::Nobody)
+        Ok(held)
     }
 
     /// A prompt reached this actor, which is the sign that its previous turn is over
@@ -3542,7 +3565,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             root: root.clone(),
             child: Some(TrajectoryId(format!("{}:c1", root.0))),
         };
-        let quoted = PermitKey::offer(&OfferId("offer-1".to_string()));
+        let quoted = PermitKey::offer(&OfferId("0ffe000000000001".to_string()));
 
         runtime.vouch(&quoted, &child, Some(appa_runtime_api::Ruling::Approve));
         crate::hooks::handle(&runtime, appa_runtime_api::HookEvent::TurnEnd { actor: parent.clone() }).await;
@@ -3588,7 +3611,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             root: root.clone(),
             child: None,
         };
-        let quoted = PermitKey::offer(&OfferId("offer-1".to_string()));
+        let quoted = PermitKey::offer(&OfferId("0ffe000000000001".to_string()));
 
         runtime.vouch(&quoted, &actor, None);
         assert_eq!(
