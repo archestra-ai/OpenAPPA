@@ -1,9 +1,9 @@
 # Example deployment for protecting a Claude Code session.
 #
-# The stable built-in tools of the harness are named. Bash and Read are left to
-# the Claude Code battery, which `appa plugin install claude-code` includes with
-# this file; a deployment that removed the battery sends them to the bounded
-# Claude fallback at the end of this file instead. Any other tool the policy
+# The stable built-in tools of the harness are named. Bash, Read, Grep, Write
+# and Edit are left to the Claude Code battery, which `appa plugin install
+# claude-code` includes with this file; a deployment that removed the battery
+# sends them to the bounded Claude fallback at the end of this file instead. Any other tool the policy
 # does not name gets the same per-call fallback until `/appa-guide init` gives it
 # an exact contract. A named tool without a `delta` key restricts nothing, the
 # same statement as `delta = {}`: the result's label is the combination of its
@@ -24,10 +24,12 @@
 # channel history `internal` — cannot reach them. The chain works without a
 # directory: `self` and `internal` are symbolic, and only a rule naming an
 # individual recipient needs a source to check them (see the end of this
-# file). Bash and Read are not named here on purpose: a name written with
-# an argument selector is declared, and a call no selector matches is
-# refused rather than sent to the `*` fallback, so their rules live in the
-# battery beside its bare `Bash` and `Read` rules.
+# file). Bash, Read, Grep, Write and Edit are not named here on purpose: the
+# root's declarations are checked before an included file's, so a bare rule
+# here would shadow the battery's argument selectors, and a name written with
+# a selector is declared, so a call no selector matches is refused rather than
+# sent to the `*` fallback. Their rules live in the battery, selectors first
+# and the bare rule last.
 #
 # The built-in tool set varies by Claude Code version; regenerate the
 # list from a live session when it drifts.
@@ -76,10 +78,6 @@ name = "host/claude-code/CronList"
 delta = {}
 
 [[policy.tool]]
-name = "host/claude-code/Edit"
-delta = {}
-
-[[policy.tool]]
 name = "host/claude-code/EnterPlanMode"
 delta = {}
 
@@ -97,10 +95,6 @@ delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Glob"
-delta = {}
-
-[[policy.tool]]
-name = "host/claude-code/Grep"
 delta = {}
 
 [[policy.tool]]
@@ -202,10 +196,6 @@ delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/Workflow"
-delta = {}
-
-[[policy.tool]]
-name = "host/claude-code/Write"
 delta = {}
 
 # --- tools that bring outside content into the session ---

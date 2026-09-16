@@ -4,7 +4,7 @@ name = "appa"
 
 [packages.battery.claude-code]
 path = "batteries/claude-code"
-digest = "sha256:af3a1ed501bc6b64e65bccf6b256019cdc47c8521bf30abb47f042908a8e482e"
+digest = "sha256:90182616398329e8c62a12d2cd1e36c195ba7eb4fb7dcdf301624fe2f9c3996b"
 
 [packages.battery.cloudflare-docs]
 path = "batteries/cloudflare-docs"
@@ -64,7 +64,7 @@ digest = "sha256:05683c96e66f8e8afcb66e9bfa0535bed1a226467241399aec082b687a947ed
 
 [packages.plugin.claude-code]
 path = "plugins/claude-code"
-digest = "sha256:e26651ff89f5114764918bca5d4e8d849dbcc635fdbc9ea0e9333e207f0fa164"
+digest = "sha256:8fcdc75951fb942db6b18b45f28b803e7ab6dd789a46d99b538f4f6c2a4f0054"
 
 [packages.plugin.kagent]
 path = "plugins/kagent"

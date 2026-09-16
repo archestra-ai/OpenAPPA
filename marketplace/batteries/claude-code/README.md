@@ -5,8 +5,9 @@ labels on the requester's own secrets. `appa plugin install claude-code`
 includes it on a first install; `appa battery remove claude-code` takes it out,
 and a later plugin install does not bring it back.
 
-It covers two built-in tools, which the policy names `host/claude-code/Bash`
-and `host/claude-code/Read`:
+It covers five built-in tools, which the policy names `host/claude-code/Bash`,
+`host/claude-code/Read`, `host/claude-code/Grep`, `host/claude-code/Write`
+and `host/claude-code/Edit`:
 
 - **Bash** — A command that names a credential path (`.env`, `.ssh/`, `.netrc`,
   `.claude.json`, `.aws/credentials`, a private key, ...) narrows the session
@@ -29,6 +30,15 @@ and `host/claude-code/Read`:
   built from it reaches a sink that requires `internal` or `public`. The rules
   match the path as written, absolute or relative. Other paths keep the
   session's label. No rule blocks a read or lowers its trust.
+- **Grep** — A search inside one of the same paths is a read of it and
+  narrows the session to `self`. A search over a directory that holds such
+  a file is not matched; only the path as written is.
+- **Write, Edit** — Writing into one of the same paths requires a `trusted`
+  session: content that arrived at `suspicious` reaches a file the next
+  process trusts only when the person running the session approves the exact
+  call. Writing the harness's own settings (`.claude/settings*`) or the
+  deployment's policy (`appa/appa.toml`, `appa/batteries/`) asks that person
+  every time. Every other path takes the session's label as it is.
 
 The default config `appa plugin install claude-code` writes provides the
 wildcard fallback for tools it does not name and the deployment-specific Bash
