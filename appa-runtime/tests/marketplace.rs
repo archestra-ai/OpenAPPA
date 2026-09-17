@@ -1,0 +1,627 @@
+//! The marketplace manifest against the marketplace it describes.
+//!
+//! `marketplace.toml` is what a deployment authenticates a package against, so
+//! a digest that has drifted from the directory it names is the one failure
+//! that must never reach a release. This runs in the repository, where the
+//! packages are files; a deployment checks the same digests against what it
+//! fetched.
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use appa_package::{Host, Marketplace, PackageKind, Role, TreeDigest, check_ownership, validate_package};
+use appa_runtime::config::Config;
+
+fn repository() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("appa-runtime is inside the repository")
+        .to_path_buf()
+}
+
+fn marketplace_root() -> PathBuf {
+    repository().join("marketplace")
+}
+
+fn manifest() -> Marketplace {
+    Marketplace::read(&marketplace_root().join("marketplace.toml")).expect("the marketplace manifest reads")
+}
+
+#[test]
+fn kagent_package_images_follow_the_release_registry_and_version() {
+    let package = validate_package(&marketplace_root().join("plugins/kagent")).unwrap();
+    let Role::Plugin(appa_package::Plugin::Kagent { images, .. }) = package.role else {
+        panic!("the kagent package declares kagent images");
+    };
+    for (name, reference) in images {
+        let expected = format!(
+            "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-{}:v{}",
+            name.as_str(),
+            env!("CARGO_PKG_VERSION"),
+        );
+        assert_eq!(reference.as_str(), expected);
+    }
+}
+
+/// Every package the manifest names is a package: it parses, its declared paths
+/// exist, its policy names only namespaces it covers, and it runs only helpers
+/// it ships.
+///
+/// And the packages hold together: a namespace and a credential each have one
+/// owner. A deployment installs several of these side by side into one policy,
+/// so a second package covering the first's namespace would append contracts to
+/// tools the first never declared, and one naming a credential the first's
+/// prefix covers would be handed it at spawn.
+#[test]
+fn every_package_the_marketplace_names_validates() {
+    let root = marketplace_root();
+    let mut packages = Vec::new();
+    for entry in manifest().packages {
+        let directory = root.join(entry.path.as_str());
+        let package = validate_package(&directory).unwrap_or_else(|error| {
+            panic!("{} does not validate: {error}", entry.path);
+        });
+        assert_eq!(
+            package.name, entry.name,
+            "{} is listed as {} and calls itself {}",
+            entry.path, entry.name, package.name
+        );
+        // The kind is the table the package is listed under, and it decides how
+        // a deployment installs it. A battery listed as an adapter parses,
+        // validates and digests, and is installed as the wrong thing.
+        let kind = match package.role {
+            Role::Plugin(_) => PackageKind::Plugin,
+            Role::Battery(_) => PackageKind::Battery,
+        };
+        assert_eq!(
+            kind, entry.kind,
+            "{} is listed as a {} and is a {kind}",
+            entry.path, entry.kind
+        );
+        packages.push(package);
+    }
+    check_ownership(&packages).expect("the marketplace's packages hold together");
+}
+
+/// The recorded digest is the digest of the package's committed content, which
+/// is what a deployment fetches and digests in turn. It is read out of Git
+/// rather than off the working tree, because a working tree also holds what the
+/// tests left behind — a `__pycache__` beside a battery's helper is not part of
+/// the package, and never reaches the archive a deployment resolves. When this
+/// fails, regenerate the catalog with `bash scripts/appa-marketplace.sh`.
+#[test]
+fn every_recorded_digest_is_the_digest_of_its_committed_package() {
+    let exported = tempfile::tempdir().expect("a temp dir is creatable");
+    export_committed(exported.path());
+    let root = exported.path().join("marketplace");
+
+    let drifted: Vec<String> = manifest()
+        .packages
+        .iter()
+        .filter_map(|entry| {
+            let directory = root.join(entry.path.as_str());
+            let found = TreeDigest::of_tree(&directory).unwrap_or_else(|error| {
+                panic!("{} cannot be digested: {error}", entry.path);
+            });
+            (found != entry.digest).then(|| format!("[{}] {} -> {}", entry.path, entry.digest, found))
+        })
+        .collect();
+
+    assert!(
+        drifted.is_empty(),
+        "Regenerate with `bash scripts/appa-marketplace.sh`: package digests changed:\n  {}",
+        drifted.join("\n  ")
+    );
+}
+
+/// The marketplace subtree as `HEAD` holds it. `git archive` is how the build
+/// script already reads committed content, and how a deployment will receive a
+/// generation.
+fn export_committed(destination: &Path) {
+    let archive = Command::new("git")
+        .arg("-C")
+        .arg(repository())
+        .args(["archive", "--format=tar", "HEAD", "--", "marketplace"])
+        .output()
+        .expect("git runs");
+    assert!(
+        archive.status.success(),
+        "git archive failed: {}",
+        String::from_utf8_lossy(&archive.stderr)
+    );
+    let mut extract = Command::new("tar")
+        .arg("-x")
+        .arg("-C")
+        .arg(destination)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("tar runs");
+    extract
+        .stdin
+        .take()
+        .expect("tar takes its input")
+        .write_all(&archive.stdout)
+        .expect("the archive is written");
+    assert!(extract.wait().expect("tar finishes").success(), "tar failed");
+}
+
+/// A package directory that no entry names would ship unauthenticated, so the
+/// manifest must list every one of them.
+#[test]
+fn every_package_directory_is_named_by_the_marketplace() {
+    let root = marketplace_root();
+    let listed: Vec<PathBuf> = manifest()
+        .packages
+        .iter()
+        .map(|entry| root.join(entry.path.as_str()))
+        .collect();
+
+    let mut found = Vec::new();
+    for kind in ["plugins", "batteries"] {
+        let directory = root.join(kind);
+        for entry in std::fs::read_dir(&directory).expect("the marketplace holds both package kinds") {
+            let path = entry.expect("the directory entry reads").path();
+            if path.join(appa_package::MANIFEST_FILE).is_file() {
+                found.push(path);
+            }
+        }
+    }
+
+    let unlisted: Vec<&Path> = found
+        .iter()
+        .filter(|path| !listed.contains(path))
+        .map(PathBuf::as_path)
+        .collect();
+    assert!(
+        unlisted.is_empty(),
+        "a package directory the marketplace does not name: {unlisted:?}"
+    );
+}
+
+/// A battery that validates is a battery a deployment can include. The two
+/// checks run in different crates and the dependency goes one way — the
+/// validator is a leaf that cannot see the config loader, so it restates the
+/// loader's rules rather than deriving them — so this composes each battery
+/// into the root config of every host it declares and loads the result. A rule
+/// one of them learns and the other does not shows up here as a battery that
+/// validates and will not load.
+#[test]
+fn every_battery_composes_into_each_host_it_declares() {
+    let root = marketplace_root();
+    let manifest = manifest();
+    let default_policy = |host: Host| {
+        manifest
+            .packages
+            .iter()
+            .find_map(
+                |entry| match validate_package(&root.join(entry.path.as_str())).ok()?.role {
+                    Role::Plugin(adapter) if adapter.host() == host => {
+                        Some(root.join(entry.path.as_str()).join(adapter.default_policy().as_str()))
+                    }
+                    _ => None,
+                },
+            )
+            .unwrap_or_else(|| panic!("the marketplace ships no adapter for {host}"))
+    };
+
+    for entry in &manifest.packages {
+        let directory = root.join(entry.path.as_str());
+        let Role::Battery(battery) = validate_package(&directory).expect("the package validates").role else {
+            continue;
+        };
+        for host in &battery.hosts {
+            // A deployment holds the package beside its root config and
+            // includes it by a relative path, which is the only shape the
+            // loader accepts. The composition is that arrangement.
+            let composed = tempfile::tempdir().expect("a temp dir is creatable");
+            let installed = composed.path().join(entry.name.as_str());
+            copy_tree(&directory, &installed);
+            let seed = std::fs::read_to_string(default_policy(*host)).expect("the adapter ships its default policy");
+            let path = composed.path().join("appa.toml");
+            std::fs::write(
+                &path,
+                format!("include = [\"{}/{}\"]\n{seed}", entry.name, battery.policy),
+            )
+            .expect("the composed config is writable");
+
+            Config::load(&path)
+                .unwrap_or_else(|error| panic!("{} validates but does not compose into {host}: {error}", entry.path));
+        }
+    }
+}
+
+/// Where the test process's own PATH resolves `program`.
+fn on_path(program: &str) -> PathBuf {
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|directory| directory.join(program))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| panic!("{program} is on the PATH"))
+}
+
+/// Every audience source a battery binds refuses a consult whose declared
+/// templates are not the ones it serves, and does so before it reads a
+/// credential: with no `APPA_PROVIDER_*` variable set and no CLI login on the
+/// `PATH` to fall back to, the matching declaration reaches the token check
+/// (exit 1) and a foreign one stops at the declaration check (exit 2). A
+/// policy and a script of different versions never answer each other,
+/// whatever the policy declares.
+#[test]
+fn every_bound_audience_source_checks_its_declaration_before_its_credential() {
+    let root = marketplace_root();
+    // The interpreter is run by its resolved path so the helper's PATH can be
+    // empty: a `gh` on the developer's PATH would supply the credential.
+    let no_path = tempfile::tempdir().expect("a temp dir is creatable");
+    let mut checked = 0;
+    for entry in &manifest().packages {
+        let directory = root.join(entry.path.as_str());
+        let Role::Battery(battery) = validate_package(&directory).expect("the package validates").role else {
+            continue;
+        };
+        let installed = tempfile::tempdir().expect("a temp dir is creatable");
+        copy_tree(&directory, installed.path());
+        let policy: toml::Value = toml::from_str(
+            &std::fs::read_to_string(installed.path().join(battery.policy.as_str())).expect("the battery policy reads"),
+        )
+        .expect("the battery policy is TOML");
+        for source in appa_policy::declared_sources(&policy).expect("the battery declares its sources") {
+            let provider = &source.provider;
+            let argv: Vec<&str> = policy["externals"]["audience"][provider]["command"]
+                .as_array()
+                .expect("a battery binds its source by a command")
+                .iter()
+                .map(|word| word.as_str().expect("an argv word"))
+                .collect();
+            let served: Vec<String> = source
+                .templates
+                .iter()
+                .map(|t| t.template.as_str().to_owned())
+                .collect();
+            let mut foreign = served.clone();
+            foreign.push("foreign/<x>".to_owned());
+            for (templates, expected) in [(served, 1), (foreign, 2)] {
+                let consult = serde_json::json!({
+                    "version": 1,
+                    "kind": "audience",
+                    "name": provider,
+                    "declaration": { "templates": templates },
+                    "artifact": { "selector": "viewer" },
+                });
+                let mut child = Command::new(on_path(argv[0]))
+                    .args(&argv[1..])
+                    .current_dir(installed.path())
+                    .env_clear()
+                    .env("PATH", no_path.path())
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("the helper spawns");
+                child
+                    .stdin
+                    .take()
+                    .expect("stdin is piped")
+                    .write_all(consult.to_string().as_bytes())
+                    .expect("the consult writes");
+                let output = child.wait_with_output().expect("the helper exits");
+                assert_eq!(
+                    output.status.code(),
+                    Some(expected),
+                    "{provider} of {}: {}",
+                    entry.path,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(
+                    output.stdout.is_empty(),
+                    "{provider} of {} answered without a credential",
+                    entry.path
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked >= 3, "the shipped batteries bind audience sources");
+}
+
+/// One package directory, as a deployment would hold it.
+fn copy_tree(source: &Path, destination: &Path) {
+    std::fs::create_dir_all(destination).expect("the destination is creatable");
+    for entry in std::fs::read_dir(source).expect("the package directory reads") {
+        let entry = entry.expect("the directory entry reads");
+        let target = destination.join(entry.file_name());
+        match entry.file_type().expect("the entry has a type").is_dir() {
+            true => copy_tree(&entry.path(), &target),
+            false => {
+                std::fs::copy(entry.path(), target).expect("the file copies");
+            }
+        }
+    }
+}
+
+/// A fragment that validates loads.
+///
+/// `appa-package` states what a distributed fragment may carry and
+/// `appa-runtime`'s config loader states what any include may carry. The
+/// dependency goes one way: `appa-package` is a leaf the build script loads,
+/// so it restates the loader's rules and nothing derives one from the other.
+/// Every rule one of them learns is a chance for them to disagree, and the
+/// disagreement that matters has one direction: a package that validates and
+/// then will not load breaks a deployment that trusted the marketplace.
+///
+/// The converse is deliberately false. A battery is a fragment someone else
+/// wrote and a deployment installed, so the marketplace refuses what the loader
+/// merely tolerates from a file the operator wrote themselves — a `url` binding
+/// reaching an endpoint the deployment did not choose is the plain case. Those
+/// are the `no, yes` rows below, and each one is a decision rather than a gap.
+///
+/// So each row carries both answers rather than the implication alone, which a
+/// validator that refused everything would satisfy. The rows are crafted to sit
+/// on each rule's edge; the shipped batteries sit in the middle of every rule
+/// and would agree whatever the rules were.
+#[test]
+fn a_battery_that_validates_loads() {
+    const HELPER: &str = "audience-source.py";
+    let body = |declarations: &str, externals: &str| format!("[policy]\nversion = 2\n\n{declarations}\n{externals}");
+    let tool = "[[policy.tool]]\nname = \"mcp/probe/read\"\ndelta = {}\n";
+    let command = format!("[externals.audience.probe]\ncommand = [\"python3\", \"{HELPER}\"]\n");
+
+    // Every row carries both answers. The marketplace's is the rule under
+    // test; the loader's is what a deployment does with the same file, and
+    // without it the rows the marketplace refuses would assert nothing.
+    let yes = true;
+    let no = false;
+    let fragments = [
+        ("a plain battery", yes, yes, body(tool, "")),
+        (
+            "a server-qualified native battery contract",
+            yes,
+            yes,
+            body("[[policy.tool]]\nname = 'read(path:docs*)'\nserver = 'probe'\n", ""),
+        ),
+        (
+            "a native battery contract outside its owned namespace",
+            no,
+            yes,
+            body("[[policy.tool]]\nname = 'read'\nserver = 'other'\n", ""),
+        ),
+        ("a battery that runs its helper", yes, yes, body(tool, &command)),
+        (
+            "a provider credential this package owns",
+            yes,
+            yes,
+            body(tool, &format!("{command}token_env = \"APPA_PROVIDER_PROBE\"\n")),
+        ),
+        // Stricter than the loader on purpose. A battery is a fragment someone
+        // else wrote and a deployment installed; the loader is reading a file
+        // the operator wrote themselves, and tolerates more from it.
+        (
+            "a credential another package owns",
+            no,
+            yes,
+            body(tool, &format!("{command}token_env = \"APPA_PROVIDER_SLACK\"\n")),
+        ),
+        (
+            "a url binding",
+            no,
+            yes,
+            body(tool, "[externals.audience.probe]\nurl = \"http://127.0.0.1:9/x\"\n"),
+        ),
+        (
+            "a declaration without a name",
+            no,
+            yes,
+            body("[[policy.tool]]\ndelta = {}\n", ""),
+        ),
+        (
+            "a stock sanitizer bound by name",
+            yes,
+            yes,
+            body(
+                &format!("{tool}\n[[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\n"),
+                "[externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\n",
+            ),
+        ),
+        // Stricter than the loader again: the loader lets an operator's own
+        // file bind the stock approving authority; a battery may not.
+        (
+            "a stock authority bound by name",
+            no,
+            yes,
+            body(
+                &format!(
+                    "{tool}\n[[policy.authority]]\nname = \"nod\"\n[policy.authority.permits]\nattention = [\"hitl\"]\n"
+                ),
+                "[externals.authorities.nod]\nbuiltin = \"approve\"\n",
+            ),
+        ),
+        // Refused by both, each for its own reason: neither crate reads the
+        // other, so agreeing here is the thing worth holding.
+        (
+            "a builtin binding",
+            no,
+            no,
+            body(tool, "[externals.audience.probe]\nbuiltin = \"llm\"\n"),
+        ),
+        (
+            "a root-only external setting",
+            no,
+            no,
+            body(tool, "[externals]\ntimeout_ms = 5000\n"),
+        ),
+        (
+            "a credential outside the provider namespace",
+            no,
+            no,
+            body(tool, &format!("{command}token_env = \"PROBE_TOKEN\"\n")),
+        ),
+        (
+            "a root-only policy section",
+            no,
+            no,
+            body(&format!("{tool}\n[policy.audience]\nteam = []\n"), ""),
+        ),
+        (
+            "a battery confining the results of its own tool",
+            yes,
+            yes,
+            body(
+                &format!("{tool}\n[policy.deployment]\nconfined_results = [\"mcp/probe/read\"]\n"),
+                "",
+            ),
+        ),
+        (
+            "a battery confining the results of a tool it does not declare",
+            no,
+            no,
+            body(
+                &format!("{tool}\n[policy.deployment]\nconfined_results = [\"mcp/probe/write\"]\n"),
+                "",
+            ),
+        ),
+        (
+            "a deployment setting beside the confinement",
+            no,
+            no,
+            body(
+                &format!(
+                    "{tool}\n[policy.deployment]\nconfined_results = [\"mcp/probe/read\"]\nstarting_label = {{ audience = [\"internal\"] }}\n"
+                ),
+                "",
+            ),
+        ),
+        (
+            "a top-level table only a root carries",
+            no,
+            no,
+            format!("[deployment]\nname = \"x\"\n{}", body(tool, "")),
+        ),
+        ("no policy version", no, no, format!("[policy]\n\n{tool}")),
+        (
+            "a source declaring the selectors it serves",
+            yes,
+            yes,
+            body(
+                tool,
+                &format!(
+                    "{command}selectors = [{{ template = \"viewer\", feeds = \"self\" }}, {{ template = \"channel/<id>\" }}]\n"
+                ),
+            ),
+        ),
+        (
+            "a selector feeding an audience outside the chain",
+            no,
+            no,
+            body(
+                tool,
+                &format!("{command}selectors = [{{ template = \"viewer\", feeds = \"public\" }}]\n"),
+            ),
+        ),
+        (
+            "a selector declared twice",
+            no,
+            no,
+            body(
+                tool,
+                &format!("{command}selectors = [{{ template = \"viewer\" }}, {{ template = \"viewer\" }}]\n"),
+            ),
+        ),
+    ];
+
+    for (what, validates_expected, loads_expected, fragment) in fragments {
+        let package = tempfile::tempdir().expect("a temp dir is creatable");
+        std::fs::write(
+            package.path().join("appa-package.toml"),
+            "schema = 1\nname = \"probe\"\ndescription = \"a fragment on a rule's edge\"\n\n[battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n",
+        )
+        .expect("the manifest is writable");
+        std::fs::write(package.path().join("appa.toml"), &fragment).expect("the policy is writable");
+        std::fs::write(package.path().join(HELPER), "print('{}')\n").expect("the helper is writable");
+
+        let validates = validate_package(package.path()).is_ok();
+        let loads = loads_beside_a_root(package.path());
+
+        assert_eq!(
+            (validates, loads),
+            (validates_expected, loads_expected),
+            "{what}: the marketplace says {validates} and the loader says {loads}"
+        );
+        assert!(
+            !validates || loads,
+            "{what}: the package validates and then does not load"
+        );
+    }
+}
+
+/// Whether a deployment holding this package beside its root config loads.
+fn loads_beside_a_root(package: &Path) -> bool {
+    let deployment = tempfile::tempdir().expect("a temp dir is creatable");
+    let installed = deployment.path().join("probe");
+    copy_tree(package, &installed);
+    let root = deployment.path().join("appa.toml");
+    std::fs::write(
+        &root,
+        "include = [\"probe/appa.toml\"]\n[policy]\nversion = 2\n\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+    )
+    .expect("the root config is writable");
+    Config::load(&root).is_ok()
+}
+
+/// Every rule the two crates share, not a sample of it.
+///
+/// `a_battery_that_validates_loads` walks fragments on each rule's edge, which
+/// says nothing about a field or a binding kind no fragment happens to name.
+/// These two lists are what `appa-package` states an included fragment may
+/// carry, and each entry is a way for a package to validate here and be refused
+/// by the loader there, so every entry gets its own fragment.
+///
+/// The loader keeps its own literals rather than reading these. It owns the
+/// rule; the package crate restates it to refuse a package before a deployment
+/// ever sees it, and reversing that would make a leaf crate normative for what
+/// a deployment config may contain.
+#[test]
+fn every_field_and_binding_a_package_may_carry_loads() {
+    for field in appa_package::INCLUDABLE_POLICY_FIELDS {
+        if field == "version" {
+            continue;
+        }
+        let fragment = format!("[policy]\nversion = 2\n\n[[policy.{field}]]\nname = \"probe\"\n");
+        assert!(
+            probe_loads(&fragment, false),
+            "a package may declare `policy.{field}` and a deployment will not load it"
+        );
+    }
+
+    for kind in appa_package::BINDABLE_KINDS {
+        let fragment = format!(
+            "[policy]\nversion = 2\n\n[externals.{kind}.probe]\ncommand = [\"python3\", \"audience-source.py\"]\n"
+        );
+        assert!(
+            probe_loads(&fragment, true),
+            "a package may bind `externals.{kind}` and a deployment will not load it"
+        );
+    }
+
+    for stock in appa_package::BINDABLE_STOCK_SANITIZERS {
+        let fragment = format!(
+            "[policy]\nversion = 2\n\n[[policy.sanitizer]]\nname = \"probe\"\non = [\"tool_output\"]\n\n\
+             [externals.sanitizers.probe]\nbuiltin = \"{stock}\"\n"
+        );
+        assert!(
+            probe_loads(&fragment, false),
+            "a package may bind the stock sanitizer {stock} and a deployment will not load it"
+        );
+    }
+}
+
+/// One fragment installed beside a root config, as `a_battery_that_validates_loads`
+/// installs one, reporting only whether the deployment loads.
+fn probe_loads(fragment: &str, with_helper: bool) -> bool {
+    let package = tempfile::tempdir().expect("a temp dir is creatable");
+    std::fs::write(package.path().join("appa.toml"), fragment).expect("the policy is writable");
+    if with_helper {
+        std::fs::write(package.path().join("audience-source.py"), "print('{}')\n").expect("the helper is writable");
+    }
+    loads_beside_a_root(package.path())
+}

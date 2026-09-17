@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 
-const TEMPLATE: &str = include_str!("../../integrations/claude-code/examples/claude-code.appa.toml");
+const TEMPLATE: &str = include_str!("../../marketplace/plugins/claude-code/default.appa.toml");
 const UNIX_FALLBACK_BEGIN: &str = "# APPA-UNIX-FALLBACK-BEGIN";
 const UNIX_FALLBACK_END: &str = "# APPA-UNIX-FALLBACK-END";
 
@@ -58,7 +58,13 @@ mod tests {
             authority.mandate.reader_ceiling,
             Some(appa_engine::label::DeclaredAudience::Public)
         ));
-        assert_eq!(authority.mandate.attends, [appa_engine::names::MarkName::new("hitl")]);
+        assert_eq!(authority.mandate.attends, appa_engine::authority::Attends::Any);
+        let trusted = compiled
+            .registry()
+            .trust_chain()
+            .rank_of("trusted")
+            .expect("the default chain names trusted");
+        assert_eq!(authority.mandate.trust_ceiling, Some(trusted));
     }
 
     #[test]

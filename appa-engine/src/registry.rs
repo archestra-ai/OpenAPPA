@@ -7,10 +7,14 @@ use thiserror::Error;
 
 use crate::audience::{AudienceConfig, AudienceRegistry, SelectorSpec, Unroutable};
 use crate::authority::{Authority, DeclaredTransition, Hint, Sanitizer};
-use crate::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec, ToolAnnotation, ToolDeclaration};
+use crate::contract::{
+    AudienceRequirement, DeltaAudience, HistoryRequirement, RecipientSpec, SelectorPlaceholder, ToolAnnotation,
+    ToolDeclaration,
+};
 use crate::fact::EffectKind;
 use crate::label::{
-    Audience, DeclaredAudience, Evaluation, Expansions, GroupRef, MembershipContext, ReaderId, SymbolicAtom, Trust,
+    Audience, AudienceSpelling, ChainAudience, Clause, DeclaredAudience, Evaluation, Expansions, GroupRef,
+    MembershipContext, ReaderId, SymbolicAtom, Trust,
 };
 use crate::names::{AnnotatorName, AuthorityName, MarkName, SanitizerName, TagName};
 use crate::value::{ToolDeclarationId, ToolName};
@@ -156,13 +160,32 @@ fn parse_clause(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<
     Some((argument, parts, closed))
 }
 
-/// Split an authored declaration name into the tool it names and the matcher that selects it:
-/// `Tool` alone, or `Tool(argument:pattern[,argument:pattern...])`.
-fn parse_tool_selector(authored: &str) -> Result<(ToolName, ToolMatcher), LoadError> {
+/// What a `[[tool]]` declaration names once its argument selector is split off: one tool by
+/// its exact name, or the wildcard — the contract covering every tool call the policy does not
+/// name. The wildcard is not a tool name: it never keys the registry, never appears in a
+/// listing, and carries no metadata or selector.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ContractName {
+    Wildcard,
+    Named(ToolName),
+}
+
+impl ContractName {
+    fn parse(tool: &str) -> ContractName {
+        match tool {
+            WILDCARD_SPELLING => ContractName::Wildcard,
+            named => ContractName::Named(ToolName::new(named)),
+        }
+    }
+}
+
+/// Split an authored declaration name into the contract it names and the matcher that selects
+/// it: `Tool` alone, or `Tool(argument:pattern[,argument:pattern...])`.
+fn parse_tool_selector(authored: &str) -> Result<(ContractName, ToolMatcher), LoadError> {
     let malformed = || LoadError::MalformedToolSelector(authored.to_string());
     if !authored.contains(['(', ')']) {
         return (!authored.is_empty())
-            .then(|| (ToolName::new(authored), ToolMatcher::Bare))
+            .then(|| (ContractName::parse(authored), ToolMatcher::Bare))
             .ok_or_else(malformed);
     }
     let open = authored.find('(').ok_or_else(malformed)?;
@@ -178,11 +201,11 @@ fn parse_tool_selector(authored: &str) -> Result<(ToolName, ToolMatcher), LoadEr
         clauses.and(argument, pattern).ok_or_else(malformed)?;
         closed = next;
     }
-    Ok((ToolName::new(tool), ToolMatcher::Arguments(clauses)))
+    Ok((ContractName::parse(tool), ToolMatcher::Arguments(clauses)))
 }
 
 #[cfg(test)]
-pub(crate) fn base_tool_name(authored: &ToolName) -> Result<ToolName, LoadError> {
+pub(crate) fn contract_name(authored: &ToolName) -> Result<ContractName, LoadError> {
     parse_tool_selector(authored.as_str()).map(|(name, _)| name)
 }
 
@@ -246,18 +269,192 @@ impl TrustChain {
     }
 }
 
+/// The audience vocabulary an Annotator's answers may draw on: the built-in chain words, group
+/// references, and literal readers, each admissible on its own. A vocabulary, not a union —
+/// both chain words may be listed — and `public` is never a member: it is always admissible. A
+/// produced audience is admitted when every atom of every clause is a member; a symbolic
+/// member stays symbolic in the label exactly as a declaration writing it would, so membership
+/// is the act's question, never the annotation's. On the wire it is its entry list, so a
+/// vocabulary that arrives as data passes the same grammar a written one does.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<String>", into = "Vec<String>")]
+pub struct AudienceVocabulary {
+    chain: BTreeSet<ChainAudience>,
+    groups: BTreeSet<GroupRef>,
+    readers: BTreeSet<ReaderId>,
+    /// Collections keyed by the call: each is instantiated into a group per call, so the
+    /// mandate admits the one collection the call's arguments spell and no other.
+    placeholders: BTreeSet<SelectorPlaceholder>,
+}
+
+impl TryFrom<Vec<String>> for AudienceVocabulary {
+    type Error = AudienceSpelling;
+
+    fn try_from(list: Vec<String>) -> Result<AudienceVocabulary, AudienceSpelling> {
+        AudienceVocabulary::parse_entries(&list)
+    }
+}
+
+impl From<AudienceVocabulary> for Vec<String> {
+    fn from(vocabulary: AudienceVocabulary) -> Vec<String> {
+        vocabulary.entries().collect()
+    }
+}
+
+impl AudienceVocabulary {
+    /// One written vocabulary list, entry by entry. `public` is refused — always admissible,
+    /// never listed — and so are an argument placeholder, which belongs to a call argument, and
+    /// a repeated entry. A selector placeholder is admitted: it names, per call, the collection
+    /// the call's arguments spell. An empty list is the vocabulary that admits `public` alone.
+    pub fn parse_entries(list: &[String]) -> Result<AudienceVocabulary, AudienceSpelling> {
+        let mut vocabulary = AudienceVocabulary::default();
+        for entry in list {
+            if entry.starts_with('$') {
+                return Err(AudienceSpelling::Placeholder(entry.clone()));
+            }
+            match crate::names::AudienceArgument::parse(entry) {
+                Some(crate::names::AudienceArgument::Public) => return Err(AudienceSpelling::PublicListed),
+                Some(crate::names::AudienceArgument::Chain(level)) => {
+                    if !vocabulary.chain.insert(level) {
+                        return Err(AudienceSpelling::Duplicate(entry.clone()));
+                    }
+                }
+                Some(crate::names::AudienceArgument::Group(group)) => {
+                    if !vocabulary.groups.insert(group) {
+                        return Err(AudienceSpelling::Duplicate(entry.clone()));
+                    }
+                }
+                Some(crate::names::AudienceArgument::Placeholder(placeholder)) => {
+                    if !vocabulary.placeholders.insert(placeholder) {
+                        return Err(AudienceSpelling::Duplicate(entry.clone()));
+                    }
+                }
+                Some(crate::names::AudienceArgument::Reader(reader)) => {
+                    if !vocabulary.readers.insert(reader) {
+                        return Err(AudienceSpelling::Duplicate(entry.clone()));
+                    }
+                }
+                None => return Err(AudienceSpelling::Unknown(entry.clone())),
+            }
+        }
+        Ok(vocabulary)
+    }
+
+    /// The whole built-in chain: what an omitted bound admits before the policy's own names.
+    fn whole_chain() -> AudienceVocabulary {
+        AudienceVocabulary {
+            chain: BTreeSet::from([ChainAudience::Self_, ChainAudience::Internal]),
+            ..AudienceVocabulary::default()
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.chain.is_empty() && self.groups.is_empty() && self.readers.is_empty() && self.placeholders.is_empty()
+    }
+
+    /// The canonical spellings, as a policy writes them: the chain words in chain order, then
+    /// the group references (named, then source-qualified), then the selector placeholders,
+    /// then the readers. The one rendering the consult declaration, the policy identity, and a
+    /// description all use.
+    pub fn entries(&self) -> impl Iterator<Item = String> + '_ {
+        self.chain
+            .iter()
+            .map(|level| level.as_str().to_string())
+            .chain(self.groups.iter().map(ToString::to_string))
+            .chain(self.placeholders.iter().map(ToString::to_string))
+            .chain(self.readers.iter().map(|reader| reader.as_str().to_string()))
+    }
+
+    pub fn placeholders(&self) -> impl Iterator<Item = &SelectorPlaceholder> {
+        self.placeholders.iter()
+    }
+
+    /// Every audience-source provider this vocabulary names, by a `@provider:selector` mention
+    /// or a selector placeholder.
+    pub fn referenced_providers(&self) -> BTreeSet<String> {
+        self.groups
+            .iter()
+            .filter_map(|group| match group {
+                GroupRef::Source { provider, .. } => Some(provider.clone()),
+                GroupRef::Named(_) => None,
+            })
+            .chain(
+                self.placeholders
+                    .iter()
+                    .map(|placeholder| placeholder.provider().to_string()),
+            )
+            .collect()
+    }
+
+    /// The vocabulary for one call: each selector placeholder becomes the group the call's
+    /// arguments spell. A vocabulary without placeholders is its own instantiation; a call
+    /// that fills no placeholder — never a minted one — has no vocabulary.
+    pub fn instantiate(
+        &self,
+        arguments: &serde_json::Value,
+    ) -> Result<AudienceVocabulary, crate::contract::UnfilledPlaceholder> {
+        let mut instantiated = AudienceVocabulary {
+            placeholders: BTreeSet::new(),
+            ..self.clone()
+        };
+        for placeholder in &self.placeholders {
+            instantiated.groups.insert(placeholder.instantiate(arguments)?);
+        }
+        Ok(instantiated)
+    }
+
+    pub(crate) fn group_atoms(&self) -> impl Iterator<Item = SymbolicAtom> + '_ {
+        self.groups.iter().cloned().map(SymbolicAtom::Group)
+    }
+
+    /// Whether every atom of one clause is a member: the one admission test for a produced
+    /// audience, the same at the runtime's answer seam and in the engine's check.
+    pub fn permits_clause(&self, clause: &Clause) -> bool {
+        clause.chain().is_none_or(|level| self.chain.contains(&level))
+            && clause.groups().all(|group| self.groups.contains(group))
+            && clause.readers().iter().all(|reader| self.readers.contains(reader))
+    }
+
+    fn add_clause(&mut self, clause: &Clause) {
+        self.chain.extend(clause.chain());
+        self.groups.extend(clause.groups().cloned());
+        self.readers.extend(clause.readers().iter().cloned());
+    }
+
+    fn add_declared(&mut self, audience: &DeclaredAudience) {
+        if let DeclaredAudience::Union(clause) = audience {
+            self.add_clause(clause);
+        }
+    }
+
+    fn add_audience(&mut self, audience: &Audience) {
+        for clause in audience.clauses() {
+            self.add_clause(clause);
+        }
+    }
+
+    /// The other vocabulary's static entries — its chain levels, groups and readers. A
+    /// selector placeholder is left behind: it reads the arguments of the calls its own
+    /// annotator sees and names no audience anywhere else.
+    fn extend_static(&mut self, other: &AudienceVocabulary) {
+        self.chain.extend(other.chain.iter().copied());
+        self.groups.extend(other.groups.iter().cloned());
+        self.readers.extend(other.readers.iter().cloned());
+    }
+}
+
 /// A registered Annotator: the boundary the policy routes per-call annotation through, named by
 /// declarations that carry `annotator = "..."` instead of static semantics. Each optional field
 /// narrows the vocabulary its produced annotations may draw on; an omitted field is the whole
-/// policy vocabulary — every chain rank, every literal reader the policy writes, every declared
-/// attention mark, every declared effect kind.
+/// policy vocabulary — every chain rank, the whole audience chain with every group and every
+/// literal reader the policy writes, every declared attention mark, every declared effect kind.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnnotatorDeclaration {
     pub name: AnnotatorName,
     #[serde(default)]
     pub trust: Option<BTreeSet<Trust>>,
     #[serde(default)]
-    pub audiences: Option<BTreeSet<ReaderId>>,
+    pub audiences: Option<AudienceVocabulary>,
     #[serde(default)]
     pub marks: Option<BTreeSet<MarkName>>,
     #[serde(default)]
@@ -268,11 +465,11 @@ pub struct AnnotatorDeclaration {
 /// every omitted bound resolved to the whole policy vocabulary at load. The engine holds the
 /// answer to it at the check and again on replay; the runtime restates it to the Annotator so an
 /// implementation knows the vocabulary before it answers. `public` is always an admissible
-/// audience state — the reader set names who a restricted answer may include.
+/// audience state — the audience vocabulary names what a restricted answer may draw on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnnotatorMandate {
     trust: BTreeSet<Trust>,
-    audiences: BTreeSet<ReaderId>,
+    audiences: AudienceVocabulary,
     marks: BTreeSet<MarkName>,
     effects: BTreeSet<EffectKind>,
 }
@@ -282,8 +479,8 @@ impl AnnotatorMandate {
         self.trust.iter().copied()
     }
 
-    pub fn audiences(&self) -> impl Iterator<Item = &ReaderId> {
-        self.audiences.iter()
+    pub fn audiences(&self) -> &AudienceVocabulary {
+        &self.audiences
     }
 
     pub fn marks(&self) -> impl Iterator<Item = &MarkName> {
@@ -294,12 +491,24 @@ impl AnnotatorMandate {
         self.effects.iter()
     }
 
+    /// The mandate for one call: its audience vocabulary with every selector placeholder
+    /// instantiated from the call's arguments.
+    pub fn instantiate(
+        &self,
+        arguments: &serde_json::Value,
+    ) -> Result<AnnotatorMandate, crate::contract::UnfilledPlaceholder> {
+        Ok(AnnotatorMandate {
+            audiences: self.audiences.instantiate(arguments)?,
+            ..self.clone()
+        })
+    }
+
     pub(crate) fn permits_trust(&self, trust: Trust) -> bool {
         self.trust.contains(&trust)
     }
 
-    pub(crate) fn permits_reader(&self, reader: &ReaderId) -> bool {
-        self.audiences.contains(reader)
+    pub(crate) fn permits_clause(&self, clause: &Clause) -> bool {
+        self.audiences.permits_clause(clause)
     }
 
     pub(crate) fn permits_mark(&self, mark: &MarkName) -> bool {
@@ -346,6 +555,10 @@ pub enum LoadError {
     WildcardMetadata,
     #[error("the policy writes more than one wildcard tool \"*\"")]
     DuplicateWildcard,
+    #[error(
+        "the wildcard tool \"*\" routes through annotator {0}, whose mandate reads call arguments through a selector placeholder — a wildcard covers calls whose arguments the policy does not describe"
+    )]
+    WildcardPlaceholderMandate(String),
     #[error("duplicate tool contract: {0}")]
     DuplicateTool(String),
     #[error("malformed tool selector {0:?}")]
@@ -368,6 +581,8 @@ pub enum LoadError {
     DuplicateSanitizer(String),
     #[error("authority {0} has an empty mandate (covers nothing)")]
     EmptyMandate(String),
+    #[error("authority {0} permits `blocked`, the reserved mark no authority may attend")]
+    ReservedMark(String),
     #[error("trust rank {rank} out of the chain (length {len}) in {context}")]
     RankOutOfChain { rank: u8, len: usize, context: String },
     #[error(
@@ -403,10 +618,16 @@ pub enum LoadError {
         slot: crate::profile::CoverageSlot,
         tool: String,
     },
+    #[error("overlapping tool rules {first} and {second} declare incompatible executors")]
+    ConflictingToolExecutors { first: String, second: String },
     #[error(
         "tool {tool} is provider-run and cannot be a confined result point: its result reaches the model inside the inference call, before any host could withhold it"
     )]
     ConfinedProviderRun { tool: String },
+    #[error(
+        "tool {tool} is provider-run and its delta reads a selector placeholder: a provider-run result arrives with no call to read the placeholder from"
+    )]
+    ProviderRunPlaceholder { tool: String },
     #[error(
         "sanitizer {sanitizer} registers on tool_output but the deployment confines no application point — neither a result point nor, under context control, a child's return"
     )]
@@ -433,7 +654,7 @@ pub enum LoadError {
         construct: crate::profile::ProviderRunConstruct,
     },
     #[error(
-        "{context} binds audience argument {argument:?}, which {fault}: a placeholder names a required top-level string property of the tool's `parameters`"
+        "{context} binds audience argument {argument:?}, which {fault}: an audience argument is a required top-level string, so `parameters` may not declare it as another type"
     )]
     AudienceBindingSchema {
         context: String,
@@ -474,18 +695,30 @@ impl Default for PlannerCap {
 /// intended shape.
 pub const MAX_HINT_CHARS: usize = 512;
 
+/// The remedy components the planner-cap lint counts against: every registered authority and
+/// sanitizer, and the policy's whole mark vocabulary, which is what a catch-all authority attends.
+struct Remedies<'a> {
+    authorities: &'a [Authority],
+    sanitizers: &'a [Sanitizer],
+    attention_marks: &'a BTreeSet<MarkName>,
+}
+
 fn worst_case_plan_alternatives(
     declaration: &ToolDeclaration,
     confined: bool,
     context_control: bool,
     tools: &[&ToolDeclaration],
-    authorities: &[Authority],
-    sanitizers: &[Sanitizer],
+    remedies: &Remedies<'_>,
     context: &MembershipContext<'_>,
 ) -> u128 {
     use crate::check::Gap;
     use crate::plan::{covers_gap, gap_cover};
 
+    let Remedies {
+        authorities,
+        sanitizers,
+        attention_marks,
+    } = *remedies;
     let tags = declaration.tags();
     let mut count: u128 = 1;
     let mut multiply = |competent: usize| count = count.saturating_mul(competent.max(1) as u128);
@@ -525,13 +758,18 @@ fn worst_case_plan_alternatives(
     match declaration {
         // An Annotated declaration's requirements exist only per call: the Annotator may answer
         // any slot its mandate allows, so the lint takes the worst case on every slot at once —
-        // a produced trust floor, a produced `contains`, and any mark an authority can attend.
+        // a produced trust floor, a produced `contains`, and any declared mark an authority
+        // covers — under a catch-all, the whole vocabulary but the reserved denial.
         ToolDeclaration::Annotated { .. } => {
             multiply(trust_cap_competent());
             multiply(reader_cap_competent());
-            let dynamic_marks: BTreeSet<_> = authorities
+            let dynamic_marks: Vec<MarkName> = attention_marks
                 .iter()
-                .flat_map(|authority| authority.mandate.attends.iter())
+                .filter(|mark| {
+                    authorities
+                        .iter()
+                        .any(|authority| authority.mandate.attends.covers(mark))
+                })
                 .cloned()
                 .collect();
             for mark in dynamic_marks {
@@ -566,7 +804,9 @@ fn worst_case_plan_alternatives(
                             RecipientSpec::Static(recipients) => multiply(includes_competent(recipients)),
                             // A placeholder's recipients come from the call, so nothing about
                             // the gap is known here.
-                            RecipientSpec::Placeholder(_) => multiply(reader_cap_competent()),
+                            RecipientSpec::Placeholder(_) | RecipientSpec::Selector(_) => {
+                                multiply(reader_cap_competent())
+                            }
                         }
                     }
                     AudienceRequirement::Includes(_) | AudienceRequirement::Cap(_) => {}
@@ -614,11 +854,15 @@ fn worst_case_plan_alternatives(
             .filter(|sanitizer| !sanitizer.name.is_attest_schema())
             .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(tags))
             .count(),
-        ToolDeclaration::Declared(tool) if tool.delta.symbolic_atoms().next().is_some() => sanitizers
-            .iter()
-            .filter(|sanitizer| !sanitizer.name.is_attest_schema())
-            .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(tags))
-            .count(),
+        ToolDeclaration::Declared(tool)
+            if tool.delta.symbolic_atoms().next().is_some() || tool.delta.selector_placeholder().is_some() =>
+        {
+            sanitizers
+                .iter()
+                .filter(|sanitizer| !sanitizer.name.is_attest_schema())
+                .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(tags))
+                .count()
+        }
         ToolDeclaration::Declared(tool) => {
             let output = tool.output_label();
             sanitizers
@@ -665,7 +909,11 @@ fn worst_case_plan_alternatives(
             ToolDeclaration::Declared(tool) => {
                 tool.emits.iter().any(|kind| priors.contains(&kind))
                     || (any_prior && !tool.emits.is_empty())
-                    || (has_cap && matches!(tool.delta.audience.as_ref(), Some(DeclaredAudience::Union(_))))
+                    || (has_cap
+                        && matches!(
+                            tool.delta.audience.as_ref(),
+                            Some(DeltaAudience::Static(DeclaredAudience::Union(_)) | DeltaAudience::Selector(_))
+                        ))
             }
             // An Annotated candidate's emits and delta are unknown at load; the cap is the only
             // bound, so it stays counted wherever a prior or a cap could match it.
@@ -704,7 +952,7 @@ fn worst_case_return_options(sanitizers: &[Sanitizer]) -> usize {
 
 /// The wildcard's spelling in a policy: `[[tool]] name = "*"` covers every tool call the policy
 /// does not name exactly, and routes each covered call through its annotator.
-pub const WILDCARD_TOOL_NAME: &str = "*";
+pub(crate) const WILDCARD_SPELLING: &str = "*";
 
 /// How the registry classifies a proposed tool name: declared and checkable, declared as
 /// provider-run (never checked), or covered by the wildcard — annotated per call. A name in
@@ -725,8 +973,13 @@ pub enum ToolKind {
 #[derive(Clone, Debug)]
 pub struct Registry {
     trust_chain: TrustChain,
-    audience_readers: BTreeSet<ReaderId>,
+    audience_vocabulary: AudienceVocabulary,
     tools: BTreeMap<ToolName, Vec<(ToolMatcher, ToolDeclaration)>>,
+    /// Declaration order is significant when precise and server-independent
+    /// names overlap. Entries point into the immutable per-name variant lists.
+    tool_order: Vec<(ToolName, usize)>,
+    /// Only leaves with a server-independent rule need cross-name lookup.
+    mcp_order: BTreeMap<String, Vec<(ToolName, usize)>>,
     provider_run: BTreeMap<ToolName, ToolAnnotation>,
     /// The wildcard declaration, when the policy writes one: the Annotated declaration every
     /// tool call the policy does not name exactly resolves to. In no listing or vector; the
@@ -753,14 +1006,35 @@ impl Registry {
         profile: crate::profile::DeploymentProfile,
     ) -> Result<Registry, LoadError> {
         config.trust_chain.validate()?;
-        let audience_readers = configured_audience_readers(&config, &profile);
+        for declaration in &config.tools {
+            let (ContractName::Named(name), _) = parse_tool_selector(declaration.name().as_str())? else {
+                continue;
+            };
+            if name.is_name_selector() {
+                for (exception, class) in profile.executor_exceptions() {
+                    if name.matches_name(exception)
+                        && profile.executor_class(&name) != *class
+                        && (profile.is_provider_run(&name) || *class == crate::profile::ExecutorClass::ProviderRun)
+                    {
+                        return Err(LoadError::ConflictingToolExecutors {
+                            first: name.as_str().into(),
+                            second: exception.as_str().into(),
+                        });
+                    }
+                }
+            }
+        }
+        let audience_vocabulary = configured_audience_vocabulary(&config, &profile);
         let audience = validated_audience_registry(&config.audience)?;
+        let mut direct = BTreeSet::new();
         for clause in profile.starting_label().audience.clauses() {
             check_literal(clause.readers(), || "starting label".to_string())?;
         }
-        check_routable(&audience, profile.starting_label().audience.symbolic_atoms(), || {
-            "starting label".to_string()
-        })?;
+        direct.extend(check_routable(
+            &audience,
+            profile.starting_label().audience.symbolic_atoms(),
+            || "starting label".to_string(),
+        )?);
 
         // Sanitizers index first: the child return-sanitizer binding validates against them.
         let mut sanitizers = BTreeMap::new();
@@ -786,8 +1060,10 @@ impl Registry {
                     }
                 }
                 DeclaredTransition::Audience { from_includes, to } => {
-                    check_declared(&audience, from_includes, || format!("{} from", context()))?;
-                    check_declared(&audience, to, || format!("{} to", context()))?;
+                    direct.extend(check_declared(&audience, from_includes, || {
+                        format!("{} from", context())
+                    })?);
+                    direct.extend(check_declared(&audience, to, || format!("{} to", context()))?);
                 }
             }
             check_hint(sanitizer.hint.as_ref(), context)?;
@@ -804,7 +1080,10 @@ impl Registry {
                 check_rank(&config.trust_chain, Some(*rank), context)?;
             }
             if let Some(audiences) = &annotator.audiences {
-                check_literal(audiences, context)?;
+                direct.extend(check_routable(&audience, audiences.group_atoms(), context)?);
+                for placeholder in audiences.placeholders() {
+                    check_placeholder(&audience, placeholder, context)?;
+                }
             }
             let name = annotator.name.clone();
             if annotator_declarations.insert(name.clone(), annotator).is_some() {
@@ -813,42 +1092,42 @@ impl Registry {
         }
 
         let mut tools: BTreeMap<ToolName, Vec<(ToolMatcher, ToolDeclaration)>> = BTreeMap::new();
+        let mut tool_order = Vec::new();
         let mut provider_run: BTreeMap<ToolName, ToolAnnotation> = BTreeMap::new();
         let mut wildcard: Option<ToolDeclaration> = None;
         for mut declaration in config.tools {
-            let (base_name, matcher) = parse_tool_selector(declaration.name().as_str())?;
-            declaration.set_name(base_name);
-            if declaration.name().as_str() == WILDCARD_TOOL_NAME {
-                let ToolDeclaration::Annotated {
-                    tags,
-                    description,
-                    parameters,
-                    annotator,
-                    ..
-                } = &declaration
-                else {
-                    return Err(LoadError::WildcardStatic);
+            let (contract, matcher) = parse_tool_selector(declaration.name().as_str())?;
+            // An audience argument binding implies its schema: the argument is a required
+            // top-level string, so a minted call always carries a value the binding can read.
+            let bound_arguments = audience_arguments(&declaration, &annotator_declarations);
+            if !bound_arguments.is_empty() {
+                let tool_name = declaration.name().as_str().to_string();
+                let parameters = match &mut declaration {
+                    ToolDeclaration::Declared(tool) => &mut tool.parameters,
+                    ToolDeclaration::Annotated { parameters, .. } => parameters,
                 };
-                if !annotator_declarations.contains_key(annotator) {
-                    return Err(LoadError::UnknownAnnotator {
-                        tool: WILDCARD_TOOL_NAME.to_string(),
-                        annotator: annotator.as_str().to_string(),
-                    });
+                for argument in bound_arguments {
+                    *parameters =
+                        parameters
+                            .require_string(&argument)
+                            .map_err(|fault| LoadError::AudienceBindingSchema {
+                                context: format!("tool {tool_name}"),
+                                argument,
+                                fault,
+                            })?;
                 }
-                // The wildcard covers calls this policy knows nothing about: metadata and
-                // argument selectors describe a specific tool, so it carries none.
-                if matcher != ToolMatcher::Bare
-                    || !tags.is_empty()
-                    || description.is_some()
-                    || *parameters != crate::params::ToolParameters::open()
-                {
-                    return Err(LoadError::WildcardMetadata);
-                }
-                if wildcard.replace(declaration).is_some() {
-                    return Err(LoadError::DuplicateWildcard);
-                }
-                continue;
             }
+            let base_name = match contract {
+                ContractName::Named(name) => name,
+                ContractName::Wildcard => {
+                    Self::admit_wildcard(&declaration, &matcher, &annotator_declarations)?;
+                    if wildcard.replace(declaration).is_some() {
+                        return Err(LoadError::DuplicateWildcard);
+                    }
+                    continue;
+                }
+            };
+            declaration.set_name(base_name);
             match &declaration {
                 ToolDeclaration::Declared(tool) => {
                     check_rank(&config.trust_chain, tool.delta.trust, || {
@@ -857,18 +1136,33 @@ impl Registry {
                     check_rank(&config.trust_chain, tool.requires.trust_floor(), || {
                         format!("tool {} trust floor", tool.name.as_str())
                     })?;
-                    if let Some(declared) = tool.delta.audience.as_ref() {
-                        check_declared(&audience, declared, || format!("tool {} delta", tool.name.as_str()))?;
+                    match tool.delta.audience.as_ref() {
+                        Some(DeltaAudience::Static(declared)) => {
+                            direct.extend(check_declared(&audience, declared, || {
+                                format!("tool {} delta", tool.name.as_str())
+                            })?);
+                        }
+                        Some(DeltaAudience::Selector(placeholder)) => {
+                            check_placeholder(&audience, placeholder, || format!("tool {} delta", tool.name.as_str()))?;
+                        }
+                        None => {}
                     }
                     for requirement in tool.requires.audience_requirements() {
                         match requirement {
                             AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => {
-                                check_declared(&audience, recipients, || {
+                                direct.extend(check_declared(&audience, recipients, || {
                                     format!("tool {} contains", tool.name.as_str())
-                                })?;
+                                })?);
                             }
                             AudienceRequirement::Cap(cap) => {
-                                check_declared(&audience, cap, || format!("tool {} within", tool.name.as_str()))?;
+                                direct.extend(check_declared(&audience, cap, || {
+                                    format!("tool {} within", tool.name.as_str())
+                                })?);
+                            }
+                            AudienceRequirement::Includes(RecipientSpec::Selector(placeholder)) => {
+                                check_placeholder(&audience, placeholder, || {
+                                    format!("tool {} contains", tool.name.as_str())
+                                })?;
                             }
                             AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => {}
                         }
@@ -890,7 +1184,18 @@ impl Registry {
                 let ToolDeclaration::Declared(tool) = declaration else {
                     return Err(LoadError::ProviderRunAnnotated(declaration.name().as_str().to_string()));
                 };
+                if tool.delta.selector_placeholder().is_some() {
+                    return Err(LoadError::ProviderRunPlaceholder {
+                        tool: tool.name.as_str().to_string(),
+                    });
+                }
                 let name = tool.name.clone();
+                if provider_run
+                    .keys()
+                    .any(|rule| rule.matches_name(&name) || name.matches_name(rule))
+                {
+                    return Err(LoadError::DuplicateTool(name.as_str().to_string()));
+                }
                 if provider_run.insert(name.clone(), tool).is_some() {
                     return Err(LoadError::DuplicateTool(name.as_str().to_string()));
                 }
@@ -899,6 +1204,7 @@ impl Registry {
                 if ToolDeclarationId::new(variants.len()).is_none() {
                     return Err(LoadError::TooManyToolVariants(declaration.name().as_str().to_string()));
                 }
+                tool_order.push((declaration.name().clone(), variants.len()));
                 variants.push((matcher, declaration));
             }
         }
@@ -908,13 +1214,16 @@ impl Registry {
             if authority.mandate.is_empty() {
                 return Err(LoadError::EmptyMandate(authority.name.as_str().to_string()));
             }
+            if authority.mandate.attends.named().iter().any(MarkName::is_blocked) {
+                return Err(LoadError::ReservedMark(authority.name.as_str().to_string()));
+            }
             check_rank(&config.trust_chain, authority.mandate.trust_ceiling, || {
                 format!("authority {} trust ceiling", authority.name.as_str())
             })?;
             if let Some(ceiling) = &authority.mandate.reader_ceiling {
-                check_declared(&audience, ceiling, || {
+                direct.extend(check_declared(&audience, ceiling, || {
                     format!("authority {} reader ceiling", authority.name.as_str())
-                })?;
+                })?);
             }
             check_hint(authority.hint.as_ref(), || {
                 format!("authority {}", authority.name.as_str())
@@ -924,41 +1233,12 @@ impl Registry {
             }
         }
 
-        for tool in tools.values().flatten().filter_map(|(_, d)| d.declared()) {
-            check_audience_bindings(tool)?;
-        }
-
-        // The planner-cap lint runs the same cover evaluation planning runs, against the
-        // policy facts alone: the declared `within` assertions and no directory answers.
-        let no_expansions = Expansions::default();
-        let membership_context =
-            MembershipContext::new(audience.within_assertions(), audience.providers(), &no_expansions);
-
-        let sanitizer_list: Vec<Sanitizer> = sanitizers.values().cloned().collect();
-        let checkable_tools: Vec<&ToolDeclaration> = tools.values().flatten().map(|(_, d)| d).collect();
-        for declaration in tools.values().flatten().map(|(_, d)| d).chain(wildcard.as_ref()) {
-            let count = worst_case_plan_alternatives(
-                declaration,
-                profile.confines_result(declaration.name()),
-                profile.context_control(),
-                &checkable_tools,
-                &config.authorities,
-                &sanitizer_list,
-                &membership_context,
-            );
-            if count > planner_cap.0 {
-                return Err(LoadError::TooManyPlanAlternatives {
-                    tool: declaration.name().as_str().to_string(),
-                    count,
-                    max: planner_cap.0,
-                });
-            }
-        }
         // Attention names are a policy vocabulary, not an authority vocabulary. A policy may
-        // deliberately use a mark as an unremediable denial (for example `blocked`) while
-        // registering no authority at all. An Annotator must be able to produce those marks,
-        // but still remains confined to names the policy declares somewhere — and an
-        // annotator's own explicit mark bound is itself such a declaration.
+        // deliberately use the reserved `blocked` as an unremediable denial while registering
+        // no authority at all. An Annotator must be able to produce those marks, but still
+        // remains confined to names the policy declares somewhere — and an annotator's own
+        // explicit mark bound is itself such a declaration. A catch-all mandate names
+        // nothing: it attends whatever the rest of the policy declares.
         let attention_marks: BTreeSet<MarkName> = tools
             .values()
             .flatten()
@@ -969,7 +1249,7 @@ impl Registry {
                 config
                     .authorities
                     .iter()
-                    .flat_map(|authority| authority.mandate.attends.iter().cloned()),
+                    .flat_map(|authority| authority.mandate.attends.named().iter().cloned()),
             )
             .chain(
                 annotator_declarations
@@ -977,6 +1257,41 @@ impl Registry {
                     .flat_map(|annotator| annotator.marks.iter().flatten().cloned()),
             )
             .collect();
+
+        // The planner-cap lint runs the same cover evaluation planning runs, against the
+        // policy facts alone: the declared `within` assertions and no directory answers.
+        let no_expansions = Expansions::default();
+        let membership_context =
+            MembershipContext::new(audience.within_assertions(), audience.providers(), &no_expansions);
+
+        let sanitizer_list: Vec<Sanitizer> = sanitizers.values().cloned().collect();
+        let checkable_tools: Vec<&ToolDeclaration> = tools
+            .iter()
+            .filter(|(name, _)| !name.is_name_selector())
+            .flat_map(|(_, variants)| variants)
+            .map(|(_, d)| d)
+            .collect();
+        for declaration in tools.values().flatten().map(|(_, d)| d).chain(wildcard.as_ref()) {
+            let count = worst_case_plan_alternatives(
+                declaration,
+                profile.confines_result(declaration.name()),
+                profile.context_control(),
+                &checkable_tools,
+                &Remedies {
+                    authorities: &config.authorities,
+                    sanitizers: &sanitizer_list,
+                    attention_marks: &attention_marks,
+                },
+                &membership_context,
+            );
+            if count > planner_cap.0 {
+                return Err(LoadError::TooManyPlanAlternatives {
+                    tool: declaration.name().as_str().to_string(),
+                    count,
+                    max: planner_cap.0,
+                });
+            }
+        }
 
         // The policy's whole effect vocabulary: every kind a declaration emits or requires, and
         // every kind an annotator's explicit bound names.
@@ -1011,7 +1326,7 @@ impl Registry {
             .map(|(name, declaration)| {
                 let mandate = AnnotatorMandate {
                     trust: declaration.trust.unwrap_or_else(|| every_rank.clone()),
-                    audiences: declaration.audiences.unwrap_or_else(|| audience_readers.clone()),
+                    audiences: declaration.audiences.unwrap_or_else(|| audience_vocabulary.clone()),
                     marks: declaration.marks.unwrap_or_else(|| attention_marks.clone()),
                     effects: declaration.effects.unwrap_or_else(|| effect_kinds.clone()),
                 };
@@ -1019,10 +1334,34 @@ impl Registry {
             })
             .collect();
 
+        let audience = audience.with_direct(direct);
+        // Exact-only policies retain their existing canonical name order. With
+        // overlapping names the authored order is part of the policy identity.
+        if !tools.keys().any(ToolName::is_name_selector) {
+            tool_order.sort_by(|(a, _), (b, _)| a.cmp(b));
+        }
+        let mut mcp_order: BTreeMap<String, Vec<(ToolName, usize)>> = tools
+            .keys()
+            .filter(|name| name.is_name_selector())
+            .filter_map(|name| {
+                name.as_str()
+                    .strip_prefix("mcp/*/")
+                    .map(|leaf| (leaf.to_string(), Vec::new()))
+            })
+            .collect();
+        for (name, ordinal) in &tool_order {
+            if let Some((_, leaf)) = name.as_str().strip_prefix("mcp/").and_then(|name| name.split_once('/'))
+                && let Some(ordered) = mcp_order.get_mut(leaf)
+            {
+                ordered.push((name.clone(), *ordinal));
+            }
+        }
         Ok(Registry {
             trust_chain: config.trust_chain,
-            audience_readers,
+            audience_vocabulary,
             tools,
+            tool_order,
+            mcp_order,
             provider_run,
             wildcard,
             annotators,
@@ -1033,6 +1372,47 @@ impl Registry {
             audience_config: config.audience,
             profile,
         })
+    }
+
+    /// The wildcard covers calls this policy knows nothing about, so it is an Annotated
+    /// declaration and nothing more: metadata and an argument selector describe a specific
+    /// tool, so it carries none.
+    fn admit_wildcard(
+        declaration: &ToolDeclaration,
+        matcher: &ToolMatcher,
+        annotators: &BTreeMap<AnnotatorName, AnnotatorDeclaration>,
+    ) -> Result<(), LoadError> {
+        let ToolDeclaration::Annotated {
+            tags,
+            description,
+            parameters,
+            annotator,
+            ..
+        } = declaration
+        else {
+            return Err(LoadError::WildcardStatic);
+        };
+        let Some(declared) = annotators.get(annotator) else {
+            return Err(LoadError::UnknownAnnotator {
+                tool: WILDCARD_SPELLING.to_string(),
+                annotator: annotator.as_str().to_string(),
+            });
+        };
+        if declared
+            .audiences
+            .as_ref()
+            .is_some_and(|audiences| audiences.placeholders().next().is_some())
+        {
+            return Err(LoadError::WildcardPlaceholderMandate(annotator.as_str().to_string()));
+        }
+        if *matcher != ToolMatcher::Bare
+            || !tags.is_empty()
+            || description.is_some()
+            || *parameters != crate::params::ToolParameters::open()
+        {
+            return Err(LoadError::WildcardMetadata);
+        }
+        Ok(())
     }
 
     /// The validated audience registry: sources, chain mappings, named audiences, `within`
@@ -1054,19 +1434,27 @@ impl Registry {
         &self.trust_chain
     }
 
-    /// The closed audience vocabulary written by this policy. `public` is the reserved
-    /// unrestricted state; the remaining entries are literal reader IDs, in stable order.
-    pub fn audiences(&self) -> impl Iterator<Item = &str> {
-        std::iter::once("public").chain(self.audience_readers.iter().map(ReaderId::as_str))
+    /// The closed audience vocabulary of this policy. `public` is the reserved unrestricted
+    /// state; the remaining entries are the chain words, the groups, and the literal readers
+    /// the policy writes, in canonical order.
+    pub fn audiences(&self) -> impl Iterator<Item = String> + '_ {
+        std::iter::once("public".to_string()).chain(self.audience_vocabulary.entries())
     }
 
     /// The one classification every name lookup derives from. An exact declaration always wins;
     /// the wildcard covers only a name the policy does not write. `None` is a name no contract
     /// covers: a proposal naming it is refused.
+    ///
+    /// [`WILDCARD_SPELLING`] is the wildcard contract's own spelling and never a tool a host
+    /// dispatches, so a proposal naming it names no tool: it classifies as `None` even under a
+    /// policy that writes the wildcard, rather than resolving to the contract that covers
+    /// everything else.
     pub fn classify(&self, name: &ToolName) -> Option<ToolKind> {
-        if self.tools.contains_key(name) {
+        if name.as_str() == WILDCARD_SPELLING || name.is_name_selector() {
+            None
+        } else if self.tools.contains_key(name) || self.matching_variants(name.clone()).next().is_some() {
             Some(ToolKind::Declared)
-        } else if self.provider_run.contains_key(name) {
+        } else if self.provider_run.keys().any(|rule| rule.matches_name(name)) {
             Some(ToolKind::ProviderRun)
         } else if self.wildcard.is_some() {
             Some(ToolKind::Wildcard)
@@ -1086,7 +1474,7 @@ impl Registry {
     #[cfg(test)]
     pub(crate) fn tool(&self, name: &ToolName) -> Option<&ToolDeclaration> {
         match self.classify(name)? {
-            ToolKind::Declared => self.tools.get(name)?.first().map(|(_, d)| d),
+            ToolKind::Declared => self.matching_variants(name.clone()).next().map(|(_, d)| d),
             ToolKind::ProviderRun => None,
             ToolKind::Wildcard => self.wildcard.as_ref(),
         }
@@ -1096,7 +1484,7 @@ impl Registry {
     /// ordinal zero; a record naming another ordinal for it is forged.
     pub(crate) fn keyed_tool(&self, name: &ToolName, id: ToolDeclarationId) -> Option<&ToolDeclaration> {
         match self.classify(name)? {
-            ToolKind::Declared => self.tools.get(name)?.get(id.ordinal()).map(|(_, d)| d),
+            ToolKind::Declared => self.matching_variants(name.clone()).nth(id.ordinal()).map(|(_, d)| d),
             ToolKind::ProviderRun => None,
             ToolKind::Wildcard => (id.ordinal() == 0).then_some(self.wildcard.as_ref()).flatten(),
         }
@@ -1118,11 +1506,25 @@ impl Registry {
         call: &'a crate::value::ResolvedCall,
     ) -> Option<std::borrow::Cow<'a, ToolAnnotation>> {
         let declaration = self.declaration(call)?;
-        match call.annotation() {
-            Some(pinned) => Some(std::borrow::Cow::Owned(
-                pinned.tool_annotation(declaration, call.tool()),
-            )),
-            None => declaration.declared().map(std::borrow::Cow::Borrowed),
+        let annotation = match call.annotation() {
+            Some(pinned) => std::borrow::Cow::Owned(pinned.tool_annotation(declaration, call.tool())),
+            None => {
+                let annotation = declaration.declared()?;
+                if annotation.name == *call.tool() {
+                    std::borrow::Cow::Borrowed(annotation)
+                } else {
+                    let mut annotation = annotation.clone();
+                    annotation.name = call.tool().clone();
+                    std::borrow::Cow::Owned(annotation)
+                }
+            }
+        };
+        // The one place a call meets its contract: a delta placeholder is bound here, so every
+        // label read from the annotation downstream is static. A minted call fills it; a
+        // recorded call that does not was never minted here and has no annotation.
+        match annotation.bound_to(call.arguments()).ok()? {
+            Some(bound) => Some(std::borrow::Cow::Owned(bound)),
+            None => Some(annotation),
         }
     }
 
@@ -1133,9 +1535,7 @@ impl Registry {
     ) -> Option<(ToolDeclarationId, &ToolDeclaration)> {
         match self.classify(name)? {
             ToolKind::Declared => {
-                self.tools
-                    .get(name)?
-                    .iter()
+                self.matching_variants(name.clone())
                     .enumerate()
                     .find_map(|(ordinal, (matcher, declaration))| {
                         if matcher.matches(arguments) {
@@ -1165,14 +1565,33 @@ impl Registry {
     }
 
     pub fn variants(&self, name: &ToolName) -> impl Iterator<Item = &ToolDeclaration> {
-        self.tools.get(name).into_iter().flatten().map(|(_, d)| d)
+        self.matching_variants(name.clone()).map(|(_, d)| d)
+    }
+
+    fn matching_variants(&self, name: ToolName) -> impl Iterator<Item = &(ToolMatcher, ToolDeclaration)> {
+        let overlap = name
+            .as_str()
+            .strip_prefix("mcp/")
+            .and_then(|name| name.split_once('/'))
+            .and_then(|(_, leaf)| self.mcp_order.get(leaf));
+        let exact = if overlap.is_none() { self.tools.get(&name) } else { None };
+        exact.into_iter().flatten().chain(
+            overlap
+                .into_iter()
+                .flatten()
+                .filter(move |(rule, _)| rule.matches_name(&name))
+                .map(|(rule, ordinal)| &self.tools[rule][*ordinal]),
+        )
     }
 
     /// The declared annotation of a provider-run tool: never checked or planned; its
     /// static `delta` is what an exposed result is admitted under. Always static — a
     /// provider-run declaration routing through an Annotator is refused at load.
     pub fn provider_run_annotation(&self, name: &ToolName) -> Option<&ToolAnnotation> {
-        self.provider_run.get(name)
+        self.provider_run
+            .iter()
+            .find(|(rule, _)| rule.matches_name(name))
+            .map(|(_, annotation)| annotation)
     }
 
     pub fn provider_run_annotations(&self) -> impl Iterator<Item = &ToolAnnotation> {
@@ -1184,22 +1603,45 @@ impl Registry {
     }
 
     pub(crate) fn tool_names(&self) -> impl Iterator<Item = &ToolName> {
-        self.tools.keys()
+        self.tools.keys().filter(|name| !name.is_name_selector())
     }
 
     /// Every declaration the policy identity hashes over: the ordered contracts and, when
     /// the policy writes one, the wildcard — its presence and its annotator change what an
     /// unwritten tool call does, so two policies differing only there are different policies.
     pub(crate) fn semantic_tools(&self) -> impl Iterator<Item = (&ToolMatcher, &ToolDeclaration)> {
-        self.tools
-            .values()
-            .flatten()
+        self.tool_order
+            .iter()
+            .map(|(name, ordinal)| &self.tools[name][*ordinal])
             .map(|(matcher, d)| (matcher, d))
             .chain(self.wildcard.iter().map(|d| (&ToolMatcher::Bare, d)))
     }
 
     /// One registered Annotator's compiled mandate, with every omitted bound already resolved
     /// to the policy vocabulary.
+    /// Whether a call's arguments fill every selector placeholder its declaration reads: a
+    /// static contract's own, or the mandate's of the Annotator an annotated tool routes
+    /// through. Part of minting a call, so the check and the annotation consult only ever meet
+    /// a filled placeholder.
+    pub(crate) fn placeholders_filled(
+        &self,
+        declaration: &ToolDeclaration,
+        arguments: &serde_json::Value,
+    ) -> Result<(), crate::params::ArgumentError> {
+        let placeholders: Vec<&SelectorPlaceholder> = match declaration {
+            ToolDeclaration::Declared(tool) => tool.selector_placeholders().collect(),
+            ToolDeclaration::Annotated { annotator, .. } => self
+                .annotator_mandate(annotator)
+                .into_iter()
+                .flat_map(|mandate| mandate.audiences().placeholders())
+                .collect(),
+        };
+        for placeholder in placeholders {
+            placeholder.instantiate(arguments)?;
+        }
+        Ok(())
+    }
+
     pub fn annotator_mandate(&self, name: &AnnotatorName) -> Option<&AnnotatorMandate> {
         self.annotators.get(name)
     }
@@ -1248,23 +1690,58 @@ impl Registry {
     }
 }
 
-fn check_audience_bindings(tool: &ToolAnnotation) -> Result<(), LoadError> {
-    let check = |argument: &str, site: &str| {
-        tool.parameters
-            .required_string_property(argument)
-            .map_err(|fault| LoadError::AudienceBindingSchema {
-                context: format!("tool {} {site}", tool.name.as_str()),
-                argument: argument.to_string(),
-                fault,
-            })
-    };
-    for requirement in tool.requires.audience_requirements() {
-        match requirement {
-            AudienceRequirement::Includes(RecipientSpec::Placeholder(argument)) => check(argument, "contains")?,
-            AudienceRequirement::Includes(RecipientSpec::Static(_)) | AudienceRequirement::Cap(_) => {}
+/// The call arguments a tool's audience bindings read: each `$argument` recipient and each
+/// argument of a selector placeholder in its delta, its `contains`, or — for an
+/// Annotator-routed tool — its annotator's mandate.
+fn audience_arguments(
+    declaration: &ToolDeclaration,
+    annotators: &BTreeMap<AnnotatorName, AnnotatorDeclaration>,
+) -> Vec<String> {
+    match declaration {
+        ToolDeclaration::Declared(tool) => {
+            let recipients = tool
+                .requires
+                .audience_requirements()
+                .iter()
+                .filter_map(|requirement| match requirement {
+                    AudienceRequirement::Includes(RecipientSpec::Placeholder(argument)) => Some(argument.clone()),
+                    AudienceRequirement::Includes(_) | AudienceRequirement::Cap(_) => None,
+                });
+            recipients
+                .chain(
+                    tool.selector_placeholders()
+                        .flat_map(|placeholder| placeholder.arguments().map(str::to_string)),
+                )
+                .collect()
         }
+        ToolDeclaration::Annotated { annotator, .. } => annotators
+            .get(annotator)
+            .into_iter()
+            .flat_map(|declared| declared.audiences.iter().flat_map(AudienceVocabulary::placeholders))
+            .flat_map(|placeholder| placeholder.arguments().map(str::to_string))
+            .collect(),
     }
-    Ok(())
+}
+
+/// A selector placeholder resolves at load as far as it can: its provider is registered and
+/// some declared template fits every collection it may instantiate into.
+fn check_placeholder(
+    registry: &AudienceRegistry,
+    placeholder: &SelectorPlaceholder,
+    context: impl Fn() -> String,
+) -> Result<(), LoadError> {
+    let fault = match registry.templates(placeholder.provider()) {
+        None => Unroutable::UnknownProvider(placeholder.provider().to_string()),
+        Some(templates) if templates.iter().any(|declared| placeholder.fits(&declared.template)) => return Ok(()),
+        Some(_) => Unroutable::UnknownSelector {
+            provider: placeholder.provider().to_string(),
+            selector: placeholder.to_string(),
+        },
+    };
+    Err(LoadError::UnroutableAudience {
+        context: context(),
+        fault,
+    })
 }
 
 pub(crate) fn check_rank(
@@ -1321,8 +1798,8 @@ fn validated_audience_registry(config: &AudienceConfig) -> Result<AudienceRegist
         }
         Ok(())
     };
-    sourced(&config.self_from, "[audience.self]")?;
-    sourced(&config.internal_from, "[audience.internal]")?;
+    sourced(&config.self_from, "[audience] self")?;
+    sourced(&config.internal_from, "[audience] internal")?;
     for group in &config.groups {
         sourced(&group.from, &format!("named audience @{}", group.name.as_str()))?;
     }
@@ -1345,12 +1822,14 @@ fn check_selector(
 
 /// Every group reference a policy declaration writes must resolve at load: a named audience
 /// must be configured, and a source-qualified selector must match a template of its
-/// registered provider. Chain words and readers pass — they are always meaningful.
+/// registered provider. Chain words and readers pass — they are always meaningful. Returns
+/// the selectors it routed, which the registry build gathers for the source probe.
 pub(crate) fn check_routable(
     registry: &AudienceRegistry,
     atoms: impl IntoIterator<Item = SymbolicAtom>,
     context: impl Fn() -> String,
-) -> Result<(), LoadError> {
+) -> Result<BTreeSet<SelectorSpec>, LoadError> {
+    let mut routed = BTreeSet::new();
     for atom in atoms {
         let SymbolicAtom::Group(group) = atom else {
             continue;
@@ -1363,17 +1842,13 @@ pub(crate) fn check_routable(
                 Unroutable::UnknownGroup(name.clone())
             }
             GroupRef::Source { provider, selector } => {
-                match check_selector(
-                    registry,
-                    &SelectorSpec {
-                        provider: provider.clone(),
-                        selector: selector.clone(),
-                    },
-                    &context,
-                ) {
-                    Ok(()) => continue,
-                    Err(error) => return Err(error),
-                }
+                let spec = SelectorSpec {
+                    provider: provider.clone(),
+                    selector: selector.clone(),
+                };
+                check_selector(registry, &spec, &context)?;
+                routed.insert(spec);
+                continue;
             }
         };
         return Err(LoadError::UnroutableAudience {
@@ -1381,7 +1856,7 @@ pub(crate) fn check_routable(
             fault,
         });
     }
-    Ok(())
+    Ok(routed)
 }
 
 /// One test for every audience a policy declaration writes: its readers are literal — no
@@ -1391,7 +1866,7 @@ fn check_declared(
     registry: &AudienceRegistry,
     declared: &DeclaredAudience,
     context: impl Fn() -> String + Copy,
-) -> Result<(), LoadError> {
+) -> Result<BTreeSet<SelectorSpec>, LoadError> {
     if let DeclaredAudience::Union(clause) = declared {
         check_literal(clause.readers(), context)?;
     }
@@ -1419,62 +1894,58 @@ fn check_hint(hint: Option<&Hint>, context: impl Fn() -> String) -> Result<(), L
     }
 }
 
-/// Every literal reader the loaded policy writes, across every audience-bearing declaration —
-/// an annotator's explicit audience bound included. Annotators choose from this vocabulary;
-/// call arguments are evidence, not a source of new policy labels. Groups and placeholders are
-/// deliberately absent because their members are resolved per operation rather than declared by
-/// the policy.
-fn configured_audience_readers(
+/// The whole audience vocabulary the loaded policy knows: the built-in chain, every configured
+/// named audience, and every group reference and literal reader written across every
+/// audience-bearing declaration — an annotator's explicit audience bound included. Annotators
+/// choose from this vocabulary; call arguments are evidence, not a source of new policy labels,
+/// which is why placeholders are absent.
+fn configured_audience_vocabulary(
     config: &RegistryConfig,
     profile: &crate::profile::DeploymentProfile,
-) -> BTreeSet<ReaderId> {
-    fn add_audience(readers: &mut BTreeSet<ReaderId>, audience: &Audience) {
-        for clause in audience.clauses() {
-            readers.extend(clause.readers().iter().cloned());
-        }
-    }
-
-    fn add_declared(readers: &mut BTreeSet<ReaderId>, audience: &DeclaredAudience) {
-        if let DeclaredAudience::Union(clause) = audience {
-            readers.extend(clause.readers().iter().cloned());
-        }
-    }
-
-    let mut readers = BTreeSet::new();
-    add_audience(&mut readers, &profile.starting_label().audience);
+) -> AudienceVocabulary {
+    let mut vocabulary = AudienceVocabulary::whole_chain();
+    vocabulary.groups.extend(
+        config
+            .audience
+            .groups
+            .iter()
+            .map(|group| GroupRef::Named(group.name.clone())),
+    );
+    vocabulary.add_audience(&profile.starting_label().audience);
     for declaration in &config.tools {
         let Some(tool) = declaration.declared() else {
             continue;
         };
-        if let Some(audience) = &tool.delta.audience {
-            add_declared(&mut readers, audience);
+        // A placeholder names no audience until a call does; the omitted bound stays static.
+        if let Some(DeltaAudience::Static(audience)) = &tool.delta.audience {
+            vocabulary.add_declared(audience);
         }
-        {
-            let requirements = &tool.requires.label.audience;
-            for requirement in requirements {
-                match requirement {
-                    AudienceRequirement::Includes(RecipientSpec::Static(audience))
-                    | AudienceRequirement::Cap(audience) => add_declared(&mut readers, audience),
-                    AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => {}
+        for requirement in &tool.requires.label.audience {
+            match requirement {
+                AudienceRequirement::Includes(RecipientSpec::Static(audience)) | AudienceRequirement::Cap(audience) => {
+                    vocabulary.add_declared(audience)
                 }
+                AudienceRequirement::Includes(RecipientSpec::Placeholder(_) | RecipientSpec::Selector(_)) => {}
             }
         }
     }
     for annotator in &config.annotators {
-        readers.extend(annotator.audiences.iter().flatten().cloned());
+        if let Some(bound) = &annotator.audiences {
+            vocabulary.extend_static(bound);
+        }
     }
     for authority in &config.authorities {
         if let Some(audience) = &authority.mandate.reader_ceiling {
-            add_declared(&mut readers, audience);
+            vocabulary.add_declared(audience);
         }
     }
     for sanitizer in &config.sanitizers {
         if let DeclaredTransition::Audience { from_includes, to } = &sanitizer.transition {
-            add_declared(&mut readers, from_includes);
-            add_declared(&mut readers, to);
+            vocabulary.add_declared(from_includes);
+            vocabulary.add_declared(to);
         }
     }
-    readers
+    vocabulary
 }
 
 #[cfg(test)]
@@ -1483,7 +1954,7 @@ mod tests {
 
     use super::*;
     use crate::authority::SanitizerPoints;
-    use crate::authority::{Mandate, Scope};
+    use crate::authority::{Attends, Mandate, Scope};
     use crate::contract::{AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, Requires};
     use crate::fact::{EffectKind, EffectSet};
     use crate::label::{Audience, ReaderId, Trust};
@@ -1530,6 +2001,33 @@ mod tests {
         }
     }
 
+    fn vocabulary(entries: &[&str]) -> AudienceVocabulary {
+        AudienceVocabulary::parse_entries(&entries.iter().map(|entry| entry.to_string()).collect::<Vec<_>>())
+            .expect("a fixture vocabulary parses")
+    }
+
+    /// Named audiences served by one `slack` source: `@<handle>` for each handle.
+    fn slack_groups(handles: &[&str]) -> crate::audience::AudienceConfig {
+        crate::audience::AudienceConfig {
+            sources: vec![crate::audience::SourceRegistration {
+                provider: "slack".to_string(),
+                templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
+            }],
+            groups: handles
+                .iter()
+                .map(|handle| crate::audience::NamedAudience {
+                    name: crate::names::GroupName::new(*handle),
+                    within: None,
+                    from: vec![SelectorSpec {
+                        provider: "slack".to_string(),
+                        selector: format!("user-group/{handle}"),
+                    }],
+                })
+                .collect(),
+            ..crate::audience::AudienceConfig::default()
+        }
+    }
+
     fn annotated(name: &str, by: &str) -> ToolDeclaration {
         ToolDeclaration::Annotated {
             name: ToolName::new(name),
@@ -1544,7 +2042,7 @@ mod tests {
         Authority {
             name: AuthorityName::new(name),
             mandate: Mandate {
-                attends: vec![MarkName::new("signoff")],
+                attends: Attends::Named(vec![MarkName::new("signoff")]),
                 ..Mandate::default()
             },
             scope: Scope::default(),
@@ -1568,11 +2066,64 @@ mod tests {
     }
 
     #[test]
+    fn a_catch_all_authority_covers_every_declared_mark_but_the_reserved_denial() {
+        let mut review = tool("review");
+        review.requires.attention = vec![MarkName::new("sentry-review")];
+        let mut denied = tool("denied");
+        denied.requires.attention = vec![MarkName::new(MarkName::BLOCKED)];
+        let mut cfg = base();
+        cfg.tools = declared(vec![review, denied]);
+        cfg.authorities = vec![Authority {
+            name: AuthorityName::new("anyone"),
+            mandate: Mandate {
+                attends: Attends::Any,
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        }];
+
+        let registry = Registry::build_covered(cfg).expect("a catch-all mandate is valid policy");
+        let anyone = registry
+            .authority(&AuthorityName::new("anyone"))
+            .expect("the catch-all registers");
+
+        assert!(anyone.mandate.attends.covers(&MarkName::new("sentry-review")));
+        assert!(!anyone.mandate.attends.covers(&MarkName::new(MarkName::BLOCKED)));
+        assert_eq!(
+            registry.attention_marks().map(MarkName::as_str).collect::<Vec<_>>(),
+            ["blocked", "sentry-review"],
+            "a catch-all names nothing; the vocabulary is the tools' marks"
+        );
+    }
+
+    #[test]
+    fn an_authority_naming_the_reserved_denial_is_refused() {
+        let mut cfg = base();
+        cfg.authorities = vec![Authority {
+            name: AuthorityName::new("overreach"),
+            mandate: Mandate {
+                attends: Attends::Named(vec![MarkName::new("signoff"), MarkName::new(MarkName::BLOCKED)]),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        }];
+
+        assert!(matches!(
+            Registry::build_covered(cfg),
+            Err(LoadError::ReservedMark(name)) if name == "overreach"
+        ));
+    }
+
+    #[test]
     fn declared_readers_form_a_closed_audience_vocabulary_with_public() {
         let mut classified = tool("classified");
         classified.delta = Delta {
             trust: None,
-            audience: Some(DeclaredAudience::restricted([ReaderId::new("private")])),
+            audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                "private",
+            )]))),
         };
         classified.requires.label.audience =
             vec![AudienceRequirement::Cap(DeclaredAudience::restricted([ReaderId::new(
@@ -1585,7 +2136,7 @@ mod tests {
 
         assert_eq!(
             registry.audiences().collect::<Vec<_>>(),
-            ["public", "partner", "private"]
+            ["public", "self", "internal", "partner", "private"]
         );
     }
 
@@ -1597,7 +2148,7 @@ mod tests {
         let mut delta_tool = tool("emit");
         delta_tool.delta = Delta {
             trust: None,
-            audience: Some(DeclaredAudience::literal(named.clone())),
+            audience: Some(DeltaAudience::Static(DeclaredAudience::literal(named.clone()))),
         };
         delta.tools = declared(vec![delta_tool]);
 
@@ -1660,7 +2211,10 @@ mod tests {
         use crate::audience::{NamedAudience, SourceRegistration};
         let source = |provider: &str| SourceRegistration {
             provider: provider.to_string(),
-            templates: vec![crate::audience::SelectorTemplate::new("viewer")],
+            templates: vec![crate::audience::DeclaredTemplate::new(
+                "viewer",
+                Some(ChainAudience::Self_),
+            )],
         };
         // A `:` makes one member id qualified under two providers, `@` makes members
         // non-literal, and an empty name owns no namespace.
@@ -1830,21 +2384,250 @@ mod tests {
             Err(LoadError::RankOutOfChain { rank: 9, .. })
         ));
 
-        let mut cfg = base();
-        cfg.annotators = vec![AnnotatorDeclaration {
-            audiences: Some(BTreeSet::from([ReaderId::new("@team")])),
+        // A group in an audience bound routes at load like a group anywhere else in the policy:
+        // a named audience must be configured, a source-qualified selector must match a
+        // registered template. Chain words and readers are always meaningful.
+        let bound = |entries: &[&str]| AnnotatorDeclaration {
+            audiences: Some(vocabulary(entries)),
             ..annotator("classifier")
-        }];
+        };
+        let mut cfg = base();
+        cfg.annotators = vec![bound(&["@team"])];
         assert!(matches!(
             Registry::build_covered(cfg),
-            Err(LoadError::NonLiteralReader { reader, .. }) if reader == "@team"
+            Err(LoadError::UnroutableAudience {
+                fault: Unroutable::UnknownGroup(name),
+                ..
+            }) if name.as_str() == "team"
         ));
+        let mut cfg = base();
+        cfg.audience = slack_groups(&["team"]);
+        cfg.annotators = vec![bound(&["@slack:channel/eng"])];
+        assert!(matches!(
+            Registry::build_covered(cfg),
+            Err(LoadError::UnroutableAudience { .. })
+        ));
+        let mut cfg = base();
+        cfg.audience = slack_groups(&["team"]);
+        cfg.annotators = vec![bound(&["self", "internal", "@team", "@slack:user-group/eng", "alice"])];
+        let registry = Registry::build_covered(cfg).expect("a routable symbolic bound loads");
+        assert_eq!(
+            registry
+                .annotator_mandate(&AnnotatorName::new("classifier"))
+                .expect("classifier is registered")
+                .audiences()
+                .entries()
+                .collect::<Vec<_>>(),
+            ["self", "internal", "@team", "@slack:user-group/eng", "alice"]
+        );
+    }
+
+    #[test]
+    fn an_audience_vocabulary_lists_admissible_spellings_only() {
+        let parsed = |entries: &[&str]| {
+            AudienceVocabulary::parse_entries(&entries.iter().map(|entry| entry.to_string()).collect::<Vec<_>>())
+        };
+        assert_eq!(parsed(&[]), Ok(AudienceVocabulary::default()));
+        assert_eq!(
+            parsed(&["internal", "self"]).map(|vocabulary| vocabulary.entries().collect::<Vec<_>>()),
+            Ok(vec!["self".to_string(), "internal".to_string()])
+        );
+        assert_eq!(parsed(&["public"]), Err(AudienceSpelling::PublicListed));
+        assert_eq!(parsed(&["$to"]), Err(AudienceSpelling::Placeholder("$to".to_string())));
+        assert_eq!(parsed(&[""]), Err(AudienceSpelling::Unknown(String::new())));
+        assert_eq!(parsed(&["@"]), Err(AudienceSpelling::Unknown("@".to_string())));
+        for repeated in [
+            ["self", "self"],
+            ["@team", "@team"],
+            ["alice", "alice"],
+            ["a@CORP.example", "a@corp.example"],
+        ] {
+            assert_eq!(
+                parsed(&repeated),
+                Err(AudienceSpelling::Duplicate(repeated[1].to_string())),
+                "{repeated:?}"
+            );
+        }
+    }
+
+    /// A vocabulary arriving as data is its entry list and passes the written grammar: the
+    /// derived field shape never bypasses `parse_entries`.
+    #[test]
+    fn an_audience_vocabulary_round_trips_as_its_entry_list_and_is_validated_on_the_way_in() {
+        let vocabulary =
+            AudienceVocabulary::parse_entries(&["@team".to_string(), "alice".to_string(), "internal".to_string()])
+                .expect("a fixture vocabulary parses");
+        let wire = serde_json::to_value(&vocabulary).expect("serializes");
+        assert_eq!(wire, serde_json::json!(["internal", "@team", "alice"]));
+        assert_eq!(
+            serde_json::from_value::<AudienceVocabulary>(wire).expect("its own rendering deserializes"),
+            vocabulary
+        );
+        for refused in [
+            serde_json::json!(["public"]),
+            serde_json::json!(["alice", "alice"]),
+            serde_json::json!(["$to"]),
+            serde_json::json!({"chain": [], "groups": [], "readers": ["public"]}),
+        ] {
+            assert!(
+                serde_json::from_value::<AudienceVocabulary>(refused.clone()).is_err(),
+                "{refused} is refused on the way in"
+            );
+        }
+    }
+
+    #[test]
+    fn an_omitted_audience_bound_admits_every_surface_the_policy_writes() {
+        let mut reads = tool("read");
+        reads.delta.audience = Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+            "insider",
+        )])));
+        let mut sends = tool("send");
+        sends.requires.label.audience = vec![
+            AudienceRequirement::Includes(RecipientSpec::Static(DeclaredAudience::Union(
+                crate::label::Clause::new(
+                    [],
+                    [GroupRef::Source {
+                        provider: "slack".to_string(),
+                        selector: "user-group/oncall".to_string(),
+                    }],
+                    [],
+                )
+                .unwrap(),
+            ))),
+            AudienceRequirement::Cap(DeclaredAudience::restricted([ReaderId::new("partner")])),
+        ];
+        let officer = Authority {
+            name: AuthorityName::new("officer"),
+            mandate: Mandate {
+                reader_ceiling: Some(DeclaredAudience::restricted([ReaderId::new("auditor")])),
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        let redact = Sanitizer {
+            name: SanitizerName::new("redact"),
+            on: SanitizerPoints {
+                input: false,
+                output: true,
+            },
+            transition: DeclaredTransition::Audience {
+                from_includes: DeclaredAudience::restricted([ReaderId::new("hr")]),
+                to: DeclaredAudience::restricted([ReaderId::new("desk")]),
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        let mut cfg = base();
+        cfg.audience = slack_groups(&["team", "unreferenced"]);
+        cfg.tools = vec![
+            ToolDeclaration::Declared(reads),
+            ToolDeclaration::Declared(sends),
+            annotated("shell", "open"),
+        ];
+        cfg.annotators = vec![
+            annotator("open"),
+            AnnotatorDeclaration {
+                audiences: Some(vocabulary(&["support"])),
+                ..annotator("narrow")
+            },
+        ];
+        cfg.authorities = vec![officer];
+        cfg.sanitizers = vec![redact];
+        let registry = Registry::build_covered(cfg).expect("the surfaces load");
+        // The probe's reading list: every configured group source and the one selector a
+        // declaration routes directly.
+        assert_eq!(
+            registry
+                .audience()
+                .referenced_selectors()
+                .iter()
+                .map(|spec| format!("{}:{}", spec.provider, spec.selector))
+                .collect::<Vec<_>>(),
+            [
+                "slack:user-group/oncall",
+                "slack:user-group/team",
+                "slack:user-group/unreferenced",
+            ]
+        );
+        let open = registry
+            .annotator_mandate(&AnnotatorName::new("open"))
+            .expect("open is registered");
+        // The whole chain, every configured named audience (referenced or not), every group
+        // reference and reader a declaration, a bound, a ceiling, or a transition writes.
+        assert_eq!(
+            open.audiences().entries().collect::<Vec<_>>(),
+            [
+                "self",
+                "internal",
+                "@team",
+                "@unreferenced",
+                "@slack:user-group/oncall",
+                "auditor",
+                "desk",
+                "hr",
+                "insider",
+                "partner",
+                "support",
+            ]
+        );
+    }
+
+    /// Another annotator's selector placeholder reads that annotator's calls; the whole
+    /// vocabulary carries its static entries and not the placeholder, so a tool routed
+    /// through an open annotator is not asked for arguments it never declared.
+    #[test]
+    fn an_omitted_mandate_bound_leaves_other_annotators_placeholders_behind() {
+        let mut cfg = base();
+        cfg.audience = crate::audience::AudienceConfig {
+            sources: vec![crate::audience::SourceRegistration {
+                provider: "slack".to_string(),
+                templates: vec![crate::audience::DeclaredTemplate::named("channel/<id>")],
+            }],
+            ..crate::audience::AudienceConfig::default()
+        };
+        cfg.tools = vec![annotated("shell", "open"), annotated("post", "channels")];
+        cfg.annotators = vec![
+            annotator("open"),
+            AnnotatorDeclaration {
+                audiences: Some(vocabulary(&["support", "@slack:channel/$channel"])),
+                ..annotator("channels")
+            },
+        ];
+        let registry = Registry::build_covered(cfg).expect("the surfaces load");
+
+        let open = registry
+            .annotator_mandate(&AnnotatorName::new("open"))
+            .expect("open is registered");
+        assert_eq!(
+            open.audiences().entries().collect::<Vec<_>>(),
+            ["self", "internal", "support"]
+        );
+        let no_arguments = serde_json::json!({});
+        let (_, shell) = registry
+            .select_tool(&ToolName::new("shell"), &no_arguments)
+            .expect("shell is declared");
+        registry
+            .placeholders_filled(shell, &no_arguments)
+            .expect("an open annotator asks the call for no argument");
+
+        let channels = registry
+            .annotator_mandate(&AnnotatorName::new("channels"))
+            .expect("channels is registered");
+        assert_eq!(channels.audiences().placeholders().count(), 1);
+        let (_, post) = registry
+            .select_tool(&ToolName::new("post"), &no_arguments)
+            .expect("post is declared");
+        assert!(registry.placeholders_filled(post, &no_arguments).is_err());
     }
 
     #[test]
     fn an_omitted_mandate_bound_resolves_to_the_whole_policy_vocabulary() {
         let mut catalogued = tool("send");
-        catalogued.delta.audience = Some(DeclaredAudience::restricted([ReaderId::new("insider")]));
+        catalogued.delta.audience = Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+            "insider",
+        )])));
         catalogued.emits = EffectSet::new([EffectKind::new("mail.sent")]).unwrap();
         catalogued.requires.attention = vec![MarkName::new("signoff")];
         let mut cfg = base();
@@ -1853,7 +2636,7 @@ mod tests {
             annotator("classifier"),
             AnnotatorDeclaration {
                 trust: Some(BTreeSet::from([Trust::new(0)])),
-                audiences: Some(BTreeSet::from([ReaderId::new("support")])),
+                audiences: Some(vocabulary(&["support"])),
                 marks: Some(BTreeSet::from([MarkName::new("reviewed")])),
                 effects: Some(BTreeSet::from([EffectKind::new("audit.log")])),
                 ..annotator("narrow")
@@ -1867,8 +2650,8 @@ mod tests {
         assert_eq!(open.trust_ranks().collect::<Vec<_>>(), [Trust::new(0), Trust::new(1)]);
         // The whole vocabulary includes what another annotator's explicit bound declares.
         assert_eq!(
-            open.audiences().map(ReaderId::as_str).collect::<Vec<_>>(),
-            ["insider", "support"]
+            open.audiences().entries().collect::<Vec<_>>(),
+            ["self", "internal", "insider", "support"]
         );
         assert_eq!(
             open.marks().map(MarkName::as_str).collect::<Vec<_>>(),
@@ -1883,10 +2666,7 @@ mod tests {
             .annotator_mandate(&AnnotatorName::new("narrow"))
             .expect("narrow is registered");
         assert_eq!(narrow.trust_ranks().collect::<Vec<_>>(), [Trust::new(0)]);
-        assert_eq!(
-            narrow.audiences().map(ReaderId::as_str).collect::<Vec<_>>(),
-            ["support"]
-        );
+        assert_eq!(narrow.audiences().entries().collect::<Vec<_>>(), ["support"]);
         assert_eq!(narrow.marks().map(MarkName::as_str).collect::<Vec<_>>(), ["reviewed"]);
         assert_eq!(
             narrow.effects().cloned().collect::<BTreeSet<_>>(),
@@ -2022,6 +2802,69 @@ mod tests {
     }
 
     #[test]
+    fn server_independent_names_match_only_concrete_mcp_tools() {
+        let mut cfg = base();
+        cfg.tools = declared(vec![tool("mcp/*/read")]);
+        let registry = Registry::build_covered(cfg).unwrap();
+        for name in ["mcp/demo/read", "mcp/other/read", "mcp/a.b-c/read"] {
+            assert_eq!(registry.classify(&ToolName::new(name)), Some(ToolKind::Declared));
+        }
+        for name in [
+            "read",
+            "host/kagent/read",
+            "agent/demo/read",
+            "appa/execute_remedy_plan",
+            "mcp/*/read",
+            "mcp//read",
+            "mcp/demo/write",
+            "mcp/demo/read/extra",
+            "mcp/a__b/read",
+        ] {
+            assert_eq!(registry.classify(&ToolName::new(name)), None, "{name}");
+        }
+        assert_eq!(
+            registry.tool_names().count(),
+            0,
+            "a rule selector is not a redispatch target"
+        );
+        let mut cfg = base();
+        cfg.tools = declared(vec![tool("mcp/*/.read.")]);
+        let dotted = Registry::build_covered(cfg).unwrap();
+        assert_eq!(
+            dotted.classify(&ToolName::new("mcp/.server./.read.")),
+            Some(ToolKind::Declared)
+        );
+        assert_eq!(dotted.tool_names().count(), 0);
+    }
+
+    #[test]
+    fn overlapping_names_preserve_authored_order_and_canonical_annotation_identity() {
+        let actual = ToolName::new("mcp/demo/read");
+        let broad = "mcp/*/read(path:private*)";
+        let precise = "mcp/demo/read";
+        for names in [[broad, precise], [precise, broad]] {
+            let mut cfg = base();
+            cfg.tools = declared(names.iter().map(|name| tool(name)).collect());
+            let registry = Registry::build_covered(cfg).unwrap();
+            let arguments = crate::params::CanonicalArguments::parse(br#"{"path":"private.txt"}"#).unwrap();
+            let (id, selected) = registry.select_tool(&actual, arguments.value()).unwrap();
+            assert_eq!(id.ordinal(), 0);
+            assert_eq!(selected.name().as_str(), names[0].split('(').next().unwrap());
+            let call = crate::value::ResolvedCall::new_keyed(actual.clone(), id, arguments);
+            assert_eq!(registry.declaration(&call), Some(selected));
+            assert!(registry.selection_matches(&call));
+            assert_eq!(registry.annotation_of(&call).unwrap().name, actual);
+        }
+        let mut cfg = base();
+        cfg.tools = declared(vec![tool(broad), tool(precise)]);
+        let registry = Registry::build_covered(cfg).unwrap();
+        let (id, _) = registry
+            .select_tool(&actual, &serde_json::json!({"path":"public.txt"}))
+            .unwrap();
+        assert_eq!(id.ordinal(), 1, "argument mismatch moves to the next authored contract");
+    }
+
+    #[test]
     fn refuses_empty_mandate() {
         let mut cfg = base();
         cfg.authorities = vec![Authority {
@@ -2068,7 +2911,7 @@ mod tests {
     fn the_wildcard_covers_every_name_the_policy_does_not_write() {
         let mut cfg = base();
         cfg.tools = declared(vec![tool("read")]);
-        cfg.tools.push(annotated(WILDCARD_TOOL_NAME, "any"));
+        cfg.tools.push(annotated(WILDCARD_SPELLING, "any"));
         cfg.annotators = vec![annotator("any")];
         let registry = Registry::build_covered(cfg).unwrap();
         let read = ToolName::new("read");
@@ -2091,8 +2934,54 @@ mod tests {
                 .keyed_tool(&ghost, ToolDeclarationId::new(1).unwrap())
                 .is_none()
         );
-        assert!(registry.tools().all(|tool| tool.name().as_str() != WILDCARD_TOOL_NAME));
-        assert!(registry.tool_names().all(|name| name.as_str() != WILDCARD_TOOL_NAME));
+        assert!(registry.tools().all(|tool| tool.name().as_str() != WILDCARD_SPELLING));
+        assert!(registry.tool_names().all(|name| name.as_str() != WILDCARD_SPELLING));
+        assert!(
+            !registry.declared(&ToolName::new(WILDCARD_SPELLING)),
+            "the wildcard's spelling names no tool"
+        );
+    }
+
+    /// The wildcard's spelling is a contract, not a tool: a caller that proposes the literal
+    /// `*` names a tool no host dispatches, so it resolves to nothing — the wildcard covers
+    /// every *other* name — and the proposal is refused instead of annotated and checked.
+    #[test]
+    fn a_call_proposing_the_wildcards_own_spelling_resolves_to_no_declaration() {
+        let mut cfg = base();
+        cfg.tools = declared(vec![tool("read")]);
+        cfg.tools.push(annotated(WILDCARD_SPELLING, "any"));
+        cfg.annotators = vec![annotator("any")];
+        let registry = Registry::build_covered(cfg).unwrap();
+        let literal = ToolName::new(WILDCARD_SPELLING);
+
+        assert_eq!(registry.classify(&literal), None);
+        assert!(!registry.contains_tool(&literal));
+        assert!(!registry.declared(&literal));
+        assert!(registry.select_tool(&literal, &serde_json::json!({})).is_none());
+        assert!(registry.keyed_tool(&literal, ToolDeclarationId::default()).is_none());
+        assert_eq!(
+            registry.classify(&ToolName::new("ghost")),
+            Some(ToolKind::Wildcard),
+            "every other unwritten name still resolves to the wildcard"
+        );
+    }
+
+    #[test]
+    fn the_wildcard_parses_apart_from_every_tool_name() {
+        assert_eq!(
+            parse_tool_selector(WILDCARD_SPELLING).map(|(name, _)| name),
+            Ok(ContractName::Wildcard)
+        );
+        assert!(matches!(
+            parse_tool_selector("*(path:x)"),
+            Ok((ContractName::Wildcard, ToolMatcher::Arguments(_)))
+        ));
+        for named in ["read", "a*", "**", "read(path:*)"] {
+            assert!(
+                matches!(parse_tool_selector(named), Ok((ContractName::Named(_), _))),
+                "{named} names a tool"
+            );
+        }
     }
 
     #[test]
@@ -2111,7 +3000,7 @@ mod tests {
     fn a_wildcard_declares_no_statics_no_metadata_and_registers_once() {
         let statics = {
             let mut cfg = base();
-            cfg.tools = declared(vec![tool(WILDCARD_TOOL_NAME)]);
+            cfg.tools = declared(vec![tool(WILDCARD_SPELLING)]);
             Registry::build_covered(cfg)
         };
         assert!(matches!(statics, Err(LoadError::WildcardStatic)));
@@ -2120,7 +3009,7 @@ mod tests {
             let mut cfg = base();
             cfg.annotators = vec![annotator("any")];
             cfg.tools = vec![ToolDeclaration::Annotated {
-                name: ToolName::new(WILDCARD_TOOL_NAME),
+                name: ToolName::new(WILDCARD_SPELLING),
                 tags: vec![crate::names::TagName::new("web")],
                 description: None,
                 parameters: crate::params::ToolParameters::open(),
@@ -2130,20 +3019,25 @@ mod tests {
         };
         assert!(matches!(tagged, Err(LoadError::WildcardMetadata)));
 
+        let selected = {
+            let mut cfg = base();
+            cfg.annotators = vec![annotator("any")];
+            cfg.tools = vec![annotated("*(path:*)", "any")];
+            Registry::build_covered(cfg)
+        };
+        assert!(matches!(selected, Err(LoadError::WildcardMetadata)));
+
         let doubled = {
             let mut cfg = base();
             cfg.annotators = vec![annotator("any")];
-            cfg.tools = vec![
-                annotated(WILDCARD_TOOL_NAME, "any"),
-                annotated(WILDCARD_TOOL_NAME, "any"),
-            ];
+            cfg.tools = vec![annotated(WILDCARD_SPELLING, "any"), annotated(WILDCARD_SPELLING, "any")];
             Registry::build_covered(cfg)
         };
         assert!(matches!(doubled, Err(LoadError::DuplicateWildcard)));
 
         let unregistered = {
             let mut cfg = base();
-            cfg.tools = vec![annotated(WILDCARD_TOOL_NAME, "ghost")];
+            cfg.tools = vec![annotated(WILDCARD_SPELLING, "ghost")];
             Registry::build_covered(cfg)
         };
         assert!(matches!(unregistered, Err(LoadError::UnknownAnnotator { .. })));
@@ -2186,87 +3080,84 @@ mod tests {
     }
 
     #[test]
-    fn every_audience_argument_binding_names_a_required_top_level_string() {
+    fn an_audience_argument_binding_implies_a_required_top_level_string() {
         use crate::params::{PropertyFault, ToolParameters};
         let schema = |value: serde_json::Value| ToolParameters::compile(&value).unwrap();
-        let refused = [
-            (ToolParameters::open(), PropertyFault::Undeclared),
+        let required_string = |extra: serde_json::Value| {
+            let mut object = serde_json::json!({
+                "type": "object",
+                "properties": { "to": { "type": "string" } },
+                "required": ["to"],
+            });
+            object
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            schema(object)
+        };
+        let implied = [
             (
-                schema(serde_json::json!({
-                    "type": "object",
-                    "properties": { "cc": { "type": "string" } },
-                    "required": ["cc"],
-                })),
-                PropertyFault::Undeclared,
-            ),
-            (
-                schema(serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "envelope": {
-                            "type": "object",
-                            "properties": { "to": { "type": "string" } },
-                            "required": ["to"],
-                        }
-                    },
-                    "required": ["envelope"],
-                })),
-                PropertyFault::Undeclared,
+                ToolParameters::open(),
+                required_string(serde_json::json!({"additionalProperties": true})),
             ),
             (
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": { "to": { "type": "string" } },
                 })),
-                PropertyFault::Optional,
+                required_string(serde_json::json!({})),
             ),
             (
                 schema(serde_json::json!({
                     "type": "object",
-                    "properties": { "to": { "type": "array", "items": { "type": "string" } } },
+                    "properties": { "body": { "type": "string" } },
+                    "required": ["body"],
+                })),
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": { "body": { "type": "string" }, "to": { "type": "string" } },
+                    "required": ["body", "to"],
+                })),
+            ),
+            (
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": { "to": { "type": "string", "enum": ["ops", "dev"] } },
                     "required": ["to"],
                 })),
-                PropertyFault::NotString,
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": { "to": { "type": "string", "enum": ["ops", "dev"] } },
+                    "required": ["to"],
+                })),
             ),
         ];
-        for (parameters, expected) in refused {
-            for (expected_context, cfg) in binding_sites(&parameters) {
-                match Registry::build_covered(cfg) {
-                    Err(LoadError::AudienceBindingSchema {
-                        context,
-                        argument,
-                        fault,
-                    }) => {
-                        assert_eq!(context, expected_context);
-                        assert_eq!(argument, "to");
-                        assert_eq!(fault, expected, "at {expected_context}");
-                    }
-                    other => {
-                        panic!("{expected_context} under {parameters:?} must refuse with {expected:?}, got {other:?}")
-                    }
-                }
+        for (parameters, expected) in implied {
+            for (context, cfg) in binding_sites(&parameters) {
+                let registry = Registry::build_covered(cfg)
+                    .unwrap_or_else(|error| panic!("{context} under {parameters:?} must load: {error}"));
+                let loaded = registry.tool(&ToolName::new("emit")).unwrap().declared().unwrap();
+                assert_eq!(loaded.parameters.normalized(), expected.normalized(), "{context}");
             }
         }
 
-        let accepted = [
-            schema(serde_json::json!({
-                "type": "object",
-                "properties": { "to": { "type": "string" }, "body": { "type": "string" } },
-                "required": ["to"],
-                "additionalProperties": true,
-            })),
-            schema(serde_json::json!({
-                "type": "object",
-                "properties": { "to": { "type": "string", "enum": ["ops", "dev"] } },
-                "required": ["to"],
-            })),
-        ];
-        for parameters in accepted {
-            for (context, cfg) in binding_sites(&parameters) {
-                assert!(
-                    Registry::build_covered(cfg).is_ok(),
-                    "{context} under {parameters:?} must load"
-                );
+        let array = schema(serde_json::json!({
+            "type": "object",
+            "properties": { "to": { "type": "array", "items": { "type": "string" } } },
+            "required": ["to"],
+        }));
+        for (context, cfg) in binding_sites(&array) {
+            match Registry::build_covered(cfg) {
+                Err(LoadError::AudienceBindingSchema {
+                    context: found,
+                    argument,
+                    fault,
+                }) => {
+                    assert_eq!(found, "tool emit");
+                    assert_eq!(argument, "to");
+                    assert_eq!(fault, PropertyFault::NotString, "at {context}");
+                }
+                other => panic!("{context} must refuse a non-string argument, got {other:?}"),
             }
         }
 
@@ -2291,7 +3182,7 @@ mod tests {
         let attester = |name: String| Authority {
             name: AuthorityName::new(name),
             mandate: Mandate {
-                attends: vec![MarkName::new("m1"), MarkName::new("m2")],
+                attends: Attends::Named(vec![MarkName::new("m1"), MarkName::new("m2")]),
                 ..Mandate::default()
             },
             scope: Scope::default(),
@@ -2349,7 +3240,7 @@ mod tests {
                 mandate: Mandate {
                     trust_ceiling: Some(Trust::new(1)),
                     reader_ceiling: Some(DeclaredAudience::literal(Audience::public())),
-                    attends: vec![MarkName::new("signoff")],
+                    attends: Attends::Named(vec![MarkName::new("signoff")]),
                     ..Mandate::default()
                 },
                 scope: Scope::default(),
@@ -2434,7 +3325,7 @@ mod tests {
         grouped.audience = crate::audience::AudienceConfig {
             sources: vec![crate::audience::SourceRegistration {
                 provider: "slack".to_string(),
-                templates: vec![crate::audience::SelectorTemplate::new("user-group/<handle>")],
+                templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
             }],
             groups: vec![crate::audience::NamedAudience {
                 name: crate::names::GroupName::new("desk"),
@@ -2581,11 +3472,14 @@ mod tests {
         let mut tools = vec![target];
         for i in 0..narrowers {
             let mut narrower = tool(&format!("narrow{i}"));
-            narrower.delta.audience = Some(DeclaredAudience::restricted([ReaderId::new("a"), ReaderId::new("c")]));
+            narrower.delta.audience = Some(DeltaAudience::Static(DeclaredAudience::restricted([
+                ReaderId::new("a"),
+                ReaderId::new("c"),
+            ])));
             tools.push(narrower);
         }
         let mut public = tool("public-delta");
-        public.delta.audience = Some(DeclaredAudience::literal(Audience::public()));
+        public.delta.audience = Some(DeltaAudience::Static(DeclaredAudience::literal(Audience::public())));
         let neutral = tool("neutral");
         let mut unannotated = tool("unannotated");
         unannotated.delta = Delta::NONE;
@@ -2653,7 +3547,9 @@ mod tests {
         };
         let mut fixer = tool("fixer");
         fixer.emits = EffectSet::new([EffectKind::new("k")]).unwrap();
-        fixer.delta.audience = Some(DeclaredAudience::restricted([ReaderId::new("a")]));
+        fixer.delta.audience = Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+            "a",
+        )])));
         let mut cfg = base();
         cfg.tools = declared(vec![target, fixer]);
         assert!(Registry::build_covered_with_cap(cfg, PlannerCap::new(2).expect("nonzero")).is_ok());
@@ -2878,7 +3774,9 @@ mod tests {
     #[test]
     fn sanitizer_chains_do_not_multiply_either_stage_bound() {
         let mut narrowing = tool("fetch");
-        narrowing.delta.audience = Some(DeclaredAudience::restricted([ReaderId::new("a")]));
+        narrowing.delta.audience = Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+            "a",
+        )])));
         let mut cfg = base();
         cfg.tools = declared(vec![narrowing]);
         cfg.sanitizers = (0..5).map(output_sanitizer).collect();

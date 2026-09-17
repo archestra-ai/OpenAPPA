@@ -6,17 +6,17 @@
 version = 2
 
 [[policy.tool]]
-name = "Backup"
+name = "mcp/ops/backup"
 effects = ["backup.completed"]
 delta = {}
 
 [[policy.tool]]
-name = "Deploy"
+name = "mcp/ops/deploy"
 requires = { effects = { contains = ["backup.completed"] } }
 delta = {}
 
 [[policy.tool]]
-name = "Migrate"
+name = "mcp/ops/migrate"
 effects = ["migration.applied"]
 requires = { effects = { excludes = ["migration.applied"] } }
 delta = {}

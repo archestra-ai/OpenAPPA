@@ -1,0 +1,166 @@
+# Included Slack battery for the claude.ai Slack connector.
+#
+# One rule per tool. A read that names a conversation is read by that
+# conversation's readers: its result is labelled `@slack:channel/<the
+# channel_id the call spells>`, which the `slack` audience source resolves
+# to every full member for a public channel and to the members Slack
+# reports for a private one. A message sent or scheduled into a
+# conversation needs trusted data that every member of that conversation
+# may see. Reads without a conversation — canvases, files, profiles,
+# public search — are `internal`; a search over private conversations
+# stays with the viewer (`self`); the writes other people read without a
+# conversation id need trusted data that includes `internal`. Requester
+# secrets (`self`) never enter a channel; internal communication stays
+# autonomous, with no human approval in the loop.
+#
+# A root rule placed above these can narrow any of them by argument.
+# Root rules run first. For example, to let replies inside a thread go
+# out without a question:
+#
+#   [[policy.tool]]
+#   name = "mcp/claude_ai_Slack/slack_send_message(thread_ts:*)"
+#   requires = { trust = "trusted" }
+#   delta = {}
+#
+# The battery also binds `audience-source.py`, the `slack` audience
+# source, and declares the selectors it serves. The root config maps
+# `self` and `internal` onto them — the README shows the wiring.
+
+[policy]
+version = 2
+
+[externals.audience.slack]
+command = ["python3", "audience-source.py"]
+token_env = "APPA_PROVIDER_SLACK_TOKEN"
+selectors = [
+  { template = "viewer", feeds = "self" },
+  { template = "full-members", feeds = "internal" },
+  { template = "user-group/<handle>" },
+  { template = "channel/<id>" },
+]
+
+# --- reads of one conversation: its members ---
+
+[[policy.tool]]
+name = "mcp/claude_ai_Slack/slack_read_channel"
+delta = { audience = ["@slack:channel/$channel_id"] }
+
+[[policy.tool]]
+name = "mcp/claude_ai_Slack/slack_read_thread"
+delta = { audience = ["@slack:channel/$channel_id"] }
+
+[[policy.tool]]
+name = "mcp/claude_ai_Slack/slack_list_channel_members"
+delta = { audience = ["@slack:channel/$channel_id"] }
+
+[[policy.tool]]
+name = "mcp/claude_ai_Slack/slack_get_reactions"
+delta = { audience = ["@slack:channel/$channel_id"] }
+
+# --- reads without a conversation: internal ---
+
+[[policy.tool]]
+name = "mcp/claude_ai_Slack/slack_read_canvas"
+
+[policy.tool.delta]
+audience = ["internal"]
+
+[[policy.tool]]
+name = "mcp/claude_ai_Slack/slack_read_file"
+
+[policy.tool.delta]
+audience = ["internal"]
+
+[[policy.tool]]
+name = "mcp/claude_ai_Slack/slack_read_user_profile"
+
+[policy.tool.delta]
+audience = ["internal"]
+
+[[policy.tool]]
+name = "mcp/claude_ai_Slack/slack_search_public"
+
+[policy.tool.delta]
+audience = ["internal"]
+
+[[policy.tool]]
+name = "mcp/claude_ai_Slack/slack_search_public_and_private"
+
+# Hits come from every private conversation the token can see, so only
+# the viewer is known to read them all.
+[policy.tool.delta]
+audience = ["self"]
+
+[[policy.tool]]
+name = "mcp/claude_ai_Slack/slack_search_channels"
+
+[policy.tool.delta]
+audience = ["internal"]
+
+[[policy.tool]]
+name = "mcp/claude_ai_Slack/slack_search_users"
+
+[policy.tool.delta]
+audience = ["internal"]
+
+[[policy.tool]]
+name = "mcp/claude_ai_Slack/slack_search_emojis"
+
+[policy.tool.delta]
+audience = ["internal"]
+
+# --- writes nobody else reads yet: trusted data, no approval ---
+
+[[policy.tool]]
+name = "mcp/claude_ai_Slack/slack_add_reaction"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "mcp/claude_ai_Slack/slack_send_message_draft"
+requires = { trust = "trusted" }
+delta = {}
+
+# --- writes into one conversation: trusted data its members may see ---
+
+[[policy.tool]]
+name = "mcp/claude_ai_Slack/slack_send_message"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["@slack:channel/$channel_id"] }
+
+[[policy.tool]]
+name = "mcp/claude_ai_Slack/slack_schedule_message"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["@slack:channel/$channel_id"] }
+
+# --- writes other people read, without a conversation: trusted data reaching internal ---
+
+[[policy.tool]]
+name = "mcp/claude_ai_Slack/slack_create_canvas"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/claude_ai_Slack/slack_update_canvas"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/claude_ai_Slack/slack_create_conversation"
+delta = {}
+
+[policy.tool.requires]
+trust = "trusted"
+audience = { contains = ["internal"] }

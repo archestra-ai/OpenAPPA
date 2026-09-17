@@ -1165,7 +1165,7 @@ pub(crate) fn gap_cover(
         }
         Gap::NoPrior(kind) => Evaluation::of_exact(authority.scope.covers(tags) && mandate.waivers.contains(kind)),
         // Attention routes by its own currency — the attended mark — never by scope.
-        Gap::Attention(mark) => Evaluation::of_exact(mandate.attends.contains(mark)),
+        Gap::Attention(mark) => Evaluation::of_exact(mandate.attends.covers(mark)),
         Gap::Prior(_) | Gap::Cap { .. } => Evaluation::Fails,
     }
 }
@@ -1179,17 +1179,13 @@ pub(crate) fn covers_gap(authority: &Authority, gap: &Gap, tags: &[TagName], con
 
 /// The atoms the planning of one surfaced block reads, so the operation answers them
 /// before [`plan`] runs — the deterministic second gathering stage, a pure function of the
-/// block, the policy, and the role. Each read site of the enumeration is mirrored by its
-/// gate here: an `includes` gap reads the mandate of every in-scope authority (`gap_cover`)
-/// and the transition of every in-scope input sanitizer; a narrowing at a confined result
-/// point reads the transition of every in-scope output sanitizer; a `cap` gap reads every
-/// tool's delta. The check's own reads — the call's contract — are the check stage's.
-pub(crate) fn block_atoms(
-    registry: &Registry,
-    contract: &ToolAnnotation,
-    raw: &RawBlock,
-    role: CallRole,
-) -> Vec<SymbolicAtom> {
+/// block and the policy. Each read site of the enumeration is mirrored by its
+/// gate here: an `includes` gap reads the mandate of every in-scope authority (`gap_cover`);
+/// a `cap` gap reads every tool's delta. A sanitizer's transition is not gathered: its
+/// admission derives from the value's label first and asks for members only where the
+/// enumeration itself finds derivation short, so the gate would demand atoms the decision
+/// never reads. The check's own reads — the call's contract — are the check stage's.
+pub(crate) fn block_atoms(registry: &Registry, contract: &ToolAnnotation, raw: &RawBlock) -> Vec<SymbolicAtom> {
     let providers = registry.audience().providers();
     let mut atoms: Vec<SymbolicAtom> = Vec::new();
     let has = |wanted: fn(&Gap) -> bool| raw.requirement_gaps.iter().any(wanted);
@@ -1199,24 +1195,12 @@ pub(crate) fn block_atoms(
                 atoms.extend(authority.mandate.needed_atoms(providers));
             }
         }
-        if role != CallRole::MarkedSpawn {
-            for sanitizer in registry.sanitizers() {
-                if sanitizer.on.input && sanitizer.applies_to(&contract.tags) {
-                    atoms.extend(sanitizer.needed_atoms(providers));
-                }
-            }
-        }
-    }
-    if raw.narrowing.is_some() && registry.profile().confines_result(&contract.name) {
-        for sanitizer in registry.sanitizers() {
-            if sanitizer.on.output && !sanitizer.name.is_attest_schema() && sanitizer.applies_to(&contract.tags) {
-                atoms.extend(sanitizer.needed_atoms(providers));
-            }
-        }
     }
     if has(|gap| matches!(gap, Gap::Cap { .. })) {
         for tool in registry.tools().filter_map(crate::contract::ToolDeclaration::declared) {
-            if let Some(audience) = &tool.delta.audience {
+            // A placeholder delta names its collection only per call; a cap comparison against
+            // it waits for that call.
+            if let Some(crate::contract::DeltaAudience::Static(audience)) = &tool.delta.audience {
                 atoms.extend(audience.needed_atoms(providers));
             }
         }
@@ -1224,49 +1208,19 @@ pub(crate) fn block_atoms(
     atoms
 }
 
-/// The atoms executing one offered plan reads: the call's own contract, the mandate of
-/// every assigned authority as far as the gaps it covers consult it and the transition
-/// of every sanitizer a step names.
-pub(crate) fn plan_atoms(
-    registry: &Registry,
-    contract: &ToolAnnotation,
-    plan: &ExecutableRemedyPlan,
-) -> Vec<SymbolicAtom> {
+/// The atoms executing one offered plan reads beyond the call check: the mandate of
+/// every assigned authority as far as the gaps it covers consult it. The call check
+/// requests membership only when a comparison cannot be established symbolically.
+/// A step's sanitizer reads its transition when it applies, as [`block_atoms`] explains.
+pub(crate) fn plan_atoms(registry: &Registry, plan: &ExecutableRemedyPlan) -> Vec<SymbolicAtom> {
     let providers = registry.audience().providers();
-    let mut atoms: Vec<SymbolicAtom> = contract.needed_atoms(providers).collect();
+    let mut atoms: Vec<SymbolicAtom> = Vec::new();
     for required in &plan.required {
         if let Some(authority) = registry.authority(&required.authority) {
             atoms.extend(authority.mandate.reads(&required.covers, providers));
         }
     }
-    for step in &plan.steps {
-        // A return declaration runs its sanitizer at the child's stop, which reads its atoms then.
-        let sanitizer = match step {
-            RemedyStep::Derive(sanitizer) | RemedyStep::Sanitize(sanitizer) => sanitizer,
-            RemedyStep::Accept(_) | RemedyStep::Authorize(_) | RemedyStep::Return(_) => continue,
-        };
-        if let Some(sanitizer) = registry.sanitizer(sanitizer) {
-            atoms.extend(sanitizer.needed_atoms(providers));
-        }
-    }
     atoms
-}
-
-/// The atoms one confined candidate's stage reads: the transition of every
-/// in-scope output sanitizer the chain has not spent.
-pub(crate) fn confined_stage_atoms(
-    registry: &Registry,
-    contract: &ToolAnnotation,
-    lineage: &SanitizerLineage,
-) -> Vec<SymbolicAtom> {
-    let providers = registry.audience().providers();
-    registry
-        .sanitizers()
-        .filter(|sanitizer| !lineage.contains(&sanitizer.name))
-        .filter(|sanitizer| !sanitizer.name.is_attest_schema())
-        .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(&contract.tags))
-        .flat_map(|sanitizer| sanitizer.needed_atoms(providers))
-        .collect()
 }
 
 fn direct_redispatches(
@@ -1313,7 +1267,9 @@ pub(crate) fn direct_clears(
     needs: &mut NeededAtoms,
 ) -> Vec<Gap> {
     let has_cap = gaps.iter().any(|gap| matches!(gap, Gap::Cap { .. }));
-    let committed = has_cap.then(|| check::committed_label(tool, current));
+    // No call is at hand here, so a placeholder delta commits no label and clears no cap.
+    let committed =
+        (has_cap && tool.delta.selector_placeholder().is_none()).then(|| check::committed_label(tool, current));
     gaps.iter()
         .filter(|gap| match (gap, &committed) {
             (Gap::Prior(kind), _) => tool.emits.contains(kind),
@@ -1336,11 +1292,11 @@ pub(crate) fn direct_clears(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::{Hint, Mandate, Sanitizer, SanitizerPoints, Scope};
+    use crate::authority::{Attends, Hint, Mandate, Sanitizer, SanitizerPoints, Scope};
     use crate::check::CheckOutcome;
     use crate::contract::{
-        AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, PinnedAnnotation, ProducedAnnotation,
-        RecipientSpec, Requires, ToolAnnotation, ToolDeclaration,
+        AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, LabelRequirements, PinnedAnnotation,
+        ProducedAnnotation, RecipientSpec, Requires, ToolAnnotation, ToolDeclaration,
     };
     use crate::fact::{EffectSet, Fact};
     use crate::label::DeclaredAudience;
@@ -1621,14 +1577,14 @@ mod tests {
             "crm",
             Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::literal(internal())),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(internal()))),
             },
         );
         let tracker = reader(
             "tracker",
             Delta {
                 trust: Some(SUSPICIOUS),
-                audience: Some(DeclaredAudience::literal(internal())),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(internal()))),
             },
         );
         let registry = build(RegistryConfig {
@@ -1682,7 +1638,7 @@ mod tests {
             "lookup",
             Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::literal(internal())),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(internal()))),
             },
         );
         pinned.parameters = crate::params::test_string_argument_schema("room");
@@ -1748,14 +1704,14 @@ mod tests {
             "publish",
             Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::literal(internal())),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(internal()))),
             },
         );
         publish.requires.attention = vec![MarkName::new("signoff")];
         let steward = Authority {
             name: AuthorityName::new("steward"),
             mandate: Mandate {
-                attends: vec![MarkName::new("signoff")],
+                attends: Attends::Named(vec![MarkName::new("signoff")]),
                 ..Mandate::default()
             },
             scope: Scope::default(),
@@ -1890,7 +1846,7 @@ mod tests {
             tags: vec![],
             delta: Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::literal(to)),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(to))),
             },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
@@ -2023,7 +1979,7 @@ mod tests {
             tags: vec![],
             delta: Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::literal(a.clone())),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::literal(a.clone()))),
             },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::new([EffectKind::new("backup.done"), EffectKind::new("receipt")]).unwrap(),
@@ -2127,7 +2083,7 @@ mod tests {
         let attester = Authority {
             name: AuthorityName::new("attester"),
             mandate: Mandate {
-                attends: vec![MarkName::new("signoff")],
+                attends: Attends::Named(vec![MarkName::new("signoff")]),
                 ..Mandate::default()
             },
             scope: Scope::default(),
@@ -2319,7 +2275,7 @@ mod tests {
             audience: crate::audience::AudienceConfig {
                 sources: vec![crate::audience::SourceRegistration {
                     provider: "slack".to_string(),
-                    templates: vec![crate::audience::SelectorTemplate::new("user-group/<handle>")],
+                    templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
                 }],
                 groups: vec![crate::audience::NamedAudience {
                     name: crate::names::GroupName::new("team"),
@@ -2336,8 +2292,7 @@ mod tests {
         let log = vec![opened(known(Trust::new(0), Audience::public()))];
         let planned = plan_of(&registry, &log, &call("send", json!({})));
         assert_eq!(assigned(&planned), vec![vec!["desk"]]);
-        let contract = registry.tool(&ToolName::new("send")).unwrap().declared().unwrap();
-        assert!(plan_atoms(&registry, contract, exec(&planned.plans[0])).is_empty());
+        assert!(plan_atoms(&registry, exec(&planned.plans[0])).is_empty());
     }
 
     /// The four gathering collectors, each against the scope rule its enumeration mirrors:
@@ -2346,7 +2301,6 @@ mod tests {
     mod gathering {
         use super::*;
         use crate::authority::DeclaredTransition;
-        use crate::candidate::SanitizerLineage;
         use crate::check::{Gap, Narrowing, RawBlock};
         use crate::label::{Clause, GroupRef};
         use crate::names::{GroupName, SanitizerName, TagName};
@@ -2438,7 +2392,7 @@ mod tests {
                         &[],
                         Delta {
                             trust: None,
-                            audience: Some(group("press")),
+                            audience: Some(DeltaAudience::Static(group("press"))),
                         },
                     ),
                 ]),
@@ -2454,7 +2408,7 @@ mod tests {
                 audience: crate::audience::AudienceConfig {
                     sources: vec![crate::audience::SourceRegistration {
                         provider: "slack".to_string(),
-                        templates: vec![crate::audience::SelectorTemplate::new("user-group/<handle>")],
+                        templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
                     }],
                     groups: vec![named("team"), named("legal"), named("press")],
                     ..crate::audience::AudienceConfig::default()
@@ -2493,35 +2447,21 @@ mod tests {
             }
         }
 
-        fn lineage(names: &[&str]) -> SanitizerLineage {
-            SanitizerLineage::try_from(names.iter().map(|name| SanitizerName::new(*name)).collect::<Vec<_>>())
-                .expect("a lineage without repeats")
-        }
-
         #[test]
         fn a_block_reads_each_component_the_gap_it_carries_consults() {
             let unconfined = registry(&[]);
             let confined = registry(&["send"]);
             let contract = send(&unconfined);
-            let collect = |registry: &Registry, raw: &RawBlock, role: CallRole| -> BTreeSet<SymbolicAtom> {
-                block_atoms(registry, &contract, raw, role).into_iter().collect()
+            let collect = |registry: &Registry, raw: &RawBlock| -> BTreeSet<SymbolicAtom> {
+                block_atoms(registry, &contract, raw).into_iter().collect()
             };
             assert_eq!(
-                collect(&unconfined, &raw(vec![includes()], false), CallRole::Ordinary),
-                atoms(&["team", "legal"]),
-                "an includes gap reads the in-scope authority and the in-scope input sanitizer"
-            );
-            assert_eq!(
-                collect(&unconfined, &raw(vec![includes()], false), CallRole::MarkedSpawn),
+                collect(&unconfined, &raw(vec![includes()], false)),
                 atoms(&["team"]),
-                "a marked spawn never routes through an input sanitizer"
+                "an includes gap reads the in-scope authority; the input sanitizer reads its transition against the value"
             );
             assert_eq!(
-                collect(
-                    &unconfined,
-                    &raw(vec![Gap::Cap { cap: group("team") }], false),
-                    CallRole::Ordinary
-                ),
+                collect(&unconfined, &raw(vec![Gap::Cap { cap: group("team") }], false)),
                 atoms(&["press"]),
                 "a cap gap reads every tool's delta and no authority"
             );
@@ -2535,51 +2475,27 @@ mod tests {
                         }],
                         false
                     ),
-                    CallRole::Ordinary
                 ),
                 atoms(&[]),
                 "a trust-floor gap consults no reader ceiling"
             );
             assert_eq!(
-                collect(&unconfined, &raw(vec![], true), CallRole::Ordinary),
+                collect(&confined, &raw(vec![], true)),
                 atoms(&[]),
-                "a narrowing at an unconfined result point reads no output sanitizer"
-            );
-            assert_eq!(
-                collect(&confined, &raw(vec![], true), CallRole::Ordinary),
-                atoms(&["legal"]),
-                "a narrowing at a confined result point reads the in-scope output sanitizers"
+                "a narrowing at a confined result point gathers nothing: the output sanitizers derive from the value"
             );
         }
 
         #[test]
-        fn a_confined_stage_reads_the_unspent_in_scope_output_sanitizers() {
-            let registry = registry(&["send"]);
-            let contract = send(&registry);
-            let collect = |lineage: &SanitizerLineage| -> BTreeSet<SymbolicAtom> {
-                confined_stage_atoms(&registry, &contract, lineage)
-                    .into_iter()
-                    .collect()
-            };
-            assert_eq!(collect(&lineage(&[])), atoms(&["legal"]));
-            assert_eq!(
-                collect(&lineage(&["redact"])),
-                atoms(&[]),
-                "a spent sanitizer is not read again"
-            );
-        }
-
-        #[test]
-        fn a_plan_reads_its_rulings_as_far_as_their_gaps_consult_the_mandate_and_its_steps() {
+        fn a_plan_reads_its_rulings_as_far_as_their_gaps_consult_the_mandate() {
             let registry = registry(&[]);
-            let contract = send(&registry);
             let collect = |required: Vec<RequiredRuling>, steps: Vec<RemedyStep>| -> BTreeSet<SymbolicAtom> {
                 let plan = ExecutableRemedyPlan {
                     id: PlanId::new(0),
                     steps,
                     required,
                 };
-                plan_atoms(&registry, &contract, &plan).into_iter().collect()
+                plan_atoms(&registry, &plan).into_iter().collect()
             };
             let desk = |covers: Vec<Gap>| RequiredRuling {
                 authority: AuthorityName::new("desk"),
@@ -2593,7 +2509,8 @@ mod tests {
                         RemedyStep::Sanitize(SanitizerName::new("redact")),
                     ]
                 ),
-                atoms(&["team", "legal"])
+                atoms(&["team"]),
+                "a ruling over an includes gap reads the ceiling; a sanitize step reads its transition against the value"
             );
             assert_eq!(
                 collect(
@@ -2661,7 +2578,7 @@ mod tests {
             audience: crate::audience::AudienceConfig {
                 sources: vec![crate::audience::SourceRegistration {
                     provider: "slack".to_string(),
-                    templates: vec![crate::audience::SelectorTemplate::new("user-group/<handle>")],
+                    templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
                 }],
                 groups: vec![crate::audience::NamedAudience {
                     name: crate::names::GroupName::new("team"),
@@ -2785,6 +2702,7 @@ mod tests {
             receiving: established(TRUSTED, Audience::public()),
             proposed_effects: annotation.emits.clone(),
             annotation: None,
+            file_basis: None,
             subject: crate::basis::fixture_subject(&traj()),
             evidence: crate::audience::AudienceEvidence::default(),
         }
@@ -3290,7 +3208,7 @@ mod tests {
         let attester = |name: &str| Authority {
             name: AuthorityName::new(name),
             mandate: Mandate {
-                attends: vec![MarkName::new("signoff")],
+                attends: Attends::Named(vec![MarkName::new("signoff")]),
                 ..Mandate::default()
             },
             scope: Scope::default(),
@@ -3338,7 +3256,7 @@ mod tests {
             name: AuthorityName::new("officer"),
             mandate: Mandate {
                 trust_ceiling: Some(TRUSTED),
-                attends: vec![MarkName::new("signoff")],
+                attends: Attends::Named(vec![MarkName::new("signoff")]),
                 ..Mandate::default()
             },
             scope: Scope::default(),
@@ -3403,7 +3321,9 @@ mod tests {
             tags: vec![],
             delta: Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::restricted([ReaderId::new("insider")])),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                    "insider",
+                )]))),
             },
             parameters: crate::params::ToolParameters::open(),
             emits: EffectSet::default(),
@@ -3662,7 +3582,7 @@ mod tests {
         let officer = Authority {
             name: AuthorityName::new("officer"),
             mandate: Mandate {
-                attends: vec![MarkName::new("signoff")],
+                attends: Attends::Named(vec![MarkName::new("signoff")]),
                 ..Mandate::default()
             },
             scope: Scope {
@@ -3703,7 +3623,7 @@ mod tests {
         let officer = Authority {
             name: AuthorityName::new("officer"),
             mandate: Mandate {
-                attends: vec![MarkName::new("other")],
+                attends: Attends::Named(vec![MarkName::new("other")]),
                 ..Mandate::default()
             },
             scope: Scope::default(),
@@ -3720,6 +3640,59 @@ mod tests {
         let log = vec![opened(known(TRUSTED, Audience::public()))];
         let planned = plan_of(&registry, &log, &call("wire", json!({})));
         assert!(!planned.is_curable());
+    }
+
+    #[test]
+    fn a_catch_all_authority_remedies_any_mark_but_leaves_blocked_terminal() {
+        let wire = ToolAnnotation {
+            description: Some("A test tool.".to_string()),
+            name: ToolName::new("wire"),
+            tags: vec![],
+            delta: Delta::NONE,
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::default(),
+            requires: Requires {
+                attention: vec![MarkName::new("sentry-review")],
+                ..Requires::default()
+            },
+        };
+        let denied = ToolAnnotation {
+            description: Some("A test tool.".to_string()),
+            name: ToolName::new("denied"),
+            tags: vec![],
+            delta: Delta::NONE,
+            parameters: crate::params::ToolParameters::open(),
+            emits: EffectSet::default(),
+            requires: Requires {
+                attention: vec![MarkName::new(MarkName::BLOCKED)],
+                ..Requires::default()
+            },
+        };
+        let anyone = Authority {
+            name: AuthorityName::new("anyone"),
+            mandate: Mandate {
+                attends: Attends::Any,
+                ..Mandate::default()
+            },
+            scope: Scope::default(),
+            hint: None,
+        };
+        let registry = build(RegistryConfig {
+            trust_chain: chain(),
+            tools: declared(vec![wire, denied]),
+            authorities: vec![anyone],
+            sanitizers: vec![],
+            audience: crate::audience::AudienceConfig::default(),
+            annotators: vec![],
+        });
+        let log = vec![opened(known(TRUSTED, Audience::public()))];
+        let reviewed = plan_of(&registry, &log, &call("wire", json!({})));
+        assert_eq!(
+            exec(&reviewed.plans[0]).steps,
+            vec![RemedyStep::Authorize(AuthorityName::new("anyone"))]
+        );
+        let blocked = plan_of(&registry, &log, &call("denied", json!({})));
+        assert!(!blocked.is_curable());
     }
 
     #[test]
@@ -3806,7 +3779,7 @@ mod tests {
                     })
                 }
                 Gap::NoPrior(kind) => authority.mandate.waivers.contains(kind),
-                Gap::Attention(mark) => authority.mandate.attends.contains(mark),
+                Gap::Attention(mark) => authority.mandate.attends.covers(mark),
                 Gap::Prior(_) | Gap::Cap { .. } => false,
             })
         }
@@ -3816,7 +3789,8 @@ mod tests {
             for tool in registry.tools().filter_map(crate::contract::ToolDeclaration::declared) {
                 let narrowed = match &tool.delta {
                     Delta {
-                        audience: Some(delta), ..
+                        audience: Some(DeltaAudience::Static(delta)),
+                        ..
                     } => Some(intersect(&current.audience, &Audience::of_declared(delta))),
                     _ => None,
                 };
@@ -3889,7 +3863,10 @@ mod tests {
             prop::option::of((0u8..2).prop_map(Trust::new)),
             prop::option::of(small_audience().prop_map(DeclaredAudience::literal)),
         )
-            .prop_map(|(trust, audience)| Delta { trust, audience })
+            .prop_map(|(trust, audience)| Delta {
+                trust,
+                audience: audience.map(DeltaAudience::Static),
+            })
     }
 
     fn an_includes() -> impl Strategy<Value = Option<AudienceRequirement>> {
@@ -3958,7 +3935,11 @@ mod tests {
             prop::option::of((0u8..2).prop_map(Trust::new)),
             prop::option::of(small_audience()),
             prop::collection::vec(small_effect(), 0..2),
-            prop::bool::ANY,
+            prop_oneof![
+                Just(Attends::Named(vec![])),
+                Just(Attends::Named(vec![MarkName::new("m0")])),
+                Just(Attends::Any),
+            ],
         )
             .prop_map(move |(trust_ceiling, reader_ceiling, waivers, attends)| Authority {
                 name: name.clone(),
@@ -3966,7 +3947,7 @@ mod tests {
                     trust_ceiling,
                     reader_ceiling: reader_ceiling.map(DeclaredAudience::literal),
                     waivers,
-                    attends: if attends { vec![MarkName::new("m0")] } else { vec![] },
+                    attends,
                 },
                 scope: Scope::default(),
                 hint: None,
@@ -4230,7 +4211,7 @@ mod tests {
             }
             let marks: BTreeSet<_> = contract.requires.attention_marks().iter().collect();
             for mark in &marks {
-                multiply(authorities.iter().filter(|a| a.mandate.attends.contains(mark)).count());
+                multiply(authorities.iter().filter(|a| a.mandate.attends.covers(mark)).count());
             }
             let output_sanitizers = registry.sanitizers().filter(|sanitizer| sanitizer.on.output).count();
             bound = bound.saturating_mul(1 + output_sanitizers as u128);
@@ -4252,7 +4233,10 @@ mod tests {
                 .filter(|candidate| {
                     candidate.emits.iter().any(|kind| priors.contains(kind))
                         || (has_cap
-                            && matches!(candidate.delta.audience.as_ref(), Some(DeclaredAudience::Union(_))))
+                            && matches!(
+                                candidate.delta.audience.as_ref(),
+                                Some(DeltaAudience::Static(DeclaredAudience::Union(_)) | DeltaAudience::Selector(_))
+                            ))
                 })
                 .count() as u128;
             bound = bound.saturating_add(redispatches);
@@ -4344,7 +4328,7 @@ mod tests {
                     Gap::Includes { recipients } => scoped && authority.mandate.reader_ceiling.as_ref()
                         .is_some_and(|c| decided(Audience::of_declared(c).includes(recipients, &parts.context()))),
                     Gap::NoPrior(kind) => scoped && authority.mandate.waivers.contains(kind),
-                    Gap::Attention(mark) => authority.mandate.attends.contains(mark),
+                    Gap::Attention(mark) => authority.mandate.attends.covers(mark),
                     Gap::Prior(_) | Gap::Cap { .. } => false,
                 }
             };

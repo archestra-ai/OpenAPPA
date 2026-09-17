@@ -2,7 +2,7 @@
 title: What is OpenAPPA
 category: Get started
 order: 1
-description: OpenAPPA is open-source, deterministic security for real-world agentic applications.
+description: OpenAPPA is an open-source, deterministic security engine for real-world agentic applications.
 ---
 
 The more tools and data sources an agent is connected to, the more it can do. Capability, however, arrives together with risk — the risk of data exfiltration. Put plainly, an agent can pick up something sensitive and publish it, whether through a hallucination or an outright prompt injection.
@@ -28,6 +28,15 @@ Plenty of PII detectors and prompt-injection classifiers exist today — OpenAI'
 The foundation of OpenAPPA is data-flow tracking. In other words, it answers one simple question before every tool call: *is this data allowed to go to this destination?* 
 
 And where it is genuinely unavoidable, OpenAPPA also lets you plug in non-deterministic agent-security tools.
+
+### Threat Model: What OpenAPPA Protects Against
+
+OpenAPPA is designed for real-world enterprise agent workflows:
+
+- **What it protects against:** Prompt injections, poisoned external data, confused agent actions, and accidental data leaks across multi-step workflows.
+- **How it stops attacks:** At the deterministic runtime boundary. Even if the LLM is completely tricked by an attacker, unauthorized tool calls physically cannot dispatch.
+- **System boundaries:** Pre-vetted internal data is trusted by configuration. Custom authorities (like human review queues) are trusted within their declared permissions.
+- **Auditability:** Every check, dispatch, and remedy decision is recorded in an append-only, tamper-evident log for post-hoc audit and deterministic replay.
 
 ## Where next
 

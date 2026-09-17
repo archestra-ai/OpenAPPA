@@ -490,11 +490,10 @@ impl<'a> Search<'a> {
             // enumeration may consult is answered, or the missing ones are the ask. Without
             // it, an unanswered mandate would silently drop this state's plans from the
             // advisory menu instead of refusing the search.
-            let mut unanswered: Vec<SymbolicAtom> =
-                plan::block_atoms(self.registry, &context.contract, &eval, context.role)
-                    .into_iter()
-                    .filter(|atom| !self.context.expansions.answered(atom))
-                    .collect();
+            let mut unanswered: Vec<SymbolicAtom> = plan::block_atoms(self.registry, &context.contract, &eval)
+                .into_iter()
+                .filter(|atom| !self.context.expansions.answered(atom))
+                .collect();
             if !unanswered.is_empty() {
                 unanswered.sort();
                 unanswered.dedup();
@@ -885,7 +884,9 @@ fn disclosure_cmp(a: &[Audience], b: &[Audience], within: &WithinAssertions) -> 
 mod tests {
     use super::*;
     use crate::authority::{Authority, Mandate, Sanitizer, SanitizerPoints, Scope};
-    use crate::contract::{AudienceRequirement, Delta, HistoryRequirement, RecipientSpec, Requires, ToolAnnotation};
+    use crate::contract::{
+        AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, RecipientSpec, Requires, ToolAnnotation,
+    };
     use crate::fact::{CloseOutcome, EffectSet, Fact};
     use crate::label::DeclaredAudience;
     use crate::label::{Label, ReaderId, Trust};
@@ -972,7 +973,7 @@ mod tests {
     fn narrowing_to(mut contract: ToolAnnotation, trust: Option<Trust>, audience: Option<Audience>) -> ToolAnnotation {
         contract.delta = Delta {
             trust,
-            audience: audience.map(DeclaredAudience::literal),
+            audience: audience.map(|audience| DeltaAudience::Static(DeclaredAudience::literal(audience))),
         };
         contract
     }
@@ -1099,6 +1100,7 @@ mod tests {
             receiving: Label::new(TRUSTED, Audience::public()),
             proposed_effects: EffectSet::new(kinds.iter().map(|kind| effect(kind))).unwrap(),
             annotation: None,
+            file_basis: None,
             subject: crate::basis::fixture_subject(&traj()),
             evidence: crate::audience::AudienceEvidence::default(),
         }

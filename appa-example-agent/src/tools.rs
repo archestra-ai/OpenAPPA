@@ -2,26 +2,39 @@
 
 use std::time::Duration;
 
-use appa_runtime_api::{OutcomeBody, ProposedCall, ToolOutcome};
+use appa_runtime_api::{ADVERTISED_CONTROL_TOOL, OutcomeBody, ProposedCall, ToolOutcome, is_reserved_tool_name};
+use thiserror::Error;
 
 use crate::http::{HttpClient, read_body_capped};
 use crate::wire::WireTool;
 
-/// Runtime control tool for executing remedies.
-pub(crate) const CONTROL_TOOL: &str = "execute_remedy_plan";
+/// Why a host's tools cannot become a catalogue, and why a spawn tool cannot be named.
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum CatalogueError {
+    /// The control tool's names belong to the runtime. A host tool spelled either way
+    /// would be unreachable — every call to it reaches the control tool instead — so the
+    /// catalogue is refused rather than rerouting the host's tool.
+    #[error("{0} is a reserved control tool name; rename the host tool")]
+    ReservedToolName(String),
+}
 
-/// Host tools combined with the runtime control tool.
+/// Host tools combined with the runtime control tool. Every catalogue that exists
+/// advertises the control tool exactly once, under the name the runtime routes.
 #[derive(Clone, Debug)]
 pub struct ToolCatalogue {
     tools: Vec<WireTool>,
 }
 
 impl ToolCatalogue {
-    /// Builds the catalogue with the control tool appended.
-    pub fn new(tools: Vec<WireTool>) -> Self {
+    /// Builds the catalogue with the control tool appended, or refuses a host tool
+    /// that claims either of the control tool's names.
+    pub fn new(tools: Vec<WireTool>) -> Result<Self, CatalogueError> {
         let mut tools = tools;
+        if let Some(reserved) = tools.iter().find(|tool| is_reserved_tool_name(&tool.function.name)) {
+            return Err(CatalogueError::ReservedToolName(reserved.function.name.clone()));
+        }
         tools.push(control_tool_schema());
-        ToolCatalogue { tools }
+        Ok(ToolCatalogue { tools })
     }
 
     /// Builds the catalogue excluding a tool that cannot run in the current frame.
@@ -36,7 +49,7 @@ impl ToolCatalogue {
 
 fn control_tool_schema() -> WireTool {
     WireTool::new(
-        CONTROL_TOOL,
+        ADVERTISED_CONTROL_TOOL,
         "Execute one remedy plan by the offer id that blocking feedback surfaced. The id must be \
          quoted exactly. Accepting a narrowing permanently restricts this trajectory, so run any \
          later work that needs its current label before you accept. A plan that declares a \
@@ -118,8 +131,19 @@ impl ToolShim {
         };
         let status = response.status();
         if !status.is_success() {
-            return ToolOutcome::Failure {
-                message: format!("the tool endpoint answered {}", status.as_u16()),
+            // Only the endpoint saying the call itself was bad reports a
+            // failure. Every other status is the endpoint answering about
+            // itself, and it may have run the call before it did: a 500 after
+            // the effect committed, reported as a failure, tells the engine
+            // nothing was admitted when something was.
+            return match status.as_u16() {
+                422 => ToolOutcome::Failure {
+                    message: "the tool endpoint reported a failed call".to_string(),
+                },
+                other => {
+                    tracing::debug!(status = other, "tool endpoint answered a non-success status");
+                    ToolOutcome::Indeterminate
+                }
             };
         }
         let mut response = response;
@@ -143,6 +167,7 @@ fn body_of(call: &ProposedCall) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use appa_runtime_api::canonical_tool_name;
 
     fn call(tool: &str, arguments: &str) -> ProposedCall {
         ProposedCall {
@@ -168,13 +193,14 @@ mod tests {
 
     #[test]
     fn the_catalogue_always_carries_the_control_tool() {
-        let catalogue = ToolCatalogue::new(vec![WireTool::new("read_hr", "read", serde_json::json!({}))]);
+        let catalogue = ToolCatalogue::new(vec![WireTool::new("read_hr", "read", serde_json::json!({}))])
+            .expect("no host tool claims the reserved name");
         let names: Vec<String> = catalogue
             .advertised_without(None)
             .into_iter()
             .map(|tool| tool.function.name)
             .collect();
-        assert_eq!(names, vec!["read_hr".to_string(), CONTROL_TOOL.to_string()]);
+        assert_eq!(names, vec!["read_hr".to_string(), ADVERTISED_CONTROL_TOOL.to_string()]);
     }
 
     #[test]
@@ -182,12 +208,45 @@ mod tests {
         let catalogue = ToolCatalogue::new(vec![
             WireTool::new("fork", "spawn", serde_json::json!({})),
             WireTool::new("read_hr", "read", serde_json::json!({})),
-        ]);
+        ])
+        .expect("no host tool claims the reserved name");
         let names: Vec<String> = catalogue
             .advertised_without(Some("fork"))
             .into_iter()
             .map(|tool| tool.function.name)
             .collect();
-        assert_eq!(names, vec!["read_hr".to_string(), CONTROL_TOOL.to_string()]);
+        assert_eq!(names, vec!["read_hr".to_string(), ADVERTISED_CONTROL_TOOL.to_string()]);
+    }
+
+    /// A host tool under either of the control tool's names has no catalogue to be
+    /// advertised in: every call to those names reaches the control tool — the alias is
+    /// translated into the canonical id, and the canonical id passes through — so the host
+    /// tool would be unreachable and a spawn under it unrecognized.
+    #[test]
+    fn a_host_tool_cannot_claim_either_control_tool_name() {
+        for reserved in [ADVERTISED_CONTROL_TOOL, appa_runtime_api::CONTROL_TOOL] {
+            assert_eq!(
+                ToolCatalogue::new(vec![
+                    WireTool::new("read_hr", "read", serde_json::json!({})),
+                    WireTool::new(reserved, "the host's own", serde_json::json!({})),
+                ])
+                .err(),
+                Some(CatalogueError::ReservedToolName(reserved.to_string())),
+            );
+            assert_eq!(
+                canonical_tool_name(reserved),
+                appa_runtime_api::CONTROL_TOOL,
+                "both spellings reach the control tool"
+            );
+        }
+        assert!(
+            ToolCatalogue::new(vec![WireTool::new(
+                "mcp/evil/execute_remedy_plan",
+                "a lookalike on another server",
+                serde_json::json!({}),
+            )])
+            .is_ok(),
+            "only the runtime's own two names are reserved"
+        );
     }
 }

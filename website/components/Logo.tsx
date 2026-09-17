@@ -108,6 +108,84 @@ export function PixelMark({
   );
 }
 
+const ALERT_COLS = 34;
+const ALERT_ROWS = 22;
+
+const ALERT_BEAST = [
+  "..........11..........11..........",
+  "..........11..........11..........",
+  ".........1111111111111111.........",
+  "YY......111111111111111111......YY",
+  ".YY.....111111111111111111.....YY.",
+  "..YYY...11EE1111111111EE11...YYY..",
+  "...YYY..1113E11111111E3111..YYY...",
+  "....YY..11111E111111E11111..YY....",
+  "........11EE1111111111EE11........",
+  ".YY.....111111333333111111.....YY.",
+  ".YY.....11111133TT33111111.....YY.",
+  "....Y...1111113KKKK3111111...Y....",
+  "........1111113KKKK3111111........",
+  "...YY....111113KKKK311111....YY...",
+  "..YYY.111111113TTTT311111111.YYY..",
+  ".YY...1111111111111111111111...YY.",
+  ".....111111111111111111111111.....",
+  ".....111111111111111111111111.....",
+  ".....111111111111111111111111.....",
+  ".....111111111111111111111111.....",
+  ".....11111..1111..1111..11111.....",
+  ".....33333..3333..3333..33333.....",
+];
+
+const ALERT_FILL: Record<string, string> = {
+  "1": "var(--text-strong)",
+  "3": "var(--text-weak)",
+  E: "var(--bg)",
+  K: "var(--appa-throat, var(--text-strong))",
+  T: "var(--appa-teeth, var(--bg))",
+  Y: "var(--spark, #fcc405)",
+};
+
+export function PixelAlertMark({
+  size = 136,
+  style,
+  className,
+}: {
+  size?: number;
+  style?: CSSProperties;
+  className?: string;
+}) {
+  const height = Math.round((size * ALERT_ROWS) / ALERT_COLS);
+  const body: ReactNode[] = [];
+  const sparks: ReactNode[] = [];
+  ALERT_BEAST.forEach((row, y) => {
+    for (let x = 0; x < ALERT_COLS; x++) {
+      const c = row[x];
+      if (c === ".") continue;
+      const rect = <rect key={`a${x}-${y}`} x={x} y={y} width={1} height={1} fill={ALERT_FILL[c]} />;
+      if (c === "Y") {
+        sparks.push(rect);
+      } else {
+        body.push(rect);
+      }
+    }
+  });
+  return (
+    <svg
+      viewBox={`0 0 ${ALERT_COLS} ${ALERT_ROWS}`}
+      width={size}
+      height={height}
+      className={className ? `appa-alert-mark ${className}` : "appa-alert-mark"}
+      shapeRendering="crispEdges"
+      role="img"
+      aria-label="OpenAPPA alert mark"
+      style={{ display: "block", overflow: "visible", ...style }}
+    >
+      <g className="appa-alert-body appa-alert-shake">{body}</g>
+      <g className="appa-alert-sparks">{sparks}</g>
+    </svg>
+  );
+}
+
 interface Pixel {
   x: number;
   y: number;

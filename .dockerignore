@@ -1,4 +1,4 @@
-# Keep the build context to the crates the Dockerfile copies.
+# Keep the runtime image build context to the crates its Dockerfile copies.
 .git
 target
 **/target
@@ -8,4 +8,12 @@ website
 !website/content/docs/contracts.md
 paper
 docs
+# The Python bench trees. The image builds `--package appa` alone; bench/corp
+# policies are read only by tests, never at build time.
+bench/corp
+bench/agentthreatbench
+bench/corp-agent-fides
 demo/*/world/**/.DS_Store
+marketplace/batteries/**/__pycache__
+marketplace/batteries/**/test_*.py
+marketplace/batteries/test_cross_battery.py

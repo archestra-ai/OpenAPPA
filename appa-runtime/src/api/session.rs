@@ -6,30 +6,28 @@ use std::sync::Arc;
 use crate::elicit::Elicitation;
 
 use crate::consult::{
-    AnnotationAnswer, AnnotationArtifact, AudienceSourceArtifact, AudienceSourceDeclaration, Consult, ConsultBody,
-    LookupAnswer, MembersAnswer, PrincipalAnswer, SanitizerAnswer,
+    AnnotationAnswer, AnnotationArtifact, Consult, ConsultBody, LookupAnswer, MembersAnswer, SanitizerAnswer,
 };
 use crate::engine::{
     AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback, ForkStatus,
     Liveness, Next, OfferNonce, OpenDispatch, Presentation, RemedyArguments, engine_id,
 };
 use crate::external::ConsultOutcome;
+use appa_engine::label::ReaderId;
 
 use super::{
     ChildReturnDecision, Deployment, EventError, ExactCall, Inner, OfferId, OutcomeBody, ProposedCall, RemedyDecision,
     SpawnRef, SpawnResultDecision, ToolCallDecision, ToolOutcome, ToolResultDecision, TrajectoryId,
 };
 
-/// The runtime's own control tool, recognized by its exact
-/// wire names: the bare name and each name the runtime's distribution
-/// channels produce — the directly registered MCP server and the
-/// `appa-runtime` plugin's server. Selecting an offer is not a checked
-/// flow. A lookalike on another server — say
-/// `mcp__evil__execute_remedy_plan` — is an ordinary checked call.
+/// The runtime's own control tool, recognized by its one canonical
+/// identity, `appa/execute_remedy_plan`: the served adapter derives it
+/// from the host's registered spelling of the runtime's MCP server, and
+/// nothing else derives it. Selecting an offer is not a checked flow. A
+/// lookalike on another server — say `mcp/evil/execute_remedy_plan` —
+/// is an ordinary checked call.
 pub(crate) fn is_control_tool(tool: &str) -> bool {
-    tool == "execute_remedy_plan"
-        || tool == "mcp__appa__execute_remedy_plan"
-        || tool == "mcp__plugin_appa-runtime_appa__execute_remedy_plan"
+    tool == appa_runtime_api::CONTROL_TOOL
 }
 
 /// Why a reported outcome named no reportable dispatch. The threat model puts
@@ -70,6 +68,27 @@ fn is_open_call(call: &ProposedCall, canonical: impl FnOnce() -> Option<Vec<u8>>
     call.tool == open.tool && canonical().as_deref() == Some(open.bytes.as_slice())
 }
 
+/// Run one ledger operation on the blocking pool.
+///
+/// Every one of them hashes whole files or writes rows under a synchronous connection, and
+/// this executor also serves the harness's hooks and MCP requests. `bind`, `cancel` and
+/// `abandon` stay inline: each is one indexed row, with no file read behind it.
+async fn ledger<T: Send + 'static>(
+    inner: std::sync::Arc<super::Inner>,
+    work: impl FnOnce(&super::files::FileTracking) -> Result<T, appa_eventlog::files::FileStoreError> + Send + 'static,
+) -> Result<T, EventError> {
+    let joined = tokio::task::spawn_blocking(move || {
+        let files = inner
+            .files
+            .as_ref()
+            .ok_or_else(|| appa_eventlog::files::FileStoreError::Corrupt("file tools are not enabled".into()))?;
+        work(files)
+    })
+    .await
+    .map_err(|error| super::files::refused(format!("the file ledger task failed: {error}")))?;
+    joined.map_err(super::files::refused)
+}
+
 /// Which dispatch a reported outcome belongs to, or why none can take
 /// it. Total over everything the log shows: the reported call in the
 /// engine's canonical domain and the dispatches this
@@ -77,22 +96,57 @@ fn is_open_call(call: &ProposedCall, canonical: impl FnOnce() -> Option<Vec<u8>>
 /// no open dispatch — the duplicate every crash recovery produces —
 /// settles without canonicalizing anything.
 ///
-/// More than one open dispatch is not a state this deployment reaches:
-/// one call in flight is refused at the decision that would open the
-/// second. It is still refused here rather than resolved, because a
-/// byte match that named one of several occurrences would be a guess.
-fn classify_report(
+/// A host call id selects one occurrence among parallel dispatches. A
+/// legacy event without an id can report only when exactly one dispatch
+/// is open; a byte match among several occurrences would be a guess.
+fn classify_report_identified<'a>(
     call: &ProposedCall,
+    call_id: Option<&str>,
     canonical: impl FnOnce() -> Option<Vec<u8>>,
     open: &[OpenDispatch],
+    bindings: impl Iterator<Item = appa_eventlog::CallBinding<'a>>,
+    trajectory: &appa_engine::value::TrajectoryId,
 ) -> Result<appa_engine::value::DispatchId, UnreportableOutcome> {
-    let [open] = open else {
-        return Err(UnreportableOutcome::NoOpenDispatch);
+    let open = match call_id {
+        Some(call_id) => {
+            let Some(binding) = bindings
+                .into_iter()
+                .find(|binding| binding.trajectory == trajectory && binding.call_id == call_id)
+            else {
+                return Err(UnreportableOutcome::NoOpenDispatch);
+            };
+            let Some(open) = open.iter().find(|open| open.id == *binding.dispatch) else {
+                return Err(UnreportableOutcome::NoOpenDispatch);
+            };
+            open
+        }
+        None => {
+            let [open] = open else {
+                return Err(UnreportableOutcome::NoOpenDispatch);
+            };
+            open
+        }
     };
     if !is_open_call(call, canonical, open) {
         return Err(UnreportableOutcome::ByteMismatch);
     }
     Ok(open.id.clone())
+}
+
+#[cfg(test)]
+fn classify_report(
+    call: &ProposedCall,
+    canonical: impl FnOnce() -> Option<Vec<u8>>,
+    open: &[OpenDispatch],
+) -> Result<appa_engine::value::DispatchId, UnreportableOutcome> {
+    classify_report_identified(
+        call,
+        None,
+        canonical,
+        open,
+        std::iter::empty(),
+        &appa_engine::value::TrajectoryId::new("test"),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -134,8 +188,10 @@ fn outcome_decision(decision: EngineDecision) -> Result<ToolResultDecision, Even
         Next::PresentToModel(Presentation::ReplaceOutput { placeholder, .. }) => {
             Ok(ToolResultDecision::Replace { placeholder })
         }
-        // An admitted value delivered in place of the raw output.
-        Next::PresentToModel(Presentation::Value { value }) => Ok(ToolResultDecision::Replace { placeholder: value }),
+        // An admitted value delivered in place of the raw output, as it crossed.
+        Next::PresentToModel(Presentation::Value { value }) => Ok(ToolResultDecision::Deliver { value }),
+        // The runtime's own words: the narrowing this result causes and the control call
+        // that accepts it.
         Next::PresentToModel(Presentation::Blocked { feedback, .. }) => {
             Ok(ToolResultDecision::Replace { placeholder: feedback })
         }
@@ -158,7 +214,7 @@ const REPLAY_LIMIT: u32 = 8;
 /// The most external-resolution rounds one invocation runs before refusing operationally.
 /// Gathering is designed to close at least one ask per round, so this cap never fires on a
 /// healthy deployment; it bounds the blast radius of a gathering bug or a hostile external.
-const RESOLUTION_ROUNDS: u32 = 8;
+pub(super) const RESOLUTION_ROUNDS: u32 = 8;
 
 /// The outcome that closes a substituted release the harness never ran:
 /// the child proposed past it, or ended without running it.
@@ -207,11 +263,11 @@ impl Session {
         &self.trajectory
     }
 
-    /// The actor's turn is over. A call still open here got no outcome
+    /// The actor's turn is over. Calls still open here got no outcome
     /// hook and will never get one: Claude Code reports none for a call
     /// refused at its permission prompt, and none for a turn the user
-    /// interrupted. Left open it refuses every later proposal as a
-    /// second call in flight, for the life of the trajectory. Two
+    /// interrupted. Left open they keep effect reservations and remain
+    /// reportable for the life of the trajectory. Two
     /// hooks reach here: the turn end, and the first tool call after a
     /// prompt that no turn end preceded.
     ///
@@ -226,22 +282,75 @@ impl Session {
     /// Not an engine event when nothing is carried, which is every
     /// ordinary turn: the view is read, no fact is appended.
     pub async fn on_turn_end(&self) -> Result<(), EventError> {
-        let Some(open) = self.carried_call()? else {
+        let open = self.carried_calls()?;
+        if open.is_empty() {
             tracing::debug!(trajectory = %self.trajectory.0, "no call outstanding");
             return Ok(());
-        };
-        self.abandon_open(&ToolOutcome::Indeterminate).await?;
-        tracing::debug!(
-            trajectory = %self.trajectory.0,
-            dispatch = ?open.id,
-            tool = %open.tool,
-            "call closed as unreported",
-        );
+        }
+        for dispatch in open {
+            match self
+                .abandon_dispatch(dispatch.id.clone(), &ToolOutcome::Indeterminate)
+                .await
+            {
+                Ok(_) => {
+                    self.release_file_reservation(&dispatch.id).await;
+                    tracing::debug!(
+                        trajectory = %self.trajectory.0,
+                        dispatch = ?dispatch.id,
+                        tool = %dispatch.tool,
+                        "call closed as unreported",
+                    );
+                }
+                Err(EventError::UnknownDispatch) => continue,
+                Err(error) => return Err(error),
+            }
+        }
         Ok(())
     }
 
-    /// The call a turn end closes. A trajectory that has ended or never
-    /// opened carries nothing, so a turn end that names one is a no-op
+    /// Give back the ledger reservation of a released file call the harness never ran.
+    ///
+    /// The ledger releases it only while the workspace still shows the pinned state, which is
+    /// what an unrun call leaves behind. A workspace that moved keeps its reservation: the
+    /// runtime cannot tell an unrun call from one whose report was lost, and guessing would
+    /// publish bytes whose Label nobody recorded. That case is an operator's, so it is
+    /// reported loudly rather than resolved here.
+    ///
+    /// A ledger failure never turns a turn end into a refusal: the session would then be
+    /// blocked by bookkeeping rather than by a policy decision, and the reservation it could
+    /// not read stays exactly as it was.
+    async fn release_file_reservation(&self, dispatch: &appa_engine::value::DispatchId) {
+        if self.inner.files.is_none() {
+            return;
+        }
+        let key = match super::files::key(dispatch) {
+            Ok(key) => key,
+            Err(error) => {
+                tracing::warn!(%error, "a file reservation key could not be rendered");
+                return;
+            }
+        };
+        let released = ledger(self.inner.clone(), {
+            let (actor, key) = (self.trajectory.0.clone(), key);
+            move |files| files.store.abandon(&actor, &key)
+        })
+        .await;
+        match released {
+            Ok(appa_eventlog::files::AbandonOutcome::Absent) => {}
+            Ok(appa_eventlog::files::AbandonOutcome::Released) => tracing::info!(
+                trajectory = %self.trajectory.0,
+                "released the reservation of a file call the harness never ran"
+            ),
+            Ok(appa_eventlog::files::AbandonOutcome::Quarantined) => tracing::warn!(
+                trajectory = %self.trajectory.0,
+                "a released file call left the workspace inconsistent; the reservation stands and file calls stay refused"
+            ),
+            Err(error) => tracing::warn!(%error, "a file reservation could not be released"),
+        }
+    }
+
+    /// The calls a turn end closes. A trajectory that has ended or never
+    /// opened carries none, so a turn end that names one is a no-op
     /// rather than a refusal — a turn ends for reasons the engine does
     /// not model.
     ///
@@ -250,22 +359,141 @@ impl Session {
     /// for it, and it ends only when the harness runs it or proposes
     /// past it (`claim_or_abandon`). Closing it here would discard the
     /// remedy that minted it.
-    fn carried_call(&self) -> Result<Option<OpenDispatch>, EventError> {
+    fn carried_calls(&self) -> Result<Vec<OpenDispatch>, EventError> {
         let log = self.inner.log(&self.root)?;
         let policy = self.inner.resolve_policy(&self.deployment, &log)?;
         let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
         match policy.engine().liveness(&view, &self.trajectory) {
-            Liveness::Ended | Liveness::Unopened => Ok(None),
-            Liveness::Live if policy.engine().substituted_release(&view, &self.trajectory).is_some() => Ok(None),
-            Liveness::Live => Ok(policy.engine().open_dispatches(&view, &self.trajectory).pop()),
+            Liveness::Ended | Liveness::Unopened => Ok(Vec::new()),
+            Liveness::Live if policy.engine().substituted_release(&view, &self.trajectory).is_some() => Ok(Vec::new()),
+            Liveness::Live => Ok(policy.engine().open_dispatches(&view, &self.trajectory)),
         }
     }
 
+    #[cfg(test)]
     pub async fn on_tool_call(&self, call: ProposedCall, spawn: bool) -> Result<ToolCallDecision, EventError> {
-        if let Some(open) = self.substituted_release(&call)? {
-            return self.claim_or_abandon(call, open).await;
+        self.on_tool_call_identified(call, None, spawn).await
+    }
+
+    pub async fn on_tool_call_identified(
+        &self,
+        call: ProposedCall,
+        call_id: Option<String>,
+        spawn: bool,
+    ) -> Result<ToolCallDecision, EventError> {
+        let Some(files) = &self.inner.files else {
+            return self.propose_tool_call(call, call_id, spawn, None).await;
+        };
+        let (operation, path) = super::files::operation(&call)?;
+        let log = self.inner.log(&self.root)?;
+        if crate::engine::policy_file_key(log.policy_file()) != files.policy_key
+            || crate::engine::policy_file_key(self.deployment.config.policy_file().bytes()) != files.policy_key
+        {
+            return Err(super::files::refused(
+                "the workspace ledger and trajectory must use the same policy",
+            ));
         }
-        if spawn && self.inner.spawn_coverage() == super::SpawnCoverage::Declared && !self.names_tool(&call.tool)? {
+        let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+        let view = policy.engine().rebuild_view(&log)?;
+        let expected = policy.engine().file_dispatch(&view, &self.trajectory, &call)?;
+        let key = super::files::key(&expected)?;
+        let pin = match operation {
+            appa_eventlog::files::FileOperation::Process => {
+                if files.process_backend.is_none() {
+                    return Err(super::files::refused("isolated processing is not enabled"));
+                }
+                let args: super::files::ProcessArgs =
+                    serde_json::from_str(call.arguments.get()).map_err(super::files::refused)?;
+                ledger(self.inner.clone(), {
+                    let (actor, key, path, inputs) =
+                        (self.trajectory.0.clone(), key.clone(), path.clone(), args.input_paths);
+                    move |files| files.store.prepare_process(&actor, &key, &inputs, &path)
+                })
+                .await?
+            }
+            appa_eventlog::files::FileOperation::Copy | appa_eventlog::files::FileOperation::Move => {
+                let args: super::files::FileTransferArgs =
+                    serde_json::from_str(call.arguments.get()).map_err(super::files::refused)?;
+                ledger(self.inner.clone(), {
+                    let (actor, key, path, source) =
+                        (self.trajectory.0.clone(), key.clone(), path.clone(), args.source_path);
+                    move |files| files.store.prepare_transfer(&actor, &key, operation, &source, &path)
+                })
+                .await?
+            }
+            _ => {
+                ledger(self.inner.clone(), {
+                    let (actor, key, path) = (self.trajectory.0.clone(), key.clone(), path.clone());
+                    move |files| files.store.prepare(&actor, &key, operation, &path)
+                })
+                .await?
+            }
+        };
+        // Managed writes must not reconfigure Claude Code, Git hooks, or MCP execution.
+        // Claude loads instruction files implicitly, outside the file-tool observation path.
+        if operation != appa_eventlog::files::FileOperation::Read
+            && std::iter::once(pin.path.as_str())
+                .chain(
+                    pin.source
+                        .as_ref()
+                        .filter(|_| operation == appa_eventlog::files::FileOperation::Move)
+                        .map(|source| source.path.as_str()),
+                )
+                .flat_map(|path| path.split('/'))
+                .any(|part| {
+                    matches!(
+                        part,
+                        ".claude" | ".git" | ".mcp.json" | ".appa" | "CLAUDE.md" | "CLAUDE.local.md"
+                    )
+                })
+        {
+            files
+                .store
+                .cancel(&self.trajectory.0, &key)
+                .map_err(super::files::refused)?;
+            return Err(super::files::refused(
+                "execution-control files are not writable in file-tracking mode",
+            ));
+        }
+        let basis = super::files::basis(pin)?;
+        let decision = self.propose_tool_call(call, call_id, spawn, Some(basis)).await;
+        match &decision {
+            Ok(ToolCallDecision::Allow { dispatch, .. }) => {
+                if dispatch != &expected {
+                    return Err(super::files::refused("dispatch changed while reserving the file"));
+                }
+                let log = self.inner.log(&self.root)?;
+                let view = policy.engine().rebuild_view(&log)?;
+                let label = policy.engine().file_output_label(&view, dispatch)?;
+                files
+                    .store
+                    .bind(&self.trajectory.0, &key, &key, &label)
+                    .map_err(super::files::refused)?;
+            }
+            _ => {
+                files
+                    .store
+                    .cancel(&self.trajectory.0, &key)
+                    .map_err(super::files::refused)?;
+            }
+        }
+        decision
+    }
+
+    async fn propose_tool_call(
+        &self,
+        call: ProposedCall,
+        call_id: Option<String>,
+        spawn: bool,
+        file_basis: Option<appa_engine::value::FileBasis>,
+    ) -> Result<ToolCallDecision, EventError> {
+        if let Some(open) = self.substituted_release(&call)? {
+            return self.claim_or_abandon(call, call_id, open).await;
+        }
+        if spawn
+            && self.inner.naming.spawn_coverage() == super::SpawnCoverage::Declared
+            && !self.names_tool(&call.tool)?
+        {
             tracing::debug!(trajectory = %self.trajectory.0, tool = %call.tool, "spawn denied: the policy names no such agent");
             return Err(EventError::UndeclaredSpawn {
                 tool: call.tool.clone(),
@@ -273,7 +501,10 @@ impl Session {
         }
         let decision = self
             .drive_with_evidence(
-                |_, evidence| {
+                |_, mut evidence| {
+                    if let Some(basis) = &file_basis {
+                        evidence.push(ExternalEvidence::File { basis: basis.clone() });
+                    }
                     Ok(EngineEvent::ModelResponse {
                         call: call.clone(),
                         evidence,
@@ -283,6 +514,7 @@ impl Session {
                 },
                 None,
                 None,
+                call_id.as_deref(),
             )
             .await?;
 
@@ -297,6 +529,7 @@ impl Session {
                     );
                     Ok(ToolCallDecision::Allow {
                         spawn: released.fork.clone(),
+                        dispatch: released.dispatch.clone(),
                     })
                 }
                 ([], feedback) if !feedback.is_empty() => {
@@ -341,20 +574,31 @@ impl Session {
         }))
     }
 
-    async fn claim_or_abandon(&self, call: ProposedCall, standing: Standing) -> Result<ToolCallDecision, EventError> {
+    async fn claim_or_abandon(
+        &self,
+        call: ProposedCall,
+        call_id: Option<String>,
+        standing: Standing,
+    ) -> Result<ToolCallDecision, EventError> {
         let open = match standing {
             Standing::Runs(open) => {
+                if let Some(call_id) = call_id {
+                    self.bind_existing_call(call_id, open.id.clone())?;
+                }
                 tracing::debug!(
                     trajectory = %self.trajectory.0,
                     dispatch = ?open.id,
                     tool = %open.tool,
                     "substituted call handed to the harness"
                 );
-                return Ok(ToolCallDecision::Allow { spawn: None });
+                return Ok(ToolCallDecision::Allow {
+                    spawn: None,
+                    dispatch: open.id.clone(),
+                });
             }
             Standing::Abandoned(open) => open,
         };
-        self.abandon_open(&unrun_substitution()).await?;
+        self.abandon_dispatch(open.id.clone(), &unrun_substitution()).await?;
         tracing::debug!(
             trajectory = %self.trajectory.0,
             dispatch = ?open.id,
@@ -365,21 +609,50 @@ impl Session {
         Err(EventError::SubstitutionAbandoned { tool: open.tool })
     }
 
+    /// Bind a host call identity to a dispatch that a remedy opened before
+    /// the harness received the substituted call. Only the binding is durable, at the log's
+    /// CAS position, and the identity is checked against the position it is written at.
+    fn bind_existing_call(&self, call_id: String, dispatch: appa_engine::value::DispatchId) -> Result<(), EventError> {
+        if call_id.is_empty() {
+            return Err(EventError::CallIdReused);
+        }
+        let trajectory = crate::engine::engine_id(&self.trajectory);
+        self.inner.append_host_with(&self.root, |log| {
+            if log
+                .call_bindings()
+                .any(|binding| *binding.trajectory == trajectory && binding.call_id == call_id)
+            {
+                return Err(EventError::CallIdReused);
+            }
+            Ok((
+                Some(appa_eventlog::HostObservation::CallBound {
+                    trajectory: trajectory.clone(),
+                    call_id: call_id.clone(),
+                    dispatch: dispatch.clone(),
+                }),
+                (),
+            ))
+        })
+    }
+
     /// Close the call this trajectory has open as one that did not run.
     /// The dispatch is re-read from the view on every replay, so a
     /// contended append never closes an occurrence the winning writer
     /// already closed. Both callers reach here with one dispatch open:
     /// a substituted release the harness declined to run, and a
     /// released call whose turn ended without an outcome.
-    async fn abandon_open(&self, outcome: &ToolOutcome) -> Result<EngineDecision, EventError> {
+    async fn abandon_dispatch(
+        &self,
+        dispatch: appa_engine::value::DispatchId,
+        outcome: &ToolOutcome,
+    ) -> Result<EngineDecision, EventError> {
         self.drive_with_evidence(
-            |context, evidence| {
-                let open = context.open_dispatches();
-                let [open] = open.as_slice() else {
+            move |context, evidence| {
+                if !context.open_dispatches().iter().any(|open| open.id == dispatch) {
                     return Err(EventError::UnknownDispatch);
-                };
+                }
                 Ok(EngineEvent::ToolOutcome {
-                    dispatch: open.id.clone(),
+                    dispatch: dispatch.clone(),
                     outcome: outcome.clone(),
                     evidence,
                     entropy: fresh_entropy(),
@@ -387,20 +660,150 @@ impl Session {
             },
             None,
             None,
+            None,
         )
         .await
     }
 
-    pub async fn on_tool_result(&self, call: ProposedCall, o: ToolOutcome) -> Result<ToolResultDecision, EventError> {
-        let o = self.cap_outcome(o);
-        outcome_decision(self.report_outcome(&call, &o).await?)
+    /// Execute only the exact released runtime-owned call. Content-dependent checks happen
+    /// here, never during proposal parsing or in Claude Code's native validation.
+    ///
+    /// The file work runs on the blocking pool: it reads and hashes files, and a Process call
+    /// may run a sandboxed command for two minutes. The runtime serves hooks and MCP on this
+    /// executor, so none of that belongs on an async worker.
+    #[cfg(feature = "daemon")]
+    pub(super) async fn execute_file(&self, call: ProposedCall) -> Result<super::files::FileReply, EventError> {
+        if self.inner.files.is_none() {
+            return Err(super::files::refused("file tools are not enabled"));
+        }
+        let open = self.carried_calls()?;
+        let [open] = open.as_slice() else {
+            return Err(EventError::UnknownDispatch);
+        };
+        let log = self.inner.log(&self.root)?;
+        let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+        if !is_open_call(&call, || policy.engine().canonical_bytes(&call), open) {
+            return Err(EventError::OutcomeMismatch);
+        }
+        let key = super::files::key(&open.id)?;
+        let pin = ledger(self.inner.clone(), {
+            let (actor, key) = (self.trajectory.0.clone(), key.clone());
+            move |files| files.store.pin_for(&actor, &key)
+        })
+        .await?
+        .ok_or_else(|| super::files::refused("the released call holds no file reservation"))?;
+        let result = {
+            let inner = self.inner.clone();
+            let (call, pin) = (call.clone(), pin.clone());
+            tokio::task::spawn_blocking(move || match inner.files.as_ref() {
+                Some(files) => super::files::perform(files, &call, &pin),
+                None => Err("file tools are not enabled".to_string()),
+            })
+            .await
+            .map_err(|error| super::files::refused(format!("the file operation did not complete: {error}")))?
+        };
+        let outcome = match &result {
+            Ok(value) => ToolOutcome::Success {
+                body: OutcomeBody::Available(value.clone()),
+            },
+            Err(message) => ToolOutcome::Failure {
+                message: message.clone(),
+            },
+        };
+        // No bytes reach the MCP caller until the engine admits the observation and the
+        // ledger reconciles the mutation. A failed commit returns no file-derived detail.
+        let decision = self.on_tool_result_identified(call, None, outcome).await?;
+        let succeeded = result.is_ok();
+        let value = match decision {
+            ToolResultDecision::Keep => result.unwrap_or_else(|error| error),
+            ToolResultDecision::Deliver { value } => value,
+            ToolResultDecision::Replace { placeholder } => return Ok(super::files::FileReply::Failure(placeholder)),
+        };
+        Ok(if succeeded {
+            super::files::FileReply::Value(value)
+        } else {
+            super::files::FileReply::Failure(value)
+        })
     }
 
-    async fn report_outcome(&self, call: &ProposedCall, o: &ToolOutcome) -> Result<EngineDecision, EventError> {
+    #[cfg(test)]
+    pub async fn on_tool_result(&self, call: ProposedCall, o: ToolOutcome) -> Result<ToolResultDecision, EventError> {
+        self.on_tool_result_identified(call, None, o).await
+    }
+
+    pub async fn on_tool_result_identified(
+        &self,
+        call: ProposedCall,
+        call_id: Option<String>,
+        o: ToolOutcome,
+    ) -> Result<ToolResultDecision, EventError> {
+        if self.inner.files.is_some() {
+            super::files::operation(&call)?;
+            let log = self.inner.log(&self.root)?;
+            let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+            let open = self.carried_calls()?;
+            let dispatch = classify_report_identified(
+                &call,
+                call_id.as_deref(),
+                || policy.engine().canonical_bytes(&call),
+                &open,
+                log.call_bindings(),
+                &crate::engine::engine_id(&self.trajectory),
+            )
+            .map_err(UnreportableOutcome::refusal)?;
+            let key = super::files::key(&dispatch)?;
+            // Preserve actual failure text: the native failure hook cannot reliably replace it.
+            // A missing observation keeps the reservation; no later file call may proceed.
+            let o = match o {
+                ToolOutcome::Success {
+                    body: OutcomeBody::Unavailable,
+                } => ToolOutcome::Success {
+                    body: OutcomeBody::Available(String::new()),
+                },
+                other => other,
+            };
+            if matches!(o, ToolOutcome::Success { .. }) {
+                // Verify the physical version before admitting a successful result. The
+                // dispatch was durably released; an append failure afterward cannot erase
+                // this already-published file's Label.
+                ledger(self.inner.clone(), {
+                    let (actor, key) = (self.trajectory.0.clone(), key.clone());
+                    move |files| files.store.finish(&actor, &key, true)
+                })
+                .await?;
+            }
+            let decision = self.report_outcome(&call, call_id.as_deref(), &o).await?;
+            match &o {
+                ToolOutcome::Indeterminate => {
+                    return Err(super::files::refused(
+                        "missing outcome; workspace requires operator reconciliation",
+                    ));
+                }
+                ToolOutcome::Failure { .. } => {
+                    ledger(self.inner.clone(), {
+                        let (actor, key) = (self.trajectory.0.clone(), key.clone());
+                        move |files| files.store.finish(&actor, &key, false)
+                    })
+                    .await?;
+                }
+                ToolOutcome::Success { .. } => {}
+            }
+            return outcome_decision(decision);
+        }
+        let o = self.cap_outcome(o);
+        outcome_decision(self.report_outcome(&call, call_id.as_deref(), &o).await?)
+    }
+
+    async fn report_outcome(
+        &self,
+        call: &ProposedCall,
+        call_id: Option<&str>,
+        o: &ToolOutcome,
+    ) -> Result<EngineDecision, EventError> {
         self.drive_with_evidence(
             |context, evidence| {
                 let open = context.open_dispatches();
-                let dispatch = match classify_report(call, || context.canonical_bytes(call), &open) {
+                let dispatch = match context.classify_report(call, call_id, &open) {
                     Ok(dispatch) => dispatch,
                     Err(case) => return Err(self.refuse_report(case, call, &open)),
                 };
@@ -413,8 +816,40 @@ impl Session {
             },
             None,
             None,
+            None,
         )
         .await
+    }
+
+    /// Resume the exact suspended call without releasing a second dispatch.
+    /// Rebinding the same pair inherits the parent's current label in the child.
+    pub fn on_spawn_resume(&self, call: ProposedCall, child: TrajectoryId) -> Result<(), EventError> {
+        let opened = self.inner.log(&self.root)?;
+        let policy = self.inner.resolve_policy(&self.deployment, &opened)?;
+        let decision = self.drive(&policy, Some(opened), true, None, |context| {
+            let open = context.open_dispatches();
+            let dispatch = context
+                .classify_report(&call, None, &open)
+                .map_err(|case| self.refuse_report(case, &call, &open))?;
+            let fork = appa_engine::value::ForkId::of(&dispatch);
+            match context.fork_status(&fork) {
+                ForkStatus::Bound(bound) if bound == engine_id(&child) => {}
+                _ => return Err(EventError::BindingMismatch),
+            }
+            match context.policy.engine().liveness(context.view, &child) {
+                Liveness::Live => {}
+                Liveness::Ended => return Err(EventError::TrajectoryEnded),
+                Liveness::Unopened => return Err(EventError::SpawnNotTaken),
+            }
+            Ok(EngineEvent::BindFork {
+                fork,
+                child: child.clone(),
+            })
+        })?;
+        match decision.then {
+            Next::Done => Ok(()),
+            _ => Err(EventError::UnexpectedDecision),
+        }
     }
 
     /// The spawn call's own result, keyed on where its fork stands and on
@@ -426,9 +861,21 @@ impl Session {
     /// never checked at a stop — the harness delivered content the child
     /// never returned — and is withheld from the parent with nothing
     /// admitted.
+    #[cfg(test)]
     pub async fn on_spawn_result(
         &self,
         call: ProposedCall,
+        outcome: ToolOutcome,
+        child: Option<TrajectoryId>,
+        value: Option<String>,
+    ) -> Result<SpawnResultDecision, EventError> {
+        self.on_spawn_result_identified(call, None, outcome, child, value).await
+    }
+
+    pub async fn on_spawn_result_identified(
+        &self,
+        call: ProposedCall,
+        call_id: Option<String>,
         outcome: ToolOutcome,
         child: Option<TrajectoryId>,
         value: Option<String>,
@@ -443,7 +890,7 @@ impl Session {
                 .drive_with_evidence(
                     |context, evidence| {
                         let open = context.open_dispatches();
-                        let dispatch = match classify_report(&call, || context.canonical_bytes(&call), &open) {
+                        let dispatch = match context.classify_report(&call, call_id.as_deref(), &open) {
                             Ok(dispatch) => dispatch,
                             Err(case) => return Err(self.refuse_report(case, &call, &open)),
                         };
@@ -498,6 +945,7 @@ impl Session {
                         plan = Some(next);
                         Ok(event)
                     },
+                    None,
                     None,
                     None,
                 )
@@ -557,6 +1005,7 @@ impl Session {
                 },
                 elicitation,
                 ruling,
+                None,
             )
             .await?;
 
@@ -628,7 +1077,7 @@ impl Session {
         let opened = self.inner.log(&self.root)?;
         let policy = self.inner.resolve_policy(&self.deployment, &opened)?;
         let mut contract = None;
-        let decision = self.drive(&policy, Some(opened), true, |context| {
+        let decision = self.drive(&policy, Some(opened), true, None, |context| {
             let fork = fork(context)?;
             match context.fork_status(&fork) {
                 ForkStatus::Unprepared | ForkStatus::Failed | ForkStatus::ParentEnded => Err(EventError::SpawnNotTaken),
@@ -701,13 +1150,14 @@ impl Session {
                 },
                 None,
                 None,
+                None,
             )
             .await?;
 
         return_decision(decision)
     }
 
-    /// Close whatever call this child still has open before it returns.
+    /// Close whatever calls this child still has open before it returns.
     /// A substituted release stands until the harness runs it or the
     /// model proposes past it; a child that ends has done neither and
     /// abandons it. Any other open release got no outcome hook and closes
@@ -718,7 +1168,8 @@ impl Session {
         view: &EngineView,
     ) -> Result<(), EventError> {
         if let Some(open) = policy.engine().substituted_release(view, &self.trajectory) {
-            self.abandon_open(&unrun_substitution()).await?;
+            self.abandon_dispatch(open.id.clone(), &unrun_substitution()).await?;
+            self.release_file_reservation(&open.id).await;
             tracing::debug!(
                 trajectory = %self.trajectory.0,
                 dispatch = ?open.id,
@@ -727,14 +1178,23 @@ impl Session {
             );
             return Ok(());
         }
-        if let Some(open) = policy.engine().open_dispatches(view, &self.trajectory).pop() {
-            self.abandon_open(&ToolOutcome::Indeterminate).await?;
-            tracing::debug!(
-                trajectory = %self.trajectory.0,
-                dispatch = ?open.id,
-                tool = %open.tool,
-                "call closed as unreported at the child's end"
-            );
+        for open in policy.engine().open_dispatches(view, &self.trajectory) {
+            match self
+                .abandon_dispatch(open.id.clone(), &ToolOutcome::Indeterminate)
+                .await
+            {
+                Ok(_) => {
+                    self.release_file_reservation(&open.id).await;
+                    tracing::debug!(
+                        trajectory = %self.trajectory.0,
+                        dispatch = ?open.id,
+                        tool = %open.tool,
+                        "call closed as unreported at the child's end"
+                    );
+                }
+                Err(EventError::UnknownDispatch) => continue,
+                Err(error) => return Err(error),
+            }
         }
         Ok(())
     }
@@ -774,6 +1234,7 @@ impl Session {
         mut event: impl FnMut(&Decided<'_>, Vec<ExternalEvidence>) -> Result<EngineEvent, EventError>,
         elicitation: Option<&Elicitation>,
         ruling: Option<appa_runtime_api::Ruling>,
+        opening_call_id: Option<&str>,
     ) -> Result<EngineDecision, EventError> {
         let opened = self.inner.log(&self.root)?;
         let policy = self.inner.resolve_policy(&self.deployment, &opened)?;
@@ -788,7 +1249,7 @@ impl Session {
         for _ in 0..RESOLUTION_ROUNDS {
             let carried = evidence.clone();
             let entering = carried.is_empty();
-            let decision = self.drive(&policy, opened.take(), entering, |context| {
+            let decision = self.drive(&policy, opened.take(), entering, opening_call_id, |context| {
                 event(context, carried.clone())
             })?;
             match decision.then {
@@ -799,11 +1260,12 @@ impl Session {
                 // reviewer they stay serial: one staged review on screen at a time.
                 Next::ResolveExternal(requests) => match elicitation {
                     None => {
-                        // Batch-terminal: join_all settles every sibling first; any
-                        // no-answer then aborts the invocation, discarding the
-                        // siblings' answers, before another engine round or any append.
-                        let consults = requests.into_iter().map(|request| self.consult(request, None, None));
-                        for answered in futures_util::future::join_all(consults).await {
+                        // Batch-terminal: every sibling settles first; any no-answer
+                        // then aborts the invocation, discarding the siblings' answers,
+                        // before another engine round or any append.
+                        // Embedded hosts supply the ruling outside an MCP elicitation context.
+                        let consults = requests.into_iter().map(|request| self.consult(request, None, ruling));
+                        for answered in crate::external::settle_batch(consults).await {
                             evidence.push(answered?);
                         }
                     }
@@ -833,6 +1295,7 @@ impl Session {
         policy: &crate::engine::PolicyEngine<'_>,
         mut opened: Option<appa_eventlog::Log>,
         entering: bool,
+        opening_call_id: Option<&str>,
         mut event: impl FnMut(&Decided<'_>) -> Result<EngineEvent, EventError>,
     ) -> Result<EngineDecision, EventError> {
         for attempt in 1..=REPLAY_LIMIT {
@@ -845,6 +1308,7 @@ impl Session {
                 session: self,
                 policy,
                 view: &view,
+                log: &log,
             };
             if entering {
                 match policy.engine().liveness(&view, &self.trajectory) {
@@ -854,6 +1318,7 @@ impl Session {
                 }
             }
             let event = event(&context)?;
+            let remedy_opens_unbound = matches!(&event, EngineEvent::ExecuteOffer { .. });
             if let EngineEvent::ChildReturn { child, .. } = &event
                 && !policy.engine().open_dispatches(&view, child).is_empty()
             {
@@ -867,10 +1332,50 @@ impl Session {
             let Some(facts) = decision.append.as_ref() else {
                 return Ok(decision);
             };
-            if policy.engine().opens_a_second_dispatch(&view, &self.trajectory, facts) {
+            let opens_dispatch = facts.iter().find_map(|fact| match fact {
+                appa_engine::fact::Fact::DispatchOpened { dispatch, .. }
+                    if dispatch.trajectory() == &crate::engine::engine_id(&self.trajectory) =>
+                {
+                    Some(dispatch.clone())
+                }
+                _ => None,
+            });
+            if policy.engine().opens_a_second_dispatch(&view, &self.trajectory, facts)
+                && ((opening_call_id.is_none() && !remedy_opens_unbound) || context.has_unbound_open_dispatch())
+            {
                 return Err(EventError::CallOutstanding);
             }
-            match self.inner.store.append(&log, facts) {
+            if opens_dispatch.is_some()
+                && facts
+                    .iter()
+                    .any(|fact| matches!(fact, appa_engine::fact::Fact::ForkPrepared { .. }))
+                && !policy.engine().forks_in_flight(&view).is_empty()
+            {
+                return Err(EventError::SpawnOutstanding);
+            }
+            let appended = match (opening_call_id, opens_dispatch) {
+                (Some(call_id), Some(dispatch)) => {
+                    if call_id.is_empty()
+                        || log.call_bindings().any(|binding| {
+                            *binding.trajectory == crate::engine::engine_id(&self.trajectory)
+                                && binding.call_id == call_id
+                        })
+                    {
+                        return Err(EventError::CallIdReused);
+                    }
+                    self.inner.store.append_host(
+                        &log,
+                        facts,
+                        &appa_eventlog::HostObservation::CallBound {
+                            trajectory: crate::engine::engine_id(&self.trajectory),
+                            call_id: call_id.to_string(),
+                            dispatch,
+                        },
+                    )
+                }
+                _ => self.inner.store.append(&log, facts),
+            };
+            match appended {
                 Ok(()) => return Ok(decision),
                 Err(appa_eventlog::AppendError::Conflict { .. }) => {
                     tracing::debug!(
@@ -880,10 +1385,44 @@ impl Session {
                     );
                     continue;
                 }
-                Err(error) => return Err(EventError::Storage(error.to_string())),
+                Err(error) => {
+                    self.inner
+                        .note_store_error(Some(&self.root), crate::events::StoreOperation::Append, &error);
+                    return Err(EventError::Storage(error.to_string()));
+                }
             }
         }
         Err(EventError::Contended { attempts: REPLAY_LIMIT })
+    }
+
+    /// Run one consult, timed, and note what it cost.
+    ///
+    /// Every consult in this file goes through here rather than calling `externals.consult`
+    /// directly. An external that is slow, unreachable, or answering nonsense is the single
+    /// most common reason an agent appears to be stuck for no reason the trajectory's facts
+    /// explain, and the duration is only knowable at the await.
+    async fn timed_consult(
+        &self,
+        consult: &Consult,
+        elicitation: Option<&Elicitation>,
+        ruling: Option<appa_runtime_api::Ruling>,
+    ) -> crate::external::ConsultOutcome {
+        let started = std::time::Instant::now();
+        let outcome = self.deployment.externals.consult(consult, elicitation, ruling).await;
+        // Filed under the family, never the acting trajectory: a subagent's slow authority is
+        // part of its family's account, and `EventLog` reads one root's bucket.
+        self.inner.record(
+            Some(&self.root),
+            crate::events::RuntimeEvent::External {
+                role: consult.kind().into(),
+                name: consult.name.clone(),
+                outcome: (&outcome).into(),
+                duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                offer: None,
+                dispatch: None,
+            },
+        );
+        outcome
     }
 
     /// One external consult. Only an annotation failure is an error: the call cannot be
@@ -909,7 +1448,7 @@ impl Session {
                         artifact: artifact.clone(),
                     },
                 };
-                let verdict = match self.deployment.externals.consult(&consult, elicitation, ruling).await {
+                let verdict = match self.timed_consult(&consult, elicitation, ruling).await {
                     ConsultOutcome::Answer(answer) => AuthorityVerdict::from_wire(&answer),
                     ConsultOutcome::NoAnswer(_) => AuthorityVerdict::Abstain,
                 };
@@ -932,7 +1471,7 @@ impl Session {
                         artifact: artifact.clone(),
                     },
                 };
-                let derived = match self.deployment.externals.consult(&consult, None, None).await {
+                let derived = match self.timed_consult(&consult, None, None).await {
                     ConsultOutcome::Answer(answer) => SanitizerAnswer::from_wire(&answer).map(|answer| answer.body),
                     ConsultOutcome::NoAnswer(_) => None,
                 };
@@ -955,7 +1494,7 @@ impl Session {
                         artifact: AnnotationArtifact { args: args.clone() },
                     },
                 };
-                let answer = match self.deployment.externals.consult(&consult, None, None).await {
+                let answer = match self.timed_consult(&consult, None, None).await {
                     ConsultOutcome::Answer(answer) => {
                         AnnotationAnswer::from_wire(&answer, declaration).ok_or_else(|| {
                             crate::external::NoAnswerReason::MalformedAnswer(
@@ -992,19 +1531,10 @@ impl Session {
                 selector,
                 templates,
             } => {
-                let consult = Consult {
-                    name: provider.clone(),
-                    body: ConsultBody::AudienceSource {
-                        declaration: AudienceSourceDeclaration {
-                            templates: templates.clone(),
-                        },
-                        artifact: AudienceSourceArtifact::Selector {
-                            selector: selector.clone(),
-                        },
-                    },
-                };
-                let members = match self.deployment.externals.consult(&consult, None, None).await {
-                    ConsultOutcome::Answer(answer) => MembersAnswer::from_wire(&answer).map(|answer| answer.members),
+                let consult = Consult::audience_selector(provider, selector, templates.clone());
+                let members = match self.timed_consult(&consult, None, None).await {
+                    ConsultOutcome::Answer(answer) => MembersAnswer::from_wire(&answer)
+                        .map(|answer| answer.members.into_iter().map(ReaderId::new).collect()),
                     ConsultOutcome::NoAnswer(_) => None,
                 };
                 ExternalEvidence::AudienceSource {
@@ -1016,42 +1546,21 @@ impl Session {
             ExternalRequest::MemberLookup {
                 provider,
                 member,
+                answering,
                 templates,
             } => {
-                let consult = Consult {
-                    name: provider.clone(),
-                    body: ConsultBody::AudienceSource {
-                        declaration: AudienceSourceDeclaration {
-                            templates: templates.clone(),
-                        },
-                        artifact: AudienceSourceArtifact::Member { member: member.clone() },
-                    },
-                };
-                let claims = match self.deployment.externals.consult(&consult, None, None).await {
-                    ConsultOutcome::Answer(answer) => LookupAnswer::from_wire(&answer).map(|answer| answer.claims),
+                // The evidence stays keyed by the member's own provider, whichever entry
+                // answered.
+                let consult = Consult::member_lookup(answering, member, templates.clone());
+                let principal = match self.timed_consult(&consult, None, None).await {
+                    ConsultOutcome::Answer(answer) => {
+                        LookupAnswer::from_wire(&answer).map(|answer| answer.principal.map(ReaderId::new))
+                    }
                     ConsultOutcome::NoAnswer(_) => None,
                 };
                 ExternalEvidence::MemberLookup {
                     provider: provider.clone(),
                     member: member.clone(),
-                    claims,
-                }
-            }
-            ExternalRequest::Identity { implementation, claims } => {
-                let consult = Consult {
-                    name: implementation.clone(),
-                    body: ConsultBody::Identity {
-                        artifact: claims.clone(),
-                    },
-                };
-                let principal = match self.deployment.externals.consult(&consult, None, None).await {
-                    ConsultOutcome::Answer(answer) => PrincipalAnswer::from_wire(&answer)
-                        .map(|answer| appa_engine::label::ReaderId::new(answer.principal)),
-                    ConsultOutcome::NoAnswer(_) => None,
-                };
-                ExternalEvidence::Identity {
-                    implementation: implementation.clone(),
-                    id: claims.id.clone(),
                     principal,
                 }
             }
@@ -1068,6 +1577,7 @@ pub(crate) struct Decided<'a> {
     session: &'a Session,
     policy: &'a crate::engine::PolicyEngine<'a>,
     view: &'a EngineView,
+    log: &'a appa_eventlog::Log,
 }
 
 impl Decided<'_> {
@@ -1081,6 +1591,32 @@ impl Decided<'_> {
 
     fn canonical_bytes(&self, call: &ProposedCall) -> Option<Vec<u8>> {
         self.engine().canonical_bytes(call)
+    }
+
+    fn classify_report(
+        &self,
+        call: &ProposedCall,
+        call_id: Option<&str>,
+        open: &[OpenDispatch],
+    ) -> Result<appa_engine::value::DispatchId, UnreportableOutcome> {
+        classify_report_identified(
+            call,
+            call_id,
+            || self.canonical_bytes(call),
+            open,
+            self.log.call_bindings(),
+            &crate::engine::engine_id(&self.session.trajectory),
+        )
+    }
+
+    fn has_unbound_open_dispatch(&self) -> bool {
+        let trajectory = crate::engine::engine_id(&self.session.trajectory);
+        self.open_dispatches().iter().any(|open| {
+            !self
+                .log
+                .call_bindings()
+                .any(|binding| *binding.trajectory == trajectory && *binding.dispatch == open.id)
+        })
     }
 
     fn parent_of(&self, child: &TrajectoryId) -> Option<TrajectoryId> {
@@ -1238,6 +1774,25 @@ context_control = true
         sanitizer: Option<&str>,
         label: crate::engine::LabelSpelling,
     ) -> SpawnBinding {
+        let call = authorize_spawn(session, spawn, sanitizer, label).await;
+        let ToolCallDecision::Allow {
+            spawn: Some(binding), ..
+        } = session
+            .on_tool_call(call.proposed(), true)
+            .await
+            .expect("the approved spawn releases")
+        else {
+            panic!("a context-controlled spawn releases a fork binding");
+        };
+        binding
+    }
+
+    async fn authorize_spawn(
+        session: &Session,
+        spawn: ProposedCall,
+        sanitizer: Option<&str>,
+        label: crate::engine::LabelSpelling,
+    ) -> ExactCall {
         let ToolCallDecision::Deny { offers, .. } =
             session.on_tool_call(spawn, true).await.expect("the spawn is judged")
         else {
@@ -1270,14 +1825,7 @@ context_control = true
         else {
             panic!("a return declaration approves the spawn");
         };
-        let ToolCallDecision::Allow { spawn: Some(binding) } = session
-            .on_tool_call(call.proposed(), true)
-            .await
-            .expect("the approved spawn releases")
-        else {
-            panic!("a context-controlled spawn releases a fork binding");
-        };
-        binding
+        call
     }
 
     /// The bare declaration: the return crosses as spoken, floored at the parent's
@@ -1441,7 +1989,7 @@ starting_label = { trust = "suspicious" }
         let policy = r#"
 version = 2
 [[policy.tool]]
-name = "execute_remedy_plan"
+name = "appa/execute_remedy_plan"
 "#;
         assert!(matches!(
             Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None),
@@ -1459,7 +2007,7 @@ name = "execute_remedy_plan"
             .on_tool_call(fetch(serde_json::json!({"b": 1, "a": 2})), false)
             .await
             .expect("the call is decided");
-        assert_eq!(decision, ToolCallDecision::Allow { spawn: None });
+        assert!(matches!(decision, ToolCallDecision::Allow { spawn: None, .. }));
         let open = runtime
             .open_dispatches(&root(), &root())
             .pop()
@@ -1472,6 +2020,129 @@ name = "execute_remedy_plan"
             facts.last(),
             Some(appa_engine::fact::Fact::DispatchOpened { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn identified_calls_run_in_parallel_and_report_after_restart_in_any_order() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let db = dir.path().join("appa.db");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), db.clone(), None).expect("the deployment opens");
+        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let call = fetch(serde_json::json!({"a": 1}));
+
+        for call_id in ["toolu-1", "toolu-2"] {
+            assert!(matches!(
+                session
+                    .on_tool_call_identified(call.clone(), Some(call_id.to_string()), false)
+                    .await
+                    .expect("the identified call releases"),
+                ToolCallDecision::Allow { spawn: None, .. }
+            ));
+        }
+        assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 2);
+        drop(session);
+        drop(runtime);
+
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), db, None).expect("the deployment reopens");
+        let session = runtime.session(&root(), &root()).expect("the session reattaches");
+        for (call_id, body) in [("toolu-2", "second"), ("toolu-1", "first")] {
+            assert_eq!(
+                session
+                    .on_tool_result_identified(
+                        call.clone(),
+                        Some(call_id.to_string()),
+                        ToolOutcome::Success {
+                            body: OutcomeBody::Available(body.to_string()),
+                        },
+                    )
+                    .await
+                    .expect("the identified result is correlated"),
+                ToolResultDecision::Keep,
+            );
+        }
+        assert!(runtime.open_dispatches(&root(), &root()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_host_call_id_cannot_be_reused() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let session = runtime.create_session(root()).expect("a fresh id opens");
+        session
+            .on_tool_call_identified(fetch(serde_json::json!({"a": 1})), Some("toolu-1".to_string()), false)
+            .await
+            .expect("the first call releases");
+
+        let reused = session
+            .on_tool_call_identified(fetch(serde_json::json!({"a": 2})), Some("toolu-1".to_string()), false)
+            .await;
+        assert!(matches!(reused, Err(EventError::CallIdReused)), "got {reused:?}");
+        assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ordinary_calls_overlap_an_unbound_spawn_but_a_second_spawn_does_not() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let session = runtime.create_session(root()).expect("a fresh id opens");
+
+        let first = authorize_spawn(
+            &session,
+            fetch(serde_json::json!({"a": 1})),
+            None,
+            crate::engine::LabelSpelling::default(),
+        )
+        .await;
+        assert!(matches!(
+            session
+                .on_tool_call_identified(first.proposed(), Some("spawn-1".to_string()), true)
+                .await
+                .expect("the first spawn releases"),
+            ToolCallDecision::Allow { spawn: Some(_), .. }
+        ));
+        assert!(matches!(
+            session
+                .on_tool_call_identified(
+                    fetch(serde_json::json!({"a": 2})),
+                    Some("ordinary-1".to_string()),
+                    false,
+                )
+                .await
+                .expect("an ordinary call overlaps the spawn"),
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
+
+        let second_proposal = session
+            .on_tool_call_identified(fetch(serde_json::json!({"a": 3})), Some("spawn-2".to_string()), true)
+            .await
+            .expect("the second spawn is checked");
+        let ToolCallDecision::Deny { offers, .. } = second_proposal else {
+            panic!("the second spawn first declares its return");
+        };
+        let quoted = OfferId(offers[0].id.clone());
+        let log = session.inner.log(&session.root).expect("the log reads");
+        let offer = crate::engine::resolve_rendered(&log, &quoted).expect("the quoted id resolves");
+        let RemedyDecision::Authorized { call: second } = session
+            .on_remedy(
+                offer,
+                RemedyArguments {
+                    label: Some(crate::engine::LabelSpelling::default()),
+                    return_schema: None,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect("the second return declaration executes")
+        else {
+            panic!("the return declaration authorizes the second spawn");
+        };
+        let second = session
+            .on_tool_call_identified(second.proposed(), Some("spawn-2".to_string()), true)
+            .await;
+        assert!(matches!(second, Err(EventError::SpawnOutstanding)), "got {second:?}");
     }
 
     #[tokio::test]
@@ -1556,13 +2227,13 @@ name = "execute_remedy_plan"
                 .expect("the sanitize offer binds"),
             RemedyDecision::Authorized { .. },
         ));
-        assert_eq!(
+        assert!(matches!(
             session
                 .on_tool_call(leak(), false)
                 .await
                 .expect("the re-proposal resumes"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
         let base = runtime.log_basis(&root());
 
         runtime.store().fail_commit_after(1);
@@ -1597,8 +2268,8 @@ name = "execute_remedy_plan"
             .expect("the re-reported outcome admits");
         assert_eq!(
             replaced,
-            ToolResultDecision::Replace {
-                placeholder: "scrubbed".to_string()
+            ToolResultDecision::Deliver {
+                value: "scrubbed".to_string()
             },
         );
         let log = runtime.log_facts(&root());
@@ -1744,9 +2415,8 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
             .await
             .expect("the old root decides");
-        assert_eq!(
-            decision,
-            ToolCallDecision::Allow { spawn: None },
+        assert!(
+            matches!(decision, ToolCallDecision::Allow { spawn: None, .. }),
             "the old root keeps fetch"
         );
 
@@ -1768,9 +2438,8 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             )
             .await
             .expect("the new root decides");
-        assert_eq!(
-            allowed,
-            ToolCallDecision::Allow { spawn: None },
+        assert!(
+            matches!(allowed, ToolCallDecision::Allow { spawn: None, .. }),
             "the edited policy's tool releases"
         );
     }
@@ -1923,7 +2592,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
             .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
             .await
             .expect("the reopened trajectory decides");
-        assert_eq!(decision, ToolCallDecision::Allow { spawn: None });
+        assert!(matches!(decision, ToolCallDecision::Allow { spawn: None, .. }));
     }
 
     #[tokio::test]
@@ -1984,7 +2653,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
                 post(|| async {
                     axum::Json(serde_json::json!({
                         "version": 1,
-                        "answer": {"members": [{"id": "slack:U1", "verified_email": "alice@corp.example"}]}
+                        "answer": {"members": ["alice@corp.example"]}
                     }))
                 }),
             );
@@ -2000,8 +2669,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let policy = r#"
 version = 2
 
-[[policy.audience.group]]
-name = "team"
+[policy.audience.group.team]
 from = ["slack:user-group/team"]
 
 [[policy.tool]]
@@ -2013,7 +2681,7 @@ delta = {}
 starting_label = { audience = ["alice@corp.example"] }
 "#;
         let text = format!(
-            "[policy]\n{policy}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.audience.slack]\nurl = \"{source}\"\n"
+            "[policy]\n{policy}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.audience.slack]\nurl = \"{source}\"\nselectors = [{{ template = \"user-group/<handle>\" }}]\n"
         );
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let path = dir.path().join("appa.toml");
@@ -2150,9 +2818,8 @@ context_control = false
             )
             .await
             .expect("the marked call is decided");
-        assert_eq!(
-            decision,
-            ToolCallDecision::Allow { spawn: None },
+        assert!(
+            matches!(decision, ToolCallDecision::Allow { spawn: None, .. }),
             "the mark is refused and the call releases as an ordinary flow, not a fork",
         );
     }
@@ -2266,6 +2933,78 @@ context_control = false
             "the crossed narrowing must charge the parent's send, got {decision:?}"
         );
     }
+    #[tokio::test]
+    async fn symbolic_audience_acceptance_needs_no_membership_sources() {
+        for requirement in ["within", "contains"] {
+            let policy = format!(
+                r#"
+version = 2
+[[policy.tool]]
+name = "read_internal"
+delta = {{ audience = ["internal"] }}
+requires = {{ audience = {{ {requirement} = ["internal"] }} }}
+[[policy.tool]]
+name = "send_reader"
+delta = {{}}
+requires = {{ audience = {{ contains = ["reader@example.com"] }} }}
+"#
+            );
+            let dir = tempfile::tempdir().unwrap();
+            let db = dir.path().join("appa.db");
+            let runtime = Runtime::open(config_with(&policy, None), db.clone(), None).unwrap();
+            let session = runtime.create_session(root()).unwrap();
+            let read = ProposedCall {
+                tool: "read_internal".into(),
+                arguments: raw(serde_json::json!({})),
+            };
+            assert!(matches!(
+                session.on_tool_call(read.clone(), false).await.unwrap(),
+                ToolCallDecision::Deny { .. }
+            ));
+            let decision = session
+                .on_remedy(surfaced_offer(&runtime), RemedyArguments::default(), None, None)
+                .await
+                .unwrap();
+            assert!(
+                matches!(decision, RemedyDecision::Authorized { .. }),
+                "{requirement}: {decision:?}"
+            );
+            assert!(matches!(
+                session.on_tool_call(read.clone(), false).await.unwrap(),
+                ToolCallDecision::Allow { .. }
+            ));
+            session
+                .on_tool_result(
+                    read,
+                    ToolOutcome::Success {
+                        body: OutcomeBody::Available("internal result".into()),
+                    },
+                )
+                .await
+                .unwrap();
+            drop(session);
+            drop(runtime);
+
+            // Replay preserves the symbolic label; a real membership question still refuses.
+            let runtime = Runtime::open(config_with(&policy, None), db, None).unwrap();
+            assert_eq!(runtime.status(&root()).unwrap().audience, "internal");
+            let session = runtime.session(&root(), &root()).unwrap();
+            assert!(matches!(
+                session
+                    .on_tool_call(
+                        ProposedCall {
+                            tool: "send_reader".into(),
+                            arguments: raw(serde_json::json!({})),
+                        },
+                        false
+                    )
+                    .await
+                    .unwrap(),
+                ToolCallDecision::Deny { .. }
+            ));
+        }
+    }
+
     const ATTENTION: &str = r#"
 version = 2
 
@@ -2330,7 +3069,7 @@ attention = ["irreversible"]
             .on_tool_call(wire(500), false)
             .await
             .expect("the re-proposal resumes");
-        assert_eq!(resumed, ToolCallDecision::Allow { spawn: None });
+        assert!(matches!(resumed, ToolCallDecision::Allow { spawn: None, .. }));
         let kept = session
             .on_tool_result(
                 wire(500),
@@ -2630,13 +3369,13 @@ context_control = true
             session.on_remedy(accept, RemedyArguments::default(), None, None).await,
             Ok(RemedyDecision::Authorized { .. }),
         ));
-        assert_eq!(
+        assert!(matches!(
             session
                 .on_tool_call(read.clone(), false)
                 .await
                 .expect("the read releases"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
         session
             .on_tool_result(
                 read,
@@ -2702,20 +3441,20 @@ context_control = true
         );
         assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 1);
 
-        assert_eq!(
+        assert!(matches!(
             session
                 .on_tool_call(send(REDACTED_BODY), false)
                 .await
                 .expect("the substituted call is allowed"),
-            ToolCallDecision::Allow { spawn: None },
-        );
-        assert_eq!(
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
+        assert!(matches!(
             session
                 .on_tool_call(send(REDACTED_BODY), false)
                 .await
                 .expect("the repeat is handed the same release"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
 
         assert_eq!(
             session
@@ -2830,13 +3569,13 @@ context_control = true
             standing_release(&runtime).is_some(),
             "the substituted call still stands after the turn ended"
         );
-        assert_eq!(
+        assert!(matches!(
             session
                 .on_tool_call(send(REDACTED_BODY), false)
                 .await
                 .expect("the next turn is still handed the substituted call"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
     }
 
     #[tokio::test]
@@ -2876,10 +3615,10 @@ context_control = true
             "the abandoned dispatch closed as not run: {entries:?}"
         );
 
-        assert_eq!(
+        assert!(matches!(
             session.on_tool_call(other, false).await.expect("the repeat is decided"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
         assert!(matches!(
             session.on_remedy(hop, RemedyArguments::default(), None, None).await,
             Ok(RemedyDecision::Declined { .. }),
@@ -2904,13 +3643,13 @@ context_control = true
             Runtime::open(substituting_config(SUBSTITUTED_SEND, None), db, None).expect("the deployment reopens");
         let session = runtime.session(&root(), &root()).expect("the trajectory reopens");
         assert!(standing_release(&runtime).is_some());
-        assert_eq!(
+        assert!(matches!(
             session
                 .on_tool_call(send(REDACTED_BODY), false)
                 .await
                 .expect("the substituted call is allowed after the restart"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
     }
 
     #[tokio::test]
@@ -2940,13 +3679,13 @@ context_control = true
         ));
         assert!(standing_release(&runtime).is_some());
 
-        assert_eq!(
+        assert!(matches!(
             session
                 .on_tool_call(send(REDACTED_BODY), false)
                 .await
                 .expect("the replaced call still runs"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
     }
 
     #[tokio::test]
@@ -2984,13 +3723,13 @@ context_control = true
             session.on_tool_call(send(RAW_BODY), false).await,
             Ok(ToolCallDecision::Deny { .. }),
         ));
-        assert_eq!(
+        assert!(matches!(
             session
                 .on_tool_call(send(REDACTED_BODY), false)
                 .await
                 .expect("the approved call releases"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
     }
 
     const SANITIZED_CHILD: &str = r#"
@@ -3307,13 +4046,13 @@ confined_results = ["leak"]
             .await
             .expect("the offer executes");
         assert!(matches!(authorized, RemedyDecision::Authorized { .. }));
-        assert_eq!(
+        assert!(matches!(
             session
                 .on_tool_call(leak(), false)
                 .await
                 .expect("the re-proposal resumes"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
         session
             .on_tool_result(
                 leak(),
@@ -3342,8 +4081,8 @@ confined_results = ["leak"]
         let decision = run_sanitize_offer(&runtime, &mut session).await;
         assert_eq!(
             decision,
-            ToolResultDecision::Replace {
-                placeholder: "scrubbed".to_string()
+            ToolResultDecision::Deliver {
+                value: "scrubbed".to_string()
             },
             "the derivation is admitted and the raw is withheld",
         );
@@ -3449,13 +4188,13 @@ context_control = true
             child.on_remedy(offer, RemedyArguments::default(), None, None).await,
             Ok(RemedyDecision::Authorized { .. })
         ));
-        assert_eq!(
+        assert!(matches!(
             child
                 .on_tool_call(browse.clone(), false)
                 .await
                 .expect("the accepted narrowing releases the call"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
         assert_eq!(
             child
                 .on_tool_result(
@@ -3581,13 +4320,13 @@ context_control = true
                     .expect("the acceptance executes"),
                 RemedyDecision::Authorized { .. },
             ));
-            assert_eq!(
+            assert!(matches!(
                 session
                     .on_tool_call(call.clone(), false)
                     .await
                     .expect("the re-proposal resumes"),
-                ToolCallDecision::Allow { spawn: None },
-            );
+                ToolCallDecision::Allow { spawn: None, .. }
+            ));
         }
         let kept = session
             .on_tool_result(
@@ -3776,6 +4515,69 @@ context_control = true
     }
 
     #[tokio::test]
+    async fn a_spawn_resume_keeps_the_original_dispatch_and_binding() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
+        session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the child opens");
+        let dispatches = runtime.open_dispatches(&root(), &root());
+        session
+            .on_spawn_resume(fetch(serde_json::json!({"a": 1})), child("c1"))
+            .expect("same call resumes");
+        assert_eq!(runtime.open_dispatches(&root(), &root())[0].id, dispatches[0].id);
+        assert_eq!(fork_opened_count(&runtime), 1);
+        assert_eq!(resumed_count(&runtime), 1);
+    }
+
+    #[tokio::test]
+    async fn a_spawn_resume_refuses_mismatched_or_finished_work_without_mutation() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
+        let before = runtime.log_basis(&root());
+        assert!(
+            session
+                .on_spawn_resume(fetch(serde_json::json!({"a": 1})), child("c1"))
+                .is_err()
+        );
+        assert_eq!(runtime.log_basis(&root()), before, "an unbound fork cannot resume");
+        let child_session = session
+            .on_child_start(child("c1"), SpawnRef::InFlight)
+            .expect("the child opens");
+        for (call, target) in [
+            (fetch(serde_json::json!({"a": 2})), child("c1")),
+            (fetch(serde_json::json!({"a": 1})), child("other")),
+            (leak(), child("c1")),
+        ] {
+            let before = runtime.log_basis(&root());
+            assert!(session.on_spawn_resume(call, target).is_err());
+            assert_eq!(runtime.log_basis(&root()), before);
+        }
+        child_session.on_child_end(None).await.expect("the child ends");
+        let before = runtime.log_basis(&root());
+        assert!(
+            session
+                .on_spawn_resume(fetch(serde_json::json!({"a": 1})), child("c1"))
+                .is_err()
+        );
+        assert_eq!(runtime.log_basis(&root()), before, "ended child cannot resume");
+        session.on_turn_end().await.expect("dispatch abandoned");
+        let before = runtime.log_basis(&root());
+        assert!(
+            session
+                .on_spawn_resume(fetch(serde_json::json!({"a": 1})), child("c1"))
+                .is_err()
+        );
+        assert_eq!(runtime.log_basis(&root()), before, "closed dispatch cannot resume");
+    }
+
+    #[tokio::test]
     async fn a_child_start_repeats_as_the_same_act_and_refuses_any_other_pairing() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
@@ -3901,7 +4703,7 @@ context_control = true
     }
 
     #[tokio::test]
-    async fn two_forks_in_flight_bind_nothing() {
+    async fn a_second_unbound_spawn_is_refused_across_the_family() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
@@ -3921,15 +4723,24 @@ context_control = true
             .expect("the spawn dispatch closes");
 
         release_spawn(&mut first, fetch(serde_json::json!({"a": 2}))).await;
-        release_spawn(&mut session, fetch(serde_json::json!({"a": 3}))).await;
+        let second = authorize_spawn(
+            &session,
+            fetch(serde_json::json!({"a": 3})),
+            None,
+            crate::engine::LabelSpelling::default(),
+        )
+        .await;
         let error = session
+            .on_tool_call_identified(second.proposed(), Some("spawn-2".to_string()), true)
+            .await
+            .expect_err("another unbound spawn would make SubagentStart ambiguous");
+        assert!(matches!(error, EventError::SpawnOutstanding), "got {error:?}");
+
+        session
             .on_child_start(child("c2"), SpawnRef::InFlight)
-            .err()
-            .expect("two forks in flight: none is picked");
-        assert!(matches!(error, EventError::SpawnAmbiguous), "got {error:?}");
-        assert!(!error.is_operational());
-        assert!(!opened(&runtime, &child("c2")), "no child opened");
-        assert_eq!(fork_opened_count(&runtime), 1);
+            .expect("the one remaining spawn binds unambiguously");
+        assert!(opened(&runtime, &child("c2")));
+        assert_eq!(fork_opened_count(&runtime), 2);
     }
 
     #[tokio::test]
@@ -4397,13 +5208,13 @@ context_control = true
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
         let session = runtime.create_session(root()).expect("a fresh id opens");
-        assert_eq!(
+        assert!(matches!(
             session
                 .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
                 .await
                 .expect("the call releases"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
         assert!(matches!(
             session.on_tool_call(fetch(serde_json::json!({"a": 2})), false).await,
             Err(EventError::CallOutstanding),
@@ -4425,13 +5236,50 @@ context_control = true
                 )),
             "the unreported dispatch closed as unknown, not as a run that failed"
         );
-        assert_eq!(
+        assert!(matches!(
             session
                 .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
                 .await
                 .expect("the next turn proposes freely"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_turn_end_closes_all_parallel_calls_the_harness_never_ran() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let session = runtime.create_session(root()).expect("a fresh id opens");
+        for (call_id, argument) in [("toolu-1", 1), ("toolu-2", 2)] {
+            session
+                .on_tool_call_identified(
+                    fetch(serde_json::json!({"a": argument})),
+                    Some(call_id.to_string()),
+                    false,
+                )
+                .await
+                .expect("the identified call releases");
+        }
+        assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 2);
+
+        session.on_turn_end().await.expect("the turn end closes every call");
+
+        assert!(runtime.open_dispatches(&root(), &root()).is_empty());
+        let unknown_closes = runtime
+            .audit(&root())
+            .expect("the audit reads")
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.event,
+                    crate::engine::AuditEvent::Closed {
+                        outcome: crate::engine::DispatchOutcome::Unknown
+                    }
+                )
+            })
+            .count();
+        assert_eq!(unknown_closes, 2);
     }
 
     /// The outcome the close ruled out cannot be reported afterwards:
@@ -4721,13 +5569,13 @@ context_control = true
         let runtime = open_runtime(&dir);
         let session = runtime.create_session(root()).expect("a fresh id opens");
         runtime.store().contend_next_appends(1);
-        assert_eq!(
+        assert!(matches!(
             session
                 .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
                 .await
                 .expect("the replay commits"),
-            ToolCallDecision::Allow { spawn: None },
-        );
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
         assert_eq!(
             runtime.log_basis(&root()),
             3,
@@ -4771,9 +5619,9 @@ context_control = true
         let session = runtime.create_session(root()).expect("a fresh id opens");
         assert!(matches!(
             session
-                .on_tool_call(control_call("mcp__evil__execute_remedy_plan"), false)
+                .on_tool_call(control_call("mcp/evil/execute_remedy_plan"), false)
                 .await,
-            Err(EventError::UndeclaredTool { tool }) if tool == "mcp__evil__execute_remedy_plan",
+            Err(EventError::UndeclaredTool { tool }) if tool == "mcp/evil/execute_remedy_plan",
         ));
     }
 

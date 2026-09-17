@@ -30,7 +30,8 @@ async fn agent(runtime: appa_runtime::api::Runtime, provider: &Provider, host: &
             appa_example_agent::HttpClient::loopback(),
         ),
         ToolShim::new(shim),
-        ToolCatalogue::new(tools.iter().map(|name| tool(name)).collect()),
+        ToolCatalogue::new(tools.iter().map(|name| tool(name)).collect())
+            .expect("the fixture tools leave the control name to the runtime"),
     )
     .with_head(TranscriptHead::new(vec![WireMessage::system("You are a fixture.")]))
     .with_limits(Limits {
@@ -290,10 +291,10 @@ context_control = true
 "#;
 
 fn delegating(agent: Agent) -> Agent {
-    agent.with_spawn_tool(SpawnTool {
-        name: ToolName::new("delegate"),
-        errand: ArgumentKey::new("task"),
-    })
+    agent.with_spawn_tool(
+        SpawnTool::new(ToolName::new("delegate"), ArgumentKey::new("task"))
+            .expect("the spawn tool leaves the control name to the runtime"),
+    )
 }
 
 #[tokio::test]
@@ -1081,5 +1082,74 @@ async fn an_observer_receives_every_record_typed() {
             text: "I could not read it.".to_string()
         }),
         "and the run's answer closes the record. Recorded: {records:?}",
+    );
+}
+
+#[tokio::test]
+async fn a_call_its_annotator_cannot_classify_is_refused_and_the_run_goes_on() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let policy = r#"
+version = 2
+
+[[policy.annotator]]
+name = "classify"
+inputs = { subject = "$tool_call.arguments.who" }
+
+[[policy.tool]]
+name = "read_hr"
+parameters = { type = "object", properties = { who = { type = "string" } }, required = ["who"], additionalProperties = false }
+annotator = "classify"
+
+[[policy.tool]]
+name = "send_email"
+"#;
+    let host = ToolHost::default();
+    host.answers("read_hr", "Alice Chen, Staff Engineer")
+        .answers("send_email", "sent");
+    let annotator_url = format!("{}/annotator", host.clone().serve().await);
+    let externals = format!("[externals.annotators.classify]\nurl = \"{annotator_url}\"\n");
+    let decisions = Decisions::recording();
+
+    let provider = Provider::default();
+    provider
+        .calls("read_hr", serde_json::json!({"who": "nobody"}))
+        .calls("send_email", serde_json::json!({"to": "alice"}))
+        .says("I could not read the record, so I only sent the note.");
+
+    let agent = agent(
+        runtime(&dir, policy, &externals),
+        &provider,
+        &host,
+        &["read_hr", "send_email"],
+    )
+    .await;
+    let outcome = agent
+        .run(root(), "Look up nobody and tell Alice.", Default::default())
+        .await;
+
+    assert_eq!(
+        outcome,
+        Outcome::Answer("I could not read the record, so I only sent the note.".to_string()),
+        "an unanswered annotation costs the one call, not the run",
+    );
+    assert_eq!(
+        host.calls(),
+        vec![serde_json::json!({"tool": "send_email", "arguments": {"to": "alice"}})],
+        "the unclassified call never reached the host; the next one ran",
+    );
+    let reply = provider.tool_result(1, "call_0");
+    assert!(
+        reply.starts_with(
+            "[appa] this call was refused and did not run: annotator=classify error=non_success status=404"
+        ),
+        "the model reads the runtime's own refusal: {reply}",
+    );
+    assert!(
+        decisions
+            .recorded()
+            .iter()
+            .any(|line| line.starts_with("appa: [agent-test] refused read_hr: annotator=classify")),
+        "the refusal is a decision line of its own: {:?}",
+        decisions.recorded(),
     );
 }

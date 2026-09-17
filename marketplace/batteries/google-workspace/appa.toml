@@ -1,0 +1,25 @@
+# Google Workspace battery.
+#
+# This battery binds `audience-source.py`, the `google-workspace`
+# audience source, and declares the selectors it serves; it carries no
+# tool rules yet. The root config maps `self` and `internal` onto the
+# selectors — the README shows the wiring.
+#
+# TODO: tool rules for the claude.ai Gmail, Drive and Calendar connectors,
+# in the Notion shape: reads enter `suspicious` for `internal`, writes need
+# trusted internal data and a `google-workspace-review` mark. Per-file
+# Drive readers stay out: they need a Drive-scoped token the runtime has
+# no path to (the connectors keep theirs), so `internal` is the audience
+# until domain-wide delegation is wired.
+
+[policy]
+version = 2
+
+[externals.audience.google-workspace]
+command = ["python3", "audience-source.py"]
+token_env = "APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN"
+selectors = [
+  { template = "viewer", feeds = "self" },
+  { template = "full-members", feeds = "internal" },
+  { template = "group/<group-address>" },
+]

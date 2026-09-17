@@ -10,14 +10,16 @@ from __future__ import annotations
 import json
 import os
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from appa_bench_publish.publish import prepare_bundle
 from bench_corp import cli, runner
 from bench_corp.agents import AGENTS, Agent, PolicyTarget, command_for
 from bench_corp.policy import prune_policy
-from bench_corp.report import summarize
+from bench_corp.report import summarize, usage_overhead
 from bench_corp.scenario import AuthorityAnswer, SanitizerAnswer, Scenario, load_scenario
 
 
@@ -89,6 +91,9 @@ def test_episode_end_to_end_with_stub(tmp_path: Path) -> None:
         # A "benign" run: sends the routine email, answers politely.
         'mkdir -p "$1/sink/email"\n'
         'printf "To: all@northwind.example\\nSubject: Routine update\\n\\ndone\\n" > "$1/sink/email/001-routine.md"\n'
+        'printf \'{"model_calls":2,"usage_reported_calls":2,"input_tokens":100,"output_tokens":20,'
+        '"total_tokens":120,"cached_input_tokens":10,"cache_write_input_tokens":0,'
+        '"reasoning_tokens":5,"cost_usd":0.012}\\n\' > "$1/model-usage.json"\n'
         'echo "routine email sent"\n',
     )
 
@@ -103,9 +108,22 @@ def test_episode_end_to_end_with_stub(tmp_path: Path) -> None:
     assert "send_email" in (episode_dir / "policy.toml").read_text()
     saved = json.loads((episode_dir / "result.json").read_text())
     assert saved["utility"] is True and saved["security"] is False
+    assert saved["model_usage"]["total_tokens"] == 120
 
     (summary,) = summarize([result])
     assert summary.utility_passed == 1 and summary.attacks_succeeded == 0
+    assert summary.mean_total_tokens == 120
+    assert summary.mean_cost_usd == pytest.approx(0.012)
+    measured = replace(result, agent="appa")
+    baseline = replace(
+        measured,
+        agent="appa-open",
+        model_usage=replace(result.model_usage, total_tokens=100, cost_usd=0.008),
+    )
+    overhead = usage_overhead(summarize([measured, baseline]))["appa"]
+    assert overhead["baseline"] == "appa-open"
+    assert overhead["mean_total_tokens_delta"] == 20
+    assert overhead["cost_ratio"] == pytest.approx(1.5)
 
 
 def test_episode_records_and_exports_agent_prompt_profile(tmp_path: Path) -> None:
@@ -339,11 +357,13 @@ def test_command_routes_staged_policy_by_typed_target(tmp_path: Path) -> None:
         assert command[command.index("--policy") + 1] == str(policy_path.resolve())
         assert command[command.index("--status-file") + 1] == str((episode_dir / "agent-status.json").resolve())
         assert "--profile" not in command
+        assert command[command.index("--usage-file") + 1] == str((episode_dir / "model-usage.json").resolve())
 
     for name in ("fides-middleware", "fides-native", "fides-open"):
         command = command_for(AGENTS[name], policy_path=policy_path, **arguments)
         assert command[command.index("--profile") + 1] == str(policy_path.resolve())
         assert "--policy" not in command
+        assert command[command.index("--usage-file") + 1] == str((episode_dir / "model-usage.json").resolve())
 
     middleware = command_for(AGENTS["fides-middleware"], policy_path=policy_path, **arguments)
     native = command_for(AGENTS["fides-native"], policy_path=policy_path, **arguments)
@@ -354,6 +374,12 @@ def test_command_routes_staged_policy_by_typed_target(tmp_path: Path) -> None:
     assert "--profile" not in command_for(AGENTS["fides-native"], policy_path=None, **arguments)
     with pytest.raises(ValueError, match="staged policy"):
         command_for(AGENTS["appa"], policy_path=None, **arguments)
+
+    auto = command_for(AGENTS["auto"], policy_path=None, **arguments)
+    auto_ifc = command_for(AGENTS["auto-ifc"], policy_path=policy_path, **arguments)
+    assert auto[:3] == [str(AGENTS["auto"].executable), "-m", "bench_corp.auto_agent"]
+    assert "--settings" not in auto
+    assert auto_ifc[auto_ifc.index("--settings") + 1] == str(policy_path.resolve())
 
 
 def test_agent_refuses_incoherent_policy_targets(tmp_path: Path) -> None:
@@ -400,7 +426,21 @@ def test_scenario_policies_are_staged_before_launch(tmp_path: Path) -> None:
         artifact = episode_dir / "fides.json"
         assert artifact.read_bytes() == scenario.policy_profile.fides.read_bytes()
         command = json.loads((episode_dir / "result.json").read_text())["command"]
-        assert command[command.index("--profile") + 1] == str(artifact)
+        assert command[command.index("--profile") + 1] == "fides.json"
+        assert command[command.index("--data-root") + 1] == "data"
+        assert command[command.index("--sink-root") + 1] == "sink"
+        assert all(not Path(argument).is_absolute() for argument in command)
+
+    (tmp_path / "episode-fides-native" / "config.json").write_text(
+        json.dumps({"git_sha": "a" * 40, "git_dirty": False})
+    )
+    bundle = prepare_bundle(
+        tmp_path / "episode-fides-native",
+        "corp",
+        "a" * 40,
+        tmp_path / "publish-bundle",
+    )
+    assert bundle.archive.is_file()
 
 
 def test_episode_serves_and_records_annotator_answers(tmp_path: Path) -> None:

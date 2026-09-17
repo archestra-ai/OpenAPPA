@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if command -v mise >/dev/null 2>&1; then
+  mise_bin="$(command -v mise)"
+else
+  curl -fsSL https://mise.run | sh
+  mise_bin="$HOME/.local/bin/mise"
+fi
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+profile_marker="# OpenAPPA mise environment"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >> "$HOME/.bash_profile" <<EOF
+
+$profile_marker
+if [[ "\${PWD}" == "$repo_root" || "\${PWD}" == "$repo_root"/* ]]; then
+  eval "\$("$mise_bin" activate bash)"
+fi
+EOF
+fi
+
+"$mise_bin" trust "$repo_root/mise.toml"
+echo "==> Installing pinned toolchains"
+toolchain_start=$SECONDS
+"$mise_bin" install
+echo "==> Toolchains installed in $((SECONDS - toolchain_start))s"
+
+echo "==> Installing locked dependencies"
+dependency_start=$SECONDS
+"$mise_bin" run setup
+echo "==> Dependencies installed in $((SECONDS - dependency_start))s"

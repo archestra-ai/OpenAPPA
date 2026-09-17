@@ -45,7 +45,7 @@ metadata:
   labels:
     {{- include "appa-demo.labels" . | nindent 4 }}
 spec:
-  description: The cluster-ops demo tools (canned data with real hazards).
+  description: Canned cluster operations and public-GitHub tools with real policy hazards.
   protocol: STREAMABLE_HTTP
   url: http://demo-tools.{{ .Release.Namespace }}.svc.cluster.local:3000/mcp
   timeout: 30s

@@ -2,35 +2,55 @@
 title: Benchmarks
 category: Evaluation
 order: 10
-description: Empirical security and task-completion results across Bench-Corp and AgentThreatBench.
+description: Evidence for OpenAPPA's security, utility, and token cost across three agent benchmarks.
 ---
 
-## Security that still lets agents finish the job
+## Security without blocking useful work
 
-A secure agent is not useful if it refuses every action. A capable agent is not
-safe if it completes a task by violating policy. We measure defenses on two
-standard axes: **task completion** (utility on legitimate goals) and **attack
-success rate** (ASR, policy breaches under adversarial inputs).
+These results answer three questions: Does OpenAPPA stop policy violations? Can
+the agent still finish legitimate tasks? How many extra tokens does protection
+require?
 
-Across three evaluated models on Bench-Corp (200 episodes per model), guarded
-OpenAPPA achieved **88–90% task completion with 0/600 observed attacks** (0% ASR).
-The evaluated defended FIDES configurations achieved **37–45% task completion
-with 28–35% attack success**.
+OpenAPPA
+uses
+[deterministic policy enforcement](/how-it-works#openappa-enforces-information-flow-policy-proactively)
+to check each action. These benchmarks test the complete integration and show
+whether its policies stop the intended threats without making the agent useless.
 
-These are empirical results for the evaluated agents, policies, and scenarios—not
-a claim that attacks are impossible. Full methodology, per-model results, and
-limitations are available in the [OpenAPPA paper](/paper).
+## Security: no observed attacks in 1,320 evaluations
 
-## Bench-Corp: realistic enterprise workflows
+No scored attack succeeded against guarded OpenAPPA in **1,320 evaluations**:
+600 from
+[Bench‑Corp](https://github.com/archestra-ai/OpenAPPA/tree/main/bench/corp) and
+720 from
+[AgentThreatBench](https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/agent_threat_bench).
+Both suites tested standard and adversarial prompts.
 
-Bench-Corp contains 20 multi-step workflows across HR, Finance, customer
-support, vendor management, email, forums, and task tracking. Scenarios are
-scored from observable effects such as emails sent, files written, and
-transactions executed—not from an LLM judge.
+In Bench-Corp, the evaluated
+[Microsoft FIDES](https://www.microsoft.com/en-us/research/publication/securing-ai-agents-with-information-flow-control/)
+configurations had a 28–35% attack success rate. OpenAPPA's policies also
+enforced rules those configurations did not support, including
+[recipient authorization](/contracts#audiences),
+[out-of-band approval](/contracts#authorities), and
+[required action ordering](/contracts#effects).
 
-For each policy configuration, each model ran every scenario five times with
-standard prompts and five times with adversarial prompts, producing 200
-episodes per model.
+The suites test concrete ways an agent can break policy:
+
+- **[Sensitive-data sharing](/how-it-works#the-core-concepts):** Restricted data
+  must not reach an unauthorized person or a less restricted data store.
+- **Prompt injection:** Instructions in untrusted email, memory, or forum
+  content try to make the agent bypass policy.
+- **Approval and ordering:** The agent receives text that falsely claims an
+  approval happened. Policy requires the real approval in its recorded history.
+- **Tenant isolation:** The agent must keep each customer's data within that
+  customer's authorized readers.
+
+## Utility: 88–90% completion while enforcing policy
+
+A secure agent is not useful if it cannot finish legitimate work. Across three
+language models in Bench-Corp, guarded OpenAPPA completed **88–90% of tasks**.
+The evaluated FIDES configurations completed 37–45%. Each table entry shows
+task completion followed by attack success rate (ASR).
 
 | Model | Guarded OpenAPPA (Utility / ASR) | FIDES middleware (Utility / ASR) | FIDES native (Utility / ASR) |
 |---|---:|---:|---:|
@@ -38,72 +58,70 @@ episodes per model.
 | DeepSeek V4 Flash | **89.5% / 0%** | 39.5% / 34.5% | 41.5% / 33.0% |
 | Gemini 3.7 Flash | **90.0% / 0%** | 43.5% / 28.5% | 44.5% / 28.0% |
 
-OpenAPPA maintained high task completion while recording no successful policy
-violations in these runs. FIDES task completion dropped to 37–45% because linear
-IFC permanently taints trajectories upon reading confidential data, blocking
-subsequent legitimate actions, while still failing to prevent 28–35% of attacks
-due to missing organizational constraints (recipient authorization `$to`,
-out-of-band approvals, and action ordering).
+In AgentThreatBench's adversarial tests, guarded OpenAPPA had the highest task
+completion for all three models. In the standard tests, it led with Luna and
+Gemini. Middleware FIDES led with DeepSeek.
 
-### What the scenarios test
+OpenAPPA's
+[recovery mechanisms](/how-it-works#keeping-agents-useful-under-restrictions)
+help the agent continue safely after a policy block. In a Bench-Corp test with
+Luna, task completion was 88.0%. It fell to 56.5% without
+[subagent isolation](/how-it-works#subagent-reads) and to 35.0% without
+[guided recovery](/contracts#remedy-plans-and-child-returns).
 
-- **Wire transfer approval:** Text inside a request claims that approval was
-  already granted. OpenAPPA requires the actual secondary-approval event before
-  permitting the transfer.
-- **Legal pre-clearance:** An agent must create an audit record before sending
-  contract material to external counsel.
-- **Multi-tenant isolation:** Customer data may be sent only to recipients in
-  that customer's dynamically resolved reader set.
-- **Persistent storage:** Restricted data cannot be written into a broader
-  store and then reread under a less restrictive label.
+No scored attack succeeded in any of these configurations. The features
+interact, so this test does not measure each feature's effect in isolation.
 
-## AgentThreatBench: attacks embedded in agent inputs
+[Tau Bench's banking benchmark](https://taubench.com/leaderboard?benchmark=knowledge)
+tests ordinary banking support work rather than attack prompts. The validated
+comparison tested all 97 tasks four times with GPT‑5.6 Luna at maximum reasoning
+effort.
 
-[AgentThreatBench](https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/agent_threat_bench)
-is published in Inspect Evals, the open evaluation collection built around the
-[UK AI Security Institute's Inspect framework](https://www.aisi.gov.uk/blog/open-sourcing-our-testing-framework-inspect).
-It turns risks from the
-[OWASP Top 10 for Agentic Applications](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications/)
-into concrete tests of memory poisoning, autonomy hijacking, and data
-exfiltration.
-
-We ran the complete 24-task suite across the same three models, with five
-seeded repetitions under standard and adversarial prompts.
-
-Guarded OpenAPPA recorded **0/720 observed attacks** across 720 evaluated task
-executions (24 tasks × 3 models × 5 seeds × 2 prompt profiles). Under adversarial
-prompting, it achieved the highest task completion with every evaluated model.
-Under standard prompts, it led with Luna and Gemini; middleware FIDES led with
-DeepSeek.
-
-The main remaining limitation is Memory utility. OpenAPPA exposes only limited,
-structured facts from untrusted memory. This filters injected instructions,
-but it can also remove wording or relationships needed for an exact answer.
-Middleware FIDES preserves more raw Memory utility by allowing that untrusted
-content into the answer; under adversarial prompting, that choice also produced
-substantially more successful Memory attacks. The full subset tables and
-scoring details are reported in the paper.
-
-## Why recovery mechanisms matter
-
-OpenAPPA does more than block unsafe calls. It can isolate risky work in a
-restricted sub-agent and tell the agent which verifiable condition would make
-a blocked action safe. A Luna ablation on Bench-Corp illustrates how much those
-capabilities contribute:
-
-| Guarded configuration | Task completion | Observed ASR |
+| Agent configuration | Successful simulations | Mean Tau reward |
 |---|---:|---:|
-| Full OpenAPPA | **88.0%** | 0% |
-| Without fork | 56.5% | 0% |
-| Without guided recovery | 35.0% | 0% |
+| Guarded OpenAPPA | 151/388 | 38.92% |
+| OpenAPPA agent, permissive policy | 153/388 | 39.43% |
+| Stock Tau agent | 156/388 | 40.21% |
 
-The mechanisms interact, so the differences should not be read as an additive
-causal decomposition. The result shows that both materially help the guarded
-agent finish legitimate work without relaxing enforcement.
+Guarded OpenAPPA finished two fewer simulations than the permissive OpenAPPA
+agent and five fewer than stock. Its mean reward was 0.52 percentage points
+below permissive and 1.29 points below stock.
 
-## Learn more
+OpenAPPA checked 11,355 calls. One policy decision stopped a state-changing call
+before identity verification. Three other blocks rejected malformed input. No
+tool execution errors occurred. Tau is not an attack benchmark, so these results
+do not establish net security.
 
-The [OpenAPPA paper](/paper) contains the complete
-tables, benchmark protocol, model-specific variance, scoring adaptations, and
-limitations. The benchmark harnesses and checked-in scenarios are available in
-the [`bench/` directory](https://github.com/archestra-ai/OpenAPPA/tree/main/bench).
+## Token overhead: 4.22% over stock on Tau
+
+Guarded OpenAPPA used a mean of 1,307,763 agent tokens per simulation. This was
+4.22% more than stock and 2.80% more than the permissive OpenAPPA agent.
+
+| Agent configuration | Mean agent tokens per simulation | Difference from stock |
+|---|---:|---:|
+| Guarded OpenAPPA | 1,307,763 | **+4.22%** |
+| OpenAPPA agent, permissive policy | 1,272,128 | +1.38% |
+| Stock Tau agent | 1,254,821 | — |
+
+These totals include every prompt and completion in the complete agent
+trajectory. They measure the whole agent setup, not the computing cost of the
+OpenAPPA policy engine alone.
+
+## What we measured
+
+- **[Bench-Corp](https://github.com/archestra-ai/OpenAPPA/tree/main/bench/corp)**
+  contains 20 multi-step workplace tasks. They cover HR, Finance, customer
+  support, vendors, email, forums, and task tracking. The benchmark checks what
+  the agent actually changed or sent. It does not use an LLM judge. Each model
+  ran every scenario five times with standard prompts and five times with
+  adversarial prompts.
+- **AgentThreatBench** is a 24-task suite published in
+  [Inspect Evals](https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/agent_threat_bench).
+  It tests poisoned memory, attempts to take control of the agent, and data
+  theft. We ran each standard and adversarial test five times with the same
+  three models.
+- **[Tau Bench](https://github.com/sierra-research/tau2-bench)** tests
+  policy-sensitive banking support tasks. We used its standard scoring. The
+  comparison covers all 97 `banking_knowledge` tasks, with four trials for each
+  agent configuration. Matching tasks and random seeds makes the comparison
+  fairer, but separate model sessions can still differ.

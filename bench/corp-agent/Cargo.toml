@@ -8,7 +8,7 @@ autobins = false
 
 [dependencies]
 # The gate in front of every flow, and the log the replay reads back.
-appa-runtime = { workspace = true }
+appa-runtime = { workspace = true, default-features = false }
 # The policy compiles here too: the tool catalogue is the harness's, and it is
 # read off the registry the same dialect produces.
 appa-policy = { workspace = true }

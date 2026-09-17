@@ -8,14 +8,71 @@ no network, no runtime.
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
 from typing import Any, Protocol
 
 import httpx
+import pytest
 
+from appa_kagent_adk.inventory import ToolInventory
 from appa_kagent_adk.plugin import AppaPluginKagent
 
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Refuse to run the pinned lane without the kagent it pins.
+
+    The lane's own tests reach for `kagent.adk` and skip without it, so a lane
+    whose overlay never arrives reports success while testing none of what it
+    exists to test. The runner that means to be the lane says so.
+    """
+    if os.environ.get("APPA_KAGENT_LANE") != "1":
+        return
+    try:
+        found = importlib.util.find_spec("kagent.adk") is not None
+    except ImportError:
+        found = False
+    if not found:
+        raise pytest.UsageError(
+            "APPA_KAGENT_LANE=1 names this run the pinned kagent lane, but kagent.adk is not importable here"
+        )
+
+
 RUNTIME_URL = "http://127.0.0.1:8787"
+
+# The rendered config the tests' inventory comes from: one MCP server
+# named by its host, and two remote agents as kagent renders them.
+INVENTORY_CONFIG = {
+    "model": {"type": "openai", "model": "gpt-5.2"},
+    "description": "a demo agent",
+    "instruction": "help with the cluster",
+    "http_tools": [
+        {
+            "params": {"url": "http://demo-tools.kagent.svc.cluster.local:3000/mcp"},
+            "tools": [
+                "k8s_scale",
+                "k8s_get_pods",
+                "read_ledger",
+                "k8s_annotate",
+                "restart_deployment",
+                "first",
+                "second",
+                "stale",
+                "read_first",
+                "read_second",
+            ],
+        }
+    ],
+    "remote_agents": [
+        {"name": "kagent__NS__billing_agent", "url": "http://billing-agent:8080"},
+        {"name": "kagent__NS__log_analyst", "url": "http://log-analyst:8080"},
+    ],
+}
+
+# `APPA_GUIDE` spells appa-guide's management set, which the cases that
+# bind a management call's actor dispatch.
+INVENTORY = ToolInventory.from_config(INVENTORY_CONFIG, environ={"APPA_GUIDE": "true"})
 
 
 class FakeSession:
@@ -70,14 +127,11 @@ class FakeAgent:
 
 
 class FakeTool:
-    def __init__(self, name: str):
+    def __init__(self, name: str, is_long_running: bool = False):
         self.name = name
-
-
-# Spawn classification is by type name, so these two classes carry the
-# names the plugin recognizes.
-AgentTool = type("AgentTool", (), {"__init__": lambda self, name: setattr(self, "name", name)})
-KAgentRemoteA2ATool = type("KAgentRemoteA2ATool", (), {"__init__": lambda self, name: setattr(self, "name", name)})
+        # ADK declares it on `BaseTool` with this default, so every tool
+        # a callback sees carries it.
+        self.is_long_running = is_long_running
 
 
 class FakePart:
@@ -101,7 +155,7 @@ class Hook:
         def handle(request: httpx.Request) -> httpx.Response:
             self.events.append(json.loads(request.content))
             if not self.answers:
-                return httpx.Response(200, json={"decision": "ack"})
+                return httpx.Response(200, json={"protocol": 1, "decision": "ack"})
             answer = self.answers.pop(0)
             if isinstance(answer, Exception):
                 raise answer
@@ -130,10 +184,13 @@ class Remedy:
         return self.answer
 
 
-def plugin_over(hook: ScriptedRuntime, remedy: Remedy | None = None) -> AppaPluginKagent:
+def plugin_over(
+    hook: ScriptedRuntime, remedy: Remedy | None = None, inventory: ToolInventory = INVENTORY
+) -> AppaPluginKagent:
     transport = hook.transport()
     return AppaPluginKagent(
         RUNTIME_URL,
+        inventory=inventory,
         client_factory=lambda: httpx.AsyncClient(transport=transport),
         remedy_call=remedy,
     )

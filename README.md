@@ -60,28 +60,27 @@ Full methodology, ablations, and paper: [Benchmarks](https://openappa.com/evalua
 
 ## Try it: Claude Code
 
-The Claude Code plugin is a playground for the model, not the product. It is the
+The Claude Code integration is a playground for the model, not the product. It is the
 fastest way to watch a policy make a decision on real work:
 
 ```sh
 curl -fsSL https://openappa.com/install.sh | sh
-~/.local/bin/appa init claude-code
+~/.local/bin/appa plugin install claude-code
 ```
 
 The installer verifies the checksum of the release binary for Linux or macOS
 and places it in `~/.local/bin`. Windows users unpack the zip from the
 [releases page](https://github.com/archestra-ai/OpenAPPA/releases). From a
-checkout, `cargo install --path appa-runtime --force` builds the binary
-instead.
+checkout, `cargo install --locked --path appa-runtime --force` builds the binary
+instead, and the same install command installs that build's own version.
 
-A release binary resolves the plugin from its baked release tag and digest. A
-clean checkout build resolves the plugin from its baked Git commit and verifies
-the canonical plugin-tree digest; a dirty plugin build uses that exact checkout
-only while its bytes still match the build.
+A release binary installs the version published for its tag; a checkout build
+installs the commit it was built from.
 
-The native `appa` command installs the plugin, the runtime deployment,
-statusline, and `clappa` launcher. It replaces an existing APPA plugin instead
-of stacking a second copy and preserves an existing policy or custom
+The native `appa` command deploys the runtime and registers it in your Claude
+Code user settings as the session's hooks and status line, together with the
+runtime's MCP server, the `appa-guide` skill, and the `clappa` launcher. Rerunning
+it rewrites only what it wrote and preserves an existing policy or custom
 statusline. Fresh policies use a fail-closed Claude annotator as a compatibility
 net for MCP tools they do not yet name. Start `clappa`, then run
 `/appa-guide init` to replace that fallback with exact connector contracts.
@@ -91,7 +90,56 @@ Plain `claude` sessions stay untouched.
 
 Setup, upgrade and uninstall: [Claude Code
 integration](https://openappa.com/claude-code) ·
-[`integrations/claude-code`](integrations/claude-code/README.md).
+[`marketplace/plugins/claude-code`](marketplace/plugins/claude-code/README.md).
+
+Plugin and battery installation, explicit version updates, offline bundles,
+and kagent deployment preparation: [marketplace guide](marketplace/README.md).
+
+## Testing
+
+Install [mise](https://mise.jdx.dev/) and prepare the repository:
+
+```sh
+mise install
+mise run setup
+```
+
+Mise supplies the locked Rust, Python, Go, and Node toolchains plus `uv`,
+`pnpm`, and the Claude Code CLI used by the harness tests. The setup task
+delegates package installation to Cargo, uv, Go, and pnpm, using their
+committed manifests and lockfiles.
+
+Run the repository-wide evaluation before handing off a change:
+
+```sh
+mise exec -- scripts/appa-eval.sh
+```
+
+It runs the Rust, Python, and Go suites, the deterministic kagent integration,
+the website checks, and the real Claude Code harness against local scripted
+inference. It does not need a model account. Use `--quick` for the shorter
+inner loop. Use `--live-model` only when you intend to consume the configured
+Claude account for an additional compatibility canary. Individual integration
+READMEs document narrower commands for focused iteration.
+
+## When APPA is in the way
+
+```sh
+appa yell "the hook blocked a Bash call I needed and the remedy went nowhere"
+```
+
+The report carries your message and what APPA decided — rulings, remedies, label
+changes, and the policy they were made under. It never carries a prompt, a tool
+argument, a tool output, or a path. You are asked twice: whether to replace the
+names your policy chose with tokens such as `tool-1`, and whether to send the
+finished file, which is named before you answer and kept either way.
+
+The agent can report on its own through the `yell` tool, on a deployment that
+turns it on. A first `appa plugin install claude-code` asks in a terminal, and
+`--agent-yell` or `--no-agent-yell` answers for a script; `[reporting]
+agent_yell` in the config is the answer either way. That call is checked by
+your policy like any other, so a session narrowed to `self` or `internal`
+reaches a human review instead of sending.
 
 ## Status
 
@@ -104,3 +152,24 @@ issue — or come argue in the [Discord](https://discord.gg/B5fmSxHKZ7).
 
 [MIT](LICENSE.md) · [Contributors](CONTRIBUTORS.md) ·
 [Brand assets](https://openappa.com/branding)
+
+## Dependency Release Age
+
+The website's pnpm workspace requires registry versions to be at least seven days
+old and disables automatic install scripts. Cargo Dependabot updates also have a
+seven-day cooldown.
+
+CI checks new crates.io versions in the root and `bench/corp-systems` lockfiles,
+including transitive dependencies, before the Rust lint and test jobs. Versions
+must be at least seven days old. Registry errors, missing publication metadata,
+and unsupported registries fail the check. Versions already in the base commit
+are grandfathered; local and git dependencies are outside this registry-age check.
+
+The checker and its tests live in the shared
+[Cargo Release Age action](https://github.com/archestra-ai/.github/tree/f9b82a1ae0c8d73088513454aa46cf5a4021df82/actions/cargo-release-age).
+The workflow pins that action to a reviewed commit. Its README includes local-check
+instructions using Python 3.11 or newer and a freshly fetched target branch.
+
+Stable Cargo does not enforce release ages during local installs. Cargo's native
+[minimum publish age](https://doc.rust-lang.org/cargo/reference/unstable.html#min-publish-age)
+currently requires nightly and `-Zmin-publish-age`.

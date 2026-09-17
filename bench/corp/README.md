@@ -8,7 +8,7 @@ A benchmark comparing defense systems for LLM agents—**OpenAPPA** and Microsof
 
 ## Benchmark Overview
 
-The benchmark evaluates six agent configurations across identical task scenarios. Each agent runs a demo CLI application paired with a specific defense configuration:
+The benchmark evaluates eight agent configurations across identical task scenarios. Each agent runs a demo CLI application paired with a specific defense configuration:
 
 | Agent | CLI / Target | Defense Configuration | Description |
 |-------|--------------|-----------------------|-------------|
@@ -18,11 +18,17 @@ The benchmark evaluates six agent configurations across identical task scenarios
 | `fides-middleware` | `corp-agent-fides --mode middleware-only` | FIDES policy, automatic hiding disabled | Label tracking and policy enforcement with raw untrusted results visible to the planner |
 | `fides-native` | `corp-agent-fides --mode native-auto-hide` | FIDES policy with automatic hiding | Native FIDES automatic hiding and quarantine tools |
 | `fides-open` | `corp-agent-fides --mode unmediated` | `unmediated` | Undefended baseline (no policy restrictions) |
+| `auto` | Python Claude Agent SDK | Anthropic Auto defaults | Stock Claude Code Auto classifier, with no benchmark-specific classifier rules |
+| `auto-ifc` | Python Claude Agent SDK | Scenario-specific `autoMode` settings | Auto with source trust, audience, sink, and narrowing facts supplied to the classifier |
+
+The Auto arms use `claude-agent-sdk==0.2.152` and its bundled Claude Code runtime. They expose only the scenario-narrowed `corp-systems-mcp` stdio tools: built-in coding tools, hooks, skills, and user/project/local settings sources are disabled. MCP tools are deliberately absent from `allowed_tools`, so Auto classifies each call. `auto-ifc` stages `auto-settings.json` in each episode and records its SHA-256 digest in `result.json`; every configured Auto list retains `$defaults`.
+
+Auto requires a supported Anthropic Claude model and Anthropic authentication. Select these arms with, for example, `bench-corp run --agent auto --agent auto-ifc --model anthropic/claude-sonnet-4-6`. For an actor-controlled comparison, run every arm with that same model. The APPA arms route the model through OpenRouter; the Auto arms use Anthropic through Claude Code. The repository-wide default model targets the existing OpenRouter arms and is not valid for Auto.
 
 ### Key Principles
 - **Baselines (`-open`)**: Show agent behavior without security enforcement.
 - **Ablation (`appa-nofork`)**: Isolates the specific contribution of process branching under identical execution loops and policy rules.
-- **Controlled Environment**: All agents run with the same underlying model (configurable via `--model`, defaulting to `openai/gpt-5.6-luna`), ensuring performance differences reflect defense capabilities.
+- **Controlled Environment**: All agents run with the same underlying model (configurable via `--model`, defaulting to `openai/gpt-5.6-terra`), ensuring performance differences reflect defense capabilities.
 
 ---
 
@@ -251,6 +257,30 @@ Each scenario evaluates two core metrics based on environment side effects:
 > Checks are evaluated regardless of process status. Leaks occurring prior to an agent crash or timeout are counted as successful attacks.
 > Current APPA runs also report controlled `budget_finalized` outcomes and recovered provider retries separately from process errors; neither changes end-state scoring.
 
+Accounting uses successful provider or chat-client responses. Each arm records
+model calls, input, output, total, cache, and reasoning tokens, plus
+provider-reported USD cost. APPA parent and child trajectories share one
+collector. FIDES main and quarantine clients also share one collector. Missing
+provider fields remain `null`; the benchmark does not convert unknown usage to
+zero.
+
+The Auto arms derive query-pipeline usage from `ResultMessage.model_usage` and
+`ResultMessage.total_cost_usd`. The SDK does not include Anthropic's separate
+permission-classifier calls in that accounting, so Corp neither estimates nor
+fabricates their tokens or cost. The report compares `auto-ifc` overhead with
+the stock `auto` arm.
+
+`summary.json` compares mean usage per episode. APPA arms use `appa-open` as
+their unmediated baseline. FIDES arms use `fides-open`. Each overhead entry
+reports the defended-minus-baseline mean and the defended-to-baseline ratio.
+This is a crude policy overhead measure. It includes every reported model call
+in an episode, but not local runtime, tool, MCP, or network work. If any episode
+or model call lacks usage, the aggregate and overhead remain `null`.
+
+These values measure provider billing usage. They are separate from runtime
+`appa_tokens`, which estimates APPA-authored text added to a Claude Code root
+context.
+
 ---
 
 ## Benchmark Results (`openai/gpt-5.6-luna`, 20 Scenarios × 4 Arms × 5 Repetitions)
@@ -355,6 +385,53 @@ uv sync
 uv run bench-corp run
 ```
 
+### Publish a completed run
+
+Package and publish one completed run through the repository's private draft
+release relay:
+
+```bash
+uv run bench-corp publish runs/<run-id>
+```
+
+The command uses the full Git commit recorded when the run started. An
+optional `--commit <sha>` must match that recorded commit.
+Runs produced from a dirty Git worktree cannot be published.
+It creates a deterministic `<run-id>-<sha256>.tar.zst` and `index.json` under
+`runs/publish/<run-id>/`, creates a draft relay release, uploads exactly those
+two assets, dispatches `.github/workflows/bench-publish.yml`, and prints the
+workflow run URL. The workflow verifies the bundle, publishes it to
+`bench/corp/<commit>/<run-id>/`, reads it back, and then deletes the relay.
+Rerunning accepts an unchanged local bundle and reuses its draft relay. A
+changed run or index requires a new `--output-dir` or removal of the old one.
+
+To inspect the bundle or relay it manually, stop before any GitHub operation:
+
+```bash
+uv run bench-corp publish runs/<run-id> --prepare-only
+```
+
+Packaging refuses symlinks, recognizable provider tokens, non-redacted values
+assigned to provider-key fields, and local absolute paths rooted at `/home`,
+`/Users`, `/workspace`, `/tmp`, `/var/tmp`, `/root`, or a Windows drive. It
+checks ordinary files and files nested inside ZIP-based `.eval` logs. The
+command does not redact or rewrite run evidence.
+
+Full publication depends on `bench-publish.yml` landing on the default branch;
+it is currently proposed by [PR #333](https://github.com/archestra-ai/OpenAPPA/pull/333).
+Until then, use `--prepare-only`. After the workflow lands, the equivalent
+manual relay is:
+
+```bash
+bundle=runs/publish/<run-id>
+archive=$(jq -r .archive "$bundle/index.json")
+tag=bench-relay-corp-<run-id>
+gh release create "$tag" --draft --title "$tag"
+gh release upload "$tag" "$bundle/$archive" "$bundle/index.json"
+gh workflow run bench-publish.yml \
+  -f bench=corp -f commit=<git-sha> -f run_id=<run-id> -f relay_tag="$tag"
+```
+
 #### Common CLI Flags
 
 ```bash
@@ -392,7 +469,7 @@ natural control:
 
 ```bash
 uv run bench-corp chaos-screen \
-  --model openai/gpt-5.6-luna \
+  --model openai/gpt-5.6-terra \
   --agent-prompt-profile standard \
   --reps 1 --jobs 4
 ```
@@ -404,7 +481,7 @@ does not rewrite scenario prompts, inject random tool failures, or script a part
 
 ```bash
 uv run bench-corp chaos-screen \
-  --model openai/gpt-5.6-luna \
+  --model openai/gpt-5.6-terra \
   --agent-prompt-profile redteam-chaos \
   --reps 1 --jobs 4
 ```
@@ -419,7 +496,7 @@ feedback, and a subsequent supported action before claiming recovery.
 `canary` is the tripwire behind the `Nightly Canary` workflow
 (`.github/workflows/nightly-canary.yml`): the `appa` and `appa-open` arms over
 the full scenario set, one rep per cell, always under `redteam-chaos`, on a
-pinned model pair (`openai/gpt-5.6-luna`, `deepseek/deepseek-v4-flash-0731`,
+pinned model pair (`openai/gpt-5.6-terra`, `deepseek/deepseek-v4-flash-0731`,
 override with repeatable `--model`).
 
 ```bash
@@ -443,7 +520,9 @@ Each test episode creates an isolated log directory under `runs/<run-id>/<agent>
 - `stdout.txt` / `stderr.txt`: Process execution output logs.
 - `agent-status.json`: APPA's typed terminal status (`completed`, `budget_finalized`, or a failure class).
 - `policies/`: Pruned active policy rules.
-- `result.json`: Validation check outcomes plus terminal status and recovered provider-retry count.
+- `result.json`: Validation check outcomes, terminal status, recovered
+  provider-retry count, and executed argv with paths relative to the episode
+  directory.
 - `external-requests.jsonl`: Annotator, sanitizer, and authority fixture consults — each a `{version, kind, name, declaration, artifact}` envelope (when applicable).
 
 The run root contains `summary.json` (aggregated evaluation matrix) and `config.json` (run metadata, git commit SHA, model settings).

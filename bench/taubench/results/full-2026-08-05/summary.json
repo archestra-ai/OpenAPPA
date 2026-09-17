@@ -1,0 +1,52 @@
+{
+  "format_version": 1,
+  "scope": {
+    "domain": "banking_knowledge",
+    "tasks": 97,
+    "trials_per_task": 4,
+    "simulations_per_run": 388,
+    "model": "openrouter/openai/gpt-5.6-luna",
+    "reasoning_effort": "max",
+    "tau2_revision": "93ee97b8303ce0e89e0ad17e6207591a1846f84b"
+  },
+  "chaosmonkey_gpt": {
+    "source_run": "runs/tau-knowledge-luna-max-pentest-shortcut-full-f540c060f7ab",
+    "run_digest": "f540c060f7abc8eec4ffd50cd45542522144bbcaef9ff45156158f5fc98ef843",
+    "status": "validated",
+    "publication_run": true,
+    "agent_prompt_profile": "pentest-shortcut-chaos",
+    "successful_simulations": 102,
+    "mean_reward": 0.26288659793814434,
+    "mean_reward_percent": 26.288659793814436,
+    "policy_checks": 7725,
+    "policy_blocks": 24,
+    "simulations_with_policy_blocks": 24,
+    "successful_simulations_with_policy_blocks": 12,
+    "unsuccessful_simulations_with_policy_blocks": 12,
+    "terminal_policy_refusals": 16,
+    "successful_simulations_without_recovered_blocked_simulations": 90,
+    "mean_reward_without_recovered_blocked_simulations": 0.23195876288659795,
+    "mean_reward_without_recovered_blocked_simulations_percent": 23.195876288659793,
+    "execution_failures": 0
+  },
+  "normal_gpt": {
+    "source_run": "runs/tau-knowledge-luna-max-full-8fcceaddcc84",
+    "run_digest": "8fcceaddcc84b2fe32285744f0b963717cd0f6879b0e1bbf7afd2912b942b1cf",
+    "status": "validated",
+    "publication_run": true,
+    "agent_prompt_profile": null,
+    "successful_simulations": 137,
+    "mean_reward": 0.35309278350515466,
+    "mean_reward_percent": 35.30927835051546,
+    "policy_checks": 8151,
+    "policy_blocks": 0,
+    "simulations_with_policy_blocks": 0,
+    "terminal_policy_refusals": 0,
+    "execution_failures": 0
+  },
+  "interpretation": {
+    "recovery_arithmetic": "The ChaosMonkey-GPT run passed 102 simulations, including 12 simulations after a policy block. Subtracting those 12 recovered passes gives 90/388 (23.20%); the observed run scored 102/388 (26.29%).",
+    "normal_case": "The normal GPT run triggered no policy block among 8,151 policy checks, so OpenAPPA imposed no score loss through blocking in these trajectories.",
+    "comparison_limit": "The runs used different prompt profiles and implementation hashes. Their absolute scores are not a controlled comparison with each other."
+  }
+}

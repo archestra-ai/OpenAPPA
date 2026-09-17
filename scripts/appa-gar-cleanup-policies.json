@@ -1,0 +1,36 @@
+[
+  {
+    "id": "keep-release-tags",
+    "action": "KEEP",
+    "condition": {
+      "tagState": "TAGGED",
+      "tagPrefixes": ["v"]
+    }
+  },
+  {
+    "id": "keep-minimum-ci-versions",
+    "action": "KEEP",
+    "mostRecentVersions": {
+      "keepCount": 10,
+      "packageNamePrefixes": [
+        "appa-runtime",
+        "appa-kagent-adk",
+        "appa-kagent-adk-go",
+        "golang-adk",
+        "appa-demo-tools",
+        "appa-demo-mocks",
+        "charts/appa-runtime",
+        "charts/appa-kagent-demo"
+      ]
+    }
+  },
+  {
+    "id": "delete-old-ci-tags",
+    "action": "DELETE",
+    "condition": {
+      "tagState": "TAGGED",
+      "tagPrefixes": ["sha-", "pr-", "main", "latest"],
+      "olderThan": "2592000s"
+    }
+  }
+]

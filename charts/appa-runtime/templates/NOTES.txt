@@ -1,0 +1,14 @@
+OpenAPPA runtime {{ .Chart.AppVersion }} deployed in namespace {{ .Release.Namespace }}.
+
+Service URL:
+  http://{{ include "appa-runtime.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+
+To protect an agent, set these environment variables in the Agent resource:
+  APPA_ENABLED: "true"
+  APPA_RUNTIME_URL: "http://{{ include "appa-runtime.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
+{{- if .Values.appaGuide.enabled }}
+
+To configure policy with appa-guide:
+  1. Forward the dashboard: kubectl port-forward -n {{ .Values.appaGuide.namespace }} svc/kagent-ui 8080:8080
+  2. Open http://localhost:8080, select Agents -> appa-guide -> Chat, and send: init
+{{- end }}

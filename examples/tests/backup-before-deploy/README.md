@@ -1,10 +1,10 @@
 # backup-before-deploy
 
-`Backup` is always allowed. It records `backup.completed`.
+`mcp/ops/backup` is always allowed. It records `backup.completed`.
 
-`Deploy` is allowed only after `Backup` records `backup.completed`.
+`mcp/ops/deploy` is allowed only after `mcp/ops/backup` records `backup.completed`.
 
-`Migrate` is allowed if `migration.applied` is not recorded. It records
+`mcp/ops/migrate` is allowed if `migration.applied` is not recorded. It records
 `migration.applied`, so it can run only one time.
 
 These tools do not limit the trust level or the audience.

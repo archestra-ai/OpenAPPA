@@ -58,11 +58,9 @@ LATE = "one more thing about the status page"
 RESERVED = "execute_remedy_plan"
 
 # The runtime's own words, quoted where a case turns on which one came
-# back. `NOT_DECLARED` is the denial at an unnamed spawn
-# (`appa-runtime/src/api/mod.rs`, `UndeclaredSpawn`). `SPAWN_NOT_TAKEN`
+# back. `SPAWN_NOT_TAKEN`
 # is the refusal that means the runtime tied no child to this parent's
 # prepared fork, so nothing crossed and the delegation did not happen.
-NOT_DECLARED = "not declared by the policy"
 SPAWN_NOT_TAKEN = "the spawn did not take"
 
 # The APPA-owned tool a child scope stops through, and the plugin's own
@@ -82,7 +80,7 @@ SANITIZE = "Use sanitizer strip-instructions"
 def status(runtime_url: str, context_id: str) -> dict:
     """The runtime's reading of one root trajectory's current label.
 
-    The kagent codec names a root trajectory `kagent:<context id>`, and
+    The runtime names a kagent root trajectory `kagent:<context id>`, and
     an A2A task carries its context id. The read is a projection: it
     gates nothing and changes nothing.
     """
@@ -115,21 +113,14 @@ def crossing(task, tool: str = CHILD_TOOL) -> dict:
 
 # ------------------------------------------------- one added fixture
 #
-# The harness fixtures serve every case here except the last one, which
-# needs two parents to meet in one child session. kagent keys a child
-# session by the caller's user id and the context id the caller sends,
-# and its python remote-agent tool draws a fresh context id in every
-# constructor while kagent derives the user id from the calling session
-# (`A2A_USER_<context id>`). Two python parents therefore reach the child
-# in two sessions. kagent's go tool sends every delegation of one pod
-# into one context id, which is the shape the (root, child) pair exists
-# for. The fixture pins both halves of the key, so the shared child
-# session is deterministic on the lane this suite drives.
+# Pin the stock transport's context and user to simulate a shared child.
+# The APPA wrapper must replace that context for each new delegation,
+# even when the upstream constructor gives both parents the same ID.
 
 
 @pytest.fixture
-def one_child_session(monkeypatch) -> str:
-    """Send every delegation of this case into one child session."""
+def shared_transport_context(monkeypatch) -> str:
+    """Give every stock remote tool the same default child context."""
     from kagent.adk import _remote_a2a_tool
     from kagent.adk.converters import request_converter
 
@@ -151,7 +142,7 @@ def one_child_session(monkeypatch) -> str:
 def test_the_child_s_value_crosses_at_its_own_stop_and_the_parent_replays_it(stack, runtime_url):
     """The declared delegation with nothing to sanitize, end to end.
 
-    The policy names `kagent__NS__log_analyst`, so the spawn is blocked
+    The policy names `agent/kagent/log-analyst`, so the spawn is blocked
     with the return menu, the plugin declares the bare floor, and the
     re-proposed call runs. The child's entry binds the prepared fork.
 
@@ -229,6 +220,7 @@ def test_the_floor_the_parent_declared_binds_the_child_s_own_reads(stack, runtim
     )
     derivation = json.dumps(reads[1], default=str)
     assert reads[1].get("appa") is None, f"the re-proposed read is not gated shut: {derivation}"
+    assert "handshake failed" in derivation, f"the derivation keeps the crash facts: {derivation}"
     assert INJECTION not in derivation, f"the derivation dropped the line addressed to the reader: {derivation}"
 
     returned = crossing(task)
@@ -298,53 +290,29 @@ def test_nothing_a_child_says_after_returning_nothing_reaches_its_parent(stack):
     assert task.confirmation() is None, "no person is asked about a delegation"
 
 
-def test_a_delegation_the_policy_never_names_is_denied_at_the_spawn(stack):
-    """The release manager is a tool the parent lists and no contract
-    names. On kagent an agent runs as a child only under a contract that
-    names it, and the wildcard covers no spawn. The runtime denies the
-    call before it dispatches, so there is no return menu to route and
-    no fork to bind.
-
-    No child session opens. Both remote agents in this suite resolve to
-    the child's port, and an entry there with no registered script
-    answers with the harness's own line. That line never appears.
-    """
+def test_an_uncovered_agent_is_refused_without_disabling_covered_tools(stack):
+    """An uncovered delegation has no side effect; the conversation continues."""
     task = stack.say(
         DELEGATE_UNDECLARED,
         [
             {"tool": UNDECLARED_TOOL, "args": {"request": BUMP}},
-            {"text": "The delegation was denied, so I did nothing."},
+            {"tool": "list_pods", "args": {}},
+            {"text": "The release manager is unavailable; I listed pods instead."},
         ],
     )
-
     assert task.state == "completed"
-    assert task.calls(UNDECLARED_TOOL), "the parent proposed the delegation"
-    responses = task.responses(UNDECLARED_TOOL)
-    assert responses, "the reserved answer reached the parent's model"
-    denied = responses[0]
-    assert denied.get("appa") == "denied", f"the delegation is denied, not run: {denied}"
-    assert NOT_DECLARED in str(denied.get("result", "")), f"the runtime's own reason reaches the model: {denied}"
-    assert "subagent_session_id" not in denied, f"no child session opened: {denied}"
-    assert "[harness]" not in task.everything(), "the child app was never entered"
-    assert not task.calls(RESERVED), "a denied spawn offers no return to declare"
-    assert task.confirmation() is None, "a denied spawn asks nobody"
+    assert task.responses(UNDECLARED_TOOL)[0]["appa"] == "denied"
+    assert task.responses("list_pods")
+    assert task.responses("list_pods")[0].get("appa") != "denied"
+    assert stack.child_turns() == [], "no uncovered delegation reaches a child"
 
 
-def test_two_parents_delegate_in_turn_into_one_child_session(stack, one_child_session):
-    """Two parent sessions, one child session, both returns crossing.
+def test_two_parents_get_isolated_children_despite_a_shared_transport_default(stack, shared_transport_context):
+    """Each parent gets a fresh child and its own checked return.
 
-    A child opens once per (root, child) pair, not once per session. The
-    second parent enters the session the first left behind, so a plugin
-    that opens a child by session freshness sends no `child_start` for
-    it. The runtime then binds no fork for the second parent, refuses
-    the child's events, and the second return never crosses. Both
-    returns crossing is the regression this case holds.
-
-    The case asserts the binding, not the child's work. The second entry
-    replays the first entry's transcript, so the child's script is spent
-    and the harness answers past its end. Both parents name the same
-    child session, which is what one child serving two parents in turn
-    looks like from the caller's side.
+    The stock constructor offers the same context to both calls. The
+    APPA wrapper must isolate them, so neither parent inherits the other
+    child's transcript or binds its already-used fork.
     """
     stack.script_child(GREET, [{"text": ANALYST}])
     turns = [
@@ -355,12 +323,14 @@ def test_two_parents_delegate_in_turn_into_one_child_session(stack, one_child_se
     second = stack.say(BRIEF, turns)
 
     assert first.context_id != second.context_id, "each parent ran in its own session"
+    children = set()
     for parent, task in (("the first parent", first), ("the second parent", second)):
         assert task.state == "completed", parent
         returned = crossing(task)
         assert returned.get("appa") is None, f"the child's return crosses the gate of {parent}: {returned}"
-        assert returned.get("result"), f"the child answered {parent} with something: {returned}"
-        assert returned.get("subagent_session_id") == one_child_session, (
-            f"one child session served {parent}: {returned}"
-        )
+        assert returned.get("result") == ANALYST, f"the fresh child returned its exact answer to {parent}: {returned}"
+        child = returned.get("subagent_session_id")
+        assert child and child != shared_transport_context, f"the stock shared context was not reused: {returned}"
+        assert child not in children, f"each parent needs a distinct child: {returned}"
+        children.add(child)
     assert first.confirmation() is None and second.confirmation() is None, "nobody is asked"

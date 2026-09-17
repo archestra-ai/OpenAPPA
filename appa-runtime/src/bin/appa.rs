@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::{env, ffi::OsString, iter};
 
+use appa_runtime_api::AdapterName;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -13,19 +14,59 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run headless Claude with runtime-owned file tools and native tools removed.
+    ClaudeFiles(appa_runtime::claude_files::Args),
+    /// Internal trajectory-bound MCP server launched by claude-files.
+    #[command(hide = true)]
+    FileMcp(appa_runtime::claude_files::ServeArgs),
+    /// Inspect a tracked workspace's file ledger, and give back a reservation the harness never ran.
+    FileLedger(appa_runtime::file_ledger::Args),
+    /// Internal release identity used when activating a selected binary.
+    #[command(hide = true)]
+    BuildInfo,
+    /// Internal noninteractive native activation after package verification.
+    #[command(hide = true)]
+    ActivateClaude {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Internal journalled removal using the selected release executable.
+    #[command(hide = true)]
+    RemoveClaude {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Inspect host plugin packages for a deployment.
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommand,
+    },
+    /// Inspect policy battery packages for a deployment.
+    Battery {
+        #[command(subcommand)]
+        command: PackageCommand,
+    },
+    /// Export a locked deployment and its artifacts for offline installation.
+    Bundle(appa_runtime::installation::cli::Bundle),
     /// Describe the configuration facts available to a human or configuring agent.
     Describe {
         #[arg(long, env = "APPA_CONFIG")]
         config: Option<PathBuf>,
 
-        #[arg(long, value_enum, default_value_t = Adapter::ClaudeCode)]
-        adapter: Adapter,
-    },
+        #[arg(
+            long = "batteries-dir",
+            env = "APPA_BATTERIES_DIR",
+            value_delimiter = ':',
+            action = clap::ArgAction::Append
+        )]
+        batteries_dir: Vec<PathBuf>,
 
-    /// Initialize OpenAPPA for an agent harness.
-    Init {
-        #[command(subcommand)]
-        harness: Harness,
+        #[arg(long, default_value_t = AdapterName::ClaudeCode)]
+        adapter: AdapterName,
+
+        /// Exit unsuccessfully unless the complete configuration loads.
+        #[arg(long)]
+        check: bool,
     },
 
     /// Replay trace files against a policy and check every expectation.
@@ -45,41 +86,86 @@ enum Command {
         paths: Vec<PathBuf>,
     },
 
+    /// Tell the OpenAPPA team that this deployment is broken, confusing, or in the way.
+    #[command(long_about = "Tell the OpenAPPA team that this deployment is broken, confusing, or \
+                            in the way.\n\n\
+                            The report carries your message and what APPA decided — its rulings, \
+                            remedies, label changes and the policy they were made under. It never \
+                            carries a prompt, a tool argument, a tool output, or a path.\n\n\
+                            Two questions, in this order: whether to replace the names your policy \
+                            chose with report-local tokens such as `tool-1`, and whether to send \
+                            the finished file, which is named before you answer. The file is kept \
+                            either way.")]
+    Yell {
+        /// The runtime that builds the report. Loopback only.
+        #[arg(long, env = "APPA_RUNTIME_URL", default_value = appa_runtime::runtime_url::DEFAULT_RUNTIME_URL)]
+        url: String,
+
+        /// Answer both questions with yes: pseudonymize the report, and send it.
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
+
+        /// What went wrong. Read from stdin when absent.
+        message: Vec<String>,
+    },
+
+    /// Render the protected session's label for Claude Code's status line.
+    #[command(hide = true)]
+    Statusline {
+        #[command(flatten)]
+        target: appa_runtime::runtime_url::RuntimeUrl,
+    },
+
+    /// Print the advice a protected session starts with.
+    #[command(hide = true)]
+    SessionContext {
+        /// Print it in the shape a SubagentStart hook is heard through.
+        #[arg(long)]
+        subagent: bool,
+    },
+
     /// Post one harness hook event to the running runtime.
     #[command(hide = true)]
     Hook {
-        #[arg(long, env = "APPA_RUNTIME_URL", default_value = "http://127.0.0.1:8787")]
-        url: String,
+        #[command(flatten)]
+        target: appa_runtime::runtime_url::RuntimeUrl,
 
         /// Report a finished turn, whose answer never blocks the harness.
         #[arg(long)]
         turn_end: bool,
+
+        /// Bring the deployed runtime up before posting, as the SessionStart entry does.
+        #[arg(long, conflicts_with = "turn_end")]
+        ensure_runtime: bool,
+
+        /// The config the started runtime serves; the installed one when absent.
+        #[arg(long, requires = "ensure_runtime")]
+        config: Option<PathBuf>,
+
+        /// Where the started runtime keeps its database and logs; the installed data directory when absent.
+        #[arg(long, requires = "ensure_runtime")]
+        data_dir: Option<PathBuf>,
     },
-}
-
-#[derive(Clone, Copy, clap::ValueEnum)]
-enum Adapter {
-    ClaudeCode,
-    Kagent,
-}
-
-impl Adapter {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::ClaudeCode => "claude-code",
-            Self::Kagent => "kagent",
-        }
-    }
 }
 
 #[derive(Subcommand)]
-enum Harness {
-    /// Install this build's Claude Code plugin and initialize its local deployment.
-    ClaudeCode {
-        /// Developer override: a staged marketplace root to deploy.
-        #[arg(long, hide = true)]
-        plugin_source: Option<String>,
-    },
+enum PackageCommand {
+    /// List selected packages offline, or explicitly fetch the available catalog.
+    List(appa_runtime::installation::cli::List),
+    /// Add a battery's policy to this deployment in one operation.
+    Install(appa_runtime::installation::cli::BatteryInstall),
+    /// Remove only unchanged installer-owned battery configuration.
+    Remove(appa_runtime::installation::cli::BatteryRemove),
+}
+
+#[derive(Subcommand)]
+enum PluginCommand {
+    /// List selected plugins offline, or explicitly fetch the available catalog.
+    List(appa_runtime::installation::cli::List),
+    /// Install a verified host plugin and its matching runtime.
+    Install(appa_runtime::installation::cli::Install),
+    /// Remove only installer-owned host support; preserve policy and data.
+    Remove(appa_runtime::installation::cli::PluginRemove),
 }
 
 fn main() -> ExitCode {
@@ -88,8 +174,94 @@ fn main() -> ExitCode {
         return appa_runtime::runtime_cli::run_from(args);
     }
 
-    match Args::parse().command {
-        Command::Hook { url, turn_end } => appa_runtime::hook_client::run(&url, turn_end),
+    let parsed = match Args::try_parse() {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            let help = matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            );
+            let marketplace = env::args_os()
+                .nth(1)
+                .is_some_and(|command| ["plugin", "battery", "bundle"].iter().any(|name| command == *name));
+            if !help && marketplace && env::args_os().any(|argument| argument == "--json") {
+                return appa_runtime::installation::cli::usage_error(&error);
+            }
+            let code = error.exit_code();
+            if error.print().is_err() {
+                return ExitCode::FAILURE;
+            }
+            return ExitCode::from(code as u8);
+        }
+    };
+    match parsed.command {
+        Command::BuildInfo => appa_runtime::installation::native::build_info(),
+        Command::ActivateClaude { config } => match appa_runtime::init::activate_claude_code(&config) {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("appa: {error}");
+                if matches!(error, appa_runtime::init::InitError::Recovery { .. }) {
+                    ExitCode::from(3)
+                } else {
+                    ExitCode::FAILURE
+                }
+            }
+        },
+        Command::Plugin {
+            command: PluginCommand::List(args),
+        } => appa_runtime::installation::cli::list(appa_package::PackageKind::Plugin, args),
+        Command::Plugin {
+            command: PluginCommand::Install(args),
+        } => appa_runtime::installation::cli::install(args),
+        Command::Plugin {
+            command: PluginCommand::Remove(args),
+        } => appa_runtime::installation::cli::remove_plugin(args),
+        Command::RemoveClaude { config: _ } => match appa_runtime::init::claude_code_remove() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("appa: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Command::Battery {
+            command: PackageCommand::List(args),
+        } => appa_runtime::installation::cli::list(appa_package::PackageKind::Battery, args),
+        Command::Battery {
+            command: PackageCommand::Install(args),
+        } => appa_runtime::installation::cli::install_battery(args),
+        Command::Battery {
+            command: PackageCommand::Remove(args),
+        } => appa_runtime::installation::cli::remove_battery(args),
+        Command::Bundle(args) => appa_runtime::installation::cli::bundle(args),
+        Command::ClaudeFiles(args) => appa_runtime::claude_files::run(args),
+        Command::FileMcp(args) => appa_runtime::claude_files::serve(args),
+        Command::FileLedger(args) => appa_runtime::file_ledger::run(args),
+        Command::Hook {
+            target,
+            turn_end,
+            ensure_runtime,
+            config,
+            data_dir,
+        } => {
+            let deployment = match ensure_runtime {
+                true => match appa_runtime::runtime_start::Deployment::installed(config, data_dir) {
+                    Ok(deployment) => Some(deployment),
+                    Err(error) => {
+                        eprintln!("OpenAPPA hook blocked: {error}");
+                        return ExitCode::from(2);
+                    }
+                },
+                false => None,
+            };
+            appa_runtime::hook_client::run(&target.resolve(), turn_end, deployment.as_ref())
+        }
+        Command::Statusline { target } => appa_runtime::statusline::run(&target.resolve()),
+        Command::SessionContext { subagent } => appa_runtime::session_context::run(if subagent {
+            appa_runtime::session_context::Delivery::SubagentContext
+        } else {
+            appa_runtime::session_context::Delivery::SessionStdout
+        }),
+        Command::Yell { url, yes, message } => appa_runtime::yell::cli::run(&url, yes, message),
         Command::Replay {
             config,
             modules_dir,
@@ -99,22 +271,25 @@ fn main() -> ExitCode {
             let config = config.unwrap_or_else(appa_runtime::init::installed_config_path);
             appa_runtime::replay::main(&config, modules_dir, verbose, &paths)
         }
-        Command::Describe { config, adapter } => {
+        Command::Describe {
+            config,
+            batteries_dir,
+            adapter,
+            check,
+        } => {
             let config = config.unwrap_or_else(appa_runtime::init::installed_config_path);
-            print!("{}", appa_runtime::describe::render(&config, adapter.as_str()));
-            ExitCode::SUCCESS
-        }
-        Command::Init {
-            harness: Harness::ClaudeCode { plugin_source },
-        } => match appa_runtime::init::claude_code(plugin_source.as_deref()) {
-            Ok(description) => {
-                print!("{description}");
+            let batteries_dir = if batteries_dir.is_empty() {
+                appa_runtime::batteries::default_search_path(&config)
+            } else {
+                batteries_dir
+            };
+            let description = appa_runtime::describe::render(&config, &batteries_dir, adapter.as_str());
+            print!("{}", description.text);
+            if check && !description.valid {
+                ExitCode::FAILURE
+            } else {
                 ExitCode::SUCCESS
             }
-            Err(error) => {
-                eprintln!("appa: {error}");
-                ExitCode::FAILURE
-            }
-        },
+        }
     }
 }

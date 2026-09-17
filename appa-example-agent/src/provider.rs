@@ -2,12 +2,14 @@
 //! inference and nothing else — it holds no trajectory, no transcript
 //! and no policy, so it is a transport leaf.
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
 use thiserror::Error;
 
 use crate::http::{HttpClient, read_body_capped};
-use crate::wire::{ChatCompletionRequest, ChatCompletionResponse, WireMessage};
+use crate::wire::{ChatCompletionRequest, ChatCompletionResponse, WireMessage, WireUsage};
 
 pub const DEFAULT_COMPLETION_BODY_CAP_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -123,6 +125,99 @@ pub struct ProviderCompletion {
     pub attempts: u32,
 }
 
+/// Provider-reported usage for successful model calls made through one shared
+/// client. Token counts are exact provider values. Cost is available only when
+/// every successful response reports it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ProviderUsage {
+    pub model_calls: u64,
+    pub usage_reported_calls: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cached_input_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+    pub cost_usd: Option<f64>,
+}
+
+#[derive(Default)]
+struct UsageAccumulator {
+    model_calls: u64,
+    usage_reported_calls: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    total_tokens: u64,
+    cached_input_tokens: Option<u64>,
+    cache_write_input_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
+    cost_usd: Option<f64>,
+}
+
+impl UsageAccumulator {
+    fn record(&mut self, usage: Option<&WireUsage>) {
+        self.model_calls += 1;
+        let Some(usage) = usage else {
+            self.cost_usd = None;
+            return;
+        };
+        self.usage_reported_calls += 1;
+        self.input_tokens += usage.prompt_tokens;
+        self.output_tokens += usage.completion_tokens;
+        self.total_tokens += usage.total_tokens;
+        Self::add_optional(
+            &mut self.cached_input_tokens,
+            usage
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|details| details.cached_tokens),
+        );
+        Self::add_optional(
+            &mut self.cache_write_input_tokens,
+            usage
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|details| details.cache_write_tokens),
+        );
+        Self::add_optional(
+            &mut self.reasoning_tokens,
+            usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens),
+        );
+        Self::add_optional_float(&mut self.cost_usd, usage.cost);
+    }
+
+    fn add_optional(total: &mut Option<u64>, value: Option<u64>) {
+        *total = match (*total, value) {
+            (None, _) | (_, None) => None,
+            (Some(total), Some(value)) => Some(total + value),
+        };
+    }
+
+    fn add_optional_float(total: &mut Option<f64>, value: Option<f64>) {
+        *total = match (*total, value) {
+            (None, _) | (_, None) => None,
+            (Some(total), Some(value)) => Some(total + value),
+        };
+    }
+
+    fn snapshot(&self) -> ProviderUsage {
+        ProviderUsage {
+            model_calls: self.model_calls,
+            usage_reported_calls: self.usage_reported_calls,
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            total_tokens: self.total_tokens,
+            cached_input_tokens: self.cached_input_tokens,
+            cache_write_input_tokens: self.cache_write_input_tokens,
+            reasoning_tokens: self.reasoning_tokens,
+            cost_usd: self.cost_usd,
+        }
+    }
+}
+
 /// Why an upstream inference round failed after its bounded attempts.
 /// Every variant is fail-closed: the agent stops rather than proceeding
 /// on a guess.
@@ -214,6 +309,7 @@ impl AttemptFault {
 pub struct OpenAiCompatible {
     config: OpenAiConfig,
     client: HttpClient,
+    usage: Arc<Mutex<UsageAccumulator>>,
 }
 
 impl OpenAiCompatible {
@@ -222,11 +318,28 @@ impl OpenAiCompatible {
     }
 
     pub fn with_http_client(config: OpenAiConfig, client: HttpClient) -> Self {
-        OpenAiCompatible { config, client }
+        OpenAiCompatible {
+            config,
+            client,
+            usage: Arc::new(Mutex::new(UsageAccumulator {
+                cached_input_tokens: Some(0),
+                cache_write_input_tokens: Some(0),
+                reasoning_tokens: Some(0),
+                cost_usd: Some(0.0),
+                ..UsageAccumulator::default()
+            })),
+        }
     }
 
     pub fn openrouter(model: impl Into<ModelId>, api_key: impl Into<String>) -> Self {
         OpenAiCompatible::new(OpenAiConfig::openrouter(model, api_key))
+    }
+
+    pub fn usage(&self) -> ProviderUsage {
+        self.usage
+            .lock()
+            .expect("provider usage lock is not poisoned")
+            .snapshot()
     }
 
     /// Run one provider call. The configured model replaces any model
@@ -236,7 +349,11 @@ impl OpenAiCompatible {
         let url = format!("{}/chat/completions", self.config.endpoint.0.trim_end_matches('/'));
         for attempt in 1..=self.config.max_attempts {
             match self.attempt(&url, &request).await {
-                Ok(message) => {
+                Ok((message, usage)) => {
+                    self.usage
+                        .lock()
+                        .expect("provider usage lock is not poisoned")
+                        .record(usage.as_ref());
                     return Ok(ProviderCompletion {
                         message,
                         attempts: attempt,
@@ -251,7 +368,11 @@ impl OpenAiCompatible {
         unreachable!("the retry policy always permits at least one attempt")
     }
 
-    async fn attempt(&self, url: &str, request: &ChatCompletionRequest) -> Result<WireMessage, AttemptFault> {
+    async fn attempt(
+        &self,
+        url: &str,
+        request: &ChatCompletionRequest,
+    ) -> Result<(WireMessage, Option<WireUsage>), AttemptFault> {
         let response = self
             .client
             .inner()
@@ -298,7 +419,7 @@ impl OpenAiCompatible {
         }
         let parsed: ChatCompletionResponse = serde_json::from_slice(&body).map_err(|_| AttemptFault::Malformed)?;
         let choice = parsed.choices.into_iter().next().ok_or(AttemptFault::NoChoice)?;
-        Ok(choice.message)
+        Ok((choice.message, parsed.usage))
     }
 
     fn retry_delay(&self, failed_attempt: u32, retry_after: Option<Duration>) -> Duration {
@@ -403,6 +524,51 @@ mod tests {
         let seen = seen.lock().expect("not poisoned");
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[0], seen[1], "a retry changes no model input");
+    }
+
+    #[tokio::test]
+    async fn provider_usage_accumulates_tokens_and_cost_across_clones() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                Json(serde_json::json!({
+                    "choices": [{ "message": { "role": "assistant", "content": "done" } }],
+                    "usage": {
+                        "prompt_tokens": 101,
+                        "completion_tokens": 23,
+                        "total_tokens": 124,
+                        "prompt_tokens_details": { "cached_tokens": 40, "cache_write_tokens": 7 },
+                        "completion_tokens_details": { "reasoning_tokens": 11 },
+                        "cost": 0.0042
+                    }
+                }))
+            }),
+        );
+        let provider = provider(app).await;
+        provider
+            .clone()
+            .complete(request())
+            .await
+            .expect("the completion succeeds");
+        provider
+            .complete(request())
+            .await
+            .expect("the second completion succeeds");
+
+        assert_eq!(
+            provider.usage(),
+            ProviderUsage {
+                model_calls: 2,
+                usage_reported_calls: 2,
+                input_tokens: 202,
+                output_tokens: 46,
+                total_tokens: 248,
+                cached_input_tokens: Some(80),
+                cache_write_input_tokens: Some(14),
+                reasoning_tokens: Some(22),
+                cost_usd: Some(0.0084),
+            }
+        );
     }
 
     #[tokio::test]

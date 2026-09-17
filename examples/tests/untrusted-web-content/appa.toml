@@ -6,16 +6,16 @@
 version = 2
 
 [[policy.tool]]
-name = "WebFetch"
+name = "mcp/web/fetch"
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
-name = "Bash"
+name = "mcp/shell/bash"
 requires = { trust = "trusted" }
 delta = {}
 
 [[policy.tool]]
-name = "Write"
+name = "mcp/files/write"
 delta = {}
 
 [externals]

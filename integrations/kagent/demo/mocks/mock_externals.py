@@ -21,8 +21,8 @@ Four components, all deterministic and logged to stdout:
   `ops-*` ids narrow the produced value to the `ops` audience, and
   any other id gets no answer.
 - POST /authorize — authority "release-window", human-less. Approves
-  the consulted call iff any top-level string argument equals
-  "catalog-cache"; every other call is denied with a reason.
+  only `scale_deployment` for `arguments.name == "catalog-cache"`; every
+  other call is denied with a reason.
 - POST /approve — authority "change-board", people out of band. Parks
   the consult until a ruling arrives on the side channel, or answers
   no-answer (504) when the approval window closes first:
@@ -31,12 +31,10 @@ Four components, all deterministic and logged to stdout:
   The window (--approval-window, default 25s) must sit inside the
   policy's externals.timeout_ms, so an unanswered consult is a clean
   no-answer and never a transport error.
-- POST /sanitize — the derivation both demo sanitizers can bind to.
-  Answers the consulted body with the demo's secret values redacted and
-  the lines that address the reader removed. The demo chart binds its
-  sanitizers to `builtin = "llm"` and never reaches this endpoint; the
-  integration suite (`../../tests/`) binds them here instead,
-  so its sanitized-remedy cases run without a model.
+- POST /sanitize — the derivation both demo sanitizers bind to. Answers
+  the consulted body with the demo's secret values redacted and the lines
+  that address the reader removed. The chart policy and integration suite
+  use the same deterministic implementation without a second model.
 
 Run: python3 mock_externals.py [--host H] [--port P] [--verbose]
 """
@@ -54,12 +52,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 WIRE_VERSION = 1
 
 # How long a change-board consult waits for a ruling before it answers
-# nothing. Inside the policy's externals.timeout_ms (30 s in the demo
-# policy) by design.
+# nothing. Its configured value must remain below the policy's
+# externals.timeout_ms.
 APPROVAL_WINDOW_S = 25.0
 
 # The one deployment whose changes sit inside the release window.
 RELEASE_WINDOW_DEPLOYMENT = "catalog-cache"
+RELEASE_WINDOW_TOOL = "scale_deployment"
+CANONICAL_RELEASE_WINDOW_TOOL = re.compile(r"mcp/server-[0-9a-f]{64}/scale_deployment")
 
 # The audience an ops-* runbook narrows its reader set to. The produced
 # contract may only use values from the declared mandate, so the answer
@@ -116,14 +116,16 @@ def authorize(artifact: object) -> tuple[dict, str]:
     """The release-window ruling: approve only the catalog-cache change."""
     tool = artifact.get("tool") if isinstance(artifact, dict) else None
     arguments = artifact.get("arguments") if isinstance(artifact, dict) else None
-    named = [value for value in arguments.values() if isinstance(value, str)] if isinstance(arguments, dict) else []
-    if RELEASE_WINDOW_DEPLOYMENT in named:
+    is_scale = tool == RELEASE_WINDOW_TOOL or (
+        isinstance(tool, str) and CANONICAL_RELEASE_WINDOW_TOOL.fullmatch(tool) is not None
+    )
+    if is_scale and isinstance(arguments, dict) and arguments.get("name") == RELEASE_WINDOW_DEPLOYMENT:
         return (
             {"ruling": "approve", "reason": f"{RELEASE_WINDOW_DEPLOYMENT} is inside the release window"},
             f"tool={tool} deployment={RELEASE_WINDOW_DEPLOYMENT} -> approve",
         )
     return (
-        {"ruling": "deny", "reason": "only catalog-cache restarts are inside the release window"},
+        {"ruling": "deny", "reason": "only catalog-cache scale changes are inside the release window"},
         f"tool={tool} arguments={json.dumps(arguments, sort_keys=True)} -> deny",
     )
 
@@ -158,6 +160,37 @@ def drop_instructions(body: str) -> str:
     return "\n".join(kept)
 
 
+def _rewrite_strings(value: object, rewrite) -> object:
+    if isinstance(value, str):
+        return rewrite(value)
+    if isinstance(value, list):
+        return [_rewrite_strings(item, rewrite) for item in value]
+    if isinstance(value, dict):
+        return {key: _rewrite_strings(item, rewrite) for key, item in value.items()}
+    return value
+
+
+def derive(body: str) -> str:
+    """The two mechanical rules, applied to the body the harness delivered.
+
+    A JSON envelope (the MCP call result in full) is walked so each
+    string is rewritten, then serialized again. A non-JSON body is
+    rewritten as one text. Either way the facts and the injection can
+    share a serialized line without the facts going with it.
+    """
+
+    def rewrite(text: str) -> str:
+        return SECRET_VALUE.sub(lambda match: f"{REDACTION} ({len(match.group())} characters)", drop_instructions(text))
+
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return rewrite(body)
+    if not isinstance(parsed, (dict, list, str)):
+        return rewrite(body)
+    return json.dumps(_rewrite_strings(parsed, rewrite), separators=(",", ":"))
+
+
 def sanitize(artifact: object) -> tuple[dict | None, str]:
     """The sanitizer derivation: (answer, log detail). None is no answer.
 
@@ -168,7 +201,7 @@ def sanitize(artifact: object) -> tuple[dict | None, str]:
     body = artifact.get("body") if isinstance(artifact, dict) else None
     if not isinstance(body, str):
         return None, "no body in the artifact"
-    derived = SECRET_VALUE.sub(REDACTION, drop_instructions(body))
+    derived = derive(body)
     tool = artifact.get("tool")
     return {"body": derived}, f"tool={tool} body={len(body)}b -> {len(derived)}b"
 
@@ -215,6 +248,8 @@ class ChangeBoard:
         if ruling not in ("approve", "deny"):
             return False
         with self._cond:
+            if not request_id and len(self._parked) == 1:
+                request_id = next(iter(self._parked))
             entry = self._parked.get(request_id) if isinstance(request_id, str) else None
             if entry is None or entry["ruling"] is not None:
                 return False

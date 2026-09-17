@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
-from bench_corp.canary import CANARY_MODELS, ModelSummaries, evaluate
+from dataclasses import replace
+
+from bench_corp.canary import (
+    CANARY_MODELS,
+    ModelSummaries,
+    evaluate,
+    render_markdown,
+    slack_payload,
+)
 from bench_corp.report import summarize
-from bench_corp.runner import EpisodeResult
+from bench_corp.runner import EpisodeResult, ModelUsage
 
 
 def _episode(agent: str, error: str | None, terminal_status: str | None) -> EpisodeResult:
@@ -93,3 +101,52 @@ def test_dulled_fixtures_warning_requires_clean_empty_arm() -> None:
     verdict = evaluate([_run(episodes)])
     assert not any("dulled" in w for w in verdict.warnings)
 
+
+def _with_tokens(episode: EpisodeResult, total: int) -> EpisodeResult:
+    return replace(
+        episode,
+        model_usage=ModelUsage(
+            model_calls=2,
+            usage_reported_calls=2,
+            input_tokens=total - 10,
+            output_tokens=10,
+            total_tokens=total,
+            cached_input_tokens=0,
+            cache_write_input_tokens=0,
+            reasoning_tokens=0,
+            cost_usd=None,
+        ),
+    )
+
+
+def test_reports_show_defended_token_overhead_against_the_empty_arm() -> None:
+    run = _run(
+        [
+            _with_tokens(_episode("appa", None, "completed"), 120),
+            _with_tokens(_episode("appa-open", None, "completed"), 100),
+        ]
+    )
+    verdict = evaluate([run])
+
+    report = render_markdown([run], verdict, "nightly")
+    assert "defended minus empty over whole trajectories" in report
+    assert "not a count of APPA-added prompt tokens" in report
+    assert "+20 (+20%)" in report
+    slack = slack_payload([run], verdict, "nightly", None)["text"]
+    assert "defended − empty over whole trajectories" in slack
+    assert "not APPA-added prompt tokens" in slack
+    assert "120" in slack
+    assert "100" in slack
+    assert "+20 (+20%)" in slack
+
+
+def test_reports_do_not_invent_overhead_when_provider_usage_is_incomplete() -> None:
+    run = _run(
+        [
+            _with_tokens(_episode("appa", None, "completed"), 120),
+            _episode("appa-open", None, "completed"),
+        ]
+    )
+    verdict = evaluate([run])
+
+    assert "| — |" in render_markdown([run], verdict, "nightly")

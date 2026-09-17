@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::authority::Attends;
 use crate::contract::{ToolAnnotation, ToolDeclaration};
 use crate::label::{Label, Trust};
 use crate::names::SurfaceName;
@@ -45,11 +46,12 @@ pub enum SurfaceMode {
 
 /// One capability the deployment leaves uncovered, derived canonically from the normalized
 /// declaration and the registered tool set — never a caller-supplied acknowledgement list.
-/// Exactly three kinds exist.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum OpenVector {
     AssumedExecutor { tool: ToolName },
     ProviderRunDispatch { tool: ToolName },
+    AssumedExecutorRule { rule: ToolName },
+    ProviderRunRule { rule: ToolName },
     OpenProviderSurface { surface: SurfaceName },
 }
 
@@ -143,6 +145,16 @@ impl DeploymentProfile {
             provider_surfaces,
             binding,
         } = declaration;
+        for (first, class) in &executor_exceptions {
+            for (second, other) in &executor_exceptions {
+                if class != other && (first.matches_name(second) || second.matches_name(first)) {
+                    return Err(LoadError::ConflictingToolExecutors {
+                        first: first.as_str().into(),
+                        second: second.as_str().into(),
+                    });
+                }
+            }
+        }
         executor_exceptions.retain(|_, class| *class != dispatch);
         Ok(DeploymentProfile {
             starting_label,
@@ -168,7 +180,15 @@ impl DeploymentProfile {
     }
 
     pub fn executor_class(&self, tool: &ToolName) -> ExecutorClass {
-        self.executor_exceptions.get(tool).copied().unwrap_or(self.dispatch)
+        self.executor_exceptions
+            .iter()
+            .find(|(rule, _)| rule.matches_name(tool))
+            .map(|(_, class)| *class)
+            .unwrap_or(self.dispatch)
+    }
+
+    pub(crate) fn executor_exceptions(&self) -> impl Iterator<Item = (&ToolName, &ExecutorClass)> {
+        self.executor_exceptions.iter()
     }
 
     /// The one shared provider-run predicate: the registry split, the plan families, and the
@@ -178,7 +198,7 @@ impl DeploymentProfile {
     }
 
     pub fn confines_result(&self, tool: &ToolName) -> bool {
-        self.confined_results.contains(tool)
+        self.confined_results.iter().any(|rule| rule.matches_name(tool))
     }
 
     pub fn provider_surfaces(&self) -> impl Iterator<Item = (&SurfaceName, SurfaceMode)> {
@@ -339,7 +359,7 @@ fn identity_document_from_registry(registry: &Registry) -> serde_json::Value {
             serde_json::json!({
                 "name": name,
                 "trust": mandate.trust_ranks().collect::<Vec<_>>(),
-                "audiences": mandate.audiences().collect::<Vec<_>>(),
+                "audiences": mandate.audiences().entries().collect::<Vec<_>>(),
                 "marks": mandate.marks().collect::<Vec<_>>(),
                 "effects": mandate.effects().collect::<Vec<_>>(),
             })
@@ -400,7 +420,10 @@ fn identity_document(registry: &RegistryConfig, profile: &DeploymentProfile) -> 
                     "trust_ceiling": authority.mandate.trust_ceiling,
                     "reader_ceiling": authority.mandate.reader_ceiling,
                     "waivers": sorted_set(&authority.mandate.waivers),
-                    "attends": sorted_set(&authority.mandate.attends),
+                    "attends": match &authority.mandate.attends {
+                        Attends::Named(marks) => serde_json::Value::Array(sorted_set(marks)),
+                        Attends::Any => serde_json::Value::String(Attends::WILDCARD.to_string()),
+                    },
                 },
                 "scope": sorted_set(&authority.scope.tags),
             })
@@ -425,8 +448,7 @@ fn identity_document(registry: &RegistryConfig, profile: &DeploymentProfile) -> 
         "trust_chain": registry.trust_chain,
         "authorities": authorities,
         "sanitizers": sanitizers,
-        // Which sources feed each audience and who resolves identity are part of what the
-        // policy means.
+        // Which sources feed each audience is part of what the policy means.
         "audience": registry.audience,
         "deployment": profile,
     })
@@ -436,13 +458,20 @@ fn identity_document(registry: &RegistryConfig, profile: &DeploymentProfile) -> 
 /// one per assumed executor, one per allowed provider-run dispatch, one per `open` provider
 /// surface, in canonical order.
 pub(crate) fn derive_open_vectors<'a>(
-    profile: &DeploymentProfile,
+    profile: &'a DeploymentProfile,
     tools: impl Iterator<Item = &'a ToolName>,
 ) -> Vec<OpenVector> {
     let mut vectors = Vec::new();
+    let tools: BTreeSet<_> = tools.chain(profile.executor_exceptions.keys()).collect();
     for tool in tools {
         match profile.executor_class(tool) {
             ExecutorClass::Enforced => {}
+            ExecutorClass::Assumed if tool.is_name_selector() => {
+                vectors.push(OpenVector::AssumedExecutorRule { rule: tool.clone() })
+            }
+            ExecutorClass::ProviderRun if tool.is_name_selector() => {
+                vectors.push(OpenVector::ProviderRunRule { rule: tool.clone() })
+            }
             ExecutorClass::Assumed => vectors.push(OpenVector::AssumedExecutor { tool: tool.clone() }),
             ExecutorClass::ProviderRun => vectors.push(OpenVector::ProviderRunDispatch { tool: tool.clone() }),
         }
@@ -476,7 +505,14 @@ pub(crate) fn validate_coverage(registry: &Registry, declaration: &ProfileDeclar
 
     // Without a wildcard, a deployment declaration naming an unwritten tool is a typo.
     // With one, every name is a runnable annotated call, so coverage accepts it.
-    let registered = |tool: &ToolName| registry.classify(tool).is_some();
+    let registered = |tool: &ToolName| {
+        registry.classify(tool).is_some()
+            || (tool.is_name_selector()
+                && (registry.tools().any(|declaration| declaration.name() == tool)
+                    || registry
+                        .provider_run_annotations()
+                        .any(|annotation| &annotation.name == tool)))
+    };
     for tool in declaration.executor_exceptions.keys() {
         if !registered(tool) {
             return Err(LoadError::UnknownDeploymentTool {
@@ -494,7 +530,11 @@ pub(crate) fn validate_coverage(registry: &Registry, declaration: &ProfileDeclar
         }
         // A provider-run result reaches the model inside the inference call, before any host
         // could withhold it: declaring it confined would be a false declaration.
-        if profile.is_provider_run(tool) {
+        if profile.is_provider_run(tool)
+            || declaration.executor_exceptions.iter().any(|(exception, class)| {
+                *class == ExecutorClass::ProviderRun && (tool.matches_name(exception) || exception.matches_name(tool))
+            })
+        {
             return Err(LoadError::ConfinedProviderRun {
                 tool: tool.as_str().to_string(),
             });
@@ -581,10 +621,12 @@ pub(crate) fn covering_declaration(config: &RegistryConfig) -> ProfileDeclaratio
         confined_results: config
             .tools
             .iter()
-            // Coverage names written tools only: the wildcard is not a name a deployment confines.
-            .filter(|declaration| declaration.name().as_str() != crate::registry::WILDCARD_TOOL_NAME)
-            .map(|declaration| {
-                crate::registry::base_tool_name(declaration.name()).expect("test contracts have valid names")
+            .filter_map(|declaration| {
+                match crate::registry::contract_name(declaration.name()).expect("test contracts have valid names") {
+                    crate::registry::ContractName::Named(name) => Some(name),
+                    // Coverage names written tools only: the wildcard is not a name a deployment confines.
+                    crate::registry::ContractName::Wildcard => None,
+                }
             })
             .collect(),
         provider_surfaces: BTreeMap::new(),
@@ -596,7 +638,7 @@ pub(crate) fn covering_declaration(config: &RegistryConfig) -> ProfileDeclaratio
 mod tests {
     use super::*;
     use crate::authority::{Authority, DeclaredTransition, Hint, Mandate, Sanitizer, SanitizerPoints, Scope};
-    use crate::contract::{Delta, LabelRequirements, Requires};
+    use crate::contract::{Delta, DeltaAudience, LabelRequirements, Requires};
     use crate::engine::Engine;
     use crate::fact::EffectSet;
     use crate::label::DeclaredAudience;
@@ -837,6 +879,82 @@ mod tests {
     }
 
     #[test]
+    fn server_independent_coverage_keeps_confinement_and_reports_rule_scope() {
+        let rule = ToolName::new("mcp/*/read");
+        let actual = ToolName::new("mcp/demo/read");
+        let cfg = config(vec![tool(rule.as_str())]);
+        let mut profile = covering_declaration(&cfg);
+        profile.executor_exceptions.insert(rule.clone(), ExecutorClass::Assumed);
+        let engine = open(cfg.clone(), profile).unwrap();
+        assert!(engine.profile().confines_result(&actual));
+        assert_eq!(engine.profile().executor_class(&actual), ExecutorClass::Assumed);
+        assert_eq!(
+            engine.open_vectors(),
+            vec![OpenVector::AssumedExecutorRule { rule: rule.clone() }]
+        );
+
+        let mut profile = covering_declaration(&cfg);
+        profile
+            .executor_exceptions
+            .insert(actual.clone(), ExecutorClass::Assumed);
+        let engine = open(cfg, profile).unwrap();
+        assert_eq!(
+            engine.open_vectors(),
+            vec![OpenVector::AssumedExecutor { tool: actual }]
+        );
+    }
+
+    #[test]
+    fn provider_run_name_rules_cannot_hide_conflicting_precise_executors() {
+        let cfg = config(vec![tool("mcp/*/read")]);
+        let mut profile = covering_declaration(&cfg);
+        provider_run(&mut profile, "mcp/demo/read");
+        assert!(matches!(
+            open(cfg.clone(), profile),
+            Err(LoadError::ConflictingToolExecutors { .. })
+        ));
+
+        let mut profile = covering_declaration(&cfg);
+        provider_run(&mut profile, "mcp/*/read");
+        let engine = open(cfg, profile).unwrap();
+        let actual = ToolName::new("mcp/demo/read");
+        assert_eq!(
+            engine.registry().classify(&actual),
+            Some(crate::registry::ToolKind::ProviderRun)
+        );
+        assert!(engine.registry().provider_run_annotation(&actual).is_some());
+        assert_eq!(
+            engine.open_vectors(),
+            vec![OpenVector::ProviderRunRule {
+                rule: ToolName::new("mcp/*/read")
+            }]
+        );
+    }
+
+    #[test]
+    fn overlapping_declaration_order_is_part_of_the_policy_identity() {
+        let mut broad = tool("mcp/*/read");
+        broad.description = Some("broad metadata".into());
+        let precise = tool("mcp/demo/read");
+        let first = config(vec![broad.clone(), precise.clone()]);
+        let second = config(vec![precise, broad]);
+        let first = open(first.clone(), covering_declaration(&first)).unwrap();
+        let second = open(second.clone(), covering_declaration(&second)).unwrap();
+        assert_ne!(first.identity(), second.identity());
+    }
+
+    #[test]
+    fn overlapping_provider_run_contracts_reject_in_either_authored_order() {
+        for names in [["mcp/*/read", "mcp/demo/read"], ["mcp/demo/read", "mcp/*/read"]] {
+            let cfg = config(names.into_iter().map(tool).collect());
+            let mut profile = covering_declaration(&cfg);
+            provider_run(&mut profile, "mcp/*/read");
+            provider_run(&mut profile, "mcp/demo/read");
+            assert!(matches!(open(cfg, profile), Err(LoadError::DuplicateTool { .. })));
+        }
+    }
+
+    #[test]
     fn the_starting_label_must_be_in_the_deployment_vocabulary() {
         let cfg = config(vec![tool("fetch")]);
         let mut declaration = covering_declaration(&cfg);
@@ -927,7 +1045,9 @@ mod tests {
         let mut leak = tool("leak");
         leak.delta = Delta {
             trust: None,
-            audience: Some(DeclaredAudience::restricted([ReaderId::new("insider")])),
+            audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                "insider",
+            )]))),
         };
         let mut cfg = config(vec![leak]);
         cfg.sanitizers = vec![Sanitizer {
@@ -1181,6 +1301,81 @@ mod tests {
         assert_ne!(identity(&rerouted, &profile), base);
     }
 
+    /// The identity document renders each mandate's audience vocabulary as its canonical
+    /// spellings: what a produced annotation may say is part of the policy, whether the bound
+    /// was written or resolved from the policy's own names.
+    #[test]
+    fn an_annotator_mandate_renders_its_audience_vocabulary_in_the_identity_document() {
+        let rendered = |cfg: &RegistryConfig| -> Vec<String> {
+            let engine = open(cfg.clone(), covering_declaration(cfg)).expect("the fixture opens");
+            let document = identity_document_from_registry(engine.registry());
+            document["annotators"][0]["audiences"]
+                .as_array()
+                .expect("a mandate renders its audiences as an array")
+                .iter()
+                .map(|entry| entry.as_str().expect("a spelling").to_string())
+                .collect()
+        };
+        let routed = |audiences: Option<crate::registry::AudienceVocabulary>| {
+            let mut cfg = config(vec![]);
+            cfg.annotators = vec![crate::registry::AnnotatorDeclaration {
+                audiences,
+                ..classifier()
+            }];
+            cfg.tools = vec![annotated("fetch")];
+            cfg
+        };
+        let vocabulary = |entries: &[&str]| {
+            crate::registry::AudienceVocabulary::parse_entries(
+                &entries.iter().map(|entry| entry.to_string()).collect::<Vec<_>>(),
+            )
+            .expect("a fixture vocabulary parses")
+        };
+
+        let omitted = routed(None);
+        assert_eq!(rendered(&omitted), ["self", "internal"]);
+
+        let mut with_reader = omitted.clone();
+        with_reader.tools.push(ToolDeclaration::Declared({
+            let mut t = tool("read");
+            t.delta.audience = Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                "alice",
+            )])));
+            t
+        }));
+        assert_eq!(rendered(&with_reader), ["self", "internal", "alice"]);
+
+        let mut with_group = with_reader.clone();
+        with_group.audience = crate::audience::AudienceConfig {
+            sources: vec![crate::audience::SourceRegistration {
+                provider: "slack".to_string(),
+                templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
+            }],
+            groups: vec![crate::audience::NamedAudience {
+                name: crate::names::GroupName::new("team"),
+                within: None,
+                from: vec![crate::audience::SelectorSpec {
+                    provider: "slack".to_string(),
+                    selector: "user-group/team".to_string(),
+                }],
+            }],
+            ..crate::audience::AudienceConfig::default()
+        };
+        assert_eq!(rendered(&with_group), ["self", "internal", "@team", "alice"]);
+
+        let mut explicit = with_group.clone();
+        explicit.annotators[0].audiences = Some(vocabulary(&["alice", "@team", "internal", "self"]));
+        assert_eq!(
+            rendered(&explicit),
+            rendered(&with_group),
+            "a written bound equal to the resolved default renders the same spellings"
+        );
+        assert_eq!(
+            identity(&explicit, &covering_profile(&explicit)),
+            identity(&with_group, &covering_profile(&with_group))
+        );
+    }
+
     #[test]
     fn every_semantic_edit_moves_the_identity() {
         let cfg = config(vec![tool("fetch")]);
@@ -1221,5 +1416,49 @@ mod tests {
             .insert(ToolName::new("fetch"), ExecutorClass::Assumed);
         let weaker = DeploymentProfile::declare(weaker).unwrap();
         assert_ne!(identity(&cfg, &weaker), base);
+    }
+
+    /// Which collections a source declares, and what each may feed, is part of what the
+    /// policy means: the identity document renders every declared template with its role,
+    /// and a declaration edit moves the identity as a delta edit does.
+    #[test]
+    fn a_sources_declared_templates_render_in_the_identity_and_move_it() {
+        use crate::audience::{AudienceConfig, DeclaredTemplate, SelectorSpec, SourceRegistration};
+        use crate::label::ChainAudience;
+
+        let with_templates = |templates: Vec<DeclaredTemplate>| {
+            let mut cfg = config(vec![tool("fetch")]);
+            cfg.audience = AudienceConfig {
+                sources: vec![SourceRegistration {
+                    provider: "slack".to_string(),
+                    templates,
+                }],
+                self_from: vec![SelectorSpec {
+                    provider: "slack".to_string(),
+                    selector: "viewer".to_string(),
+                }],
+                ..AudienceConfig::default()
+            };
+            cfg
+        };
+        let viewer_only = with_templates(vec![DeclaredTemplate::new("viewer", Some(ChainAudience::Self_))]);
+        let profile = covering_profile(&viewer_only);
+        let base = identity(&viewer_only, &profile);
+
+        let engine = open(viewer_only.clone(), covering_declaration(&viewer_only)).expect("the fixture opens");
+        let document = identity_document_from_registry(engine.registry());
+        assert_eq!(
+            document["audience"]["sources"],
+            serde_json::json!([{ "provider": "slack", "templates": [{ "template": "viewer", "feeds": "self" }] }])
+        );
+
+        let with_group = with_templates(vec![
+            DeclaredTemplate::new("viewer", Some(ChainAudience::Self_)),
+            DeclaredTemplate::named("user-group/<handle>"),
+        ]);
+        assert_ne!(identity(&with_group, &profile), base, "a declared template is policy");
+
+        let refed = with_templates(vec![DeclaredTemplate::new("viewer", Some(ChainAudience::Internal))]);
+        assert_ne!(identity(&refed, &profile), base, "what a template feeds is policy");
     }
 }

@@ -1,0 +1,9 @@
+schema = 1
+name = "notion"
+description = "Rules for the hosted Notion MCP server's 36 tools. Notion exposes no page permissions, so every read is internal; writes are trusted, structural and agent-session changes reviewed."
+
+[battery]
+policy = "appa.toml"
+hosts = ["claude-code", "kagent"]
+namespaces = ["notion"]
+helpers = []

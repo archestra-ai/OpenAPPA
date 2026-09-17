@@ -11,6 +11,6 @@
 // Pinned to the one model the demo is tuned for — the plain (non-reasoning)
 // slug; the runtime never sends a `reasoning` field, so no reasoning is
 // requested. Not selectable in the UI.
-export const PLAYGROUND_MODEL = { id: "openai/gpt-5.6-luna", label: "gpt-5.6-luna" };
+export const PLAYGROUND_MODEL = { id: "openai/gpt-5.6-terra", label: "gpt-5.6-terra" };
 
 export type LabelState = { trust: string; audience: string };

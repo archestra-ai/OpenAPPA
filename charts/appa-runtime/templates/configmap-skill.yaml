@@ -1,0 +1,14 @@
+{{- if .Values.appaGuide.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.appaGuide.name }}-skill
+  namespace: {{ .Values.appaGuide.namespace | quote }}
+  labels:
+    {{- include "appa-runtime.labels" . | nindent 4 }}
+data:
+  SKILL.md: |
+{{ .Files.Get "files/skill/SKILL.md" | indent 4 }}
+  kagent.md: |
+{{ .Files.Get "files/skill/references/kagent.md" | indent 4 }}
+{{- end }}

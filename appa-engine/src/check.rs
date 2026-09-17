@@ -7,12 +7,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::candidate::CallStage;
 use crate::contract::{
-    AudienceRequirement, HistoryRequirement, RecipientSpec, StaticAnnotation, ToolAnnotation, ToolDeclaration,
+    AudienceRequirement, DeltaAudience, HistoryRequirement, RecipientSpec, StaticAnnotation, ToolAnnotation,
+    ToolDeclaration,
 };
 use crate::fact::EffectKind;
 use crate::label::{
-    Audience, Clause, DeclaredAudience, Evaluation, Label, MembershipContext, MembershipNeeded, ReaderId, SymbolicAtom,
-    Trust,
+    Clause, DeclaredAudience, Evaluation, Label, MembershipContext, MembershipNeeded, ReaderId, SymbolicAtom, Trust,
 };
 use crate::names::{AnnotatorName, AudienceArgument, MarkName};
 use crate::projection::Views;
@@ -146,16 +146,29 @@ pub(crate) fn evaluate_state(
     stage: &CallStage,
     context: &MembershipContext<'_>,
 ) -> Result<RawBlock, MembershipNeeded> {
-    let committed = committed_label(annotation, current);
+    let committed = match reads {
+        CallReads::Resolved(call) => current.combine(&call.output_label(annotation, current)),
+        CallReads::Static => committed_label(annotation, current),
+    };
 
     let narrowing = (&committed != current).then(|| Narrowing {
         from: current.clone(),
         to: committed.clone(),
     });
 
+    // File-to-file operations return only an acknowledgement to the trajectory. Requirements
+    // still check the content that flows to the destination, without narrowing the trajectory by
+    // that content. Combining with `committed` preserves predecessor-sensitive mutation checks.
+    let checked = match reads {
+        CallReads::Resolved(call) => call
+            .file_output_label(annotation, current)
+            .map_or_else(|| committed.clone(), |file| committed.combine(&file)),
+        CallReads::Static => committed.clone(),
+    };
+
     let mut gaps = Vec::new();
     let mut needed = Vec::new();
-    label_gaps(annotation, &committed, reads, stage, context, &mut gaps, &mut needed);
+    label_gaps(annotation, &checked, reads, stage, context, &mut gaps, &mut needed);
     if !needed.is_empty() {
         // An undecided comparison keeps the whole check open: gaps drive remedy planning,
         // and a requirement that is neither held nor refuted cannot be planned over yet.
@@ -225,6 +238,11 @@ fn label_gaps(
                             recipients: unresolved_recipient(key),
                         });
                     }
+                    RecipientSpec::Selector(placeholder) => {
+                        gaps.push(Gap::Includes {
+                            recipients: unresolved_recipient(&placeholder.to_string()),
+                        });
+                    }
                     RecipientSpec::Static(_) => {
                         unreachable!("a static includes spec always resolves to its declared audience")
                     }
@@ -268,19 +286,26 @@ fn history_gaps(
 fn resolve_recipients(spec: &RecipientSpec, reads: CallReads<'_>) -> Option<DeclaredAudience> {
     match (spec, reads) {
         (RecipientSpec::Static(declared), _) => Some(declared.clone()),
-        (RecipientSpec::Placeholder(_), CallReads::Static) => {
+        (RecipientSpec::Placeholder(_) | RecipientSpec::Selector(_), CallReads::Static) => {
             unreachable!("`StaticAnnotation::of` refuses a placeholder, so a static read never meets one")
         }
         (RecipientSpec::Placeholder(key), CallReads::Resolved(call)) => {
-            placeholder_argument(key, call).map(|argument| match argument {
-                AudienceArgument::Public => DeclaredAudience::Public,
-                AudienceArgument::Chain(chain) => {
-                    DeclaredAudience::Union(Clause::new([chain], [], []).expect("a chain clause names no reader"))
-                }
-                AudienceArgument::Group(group) => {
-                    DeclaredAudience::Union(Clause::new([], [group], []).expect("a group clause names no reader"))
-                }
-                AudienceArgument::Reader(reader) => DeclaredAudience::restricted([reader]),
+            placeholder_argument(key, call).and_then(|argument| match argument {
+                AudienceArgument::Public => Some(DeclaredAudience::Public),
+                AudienceArgument::Chain(chain) => Some(DeclaredAudience::Union(
+                    Clause::new([chain], [], []).expect("a chain clause names no reader"),
+                )),
+                AudienceArgument::Group(group) => Some(DeclaredAudience::Union(
+                    Clause::new([], [group], []).expect("a group clause names no reader"),
+                )),
+                // An actual that spells a placeholder names no collection.
+                AudienceArgument::Placeholder(_) => None,
+                AudienceArgument::Reader(reader) => Some(DeclaredAudience::restricted([reader])),
+            })
+        }
+        (RecipientSpec::Selector(placeholder), CallReads::Resolved(call)) => {
+            placeholder.instantiate(call.arguments()).ok().map(|group| {
+                DeclaredAudience::Union(Clause::new([], [group], []).expect("a group clause names no reader"))
             })
         }
     }
@@ -307,8 +332,9 @@ pub(crate) enum AnnotationRefusal {
 /// Hold a call's annotation evidence to its declaration: a static declaration is its own
 /// annotation and takes no pin; an Annotated declaration requires a pin its annotator
 /// produced for this exact rendered call — the pin binds the call's canonical digest —
-/// whose every produced value is complete, literal, and within the annotator's compiled
-/// mandate. The one validator the live check and replay both consume.
+/// whose every produced value is complete and within the annotator's compiled mandate; a
+/// symbolic audience it names stays symbolic, exactly as a declaration writing it would.
+/// The one validator the live check and replay both consume.
 pub(crate) fn validate_annotation(
     registry: &crate::registry::Registry,
     declaration: &ToolDeclaration,
@@ -331,39 +357,28 @@ pub(crate) fn validate_annotation(
     }
     let annotation = pinned.produced();
     let outside = |what: &str| AnnotationRefusal::OutsidePolicy(what.to_string());
-    // Literal: a produced annotation pins exact reader sets — no chain words, no groups,
-    // no placeholders. Symbolic audiences are the policy author's vocabulary, not an
-    // annotator's.
-    if annotation.symbolic_atoms().next().is_some() {
-        return Err(outside("a produced annotation names a symbolic audience"));
-    }
-    let placeholder = annotation.requires.audience_requirements().iter().any(|requirement| {
-        matches!(
-            requirement,
-            AudienceRequirement::Includes(RecipientSpec::Placeholder(_))
-        )
-    });
-    if placeholder {
-        return Err(outside("a produced annotation reads a placeholder"));
-    }
+    // The mandate is read per call: a selector placeholder in it admits exactly the collection
+    // this call's arguments spell.
     let mandate = registry
         .annotator_mandate(annotator)
-        .expect("declarations name only registered annotators");
-    let permits_readers =
-        |readers: &std::collections::BTreeSet<ReaderId>| readers.iter().all(|reader| mandate.permits_reader(reader));
-    // The literal check above holds here, so every clause is a plain reader list.
-    let permits_audience = |audience: &Audience| audience.clauses().all(|clause| permits_readers(clause.readers()));
+        .expect("declarations name only registered annotators")
+        .instantiate(call.arguments())
+        .map_err(|unfilled| outside(&format!("the call does not fill the mandate's placeholder: {unfilled}")))?;
     let permits_declared = |declared: &DeclaredAudience| match declared {
         DeclaredAudience::Public => true,
-        DeclaredAudience::Union(clause) => permits_readers(clause.readers()),
+        DeclaredAudience::Union(clause) => mandate.permits_clause(clause),
     };
     if let Some(trust) = annotation.delta.trust
         && !mandate.permits_trust(trust)
     {
         return Err(outside("the produced delta trust is outside the mandate"));
     }
-    if !permits_audience(&annotation.delta.output_label().audience) {
-        return Err(outside("the produced delta audience is outside the mandate"));
+    match annotation.delta.audience.as_ref() {
+        Some(DeltaAudience::Static(audience)) if !permits_declared(audience) => {
+            return Err(outside("the produced delta audience is outside the mandate"));
+        }
+        Some(DeltaAudience::Selector(_)) => return Err(outside("a produced annotation reads a placeholder")),
+        Some(DeltaAudience::Static(_)) | None => {}
     }
     if annotation
         .requires
@@ -372,17 +387,20 @@ pub(crate) fn validate_annotation(
     {
         return Err(outside("the produced trust floor is outside the mandate"));
     }
-    let audience_within = annotation
-        .requires
-        .audience_requirements()
-        .iter()
-        .all(|requirement| match requirement {
+    for requirement in annotation.requires.audience_requirements() {
+        let permitted = match requirement {
             AudienceRequirement::Includes(RecipientSpec::Static(recipients)) => permits_declared(recipients),
             AudienceRequirement::Cap(cap) => permits_declared(cap),
-            AudienceRequirement::Includes(RecipientSpec::Placeholder(_)) => true,
-        });
-    if !audience_within {
-        return Err(outside("a produced audience requirement is outside the mandate"));
+            // A produced annotation never reads a call argument: a placeholder belongs to a
+            // static declaration, which resolves it per call; an annotation already is the
+            // judgment of one exact call.
+            AudienceRequirement::Includes(RecipientSpec::Placeholder(_) | RecipientSpec::Selector(_)) => {
+                return Err(outside("a produced annotation reads a placeholder"));
+            }
+        };
+        if !permitted {
+            return Err(outside("a produced audience requirement is outside the mandate"));
+        }
     }
     if annotation
         .requires
@@ -415,11 +433,11 @@ mod tests {
     use super::*;
     use crate::contract::{Delta, LabelRequirements, PinnedAnnotation, ProducedAnnotation, Requires, ToolAnnotation};
     use crate::fact::{EffectKind, EffectSet};
-    use crate::label::GroupRef;
+    use crate::label::{Audience, GroupRef, TestContext};
     use crate::names::GroupName;
     use crate::params::ToolParameters;
-    use crate::registry::{AnnotatorDeclaration, Registry, RegistryConfig, TrustChain};
-    use crate::value::ToolName;
+    use crate::registry::{AnnotatorDeclaration, AudienceVocabulary, Registry, RegistryConfig, TrustChain};
+    use crate::value::{FileBasis, FileSource, ToolName};
 
     fn annotation(name: &str) -> ToolAnnotation {
         ToolAnnotation {
@@ -443,8 +461,22 @@ mod tests {
         }
     }
 
+    fn vocabulary(entries: &[&str]) -> AudienceVocabulary {
+        AudienceVocabulary::parse_entries(&entries.iter().map(|entry| entry.to_string()).collect::<Vec<_>>())
+            .expect("a fixture vocabulary parses")
+    }
+
+    fn group(handle: &str) -> DeclaredAudience {
+        DeclaredAudience::Union(Clause::new([], [GroupRef::Named(GroupName::new(handle))], []).unwrap())
+    }
+
+    fn chain(level: crate::label::ChainAudience) -> DeclaredAudience {
+        DeclaredAudience::Union(Clause::new([level], [], []).unwrap())
+    }
+
     /// A policy with one static tool (whose declarations feed the vocabulary an omitted mandate
-    /// bound resolves to) and one tool annotated per call by `classifier`.
+    /// bound resolves to), one configured named audience `@team`, and one tool annotated per
+    /// call by `classifier`.
     fn registry(annotators: Vec<AnnotatorDeclaration>) -> Registry {
         Registry::build_covered(RegistryConfig {
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
@@ -453,7 +485,9 @@ mod tests {
                     description: Some("Reads one file.".to_string()),
                     delta: Delta {
                         trust: Some(Trust::new(1)),
-                        audience: Some(DeclaredAudience::restricted([ReaderId::new("support")])),
+                        audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                            "support",
+                        )]))),
                     },
                     emits: EffectSet::new([EffectKind::new("mail.sent")]).unwrap(),
                     requires: Requires {
@@ -473,7 +507,21 @@ mod tests {
             annotators,
             authorities: vec![],
             sanitizers: vec![],
-            audience: crate::audience::AudienceConfig::default(),
+            audience: crate::audience::AudienceConfig {
+                sources: vec![crate::audience::SourceRegistration {
+                    provider: "slack".to_string(),
+                    templates: vec![crate::audience::DeclaredTemplate::named("user-group/<handle>")],
+                }],
+                groups: vec![crate::audience::NamedAudience {
+                    name: GroupName::new("team"),
+                    within: None,
+                    from: vec![crate::audience::SelectorSpec {
+                        provider: "slack".to_string(),
+                        selector: "user-group/team".to_string(),
+                    }],
+                }],
+                ..crate::audience::AudienceConfig::default()
+            },
         })
         .expect("the fixture policy loads")
     }
@@ -491,6 +539,59 @@ mod tests {
             emits: annotation.emits,
             requires: annotation.requires,
         }
+    }
+
+    #[test]
+    fn copy_source_is_checked_without_narrowing_the_trajectory() {
+        let annotation = ToolAnnotation {
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(Trust::new(1)),
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                        DeclaredAudience::Public,
+                    ))],
+                },
+                ..Requires::default()
+            },
+            ..annotation("copy")
+        };
+        let current = Label::new(Trust::new(1), Audience::public());
+        let source = FileSource {
+            version: "source-v1".into(),
+            digest: "source-digest".into(),
+            label: Label::new(Trust::new(0), Audience::restricted([ReaderId::new("source-reader")])),
+        };
+        let call = call("copy").with_file_basis(Some(FileBasis::Copy { source, replaced: None }));
+        let context = TestContext::default();
+
+        let block = evaluate_state(
+            &annotation,
+            &current,
+            &|_| false,
+            &|_| false,
+            CallReads::Resolved(&call),
+            &CallStage::default(),
+            &context.context(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            block.narrowing, None,
+            "the acknowledgement does not carry source content"
+        );
+        assert_eq!(
+            block.requirement_gaps,
+            vec![
+                Gap::TrustFloor {
+                    required: Trust::new(1),
+                    actual: Trust::new(0),
+                },
+                Gap::Includes {
+                    recipients: DeclaredAudience::Public
+                }
+            ],
+            "destination requirements still inspect copied content"
+        );
     }
 
     fn pinned_by_classifier(produced: ToolAnnotation) -> ResolvedCall {
@@ -574,19 +675,9 @@ mod tests {
     }
 
     #[test]
-    fn a_produced_annotation_must_be_literal() {
+    fn a_produced_annotation_never_reads_a_placeholder() {
         let registry = registry(vec![classifier()]);
         let declaration = registry.tool(&ToolName::new("lookup")).expect("lookup is registered");
-
-        let grouped = ToolAnnotation {
-            delta: Delta {
-                trust: None,
-                audience: Some(DeclaredAudience::Union(
-                    Clause::new([], [GroupRef::Named(GroupName::new("team"))], []).unwrap(),
-                )),
-            },
-            ..annotation("lookup")
-        };
         let placeholder = ToolAnnotation {
             requires: Requires {
                 label: LabelRequirements {
@@ -597,12 +688,99 @@ mod tests {
             },
             ..annotation("lookup")
         };
-        for produced in [grouped, placeholder] {
-            assert!(matches!(
-                validate_annotation(&registry, declaration, &pinned_by_classifier(produced.clone())),
-                Err(AnnotationRefusal::OutsidePolicy(_))
-            ));
+        assert!(matches!(
+            validate_annotation(&registry, declaration, &pinned_by_classifier(placeholder)),
+            Err(AnnotationRefusal::OutsidePolicy(_))
+        ));
+    }
+
+    /// A symbolic audience an annotation names is admitted exactly when the mandate lists it,
+    /// atom by atom: the chain word, each group, each reader. It then stays symbolic in the
+    /// label, as a declaration writing it would.
+    #[test]
+    fn a_produced_symbolic_audience_is_admitted_inside_its_mandate() {
+        use crate::label::ChainAudience;
+        let with_delta = |audience: DeclaredAudience| ToolAnnotation {
+            delta: Delta {
+                trust: None,
+                audience: Some(DeltaAudience::Static(audience)),
+            },
+            ..annotation("lookup")
+        };
+        let with_cap = |audience: DeclaredAudience| ToolAnnotation {
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: None,
+                    audience: vec![AudienceRequirement::Cap(audience)],
+                },
+                ..Requires::default()
+            },
+            ..annotation("lookup")
+        };
+        let mixed = DeclaredAudience::Union(
+            Clause::new(
+                [ChainAudience::Internal],
+                [GroupRef::Named(GroupName::new("team"))],
+                [ReaderId::new("support")],
+            )
+            .unwrap(),
+        );
+
+        let bounded = registry(vec![AnnotatorDeclaration {
+            audiences: Some(vocabulary(&["internal", "@team", "support"])),
+            ..classifier()
+        }]);
+        let declaration = bounded.tool(&ToolName::new("lookup")).expect("lookup is registered");
+        for admitted in [
+            with_delta(chain(ChainAudience::Internal)),
+            with_delta(group("team")),
+            with_delta(mixed.clone()),
+            with_cap(group("team")),
+            with_cap(chain(ChainAudience::Internal)),
+        ] {
+            assert_eq!(
+                validate_annotation(&bounded, declaration, &pinned_by_classifier(admitted.clone())),
+                Ok(()),
+                "{admitted:?}"
+            );
         }
+        for refused in [
+            with_delta(chain(ChainAudience::Self_)),
+            with_delta(DeclaredAudience::Union(
+                Clause::new([ChainAudience::Self_], [], [ReaderId::new("support")]).unwrap(),
+            )),
+            with_cap(chain(ChainAudience::Self_)),
+        ] {
+            assert!(
+                matches!(
+                    validate_annotation(&bounded, declaration, &pinned_by_classifier(refused.clone())),
+                    Err(AnnotationRefusal::OutsidePolicy(_))
+                ),
+                "{refused:?}"
+            );
+        }
+
+        // An omitted bound is the whole policy vocabulary: the chain and the configured group
+        // included. An empty bound admits `public` alone.
+        let open = registry(vec![classifier()]);
+        let declaration = open.tool(&ToolName::new("lookup")).expect("lookup is registered");
+        assert_eq!(
+            validate_annotation(&open, declaration, &pinned_by_classifier(with_delta(mixed.clone()))),
+            Ok(())
+        );
+        let closed = registry(vec![AnnotatorDeclaration {
+            audiences: Some(AudienceVocabulary::default()),
+            ..classifier()
+        }]);
+        let declaration = closed.tool(&ToolName::new("lookup")).expect("lookup is registered");
+        assert!(matches!(
+            validate_annotation(
+                &closed,
+                declaration,
+                &pinned_by_classifier(with_delta(chain(ChainAudience::Internal)))
+            ),
+            Err(AnnotationRefusal::OutsidePolicy(_))
+        ));
     }
 
     #[test]
@@ -610,7 +788,7 @@ mod tests {
         let bounded = AnnotatorDeclaration {
             name: AnnotatorName::new("classifier"),
             trust: Some(BTreeSet::from([Trust::new(0)])),
-            audiences: Some(BTreeSet::from([ReaderId::new("support")])),
+            audiences: Some(vocabulary(&["support"])),
             marks: Some(BTreeSet::from([MarkName::new("reviewed")])),
             effects: Some(BTreeSet::from([EffectKind::new("mail.sent")])),
         };
@@ -620,7 +798,9 @@ mod tests {
         let within = ToolAnnotation {
             delta: Delta {
                 trust: Some(Trust::new(0)),
-                audience: Some(DeclaredAudience::restricted([ReaderId::new("support")])),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                    "support",
+                )]))),
             },
             emits: EffectSet::new([EffectKind::new("mail.sent")]).unwrap(),
             requires: Requires {
@@ -651,7 +831,9 @@ mod tests {
             ToolAnnotation {
                 delta: Delta {
                     trust: None,
-                    audience: Some(DeclaredAudience::restricted([ReaderId::new("stranger")])),
+                    audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                        "stranger",
+                    )]))),
                 },
                 ..annotation("lookup")
             },
@@ -709,7 +891,7 @@ mod tests {
     #[test]
     fn public_is_always_within_an_audience_mandate() {
         let bounded = AnnotatorDeclaration {
-            audiences: Some(BTreeSet::new()),
+            audiences: Some(AudienceVocabulary::default()),
             ..classifier()
         };
         let registry = registry(vec![bounded]);
@@ -717,7 +899,7 @@ mod tests {
         let produced = ToolAnnotation {
             delta: Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::Public),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::Public)),
             },
             ..annotation("lookup")
         };
@@ -728,7 +910,9 @@ mod tests {
         let restricted = ToolAnnotation {
             delta: Delta {
                 trust: None,
-                audience: Some(DeclaredAudience::restricted([ReaderId::new("support")])),
+                audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                    "support",
+                )]))),
             },
             ..annotation("lookup")
         };

@@ -1,7 +1,7 @@
 target/
 .env
 # Working runtime config and store (the install instruction copies the
-# default example here; integrations/claude-code/README.md)
+# default example here; marketplace/plugins/claude-code/README.md)
 /appa.toml
 /appa.db*
 # Custom target dirs (CARGO_TARGET_DIR from tooling)
@@ -15,6 +15,9 @@ bench/**/.venv/
 bench/**/__pycache__/
 bench/**/.pytest_cache/
 bench/**/.ruff_cache/
+# The Tau checkout the harness's setup script clones, and its embedding cache.
+bench/taubench/.tau2-bench/
+bench/taubench/data/.embeddings_cache/
 
 .venv/
 __pycache__/
@@ -26,3 +29,6 @@ __pycache__/
 .DS_Store
 /tmp/
 /appa-mcp*
+
+# Local Amp portal metadata.
+.amp/portals/*

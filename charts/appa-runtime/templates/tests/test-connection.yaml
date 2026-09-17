@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "appa-runtime.fullname" . }}-test-connection
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "appa-runtime.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: wget
+      image: {{ include "appa-runtime.testImage" . }}
+      imagePullPolicy: {{ .Values.test.image.pullPolicy }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+      command:
+        - wget
+        - -qO-
+        - {{ printf "http://%s:%v/health" (include "appa-runtime.fullname" .) .Values.service.port | quote }}

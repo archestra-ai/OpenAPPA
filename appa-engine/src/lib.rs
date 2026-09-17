@@ -20,8 +20,8 @@
 //! survive in labels and durable events. A check answers from a sound derivability calculus
 //! over policy-declared facts — the chain, `within` assertions — where that suffices, and
 //! otherwise evaluates the exact denotation from the operation's pinned evidence: primitive
-//! source answers, member lookups, and identity mappings ([`audience`]), from which identity
-//! application, union, and the symmetric `within` closure are recomputed on replay. A failed
+//! source answers and member lookups ([`audience`]), from which principal substitution,
+//! union, and the symmetric `within` closure are recomputed on replay. A failed
 //! derivation never denies; a missing answer is a membership ask, never a label state.
 //!
 //! Every released tool call carries one complete concrete annotation
@@ -34,6 +34,32 @@
 //! wildcard declaration (`"*"`) routes every call the policy does not name through an
 //! Annotator; a call nothing covers is refused before it runs, and an annotation that fails
 //! to arrive is an operational refusal, never a policy denial.
+//!
+//! ## File content: a pinned basis, and two labels
+//!
+//! A call that touches a file the runtime tracks carries a host-pinned [`value::FileBasis`]
+//! on its [`value::ResolvedCall`]: the version, digest and Label of the content it reads,
+//! replaces, edits, copies, moves or processes, all supplied by the trusted harness and
+//! never by model arguments. The basis is part of the call's proposal-batch identity, so the
+//! same rendered call over different content is a different act, while the call's own
+//! canonical digest stays the digest of its tool and arguments.
+//!
+//! Two labels follow from it, and they are not the same label:
+//!
+//! - [`value::ResolvedCall::output_label`] is what the call returns to the trajectory. A
+//!   read returns content and carries the file's Label into the trajectory; a write or a
+//!   transfer returns a constant acknowledgement, so its content does not enter the
+//!   trajectory's Label and only a later read does.
+//! - [`value::ResolvedCall::file_output_label`] is what the call publishes as file content.
+//!   A copy or move puts the source's Label there even though the trajectory never sees the
+//!   bytes, and a replacement drops the Label of the content it destroyed.
+//!
+//! Checking a call's requirements reads both: the committed label a successful call would
+//! leave the trajectory at, folded with the content the call would publish. So a copy into a
+//! destination is checked against the source's Label, and no narrowing of the trajectory can
+//! make that requirement go away. A file call that fails admits its error text at the same
+//! value Label a success would have used ([`transition::ToolOutcome::FailureWithBody`]), so
+//! an error can never say more than the call it came from.
 //!
 pub mod admit;
 pub mod audience;

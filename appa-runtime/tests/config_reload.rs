@@ -93,6 +93,7 @@ async fn propose_notes(runtime: &Arc<Runtime>, root: &TrajectoryId) -> HookDecis
         HookEvent::ToolCall {
             actor: actor(root),
             call: notes(),
+            call_id: None,
             spawn: false,
             ruling: None,
         },
@@ -104,6 +105,7 @@ async fn propose_notes(runtime: &Arc<Runtime>, root: &TrajectoryId) -> HookDecis
             HookEvent::ToolResult {
                 actor: actor(root),
                 call: notes(),
+                call_id: None,
                 outcome: ToolOutcome::Success {
                     body: OutcomeBody::Available("alice's notes".to_string()),
                 },

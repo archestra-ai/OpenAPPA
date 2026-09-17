@@ -5,6 +5,7 @@ import importlib.metadata
 import json
 import os
 import re
+import subprocess
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +17,7 @@ from inspect_ai.tool import ToolDef
 
 from appa_agentthreatbench import INSPECT_AI_VERSION, INSPECT_EVALS_REVISION, UPSTREAM_SAMPLE_COUNTS
 from appa_agentthreatbench.annotator import AnnotatorFixture, annotator_fixture_digest, mandate_readers
+from appa_agentthreatbench.auto import AUTO_BINDING_IDENTITY, AUTO_SDK_VERSION, auto_policy_digest
 from appa_agentthreatbench.fides import (
     FIDES_BINDING_IDENTITY,
     FIDES_MAX_CONCURRENT_TRAJECTORIES,
@@ -43,6 +45,7 @@ from appa_agentthreatbench.tasks import (
 )
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = PACKAGE_ROOT.parents[3]
 EXPECTED_BINDING_IDENTITY = "appa-agent-python-v7"
 EXPECTED_FIDES_VERSION = "1.13.0"
 EXPECTED_UPSTREAM_SAMPLES = sum(UPSTREAM_SAMPLE_COUNTS.values())
@@ -53,11 +56,15 @@ SMOKE_SAMPLE_IDS = (
     "guarded--ah_005",
     "fides--ah_005",
     "fides-native--ah_005",
+    "auto--ah_005",
+    "auto-ifc--ah_005",
     "stock--de_001",
     "permissive--de_001",
     "guarded--de_001",
     "fides--de_001",
     "fides-native--de_001",
+    "auto--de_001",
+    "auto-ifc--de_001",
     "permissive--de_control_authorized",
     "guarded--de_control_authorized",
     "fides--de_control_authorized",
@@ -84,6 +91,17 @@ def implementation_digest() -> str:
         digest.update(path.read_bytes())
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _git_state() -> dict[str, object]:
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True, check=False)
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=REPO_ROOT, capture_output=True, text=True, check=False
+    )
+    git_sha = commit.stdout.strip()
+    if commit.returncode or status.returncode or not re.fullmatch(r"[0-9a-f]{40}", git_sha):
+        raise RuntimeError("cannot record the OpenAPPA Git state")
+    return {"git_sha": git_sha, "git_dirty": bool(status.stdout.strip())}
 
 
 def _distribution_revision(name: str) -> str | None:
@@ -192,6 +210,8 @@ def preflight(model: str, *, require_credential: bool = True) -> dict[str, objec
         raise RuntimeError(
             f"agent-framework-core is {FIDES_VERSION!r}, expected {EXPECTED_FIDES_VERSION!r}; rebuild the environment"
         )
+    if importlib.metadata.version("claude-agent-sdk") != AUTO_SDK_VERSION:
+        raise RuntimeError(f"claude-agent-sdk must be pinned to {AUTO_SDK_VERSION}")
     env_name = required_env_name(model)
     if require_credential and not os.getenv(env_name):
         raise RuntimeError(f"{env_name} is required for {model}")
@@ -207,6 +227,7 @@ def preflight(model: str, *, require_credential: bool = True) -> dict[str, objec
         "fides_binding_identity": FIDES_BINDING_IDENTITY,
         "fides_native_binding_identity": FIDES_NATIVE_BINDING_IDENTITY,
         "fides_version": FIDES_VERSION,
+        "claude_agent_sdk_version": AUTO_SDK_VERSION,
         "upstream_samples_per_arm": EXPECTED_UPSTREAM_SAMPLES,
         "custom_controls_per_arm": 2,
         "total_samples": len(sample_ids),
@@ -251,7 +272,17 @@ def run_manifest(
         ).hexdigest()
         for sample_id in guarded_exfil_ids
     }
+    auto_policy_digests = {
+        sample_id: auto_policy_digest(
+            str(samples[sample_id].metadata.get("task_type")),
+            str(samples[sample_id].metadata.get("appa_arm")),
+            samples[sample_id].metadata,
+        )
+        for sample_id in ids
+        if samples[sample_id].metadata.get("appa_arm") in {"auto", "auto-ifc"}
+    }
     config = {
+        **_git_state(),
         "model": model,
         "reasoning_effort": reasoning_effort,
         "seed": seed,
@@ -265,8 +296,11 @@ def run_manifest(
             "guarded": BINDING_IDENTITY,
             "fides": FIDES_BINDING_IDENTITY,
             "fides-native": FIDES_NATIVE_BINDING_IDENTITY,
+            "auto": AUTO_BINDING_IDENTITY,
+            "auto-ifc": AUTO_BINDING_IDENTITY,
         },
         "fides_version": FIDES_VERSION,
+        "claude_agent_sdk_version": AUTO_SDK_VERSION,
         "fides_max_concurrent_trajectories": FIDES_MAX_CONCURRENT_TRAJECTORIES,
         "sample_ids": ids,
         "implementation_sha256": implementation_digest(),
@@ -279,6 +313,7 @@ def run_manifest(
             for arm in ARMS
         },
         "policy_sha256_by_sample": sample_policy_digests,
+        "auto_policy_sha256_by_sample": auto_policy_digests,
         "annotator_fixture_sha256": fixture_digests,
     }
     run_digest = hashlib.sha256(json.dumps(config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -334,6 +369,10 @@ def _correct(value: object) -> bool:
 
 
 def _sample_cost(sample: EvalSample) -> float | None:
+    store = getattr(sample, "store", None)
+    sdk_usage = store.get("auto_sdk_model_usage") if isinstance(store, dict) else None
+    if isinstance(sdk_usage, dict) and isinstance(sdk_usage.get("_total_cost_usd"), int | float):
+        return float(sdk_usage["_total_cost_usd"])
     costs = [usage.total_cost for usage in sample.model_usage.values()]
     if costs and all(cost is not None for cost in costs):
         return sum(costs)
@@ -351,6 +390,126 @@ def _sample_cost(sample: EvalSample) -> float | None:
         if isinstance(cost, int | float):
             provider_costs.append(float(cost))
     return sum(provider_costs) if model_calls and len(provider_costs) == model_calls else None
+
+
+def _sample_usage(sample: EvalSample) -> dict[str, int | float | None]:
+    store = getattr(sample, "store", None)
+    sdk_usage = store.get("auto_sdk_model_usage") if isinstance(store, dict) else None
+    sdk_models = (
+        [value for name, value in sdk_usage.items() if not name.startswith("_") and isinstance(value, dict)]
+        if isinstance(sdk_usage, dict)
+        else []
+    )
+    if sdk_models:
+
+        def sdk_sum(field: str) -> int:
+            return sum(int(value.get(field, 0)) for value in sdk_models)
+
+        cache_read = sdk_sum("cacheReadInputTokens")
+        cache_write = sdk_sum("cacheCreationInputTokens")
+        input_tokens = sdk_sum("inputTokens")
+        output_tokens = sdk_sum("outputTokens")
+        reasoning_tokens = sdk_sum("thinkingTokens") if all("thinkingTokens" in value for value in sdk_models) else None
+        return {
+            "model_calls": int(sdk_usage.get("_num_turns", 0)),
+            "usage_reported_calls": int(sdk_usage.get("_num_turns", 0)),
+            "input_tokens": input_tokens + cache_read + cache_write,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + cache_read + cache_write + output_tokens,
+            "cached_input_tokens": cache_read,
+            "cache_write_input_tokens": cache_write,
+            "reasoning_tokens": reasoning_tokens,
+            "cost_usd": _sample_cost(sample),
+        }
+    model_calls = []
+    usage_reported_calls = 0
+    for event in sample.events:
+        if event.event != "model" or event.call is None:
+            continue
+        model_calls.append(event)
+        call = event.call.model_dump(mode="json")
+        response = call.get("response")
+        usage = response.get("usage") if isinstance(response, dict) else None
+        # Anthropic reports input, output, and cache components but no
+        # per-call total. Inspect's aggregate ModelUsage derives total_tokens.
+        required_fields = ("input_tokens", "output_tokens")
+        if isinstance(usage, dict) and all(isinstance(usage.get(field), int) for field in required_fields):
+            usage_reported_calls += 1
+
+    usages = list(sample.model_usage.values())
+
+    def optional_sum(field: str) -> int | None:
+        values = [getattr(usage, field) for usage in usages]
+        return sum(values) if values and all(value is not None for value in values) else None
+
+    cache_read = optional_sum("input_tokens_cache_read")
+    cache_write = optional_sum("input_tokens_cache_write")
+    return {
+        "model_calls": len(model_calls),
+        "usage_reported_calls": usage_reported_calls,
+        # Inspect separates cache reads and writes from input_tokens. Report
+        # total provider input volume so this agrees with CorpBench/OpenAI.
+        "input_tokens": sum(usage.input_tokens for usage in usages)
+        + sum(usage.input_tokens_cache_read or 0 for usage in usages)
+        + sum(usage.input_tokens_cache_write or 0 for usage in usages),
+        "output_tokens": sum(usage.output_tokens for usage in usages),
+        "total_tokens": sum(usage.total_tokens for usage in usages),
+        "cached_input_tokens": cache_read,
+        "cache_write_input_tokens": cache_write,
+        "reasoning_tokens": optional_sum("reasoning_tokens"),
+        "cost_usd": _sample_cost(sample),
+    }
+
+
+def _aggregate_usage(samples: list[EvalSample]) -> dict[str, int | float | None]:
+    records = [_sample_usage(sample) for sample in samples]
+    complete_tokens = all(record["usage_reported_calls"] == record["model_calls"] for record in records)
+
+    def total(field: str, *, complete: bool = complete_tokens) -> int | float | None:
+        values = [record[field] for record in records]
+        return sum(values) if complete and all(value is not None for value in values) else None
+
+    total_tokens = total("total_tokens")
+    cost_usd = total("cost_usd", complete=True)
+    return {
+        "samples": len(samples),
+        "model_calls": sum(int(record["model_calls"]) for record in records),
+        "usage_reported_calls": sum(int(record["usage_reported_calls"]) for record in records),
+        "input_tokens": total("input_tokens"),
+        "output_tokens": total("output_tokens"),
+        "total_tokens": total_tokens,
+        "cached_input_tokens": total("cached_input_tokens"),
+        "cache_write_input_tokens": total("cache_write_input_tokens"),
+        "reasoning_tokens": total("reasoning_tokens"),
+        "cost_usd": cost_usd,
+        "mean_total_tokens": None if total_tokens is None else total_tokens / len(samples),
+        "mean_cost_usd": None if cost_usd is None else cost_usd / len(samples),
+    }
+
+
+def _usage_overhead(measured: dict[str, object], baseline: dict[str, object]) -> dict[str, float | None]:
+    def compare(field: str) -> tuple[float | None, float | None]:
+        value = measured.get(field)
+        base = baseline.get(field)
+        if not isinstance(value, int | float) or not isinstance(base, int | float):
+            return None, None
+        return float(value - base), None if base == 0 else float(value / base)
+
+    token_delta, token_ratio = compare("mean_total_tokens")
+    cost_delta, cost_ratio = compare("mean_cost_usd")
+    return {
+        "mean_total_tokens_delta": token_delta,
+        "total_tokens_ratio": token_ratio,
+        "mean_cost_usd_delta": cost_delta,
+        "cost_ratio": cost_ratio,
+    }
+
+
+USAGE_BASELINES = {
+    "guarded": "permissive",
+    "fides-native": "fides",
+    "auto-ifc": "auto",
+}
 
 
 def _transcript_digest(sample: EvalSample) -> str:
@@ -398,7 +557,9 @@ def _audit_diagnostics(
         raise ValueError("run manifest lacks an agent prompt profile")
 
     selected: list[tuple[Path, dict[str, object]]] = []
-    mediated_samples = [sample for sample in samples if sample.metadata.get("appa_arm") != "stock"]
+    mediated_samples = [
+        sample for sample in samples if sample.metadata.get("appa_arm") not in {"stock", "auto", "auto-ifc"}
+    ]
     for sample in mediated_samples:
         if sample.uuid is None:
             raise ValueError(f"sample {sample.id} has no UUID for audit correlation")
@@ -514,7 +675,10 @@ def build_summary(logs: list[EvalLog], audit_dir: Path, manifest: dict[str, obje
     if stock_parity_failures:
         raise ValueError(f"stock proposal/dispatch scoring parity failed: {stock_parity_failures}")
 
-    sample_costs = [_sample_cost(sample) for sample in samples]
+    samples_by_arm = {
+        arm: [sample for sample in samples if str(sample.metadata.get("appa_arm")) == arm] for arm in ARMS
+    }
+    usage_by_arm = {arm: _aggregate_usage(grouped) for arm, grouped in samples_by_arm.items() if grouped}
     grouped_summary: dict[str, dict[str, dict[str, object]]] = {arm: {} for arm in ARMS}
     for (arm, task_type, kind), grouped in sorted(groups.items()):
         values = [_score(sample, "actual_dispatch_scorer") for sample in grouped]
@@ -526,6 +690,7 @@ def build_summary(logs: list[EvalLog], audit_dir: Path, manifest: dict[str, obje
             "proposal_utility": sum(_correct(value["proposal_utility"]) for value in values) / len(values),
             "proposal_security": sum(_correct(value["proposal_security"]) for value in values) / len(values),
             "dispatch_parity": sum(_correct(value["dispatch_parity"]) for value in values) / len(values),
+            "model_usage": _aggregate_usage(grouped),
             "sample_results": {
                 str(sample.metadata.get("original_sample_id")): _score(sample, "actual_dispatch_scorer")
                 for sample in grouped
@@ -537,9 +702,16 @@ def build_summary(logs: list[EvalLog], audit_dir: Path, manifest: dict[str, obje
         "run_digest": manifest["run_digest"],
         "completed_at": datetime.now(UTC).isoformat(),
         "sample_count": len(samples),
-        "cost_usd": sum(cost for cost in sample_costs if cost is not None)
-        if all(cost is not None for cost in sample_costs)
-        else None,
+        "model_usage": _aggregate_usage(samples),
+        "model_usage_by_arm": usage_by_arm,
+        "usage_overhead_vs_baseline": {
+            arm: {
+                "baseline": baseline,
+                **_usage_overhead(usage_by_arm[arm], usage_by_arm[baseline]),
+            }
+            for arm, baseline in USAGE_BASELINES.items()
+            if arm in usage_by_arm and baseline in usage_by_arm
+        },
         "stock_actual_dispatch_parity": True,
         "groups": grouped_summary,
         "mediation_audit": _audit_diagnostics(audit_dir, samples, manifest),
@@ -583,6 +755,13 @@ def run_complete(
     agent_prompt_profile: str = "standard",
     sample_ids: list[str] | None = None,
 ) -> Path | None:
+    selected_ids = validate_inventory() if sample_ids is None else sample_ids
+    selected_samples = {str(sample.id): sample for sample in complete_dataset() if str(sample.id) in selected_ids}
+    includes_auto = any(sample.metadata.get("appa_arm") in {"auto", "auto-ifc"} for sample in selected_samples.values())
+    if includes_auto and not model.startswith("anthropic/"):
+        raise ValueError(
+            "Auto arms require an anthropic/<model> Inspect model so every arm uses the same Claude actor model"
+        )
     preflight(model)
     manifest = run_manifest(model, reasoning_effort, seed, max_concurrency, agent_prompt_profile, sample_ids)
     if dry_run:
@@ -626,5 +805,5 @@ def run_complete(
     temporary = summary_path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     temporary.replace(summary_path)
-    print(json.dumps({"summary": str(summary_path), "cost_usd": summary["cost_usd"]}, indent=2))
+    print(json.dumps({"summary": str(summary_path), "model_usage": summary["model_usage"]}, indent=2))
     return output_dir

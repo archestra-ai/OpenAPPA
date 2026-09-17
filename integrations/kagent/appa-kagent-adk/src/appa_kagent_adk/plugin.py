@@ -37,6 +37,24 @@ that object answers to. A tool of the same name from anywhere else
 crosses the tool gate like any other, and the config guard refuses a
 rendered config that declares one.
 
+Every other tool crosses under the spelling its inventory gives it
+(``inventory``): the entrypoint builds that inventory from the rendered
+config at startup, and a name outside it is refused at the call gate
+with a deny the model reads, never forwarded. A spelled ``agent:``
+tool is a spawn, and its result crosses as ``spawn_result``.
+
+The inverse runs on the way back. The runtime names a tool to the model
+by that same spelling — in the redispatch line of a block, in the tool
+a remedy releases — and the model dispatches the raw ADK name, so every
+runtime string the plugin hands the model is spelled back through the
+inventory first (``_for_model``). The bytes a child's return crossed
+with are the exception: they reach the parent as the runtime crossed
+them, and the wire names which kind it carries: a ``deliver_value``
+holds the admitted value of a confined or sanitized result, which
+reaches the model byte for byte, and a ``replace_output`` holds the
+runtime's own staged-narrowing text, which is spelled back with the
+rest.
+
 The plugin also declares the return of a spawn itself. A ``deny_call``
 that offers a return route never reaches the model: the plugin takes
 the bare floor, runs that plan on the ``/mcp`` endpoint of the runtime,
@@ -45,6 +63,7 @@ and proposes the same call again.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -59,6 +78,8 @@ from google.genai import types
 
 from . import wire
 from .identity import SessionIdentity
+from .inventory import ToolInventory, is_spawn
+from .wire import RETURN_TOOL
 
 logger = logging.getLogger("appa_kagent_adk.plugin")
 
@@ -71,14 +92,15 @@ _REVIEW_PENDING = (
     "[appa] this remedy needs a person's ruling. The reviewer has been asked through the "
     "confirmation; wait for the answer and do not call the tool again."
 )
+_REVIEW_REJECTED = (
+    "[appa] the operator rejected this request. The proposed call did not run. "
+    "Stop this operation; do not request or await approval again."
+)
 
-RETURN_TOOL = "appa_return"
-"""The name of the tool a child scope stops through.
+__all__ = ["AppaFailClosed", "AppaPluginKagent", "RETURN_TOOL"]
 
-APPA owns the gate object, and only that object crosses no tool gate.
-The name is what the model types, and anything else that answers to it
-is somebody else's tool.
-"""
+# The call gate's own refusal of a name the inventory does not carry.
+_OUTSIDE_INVENTORY = "[appa] the tool {tool} is outside the gated inventory of this agent, so the call was refused"
 
 # What the return gate hands the model back. A crossing names the bytes
 # the child must repeat, so its outgoing reply carries what crossed.
@@ -87,15 +109,6 @@ _RETURN_CROSSED = (
 )
 _RETURN_VOID = "[appa] the void return crossed. End this errand now with an empty final message."
 _RETURN_BLOCKED = "[appa] this return did not cross: {reason}"
-
-# Agent-as-tool classes, by name: ADK's own AgentTool family plus
-# kagent's remote A2A tool. Name-based so the plugin imports no kagent
-# code and no version-specific ADK module.
-_SPAWN_TOOL_TYPES = (
-    "AgentTool",
-    "GoogleSearchAgentTool",
-    "KAgentRemoteA2ATool",
-)
 
 _GATED_TIMEOUT_SECONDS = 120.0
 _TURN_END_TIMEOUT_SECONDS = 30.0
@@ -118,8 +131,8 @@ class AppaPluginKagent(BasePlugin):
         self,
         runtime_url: str,
         *,
+        inventory: ToolInventory,
         client_factory: Callable[[], httpx.AsyncClient] | None = None,
-        spawn_tool_types: tuple[str, ...] = _SPAWN_TOOL_TYPES,
         identity: SessionIdentity | None = None,
         remedy_call: Callable[[dict[str, Any]], Awaitable[str]] | None = None,
     ):
@@ -134,7 +147,8 @@ class AppaPluginKagent(BasePlugin):
         # next gated event instead of failing the whole next request.
         self._client_factory = client_factory or (lambda: httpx.AsyncClient(timeout=_GATED_TIMEOUT_SECONDS))
         self._client = self._client_factory()
-        self._spawn_tool_types = spawn_tool_types
+        self._inventory = inventory
+        self._discovery_runs = {}
         # Shared with the entrypoint gates. The gates classify from the
         # session state, which the kagent executor lands before each
         # run, so a synthetic call lands in the trajectory the run
@@ -151,6 +165,14 @@ class AppaPluginKagent(BasePlugin):
         # call that quotes one asks the person through kagent's own
         # confirmation before it crosses, and the answer rides the call.
         self._reviews: dict[str, str] = {}
+        # Human-review offers created in one invocation. If the model
+        # tries to stop instead of pursuing the one unambiguous review,
+        # the model gate emits the exact reserved call for it.
+        self._pending_reviews: dict[str, set[str]] = {}
+        self._review_authorized_invocations: set[str] = set()
+        self._init_invocations: set[str] = set()
+        self._battery_suggestions: dict[str, set[str]] = {}
+        self._rejected_controls: dict[str, set[str]] = {}
         # The return the gate crossed for a run, by invocation id, and
         # the exact bytes that crossed. The stop of that run then carries
         # those bytes, so the reply the child sends replays them. The
@@ -163,6 +185,18 @@ class AppaPluginKagent(BasePlugin):
         # nothing. The result gate drops the entry it reads, and the
         # run's end drops what no result gate reached.
         self._settled: dict[str, set[str]] = {}
+        self._paused_spawns: set[str] = set()
+        # ADK executes parallel function calls concurrently, while one
+        # OpenAPPA branch admits one dispatch lifecycle at a time. A
+        # function-call id holds its branch's lock from the call gate
+        # through the result or error gate. Calls on other branches stay
+        # independent.
+        self._dispatch_locks: dict[tuple[str, str | None], asyncio.Lock] = {}
+        self._dispatch_users: dict[tuple[str, str | None], int] = {}
+        self._dispatch_leases: dict[tuple[str, str], tuple[tuple[str, str | None], asyncio.Lock]] = {}
+        self._dispatch_waiters: dict[tuple[str, str], tuple[tuple[str, str | None], asyncio.Lock]] = {}
+        self._abandoned_invocations: set[str] = set()
+        self._runner_invocations: dict[asyncio.Task, set[str]] = {}
         # The agent scope each invocation opened first. Every later
         # scope of that invocation is an in-process child.
         self._scopes: dict[str, str] = {}
@@ -175,6 +209,9 @@ class AppaPluginKagent(BasePlugin):
         self._return_tool = _return_gate_tool(self)
 
     async def close(self) -> None:
+        task = asyncio.current_task()
+        for invocation_id in self._runner_invocations.pop(task, set()) if task is not None else ():
+            self._abandon_invocation(invocation_id)
         await self._client.aclose()
 
     # -- transport ----------------------------------------------------
@@ -249,8 +286,29 @@ class AppaPluginKagent(BasePlugin):
     def _is_fresh(self, session: Any) -> bool:
         return self._identity.is_fresh(session)
 
-    def _is_spawn(self, tool: Any) -> bool:
-        return type(tool).__name__ in self._spawn_tool_types
+    def _spelling(self, tool: Any, context=None) -> str | None:
+        """The wire spelling of a dispatched tool, or None outside the inventory."""
+        if context is not None and (discovery := self._discovery_runs.get(context.invocation_id)) is not None:
+            found = discovery.state(context.invocation_id).identities.get(tool)
+            if found is not None:
+                return found
+            if self._inventory.spelling(tool.name) is not None:
+                return discovery.state(context.invocation_id).names.spelling(tool.name)
+        return self._inventory.spelling(tool.name)
+
+    def _for_model(self, text: str | None, context=None) -> str:
+        """Runtime text as the model must read it.
+
+        A tool crosses the wire under its spelling, and the runtime
+        names it back the same way — in the redispatch line of a block,
+        in the tool the remedy releases. The model dispatches the raw
+        ADK name, so every runtime string this plugin hands the model
+        goes through the inventory first.
+        """
+        inventory = self._inventory
+        if context is not None and (discovery := self._discovery_runs.get(context.invocation_id)) is not None:
+            inventory = discovery.state(context.invocation_id).names
+        return inventory.despell(text or "")
 
     def _claim_scope(self, invocation_id: str, agent_name: str) -> bool:
         """Whether this agent scope is the invocation's own: the first scope it opened, or a re-entry of it.
@@ -265,29 +323,44 @@ class AppaPluginKagent(BasePlugin):
 
     def _close_run(self, invocation_id: str) -> None:
         """Drop everything this run pinned. The next run reads afresh."""
+        self._paused_spawns.discard(invocation_id)
+        self._abandon_invocation(invocation_id)
+        for task, invocations in list(self._runner_invocations.items()):
+            invocations.discard(invocation_id)
+            if not invocations:
+                self._runner_invocations.pop(task)
         self._identity.close_invocation(invocation_id)
         self._crossed.pop(invocation_id, None)
         self._scopes.pop(invocation_id, None)
         self._settled.pop(invocation_id, None)
+        self._rejected_controls.pop(invocation_id, None)
+        self._pending_reviews.pop(invocation_id, None)
+        self._review_authorized_invocations.discard(invocation_id)
+        self._init_invocations.discard(invocation_id)
+        self._battery_suggestions.pop(invocation_id, None)
+        discovery = self._discovery_runs.pop(invocation_id, None)
+        if discovery is not None:
+            discovery.runs.pop(invocation_id, None)
 
     # -- synthetic gates for the entrypoint wrappers ------------------
 
-    async def gate_synthetic_call(self, session: Any, tool: str, arguments: dict[str, Any]) -> wire.Decision:
-        """Gate an out-of-band flow as a tool call in the session's trajectory.
+    async def gate_synthetic_call(self, invocation_context: Any, tool: str, arguments: dict[str, Any]) -> wire.Decision:
+        """Gate an out-of-band flow in the invocation's pinned trajectory.
 
         The entrypoint wraps ADK features that move a value without a
         FunctionTool call — code execution, the memory write-back — and
-        brings each under the tool gate through this method. The caller
-        enforces the decision.
+        brings each under the tool gate through this method, under the
+        ``gate:`` spelling it hands over. The caller enforces the
+        decision.
         """
-        root_id, child_id = self._identity.ids(session)
-        return await self._post(wire.tool_call(root_id, tool, arguments, False, child_id))
+        root_id, child_id = self._identity.ids_for(invocation_context)
+        return await self._post(wire.tool_call(root_id, tool, arguments, child_id))
 
     async def report_synthetic_result(
-        self, session: Any, tool: str, arguments: dict[str, Any], body: Any
+        self, invocation_context: Any, tool: str, arguments: dict[str, Any], body: Any
     ) -> wire.Decision:
         """Report an out-of-band flow's output as its tool result."""
-        root_id, child_id = self._identity.ids(session)
+        root_id, child_id = self._identity.ids_for(invocation_context)
         return await self._post(wire.tool_result(root_id, tool, arguments, wire.success(body), child_id))
 
     # -- session and prompt -------------------------------------------
@@ -329,16 +402,37 @@ class AppaPluginKagent(BasePlugin):
         return None
 
     async def on_user_message_callback(self, *, invocation_context, user_message):
+        self._own_invocation(invocation_context.invocation_id)
+        message = _content_text(user_message)
+        if message.strip().casefold() == "init":
+            self._init_invocations.add(invocation_context.invocation_id)
+        if _is_chat_approval(message):
+            self._review_authorized_invocations.add(invocation_context.invocation_id)
         root_id, child_id = self._identity.open_invocation(invocation_context)
+        from google.adk.agents.readonly_context import ReadonlyContext
+
+        from .mcp_lifecycle import MCPDiscovery
+
+        discovery = next(
+            (tool for tool in getattr(invocation_context.agent, "tools", []) if isinstance(tool, MCPDiscovery)), None
+        )
+        state = None
+        if discovery is not None:
+            state = await discovery.prepare(
+                ReadonlyContext(invocation_context),
+                allow_new=child_id is None and self._is_fresh(invocation_context.session),
+            )
         contract = None
         opening = self._opening(invocation_context.session, root_id, child_id)
         if opening is not None:
+            if state is not None:
+                opening["inventory"] = state.evidence
             decision = await self._post(opening)
             if decision.kind == "context" and child_id is not None:
                 # The return policy of the fork needs words. The child
                 # reads them in front of the request its parent sent, and
                 # that request stands unchanged.
-                contract = decision.text
+                contract = self._for_model(decision.text, invocation_context)
             elif decision.kind != "ack":
                 raise AppaFailClosed(f"appa refused the session: {decision.detail or decision.kind}")
             if child_id is not None:
@@ -346,6 +440,8 @@ class AppaPluginKagent(BasePlugin):
                 # answers ack too, so a repeat after a plugin restart
                 # changes nothing.
                 self._opened.add((root_id, child_id))
+        if state is not None:
+            state.opened = True
         decision = await self._post(wire.prompt(root_id, _content_text(user_message), child_id))
         if decision.kind == "block":
             raise AppaFailClosed(f"appa blocked the prompt: {decision.reason}")
@@ -358,6 +454,7 @@ class AppaPluginKagent(BasePlugin):
     # -- liveness gates -----------------------------------------------
 
     async def before_run_callback(self, *, invocation_context):
+        self._own_invocation(invocation_context.invocation_id)
         self._identity.open_invocation(invocation_context)
         await self._ping()
         return None
@@ -377,6 +474,13 @@ class AppaPluginKagent(BasePlugin):
 
     async def after_model_callback(self, *, callback_context, llm_response):
         await self._ping()
+        self._bind_management_calls(callback_context, llm_response)
+        review = self._open_pending_review(callback_context.invocation_id, llm_response)
+        if review is not None:
+            return review
+        proposal = self._complete_init_proposal(callback_context.invocation_id, llm_response)
+        if proposal is not None:
+            return proposal
         _, child_id = self._ids(callback_context)
         if child_id is None:
             return None
@@ -411,6 +515,75 @@ class AppaPluginKagent(BasePlugin):
 
     # -- the tool gate ------------------------------------------------
 
+    async def _acquire_dispatch(self, root_id: str, child_id: str | None, tool_context: Any) -> None:
+        """Queue one ADK call behind the open dispatch on its branch."""
+        call_id = _call_id(tool_context)
+        if call_id is None:
+            return
+        lease = (tool_context.invocation_id, call_id)
+        if lease in self._dispatch_leases or lease in self._dispatch_waiters:
+            raise AppaFailClosed(f"ADK reused function-call id {call_id!r} before its result")
+        key = (root_id, child_id)
+        lock = self._dispatch_locks.setdefault(key, asyncio.Lock())
+        self._dispatch_users[key] = self._dispatch_users.get(key, 0) + 1
+        self._dispatch_waiters[lease] = (key, lock)
+        try:
+            await lock.acquire()
+        except BaseException:
+            self._dispatch_waiters.pop(lease, None)
+            self._drop_dispatch_user(key, lock)
+            self._forget_abandoned(tool_context.invocation_id)
+            raise
+        self._dispatch_waiters.pop(lease, None)
+        if tool_context.invocation_id in self._abandoned_invocations:
+            lock.release()
+            self._drop_dispatch_user(key, lock)
+            self._forget_abandoned(tool_context.invocation_id)
+            raise AppaFailClosed("the runner ended before this queued tool call could execute")
+        self._dispatch_leases[lease] = (key, lock)
+
+    def _release_dispatch(self, lease: tuple[str, str]) -> None:
+        """Release the branch held by one completed ADK call."""
+        held = self._dispatch_leases.pop(lease, None)
+        if held is None:
+            return
+        key, lock = held
+        lock.release()
+        self._drop_dispatch_user(key, lock)
+        self._forget_abandoned(lease[0])
+
+    def _release_tool_dispatch(self, tool_context: Any) -> None:
+        call_id = _call_id(tool_context)
+        if call_id is not None:
+            self._release_dispatch((tool_context.invocation_id, call_id))
+
+    def _own_invocation(self, invocation_id: str) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            self._runner_invocations.setdefault(task, set()).add(invocation_id)
+
+    def _abandon_invocation(self, invocation_id: str) -> None:
+        self._abandoned_invocations.add(invocation_id)
+        for lease in [lease for lease in self._dispatch_leases if lease[0] == invocation_id]:
+            self._release_dispatch(lease)
+        self._forget_abandoned(invocation_id)
+
+    def _forget_abandoned(self, invocation_id: str) -> None:
+        if any(lease[0] == invocation_id for lease in self._dispatch_leases):
+            return
+        if any(waiter[0] == invocation_id for waiter in self._dispatch_waiters):
+            return
+        self._abandoned_invocations.discard(invocation_id)
+
+    def _drop_dispatch_user(self, key: tuple[str, str | None], lock: asyncio.Lock) -> None:
+        users = self._dispatch_users[key] - 1
+        if users:
+            self._dispatch_users[key] = users
+            return
+        self._dispatch_users.pop(key)
+        if self._dispatch_locks.get(key) is lock:
+            self._dispatch_locks.pop(key)
+
     def _settle(self, tool_context: Any) -> None:
         """Remember that this plugin closed the call the context names.
 
@@ -440,6 +613,7 @@ class AppaPluginKagent(BasePlugin):
         return True
 
     async def before_tool_callback(self, *, tool, tool_args, tool_context):
+        self._paused_spawns.discard(tool_context.invocation_id)
         root_id, child_id = self._ids(tool_context)
         if tool is self._return_tool:
             # APPA owns the return gate — the object this plugin built,
@@ -448,9 +622,24 @@ class AppaPluginKagent(BasePlugin):
             # the same name from anywhere else is somebody else's, and
             # it crosses the gate like any other.
             return None
+        spelled = self._spelling(tool, tool_context)
+        if spelled is None:
+            # A name the inventory never saw has no spelling on the wire,
+            # so nothing crosses: the gate refuses it here and the model
+            # reads the refusal as the result of its call.
+            logger.warning("the tool %s is outside the gated inventory, so the call is refused", tool.name)
+            self._settle(tool_context)
+            return {"result": _OUTSIDE_INVENTORY.format(tool=tool.name), _DENY_KEY: _DENIED}
+        if tool.name in wire.MANAGEMENT_TOOLS:
+            tool_args["_appa_actor"] = f"{root_id}:{child_id}" if child_id else root_id
         ruling = None
         if tool.name == wire.RESERVED_TOOL:
             offer = str(tool_args.get("offer_id", ""))
+            pending = self._pending_reviews.get(tool_context.invocation_id)
+            if pending is not None:
+                pending.discard(offer)
+                if not pending:
+                    self._pending_reviews.pop(tool_context.invocation_id)
             confirmation = getattr(tool_context, "tool_confirmation", None)
             if confirmation is None:
                 review = self._reviews.get(offer)
@@ -466,23 +655,52 @@ class AppaPluginKagent(BasePlugin):
             else:
                 ruling = "approve" if confirmation.confirmed else "deny"
                 self._reviews.pop(offer, None)
-        call = wire.tool_call(root_id, tool.name, _plain_json(tool_args), self._is_spawn(tool), child_id, ruling=ruling)
-        decision = await self._post(call)
-        route = _return_offer(decision)
-        if route is not None:
-            decision = await self._declare_return(root_id, child_id, call, route, decision)
+                if ruling == "deny":
+                    call_id = _call_id(tool_context)
+                    if call_id is not None:
+                        self._rejected_controls.setdefault(tool_context.invocation_id, set()).add(call_id)
+        await self._acquire_dispatch(root_id, child_id, tool_context)
+        if is_spawn(spelled) and tool_context.tool_confirmation is not None:
+            try:
+                payload = tool_context.tool_confirmation.payload
+                target = payload.get("context_id") if isinstance(payload, dict) else None
+                if not isinstance(target, str) or not target:
+                    raise AppaFailClosed("remote approval resume requires the original child context_id")
+                decision = await self._post(
+                    wire.spawn_resume(root_id, spelled, _plain_json(tool_args), target, child_id)
+                )
+                if decision.kind != "ack":
+                    raise AppaFailClosed(f"appa refused the spawn resume: {decision.reason or decision.kind}")
+                return None
+            except BaseException:
+                self._release_tool_dispatch(tool_context)
+                raise
+        call = wire.tool_call(root_id, spelled, _plain_json(tool_args), child_id, ruling=ruling)
+        if (discovery := self._discovery_runs.get(tool_context.invocation_id)) is not None:
+            call["inventory"] = discovery.state(tool_context.invocation_id).evidence
+        try:
+            decision = await self._post(call)
+            route = _return_offer(decision)
+            if route is not None:
+                decision = await self._declare_return(root_id, child_id, call, route, decision)
+        except BaseException:
+            self._release_tool_dispatch(tool_context)
+            raise
         if decision.kind in ("allow_call", "pass_control"):
             return None
         if decision.kind == "deny_call":
             for offer_id, text in decision.review:
                 self._reviews[offer_id] = text
+                self._pending_reviews.setdefault(tool_context.invocation_id, set()).add(offer_id)
             self._settle(tool_context)
+            self._release_tool_dispatch(tool_context)
             # The feedback rides under "result": kagent's model converters
             # serialize a function response only from a str or a dict with
             # a "content" or "result" key, and any other shape reaches the
             # model as an EMPTY tool message — the model then cannot see
             # why the call was blocked, or the remedy offer it quotes.
-            return {"result": decision.feedback, _DENY_KEY: _DENIED}
+            return {"result": self._for_model(decision.feedback, tool_context), _DENY_KEY: _DENIED}
+        self._release_tool_dispatch(tool_context)
         raise AppaFailClosed(f"appa answered the tool call with {decision.detail or decision.kind}")
 
     async def after_tool_callback(self, *, tool, tool_args, tool_context, result):
@@ -498,52 +716,120 @@ class AppaPluginKagent(BasePlugin):
             # dispatch. The id of the call decides that, never the
             # payload — a tool result carries whatever its tool spells,
             # the `appa` key included.
+            self._release_tool_dispatch(tool_context)
             return None
-        root_id, child_id = self._ids(tool_context)
-        arguments = _plain_json(tool_args)
-        # A result of None with no failure is a deferred or long-running
-        # call. Nothing entered attention, and the dispatch is genuinely
-        # unresolved here.
-        outcome = wire.indeterminate() if result is None else wire.success(_plain_json(result))
-        if self._is_spawn(tool):
-            spawned_id, value = _spawn_return(result)
-            decision = await self._post(
-                wire.spawn_result(root_id, tool.name, arguments, outcome, spawned_id, value, child_id)
-            )
-            if decision.kind == "ack":
+        spelled = self._spelling(tool, tool_context)
+        if spelled is None:
+            raise AppaFailClosed(f"the tool {tool.name} is outside the gated inventory, and its result cannot cross")
+        if (
+            is_spawn(spelled)
+            and isinstance(result, dict)
+            and result.get("status") == "pending"
+            and result.get("waiting_for") == "subagent_approval"
+        ):
+            try:
+                await self._ping()
+                self._paused_spawns.add(tool_context.invocation_id)
                 return None
-            if decision.kind == "child_return":
+            finally:
+                self._release_tool_dispatch(tool_context)
+        if tool.name == wire.BATTERY_MATCH_TOOL:
+            self._remember_battery_suggestions(tool_context.invocation_id, result)
+        root_id, child_id = self._ids(tool_context)
+        call_id = _call_id(tool_context)
+        rejected = bool(
+            call_id is not None and call_id in self._rejected_controls.get(tool_context.invocation_id, set())
+        )
+        if rejected:
+            self._rejected_controls[tool_context.invocation_id].discard(call_id)
+            if not self._rejected_controls[tool_context.invocation_id]:
+                self._rejected_controls.pop(tool_context.invocation_id)
+        arguments = _plain_json(tool_args)
+        # ADK hands this callback the tool's own return value unchanged,
+        # and skips the response event only afterwards, only where the
+        # tool is long running and returned nothing. So a None from a
+        # long-running tool or a spawn is a call that delivers later, and
+        # the dispatch stays unresolved; every other None is a call that
+        # completed, and the null it returned is the body ADK gives the
+        # model as {"result": null} — a success without a body would say
+        # instead that the result was not carried, which it was.
+        deferred = tool.is_long_running or is_spawn(spelled)
+        outcome = wire.indeterminate() if result is None and deferred else wire.success(_plain_json(result))
+        try:
+            if is_spawn(spelled):
+                spawned_id, value = _spawn_return(result)
+                decision = await self._post(
+                    wire.spawn_result(root_id, spelled, arguments, outcome, spawned_id, value, child_id)
+                )
+                if decision.kind == "ack":
+                    return None
+                if decision.kind in ("child_return", "deliver_value"):
+                    # The bytes the value crossed with, never spelled over:
+                    # the parent receives what the runtime admitted.
+                    return {"result": decision.value}
+                if decision.kind == "replace_output":
+                    return {"result": self._for_model(decision.output, tool_context)}
+                if decision.kind == "block":
+                    return _withheld(self._for_model(decision.reason, tool_context))
+                raise AppaFailClosed(f"appa answered the spawn result with {decision.detail or decision.kind}")
+            decision = await self._post(wire.tool_result(root_id, spelled, arguments, outcome, child_id))
+            if decision.kind == "ack":
+                if rejected:
+                    return {"result": _REVIEW_REJECTED, _DENY_KEY: _DENIED}
+                return self._remedy_rendering(tool, result, tool_context)
+            if decision.kind == "deliver_value":
+                # The admitted value of a confined or sanitized result, as
+                # it crossed. Spelling it back would hand the model other
+                # bytes than the ones the runtime admitted.
                 return {"result": decision.value}
             if decision.kind == "replace_output":
-                return {"result": decision.output}
+                # The runtime's own words about this result, which name the
+                # control tool by a spelling ADK cannot dispatch.
+                return {"result": self._for_model(decision.output, tool_context)}
             if decision.kind == "block":
-                return _withheld(decision.reason or "")
-            raise AppaFailClosed(f"appa answered the spawn result with {decision.detail or decision.kind}")
-        decision = await self._post(wire.tool_result(root_id, tool.name, arguments, outcome, child_id))
-        if decision.kind == "ack":
+                return _withheld(self._for_model(decision.reason, tool_context))
+            raise AppaFailClosed(f"appa answered the tool result with {decision.detail or decision.kind}")
+        finally:
+            self._release_tool_dispatch(tool_context)
+
+    def _remedy_rendering(self, tool: Any, result: Any, context=None) -> Any:
+        """The reserved tool's own answer, spelled for the model, or None to leave a result alone.
+
+        The runtime writes that answer itself and names the released
+        tool in it, by the spelling this plugin sent. Every other tool
+        spells its own result, and the plugin hands it on untouched.
+        """
+        if tool.name != wire.RESERVED_TOOL or result is None:
             return None
-        if decision.kind == "replace_output":
-            return {"result": decision.output}
-        if decision.kind == "block":
-            return _withheld(decision.reason or "")
-        raise AppaFailClosed(f"appa answered the tool result with {decision.detail or decision.kind}")
+        return _despelled(result, lambda text: self._for_model(text, context))
 
     async def on_tool_error_callback(self, *, tool, tool_args, tool_context, error):
         # The failure closes the dispatch here. ADK runs the result gate
         # of a handled failure too, and that second report would
         # double-count one dispatch.
         self._settle(tool_context)
+        spelled = self._spelling(tool, tool_context)
+        if spelled is None:
+            raise AppaFailClosed(f"the tool {tool.name} is outside the gated inventory, and its failure cannot cross")
         root_id, child_id = self._ids(tool_context)
-        decision = await self._post(
-            wire.tool_result(root_id, tool.name, _plain_json(tool_args), wire.failure(str(error)), child_id)
-        )
-        if decision.kind == "ack":
-            return None  # the original error propagates
-        if decision.kind == "replace_output":
-            return {"result": decision.output}
-        if decision.kind == "block":
-            return _withheld(decision.reason or "")
-        raise AppaFailClosed(f"appa answered the tool failure with {decision.detail or decision.kind}")
+        try:
+            failure = wire.tool_result(root_id, spelled, _plain_json(tool_args), wire.failure(str(error)), child_id)
+            if is_spawn(spelled):
+                failure = wire.spawn_result(
+                    root_id, spelled, _plain_json(tool_args), wire.failure(str(error)), child_id=child_id
+                )
+            decision = await self._post(failure)
+            if decision.kind == "ack":
+                return None  # the original error propagates
+            if decision.kind == "deliver_value":
+                return {"result": decision.value}
+            if decision.kind == "replace_output":
+                return {"result": self._for_model(decision.output, tool_context)}
+            if decision.kind == "block":
+                return _withheld(self._for_model(decision.reason, tool_context))
+            raise AppaFailClosed(f"appa answered the tool failure with {decision.detail or decision.kind}")
+        finally:
+            self._release_tool_dispatch(tool_context)
 
     # -- the return gate ----------------------------------------------
 
@@ -562,7 +848,7 @@ class AppaPluginKagent(BasePlugin):
         deny goes to the model as it stands.
         """
         arguments = {"offer_id": offer.offer_id, "label": {}}
-        vouch = await self._post(wire.tool_call(root_id, wire.RESERVED_TOOL, arguments, False, child_id))
+        vouch = await self._post(wire.tool_call(root_id, wire.CONTROL_TOOL, arguments, child_id))
         if vouch.kind != "pass_control":
             logger.info(
                 "appa answered the return declaration %s with %s, so the block goes to the model",
@@ -596,7 +882,7 @@ class AppaPluginKagent(BasePlugin):
         if decision.kind == "ack":
             return self._crossing(tool_context.invocation_id, text)
         if decision.kind == "block":
-            return {"result": _RETURN_BLOCKED.format(reason=decision.reason or "")}
+            return {"result": _RETURN_BLOCKED.format(reason=self._for_model(decision.reason, tool_context))}
         raise AppaFailClosed(f"appa answered the child end with {decision.detail or decision.kind}")
 
     def _crossing(self, invocation_id: str, value: str) -> dict[str, Any]:
@@ -631,6 +917,82 @@ class AppaPluginKagent(BasePlugin):
             return _spoken(crossed)
         return _return_call("\n".join(part.text for part in answer if getattr(part, "text", None)))
 
+    def _open_pending_review(self, invocation_id: str, llm_response: Any) -> Any:
+        """Turn an attempted stop after one review block into its card call."""
+        offers = self._pending_reviews.get(invocation_id)
+        if (
+            invocation_id not in self._review_authorized_invocations
+            or offers is None
+            or len(offers) != 1
+            or getattr(llm_response, "partial", None)
+        ):
+            return None
+        content = getattr(llm_response, "content", None)
+        parts = getattr(content, "parts", None) or []
+        if any(getattr(part, "function_call", None) is not None for part in parts):
+            return None
+        if not any(not getattr(part, "thought", None) and getattr(part, "text", None) for part in parts):
+            return None
+        offer = next(iter(offers))
+        logger.info("model stopped with one human-review offer pending; opening its confirmation card")
+        return _review_call(offer)
+
+    def _remember_battery_suggestions(self, invocation_id: str, result: Any) -> None:
+        if invocation_id not in self._init_invocations or not isinstance(result, dict):
+            return
+        for content in result.get("content", []):
+            if not isinstance(content, dict) or not isinstance(content.get("text"), str):
+                continue
+            try:
+                matched = json.loads(content["text"])
+            except json.JSONDecodeError:
+                continue
+            for battery in matched.get("matches", []):
+                if (
+                    isinstance(battery, dict)
+                    and battery.get("included") is False
+                    and isinstance(battery.get("battery"), str)
+                ):
+                    self._battery_suggestions.setdefault(invocation_id, set()).add(battery["battery"])
+
+    def _complete_init_proposal(self, invocation_id: str, llm_response: Any) -> Any:
+        suggestions = self._battery_suggestions.get(invocation_id)
+        if not suggestions or getattr(llm_response, "partial", None):
+            return None
+        content = getattr(llm_response, "content", None)
+        parts = getattr(content, "parts", None) or []
+        if any(getattr(part, "function_call", None) is not None for part in parts):
+            return None
+        answer = "\n".join(
+            part.text for part in parts if not getattr(part, "thought", None) and getattr(part, "text", None)
+        )
+        if not answer:
+            return None
+        lowered = answer.casefold()
+        if all(name.casefold() in lowered for name in suggestions) and any(
+            word in lowered for word in ("approve", "confirm")
+        ):
+            return None
+        names = ", ".join(sorted(_battery_display_name(name) for name in suggestions))
+        appendix = (
+            f"\n\nSuggested includes\n- {names} battery"
+            f"\n\nApprove the {names} battery include, or tell me what to change."
+        )
+        return _response(types.Part(text=answer.rstrip() + appendix))
+
+    def _bind_management_calls(self, callback_context: Any, llm_response: Any) -> None:
+        content = getattr(llm_response, "content", None)
+        parts = getattr(content, "parts", None) or []
+        root_id, child_id = self._ids(callback_context)
+        actor = f"{root_id}:{child_id}" if child_id else root_id
+        for part in parts:
+            call = getattr(part, "function_call", None)
+            if call is None or call.name not in wire.MANAGEMENT_TOOLS:
+                continue
+            arguments = dict(call.args or {})
+            arguments["_appa_actor"] = actor
+            call.args = arguments
+
     # -- turn ends ----------------------------------------------------
 
     async def after_run_callback(self, *, invocation_context):
@@ -638,7 +1000,8 @@ class AppaPluginKagent(BasePlugin):
         # turn_end lands where the prompt and the tool calls of the run
         # landed. The pin then goes, and the next run classifies afresh.
         root_id, child_id = self._ids(invocation_context)
-        await self._post_quiet(wire.turn_end(root_id, child_id))
+        if invocation_context.invocation_id not in self._paused_spawns:
+            await self._post_quiet(wire.turn_end(root_id, child_id))
         self._close_run(invocation_context.invocation_id)
 
     # google-adk 2.8.0 only — the 1.31.1 manager never calls these two.
@@ -682,6 +1045,21 @@ def _return_call(text: str) -> LlmResponse:
     """The stop of a child, as one call to the return gate."""
     call = types.FunctionCall(name=RETURN_TOOL, args={"text": text})
     return _response(types.Part(function_call=call))
+
+
+def _review_call(offer_id: str) -> LlmResponse:
+    """One exact human-review offer as the runtime-owned control call."""
+    call = types.FunctionCall(name=wire.RESERVED_TOOL, args={"offer_id": offer_id})
+    return _response(types.Part(function_call=call))
+
+
+def _is_chat_approval(text: str) -> bool:
+    first = text.strip().casefold()
+    return first == "approve" or first.startswith(("approve ", "approved ", "yes, approve"))
+
+
+def _battery_display_name(name: str) -> str:
+    return "GitHub" if name.casefold() == "github" else name.title()
 
 
 def _spoken(value: str) -> LlmResponse:
@@ -768,6 +1146,24 @@ def _content_text(content: Any) -> str:
     if callable(dump):
         return json.dumps(dump(exclude_none=True), default=str)
     return str(content)
+
+
+def _despelled(value: Any, despell: Callable[[str], str]) -> Any:
+    """A copy of one tool result with every string spelled for the model.
+
+    A tool result is a JSON value of any shape — the MCP content blocks
+    of the reserved tool among them — so the walk reaches every string
+    it carries.
+    """
+    match value:
+        case str():
+            return despell(value)
+        case dict():
+            return {key: _despelled(item, despell) for key, item in value.items()}
+        case list():
+            return [_despelled(item, despell) for item in value]
+        case _:
+            return value
 
 
 def _plain_json(value: Any) -> Any:

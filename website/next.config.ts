@@ -34,6 +34,7 @@ const nextConfig: NextConfig = {
   // already shared under the old prefix keep working.
   async redirects() {
     return [
+      { source: "/comparison", destination: "/openappa-vs-cedar", permanent: true },
       { source: "/docs", destination: "/", permanent: true },
       { source: "/docs/:slug", destination: "/:slug", permanent: true },
       { source: "/chat", destination: "/playground", permanent: true },

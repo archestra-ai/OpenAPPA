@@ -7,15 +7,19 @@ appa replay --config examples/tests/secret-stays-inside/appa.toml examples/tests
 ```
 
 Add `-v` to see every step. `cargo test -p appa --test replay` runs all of them.
+`local-annotator` binds a command, which the runtime accepts on Unix only;
+it needs `python3`.
 
 | Example | What it pins |
 |---|---|
 | [secret-stays-inside](secret-stays-inside/) | Reading HR data limits an email to HR recipients. |
 | [untrusted-web-content](untrusted-web-content/) | Fetched web content lowers trust; a shell command may then not run. |
 | [backup-before-deploy](backup-before-deploy/) | A deploy needs a recorded backup; a migration runs once. |
-| [push-only-to-the-org](push-only-to-the-org/) | Three `Bash` contracts chosen by the command text; a non-org push needs a person. |
+| [push-only-to-the-org](push-only-to-the-org/) | Three `mcp/shell/bash` contracts chosen by the command text; a non-org push needs a person. |
 | [three-trust-ranks](three-trust-ranks/) | A custom trust chain with two sinks at different ranks. |
 | [redact-before-sending](redact-before-sending/) | Private data leaves only through the declared sanitizer. |
+| [mask-before-sharing](mask-before-sharing/) | A credential read is `self` data; its output enters the trajectory only through the masker, with no audience source bound. |
+| [local-annotator](local-annotator/) | A local command annotates each file read; a client file or a dotfile waits for a person. |
 
 A test case lists tool calls in order. Each call has one expected result.
 

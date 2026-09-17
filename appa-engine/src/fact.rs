@@ -21,7 +21,7 @@ use crate::value::{
 /// stands below it is refused at the child's stop. `sanitizer` names the derivation every return
 /// crosses through; the dimension it raises is the one the floor does not bind, so the child may
 /// descend freely there. The submission path is **derived from this binding**, never selected by
-/// the child, so no engine client can route a return through a transformer the fork did not
+/// the child, so no engine client can route a return through a sanitizer the fork did not
 /// declare — that would be a trust-laundering selector.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReturnPolicy {
@@ -211,6 +211,7 @@ pub enum ObservedResult {
 pub enum CloseOutcome {
     Success { effects: EffectSet },
     Failure,
+    FailureWithBody { observed: RawResultDigest },
     Indeterminate,
 }
 
@@ -250,6 +251,8 @@ pub enum Fact {
         /// the registry at replay, which the opening's policy identity already fixes
         /// byte-for-byte.
         annotation: Option<crate::contract::PinnedAnnotation>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_basis: Option<crate::value::FileBasis>,
         #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
         evidence: crate::audience::AudienceEvidence,
         subject: crate::basis::SubjectKey,

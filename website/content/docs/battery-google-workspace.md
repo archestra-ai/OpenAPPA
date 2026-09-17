@@ -9,7 +9,7 @@ breadcrumb: Google Workspace
 
 The Google Workspace battery reads your Workspace directory to build audiences. It does not contain tool rules yet.
 
-[View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/batteries/google-workspace).
+[View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/google-workspace).
 
 ## Audiences
 

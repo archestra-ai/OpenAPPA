@@ -103,6 +103,8 @@ pub enum ArgumentError {
     UnsafeInteger,
     #[error("arguments do not satisfy the tool's registered schema: {0}")]
     Schema(String),
+    #[error("arguments do not fill the contract's selector placeholder: {0}")]
+    UnfilledPlaceholder(#[from] crate::contract::UnfilledPlaceholder),
     #[error("arguments match no registered contract")]
     NoMatchingContract,
     #[error("persisted argument payload is not in canonical form")]
@@ -215,16 +217,33 @@ impl ToolParameters {
         validate_object(&self.root, arguments, "$")
     }
 
-    /// Whether `name` is a required top-level string property — the shape an audience argument
-    /// binding must point at: a placeholder or dynamic binding reads that
-    /// argument, so the schema has to guarantee it is present and a string before any check.
-    pub(crate) fn required_string_property(&self, name: &str) -> Result<(), PropertyFault> {
-        match self.root.properties.get(name) {
-            None => Err(PropertyFault::Undeclared),
-            Some(SchemaNode::String { .. }) if self.root.required.iter().any(|required| required == name) => Ok(()),
-            Some(SchemaNode::String { .. }) => Err(PropertyFault::Optional),
-            Some(_) => Err(PropertyFault::NotString),
+    /// This schema with `name` a required top-level string: what an audience argument binding
+    /// implies, since a placeholder reads that argument and the schema has to guarantee it is
+    /// present and a string before any check. An undeclared property is added as a free
+    /// string, an optional string becomes required, and a property of another type is refused.
+    /// The result is compiled again, so the implied property is held to the budgets an
+    /// authored one is.
+    pub(crate) fn require_string(&self, name: &str) -> Result<ToolParameters, PropertyFault> {
+        let mut root = (*self.root).clone();
+        match root.properties.get(name) {
+            None => {
+                root.properties.insert(
+                    name.to_string(),
+                    SchemaNode::String {
+                        description: None,
+                        constraint: ScalarConstraint::Free,
+                        min_length: None,
+                        max_length: None,
+                    },
+                );
+            }
+            Some(SchemaNode::String { .. }) => {}
+            Some(_) => return Err(PropertyFault::NotString),
         }
+        if !root.required.iter().any(|required| required == name) {
+            root.required.push(name.to_string());
+        }
+        Self::compile(&render_object(&root)).map_err(PropertyFault::Budget)
     }
 
     /// Whether `name` is a required top-level property of any type — the shape an Annotator
@@ -242,9 +261,10 @@ impl ToolParameters {
     }
 }
 
-/// Why a top-level property is not the required string an audience argument binding needs.
-/// Nesting does not count: only the root object's own properties are read.
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+/// Why a top-level property is not what a binding needs: the required string an audience
+/// argument implies, or the required property an Annotator input reads. Nesting does not
+/// count: only the root object's own properties are read.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum PropertyFault {
     #[error("is not a top-level property of the tool's `parameters`")]
     Undeclared,
@@ -252,6 +272,8 @@ pub enum PropertyFault {
     NotString,
     #[error("is declared but not listed in `required`")]
     Optional,
+    #[error("cannot be added to the tool's `parameters`: {0}")]
+    Budget(ParamsError),
 }
 
 impl Serialize for ToolParameters {
@@ -1590,13 +1612,11 @@ mod tests {
     // --- the audience-binding read ------------------------------------------
 
     #[test]
-    fn a_binding_target_is_a_required_top_level_string_and_nothing_else() {
+    fn requiring_a_string_adds_or_promotes_a_top_level_property_and_refuses_another_type() {
         let schema = compile(json!({
             "type": "object",
             "properties": {
-                "to": { "type": "string" },
                 "channel": { "type": "string", "enum": ["ops", "dev"] },
-                "kind": { "type": "string", "const": "email" },
                 "cc": { "type": "string" },
                 "count": { "type": "integer" },
                 "meta": {
@@ -1605,24 +1625,49 @@ mod tests {
                     "required": ["owner"]
                 }
             },
-            "required": ["to", "channel", "kind", "count", "meta"],
+            "required": ["channel", "count", "meta"],
             "additionalProperties": true,
         }))
         .unwrap();
-        assert_eq!(schema.required_string_property("to"), Ok(()));
-        assert_eq!(schema.required_string_property("channel"), Ok(()));
-        assert_eq!(schema.required_string_property("kind"), Ok(()));
-        assert_eq!(schema.required_string_property("cc"), Err(PropertyFault::Optional));
-        assert_eq!(schema.required_string_property("count"), Err(PropertyFault::NotString));
-        assert_eq!(schema.required_string_property("meta"), Err(PropertyFault::NotString));
-        // Nesting does not count: `owner` is required inside `meta`, not at the top level.
-        assert_eq!(schema.required_string_property("owner"), Err(PropertyFault::Undeclared));
-        assert_eq!(schema.required_string_property("bcc"), Err(PropertyFault::Undeclared));
-        // The omitted-`parameters` default declares nothing, so it can host no binding.
+        // A required string keeps its constraints; an optional one becomes required.
+        assert_eq!(schema.require_string("channel").unwrap(), schema);
+        let promoted = schema.require_string("cc").unwrap();
+        assert_eq!(promoted.root.required, vec!["cc", "channel", "count", "meta"]);
+        assert_eq!(promoted.root.properties, schema.root.properties);
+        // An undeclared name is added as a free string; nesting does not count, so `owner`
+        // inside `meta` is undeclared at the top level.
+        let added = schema.require_string("owner").unwrap();
         assert_eq!(
-            ToolParameters::open().required_string_property("to"),
-            Err(PropertyFault::Undeclared)
+            added.root.properties["owner"],
+            SchemaNode::String {
+                description: None,
+                constraint: ScalarConstraint::Free,
+                min_length: None,
+                max_length: None,
+            }
         );
+        assert!(added.root.required.iter().any(|name| name == "owner"));
+        assert_eq!(schema.require_string("count"), Err(PropertyFault::NotString));
+        assert_eq!(schema.require_string("meta"), Err(PropertyFault::NotString));
+        // The implied property is held to the compiled budgets.
+        let members: serde_json::Map<String, Value> = (0..MAX_OBJECT_PROPERTIES)
+            .map(|i| (format!("p{i:03}"), json!({ "type": "string" })))
+            .collect();
+        let full = compile(json!({ "type": "object", "properties": members })).unwrap();
+        assert_eq!(
+            full.require_string("one-more"),
+            Err(PropertyFault::Budget(ParamsError::TooManyProperties))
+        );
+        let long = "a".repeat(MAX_PROPERTY_NAME_BYTES + 1);
+        assert_eq!(
+            schema.require_string(&long),
+            Err(PropertyFault::Budget(ParamsError::PropertyNameTooLong(long)))
+        );
+        // The omitted-`parameters` default declares nothing, so every argument is added.
+        let open = ToolParameters::open().require_string("to").unwrap();
+        assert!(open.validate(&json!({ "to": "ops", "extra": 1 })).is_ok());
+        assert!(open.validate(&json!({ "extra": 1 })).is_err());
+        assert!(open.validate(&json!({ "to": 1 })).is_err());
     }
 
     // --- the strict argument path ----------------------------------------------------------

@@ -1,0 +1,61 @@
+# Replace these names with one public repository and one private repository
+# that APPA_PROVIDER_GITHUB_TOKEN can read and push to.
+
+# A write into the private repository, from a fresh trajectory: trusted
+# data everyone may see reaches its collaborators.
+mcp/github/issue_write {
+  method: "create"
+  owner: "your-org"
+  repo: "your-private-repo"
+  title: "hello"
+}
+expect allow
+
+# Public repository content is suspicious, and stays public.
+mcp/github/get_file_contents {
+  owner: "your-org"
+  repo: "your-public-repo"
+  path: "README.md"
+}
+expect allow
+
+# Suspicious content cannot enter a tool that requires trusted input.
+mcp/shell/run_command {
+  command: "deploy"
+}
+expect deny
+
+# Public repository content can go to a public destination.
+mcp/mail/send {
+  to: "public"
+}
+expect allow
+
+# Private repository content narrows the audience to its collaborators.
+mcp/github/get_file_contents {
+  owner: "your-org"
+  repo: "your-private-repo"
+  path: "README.md"
+}
+expect allow
+
+# Private repository content cannot go to a public destination.
+mcp/mail/send {
+  to: "public"
+}
+expect deny
+
+# The repository's collaborators can receive it.
+mcp/mail/send {
+  to: "@github:repo/your-org/your-private-repo/collaborators"
+}
+expect allow
+
+# Suspicious content cannot be written back, even into the same repository.
+mcp/github/add_issue_comment {
+  owner: "your-org"
+  repo: "your-private-repo"
+  issue_number: 1
+  body: "summary"
+}
+expect deny

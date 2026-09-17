@@ -2,12 +2,14 @@
 //! executable behind the command override, a real store, the real hook path.
 
 mod common;
-use common::{audit_len, propose, ran, raw, root, serve};
+#[cfg(unix)]
+use common::fake_claude;
+use common::{actor, audit_len, offer_of, propose, ran, raw, root, serve};
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use appa_runtime::api::{AuditEvent, Runtime};
+use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
 use appa_runtime::{config::Config, hooks};
 use appa_runtime_api::{Actor, HookDecision, HookEvent, ProposedCall, TrajectoryId};
 use axum::Router;
@@ -438,15 +440,6 @@ async fn every_annotation_failure_refuses_the_hook_and_appends_nothing() {
 }
 
 #[cfg(unix)]
-fn fake_claude(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let path = dir.join("fake-claude");
-    std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("the fake claude writes");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("the fake claude is executable");
-    path
-}
-
-#[cfg(unix)]
 fn builtin_policy(command: &std::path::Path, extra: &str) -> String {
     format!(
         r#"
@@ -574,6 +567,7 @@ async fn concurrent_claude_consults_are_gated_by_the_runtime_permit_pool() {
                 HookEvent::ToolCall {
                     actor: Actor { root, child: None },
                     call: fetch("https://a.example"),
+                    call_id: None,
                     spawn: false,
                     ruling: None,
                 },
@@ -914,4 +908,295 @@ async fn a_tool_nothing_covers_refuses_the_hook_and_appends_nothing() {
         other => panic!("expected a typed refusal, got {other:?}"),
     }
     assert_eq!(audit_len(&runtime), before, "the refusal appends nothing");
+}
+
+/// An annotator whose mandate names a chain word, a configured group, and a literal reader,
+/// beside a loopback audience source serving the group.
+fn symbolic_policy(annotator_url: &str, audience_url: &str) -> String {
+    format!(
+        r#"
+[policy]
+version = 2
+
+[policy.audience.group.team]
+from = ["slack:user-group/team"]
+
+[[policy.annotator]]
+name = "classifier"
+audiences = ["internal", "@team", "alice@corp.example"]
+
+[[policy.tool]]
+name = "fetch"
+parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
+annotator = "classifier"
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+
+[externals.annotators.classifier]
+url = "{annotator_url}"
+
+[externals.audience.slack]
+url = "{audience_url}"
+selectors = [{{ template = "user-group/<handle>" }}]
+"#
+    )
+}
+
+/// A loopback audience source answering every group read with the members set on it.
+#[derive(Clone)]
+struct Members {
+    members: Arc<Mutex<Vec<&'static str>>>,
+    requests: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+impl Members {
+    fn set(&self, members: &[&'static str]) {
+        *self.members.lock().unwrap() = members.to_vec();
+    }
+
+    fn reads(&self) -> Vec<serde_json::Value> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+async fn serve_members() -> (String, Members) {
+    let source = Members {
+        members: Arc::new(Mutex::new(Vec::new())),
+        requests: Arc::new(Mutex::new(Vec::new())),
+    };
+    let router = Router::new()
+        .route(
+            "/audience",
+            post(|State(source): State<Members>, body: String| async move {
+                let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
+                source.requests.lock().unwrap().push(request);
+                let members: Vec<serde_json::Value> = source
+                    .members
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|email| serde_json::Value::String(email.to_string()))
+                    .collect();
+                (
+                    axum::http::StatusCode::OK,
+                    serde_json::json!({ "version": 1, "answer": { "members": members } }).to_string(),
+                )
+            }),
+        )
+        .with_state(source.clone());
+    (format!("{}/audience", serve(router).await), source)
+}
+
+fn answer(delta: serde_json::Value, requires_audience: Option<serde_json::Value>) -> Answer {
+    let mut requires = serde_json::json!({ "history": [], "attention": [] });
+    if let Some(audience) = requires_audience {
+        requires["audience"] = audience;
+    }
+    Answer::Wire(serde_json::json!({
+        "version": 1,
+        "answer": { "delta": delta, "requires": requires, "emits": [] }
+    }))
+}
+
+/// Accept the narrowing a produced delta offers, then the same call runs.
+async fn narrow_through(runtime: &Arc<Runtime>, call: ProposedCall) {
+    let offered = propose(runtime, call.clone()).await;
+    assert!(matches!(
+        runtime.execute_remedy(&actor(), offer_of(&offered)).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    assert_eq!(
+        propose(runtime, call.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(runtime, call).await;
+}
+
+/// A produced group requirement is the act's membership question, exactly as a written
+/// one: the annotation consult settles first, then the audience source is read once for
+/// the group, and the decision follows the pinned answer.
+#[tokio::test]
+async fn a_produced_group_requirement_reads_membership_from_the_audience_source() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (annotator_url, annotator) = serve_annotator().await;
+    let (audience_url, source) = serve_members().await;
+    let runtime = open_runtime(&dir, &symbolic_policy(&annotator_url, &audience_url)).await;
+
+    annotator.set(
+        "classifier",
+        answer(serde_json::json!({ "audience": ["alice@corp.example"] }), None),
+    );
+    narrow_through(&runtime, fetch("https://a.example")).await;
+    assert!(source.reads().is_empty(), "a literal delta reads no directory");
+
+    annotator.set(
+        "classifier",
+        answer(serde_json::json!({}), Some(serde_json::json!({ "within": ["@team"] }))),
+    );
+    source.set(&["alice@corp.example"]);
+    let consults_before = annotator.requests().len();
+    assert_eq!(
+        propose(&runtime, fetch("https://b.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert_eq!(annotator.requests().len(), consults_before + 1);
+    let reads = source.reads();
+    assert_eq!(reads.len(), 1, "one act, one membership read for the produced group");
+    assert_eq!(
+        reads[0]["artifact"],
+        serde_json::json!({ "selector": "user-group/team" })
+    );
+    ran(&runtime, fetch("https://b.example")).await;
+
+    source.set(&["carol@corp.example"]);
+    let decision = propose(&runtime, fetch("https://c.example")).await;
+    assert!(
+        matches!(decision, HookDecision::DenyCall { .. }),
+        "the narrowed trajectory is not within the moved group: {decision:?}"
+    );
+    assert_eq!(source.reads().len(), 2);
+
+    // A symbolic audience outside the mandate is no answer: the hook refuses operationally,
+    // appends nothing, and never reaches the directory.
+    let before = audit_len(&runtime);
+    annotator.set(
+        "classifier",
+        answer(
+            serde_json::json!({}),
+            Some(serde_json::json!({ "within": ["@nobody"] })),
+        ),
+    );
+    let refused = propose(&runtime, fetch("https://d.example")).await;
+    let HookDecision::Refuse { detail } = refused else {
+        panic!("an out-of-mandate audience is an operational refusal, got {refused:?}");
+    };
+    assert!(
+        detail.contains("classifier"),
+        "the refusal names the annotator: {detail}"
+    );
+    assert_eq!(audit_len(&runtime), before);
+    assert_eq!(source.reads().len(), 2);
+}
+
+/// A produced chain word narrows the trajectory symbolically: the delta is offered and
+/// accepted like any written narrowing, and no directory is read for it.
+#[tokio::test]
+async fn a_produced_chain_word_narrows_the_trajectory_without_a_directory_read() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (annotator_url, annotator) = serve_annotator().await;
+    let (audience_url, source) = serve_members().await;
+    let runtime = open_runtime(&dir, &symbolic_policy(&annotator_url, &audience_url)).await;
+
+    annotator.set(
+        "classifier",
+        answer(serde_json::json!({ "audience": ["internal"] }), None),
+    );
+    narrow_through(&runtime, fetch("https://a.example")).await;
+    assert!(source.reads().is_empty());
+
+    // The narrowed trajectory holds `internal` as written: a later call requiring it to
+    // stay within `internal` needs no membership either.
+    annotator.set(
+        "classifier",
+        answer(
+            serde_json::json!({}),
+            Some(serde_json::json!({ "within": ["internal"] })),
+        ),
+    );
+    assert_eq!(
+        propose(&runtime, fetch("https://b.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert!(source.reads().is_empty());
+}
+
+/// An annotator whose mandate reads the call's channel: bound to a tool that carries the
+/// argument, served by `url`; the slack source is declared so the placeholder routes.
+fn placeholder_mandate_policy(url: &str) -> String {
+    format!(
+        r#"
+[policy]
+version = 2
+
+[[policy.annotator]]
+name = "acl"
+audiences = ["@slack:channel/$channel_id"]
+
+[[policy.tool]]
+name = "read_channel"
+parameters = {{ type = "object", properties = {{ channel_id = {{ type = "string" }} }}, required = ["channel_id"] }}
+annotator = "acl"
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+
+[externals.annotators.acl]
+url = "{url}"
+
+[externals.audience.slack]
+url = "{url}"
+selectors = [{{ template = "viewer", feeds = "self" }}, {{ template = "channel/<id>" }}]
+"#
+    )
+}
+
+fn read_channel(channel_id: &str) -> ProposedCall {
+    ProposedCall {
+        tool: "read_channel".to_string(),
+        arguments: raw(serde_json::json!({ "channel_id": channel_id })),
+    }
+}
+
+/// A mandate placeholder is instantiated per call: the consult declares the one collection
+/// the call's argument spells, and an answer naming any other collection is outside the
+/// mandate.
+#[tokio::test]
+async fn a_mandate_placeholder_declares_the_collection_each_call_spells() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, annotator) = serve_annotator().await;
+    annotator.set(
+        "acl",
+        Answer::Wire(serde_json::json!({
+            "version": 1,
+            "answer": {
+                "delta": { "audience": ["@slack:channel/C1"] },
+                "requires": { "history": [], "attention": [] },
+                "emits": [],
+            }
+        })),
+    );
+    let runtime = open_runtime(&dir, &placeholder_mandate_policy(&url)).await;
+
+    // The answer names the channel the call reads: the produced delta narrows to it, which
+    // is offered for acceptance like any narrowing.
+    assert!(matches!(
+        propose(&runtime, read_channel("C1")).await,
+        HookDecision::DenyCall { .. }
+    ));
+    let requests = annotator.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]["declaration"]["audiences"],
+        serde_json::json!(["@slack:channel/C1"])
+    );
+
+    // The same answer for another channel names a collection the call did not spell: no
+    // answer at all, which refuses the hook.
+    let baseline = audit_len(&runtime);
+    let second = propose(&runtime, read_channel("C2")).await;
+    assert!(matches!(second, HookDecision::Refuse { .. }), "got {second:?}");
+    let requests = annotator.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1]["declaration"]["audiences"],
+        serde_json::json!(["@slack:channel/C2"])
+    );
+    assert_eq!(
+        audit_len(&runtime),
+        baseline,
+        "an answer outside the mandate appends nothing"
+    );
 }

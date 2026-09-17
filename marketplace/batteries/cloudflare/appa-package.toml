@@ -1,0 +1,10 @@
+schema = 1
+name = "cloudflare"
+description = "Rules for Cloudflare's documentation and Workers Observability MCP servers, one namespace bound to both: public documentation reads, internal logs, telemetry and Worker reads. No writes."
+
+[battery]
+policy = "appa.toml"
+hosts = ["claude-code", "kagent"]
+namespaces = ["cloudflare"]
+helpers = []
+setup = "Bind each Cloudflare server you run: appa battery install cloudflare --server <docs-server> --server <observability-server>. A deployment with one of them binds that one."

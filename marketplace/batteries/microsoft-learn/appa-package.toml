@@ -1,0 +1,9 @@
+schema = 1
+name = "microsoft-learn"
+description = "Rules for the Microsoft Learn MCP Server's 3 read-only tools: public documentation and code samples enter suspicious, and every query must be sharable with public."
+
+[battery]
+policy = "appa.toml"
+hosts = ["claude-code", "kagent"]
+namespaces = ["microsoft-learn"]
+helpers = []

@@ -19,8 +19,9 @@
 //! Beside `handle` the boundary makes projection reads — which branch has ended,
 //! which dispatches it has open, what its label renders as. They gate nothing
 //! and append nothing. One of them is not a read at all:
-//! [`RuntimeEngine::opens_a_second_dispatch`] is this deployment's own host
-//! policy, which the engine deliberately does not enforce.
+//! [`RuntimeEngine::opens_a_second_dispatch`] supports the runtime's legacy
+//! host policy for events without call identities. The engine deliberately
+//! does not impose that policy.
 //!
 //! External evidence is typed before it reaches an engine input:
 //! an authority verdict, a sanitizer derivation, an annotation answer, or a
@@ -36,10 +37,10 @@
 //! the plan from the live views and matches it by value, so an offer whose
 //! basis has moved declines instead of executing.
 
-use appa_engine::audience::{AudienceEvidence, IdentityImplementation, IdentityMapping, MemberClaims, SelectorSpec};
+use appa_engine::audience::{AudienceEvidence, MemberLookup, SelectorSpec, SourceClaims, Unroutable};
 use appa_engine::contract::{
-    AudienceRequirement, Delta, HistoryRequirement, LabelRequirements, PinnedAnnotation, ProducedAnnotation,
-    RecipientSpec, Requires, ToolDeclaration,
+    AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, LabelRequirements, PinnedAnnotation,
+    ProducedAnnotation, RecipientSpec, Requires, ToolDeclaration,
 };
 pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
@@ -47,7 +48,7 @@ use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
 use appa_engine::fact::{
     BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ReturnDerivation, ReturnPolicy, ReturnSanitizer,
 };
-use appa_engine::label::{Audience, Clause, DeclaredAudience, Label, ReaderId, SymbolicAtom, Trust};
+use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, Label, ReaderId, SymbolicAtom, Trust};
 use appa_engine::names::MarkName;
 use appa_engine::plan::{
     ExecutableRemedyPlan, FloorStanding, ForkAdvice, PlanId, PlannedBlock, RemedyPlan, RequiredRuling,
@@ -74,11 +75,11 @@ use appa_engine::value::{
 use appa_eventlog::Log;
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::api::OutcomeBody;
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
+use crate::api::{OutcomeBody, ToolNaming};
 use crate::consult::{
     AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, HistoryEntry,
-    Requirement, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
+    Requirement, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
 };
 use appa_runtime_api::{OfferedRemedy, OfferedReturn};
 
@@ -98,6 +99,10 @@ pub struct ReleasedCall {
     /// start so the child names the exact fork that opened it. `None` for
     /// every ordinary released call.
     pub fork: Option<SpawnBinding>,
+    /// The dispatch this release opened. The engine has always carried it on `Released`;
+    /// the runtime keeps it so a diagnostic can tie a hook to the dispatch it produced.
+    /// It never reaches an adapter: `HookDecision` is the wire type and carries no id.
+    pub dispatch: EngineDispatchId,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -152,25 +157,26 @@ pub enum ExternalRequest {
         /// declaration.
         templates: Vec<String>,
     },
-    /// One member lookup at its provider's source: the claims for one qualified reader.
+    /// One member lookup: the principal for one qualified reader, asked of `answering` —
+    /// the entry the deciding policy's routing sends `provider`'s lookups to, which is the
+    /// provider's own source when nothing redirects them.
     MemberLookup {
         provider: String,
         member: String,
+        answering: String,
         templates: Vec<String>,
-    },
-    /// One custom identity canonicalization: the principal for one member's claims. Only a
-    /// policy-selected custom implementation is consulted; the shipped `verified-email`
-    /// normalization is deterministic and recomputed by the engine.
-    Identity {
-        implementation: String,
-        claims: MemberClaims,
     },
 }
 
 /// A typed external answer. `None`/`Abstain` mean the external gave
 /// no usable answer; that stays runtime-side and grants nothing.
+// One consult's transient answer, never stored in bulk: an annotation's declared audiences
+// outsize the other variants and that is fine.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExternalEvidence {
+    /// Trusted runtime ledger input, never an external Annotator answer.
+    File { basis: appa_engine::value::FileBasis },
     Authority {
         authority: String,
         verdict: AuthorityVerdict,
@@ -191,19 +197,14 @@ pub enum ExternalEvidence {
     AudienceSource {
         provider: String,
         selector: String,
-        members: Option<Vec<MemberClaims>>,
+        members: Option<Vec<ReaderId>>,
     },
     MemberLookup {
         provider: String,
         member: String,
-        /// `None`: the consult produced no answer. `Some(None)`: the provider definitively
-        /// does not know the member, who keeps its qualified identity.
-        claims: Option<Option<MemberClaims>>,
-    },
-    Identity {
-        implementation: String,
-        id: String,
-        principal: Option<ReaderId>,
+        /// `None`: the consult produced no answer. `Some(None)`: the answering entry
+        /// definitively does not know the member, who keeps its qualified identity.
+        principal: Option<Option<ReaderId>>,
     },
 }
 
@@ -306,9 +307,12 @@ pub enum Next {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Presentation {
     KeepOutput,
+    /// The runtime's own words in place of the output: nothing here was admitted from a
+    /// value, and the harness may spell the tool names it carries.
     ReplaceOutput {
         placeholder: String,
     },
+    /// A value the engine admitted, delivered as it crossed.
     Value {
         value: String,
     },
@@ -344,15 +348,175 @@ impl EngineDecision {
     }
 }
 
+/// Why a replay was refused, with nothing of the refusal in it.
+///
+/// `TransitionRefusal` formats raw tool, authority, sanitizer and selector names into its
+/// `Display`, and the `EvidenceRefusal` under it formats provider selectors, member ids and
+/// verified email addresses. A diagnostic that carried the message would walk straight past
+/// everything the report's own classification guarantees, so it carries this instead.
+///
+/// A `&'static str` rather than a 94-variant enum, but with the same three properties: the
+/// field is private so a caller cannot fabricate one, every value is a literal so no
+/// refusal's own text can reach it, and the matches below are exhaustive so a new engine
+/// variant fails to compile rather than silently becoming a wildcard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(transparent)]
+pub struct ReplayRefusalClass(&'static str);
+
+impl From<&TransitionRefusal> for ReplayRefusalClass {
+    fn from(refusal: &TransitionRefusal) -> Self {
+        match refusal {
+            TransitionRefusal::Unopened => ReplayRefusalClass("unopened"),
+            TransitionRefusal::UnrequestedEvidence { .. } => ReplayRefusalClass("unrequested_evidence"),
+            TransitionRefusal::Opening(opening) => opening.into(),
+            TransitionRefusal::ForeignTrajectory => ReplayRefusalClass("foreign_trajectory"),
+            TransitionRefusal::UnknownTool(..) => ReplayRefusalClass("unknown_tool"),
+            TransitionRefusal::InvalidPayload(..) => ReplayRefusalClass("invalid_payload"),
+            TransitionRefusal::DigestMismatch => ReplayRefusalClass("digest_mismatch"),
+            TransitionRefusal::DispatchReopened => ReplayRefusalClass("dispatch_reopened"),
+            TransitionRefusal::WrongOccurrence => ReplayRefusalClass("wrong_occurrence"),
+            TransitionRefusal::UnreleasedDispatch => ReplayRefusalClass("unreleased_dispatch"),
+            TransitionRefusal::DispatchNotOpen => ReplayRefusalClass("dispatch_not_open"),
+            TransitionRefusal::RepeatCheckpoint => ReplayRefusalClass("repeat_checkpoint"),
+            TransitionRefusal::ContradictedSuccess => ReplayRefusalClass("contradicted_success"),
+            TransitionRefusal::EffectsMismatch => ReplayRefusalClass("effects_mismatch"),
+            TransitionRefusal::NotProviderRun(..) => ReplayRefusalClass("not_provider_run"),
+            TransitionRefusal::AdmissionAfterDecision => ReplayRefusalClass("admission_after_decision"),
+            TransitionRefusal::WrongAdmissionPosition => ReplayRefusalClass("wrong_admission_position"),
+            TransitionRefusal::ForeignAdmission => ReplayRefusalClass("foreign_admission"),
+            TransitionRefusal::UndeclaredAdmission => ReplayRefusalClass("undeclared_admission"),
+            TransitionRefusal::SplitAdmission => ReplayRefusalClass("split_admission"),
+            TransitionRefusal::ForgedLabel => ReplayRefusalClass("forged_label"),
+            TransitionRefusal::ForgedEvidence => ReplayRefusalClass("forged_evidence"),
+            TransitionRefusal::ForeignEvidence(evidence) => evidence.into(),
+            TransitionRefusal::UnansweredDecision { .. } => ReplayRefusalClass("unanswered_decision"),
+            TransitionRefusal::RepeatAdmission => ReplayRefusalClass("repeat_admission"),
+            TransitionRefusal::UnknownDispatch => ReplayRefusalClass("unknown_dispatch"),
+            TransitionRefusal::ForeignDispatch => ReplayRefusalClass("foreign_dispatch"),
+            TransitionRefusal::ForkBasisMismatch => ReplayRefusalClass("fork_basis_mismatch"),
+            TransitionRefusal::ChildActiveBeforeFork => ReplayRefusalClass("child_active_before_fork"),
+            TransitionRefusal::ContextUncontrolled => ReplayRefusalClass("context_uncontrolled"),
+            TransitionRefusal::SpawnMarkOutOfRange => ReplayRefusalClass("spawn_mark_out_of_range"),
+            TransitionRefusal::ForkReprepared => ReplayRefusalClass("fork_reprepared"),
+            TransitionRefusal::UnknownFork => ReplayRefusalClass("unknown_fork"),
+            TransitionRefusal::ForkAlreadyBound => ReplayRefusalClass("fork_already_bound"),
+            TransitionRefusal::SpawnFailed => ReplayRefusalClass("spawn_failed"),
+            TransitionRefusal::BatchIdentityConflict => ReplayRefusalClass("batch_identity_conflict"),
+            TransitionRefusal::UnbackedDecision => ReplayRefusalClass("unbacked_decision"),
+            TransitionRefusal::MisdecidedBatch => ReplayRefusalClass("misdecided_batch"),
+            TransitionRefusal::UnbackedReturnPolicy => ReplayRefusalClass("unbacked_return_policy"),
+            TransitionRefusal::ReturnShapeViolation => ReplayRefusalClass("return_shape_violation"),
+            TransitionRefusal::ReturnBelowFloor => ReplayRefusalClass("return_below_floor"),
+            TransitionRefusal::BranchEnded => ReplayRefusalClass("branch_ended"),
+            TransitionRefusal::NotForked => ReplayRefusalClass("not_forked"),
+            TransitionRefusal::WrongReturnIdentity => ReplayRefusalClass("wrong_return_identity"),
+            TransitionRefusal::ReturnRecordMismatch => ReplayRefusalClass("return_record_mismatch"),
+            TransitionRefusal::AcceptanceMismatch => ReplayRefusalClass("acceptance_mismatch"),
+            TransitionRefusal::UnmergedCrossing => ReplayRefusalClass("unmerged_crossing"),
+            TransitionRefusal::ObservationMismatch => ReplayRefusalClass("observation_mismatch"),
+            TransitionRefusal::UnknownReturn => ReplayRefusalClass("unknown_return"),
+            TransitionRefusal::UnknownAuthority(..) => ReplayRefusalClass("unknown_authority"),
+            TransitionRefusal::UnknownSanitizer(..) => ReplayRefusalClass("unknown_sanitizer"),
+            TransitionRefusal::SanitizerUnapplicable => ReplayRefusalClass("sanitizer_unapplicable"),
+            TransitionRefusal::DanglingRemedy => ReplayRefusalClass("dangling_remedy"),
+            TransitionRefusal::UnadmittedDerivation => ReplayRefusalClass("unadmitted_derivation"),
+            TransitionRefusal::StagedClose => ReplayRefusalClass("staged_close"),
+            TransitionRefusal::UndeclaredAdvance => ReplayRefusalClass("undeclared_advance"),
+            TransitionRefusal::OfferReopened => ReplayRefusalClass("offer_reopened"),
+            TransitionRefusal::ForeignOffer => ReplayRefusalClass("foreign_offer"),
+            TransitionRefusal::UnbackedOffer => ReplayRefusalClass("unbacked_offer"),
+            TransitionRefusal::ForgedBasis => ReplayRefusalClass("forged_basis"),
+            TransitionRefusal::IncompleteMenu => ReplayRefusalClass("incomplete_menu"),
+            TransitionRefusal::PlanReoffered => ReplayRefusalClass("plan_reoffered"),
+            TransitionRefusal::SplitBlock => ReplayRefusalClass("split_block"),
+            TransitionRefusal::BlockReused => ReplayRefusalClass("block_reused"),
+            TransitionRefusal::UnbackedAdvance => ReplayRefusalClass("unbacked_advance"),
+            TransitionRefusal::UnknownOffer => ReplayRefusalClass("unknown_offer"),
+            TransitionRefusal::OfferEnded => ReplayRefusalClass("offer_ended"),
+            TransitionRefusal::UnbackedApproval => ReplayRefusalClass("unbacked_approval"),
+            TransitionRefusal::ApprovalRepeated => ReplayRefusalClass("approval_repeated"),
+            TransitionRefusal::UndischargedAcceptance => ReplayRefusalClass("undischarged_acceptance"),
+            TransitionRefusal::UnbackedDenial => ReplayRefusalClass("unbacked_denial"),
+            TransitionRefusal::UnknownApproval => ReplayRefusalClass("unknown_approval"),
+            TransitionRefusal::StaleSpend => ReplayRefusalClass("stale_spend"),
+        }
+    }
+}
+
+impl From<&appa_engine::transition::OpeningTransitionRefusal> for ReplayRefusalClass {
+    fn from(refusal: &appa_engine::transition::OpeningTransitionRefusal) -> Self {
+        match refusal {
+            appa_engine::transition::OpeningTransitionRefusal::Duplicate => ReplayRefusalClass("opening_duplicate"),
+            appa_engine::transition::OpeningTransitionRefusal::WrongTrajectory { .. } => {
+                ReplayRefusalClass("opening_wrong_trajectory")
+            }
+            appa_engine::transition::OpeningTransitionRefusal::UnsupportedDialect { .. } => {
+                ReplayRefusalClass("opening_unsupported_dialect")
+            }
+            appa_engine::transition::OpeningTransitionRefusal::DigestMismatch => {
+                ReplayRefusalClass("opening_digest_mismatch")
+            }
+            appa_engine::transition::OpeningTransitionRefusal::ProfileMismatch => {
+                ReplayRefusalClass("opening_profile_mismatch")
+            }
+            appa_engine::transition::OpeningTransitionRefusal::VectorMismatch => {
+                ReplayRefusalClass("opening_vector_mismatch")
+            }
+        }
+    }
+}
+
+impl From<&appa_engine::audience::EvidenceRefusal> for ReplayRefusalClass {
+    fn from(refusal: &appa_engine::audience::EvidenceRefusal) -> Self {
+        match refusal {
+            appa_engine::audience::EvidenceRefusal::DuplicateSelector { .. } => {
+                ReplayRefusalClass("evidence_duplicate_selector")
+            }
+            appa_engine::audience::EvidenceRefusal::DuplicateLookup { .. } => {
+                ReplayRefusalClass("evidence_duplicate_lookup")
+            }
+            appa_engine::audience::EvidenceRefusal::MalformedMember { .. } => {
+                ReplayRefusalClass("evidence_malformed_member")
+            }
+            appa_engine::audience::EvidenceRefusal::ForeignLookup { .. } => {
+                ReplayRefusalClass("evidence_foreign_lookup")
+            }
+            appa_engine::audience::EvidenceRefusal::MalformedPrincipal { .. } => {
+                ReplayRefusalClass("evidence_malformed_principal")
+            }
+            appa_engine::audience::EvidenceRefusal::DuplicateMember { .. } => {
+                ReplayRefusalClass("evidence_duplicate_member")
+            }
+            appa_engine::audience::EvidenceRefusal::UnroutableSelector { .. } => {
+                ReplayRefusalClass("evidence_unroutable_selector")
+            }
+            appa_engine::audience::EvidenceRefusal::UnroutableLookup { .. } => {
+                ReplayRefusalClass("evidence_unroutable_lookup")
+            }
+            appa_engine::audience::EvidenceRefusal::UnrequestedEvidence { .. } => {
+                ReplayRefusalClass("evidence_unrequested_evidence")
+            }
+            appa_engine::audience::EvidenceRefusal::ContradictedPin { .. } => {
+                ReplayRefusalClass("evidence_contradicted_pin")
+            }
+        }
+    }
+}
+
 /// Why the engine boundary refused an event outright. Model-visible outcomes (a deny, a
 /// declined offer) are decisions, not refusals; a refusal means the event
 /// cannot be processed as it stands.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineRefusal {
     #[error("the persisted log is refused: {detail}")]
-    UntrustedLog { detail: String },
+    UntrustedLog {
+        detail: String,
+        /// The same refusal as a data-free label. `detail` is for this machine's logs and
+        /// its local caller; this is the only form that may leave it.
+        class: ReplayRefusalClass,
+    },
     #[error("the opening does not match the deciding policy: {detail}")]
-    OpeningMismatch { detail: String },
+    OpeningMismatch { detail: String, class: ReplayRefusalClass },
     #[error("engine invariant breach: {detail}")]
     Invariant { detail: String },
     #[error("the trajectory has ended")]
@@ -369,6 +533,27 @@ pub enum EngineRefusal {
     /// policy cannot read. Nothing is appended; the offer stands.
     #[error("{detail}")]
     Arguments { detail: String },
+}
+
+impl EngineRefusal {
+    /// This refusal as a data-free label.
+    ///
+    /// Every `detail` here is a `Display` from the engine, and those messages format raw tool,
+    /// authority, sanitizer and selector names, member ids and verified email addresses. A
+    /// diagnostic that leaves this machine reads the class and never the message.
+    #[cfg(feature = "daemon")]
+    pub(crate) fn class(&self) -> ReplayRefusalClass {
+        match self {
+            EngineRefusal::UntrustedLog { class, .. } | EngineRefusal::OpeningMismatch { class, .. } => *class,
+            EngineRefusal::Invariant { .. } => ReplayRefusalClass("invariant"),
+            EngineRefusal::Ended => ReplayRefusalClass("ended"),
+            EngineRefusal::DispatchClosed => ReplayRefusalClass("dispatch_closed"),
+            EngineRefusal::UnknownOffer => ReplayRefusalClass("unknown_offer"),
+            EngineRefusal::Unbindable => ReplayRefusalClass("unbindable"),
+            EngineRefusal::UndeclaredTool { .. } => ReplayRefusalClass("undeclared_tool"),
+            EngineRefusal::Arguments { .. } => ReplayRefusalClass("arguments"),
+        }
+    }
 }
 
 /// One trajectory's current label rendered for a display surface — the
@@ -541,12 +726,38 @@ pub struct RuntimeEngine {
     /// The trusted hint, builtin, and consult input mapping per registered `[[annotator]]`,
     /// policy-compiled and runtime-owned. The engine sees only the enforced mandate.
     annotators: BTreeMap<String, appa_policy::AnnotatorBinding>,
+    /// How the deployment this engine decides for names tools, so feedback that tells the
+    /// model to run one names it the way that model's harness dispatches it. A property of
+    /// the deployment, not of the policy: a retired engine decides under the same one.
+    naming: ToolNaming,
 }
 
 impl RuntimeEngine {
     /// Whether the policy writes a contract for this tool's exact name. The wildcard does not
     /// count: it covers a name at a proposal, and a spawn under `SpawnCoverage::Declared` needs
     /// the name written.
+    /// Every tool name the policy writes exactly — the spellings the deployment chose, and
+    /// so the only ones a report may carry as spelled.
+    ///
+    /// A name in a hook body or a refused proposal is the model's string: the harness passes
+    /// on whatever the model asked for, and APPA records the hook either way. Under a
+    /// wildcard the policy writes no name at all, so a wildcard deployment vouches for none
+    /// and every tool in its reports is a token.
+    #[cfg(feature = "daemon")]
+    pub(crate) fn vouched_tools(&self) -> std::collections::BTreeSet<String> {
+        let registry = self.engine.registry();
+        // Two lists, because policy compilation splits an exactly written name by what kind of
+        // tool it is. A provider-run tool is written out just as a checkable one is, so
+        // leaving it out here would tokenize a name the deployment chose.
+        let declared = registry.tools().map(|declaration| declaration.name());
+        let provider_run = registry.provider_run_annotations().map(|annotation| &annotation.name);
+        declared
+            .chain(provider_run)
+            .filter(|name| !name.is_name_selector())
+            .map(|name| name.as_str().to_string())
+            .collect()
+    }
+
     pub(crate) fn names_tool(&self, tool: &str) -> bool {
         let name = appa_engine::value::ToolName::new(tool);
         self.engine.registry().classify(&name) == Some(appa_engine::registry::ToolKind::Declared)
@@ -554,14 +765,16 @@ impl RuntimeEngine {
 
     /// The one constructor: both halves — the decision core and the consult input
     /// mapping — come from the same compiled policy, so an engine can never carry
-    /// another policy's mapping.
-    pub fn from_policy(policy: &appa_policy::Config) -> RuntimeEngine {
+    /// another policy's mapping. The naming is the deployment's, and every engine of one
+    /// deployment carries the same one.
+    pub(crate) fn from_policy(policy: &appa_policy::Config, naming: ToolNaming) -> RuntimeEngine {
         RuntimeEngine {
             engine: policy.engine().clone(),
             annotators: policy
                 .annotators()
                 .map(|(name, binding)| (name.as_str().to_string(), binding.clone()))
                 .collect(),
+            naming,
         }
     }
 
@@ -607,7 +820,8 @@ impl RuntimeEngine {
     }
 
     /// Would applying this batch leave the trajectory with more than one
-    /// dispatch open?
+    /// dispatch open? The runtime asks only when a host supplied no identity
+    /// for the new call or an older open call has no identity.
     pub(crate) fn opens_a_second_dispatch(&self, view: &EngineView, trajectory: &TrajectoryId, facts: &[Fact]) -> bool {
         let owner = engine_id(trajectory);
         let mut open: std::collections::BTreeSet<_> = view
@@ -639,6 +853,7 @@ impl RuntimeEngine {
     /// Whom taking this offer involves, read without taking it: nobody (the plain narrowing
     /// acceptance), an authority, or a sanitizer. `None` for an offer that no longer stands.
     /// `appa replay` reads it to take the offer a trace expects, the way the model would.
+    #[cfg(feature = "daemon")]
     pub(crate) fn offer_kind(
         &self,
         view: &EngineView,
@@ -651,7 +866,12 @@ impl RuntimeEngine {
             .offer_consults(view, &engine_id(trajectory), &engine_offer)
             .ok()?
         {
-            OfferConsult::Accept => Some(crate::api::OfferKind::Accept),
+            OfferConsult::Accept { sanitizer: None } => Some(crate::api::OfferKind::Accept),
+            OfferConsult::Accept {
+                sanitizer: Some(sanitizer),
+            } => Some(crate::api::OfferKind::Sanitizer {
+                name: sanitizer.as_str().to_string(),
+            }),
             OfferConsult::Authorities { required, .. } => {
                 let mut names: Vec<String> = required
                     .iter()
@@ -742,16 +962,21 @@ impl RuntimeEngine {
     }
 
     fn validated(&self, facts: Vec<Fact>, family: &TrajectoryId, revision: u64) -> Result<EngineView, EngineRefusal> {
-        self.engine
-            .view(&engine_id(family), facts, revision)
-            .map_err(|error| match error {
+        self.engine.view(&engine_id(family), facts, revision).map_err(|error| {
+            // The class is taken from the variant, not from the message: by the next
+            // line the discriminant is gone and only prose is left.
+            let class = ReplayRefusalClass::from(&error);
+            match error {
                 TransitionRefusal::Unopened | TransitionRefusal::Opening(_) => EngineRefusal::OpeningMismatch {
                     detail: error.to_string(),
+                    class,
                 },
                 error => EngineRefusal::UntrustedLog {
                     detail: error.to_string(),
+                    class,
                 },
-            })
+            }
+        })
     }
 
     /// The canonical bytes of one proposed call, for the byte-exact dispatch
@@ -764,6 +989,36 @@ impl RuntimeEngine {
             .resolve_call(ToolName::new(call.tool.clone()), call.arguments.get().as_bytes())
             .ok()?;
         Some(resolved.canonical_arguments().canonical_bytes().to_vec())
+    }
+
+    pub(crate) fn file_dispatch(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        call: &ProposedCall,
+    ) -> Result<EngineDispatchId, EngineRefusal> {
+        let resolved = self
+            .engine
+            .resolve_call(ToolName::new(call.tool.clone()), call.arguments.get().as_bytes())
+            .map_err(|error| EngineRefusal::Arguments {
+                detail: error.to_string(),
+            })?;
+        let owner = engine_id(trajectory);
+        let views = view.views(&owner).ok_or(EngineRefusal::Ended)?;
+        let digest = resolved.digest();
+        let occurrence = views.dispatch_count(&digest);
+        Ok(EngineDispatchId::new(owner, digest, occurrence))
+    }
+
+    pub(crate) fn file_output_label(
+        &self,
+        view: &EngineView,
+        dispatch: &EngineDispatchId,
+    ) -> Result<Label, EngineRefusal> {
+        self.engine
+            .file_output_label(view, dispatch)
+            .map(|label| label.unwrap_or_else(Label::top))
+            .map_err(outcome_refusal)
     }
 
     /// Render one trajectory's current label from the rebuilt view, for the
@@ -879,7 +1134,7 @@ impl RuntimeEngine {
                     CloseOutcome::Success { effects } => DispatchOutcome::Ran {
                         effects: effect_names(effects),
                     },
-                    CloseOutcome::Failure => DispatchOutcome::Failed,
+                    CloseOutcome::Failure | CloseOutcome::FailureWithBody { .. } => DispatchOutcome::Failed,
                     CloseOutcome::Indeterminate => DispatchOutcome::Unknown,
                 },
             },
@@ -977,7 +1232,7 @@ impl RuntimeEngine {
             // A tool no declaration and no wildcard covers is refused before anything is
             // judged: a typed refusal, never model feedback, and nothing is appended.
             Err(EngineError::UnknownTool(tool)) => return Err(EngineRefusal::UndeclaredTool { tool }),
-            Err(error) => return Ok(deny(malformed_feedback(&error))),
+            Err(error) => return Ok(deny(malformed_feedback(&error, self.naming))),
         };
         let owner = engine_id(trajectory);
         let Some(views) = view.views(&owner) else {
@@ -1007,7 +1262,16 @@ impl RuntimeEngine {
                         proposals: vec![proposed.clone()],
                         spawn: marked.then(|| SpawnMark::at(0)),
                         offer_nonce: engine_nonce(entropy),
-                        evidence: Vec::new(),
+                        evidence: evidence
+                            .iter()
+                            .filter_map(|entry| match entry {
+                                ExternalEvidence::File { basis } => Some(Evidence::File {
+                                    position: 0,
+                                    basis: basis.clone(),
+                                }),
+                                _ => None,
+                            })
+                            .collect(),
                         audience: audience.clone(),
                     };
                     self.engine.handle(view, CoreEvent::Proposals(batch))
@@ -1058,7 +1322,7 @@ impl RuntimeEngine {
                     detail: "a non-empty proposal produced no release, block, or repeat answer".to_string(),
                 })
             }
-            FollowUp::Malformed { error, .. } => Ok(deny_next(malformed_feedback(&error))),
+            FollowUp::Malformed { error, .. } => Ok(deny_next(malformed_feedback(&error, self.naming))),
             other => Err(EngineRefusal::Invariant {
                 detail: format!("a proposal produced a non-proposal follow-up: {other:?}"),
             }),
@@ -1100,7 +1364,7 @@ impl RuntimeEngine {
             .map(|(offer, plan)| (offer_id(offer), *plan))
             .collect();
         let registry = self.engine.registry();
-        let text = block_feedback(&block.block, &offers, registry, bounds);
+        let text = block_feedback(&block.block, &offers, registry, bounds, self.naming);
         let review = self.pending_reviews(block, &offers);
         (text, offers.into_iter().map(|(offer, _)| offer).collect(), review)
     }
@@ -1157,7 +1421,19 @@ impl RuntimeEngine {
             |audience| {
                 let report = ToolReport {
                     dispatch: dispatch.clone(),
-                    outcome: engine_outcome(outcome),
+                    outcome: match outcome {
+                        ToolOutcome::Failure { message }
+                            if view
+                                .views(dispatch.trajectory())
+                                .and_then(|views| views.dispatch_call(dispatch).cloned())
+                                .is_some_and(|call| call.file_basis().is_some()) =>
+                        {
+                            CoreToolOutcome::FailureWithBody {
+                                body: ValueBody::new(message.clone()),
+                            }
+                        }
+                        _ => engine_outcome(outcome),
+                    },
                     evidence: sanitizer_evidence(evidence),
                     offer_nonce: engine_nonce(entropy),
                     audience: audience.clone(),
@@ -1231,7 +1507,7 @@ impl RuntimeEngine {
                 ));
             }
             OfferConsult::Replay(outcome) => outcome,
-            OfferConsult::Accept => OfferOutcome::Approved(Vec::new()),
+            OfferConsult::Accept { .. } => OfferOutcome::Approved(Vec::new()),
             OfferConsult::Rewrite { sanitizer, call } => {
                 let arguments = call.canonical_arguments();
                 let source = RawResultDigest::of(arguments.canonical_bytes());
@@ -1243,7 +1519,7 @@ impl RuntimeEngine {
                     SanitizerSubject::Input { call: &call },
                 ) {
                     Ok(derived) => derived,
-                    Err(next) => return Ok(next),
+                    Err(next) => return Ok(*next),
                 };
                 // A rewrite into an Annotated declaration — its own or another — is
                 // annotated afresh about the rewritten arguments before the engine judges
@@ -1285,7 +1561,7 @@ impl RuntimeEngine {
                     source,
                     derived,
                 }),
-                Err(next) => return Ok(next),
+                Err(next) => return Ok(*next),
             },
             OfferConsult::Authorities { call, required } => {
                 match self.offer_authorities(&views, &engine_offer, &call, &required, evidence) {
@@ -1476,10 +1752,17 @@ impl RuntimeEngine {
         .map_err(|error| format!("`label` is not a label this policy spells: {error}"))?;
         let floor = Label {
             trust: delta.trust.unwrap_or(current.trust),
-            audience: delta
-                .audience
-                .map(|declared| Audience::of_declared(&declared))
-                .unwrap_or(current.audience),
+            audience: match delta.audience {
+                Some(DeltaAudience::Static(declared)) => Audience::of_declared(&declared),
+                // A floor is a label, not a contract: there is no call whose argument a
+                // placeholder could read.
+                Some(DeltaAudience::Selector(placeholder)) => {
+                    return Err(format!(
+                        "`label` spells the selector placeholder \"@{placeholder}\", which reads a call argument; a return floor names its audience outright"
+                    ));
+                }
+                None => current.audience,
+            },
         };
         let sanitizer = match step {
             Some(name) if name.is_attest_schema() => {
@@ -1557,7 +1840,13 @@ impl RuntimeEngine {
         staged: &[(EngineOfferId, PlanId)],
     ) -> Presentation {
         let offers: Vec<OfferId> = staged.iter().map(|(offer, _)| offer_id(offer)).collect();
-        let feedback = stage_feedback(headline, residual, &offers, self.engine.registry().trust_chain());
+        let feedback = stage_feedback(
+            headline,
+            residual,
+            &offers,
+            self.engine.registry().trust_chain(),
+            self.naming,
+        );
         Presentation::Blocked { feedback, offers }
     }
 
@@ -1640,7 +1929,7 @@ impl RuntimeEngine {
                 return blocked(shape_feedback(&mismatch, policy.as_ref()));
             }
             AudienceRound::Failed(TransitionError::SanitizerUnapplicable) => {
-                return Ok(withheld.present("the return sanitizer's derivation was not usable"));
+                return Ok(withheld.present("the return sanitizer's derivation was not usable", self.naming));
             }
             AudienceRound::Failed(error) => return Err(child_refusal(error)),
         };
@@ -1729,7 +2018,7 @@ impl RuntimeEngine {
             return Err(Resolution(vec![ExternalRequest::Annotation {
                 annotator: annotator.as_str().to_string(),
                 call: digest,
-                declaration: self.annotation_declaration(annotator, binding),
+                declaration: self.annotation_declaration(annotator, binding, resolved),
                 args: annotation_args(&binding.inputs, declaration, resolved),
             }]));
         };
@@ -1740,18 +2029,22 @@ impl RuntimeEngine {
         ))
     }
 
-    /// What one annotation consult declares: the Annotator's trusted hint, resolved mandate
-    /// vocabulary, and the input names its artifact carries.
+    /// What one annotation consult declares: the Annotator's trusted hint, the mandate
+    /// vocabulary bound to this call — a selector placeholder in it names the collection the
+    /// call's arguments spell — and the input names its artifact carries.
     fn annotation_declaration(
         &self,
         annotator: &appa_engine::names::AnnotatorName,
         binding: &appa_policy::AnnotatorBinding,
+        resolved: &ResolvedCall,
     ) -> AnnotationDeclaration {
         let registry = self.engine.registry();
         let chain = registry.trust_chain();
         let mandate = registry
             .annotator_mandate(annotator)
-            .expect("declarations name only registered annotators");
+            .expect("declarations name only registered annotators")
+            .instantiate(resolved.arguments())
+            .expect("a minted call fills every selector placeholder of its annotator's mandate");
         AnnotationDeclaration {
             hint: binding.hint.as_ref().map(|hint| hint.as_str().to_string()),
             inputs: binding.inputs.keys().cloned().collect(),
@@ -1759,7 +2052,7 @@ impl RuntimeEngine {
                 .trust_ranks()
                 .filter_map(|trust| chain.name_of(trust).map(str::to_string))
                 .collect(),
-            audiences: mandate.audiences().map(|reader| reader.as_str().to_string()).collect(),
+            audiences: mandate.audiences().clone(),
             attention_marks: mandate.marks().map(|mark| mark.as_str().to_string()).collect(),
             effects: mandate.effects().map(|kind| kind.as_str().to_string()).collect(),
         }
@@ -1767,7 +2060,8 @@ impl RuntimeEngine {
 
     /// The produced semantics a decoded answer pins for one call; the declaration's own
     /// metadata is not restated. `from_wire` confined every leaf to the declared mandate
-    /// vocabulary, so reading it back against the policy cannot fail.
+    /// vocabulary and already read each audience as the declared audience it spells, so
+    /// reading a rank back against the policy cannot fail.
     fn produced_annotation(&self, answer: &AnnotationAnswer) -> ProducedAnnotation {
         let chain = self.engine.registry().trust_chain();
         let rank = |name: &str| {
@@ -1775,23 +2069,19 @@ impl RuntimeEngine {
                 .rank_of(name)
                 .expect("a decoded annotation answer names declared ranks")
         };
-        let declared = |audience: &WireAudience| match audience {
-            WireAudience::Public => DeclaredAudience::Public,
-            WireAudience::Readers(readers) => DeclaredAudience::restricted(readers.iter().map(ReaderId::new)),
-        };
         let mut requirements = Vec::new();
         if let Some(required) = &answer.required_audience {
             if let Some(includes) = &required.includes {
-                requirements.push(AudienceRequirement::Includes(RecipientSpec::Static(declared(includes))));
+                requirements.push(AudienceRequirement::Includes(RecipientSpec::Static(includes.clone())));
             }
             if let Some(cap) = &required.cap {
-                requirements.push(AudienceRequirement::Cap(declared(cap)));
+                requirements.push(AudienceRequirement::Cap(cap.clone()));
             }
         }
         ProducedAnnotation {
             delta: Delta {
                 trust: answer.delta_trust.as_deref().map(rank),
-                audience: answer.delta_audience.as_ref().map(declared),
+                audience: answer.delta_audience.clone().map(DeltaAudience::Static),
             },
             emits: EffectSet::new(answer.emits.iter().map(|kind| EffectKind::new(kind.as_str())))
                 .expect("a decoded annotation answer holds no duplicate effect"),
@@ -1862,16 +2152,16 @@ impl RuntimeEngine {
         source: RawResultDigest,
         body: ValueBody,
         subject: SanitizerSubject<'_>,
-    ) -> Result<ValueBody, EngineDecision> {
+    ) -> Result<ValueBody, Box<EngineDecision>> {
         match sanitizer_derivation(evidence, sanitizer.as_str(), &source) {
             SanitizerAnswer::Derived(derived) => Ok(derived),
-            SanitizerAnswer::Missing => Err(EngineDecision::deliver(Next::ResolveExternal(vec![
+            SanitizerAnswer::Missing => Err(Box::new(EngineDecision::deliver(Next::ResolveExternal(vec![
                 self.sanitizer_request(sanitizer, source, body, subject),
-            ]))),
-            SanitizerAnswer::NoAnswer => Err(no_answer(format!(
+            ])))),
+            SanitizerAnswer::NoAnswer => Err(Box::new(no_answer(format!(
                 "[appa] sanitizer {} gave no answer; the offer stands and may be executed again",
                 sanitizer.as_str()
-            ))),
+            )))),
         }
     }
 
@@ -1921,14 +2211,9 @@ impl RuntimeEngine {
     /// The selector templates the policy registers for one provider, for a consult's
     /// declaration. Every primitive a consult asks for names a registered provider.
     fn templates_of(&self, provider: &str) -> Result<Vec<String>, EngineRefusal> {
-        self.engine
-            .registry()
-            .audience()
-            .templates(provider)
-            .map(|templates| templates.iter().map(|template| template.as_str().to_string()).collect())
-            .ok_or_else(|| EngineRefusal::Invariant {
-                detail: format!("a consult names the unregistered audience provider {provider}"),
-            })
+        selector_templates(self.engine.registry().audience(), provider).ok_or_else(|| EngineRefusal::Invariant {
+            detail: format!("a consult names the unregistered audience provider {provider}"),
+        })
     }
 
     /// One act judged under its audience evidence: the evidence gathered from the consult
@@ -1948,7 +2233,9 @@ impl RuntimeEngine {
                     Next::ResolveExternal(requests),
                 )));
             }
-            Err(AudienceFailure::Refused(detail)) => return Ok(AudienceRound::Presented(unresolved.present(&detail))),
+            Err(AudienceFailure::Refused(detail)) => {
+                return Ok(AudienceRound::Presented(unresolved.present(&detail, self.naming)));
+            }
         };
         match judge(&act.payload) {
             Ok(judged) => Ok(AudienceRound::Judged(judged)),
@@ -1956,19 +2243,26 @@ impl RuntimeEngine {
                 AudienceConsult::Requests(requests) => Ok(AudienceRound::Presented(EngineDecision::deliver(
                     Next::ResolveExternal(requests),
                 ))),
-                AudienceConsult::Unresolved(detail) => Ok(AudienceRound::Presented(unresolved.present(&detail))),
+                AudienceConsult::Unresolved(detail) => {
+                    Ok(AudienceRound::Presented(unresolved.present(&detail, self.naming)))
+                }
+                AudienceConsult::Unconfigured(level) => Ok(AudienceRound::Presented(
+                    unresolved.present_unconfigured(level, self.naming),
+                )),
             },
             Err(error) => Ok(AudienceRound::Failed(error)),
         }
     }
 
-    /// One act's audience evidence, gathered from the consult answers: the source claims,
-    /// member lookups, and — under a custom identity implementation — the identity mappings
-    /// for every claimed member. A failed consult stays runtime-side as a recorded no-answer;
-    /// an answer no registered source could have served is dropped rather than carried into
-    /// an act it would refuse. The gathered payload is pre-validated against the same test
-    /// replay applies — the engine's, which is the one rule on duplicate or foreign answers
-    /// — so an inadmissible answer is an operational refusal here, never an engine error.
+    /// One act's audience evidence, gathered from the consult answers: the source claims and
+    /// the member lookups. A failed consult stays runtime-side as a recorded no-answer; an
+    /// answer no registered source could have served is dropped rather than carried into an
+    /// act it would refuse. The gathered payload is pre-validated against the same test
+    /// replay applies — the engine's, which is the one rule on duplicate or malformed
+    /// answers — so an inadmissible answer is an operational refusal here, never an engine
+    /// error. Under a redirected provider every qualified member a source reports seats
+    /// through its lookup; the lookups still owed are this round's consults, asked before
+    /// the act is judged.
     fn act_audience(&self, evidence: &[ExternalEvidence]) -> Result<ActAudience, AudienceFailure> {
         let audience = self.engine.registry().audience();
         let mut payload = AudienceEvidence::default();
@@ -1982,20 +2276,15 @@ impl RuntimeEngine {
                 } => {
                     let routable = audience
                         .templates(provider)
-                        .is_some_and(|templates| templates.iter().any(|template| template.matches(selector)));
+                        .is_some_and(|templates| templates.iter().any(|declared| declared.template.matches(selector)));
                     if !routable {
                         continue;
                     }
-                    // A claim outside the source's own provider namespace is a broken
-                    // answer; conservatively, the selector was not answered.
-                    let members = members
-                        .clone()
-                        .filter(|members| members.iter().all(|member| qualified_by(provider, &member.id)));
                     match members {
-                        Some(members) => payload.sources.push(appa_engine::audience::SourceClaims {
+                        Some(members) => payload.sources.push(SourceClaims {
                             provider: provider.clone(),
                             selector: selector.clone(),
-                            members,
+                            members: members.clone(),
                         }),
                         None => {
                             unanswered.selectors.insert(SelectorSpec {
@@ -2008,105 +2297,59 @@ impl RuntimeEngine {
                 ExternalEvidence::MemberLookup {
                     provider,
                     member,
-                    claims,
+                    principal,
                 } => {
                     if !audience.providers().contains(provider) || !qualified_by(provider, member) {
                         continue;
                     }
-                    // Claims for an id other than the member asked are a broken answer — a
-                    // source could otherwise canonicalize its member to another provider's
-                    // namespace, or pre-seat an identity mapping for a member it does not
-                    // own. Conservatively, the member was not answered.
-                    let claims = match claims {
-                        Some(Some(answered)) if answered.id != *member => None,
-                        other => other.clone(),
-                    };
-                    match claims {
-                        Some(claims) => payload.lookups.push(appa_engine::audience::MemberLookup {
+                    match principal {
+                        Some(principal) => payload.lookups.push(MemberLookup {
                             provider: provider.clone(),
                             member: member.clone(),
-                            claims,
+                            principal: principal.clone(),
                         }),
                         None => {
                             unanswered.members.insert(member.clone());
                         }
                     }
                 }
-                ExternalEvidence::Identity {
-                    implementation,
-                    id,
-                    principal,
-                } => {
-                    let named = match audience.identity() {
-                        IdentityImplementation::Custom(name) => name.as_str() == implementation,
-                        IdentityImplementation::VerifiedEmail => false,
-                    };
-                    if !named {
-                        continue;
-                    }
-                    match principal {
-                        Some(principal) => payload.identity.push(IdentityMapping {
-                            id: id.clone(),
-                            principal: principal.clone(),
-                        }),
-                        None => {
-                            unanswered.identities.insert(id.clone());
-                        }
-                    }
-                }
                 _ => {}
             }
         }
-        // Under a custom identity implementation every claimed member canonicalizes through
-        // a pinned mapping; the ones still unmapped are this round's identity consults.
-        if let IdentityImplementation::Custom(name) = audience.identity() {
-            let mut requests: Vec<ExternalRequest> = Vec::new();
-            // One question per id, asked about the folded claim the engine will canonicalize
-            // through: a member reported twice, once silently, is one member.
-            let claimed = match appa_engine::audience::folded_claims(&payload) {
-                Ok(folded) => folded,
-                Err(refusal) => {
-                    tracing::debug!(%refusal, "gathered audience evidence refused");
-                    return Err(AudienceFailure::Refused(format!(
-                        "the gathered audience evidence is not admissible: {}",
-                        refusal_class(&refusal)
-                    )));
-                }
-            };
-            for claims in claimed.values() {
-                if payload.identity.iter().any(|mapping| mapping.id == claims.id) {
-                    continue;
-                }
-                if unanswered.identities.contains(&claims.id) {
-                    // The member id is directory data the model has not seen: it stays
-                    // out of the model-visible refusal.
-                    tracing::debug!(implementation = name.as_str(), id = %claims.id, "identity gave no principal");
-                    return Err(AudienceFailure::Refused(format!(
-                        "identity implementation {} gave no principal for a claimed member",
-                        name.as_str(),
-                    )));
-                }
-                let request = ExternalRequest::Identity {
-                    implementation: name.as_str().to_string(),
-                    claims: claims.clone(),
-                };
-                if !requests.contains(&request) {
-                    requests.push(request);
-                }
-            }
-            if !requests.is_empty() {
-                return Err(AudienceFailure::Consult(requests));
-            }
-        }
         if let Err(refusal) = audience.expansions(&payload) {
-            // The refusal's own Display can carry directory data (member ids, claimed
-            // emails) the model has not seen; the model-visible detail names only the
-            // failure class and its provider/selector.
+            // The refusal's own Display can carry directory data (member ids, principals)
+            // the model has not seen; the model-visible detail names only the failure class
+            // and its provider/selector.
             tracing::debug!(%refusal, "gathered audience evidence refused");
             return Err(AudienceFailure::Refused(format!(
                 "the gathered audience evidence is not admissible: {}",
                 refusal_class(&refusal)
             )));
+        }
+        let mut requests: Vec<ExternalRequest> = Vec::new();
+        for owed in audience.member_lookups_owed(&payload) {
+            if unanswered.members.contains(&owed.member) {
+                // The member is directory data the model has not seen.
+                return Err(AudienceFailure::Refused(format!(
+                    "audience source {} gave no answer for a member lookup",
+                    owed.provider
+                )));
+            }
+            let templates = selector_templates(audience, &owed.provider)
+                .expect("an owed lookup names the registered provider of a pinned source");
+            let answering = audience
+                .lookup_target(&owed.provider)
+                .unwrap_or(&owed.provider)
+                .to_string();
+            requests.push(ExternalRequest::MemberLookup {
+                provider: owed.provider,
+                member: owed.member,
+                answering,
+                templates,
+            });
+        }
+        if !requests.is_empty() {
+            return Err(AudienceFailure::Consult(requests));
         }
         Ok(ActAudience { payload, unanswered })
     }
@@ -2117,6 +2360,9 @@ impl RuntimeEngine {
         let audience = self.engine.registry().audience();
         let primitives = match audience.needed_primitives(&needed) {
             Ok(primitives) => primitives,
+            // A built-in level the policy maps to no sources is a static gap the policy
+            // loads with: the check needs its members and can never obtain them.
+            Err(Unroutable::UnmappedChain(level)) => return Ok(AudienceConsult::Unconfigured(level)),
             // A dynamically supplied reference no source serves: an operational failure,
             // never a policy state. (A statically written one refuses at policy load.)
             Err(unroutable) => return Ok(AudienceConsult::Unresolved(unroutable.to_string())),
@@ -2154,9 +2400,14 @@ impl RuntimeEngine {
                     spec.provider
                 )));
             }
+            let audience = self.engine.registry().audience();
             requests.push(ExternalRequest::MemberLookup {
                 provider: spec.provider.clone(),
                 member: spec.member.clone(),
+                answering: audience
+                    .lookup_target(&spec.provider)
+                    .unwrap_or(&spec.provider)
+                    .to_string(),
                 templates: self.templates_of(&spec.provider)?,
             });
         }
@@ -2175,7 +2426,7 @@ impl RuntimeEngine {
 
 /// One model-visible line for an evidence refusal: the failure class and, where they are
 /// policy or argument data the model already holds, the provider and selector — never a
-/// member id or a claimed email, which are directory data.
+/// member id or a principal, which are directory data.
 fn refusal_class(refusal: &appa_engine::audience::EvidenceRefusal) -> String {
     use appa_engine::audience::EvidenceRefusal;
     match refusal {
@@ -2183,30 +2434,21 @@ fn refusal_class(refusal: &appa_engine::audience::EvidenceRefusal) -> String {
             format!("two answers for selector {provider}:{selector} in one operation")
         }
         EvidenceRefusal::DuplicateLookup { .. } => "two lookups for one member in one operation".to_string(),
-        EvidenceRefusal::DuplicateIdentity { .. } => {
-            "two identity mappings for one member in one operation".to_string()
-        }
-        EvidenceRefusal::ForeignMember { provider, selector, .. } => {
-            format!("selector {provider}:{selector} reports a member outside its own provider namespace")
+        EvidenceRefusal::MalformedMember { provider, selector, .. } => {
+            format!(
+                "selector {provider}:{selector} reports a member that is neither an address nor a {provider}-qualified id"
+            )
         }
         EvidenceRefusal::ForeignLookup { provider, .. } => {
             format!("a lookup under provider {provider} answers outside that namespace")
         }
-        EvidenceRefusal::ForeignLookupClaims { provider, .. } => {
-            format!("a lookup under provider {provider} carries claims for a different id")
+        EvidenceRefusal::MalformedPrincipal { provider, .. } => {
+            format!(
+                "a lookup under provider {provider} names a principal that is neither an address nor a {provider}-qualified id"
+            )
         }
         EvidenceRefusal::DuplicateMember { provider, selector, .. } => {
             format!("selector {provider}:{selector} reports one member twice in one answer")
-        }
-        EvidenceRefusal::ReservedPrincipal { .. } => "an identity mapping names a reserved principal".to_string(),
-        EvidenceRefusal::ConflictingClaims { .. } => {
-            "one member carries conflicting verified-email claims in one operation".to_string()
-        }
-        EvidenceRefusal::MalformedEmail { .. } => {
-            "a member claims a verified email that does not parse as one address".to_string()
-        }
-        EvidenceRefusal::UnmappedIdentity { .. } => {
-            "the identity implementation returned no mapping for a claimed member".to_string()
         }
         EvidenceRefusal::UnroutableSelector { provider, selector } => {
             format!("no registered audience source serves selector {provider}:{selector}")
@@ -2282,6 +2524,13 @@ fn unresolved_audience(tool: &str, detail: &str) -> String {
     format!("[appa] {tool}: {detail}; the call was not checked — propose it again later")
 }
 
+fn unconfigured_audience(level: ChainAudience) -> String {
+    format!(
+        "the policy configures no membership sources for the built-in audience {level} \
+         ([policy.audience] {level}), so a check that needs its members cannot be established"
+    )
+}
+
 enum AuthorityOutcome {
     Outcome(OfferOutcome),
     Consult(Vec<ExternalRequest>),
@@ -2300,11 +2549,16 @@ struct Resolution(Vec<ExternalRequest>);
 
 enum AudienceConsult {
     Requests(Vec<ExternalRequest>),
+    /// An answer this trajectory did not obtain; proposing again can obtain it.
     Unresolved(String),
+    /// A built-in level the loaded policy maps to no sources; proposing again cannot
+    /// change the answer.
+    Unconfigured(ChainAudience),
 }
 
 /// How an act presents an audience answer it cannot obtain: a failed or inadmissible
-/// consult, or a dynamically supplied reference no registered source serves.
+/// consult, a dynamically supplied reference no registered source serves, or a built-in
+/// level the policy configures no sources for.
 #[derive(Clone, Copy)]
 enum UnresolvedAudience<'a> {
     /// The proposed call is denied.
@@ -2316,9 +2570,9 @@ enum UnresolvedAudience<'a> {
 }
 
 impl UnresolvedAudience<'_> {
-    fn present(self, detail: &str) -> EngineDecision {
+    fn present(self, detail: &str, naming: ToolNaming) -> EngineDecision {
         match self {
-            UnresolvedAudience::Denied { tool } => deny(unresolved_audience(tool, detail)),
+            UnresolvedAudience::Denied { tool } => deny(unresolved_audience(&naming.model_spelling(tool), detail)),
             UnresolvedAudience::Withheld { subject } => {
                 EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
                     feedback: format!("[appa] {detail}; the {subject} is withheld and may be retried"),
@@ -2328,6 +2582,25 @@ impl UnresolvedAudience<'_> {
             UnresolvedAudience::OfferStands => {
                 no_answer(format!("[appa] {detail}; the offer stands and may be executed again"))
             }
+        }
+    }
+
+    /// The same act, short of an answer no retry obtains: the wording names the policy
+    /// gap and invites no retry.
+    fn present_unconfigured(self, level: ChainAudience, naming: ToolNaming) -> EngineDecision {
+        let detail = unconfigured_audience(level);
+        match self {
+            UnresolvedAudience::Denied { tool } => deny(format!(
+                "[appa] {}: {detail}; the call is denied",
+                naming.model_spelling(tool)
+            )),
+            UnresolvedAudience::Withheld { subject } => {
+                EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
+                    feedback: format!("[appa] {detail}; the {subject} is withheld"),
+                    offers: Vec::new(),
+                }))
+            }
+            UnresolvedAudience::OfferStands => declined(format!("[appa] {detail}; the offer is declined")),
         }
     }
 }
@@ -2340,7 +2613,7 @@ enum AudienceRound<T> {
     Failed(TransitionError),
 }
 
-/// Why an act cannot carry audience evidence yet: the identity consults still owed, or the
+/// Why an act cannot carry audience evidence yet: the member lookups still owed, or the
 /// operational refusal a failed or inadmissible answer forces.
 enum AudienceFailure {
     Consult(Vec<ExternalRequest>),
@@ -2354,13 +2627,25 @@ struct ActAudience {
     unanswered: Unanswered,
 }
 
+/// The selector templates the policy registers for one provider, as a consult's declaration
+/// carries them; `None` for a provider no source registers.
+pub(crate) fn selector_templates(
+    audience: &appa_engine::audience::AudienceRegistry,
+    provider: &str,
+) -> Option<Vec<String>> {
+    audience.templates(provider).map(|templates| {
+        templates
+            .iter()
+            .map(|declared| declared.template.as_str().to_string())
+            .collect()
+    })
+}
+
 #[derive(Debug, Default)]
 struct Unanswered {
     selectors: BTreeSet<SelectorSpec>,
     /// Qualified members whose lookup produced no answer.
     members: BTreeSet<String>,
-    /// Member ids the custom identity implementation gave no principal for.
-    identities: BTreeSet<String>,
 }
 
 fn deny(text: String) -> EngineDecision {
@@ -2420,6 +2705,17 @@ fn parse_offer(offer: &OfferId) -> Option<EngineOfferId> {
     EngineOfferId::from_hex(&offer.0).ok()
 }
 
+/// Whether an id is spelled the way [`offer_id`] renders one: the truncated lowercase hex
+/// the model is shown, which is the only spelling it can quote back. Anything else names no
+/// offer this runtime ever minted, and says so without asking the store.
+pub(crate) fn renders_offer(quoted: &OfferId) -> bool {
+    quoted.0.len() == RENDERED_OFFER_CHARS
+        && quoted
+            .0
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
 /// The canonical identity a quoted id names, resolved against the offers this
 /// log has opened.
 pub(crate) fn resolve_rendered(log: &Log, rendered: &OfferId) -> Option<OfferId> {
@@ -2466,6 +2762,7 @@ fn released(release: &Released) -> ReleasedCall {
         tool: release.call.tool().as_str().to_string(),
         bytes: release.call.canonical_arguments().canonical_bytes().to_vec(),
         fork: release.fork.as_ref().map(fork_binding),
+        dispatch: release.dispatch.clone(),
     }
 }
 
@@ -2486,6 +2783,9 @@ fn engine_outcome(outcome: &ToolOutcome) -> CoreToolOutcome {
     }
 }
 
+/// What the model reads in place of the raw result. An admitted value and the runtime's
+/// own words are separate presentations here, because a harness delivers the first as it
+/// crossed and spells its own tool names into the second.
 fn outcome_presentation(outcome: &ToolOutcome, admitted: Option<ValueBody>) -> Presentation {
     match (outcome, admitted) {
         (
@@ -2494,8 +2794,8 @@ fn outcome_presentation(outcome: &ToolOutcome, admitted: Option<ValueBody>) -> P
             },
             Some(value),
         ) if value.as_str() == raw => Presentation::KeepOutput,
-        (_, Some(value)) => Presentation::ReplaceOutput {
-            placeholder: value.as_str().to_string(),
+        (_, Some(value)) => Presentation::Value {
+            value: value.as_str().to_string(),
         },
         (
             ToolOutcome::Success {
@@ -2567,13 +2867,37 @@ fn authority_verdict(evidence: &[ExternalEvidence], name: &str) -> Option<(Autho
     })
 }
 
-fn malformed_feedback(error: &EngineError) -> String {
+/// A refused call read back to the model, which knows the call it made by its own
+/// spelling and not by the identity the runtime keys it on.
+fn malformed_feedback(error: &EngineError, naming: ToolNaming) -> String {
+    let spelled = |tool: &str| naming.model_spelling(tool);
     match error {
-        EngineError::UnknownTool(tool) => format!("[appa] unknown tool {tool}: not in this deployment's policy"),
+        EngineError::UnknownTool(tool) => {
+            format!("[appa] unknown tool {}: not in this deployment's policy", spelled(tool))
+        }
         EngineError::ProviderRunTool(tool) => format!(
-            "[appa] tool {tool} is provider-run: it executes inside the inference call and cannot be proposed as a tool call"
+            "[appa] tool {} is provider-run: it executes inside the inference call and cannot be proposed as a tool call",
+            spelled(tool)
         ),
         error => format!("[appa] invalid call: {error}"),
+    }
+}
+
+/// The control tool's own name, without the `appa` family its canonical identity
+/// carries. It is the same spelling a harness advertises to its model, and for the
+/// same reason: a function-calling API rejects the `/` the canonical id contains.
+const BARE_CONTROL_TOOL: &str = appa_runtime_api::ADVERTISED_CONTROL_TOOL;
+
+/// How this deployment's model dispatches the runtime's own control tool. Feedback that
+/// tells a model to take a remedy names a call it has to make, so a served deployment
+/// spells the control tool the way that host dispatches it — Claude Code reaches the
+/// runtime's MCP server as `mcp__appa__execute_remedy_plan`. A host
+/// that embeds the runtime names its own tools, and there the tool's bare name is what the
+/// model has to go on.
+fn control_spelling(naming: ToolNaming) -> String {
+    match naming {
+        ToolNaming::AsAuthored => BARE_CONTROL_TOOL.to_string(),
+        ToolNaming::Canonical { .. } => naming.model_spelling(appa_runtime_api::CONTROL_TOOL),
     }
 }
 
@@ -2582,6 +2906,7 @@ fn stage_feedback(
     residual: &appa_engine::check::Narrowing,
     offers: &[OfferId],
     chain: &TrustChain,
+    naming: ToolNaming,
 ) -> String {
     let mut lines = vec![headline.to_string()];
     lines.extend(
@@ -2590,13 +2915,11 @@ fn stage_feedback(
             .map(|change| format!("  - {change}")),
     );
     if !offers.is_empty() {
+        let control = control_spelling(naming);
         lines.push(String::new());
         lines.push("To accept this change and receive the output:".to_string());
         for offer in offers {
-            lines.push(format!(
-                "  - execute_remedy_plan(offer_id: \"{}\")",
-                terminal_safe(&offer.0)
-            ));
+            lines.push(format!("  - {control}(offer_id: \"{}\")", terminal_safe(&offer.0)));
         }
     }
     lines.join("\n")
@@ -2885,6 +3208,7 @@ fn return_instruction(
     sanitizer: Option<&appa_engine::names::SanitizerName>,
     id: &OfferId,
     spelling: &ReturnSpelling,
+    control: &str,
 ) -> String {
     let id = terminal_safe(&id.0);
     let ReturnSpelling { floor, ranks } = spelling;
@@ -2894,7 +3218,7 @@ fn return_instruction(
              tool again with the same arguments. The subagent starts at this session's label, now {floor}, and can \
              accept no change below the floor it is given: a subagent that must read below this session's trust needs \
              the floor at that rank, and its return may then narrow this session that far. An omitted dimension keeps \
-             its current value.\n    execute_remedy_plan(offer_id: \"{id}\", label: {{trust: \"<rank>\"}}), with \
+             its current value.\n    {control}(offer_id: \"{id}\", label: {{trust: \"<rank>\"}}), with \
              <rank> one of {ranks} (lowest first)"
         ),
         Some(name) if name.is_attest_schema() => format!(
@@ -2902,20 +3226,20 @@ fn return_instruction(
              schema is strict: an object lists its `properties`, every one `required`, and is closed as written \
              (no `additionalProperties`); an integer carries `minimum` and `maximum`; a string leaf carries \
              `enum`, `const`, or `format`, never free text. The return is delivered at the attestation's \
-             label.\n    execute_remedy_plan(offer_id: \"{id}\", label: {floor}, return_schema: {{type: \
+             label.\n    {control}(offer_id: \"{id}\", label: {floor}, return_schema: {{type: \
              \"object\", ...}})"
         ),
         Some(name) => format!(
             "  - Have sanitizer {} rewrite the subagent's return before this session receives it, and declare the \
-             floor.\n    execute_remedy_plan(offer_id: \"{id}\", label: {floor})",
+             floor.\n    {control}(offer_id: \"{id}\", label: {floor})",
             terminal_safe(name.as_str())
         ),
     }
 }
 
-fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId, spelling: &ReturnSpelling) -> String {
+fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId, spelling: &ReturnSpelling, control: &str) -> String {
     if let Some(sanitizer) = plan.return_step() {
-        return return_instruction(sanitizer, id, spelling);
+        return return_instruction(sanitizer, id, spelling, control);
     }
     let needs_approval = !plan.required.is_empty();
     let action = match (needs_approval, plan.narrowing().is_some(), plan.sanitizer()) {
@@ -2933,10 +3257,13 @@ fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId, spelling: &Retu
         (true, false, None) => "Submit for approval".to_string(),
         (false, false, None) => "Apply the offered remedy".to_string(),
     };
-    format!(
-        "  - {action}:\n    execute_remedy_plan(offer_id: \"{}\")",
-        terminal_safe(&id.0),
-    )
+    let mut instruction = format!("  - {action}:\n    {control}(offer_id: \"{}\")", terminal_safe(&id.0));
+    if needs_approval {
+        instruction.push_str(
+            "\n    The confirmation card is not open yet. Make this call now; only then wait for the ruling.",
+        );
+    }
+    instruction
 }
 
 fn remedy_lines(
@@ -2944,7 +3271,12 @@ fn remedy_lines(
     offers: &[(OfferId, PlanId)],
     spelling: &ReturnSpelling,
     chain: &TrustChain,
+    naming: ToolNaming,
 ) -> Vec<String> {
+    // Both lines name a call this model has to make: the remedy through the runtime's own
+    // control tool, the redispatch through the tool itself. Each is spelled the way this
+    // deployment's harness dispatches it, not by the identity the runtime keys facts on.
+    let control = control_spelling(naming);
     planned
         .plans
         .iter()
@@ -2952,10 +3284,10 @@ fn remedy_lines(
             RemedyPlan::Executable(plan) => offers
                 .iter()
                 .find(|(_, offered)| *offered == plan.id)
-                .map(|(id, _)| remedy_instruction(plan, id, spelling)),
+                .map(|(id, _)| remedy_instruction(plan, id, spelling, &control)),
             RemedyPlan::Redispatch(redispatch) => Some(format!(
                 "  - Run {} first; it clears: {}.",
-                terminal_safe(redispatch.tool().as_str()),
+                terminal_safe(&naming.model_spelling(redispatch.tool().as_str())),
                 terminal_safe(
                     &redispatch
                         .clears()
@@ -2974,6 +3306,7 @@ fn block_feedback(
     offers: &[(OfferId, PlanId)],
     registry: &Registry,
     bounds: &ReturnBounds,
+    naming: ToolNaming,
 ) -> String {
     let chain = registry.trust_chain();
     let mut reasons = Vec::new();
@@ -2992,7 +3325,7 @@ fn block_feedback(
         appa_engine::check::Gap::Attention(mark) => registry
             .authorities()
             .iter()
-            .any(|authority| authority.mandate.attends.contains(mark)),
+            .any(|authority| authority.mandate.attends.covers(mark)),
         _ => false,
     });
     let public_expansion_reviewable = registry.authorities().iter().any(|authority| {
@@ -3028,7 +3361,7 @@ fn block_feedback(
     ];
     lines.extend(reasons.into_iter().map(|reason| format!("  - {reason}")));
 
-    let remedies = remedy_lines(planned, offers, &ReturnSpelling::of(chain, bounds), chain);
+    let remedies = remedy_lines(planned, offers, &ReturnSpelling::of(chain, bounds), chain, naming);
     if !remedies.is_empty() {
         lines.push(String::new());
         lines.push("Continue:".to_string());
@@ -3060,7 +3393,7 @@ fn fork_heading(advice: ForkAdvice) -> &'static str {
         ForkAdvice::Narrowing {
             standing: FloorStanding::Below,
             ..
-        } => "Not acceptable here:",
+        } => "Refused by the parent's declaration:",
     }
 }
 
@@ -3102,17 +3435,19 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
                 .to_string()
         }
         (FloorStanding::Below, true) => format!(
-            "This session is a subagent, and this change falls below the floor its parent declared: this session \
-             cannot accept it, and a subagent started here under the bare floor cannot either.\nA subagent started \
+            "The parent does not allow this session to admit the raw result. This restriction does not forbid \
+             an output sanitizer offered under Continue: execute that offer and retry the call.\nWithout an \
+             output sanitizer, a further subagent under the bare floor cannot admit the raw result either. \
+             A subagent started \
              here with a return sanitizer can: delegate {delegated} there, and declare that sanitizer when the \
              spawn asks for the return declaration."
         ),
         (FloorStanding::Below, false) => {
-            "This session is a subagent, and this change falls below the floor its parent declared: neither this \
-             session nor any subagent started here can accept it, and no registered return sanitizer carries \
-             this change back without applying it.\nDo not start a subagent for this. Finish without this call, \
-             or return a plain note that the work needs a subagent declared with a lower floor or a return \
-             sanitizer, so the parent can start one."
+            "The parent does not allow this session to admit the raw result. This restriction does not forbid \
+             an output sanitizer offered under Continue: execute that offer and retry the call.\nIf no output \
+             sanitizer is offered, finish without the raw result. A further subagent cannot bypass this floor, \
+             and no registered return sanitizer carries the change back. Tell the parent that the work needs \
+             a child declared with a lower floor or a return sanitizer."
                 .to_string()
         }
     }
@@ -3122,18 +3457,35 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
 mod tests {
     use super::TrustChain;
     use super::{
-        EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Next, OfferId, OfferNonce, ProposedCall,
-        Resolution, ReturnBounds, RuntimeEngine, SanitizerSubject, TrajectoryId, audience_wire, block_feedback,
-        engine_id, remedy_instruction, remedy_lines, terminal_safe,
+        BARE_CONTROL_TOOL, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Next, OfferId, OfferNonce,
+        ProposedCall, Resolution, ReturnBounds, RuntimeEngine, SanitizerSubject, TrajectoryId, audience_wire,
+        block_feedback, engine_id, remedy_instruction, remedy_lines, terminal_safe,
     };
-    use crate::consult::{AnnotationAnswer, HistoryEntry, RequiredAudienceAnswer, SanitizerPoint, WireAudience};
+    use crate::api::ToolNaming;
+    use crate::consult::{AnnotationAnswer, HistoryEntry, RequiredAudienceAnswer, SanitizerPoint};
     use appa_engine::check::{Gap, RawBlock};
-    use appa_engine::contract::{AudienceRequirement, HistoryRequirement, RecipientSpec};
+    use appa_engine::contract::{AudienceRequirement, DeltaAudience, HistoryRequirement, RecipientSpec};
     use appa_engine::fact::{EffectKind, EffectSet};
     use appa_engine::label::{Audience, DeclaredAudience, ReaderId, Trust};
     use appa_engine::names::{AnnotatorName, MarkName};
     use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RemedyStep};
     use appa_engine::value::{RawResultDigest, ToolName, ValueBody};
+
+    #[test]
+    fn a_parent_floor_restricts_raw_results_not_offered_output_sanitizers() {
+        for sanitized_return in [false, true] {
+            let advice = super::ForkAdvice::Narrowing {
+                standing: super::FloorStanding::Below,
+                sanitized_return,
+            };
+            assert_eq!(super::fork_heading(advice), "Refused by the parent's declaration:");
+            let text = super::fork_advice_text(advice, false);
+            assert!(text.contains("does not allow this session to admit the raw result"));
+            assert!(text.contains("does not forbid an output sanitizer offered under Continue"));
+            assert!(text.contains("execute that offer and retry the call"));
+            assert!(!text.contains("Finish without this call"));
+        }
+    }
 
     #[test]
     fn a_sanitizer_consult_names_its_point_and_the_tool_the_value_belongs_to() {
@@ -3153,7 +3505,7 @@ mod tests {
             "#,
         )
         .expect("the sanitizer policy compiles");
-        let engine = RuntimeEngine::from_policy(&policy);
+        let engine = RuntimeEngine::from_policy(&policy, ToolNaming::AsAuthored);
         let scrub = appa_engine::names::SanitizerName::new("scrub");
         let request = |subject: SanitizerSubject<'_>| match engine.sanitizer_request(
             &scrub,
@@ -3217,7 +3569,7 @@ mod tests {
     }
 
     fn annotator_engine(policy: &appa_policy::Config) -> RuntimeEngine {
-        RuntimeEngine::from_policy(policy)
+        RuntimeEngine::from_policy(policy, ToolNaming::AsAuthored)
     }
 
     #[test]
@@ -3268,7 +3620,7 @@ mod tests {
 
         let answer = AnnotationAnswer {
             delta_trust: Some("trusted".to_string()),
-            delta_audience: Some(WireAudience::Public),
+            delta_audience: Some(DeclaredAudience::Public),
             required_trust: None,
             required_audience: None,
             history: Vec::new(),
@@ -3393,11 +3745,11 @@ mod tests {
 
         let answer = || AnnotationAnswer {
             delta_trust: Some("suspicious".to_string()),
-            delta_audience: Some(WireAudience::Public),
+            delta_audience: Some(DeclaredAudience::Public),
             required_trust: Some("trusted".to_string()),
             required_audience: Some(RequiredAudienceAnswer {
-                includes: Some(WireAudience::Readers(vec!["support".to_string()])),
-                cap: Some(WireAudience::Public),
+                includes: Some(DeclaredAudience::restricted([ReaderId::new("support")])),
+                cap: Some(DeclaredAudience::Public),
             }),
             history: vec![HistoryEntry::Excludes("send".to_string())],
             attention: Vec::new(),
@@ -3419,7 +3771,10 @@ mod tests {
         assert_eq!(pin.call(), &call.digest(), "the pin binds the exact call it answered");
         let produced = pin.produced();
         assert_eq!(produced.delta.trust, Some(Trust::new(0)));
-        assert_eq!(produced.delta.audience, Some(DeclaredAudience::Public));
+        assert_eq!(
+            produced.delta.audience,
+            Some(DeltaAudience::Static(DeclaredAudience::Public))
+        );
         assert_eq!(produced.requires.label.trust_floor, Some(Trust::new(1)));
         assert_eq!(
             produced.requires.label.audience,
@@ -3496,12 +3851,114 @@ mod tests {
             ranks: String::new(),
         };
         assert_eq!(
-            remedy_lines(&planned, &offers, &spelling, &TrustChain::new(Vec::new())),
+            remedy_lines(
+                &planned,
+                &offers,
+                &spelling,
+                &TrustChain::new(Vec::new()),
+                ToolNaming::AsAuthored
+            ),
             vec![
-                remedy_instruction(&plan(3), &offers[1].0, &spelling),
-                remedy_instruction(&plan(8), &offers[0].0, &spelling),
+                remedy_instruction(&plan(3), &offers[1].0, &spelling, BARE_CONTROL_TOOL),
+                remedy_instruction(&plan(8), &offers[0].0, &spelling, BARE_CONTROL_TOOL),
             ],
             "the plan with no offer is not shown; the rest carry their own offer"
+        );
+    }
+
+    /// A redispatch line tells the model to run a tool itself, so a served deployment
+    /// names it the way that model's harness dispatches it and not by the canonical
+    /// identity the contract is keyed on.
+    #[test]
+    fn a_redispatch_line_names_the_tool_the_host_dispatches() {
+        let redispatch = appa_engine::plan::RedispatchPlan::new(
+            appa_engine::value::ToolName::new("host/claude-code/Bash"),
+            vec![Gap::Prior(EffectKind::new("reviewed"))],
+        )
+        .expect("a prior gap is one of the redispatch shapes");
+        let planned = PlannedBlock {
+            raw: RawBlock {
+                requirement_gaps: vec![],
+                narrowing: None,
+            },
+            plans: vec![RemedyPlan::Redispatch(redispatch)],
+            fork_advice: None,
+        };
+        let spelling = super::ReturnSpelling {
+            floor: "{}".to_string(),
+            ranks: String::new(),
+        };
+        let lines = |naming| remedy_lines(&planned, &[], &spelling, &TrustChain::new(Vec::new()), naming).join("\n");
+        assert_eq!(
+            lines(ToolNaming::Canonical {
+                adapter: appa_adapter_claude_code::adapter()
+            }),
+            lines(ToolNaming::AsAuthored).replace("host/claude-code/Bash", "Bash"),
+            "the served line differs from the recorded one only in the tool's spelling",
+        );
+    }
+
+    /// Both feedback builders tell the model to take a remedy through the runtime's own
+    /// control tool, which is a call that model has to make: a served deployment names it
+    /// the way that harness dispatches it — Claude Code reaches the runtime's MCP server
+    /// under a plugin-qualified spelling — and a host that embeds the runtime keeps the
+    /// bare name it serves the tool under.
+    #[test]
+    fn remedy_feedback_names_the_control_tool_the_host_dispatches() {
+        let claude_code = ToolNaming::Canonical {
+            adapter: appa_adapter_claude_code::adapter(),
+        };
+        let dispatched = "mcp__appa__execute_remedy_plan";
+        let served_spelling = |embedded: String| embedded.replace(BARE_CONTROL_TOOL, dispatched);
+
+        let plan = ExecutableRemedyPlan {
+            id: PlanId::new(1),
+            steps: vec![RemedyStep::Authorize(appa_engine::names::AuthorityName::new("officer"))],
+            required: vec![],
+        };
+        let planned = PlannedBlock {
+            raw: RawBlock {
+                requirement_gaps: vec![],
+                narrowing: None,
+            },
+            plans: vec![RemedyPlan::Executable(plan)],
+            fork_advice: None,
+        };
+        let offers = vec![(OfferId("offer-1".to_string()), PlanId::new(1))];
+        let spelling = super::ReturnSpelling {
+            floor: "{}".to_string(),
+            ranks: String::new(),
+        };
+        let blocked =
+            |naming| remedy_lines(&planned, &offers, &spelling, &TrustChain::new(Vec::new()), naming).join("\n");
+        assert_eq!(
+            blocked(claude_code),
+            served_spelling(blocked(ToolNaming::AsAuthored)),
+            "the served remedy line differs from the embedded one only in the control tool's spelling",
+        );
+
+        let residual = appa_engine::check::Narrowing {
+            from: appa_engine::label::Label::top(),
+            to: appa_engine::label::Label::top(),
+        };
+        let staged = |naming| {
+            super::stage_feedback(
+                "[appa] Blocked: this result cannot be delivered yet.",
+                &residual,
+                &[OfferId("offer-1".to_string())],
+                &TrustChain::new(Vec::new()),
+                naming,
+            )
+        };
+        assert_eq!(
+            staged(claude_code),
+            served_spelling(staged(ToolNaming::AsAuthored)),
+            "the served stage line differs from the embedded one only in the control tool's spelling",
+        );
+        assert_ne!(
+            staged(claude_code),
+            staged(ToolNaming::AsAuthored),
+            "the deployments name different spellings",
         );
     }
 
@@ -3545,6 +4002,7 @@ mod tests {
                     label: appa_engine::label::Label::top(),
                     lowest: Trust::new(0),
                 },
+                ToolNaming::AsAuthored,
             )
         };
         let diagnostic = "Fresh review is configured for this call, but no authority can review the required expansion to the public audience.";

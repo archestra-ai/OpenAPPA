@@ -27,6 +27,55 @@ impl Hint {
     }
 }
 
+/// The attention marks an authority's ruling may attend. A catch-all covers every mark the
+/// policy declares except the reserved denial, [`MarkName::BLOCKED`]: one human authority
+/// serves a single-reviewer deployment without naming each battery's mark, and a contract
+/// requiring `blocked` stays unremediable under it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Attends {
+    Named(Vec<MarkName>),
+    Any,
+}
+
+impl Default for Attends {
+    fn default() -> Self {
+        Attends::Named(Vec::new())
+    }
+}
+
+impl Attends {
+    /// The one spelling of a catch-all in policy and on the wire.
+    pub const WILDCARD: &'static str = "*";
+
+    pub fn covers(&self, mark: &MarkName) -> bool {
+        match self {
+            Attends::Named(marks) => marks.contains(mark),
+            Attends::Any => !mark.is_blocked(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        matches!(self, Attends::Named(marks) if marks.is_empty())
+    }
+
+    /// The marks this mandate names — its contribution to the policy's mark vocabulary. A
+    /// catch-all names none: it attends whatever the rest of the policy declares.
+    pub fn named(&self) -> &[MarkName] {
+        match self {
+            Attends::Named(marks) => marks,
+            Attends::Any => &[],
+        }
+    }
+
+    /// The mandate as policy spells it: the names, or the wildcard alone.
+    pub fn spellings(&self) -> Vec<String> {
+        match self {
+            Attends::Named(marks) => marks.iter().map(|mark| mark.as_str().to_string()).collect(),
+            Attends::Any => vec![Self::WILDCARD.to_string()],
+        }
+    }
+}
+
 /// What an authority's ruling may cover. Each power names its currency; a mandate covering nothing
 /// is a loud load error (the empty-remedy proof depends on it — see [`Mandate::is_empty`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,7 +86,7 @@ pub struct Mandate {
     /// the comparison needs.
     pub reader_ceiling: Option<DeclaredAudience>,
     pub waivers: Vec<EffectKind>,
-    pub attends: Vec<MarkName>,
+    pub attends: Attends,
 }
 
 impl Mandate {
@@ -131,22 +180,6 @@ pub enum DeclaredTransition {
 }
 
 impl DeclaredTransition {
-    /// The atoms this mandate writes: the application that reads it evaluates them
-    /// together, because `from` and `to` are one declaration.
-    pub(crate) fn needed_atoms<'a>(
-        &'a self,
-        providers: &'a std::collections::BTreeSet<String>,
-    ) -> impl Iterator<Item = SymbolicAtom> + 'a {
-        match self {
-            DeclaredTransition::Audience { from_includes, to } => {
-                Some(from_includes.needed_atoms(providers).chain(to.needed_atoms(providers)))
-            }
-            DeclaredTransition::Trust { .. } => None,
-        }
-        .into_iter()
-        .flatten()
-    }
-
     /// The transition as an application reads and a derivation record persists it: the
     /// declared `from` comparison as written, the `to` as the whole [`Audience`] the derived
     /// label carries. Nothing expands here — symbolic atoms survive into the derived label
@@ -272,6 +305,9 @@ impl Sanitizer {
         self.scope.covers(tags)
     }
 
+    /// The label this sanitizer's derivation of `raw` would carry, or `None` where the raw
+    /// label does not satisfy its declared `from`. Derivation decides the built-in chain and
+    /// the declared facts first; an atom it cannot settle is a membership ask.
     fn derives(
         &self,
         raw: &crate::label::Label,
@@ -283,13 +319,6 @@ impl Sanitizer {
             Evaluation::Fails => Ok(None),
             Evaluation::Needs(needed) => Err(needed),
         }
-    }
-
-    pub(crate) fn needed_atoms<'a>(
-        &'a self,
-        providers: &'a std::collections::BTreeSet<String>,
-    ) -> impl Iterator<Item = SymbolicAtom> + 'a {
-        self.transition.needed_atoms(providers)
     }
 }
 
@@ -322,5 +351,52 @@ mod tests {
         let raw = |audience: Audience| Label::new(Trust::new(1), audience);
         assert!(transition.may_admit(&raw(readers(&["alice", "carol"])), &context));
         assert!(!transition.may_admit(&raw(readers(&["bob"])), &context));
+    }
+
+    /// A transition between built-in levels is decided by the chain order alone: a value at
+    /// or above its `from` derives with no member list, so a `self → internal` sanitizer
+    /// runs on a deployment that binds no audience source. A value below its `from` is
+    /// undecided by derivation and asks for the members an exact comparison needs.
+    #[test]
+    fn a_chain_only_transition_derives_by_the_chain_order_and_asks_only_below_its_from() {
+        use crate::label::ChainAudience;
+        let chain = |level: ChainAudience| {
+            DeclaredAudience::Union(Clause::new([level], [], []).expect("a chain clause names no reader"))
+        };
+        let within = WithinAssertions::default();
+        let providers = std::collections::BTreeSet::new();
+        let expansions = Expansions::default();
+        let context = MembershipContext::new(&within, &providers, &expansions);
+        let levels = [ChainAudience::Self_, ChainAudience::Internal];
+        for from in levels {
+            for to in levels {
+                for at in levels {
+                    let sanitizer = Sanitizer {
+                        name: SanitizerName::new("mask"),
+                        on: SanitizerPoints {
+                            input: false,
+                            output: true,
+                        },
+                        transition: DeclaredTransition::Audience {
+                            from_includes: chain(from),
+                            to: chain(to),
+                        },
+                        scope: Scope::default(),
+                        hint: None,
+                    };
+                    let raw = Label::new(Trust::new(1), Audience::of_declared(&chain(at)));
+                    let derived = sanitizer.derive_output(&raw, &[], &context);
+                    if from <= at {
+                        assert_eq!(
+                            derived,
+                            Ok(Some(Label::new(Trust::new(1), Audience::of_declared(&chain(to))))),
+                            "{from:?} ⊆ {at:?} derives by the chain order"
+                        );
+                    } else {
+                        assert!(derived.is_err(), "{at:?} below {from:?} asks for members");
+                    }
+                }
+            }
+        }
     }
 }

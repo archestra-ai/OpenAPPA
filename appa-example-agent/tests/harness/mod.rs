@@ -218,6 +218,12 @@ impl ToolHost {
                     }
                 }),
             )
+            // An annotator that knows no subject: every consult is answered 404, the
+            // no-answer a real classifier gives for a record it has never seen.
+            .route(
+                "/annotator",
+                axum::routing::post(|| async { axum::http::StatusCode::NOT_FOUND }),
+            )
             .route(
                 "/sanitizer",
                 axum::routing::post(move |axum::Json(_): axum::Json<serde_json::Value>| {

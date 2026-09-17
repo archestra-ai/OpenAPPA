@@ -1,10 +1,12 @@
 "use client";
 
-import { Fragment, type AnchorHTMLAttributes, type HTMLAttributes, type ReactNode } from "react";
+import { createContext, Fragment, useContext, type AnchorHTMLAttributes, type HTMLAttributes, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import rehypeSlug from "rehype-slug";
 import remarkGfm from "remark-gfm";
+import type { LanguageFn } from "highlight.js";
+import { common } from "lowlight";
 
 import { AdvisorySignup } from "@/components/AdvisorySignup";
 import { BatteryCatalog } from "@/components/BatteryCatalog";
@@ -32,6 +34,37 @@ import { ProposalBlock } from "@/components/ProposalBlock";
 import { Term } from "@/components/Term";
 import { parseProposal, PROPOSAL_SPLIT } from "@/lib/proposals";
 import { termDefinition } from "@/lib/terms";
+
+const appaTraceLanguage: LanguageFn = (hljs) => ({
+  name: "OpenAPPA replay trace",
+  aliases: ["appa"],
+  contains: [
+    hljs.COMMENT("#", "$"),
+    {
+      scope: "title.function",
+      begin: /^[A-Za-z_][A-Za-z0-9_.-]*(?=\s*\{)/m,
+    },
+    {
+      scope: "attr",
+      begin: /[A-Za-z_][A-Za-z0-9_-]*(?=\s*:)/,
+    },
+    {
+      scope: "keyword",
+      begin: /\bexpect\b/,
+    },
+    {
+      scope: "literal",
+      begin: /\b(?:allow|deny|offer)\b/,
+    },
+    {
+      scope: "string",
+      begin: /"/,
+      end: /"/,
+      contains: [hljs.BACKSLASH_ESCAPE],
+    },
+    hljs.NUMBER_MODE,
+  ],
+});
 
 /* Block directives: a line of the form :::name::: in the markdown renders
    the mapped component in place. */
@@ -109,7 +142,7 @@ function AnchoredHeading({
   id,
   children,
   ...props
-}: HTMLAttributes<HTMLHeadingElement> & { level: 2 | 3 | 4; children?: ReactNode }) {
+}: HTMLAttributes<HTMLHeadingElement> & { level: 2 | 3 | 4 | 5; children?: ReactNode }) {
   const Tag = `h${level}` as const;
   return (
     <Tag id={id} {...props}>
@@ -123,10 +156,13 @@ function AnchoredHeading({
   );
 }
 
-/* Inline code whose text names a glossary term gets a definition popover;
+const InDocTable = createContext(false);
+
+/* Inline code outside tables whose text names a glossary term gets a definition popover;
    block code (array children after highlighting) falls through untouched. */
 function MarkdownCode({ children, ...props }: HTMLAttributes<HTMLElement> & { children?: ReactNode }) {
-  if (typeof children === "string") {
+  const inTable = useContext(InDocTable);
+  if (!inTable && typeof children === "string") {
     const definition = termDefinition(children);
     if (definition !== undefined) return <Term chip={children} definition={definition} />;
   }
@@ -157,21 +193,33 @@ function Markdown({ content, terms = true }: { content: string; terms?: boolean 
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
-      rehypePlugins={[rehypeSlug, rehypeHighlight]}
+      rehypePlugins={[
+        rehypeSlug,
+        [rehypeHighlight, { languages: { ...common, appa: appaTraceLanguage } }],
+      ]}
       components={{
+        p: ({ children }) => {
+          // Indented directives stay inside their Markdown list item.
+          const match = typeof children === "string" ? children.match(/^:::([a-z0-9-]+):::$/) : null;
+          const render = match ? DIRECTIVES[match[1]] : undefined;
+          return render ? <>{render()}</> : <p>{children}</p>;
+        },
         pre: (props) => <CodeBlock {...props} />,
         code: terms ? MarkdownCode : PlainCode,
         a: MarkdownLink,
         // A table's min-content width can exceed a phone viewport; without a
         // scroll container of its own it widens the whole page instead.
         table: (props) => (
-          <div className="table-scroll">
-            <table {...props} />
-          </div>
+          <InDocTable.Provider value={true}>
+            <div className="table-scroll">
+              <table {...props} />
+            </div>
+          </InDocTable.Provider>
         ),
         h2: (props) => <AnchoredHeading level={2} {...props} />,
         h3: (props) => <AnchoredHeading level={3} {...props} />,
         h4: (props) => <AnchoredHeading level={4} {...props} />,
+        h5: (props) => <AnchoredHeading level={5} {...props} />,
       }}
     >
       {content}

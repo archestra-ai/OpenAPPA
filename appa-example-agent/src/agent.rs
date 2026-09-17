@@ -7,7 +7,8 @@ use std::sync::Arc;
 use appa_runtime::api::{RemedyOutcome, Runtime};
 use appa_runtime::hooks;
 use appa_runtime_api::{
-    Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
+    ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef,
+    ToolOutcome, TrajectoryId, canonical_tool_name, is_reserved_tool_name,
 };
 use serde_json::value::RawValue;
 use thiserror::Error;
@@ -16,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use crate::budget::{Exhausted, ForkUnavailable, Limits, RunBudget};
 use crate::provider::{OpenAiCompatible, ProviderError};
 use crate::record::{CallId, Record, Recorded};
-use crate::tools::{CONTROL_TOOL, ToolCatalogue, ToolShim};
+use crate::tools::{CatalogueError, ToolCatalogue, ToolShim};
 use crate::wire::{ChatCompletionRequest, WireMessage, WireToolCall};
 
 /// A void child return is a control result, not an information-bearing value.
@@ -24,6 +25,7 @@ use crate::wire::{ChatCompletionRequest, WireMessage, WireToolCall};
 /// result makes it retry already-committed effects merely to obtain a reply.
 const VOID_CHILD_COMPLETION: &str = "[appa] the child trajectory ended and returned no value; no child result was admitted. This does not attest that its task or side effects succeeded. Do not repeat the delegated task merely to obtain a response.";
 const BLOCKED_CHILD_COMPLETION_CONTEXT: &str = "[appa] the child trajectory ended, but its return value was not admitted. This does not roll back child side effects; they may already have committed. Do not repeat the delegated task merely because its return was blocked.";
+const REFUSED_CALL_CONTEXT: &str = "This is an operational refusal, not a policy decision: nothing was judged and no remedy is offered. Propose the call again or finish without it.";
 const BUDGET_SKIPPED_CALL: &str = "[appa] this proposed call was not run because the execution budget was reached.";
 const BUDGET_FINALIZATION_PROMPT: &str = "The execution budget is reached. Do not call tools. Briefly report only work evidenced by this parent transcript and clearly name anything unresolved. Do not claim that a child task or side effect succeeded unless an admitted result says so.";
 
@@ -70,10 +72,24 @@ impl ArgumentKey {
 /// It is an ordinary registered contract — the runtime
 /// checks it like any call — and this names which one the agent acts
 /// on, and which argument carries the errand.
+///
+/// The name is validated at construction, exactly as [`ToolCatalogue::new`] validates the
+/// advertised inventory: a spawn tool under either control tool name would be canonicalized
+/// into the control tool at check time, and the agent would then compare the canonical name
+/// against the stored one and no longer recognize its own spawn.
 #[derive(Clone, Debug)]
 pub struct SpawnTool {
-    pub name: ToolName,
-    pub errand: ArgumentKey,
+    name: ToolName,
+    errand: ArgumentKey,
+}
+
+impl SpawnTool {
+    pub fn new(name: ToolName, errand: ArgumentKey) -> Result<Self, CatalogueError> {
+        if is_reserved_tool_name(&name.0) {
+            return Err(CatalogueError::ReservedToolName(name.0));
+        }
+        Ok(SpawnTool { name, errand })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,6 +110,10 @@ pub enum StopReason {
     BudgetExhausted,
     #[error("inference failed: {0}")]
     InferenceFailed(ProviderError),
+    /// A lifecycle event — a child's start or the crossing of its return —
+    /// was refused, or an event was answered with a decision this harness
+    /// cannot deliver. A refused call or result never stops the run: it
+    /// is withheld and the trajectory goes on.
     #[error("the runtime refused the run: {0}")]
     Refused(String),
 }
@@ -134,7 +154,8 @@ impl Agent {
     }
 
     /// Without a spawn tool the agent never opens a child, whatever
-    /// the policy allows.
+    /// the policy allows. Every [`SpawnTool`] that exists carries a name the agent can
+    /// still recognize after canonicalization, so this builder takes one as it is.
     pub fn with_spawn_tool(mut self, spawn: SpawnTool) -> Self {
         self.spawn = Some(spawn);
         self
@@ -397,7 +418,7 @@ impl Run<'_> {
             ));
         };
         let proposed = ProposedCall {
-            tool: call.function.name.clone(),
+            tool: canonical_tool_name(&call.function.name).to_string(),
             arguments,
         };
         let id = CallId(call.id.clone());
@@ -421,6 +442,7 @@ impl Run<'_> {
         let event = HookEvent::ToolCall {
             actor: self.actor(frame),
             call: proposed.clone(),
+            call_id: Some(id.0.clone()),
             spawn: self.marks_spawn(&proposed),
             ruling: None,
         };
@@ -440,13 +462,26 @@ impl Run<'_> {
                 Ok(Answered::Reply(feedback))
             }
             HookDecision::PassControl => self.execute_remedy(frame, &id, &proposed).await,
-            HookDecision::Refuse { detail } => Err(StopReason::Refused(detail)),
+            HookDecision::Refuse { detail } => Ok(self.refuse_call(frame, id, &proposed.tool, detail).await),
             other => Err(unexpected("a proposed call", &other)),
         }
     }
 
     fn marks_spawn(&self, call: &ProposedCall) -> bool {
         self.agent.spawn.as_ref().is_some_and(|spawn| spawn.name.0 == call.tool)
+    }
+
+    async fn refuse_call(&self, frame: &Frame, call: CallId, tool: &str, detail: String) -> Answered {
+        self.record(
+            frame,
+            Record::Refused {
+                call,
+                tool: tool.to_string(),
+                detail: detail.clone(),
+            },
+        )
+        .await;
+        Answered::Reply(refused_call(&detail))
     }
 
     async fn run_released(
@@ -534,19 +569,10 @@ impl Run<'_> {
                     other => return Err(unexpected("an echoed child return", &other)),
                 }
             }
-            HookDecision::Block { reason } => {
-                self.record(&parent.frame, Record::ReturnBlocked { reason: reason.clone() })
-                    .await;
-                (
-                    ToolOutcome::Failure {
-                        message: reason.clone(),
-                    },
-                    Some(format!(
-                        "{reason}\n\nHarness context:\n  - {BLOCKED_CHILD_COMPLETION_CONTEXT}"
-                    )),
-                )
-            }
-            HookDecision::Refuse { detail } => return Err(StopReason::Refused(detail)),
+            HookDecision::Block { reason } => self.unadmitted_return(parent, reason).await,
+            // The return could not be judged; it is withheld like a blocked one and the
+            // parent goes on. Only a refused lifecycle event ends the run.
+            HookDecision::Refuse { detail } => self.unadmitted_return(parent, withheld(&detail)).await,
             other => return Err(unexpected("a child return", &other)),
         };
         let id = CallId(parent.reply_to.clone());
@@ -558,6 +584,19 @@ impl Run<'_> {
             .transcript
             .push(WireMessage::tool_result(&parent.reply_to, reply));
         Ok(())
+    }
+
+    async fn unadmitted_return(&self, parent: &Suspended, reason: String) -> (ToolOutcome, Option<String>) {
+        self.record(&parent.frame, Record::ReturnBlocked { reason: reason.clone() })
+            .await;
+        (
+            ToolOutcome::Failure {
+                message: reason.clone(),
+            },
+            Some(format!(
+                "{reason}\n\nHarness context:\n  - {BLOCKED_CHILD_COMPLETION_CONTEXT}"
+            )),
+        )
     }
 
     async fn report(
@@ -580,6 +619,7 @@ impl Run<'_> {
         let event = HookEvent::ToolResult {
             actor: self.actor(frame),
             call,
+            call_id: Some(id.0.clone()),
             outcome,
         };
         match hooks::handle(&self.agent.runtime, event).await {
@@ -595,7 +635,7 @@ impl Run<'_> {
                 .await;
                 Ok(raw)
             }
-            HookDecision::ReplaceOutput { output } => {
+            HookDecision::ReplaceOutput { output } | HookDecision::DeliverValue { value: output } => {
                 self.record(
                     frame,
                     Record::Substituted {
@@ -617,7 +657,18 @@ impl Run<'_> {
                 .await;
                 Ok(reason)
             }
-            HookDecision::Refuse { detail } => Err(StopReason::Refused(detail)),
+            HookDecision::Refuse { detail } => {
+                let reason = withheld(&detail);
+                self.record(
+                    frame,
+                    Record::OutputBlocked {
+                        call: id.clone(),
+                        reason: reason.clone(),
+                    },
+                )
+                .await;
+                Ok(reason)
+            }
             other => Err(unexpected("a tool outcome", &other)),
         }
     }
@@ -632,7 +683,7 @@ impl Run<'_> {
             Ok(parsed) => parsed,
             Err(_) => {
                 return Ok(Answered::Reply(format!(
-                    "{CONTROL_TOOL} needs an offer_id, quoted exactly as the feedback surfaced it."
+                    "{ADVERTISED_CONTROL_TOOL} needs an offer_id, quoted exactly as the feedback surfaced it."
                 )));
             }
         };
@@ -706,13 +757,14 @@ impl Run<'_> {
         let event = HookEvent::ToolCall {
             actor: self.actor(frame),
             call: call.clone(),
+            call_id: Some(id.0.clone()),
             spawn: self.marks_spawn(&call),
             ruling: None,
         };
         match hooks::handle(&self.agent.runtime, event).await {
             HookDecision::AllowCall { spawn } => self.run_released(frame, id, call, spawn).await,
             HookDecision::DenyCall { feedback, .. } => Ok(Answered::Reply(feedback)),
-            HookDecision::Refuse { detail } => Err(StopReason::Refused(detail)),
+            HookDecision::Refuse { detail } => Ok(self.refuse_call(frame, id.clone(), &call.tool, detail).await),
             other => Err(unexpected("a substituted call", &other)),
         }
     }
@@ -837,6 +889,18 @@ fn errand_of(call: &ProposedCall, key: &ArgumentKey) -> String {
         .unwrap_or_else(|| call.arguments.get().to_string())
 }
 
+/// The runtime's refusal of a call it could not judge, as the model reads it. The
+/// call did not run and the trajectory stays open: an operational fault costs the one
+/// call it interrupted, never the run.
+fn refused_call(detail: &str) -> String {
+    format!("[appa] this call was refused and did not run: {detail}\n\n{REFUSED_CALL_CONTEXT}")
+}
+
+/// A result the runtime could not judge, withheld in the words the hook adapter uses.
+fn withheld(detail: &str) -> String {
+    format!("[appa] the tool result was withheld: {detail}")
+}
+
 fn spawn_closed() -> ToolOutcome {
     ToolOutcome::Success {
         body: OutcomeBody::Unavailable,
@@ -847,4 +911,33 @@ fn unexpected(event: &str, decision: &HookDecision) -> StopReason {
     StopReason::Refused(format!(
         "{event} was answered with {decision:?}, which it cannot deliver"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The agent recognizes its own spawn by comparing the stored name against the name a
+    /// proposal carries, and every proposal carries the canonicalized name. A spawn tool
+    /// under either control tool name would canonicalize into the control tool and stop
+    /// being recognized, so no such [`SpawnTool`] can be built — and every one that can be
+    /// is its own canonical name.
+    #[test]
+    fn a_spawn_tool_is_named_what_the_runtime_will_call_it() {
+        for reserved in [ADVERTISED_CONTROL_TOOL, appa_runtime_api::CONTROL_TOOL] {
+            assert_eq!(
+                SpawnTool::new(ToolName::new(reserved), ArgumentKey::new("errand")).err(),
+                Some(CatalogueError::ReservedToolName(reserved.to_string())),
+            );
+        }
+        for ordinary in ["delegate", "fork", "mcp/evil/execute_remedy_plan"] {
+            let spawn = SpawnTool::new(ToolName::new(ordinary), ArgumentKey::new("errand"))
+                .expect("an ordinary host tool names a spawn");
+            assert_eq!(
+                canonical_tool_name(&spawn.name.0),
+                spawn.name.0,
+                "a proposal of this spawn carries the name the agent stored"
+            );
+        }
+    }
 }

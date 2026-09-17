@@ -42,27 +42,41 @@
 //! `ElicitationResult` hook to answer has replaced the person
 //! deliberately, which this runtime cannot detect.
 
+#[cfg(feature = "daemon")]
 use std::time::Duration;
 
+#[cfg(feature = "daemon")]
 const WITHDRAW_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[cfg(feature = "daemon")]
 use rmcp::model::{
     ClientResult, ElicitRequest, ElicitRequestParams, ElicitationAction, ElicitationSchema, ServerRequest,
 };
+#[cfg(feature = "daemon")]
 use rmcp::service::{ElicitationMode, PeerRequestOptions, RequestContext, RoleServer, ServiceError};
 
 use crate::consult::{AudienceRequirement, AuthorityArtifact, AuthorityDeclaration, Requirement};
-use crate::external::{ConsultOutcome, NoAnswerReason};
+use crate::external::ConsultOutcome;
+#[cfg(feature = "daemon")]
+use crate::external::NoAnswerReason;
 
-/// The open `execute_remedy_plan` request, and the one way back to the
-/// person while it runs. Borrowed for the length of that call and never
-/// stored: the peer is usable only from the handler task that owns the
-/// request, and MCP opens no second window once the call returns.
-pub struct Elicitation {
-    request: RequestContext<RoleServer>,
-    timeout: Duration,
+/// Which channel carries one review back to a person. An enum rather than a
+/// struct because a build without the server stack has no channel at all: the
+/// type is then uninhabited, every `Option<&Elicitation>` threaded through the
+/// engine is `None`, and no signature changes between the two builds.
+pub enum Elicitation {
+    /// The open `execute_remedy_plan` request, and the one way back to the
+    /// person while it runs. Borrowed for the length of that call and never
+    /// stored: the peer is usable only from the handler task that owns the
+    /// request, and MCP opens no second window once the call returns.
+    #[cfg(feature = "daemon")]
+    Mcp {
+        request: RequestContext<RoleServer>,
+        timeout: Duration,
+    },
 }
 
+#[cfg(feature = "daemon")]
 enum Ending {
     Answered(Result<ClientResult, ServiceError>),
     Cancelled,
@@ -70,20 +84,34 @@ enum Ending {
 }
 
 impl Elicitation {
+    #[cfg(feature = "daemon")]
     pub fn new(request: RequestContext<RoleServer>, timeout: Duration) -> Elicitation {
-        Elicitation { request, timeout }
+        Elicitation::Mcp { request, timeout }
+    }
+
+    /// No channel is compiled in, so no caller can hold one of these.
+    #[cfg(not(feature = "daemon"))]
+    pub async fn ask(
+        &self,
+        _authority: &str,
+        _declaration: &AuthorityDeclaration,
+        _artifact: &AuthorityArtifact,
+    ) -> ConsultOutcome {
+        match *self {}
     }
 
     /// Ask the reviewer to rule on one consult, and return the answer
     /// in the same shape the authority wire uses, so a component
     /// switched between backends yields identical evidence.
+    #[cfg(feature = "daemon")]
     pub async fn ask(
         &self,
         authority: &str,
         declaration: &AuthorityDeclaration,
         artifact: &AuthorityArtifact,
     ) -> ConsultOutcome {
-        let peer = &self.request.peer;
+        let Elicitation::Mcp { request, timeout } = self;
+        let peer = &request.peer;
         if !peer.supported_elicitation_modes().contains(&ElicitationMode::Form) {
             tracing::warn!(
                 client = ?peer.peer_info().map(|info| info.client_info.clone()),
@@ -91,7 +119,7 @@ impl Elicitation {
             );
             return ConsultOutcome::NoAnswer(NoAnswerReason::Unreachable);
         }
-        let request = ElicitRequestParams::FormElicitationParams {
+        let params = ElicitRequestParams::FormElicitationParams {
             meta: None,
             message: review_text(authority, declaration, artifact),
             // No fields: the action is the answer.
@@ -101,7 +129,7 @@ impl Elicitation {
         };
         let mut handle = match peer
             .send_cancellable_request(
-                ServerRequest::ElicitRequest(ElicitRequest::new(request)),
+                ServerRequest::ElicitRequest(ElicitRequest::new(params)),
                 PeerRequestOptions::no_options(),
             )
             .await
@@ -116,8 +144,8 @@ impl Elicitation {
             let answer = &mut handle.rx;
             tokio::select! {
                 biased;
-                () = self.request.ct.cancelled() => Ending::Cancelled,
-                () = tokio::time::sleep(self.timeout) => Ending::TimedOut,
+                () = request.ct.cancelled() => Ending::Cancelled,
+                () = tokio::time::sleep(*timeout) => Ending::TimedOut,
                 received = answer => match received {
                     Ok(answered) => Ending::Answered(answered),
                     Err(_) => Ending::Answered(Err(ServiceError::TransportClosed)),

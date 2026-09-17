@@ -5,11 +5,136 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
+use std::time::Duration;
 
 use appa_runtime::api::{OfferId, Runtime};
 use appa_runtime::hooks;
-use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
+use appa_runtime_api::{
+    Actor, AdapterName, HookDecision, HookEvent, OutcomeBody, ParseRefusal, ProposedCall, ToolOutcome, TrajectoryId,
+    WireDecision, WireEvent,
+};
+
+/// The Claude Code hook JSON a suite is written in, as the served runtime
+/// reads it: translated onto the wire by the client-side codec (as `appa
+/// hook --adapter claude-code` does) and derived back by the served
+/// adapter, so the event's tool is the canonical one. `None` for a hook the
+/// codec does not gate.
+pub fn claude_event(hook_json: &serde_json::Value) -> Option<HookEvent> {
+    let body = serde_json::to_vec(hook_json).expect("the event serializes");
+    let event = (appa_adapter_claude_code::codec().parse)(&body).expect("the Claude Code event parses")?;
+    let wire = WireEvent::from_event(AdapterName::ClaudeCode, &event).expect("the event translates");
+    let accepted = wire
+        .into_event(&appa_adapter_claude_code::adapter())
+        .expect("the wire event derives")
+        .expect("a translated event is no ping");
+    Some(accepted.event)
+}
+
+/// One Claude Code hook through the served `/hook` dispatcher, wire to wire,
+/// with the wire decision rendered back into Claude Code's hook answer, as
+/// `appa hook` prints it. A refusal before any event
+/// exists comes back as the runtime's `{"error": …}` body.
+pub async fn claude_hook(runtime: &Runtime, hook_json: &serde_json::Value) -> (u16, serde_json::Value) {
+    let codec = appa_adapter_claude_code::codec();
+    let body = serde_json::to_vec(hook_json).expect("the event serializes");
+    let event = match (codec.parse)(&body) {
+        Ok(Some(event)) => event,
+        Ok(None) => return (200, serde_json::json!({})),
+        Err(ParseRefusal::Unreadable { detail }) => return (400, serde_json::json!({ "error": detail })),
+        Err(ParseRefusal::Malformed { detail }) => return (409, serde_json::json!({ "error": detail })),
+    };
+    let wire = WireEvent::from_event(AdapterName::ClaudeCode, &event).expect("the event translates");
+    let wire = serde_json::to_vec(&wire).expect("the wire event serializes");
+    let (status, answer) = hooks::answer(runtime, &appa_adapter_claude_code::adapter(), &wire).await;
+    match serde_json::from_value::<WireDecision>(answer.clone()).map(WireDecision::into_decision) {
+        Ok(Ok(decision)) => (status, (codec.render)(&event, &decision)),
+        _ => (status, answer),
+    }
+}
+
+/// A served `appa runtime` process on a free loopback port, killed on drop.
+pub struct ServedRuntime {
+    child: Child,
+    pub url: String,
+}
+
+impl ServedRuntime {
+    /// Whether the runtime process has exited, reaping it when it has.
+    pub fn has_exited(&mut self) -> bool {
+        self.child.try_wait().expect("the child polls").is_some()
+    }
+}
+
+impl Drop for ServedRuntime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+pub fn free_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("an ephemeral port binds");
+    let port = listener.local_addr().expect("the bound address is readable").port();
+    drop(listener);
+    port
+}
+
+/// Start the built binary as `appa runtime` over `config` and `db`, and wait until
+/// `/health` answers.
+pub fn serve_runtime(config: &Path, db: &Path) -> ServedRuntime {
+    let port = free_port();
+    let child = Command::new(env!("CARGO_BIN_EXE_appa"))
+        .arg("runtime")
+        .arg("--config")
+        .arg(config)
+        .arg("--db")
+        .arg(db)
+        .arg("--listen")
+        .arg(format!("127.0.0.1:{port}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the binary spawns");
+    let mut served = ServedRuntime {
+        child,
+        url: format!("http://127.0.0.1:{port}"),
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        if let Some(status) = served.child.try_wait().expect("the child polls") {
+            panic!("the runtime exited before becoming healthy: {status}");
+        }
+        if http(&format!("{}/health", served.url), "GET", None).is_some() {
+            return served;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("the runtime never became healthy within the deadline");
+}
+
+/// One plain HTTP request; the body on a 2xx answer, `None` otherwise.
+pub fn http(url: &str, method: &str, body: Option<&str>) -> Option<String> {
+    use std::io::{Read, Write};
+    let rest = url.strip_prefix("http://")?;
+    let (host, path) = rest.split_once('/').map(|(h, p)| (h, format!("/{p}")))?;
+    let mut stream = std::net::TcpStream::connect(host).ok()?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("the read timeout sets");
+    let body = body.unwrap_or("");
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nhost: {host}\r\ncontent-type: application/json\r\n\
+         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len(),
+    );
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
+    let (head, payload) = response.split_once("\r\n\r\n")?;
+    head.starts_with("HTTP/1.1 2").then(|| payload.to_string())
+}
 
 /// Fixture arguments, from a `json!` value to the bytes a harness would
 /// have sent. The adapter holds the harness's bytes already, so
@@ -25,14 +150,6 @@ pub fn repo_root() -> PathBuf {
         .parent()
         .expect("the runtime crate sits one level below the repo root")
         .to_path_buf()
-}
-
-/// The marketplace root a developer passes to `--plugin-source`, staged into
-/// `into` by the same mapping the build and init use.
-pub fn stage_bundle(into: &Path) -> PathBuf {
-    let staged = into.join("plugin-source");
-    appa_runtime::plugin_bundle::stage_repository(&repo_root(), &staged).expect("the checkout stages");
-    staged
 }
 
 /// Every offer a feedback body names, in the order the feedback lists
@@ -85,6 +202,7 @@ pub async fn propose(runtime: &Arc<Runtime>, call: ProposedCall) -> HookDecision
         HookEvent::ToolCall {
             actor: actor(),
             call,
+            call_id: None,
             spawn: false,
             ruling: None,
         },
@@ -101,6 +219,7 @@ pub async fn ran(runtime: &Arc<Runtime>, call: ProposedCall) {
             HookEvent::ToolResult {
                 actor: actor(),
                 call,
+                call_id: None,
                 outcome: ToolOutcome::Success {
                     body: OutcomeBody::Available("done".to_string()),
                 },
@@ -126,4 +245,59 @@ pub async fn serve(router: axum::Router) -> String {
         axum::serve(listener, router).await.expect("the stub serves");
     });
     format!("http://{addr}")
+}
+
+/// A fake `claude` executable running `script` in place of the model, for the built-in
+/// Claude Code annotator's `[externals.claude_code] command`.
+#[cfg(unix)]
+pub fn fake_claude(dir: &Path, script: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("fake-claude");
+    std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("the fake claude writes");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("the fake claude is executable");
+    path
+}
+
+/// A fake `claude` that answers from a file: it reads its next structured answer from
+/// `answer.json` and keeps the prompt it was asked in `prompt.txt`, so a suite sets the
+/// answer before a call and reads what the annotator was asked after it.
+#[cfg(unix)]
+pub struct Classifier {
+    answer: PathBuf,
+    prompt: PathBuf,
+}
+
+#[cfg(unix)]
+impl Classifier {
+    /// Write the fake `claude` into `dir` and answer its path beside the classifier.
+    pub fn install(dir: &Path) -> (PathBuf, Classifier) {
+        let classifier = Classifier {
+            answer: dir.join("answer.json"),
+            prompt: dir.join("prompt.txt"),
+        };
+        let command = fake_claude(
+            dir,
+            &format!(
+                "cat > {prompt}\ncat {answer}",
+                prompt = classifier.prompt.display(),
+                answer = classifier.answer.display(),
+            ),
+        );
+        (command, classifier)
+    }
+
+    /// The next structured answer: its delta, its requirements, and the effects it emits.
+    pub fn answers(&self, delta: serde_json::Value, requires: serde_json::Value, emits: &[&str]) {
+        let structured = serde_json::json!({ "delta": delta, "requires": requires, "emits": emits });
+        std::fs::write(
+            &self.answer,
+            serde_json::json!({ "structured_output": structured }).to_string(),
+        )
+        .expect("the answer is written");
+    }
+
+    /// What the classifier was last asked, empty when it never ran.
+    pub fn prompt(&self) -> String {
+        std::fs::read_to_string(&self.prompt).unwrap_or_default()
+    }
 }

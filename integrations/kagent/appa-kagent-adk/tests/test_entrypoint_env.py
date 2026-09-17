@@ -8,19 +8,25 @@ def _config(model: dict) -> dict:
 
 
 def test_the_env_fills_an_unset_openai_reasoning_effort():
-    config = _config({"type": "openai", "model": "gpt-5.6-luna"})
+    config = _config({"type": "openai", "model": "gpt-5.6-terra"})
     fill_reasoning_effort(config, {REASONING_EFFORT_ENV: "none"})
     assert config["model"]["reasoning_effort"] == "none"
 
 
 def test_a_value_the_crd_set_wins_over_the_env():
-    config = _config({"type": "openai", "model": "gpt-5.6-luna", "reasoning_effort": "low"})
+    config = _config({"type": "openai", "model": "gpt-5.6-terra", "reasoning_effort": "low"})
     fill_reasoning_effort(config, {REASONING_EFFORT_ENV: "none"})
     assert config["model"]["reasoning_effort"] == "low"
 
 
-def test_no_env_leaves_the_rendered_config_untouched():
-    config = _config({"type": "openai", "model": "gpt-5.6-luna"})
+def test_no_env_defaults_openai_models_to_none():
+    config = _config({"type": "openai", "model": "gpt-5.6-terra"})
+    fill_reasoning_effort(config, {})
+    assert config["model"]["reasoning_effort"] == "none"
+
+
+def test_non_reasoning_model_with_no_env_is_untouched():
+    config = _config({"type": "openai", "model": "gpt-5.2"})
     fill_reasoning_effort(config, {})
     assert "reasoning_effort" not in config["model"]
 

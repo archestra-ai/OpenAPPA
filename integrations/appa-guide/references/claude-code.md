@@ -1,8 +1,10 @@
 # Claude Code
 
-You run in a Claude Code session protected by the appa plugin. This
-reference carries the Claude Code mechanics; the router skill you came
-from carries the mode and the shared rules.
+You run in a Claude Code session protected by APPA: the installed `appa`
+binary is registered in the user's Claude Code settings as the session's
+hooks, and its runtime serves the `appa` MCP server. This reference
+carries the Claude Code mechanics; the router skill you came from carries
+the mode and the shared rules.
 
 ## Read sources
 
@@ -11,25 +13,16 @@ For OpenAPPA configuration, read only:
 - the output of `appa describe --config <live-path>`;
 - the live root config and included files relevant to the request;
 - a matched battery's `appa.toml` and README;
-- the relevant section of the installed guide at
-  `<marketplace-root>/website/content/docs/contracts.md`.
+- the relevant section of the policy-review guide the install wrote beside
+  this skill, at `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/appa-guide/references/contracts.md`.
 
-If the installed marketplace content is missing or these sources do not
-establish the syntax or behavior, stop and report an incomplete
+If the installed guide or battery files are missing or these sources do
+not establish the syntax or behavior, stop and report an incomplete
 installation. Do not fetch a different OpenAPPA version or search the
-repository for an answer. The marketplace's `installLocation` may be a
-local checkout; read only its installed battery files and contract
-guide. Never search that checkout, inspect source code, tests, Git
-history, or implementation details.
+repository for an answer. Never search a checkout, inspect source code,
+tests, Git history, or implementation details.
 
 ## Find the live config
-
-Read `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/known_marketplaces.json` and
-take the `installLocation` for the `appa` marketplace as
-`<marketplace-root>`. Local checkout installs use
-the checkout itself; packaged and remote installs may use a Claude-managed
-clone. If the entry or directory is missing, stop and report an incomplete
-installation. Do not assume a fixed marketplace path.
 
 Run `appa describe` first. Use the complete path on its `Config:` line, including
 spaces. This is the installed deployment path and follows `APPA_CONFIG` and
@@ -65,9 +58,13 @@ The runtime address is
    report the mismatch instead of guessing.
 3. Run `claude mcp list` for configured servers.
 4. Add every MCP server visible in the current session, even when
-   `claude mcp list` omits it. MCP tools use `mcp__<server>__<tool>` names;
-   plugin-provided servers use `mcp__plugin_<plugin>_<server>__<tool>` names.
-   Keep each exact full tool name and description.
+   `claude mcp list` omits it. Claude Code spells an MCP tool
+   `mcp__<server>__<tool>` (a plugin-provided server as
+   `mcp__plugin_<plugin>_<server>__<tool>`); the policy names it by its
+   canonical tool id `mcp/<server>/<tool>`, split at the first `__` after
+   `mcp__`. A Claude Code built-in (`Bash`, `Read`, `Edit`, ...) is
+   `host/claude-code/<name>`. Keep each exact description and the exact
+   canonical id.
 5. Cross-check both sources. Record every configured MCP server whose tools
    could not be detected. Keep it separate from Claude Code's built-in tools.
    Do not invent its tool list.
@@ -81,19 +78,26 @@ mail, messages, or files merely to infer an identity.
 
 ### Find useful batteries
 
-Look under:
+Run `appa battery list --json --config <live-path>`. It names every battery
+of the installed version, whether the deployment includes it (`included`),
+whether the store holds it (`stored`), and the version's commit as
+`catalog.commit`. The batteries themselves are in the deployment's store
+beside the config:
 
 ```sh
-<marketplace-root>/batteries/
+<config-dir>/batteries/<name>/appa.toml
 ```
 
-Match a battery by the tool names in its `appa.toml`, not by its directory
-name. For a matched battery, read only its `appa.toml` and README. Do not run
-its scripts while inspecting it.
+where `<config-dir>/<config-name>` is the live config path. A battery the
+root config includes is named by that path relative to the config,
+`batteries/<name>/appa.toml`.
 
-If that marketplace clone or its `batteries/` directory is missing, stop and
-report an incomplete installation. Never configure one APPA build with
-batteries fetched from another version.
+Match a battery by the tool names in its `appa.toml`, not by its name or
+description. For a matched battery, read only its `appa.toml` and README.
+Do not run its scripts while inspecting it.
+
+If that directory is missing, stop and report an incomplete installation.
+Never configure one APPA build with batteries fetched from another version.
 
 When proposing a battery, give it exactly one short sentence that says what it
 covers, what protection it adds, and any important assumption. Keep it under
@@ -121,9 +125,11 @@ matched battery covers.
   Flow Control (IFC) monoids (`trust` lattice and `self` ⊆ `internal` ⊆ `public`
   audience chain). Effects (`emits`, `requires.history`) are a hacky workaround
   for event sequencing, not the primary algebra; avoid them when label bounding
-  suffices. Do not use synthetic attention marks (`blocked`) or default `hitl`
-  to fake boundaries; keep autonomous execution unblocked for trusted data
-  flowing within its legitimate audience.
+  suffices. Do not add attention marks or default `hitl` to fake a boundary;
+  keep autonomous execution unblocked for trusted data flowing within its
+  legitimate audience. The reserved `blocked` mark denies a call outright and
+  no Authority can permit it; use it only where a sanitizer that would make
+  the flow safe does not exist.
 - The built-in audience chain is `self` ⊆ `internal` ⊆ `public`: `self` is the
   person running the session, `internal` their organization.
 - A tool that reads the requester's private data uses
@@ -133,8 +139,18 @@ matched battery covers.
 - Static contracts can reference `self` and `internal` without an audience
   source. Checking a literal recipient against either audience requires an
   explicit audience source.
-- Annotator outputs can specify only literal readers, not `self` or `internal`.
-  Use a static contract when output belongs to a built-in audience.
+- A tool that reads or writes one resource whose readers a source can list
+  (a Slack channel, a GitHub repository, a Linear team) uses a selector
+  placeholder instead of `internal`: `delta = { audience = ["@slack:channel/$channel_id"] }`
+  for a read, `requires = { audience = { contains = ["@slack:channel/$channel_id"] } }`
+  for a write. The spelling must match a template the provider declares under
+  `selectors` on its `[externals.audience.<provider>]` binding; each
+  `$argument` becomes a required string argument of the contract, so no
+  `parameters` schema is needed for it. Use it whenever the matched battery
+  declares such a template.
+- An annotator's answer writes an audience as a static contract does: `self`,
+  `internal`, an `@` mention, or a literal reader, inside its mandate's
+  `audiences`. Omitted, the mandate admits every audience the policy writes.
 - A tool that publishes, posts, sends, shares, or uploads beyond the machine
   requires data that may be public: `requires = { audience = { contains = ["public"] } }`.
 - A tool that communicates within the organization (e.g. posting internal Slack
@@ -164,8 +180,8 @@ do not ask about each tool separately.
 Wait for the answer before showing the proposal. This answer does not replace
 the approval required below. If nothing is unclear, do not ask.
 
-For Gmail, match only exact tools visible in this session whose names start
-with `mcp__claude_ai_Gmail__`; do not assume a fixed connector tool list. Mail
+For Gmail, match only exact tools visible in this session whose canonical ids
+start with `mcp/claude_ai_Gmail/`; do not assume a fixed connector tool list. Mail
 the requester reads is `self` data. Checking a named recipient against `self`
 or `internal` requires an audience source. An email domain is not an audience
 source: `internal` needs a directory-backed source that can enumerate its
@@ -204,19 +220,32 @@ After approval:
 1. Run `appa describe --config <live-path>` again. If the config,
    batteries, Authorities, audience sources, or named audiences changed since
    the proposal, revise the proposal and ask for approval again.
-2. Copy each approved battery directory beside the root config under
-   `batteries/<name>/` and add its `appa.toml` to the root `include` list. Use
-   the installed marketplace clone so supporting scripts stay on the same
-   APPA version. Leave an existing copied battery unchanged unless the user
-   asked to refresh it.
+2. Include each approved battery with
+   `appa battery install <name> --config <live-path>`, adding
+   `--server <connection-id>` when the host reports the connection under
+   another identity. The command adds the battery's `appa.toml` to the root
+   `include` list as `batteries/<name>/appa.toml`, validates the result, and
+   reloads the runtime. Never copy a battery directory: the store beside the
+   config already holds every battery of the installed version, and an
+   install replaces the directory.
 3. Add any root support the battery requires, such as its human-approval
    Authority. If an existing `builtin hitl` Authority handles the relevant
    attention mark but cannot review public audiences, expand its permits
    instead of adding another Authority. Do not modify an explicit hard denial.
    Describe the resulting behavior, not this wiring.
-4. Add the approved uncovered-tool rules to the root config. Do not remove
-   overlapping root rules; they intentionally override batteries.
-5. Reload and report the result as described below.
+4. When the battery binds an Annotator or an audience source, name the
+   variable it reads, `APPA_PROVIDER_<PROVIDER>_TOKEN` as its README
+   states; it belongs in the runtime's environment, never in the config.
+   Map `self` and `internal` onto the source's collections under
+   `[policy.audience]` as the README shows.
+5. Add the approved uncovered-tool rules to the root config. Do not remove
+   overlapping root rules; they intentionally override batteries. To treat
+   a battery's tool differently, add a root rule for it; never edit the
+   battery.
+6. Reload and report the result as described below. When the battery's
+   README names a replay trace, offer
+   `appa replay --config <live-path> <trace>` as the check that the
+   composed config decides as the README states.
 
 ## Adjust the current config
 
@@ -232,8 +261,8 @@ not guess.
 2. Read the root config and only the included files relevant to the requested
    changes.
 3. For policy syntax or behavior that the current config does not demonstrate,
-   first consult the relevant section of
-   `<marketplace-root>/website/content/docs/contracts.md`.
+   first consult the relevant section of the policy-review guide at
+   `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/appa-guide/references/contracts.md`.
    If it is unavailable or does not answer the question, stop and report an
    incomplete installation. Do not guess syntax, fetch another version, search
    for an OpenAPPA checkout, or inspect source code.
@@ -246,10 +275,11 @@ not guess.
 7. Run `appa describe --config <live-path>` again. If the config, batteries,
    Authorities, audience sources, or named audiences changed since the
    proposal, revise the proposal and ask for approval again.
-8. Copy each newly approved battery directory from the installed marketplace
-   beside the root config under `batteries/<name>/`, add its `appa.toml` to the
-   root `include` list, and add any root support it requires. Leave an existing
-   copied battery unchanged unless the user asked to refresh it.
+8. Include each newly approved battery with
+   `appa battery install <name> --config <live-path>`, as in `init` mode, and
+   add the root support, credential variable, and audience mapping it
+   requires. To take one out, use
+   `appa battery remove <name> --config <live-path>`.
 9. Apply only the approved root-rule changes. To change battery behavior, add
    or edit a root rule; never modify the battery.
 10. Reload and report the result as described below.
@@ -259,12 +289,13 @@ argument-specific rule before its general fallback. Do not reorder unrelated
 rules.
 
 For an exact Bash command pattern, add a narrow, ordered
-`Bash(command:...)` root contract before its fallback. For semantic command
-interpretation, copy the complete `claude-code.bash-requirements` Annotator
-declaration into the root config and modify its `hint`. Preserve its
-implementation, inputs, and mandate unless the approved behavior requires a
-change. Do not add a broad root `Bash` contract that bypasses the battery's
-credential-path protections.
+`host/claude-code/Bash(command:...)` root contract before its fallback. For
+semantic command interpretation, copy the complete
+`claude-code.bash-requirements` Annotator declaration into the root config and
+modify its `hint`. Preserve its implementation, inputs, and mandate unless the
+approved behavior requires a change. Do not add a broad root
+`host/claude-code/Bash` contract that bypasses the battery's credential-path
+protections.
 
 To make an audience mismatch reviewable, permit the intended Authority to
 review that audience expansion. Do not add attention only to route the review.

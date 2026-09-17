@@ -1,0 +1,202 @@
+// MCP transport setup adapted from kagent go/adk/pkg/mcp/registry.go,
+// pinned at af84a618cb6b (Apache-2.0). Keep header precedence and TLS behavior
+// aligned with that version. APPA owns the session so discovery and dispatch
+// use the same authenticated connection; no upstream kagent modification.
+package appakagentadk
+
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"fmt"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/a2aproject/a2a-go/a2asrv"
+	"github.com/go-logr/logr"
+	"github.com/kagent-dev/kagent/go/adk/pkg/constants"
+	kagentmcp "github.com/kagent-dev/kagent/go/adk/pkg/mcp"
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+const defaultTimeout = 30 * time.Minute
+
+type DynamicHeaderProvider = kagentmcp.DynamicHeaderProvider
+
+func allowedRequestHeaders(ctx context.Context, allowed []string) map[string]string {
+	if len(allowed) == 0 {
+		return nil
+	}
+	callCtx, ok := a2asrv.CallContextFrom(ctx)
+	if !ok {
+		return nil
+	}
+	meta := callCtx.RequestMeta()
+	if meta == nil {
+		return nil
+	}
+	result := make(map[string]string)
+	for _, name := range allowed {
+		if vals, ok := meta.Get(name); ok && len(vals) > 0 && vals[0] != "" {
+			result[name] = vals[0]
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// mcpServerParams groups connection parameters for an MCP server,
+// reducing parameter sprawl across createTransport / initializeToolSet.
+type mcpServerParams struct {
+	URL                   string
+	Headers               map[string]string
+	AllowedHeaders        []string              // header names to forward from incoming request
+	PropagateToken        bool                  // when true, Authorization is forwarded independently of AllowedHeaders
+	HeaderProvider        DynamicHeaderProvider // optional per-request headers derived from invocation context (e.g., STS exchanged access tokens)
+	ServerType            string                // "http" or "sse"
+	Timeout               *float64
+	SseReadTimeout        *float64
+	TLSInsecureSkipVerify *bool
+	TLSCACertPath         *string
+	TLSDisableSystemCAs   *bool
+}
+
+// createTransport creates an MCP transport based on server type and configuration.
+// Uses the official MCP SDK (github.com/modelcontextprotocol/go-sdk/mcp).
+func createTransport(ctx context.Context, params mcpServerParams) (mcpsdk.Transport, error) {
+	log := logr.FromContextOrDiscard(ctx)
+
+	operationTimeout := defaultTimeout
+	if params.Timeout != nil && *params.Timeout > 0 {
+		operationTimeout = max(time.Duration(*params.Timeout)*time.Second, 1*time.Second)
+	}
+
+	httpTimeout := operationTimeout
+	if params.ServerType == "sse" && params.SseReadTimeout != nil && *params.SseReadTimeout > 0 {
+		configuredSseTimeout := time.Duration(*params.SseReadTimeout) * time.Second
+		if configuredSseTimeout > operationTimeout {
+			httpTimeout = configuredSseTimeout
+		}
+		if httpTimeout < 1*time.Second {
+			httpTimeout = 1 * time.Second
+		}
+	}
+
+	baseTransport := &http.Transport{}
+
+	if params.TLSInsecureSkipVerify != nil && *params.TLSInsecureSkipVerify {
+		log.Info("WARNING: TLS certificate verification disabled for MCP server - this is insecure and not recommended for production", "url", params.URL)
+		baseTransport.TLSClientConfig = &tls.Config{
+			InsecureSkipVerify: true,
+		}
+	} else if params.TLSCACertPath != nil && *params.TLSCACertPath != "" {
+		caCert, err := os.ReadFile(*params.TLSCACertPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read CA certificate from %s: %w", *params.TLSCACertPath, err)
+		}
+		caCertPool := x509.NewCertPool()
+		if !caCertPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("failed to parse CA certificate from %s", *params.TLSCACertPath)
+		}
+
+		tlsConfig := &tls.Config{}
+		if params.TLSDisableSystemCAs != nil && *params.TLSDisableSystemCAs {
+			tlsConfig.RootCAs = caCertPool
+		} else {
+			systemCAs, err := x509.SystemCertPool()
+			if err != nil {
+				tlsConfig.RootCAs = caCertPool
+			} else {
+				systemCAs.AppendCertsFromPEM(caCert)
+				tlsConfig.RootCAs = systemCAs
+			}
+		}
+		baseTransport.TLSClientConfig = tlsConfig
+	}
+
+	var httpTransport http.RoundTripper = baseTransport
+	if len(params.Headers) > 0 || len(params.AllowedHeaders) > 0 || params.PropagateToken || params.HeaderProvider != nil {
+		httpTransport = &headerRoundTripper{
+			base:           baseTransport,
+			headers:        params.Headers,
+			allowedHeaders: params.AllowedHeaders,
+			propagateToken: params.PropagateToken,
+			headerProvider: params.HeaderProvider,
+		}
+	}
+
+	httpClient := &http.Client{
+		Timeout:   httpTimeout,
+		Transport: httpTransport,
+	}
+
+	var mcpTransport mcpsdk.Transport
+	if params.ServerType == "sse" {
+		mcpTransport = &mcpsdk.SSEClientTransport{
+			Endpoint:   params.URL,
+			HTTPClient: httpClient,
+		}
+	} else {
+		mcpTransport = &mcpsdk.StreamableClientTransport{
+			Endpoint:   params.URL,
+			HTTPClient: httpClient,
+		}
+	}
+
+	return mcpTransport, nil
+}
+
+// headerRoundTripper wraps an http.RoundTripper to add custom headers to all
+// requests. It supports four sources of headers, applied in this order so that
+// higher-priority sources win on collision:
+//  1. propagateToken: when true, Authorization is read from the incoming A2A
+//     CallContext and forwarded unconditionally (independent of allowedHeaders).
+//  2. allowedHeaders: explicit per-header forwarding from the A2A CallContext.
+//  3. headerProvider: runtime headers derived from ADK context, such as STS tokens.
+//  4. headers: static key/value pairs configured on the MCP server spec (highest
+//     priority — always wins).
+type headerRoundTripper struct {
+	base           http.RoundTripper
+	headers        map[string]string
+	allowedHeaders []string // header names (case-insensitive) to forward from A2A context
+	propagateToken bool     // when true, Authorization is forwarded independently
+	headerProvider DynamicHeaderProvider
+}
+
+func (rt *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+
+	// When KAGENT_PROPAGATE_TOKEN is set, forward Authorization from the incoming
+	// A2A request independently of allowedHeaders.
+	if rt.propagateToken {
+		if callCtx, ok := a2asrv.CallContextFrom(req.Context()); ok {
+			if meta := callCtx.RequestMeta(); meta != nil {
+				if vals, ok := meta.Get(constants.AuthorizationHeader); ok && len(vals) > 0 && vals[0] != "" {
+					req.Header.Set(constants.AuthorizationHeader, vals[0])
+				}
+			}
+		}
+	}
+
+	// Forward explicitly allowed headers from the incoming A2A request.
+	for k, v := range allowedRequestHeaders(req.Context(), rt.allowedHeaders) {
+		req.Header.Set(k, v)
+	}
+
+	// Dynamic headers (e.g., STS access tokens) override propagated/allowed headers.
+	if rt.headerProvider != nil {
+		for key, value := range rt.headerProvider(req.Context()) {
+			req.Header.Set(key, value)
+		}
+	}
+
+	// Apply static headers last — they take precedence over all dynamic sources.
+	for key, value := range rt.headers {
+		req.Header.Set(key, value)
+	}
+
+	return rt.base.RoundTrip(req)
+}

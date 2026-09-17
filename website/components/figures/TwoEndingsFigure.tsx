@@ -149,12 +149,12 @@ function draw(ctx: CanvasRenderingContext2D, t: number, th: Theme) {
   panel(ctx, th, B.sanitizer, "remove_pii");
 
   /* lane titles, over everything static */
-  ctx.fillStyle = th.textWeak;
-  ctx.font = font(12, 500);
+  ctx.fillStyle = th.textStrong;
+  ctx.font = font(16, 600);
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
-  ctx.fillText("ending one · accept the narrowing", 40, 48);
-  ctx.fillText("ending two · fetch in a child", 40, 340);
+  ctx.fillText("Read the ticket directly", 40, 48);
+  ctx.fillText("Read through a subagent", 40, 340);
 
   /* ---- ending one ---- */
   const ticketFrom = center(TICKET);

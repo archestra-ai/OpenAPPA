@@ -3,7 +3,7 @@
 This harness runs all 24 samples (10 Memory Poison, 6 Autonomy Hijack, and 8
 Data Exfiltration) from the pinned Inspect
 [AgentThreatBench](https://github.com/UKGovernmentBEIS/inspect_evals/tree/0c737b01627b772db84aa223f68775c31199fdc9/src/inspect_evals/agent_threat_bench)
-revision through five arms:
+revision through seven arms:
 
 | Arm | Model loop | Mediation |
 |---|---|---|
@@ -12,6 +12,8 @@ revision through five arms:
 | `guarded` | Same OpenAPPA scaffold | Source and sink contracts |
 | `fides` | FIDES scaffold | Microsoft Agent Framework FIDES middleware on the exact upstream tool surface |
 | `fides-native` | FIDES scaffold plus official security instructions/tools | FIDES automatic hiding, quarantine, label tracking, and enforcement |
+| `auto` | Bundled Claude Code actor with the upstream prompt and tools | Anthropic Auto defaults |
+| `auto-ifc` | Same bundled Claude Code actor, prompt, and tools as `auto` | Per-sample IFC-oriented Auto classifier facts and boundaries |
 
 The run also includes paired authorized and unauthorized Data Exfiltration
 controls for every arm.
@@ -40,6 +42,35 @@ from actual store mutations and checked deliveries. A blocked proposal remains
 in the Inspect transcript for audit but cannot earn utility or count as an
 executed attack in the actual score.
 
+Accounting uses Inspect's sample-scoped provider usage. The summary records
+model calls, total input tokens, cache reads and writes, output and reasoning
+tokens, total tokens, and USD cost. It includes calls from the parent, isolated
+children, and quarantine clients. An unavailable field remains `null`; the
+benchmark never converts unknown usage to zero.
+
+The Auto arms use `ResultMessage.model_usage` and `total_cost_usd` from the
+Claude Agent SDK. These totals include the actor calls reported by Claude Code.
+Claude Code does not expose separate Auto classifier-call usage, so classifier
+tokens are excluded rather than estimated. Reasoning-token usage remains
+`null` because the SDK does not report it.
+
+Both Auto arms expose only in-process MCP wrappers over the exact upstream
+domain tools. Built-in coding tools and user, project, and local settings
+sources are disabled. MCP tools are intentionally absent from `allowed_tools`,
+so Auto classifies every call. `auto-ifc` derives Data Exfiltration audiences
+from each sample's existing ACL metadata. Memory and inbox facts identify
+suspicious provenance and the lack of an equivalent APPA attestation channel.
+Runs that include an Auto arm require an `anthropic/<model>` Inspect model and
+use that same Claude model in every arm, including Auto's Agent SDK loop.
+
+`usage_overhead_vs_baseline` compares each policy-bearing arm with its matching
+empty or default-policy arm: `guarded` with `permissive`, `fides-native` with
+`fides`, and `auto-ifc` with `auto`. Each entry reports the difference between
+mean provider-reported usage per sample and the baseline mean, plus their
+ratio. This is a crude policy overhead measure. It includes every reported
+model call in an episode, but not local runtime, tool, MCP, or network work.
+Missing or partial usage produces `null`, never an invented zero.
+
 ## Setup and preflight
 
 ```sh
@@ -57,7 +88,7 @@ manifested smoke set:
 
 ```sh
 uv run appa-agentthreatbench smoke \
-  --model openrouter/openai/gpt-5.6-luna \
+  --model openrouter/openai/gpt-5.6-terra \
   --reasoning-effort high
 ```
 
@@ -65,10 +96,10 @@ uv run appa-agentthreatbench smoke \
 
 ```sh
 uv run appa-agentthreatbench run \
-  --model openrouter/openai/gpt-5.6-luna \
+  --model openrouter/openai/gpt-5.6-terra \
   --reasoning-effort high \
   --max-concurrency 50 \
-  --run-name full-gpt-5.6-luna
+  --run-name full-gpt-5.6-terra
 ```
 
 `--max-concurrency` configures both the global Inspect sample limit and the
@@ -76,6 +107,54 @@ provider connection limit. All configured cases run inside one task. Tool calls
 within a sample remain serialized. Inspect logs,
 OpenAPPA/FIDES mediation sidecars, resolver requests, the run manifest, and
 `summary.json` are written below the ignored `runs/` directory.
+
+## Publish a completed run
+
+Package and publish one completed run through the repository's private draft
+release relay:
+
+```sh
+uv run appa-agentthreatbench publish runs/<run-id>
+```
+
+The command uses the full Git commit recorded when the run started. An
+optional `--commit <sha>` must match that recorded commit.
+Runs produced from a dirty Git worktree cannot be published.
+It creates a deterministic `<run-id>-<sha256>.tar.zst` and `index.json` under
+`runs/publish/<run-id>/`, creates a draft relay release, uploads exactly those
+two assets, dispatches `.github/workflows/bench-publish.yml`, and prints the
+workflow run URL. The workflow verifies the bundle, publishes it to
+`bench/agentthreatbench/<commit>/<run-id>/`, reads it back, and then deletes
+the relay.
+Rerunning accepts an unchanged local bundle and reuses its draft relay. A
+changed run or index requires a new `--output-dir` or removal of the old one.
+
+To inspect the bundle or relay it manually, stop before any GitHub operation:
+
+```sh
+uv run appa-agentthreatbench publish runs/<run-id> --prepare-only
+```
+
+Packaging refuses symlinks, recognizable provider tokens, non-redacted values
+assigned to provider-key fields, and local absolute paths rooted at `/home`,
+`/Users`, `/workspace`, `/tmp`, `/var/tmp`, `/root`, or a Windows drive. It
+checks ordinary files and files nested inside ZIP-based `.eval` logs. The
+command does not redact or rewrite run evidence.
+
+Full publication depends on `bench-publish.yml` landing on the default branch;
+it is currently proposed by [PR #333](https://github.com/archestra-ai/OpenAPPA/pull/333).
+Until then, use `--prepare-only`. After the workflow lands, the equivalent
+manual relay is:
+
+```sh
+bundle=runs/publish/<run-id>
+archive=$(jq -r .archive "$bundle/index.json")
+tag=bench-relay-agentthreatbench-<run-id>
+gh release create "$tag" --draft --title "$tag"
+gh release upload "$tag" "$bundle/$archive" "$bundle/index.json"
+gh workflow run bench-publish.yml \
+  -f bench=agentthreatbench -f commit=<git-sha> -f run_id=<run-id> -f relay_tag="$tag"
+```
 
 ## Render trajectory reports
 
@@ -106,11 +185,11 @@ mediated arm retains its policy-specific scaffold.
 
 ```sh
 uv run appa-agentthreatbench run \
-  --model openrouter/openai/gpt-5.6-luna \
+  --model openrouter/openai/gpt-5.6-terra \
   --reasoning-effort high \
   --agent-prompt-profile agent-threat-chaos \
   --max-concurrency 50 \
-  --run-name full-gpt-5.6-luna-chaos
+  --run-name full-gpt-5.6-terra-chaos
 ```
 
 The prompt profile and its SHA-256 digest are part of the run manifest and run

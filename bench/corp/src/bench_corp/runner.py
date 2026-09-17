@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import re
 import shutil
@@ -31,6 +32,7 @@ from typing import Iterator
 
 from . import AGENT_PROMPT_PROFILES
 from .agents import Agent, PolicyTarget, command_for
+from .auto_policy import settings_for
 from .checks import CheckResult, evaluate_check, parse_emails
 from .policy import apply_tool_requires, bind_external_urls, prune_policy
 from .scenario import AnnotatorAnswer, AuthorityAnswer, SanitizerAnswer, Scenario, canonical_args
@@ -67,6 +69,16 @@ _FAILED_TERMINAL_STATUSES = {
     "cancelled",
     "budget_exhausted",
 }
+_COMMAND_PATH_OPTIONS = {
+    "--data-root",
+    "--policy",
+    "--profile",
+    "--server-bin",
+    "--settings",
+    "--sink-root",
+    "--status-file",
+    "--usage-file",
+}
 
 
 def _count(pattern: re.Pattern[str], text: str) -> int:
@@ -75,6 +87,18 @@ def _count(pattern: re.Pattern[str], text: str) -> int:
 
 def _provider_retries(text: str) -> int:
     return sum(max(0, int(match.group(1)) - 1) for match in _PROVIDER_ATTEMPTS.finditer(text))
+
+
+def _recorded_command(command: list[str], episode_dir: Path) -> list[str]:
+    """Make machine-local argv paths relative without changing execution."""
+    recorded = list(command)
+    path_indexes = {0}
+    path_indexes.update(index + 1 for index, argument in enumerate(command) if argument in _COMMAND_PATH_OPTIONS)
+    for index in path_indexes:
+        path = Path(command[index])
+        if path.is_absolute():
+            recorded[index] = os.path.relpath(path, episode_dir)
+    return recorded
 
 
 @dataclass(frozen=True)
@@ -94,11 +118,51 @@ class EpisodeResult:
     remedy_calls: int
     provider_retries: int
     checks: list[CheckResult]
+    model_usage: ModelUsage | None = None
+    auto_policy_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class ModelUsage:
+    model_calls: int
+    usage_reported_calls: int
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    cached_input_tokens: int | None
+    cache_write_input_tokens: int | None
+    reasoning_tokens: int | None
+    cost_usd: float | None
 
 
 def episode_record(result: EpisodeResult) -> dict:
     """The JSON-ready scalar fields of a result (checks serialize separately)."""
-    return {k: v for k, v in result.__dict__.items() if k != "checks"}
+    record = {k: v for k, v in result.__dict__.items() if k not in {"checks", "model_usage"}}
+    record["model_usage"] = None if result.model_usage is None else result.model_usage.__dict__
+    return record
+
+
+def _read_model_usage(path: Path) -> ModelUsage:
+    payload = json.loads(path.read_text())
+    integer_fields = ("model_calls", "usage_reported_calls", "input_tokens", "output_tokens", "total_tokens")
+    optional_integer_fields = ("cached_input_tokens", "cache_write_input_tokens", "reasoning_tokens")
+    if not isinstance(payload, dict):
+        raise TypeError("model usage is not an object")
+    for field in integer_fields:
+        if not isinstance(payload.get(field), int) or isinstance(payload[field], bool) or payload[field] < 0:
+            raise ValueError(f"invalid {field}")
+    if payload["usage_reported_calls"] > payload["model_calls"]:
+        raise ValueError("usage_reported_calls exceeds model_calls")
+    for field in optional_integer_fields:
+        value = payload.get(field)
+        if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+            raise ValueError(f"invalid {field}")
+    cost = payload.get("cost_usd")
+    if cost is not None and (
+        not isinstance(cost, int | float) or isinstance(cost, bool) or not math.isfinite(cost) or cost < 0
+    ):
+        raise ValueError("invalid cost_usd")
+    return ModelUsage(**{field: payload.get(field) for field in ModelUsage.__dataclass_fields__})
 
 
 def _terminate_group(process: subprocess.Popen) -> None:
@@ -250,6 +314,13 @@ def _stage_policy(
             destination = episode_dir / "fides.json"
             shutil.copyfile(scenario.policy_profile.fides, destination)
             return destination
+        case PolicyTarget.AUTO:
+            return None
+        case PolicyTarget.AUTO_IFC:
+            rendered, _ = settings_for(scenario.name)
+            destination = episode_dir / "auto-settings.json"
+            destination.write_text(rendered)
+            return destination
         case PolicyTarget.NONE:
             return None
 
@@ -340,6 +411,16 @@ def run_episode(
             error = error or "invalid agent status"
     if terminal_status in _FAILED_TERMINAL_STATUSES:
         error = terminal_status
+    model_usage = None
+    usage_path = episode_dir / "model-usage.json"
+    if usage_path.is_file():
+        try:
+            model_usage = _read_model_usage(usage_path)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            error = error or "invalid model usage"
+    auto_policy_sha256 = None
+    if agent.policy_target == PolicyTarget.AUTO_IFC:
+        _, auto_policy_sha256 = settings_for(scenario.name)
     emails = parse_emails(episode_dir / "sink")
     external_requests = (
         [json.loads(line) for line in external_request_log.read_text().splitlines()]
@@ -377,6 +458,8 @@ def run_episode(
         policy_events=_count(_APPA_POLICY_EVENT, stderr_text) + _count(_FIDES_BLOCK, stderr_text),
         remedy_calls=_count(_REMEDY, stderr_text),
         provider_retries=_provider_retries(stderr_text),
+        model_usage=model_usage,
+        auto_policy_sha256=auto_policy_sha256,
         checks=results,
     )
     (episode_dir / "result.json").write_text(
@@ -384,7 +467,7 @@ def run_episode(
             {
                 **episode_record(result),
                 "checks": [check.__dict__ for check in results],
-                "command": command,
+                "command": _recorded_command(command, episode_dir),
             },
             indent=2,
         )

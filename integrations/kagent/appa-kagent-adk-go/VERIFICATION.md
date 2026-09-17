@@ -11,9 +11,8 @@ against the locked sources on disk:
 That baseline is the one `go.mod` locks. The plan names the image
 built from it for every go cell, and only cell A-go runs. On cell A-go
 (kagent v0.9.12) the image runs under the `golang-adk` name the
-controller derives from `controller.agentImage`. The demo matrix rows
-for that cell record 17/17 before the port of the child return, and no
-run after it exists ([../e2e/README.md](../e2e/README.md)). No
+controller derives from `controller.agentImage`. The Python and Go demo
+matrix rows target that cell ([../e2e/README.md](../e2e/README.md)). No
 matrix row runs cell B1-go (v0.10.0-rc4) or cell B2-go (kagent main,
 adk/v2 v2.2.0). This file does not verify the B2 baseline or its
 configuration semantics.
@@ -64,8 +63,11 @@ These are go-ADK mechanics, not gaps; `plugin.go` handles each one, and
 3. **A deferred result reaches the after-tool point.** A long-running
    or response-deferring tool yields `(nil, nil)` from `tool.Run`, and
    go still runs `AfterToolCallback` with a nil result. The python
-   ADK has no such call. The plugin reports it as an `indeterminate`
-   outcome — the dispatch is genuinely unresolved at that moment.
+   ADK has no such call. The plugin reports an ordinary deferred result
+   as an `indeterminate` outcome. A remote-agent `input_required` result
+   is different: it preserves the open spawn for a checked `spawn_resume`
+   and suppresses `turn_end` for that paused invocation. It does not
+   report a terminal spawn result while the child awaits a ruling.
 
 ## Trajectory identity on the go runtime
 
@@ -95,25 +97,19 @@ The decorator is per request because the kagent session service does
 not fold `state_delta` on `Get`; landing the headers once at `Create`
 would leave every later `Get` without them.
 
-**Finding: the go remote-agent tool sends every delegation from a pod
-into one child context.** `NewKAgentRemoteA2ATool` mints
-`sharedContextID` once, at construction
-(`kagent go/adk/pkg/tools/remote_a2a_tool.go:199, 211`).
-`contextIDForCall` returns it for every call while `isolateSessions`
-is false (`remote_a2a_tool.go:152-164, 227-234`). Each call sends that
-id as the message context id, with the parent session id in the call
-context (`remote_a2a_tool.go:306-316`). The flag comes from
-`RemoteAgentConfig.IsolateSessions` (`kagent go/api/adk/types.go:437-442`,
-`kagent go/adk/pkg/agent/agent.go:59`), false by default. The v0.9.12
-tree has no such field, so the v1alpha2 CRD cannot set it on cell
-A-go. The child pod therefore sees one ADK session id for every parent
-that delegates into it.
+**Every new delegation uses a fresh child context.** APPA's
+`discoveryAgentConfig` copies the remote-agent declarations and sets
+`IsolateSessions` before passing them to the pinned SDK. Its
+`contextIDForCall` then creates an ID per call. The v0.9.12 CRD does not
+need to expose this SDK setting. The source config remains unchanged,
+and the APPA-disabled path keeps stock construction.
 
-The python twin never shares one. The kagent python executor builds a
-fresh runner per A2A request from the root agent factory, and the
-remote tool it builds mints its child context id at construction
-(kagent-adk 0.3.0 `_agent_executor.py:128-137`, `_a2a.py:111-112`,
-`_remote_a2a_tool.py:177, 324`).
+The Python plugin wraps remote toolsets in `remote_agents.py`. Each
+call owns a copy of the stock tool with a fresh context ID. The wrapper
+preserves the original context ID on an approval resume and leaves HTTP
+client cleanup with the original toolset. Both plugins return the actual
+child ID with the tool result. Python omits the stale, per-turn ID from
+call metadata, so the pinned UI resolves activity from the result.
 
 Each parent opens the child under its own root id, so no parent takes
 the fork of another. The child trajectory id carries the root id
@@ -127,28 +123,17 @@ The plugin keeps the pairs it opened (`opened`), exactly as the python
 twin does (`plugin.py`, `_opened`). A re-entry of an opened pair sends
 no second `child_start`: the runtime ended the child trajectory when
 its first return crossed the parent's gate, and the child context id
-can bind no second fork (the limit below). The re-entry then runs in
+can bind no second fork. The re-entry then runs in
 the ended trajectory, and the log line names that case. A pair joins
 the set only after the runtime acked, so a refused start opens nothing
 and the next entry sends `child_start` again. A root session keeps the
 `isFresh` rule for `session_start`.
 
-**Limit: on kagent v0.9.12 one go parent delegates into a given child
-once per parent session.** The go tool sends a second delegation from
-the same parent session into the same child context id, and no header
-carries a per-delegation discriminator. That second delegation prepares
-a second fork, and a child bound to one fork binds no other
-(`appa-runtime/src/api/session.rs`, `bind_child`, and
-`EngineRefusal::Unbindable` mapped to `BindingMismatch` in
-`appa-runtime/src/api/mod.rs`). The child resumes under the first fork,
-and its stop crosses under the return policy of that fork. The second
-spawn result of the parent then comes back blocked with `the fork and
-the child are already bound elsewhere` (`on_spawn_result`, the
-`SpawnPlan::Bind` arm on a bound child). The rc4 `isolateSessions`
-field mints one context per call and removes the limit. The python cell
-mints a fresh child context per parent request and has no such limit.
-Both matrices delegate once per parent session, so no matrix row
-observes the limit.
+The A2A matrix checks two delegations across messages in one parent chat
+and two sequential delegations in one turn. Both require distinct child
+IDs and checked results. These tests also require actual model calls;
+a model that refuses the second request fails the scenario rather than
+counting as evidence of session isolation.
 
 `TestEachParentOpensTheSharedChildSessionUnderItsOwnRoot` and
 `TestARootSessionStillOpensOnceAtItsFirstContent` (`plugin_test.go`)
@@ -400,17 +385,16 @@ written. ADK's session keeps the event, as it does on python
 
 ## Spawn classification
 
-**Deviation from the python twin, forced by the go tree.** Python
-classifies agent-as-tool calls by class name (`AgentTool`,
-`KAgentRemoteA2ATool`). The go runtime has no such type:
-`NewKAgentRemoteA2ATool` returns a generic `functiontool`
-(`kagent go/adk/pkg/tools/remote_a2a_tool.go:199-226`), the same
-concrete type as any function tool. Classification is therefore
-name-based: the runtime main derives the spawn-tool names from
+Both plugins classify a call by the spelling the tool inventory gives
+it (`inventory.go`): the runtime main builds the inventory from
 `AgentConfig.RemoteAgents` — the same source the stock builder wires
 the tools from (`kagent go/adk/pkg/agent/agent.go:53-65`), skipping
-the same no-URL entries — and hands them to the plugin as
-`Config.SpawnTools`. The spawn-return shapes match python's:
+the same no-URL entries — and every remote agent spells
+`agent:<namespace>/<agent>`, the one class that is a spawn. No type
+check is involved: `NewKAgentRemoteA2ATool` returns a generic
+`functiontool` (`kagent go/adk/pkg/tools/remote_a2a_tool.go:199-226`),
+the same concrete type as any function tool. The spawn-return shapes
+match python's:
 `functiontool` converts the tool's `remoteA2AResponse` struct into a
 map with `result` and `subagent_session_id`
 (`adk-go tool/functiontool/function.go:227-246`,
@@ -424,10 +408,9 @@ declares `sub_agents` before the stock decoder runs (`configguard.go`,
 exit 1). The same guard refuses `agent_plugins` and any other top-level
 key outside the rc4 schema. On the decoded config it refuses
 `execute_code` true and a `context_config` that is not null (below).
-No in-process sub-agent runs on this baseline. The plugin classifies
-spawns by the configured remote-agent names only, so a
-`transfer_to_agent` call crosses as an ordinary
-`ToolCall{spawn:false}`. A sub-agent scope that opens in-process sends
+No in-process sub-agent runs on this baseline. The plugin gates only
+what the inventory spells, so a `transfer_to_agent` call is refused at
+the call gate like any undeclared tool. A sub-agent scope that opens in-process sends
 `child_start` with no spawn in flight, and the runtime refuses it
 (`SpawnNotTaken`, `appa-runtime/src/api/session.rs`). No test exercises
 `transfer_to_agent`. `TestARefusedChildScopeFailsClosed`
@@ -439,7 +422,7 @@ scripted `refuse` on that `child_start`, not the runtime's refusal.
 `cmd/appa-kagent-adk-go/main.go` is the stock
 `kagent go/adk/cmd/main.go` (rc4) with seven marked deltas, the ones its
 header comment numbers. The first six are the `APPA_RUNTIME_URL`
-refusal, the reserved-tool toolset, the plugin appended last, the
+refusal, the runtime-owned toolset, the plugin appended last, the
 reasoning-effort fill, the lineage-header session service, and the
 review-shaped executor. The seventh is the config guard
 (`configguard.go`), which refuses a rendered config this image cannot
@@ -451,7 +434,7 @@ internal import from an outside module.
 
 - The stock main itself uses only exported packages
   (`kagent go/adk/cmd/main.go:15-25`), so the replay is exact.
-- The reserved-tool toolset rides the stock `HttpTools` path:
+- The runtime-owned toolset rides the stock `HttpTools` path:
   an appended `HttpMcpServerConfig` becomes a streamable-HTTP
   `mcptoolset` through `mcp.CreateToolsets`
   (`kagent go/adk/pkg/agent/agent.go:50`,
@@ -564,9 +547,8 @@ as planned; go tooling accepted it unchanged. The root package is
 3. The lineage headers land in session state through the runtime
    main's session-service decorator, not through the go executor
    (above). Classification reads the same headers. Both plugins open a
-   (root, child) pair once and suppress the repeat, and each parent
-   opens the child under its own root id, because the go remote-agent
-   tool shares one child context across every parent of a pod (above).
+   (root, child) pair once. New delegations allocate fresh child contexts;
+   approval resumes retain the paused child and its existing binding.
 4. `beforeAgent`/`afterAgent` distinguish the invocation's own scope
    by first-seen agent name per invocation id, where python compares
    against `callback_context.agent_name`. The go `agent.Context` has
@@ -575,9 +557,9 @@ as planned; go tooling accepted it unchanged. The root package is
    records the first scope each invocation opens and clears the entry
    at `afterRun`. Same observable behavior: own scope pings, later
    differently-named scopes open `child_start`.
-5. A deferred (long-running) result crosses as an `indeterminate`
-   outcome — a callback moment the python ADK never delivers (caveat 3
-   above). The wire already carries the status; the codec parses it.
+5. An ordinary deferred result crosses as an `indeterminate` outcome —
+   a callback moment the python ADK never delivers. Native remote-agent
+   approval pauses instead preserve the spawn (caveat 3 above).
 6. The `/mcp` leg of the return declaration imports
    `github.com/modelcontextprotocol/go-sdk/mcp` directly, where the
    python cell imports the python MCP client inside the function.

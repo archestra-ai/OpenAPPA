@@ -1,0 +1,16 @@
+# The annotator answers each read: the explicit exception passes, a client
+# file and a dotfile wait for a person.
+host/claude-code/Read {
+  file_path: ".env.example"
+}
+expect allow
+
+host/claude-code/Read {
+  file_path: "clients/acme.txt"
+}
+expect authority hitl
+
+host/claude-code/Read {
+  file_path: ".env"
+}
+expect authority hitl

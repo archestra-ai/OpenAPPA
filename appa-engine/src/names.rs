@@ -36,7 +36,6 @@ impl SanitizerName {
 }
 
 name_newtype!(AnnotatorName);
-name_newtype!(IdentityImplementationName);
 name_newtype!(GroupName);
 
 impl std::fmt::Display for GroupName {
@@ -48,14 +47,16 @@ impl std::fmt::Display for GroupName {
 /// One audience entry as policy and tool arguments spell it: the reserved word `public` is
 /// the Public audience itself, `self` and `internal` are the built-in chain audiences, an
 /// `@`-marked spelling is a group reference — a configured named audience or a
-/// source-qualified selector — and any other string is one literal reader ID. `@` with no
-/// name after it, and a malformed selector form, read as nothing. The one grammar: a
-/// declared audience list and an `includes($arg)` placeholder's actual both read through it.
+/// source-qualified selector — or, with a `$argument` segment in its selector, a selector
+/// placeholder, and any other string is one literal reader ID. `@` with no name after it, and
+/// a malformed selector form, read as nothing. The one grammar: a declared audience list and
+/// an `includes($arg)` placeholder's actual both read through it; each admits what it may.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AudienceArgument {
     Public,
     Chain(crate::label::ChainAudience),
     Group(crate::label::GroupRef),
+    Placeholder(crate::contract::SelectorPlaceholder),
     Reader(crate::label::ReaderId),
 }
 
@@ -68,7 +69,10 @@ impl AudienceArgument {
             return Some(AudienceArgument::Chain(chain));
         }
         match value.strip_prefix('@') {
-            Some(reference) => crate::label::GroupRef::parse(reference).map(AudienceArgument::Group),
+            Some(reference) => match crate::contract::SelectorPlaceholder::parse(reference) {
+                Some(placeholder) => Some(AudienceArgument::Placeholder(placeholder)),
+                None => crate::label::GroupRef::parse(reference).map(AudienceArgument::Group),
+            },
             None => {
                 let reader = crate::label::ReaderId::new(value);
                 reader.is_literal().then_some(AudienceArgument::Reader(reader))
@@ -78,6 +82,17 @@ impl AudienceArgument {
 }
 
 name_newtype!(MarkName);
+
+impl MarkName {
+    /// The reserved denial. A contract requiring it has no remedy by definition: no
+    /// authority may attend it, and a catch-all mandate never covers it.
+    pub const BLOCKED: &'static str = "blocked";
+
+    pub fn is_blocked(&self) -> bool {
+        self.0 == Self::BLOCKED
+    }
+}
+
 name_newtype!(TagName);
 name_newtype!(SurfaceName);
 

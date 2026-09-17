@@ -1,10 +1,13 @@
 import hashlib
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
+from inspect_ai.model import ModelUsage
 from inspect_ai.tool import ToolDef
 
+from appa_agentthreatbench.auto import auto_mode_config
 from appa_agentthreatbench.fides import (
     FIDES_BINDING_IDENTITY,
     FIDES_MAX_CONCURRENT_TRAJECTORIES,
@@ -13,8 +16,11 @@ from appa_agentthreatbench.fides import (
 from appa_agentthreatbench.runner import (
     EXPECTED_BINDING_IDENTITY,
     EXPECTED_TOTAL_SAMPLES,
+    USAGE_BASELINES,
+    _aggregate_usage,
     _audit_diagnostics,
     _scoreable_limit_termination,
+    _usage_overhead,
     preflight,
     run_manifest,
     validate_inventory,
@@ -44,11 +50,75 @@ from appa_agentthreatbench.tasks import (
 )
 
 
+def _usage_sample(*, input_tokens: int, output_tokens: int, cost_usd: float):
+    usage = ModelUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=input_tokens + 25 + output_tokens,
+        input_tokens_cache_read=20,
+        input_tokens_cache_write=5,
+        reasoning_tokens=7,
+        total_cost=cost_usd,
+    )
+    event_usage = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+    }
+    event = SimpleNamespace(
+        event="model",
+        call=SimpleNamespace(model_dump=lambda **_: {"response": {"usage": event_usage}}),
+    )
+    return SimpleNamespace(events=[event], model_usage={"openrouter/model": usage})
+
+
+def test_usage_aggregation_includes_cache_tokens_and_provider_cost() -> None:
+    summary = _aggregate_usage(
+        [
+            _usage_sample(input_tokens=100, output_tokens=30, cost_usd=0.01),
+            _usage_sample(input_tokens=200, output_tokens=40, cost_usd=0.02),
+        ]
+    )
+
+    assert summary["model_calls"] == 2
+    assert summary["input_tokens"] == 350
+    assert summary["output_tokens"] == 70
+    assert summary["total_tokens"] == 420
+    assert summary["cost_usd"] == pytest.approx(0.03)
+    assert summary["mean_total_tokens"] == pytest.approx(210)
+
+
+def test_usage_overhead_reports_absolute_and_relative_deltas() -> None:
+    baseline = {"mean_total_tokens": 100.0, "mean_cost_usd": 0.02}
+    measured = {"mean_total_tokens": 135.0, "mean_cost_usd": 0.03}
+
+    assert _usage_overhead(measured, baseline) == {
+        "mean_total_tokens_delta": 35.0,
+        "total_tokens_ratio": 1.35,
+        "mean_cost_usd_delta": pytest.approx(0.01),
+        "cost_ratio": 1.5,
+    }
+    assert USAGE_BASELINES["guarded"] == "permissive"
+    assert USAGE_BASELINES["auto-ifc"] == "auto"
+
+
 def test_complete_inventory_has_all_tasks_arms_and_controls() -> None:
     ids = validate_inventory()
-    assert len(ids) == EXPECTED_TOTAL_SAMPLES == 130
+    assert len(ids) == EXPECTED_TOTAL_SAMPLES == 182
     dataset = complete_dataset()
-    assert sum(bool(sample.metadata.get("control")) for sample in dataset) == 10
+    assert sum(bool(sample.metadata.get("control")) for sample in dataset) == 14
+
+
+def test_auto_arms_share_actor_prompt_and_ifc_config_uses_acl_facts() -> None:
+    metadata = {"authorized_recipients": ["CX-1", "alice@example.test"]}
+    config = auto_mode_config("data_exfil", metadata)
+
+    assert system_prompt("data_exfil", "auto", "standard") == system_prompt("data_exfil", "auto-ifc", "standard")
+    assert "OpenAPPA" not in system_prompt("data_exfil", "auto", "standard")
+    assert all(values[0] == "$defaults" for values in config.values())
+    rendered = json.dumps(config)
+    assert "alice@example.test" in rendered
+    assert "attack_marker" not in rendered
+    assert "sensitive_fields" not in rendered
 
 
 def test_fides_native_tools_have_provider_portable_strict_schemas() -> None:
@@ -59,8 +129,8 @@ def test_fides_native_tools_have_provider_portable_strict_schemas() -> None:
 
 
 def test_preflight_checks_pins_without_requiring_a_credential() -> None:
-    result = preflight("openrouter/openai/gpt-5.6-luna", require_credential=False)
-    assert result["total_samples"] == 130
+    result = preflight("openrouter/openai/gpt-5.6-terra", require_credential=False)
+    assert result["total_samples"] == 182
     assert result["binding_identity"] == EXPECTED_BINDING_IDENTITY
     assert result["fides_binding_identity"] == "agent-framework-fides-agentthreatbench-v1"
     assert result["fides_native_binding_identity"] == FIDES_NATIVE_BINDING_IDENTITY
@@ -104,15 +174,17 @@ def test_chaos_profile_is_the_same_explicit_addendum_in_every_arm() -> None:
 
 
 def test_prompt_profile_changes_and_is_pinned_by_the_run_digest() -> None:
-    standard = run_manifest("openrouter/openai/gpt-5.6-luna", "high", 300, 50)
+    standard = run_manifest("openrouter/openai/gpt-5.6-terra", "high", 300, 50)
     chaos = run_manifest(
-        "openrouter/openai/gpt-5.6-luna",
+        "openrouter/openai/gpt-5.6-terra",
         "high",
         300,
         50,
         agent_prompt_profile="agent-threat-chaos",
     )
     assert standard["run_digest"] != chaos["run_digest"]
+    assert re.fullmatch(r"[0-9a-f]{40}", standard["config"]["git_sha"])
+    assert isinstance(standard["config"]["git_dirty"], bool)
     assert chaos["config"]["agent_prompt_profile"] == "agent-threat-chaos"
     assert chaos["config"]["binding_identities"]["fides"] == "agent-framework-fides-agentthreatbench-v1"
     assert chaos["config"]["binding_identities"]["fides-native"] == FIDES_NATIVE_BINDING_IDENTITY

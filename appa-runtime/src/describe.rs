@@ -4,18 +4,18 @@
 //! session tool catalogue or connector accounts. Those are session facts and must
 //! be merged by the configuring actor.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
-use crate::config::{Config, Externals, Implementation, Section};
+use crate::config::{Config, ConfigError, Externals, Implementation, Section};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ConfigDescription {
     path: PathBuf,
     state: ConfigState,
-    diagnostic: Option<&'static str>,
+    diagnostic: Option<String>,
     batteries: Vec<String>,
 }
 
@@ -94,13 +94,12 @@ enum AudienceSide {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AudienceDescription {
     /// One entry per registered source: the provider, its advertised selector templates,
-    /// and whether `[externals.audience.<provider>]` binds it.
+    /// whether `[externals.audience.<provider>]` binds it, and where its lookups go.
     sources: Vec<SourceDescription>,
     self_from: Vec<String>,
     internal_from: Vec<String>,
-    /// One entry per `[[audience.group]]`: `@name`, its `within` target, and its selectors.
+    /// One entry per `[audience.group.<name>]`: `@name`, its `within` target, and its selectors.
     groups: Vec<GroupDescription>,
-    identity: IdentityDescription,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,6 +107,8 @@ struct SourceDescription {
     provider: String,
     templates: Vec<String>,
     binding_configured: bool,
+    /// The entry the provider's member lookups are sent to, when not the provider's own.
+    lookup: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,12 +116,6 @@ struct GroupDescription {
     name: String,
     within: Option<&'static str>,
     from: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum IdentityDescription {
-    VerifiedEmail,
-    Custom { name: String, binding_configured: bool },
 }
 
 /// Where the `[externals]` bindings are read from: the loaded configuration, or the raw TOML
@@ -139,7 +134,6 @@ impl Bindings<'_> {
                 Section::Sanitizers => externals.sanitizers.contains_key(name),
                 Section::Annotators => externals.annotators.contains_key(name),
                 Section::Audience => externals.audience.contains_key(name),
-                Section::Identity => externals.identity.contains_key(name),
             },
             Bindings::Raw(root) => root
                 .get("externals")
@@ -214,19 +208,32 @@ fn authority_descriptions(compiled: &appa_policy::Config, bindings: Bindings<'_>
                 .iter()
                 .map(|effect| effect.as_str().to_string())
                 .collect(),
-            attention: authority
-                .mandate
-                .attends
-                .iter()
-                .map(|mark| mark.as_str().to_string())
-                .collect(),
+            attention: authority.mandate.attends.spellings(),
         })
         .collect::<Vec<_>>();
     authorities.sort_by(|left, right| left.name.cmp(&right.name));
     authorities
 }
 
-/// The declared audience configuration, with each source's and the identity's binding status.
+impl Bindings<'_> {
+    /// The lookup routing the bindings declare, from the loaded configuration or the raw table.
+    fn lookup_targets(self) -> BTreeMap<String, String> {
+        match self {
+            Bindings::Loaded(externals) => externals.lookup_targets(),
+            Bindings::Raw(root) => crate::config::lookup_targets_of(root),
+        }
+    }
+
+    /// The audience sources the bindings declare, from the loaded configuration or the raw table.
+    fn source_registrations(self) -> Result<Vec<appa_engine::audience::SourceRegistration>, String> {
+        match self {
+            Bindings::Loaded(externals) => Ok(externals.source_registrations()),
+            Bindings::Raw(root) => crate::config::source_registrations_of(root).map_err(|error| error.to_string()),
+        }
+    }
+}
+
+/// The declared audience configuration, with each source's binding status.
 fn audience_description(compiled: &appa_policy::Config, bindings: Bindings<'_>) -> AudienceDescription {
     let audience = compiled.registry().audience();
     let spelled = |spec: &appa_engine::audience::SelectorSpec| spec.to_string();
@@ -236,13 +243,9 @@ fn audience_description(compiled: &appa_policy::Config, bindings: Bindings<'_>) 
             .iter()
             .map(|provider| SourceDescription {
                 provider: provider.clone(),
-                templates: audience
-                    .templates(provider)
-                    .into_iter()
-                    .flatten()
-                    .map(|template| template.as_str().to_string())
-                    .collect(),
+                templates: crate::engine::selector_templates(audience, provider).unwrap_or_default(),
                 binding_configured: bindings.bound(Section::Audience, provider),
+                lookup: audience.lookup_target(provider).map(str::to_string),
             })
             .collect(),
         self_from: audience
@@ -263,39 +266,70 @@ fn audience_description(compiled: &appa_policy::Config, bindings: Bindings<'_>) 
                 from: group.from.iter().map(spelled).collect(),
             })
             .collect(),
-        identity: match audience.identity() {
-            appa_engine::audience::IdentityImplementation::VerifiedEmail => IdentityDescription::VerifiedEmail,
-            appa_engine::audience::IdentityImplementation::Custom(name) => IdentityDescription::Custom {
-                name: name.as_str().to_string(),
-                binding_configured: bindings.bound(Section::Identity, name.as_str()),
-            },
-        },
     }
 }
 
-fn inspect(path: &Path) -> (ConfigDescription, PolicyDescription) {
+/// Where a TOML error is and what it says, without the source line the error's
+/// own rendering quotes: a configuration file may hold a credential.
+fn toml_diagnostic(error: &toml::de::Error, text: &str) -> String {
+    let message = one_line(error.message());
+    match error.span() {
+        Some(span) => {
+            let before = &text[..span.start.min(text.len())];
+            let line = before.matches('\n').count() + 1;
+            let column = before.rsplit('\n').next().map_or(0, |last| last.chars().count()) + 1;
+            format!("line {line}, column {column}: {message}")
+        }
+        None => message,
+    }
+}
+
+fn one_line(message: &str) -> String {
+    message.lines().collect::<Vec<_>>().join(", ")
+}
+
+/// A load error as the description prints it. The two parse variants render
+/// their TOML error's message only, for the reason `toml_diagnostic` gives;
+/// every other variant names fields and paths, never file contents.
+fn load_diagnostic(error: &ConfigError) -> String {
+    match error {
+        ConfigError::Unparsable { path, source } => {
+            format!("cannot parse {path}: {}", one_line(source.message()))
+        }
+        ConfigError::UnparsablePolicy { source } => {
+            format!("cannot parse the composed policy: {}", one_line(source.message()))
+        }
+        other => other.to_string(),
+    }
+}
+
+fn inspect(path: &Path, battery_dirs: &[PathBuf]) -> (ConfigDescription, PolicyDescription, Option<Config>) {
     let mut config = ConfigDescription {
         path: path.to_path_buf(),
         state: ConfigState::Missing,
-        diagnostic: Some("configuration file does not exist"),
+        diagnostic: Some("configuration file does not exist".to_owned()),
         batteries: Vec::new(),
     };
     let mut policy = PolicyDescription::default();
+    let mut loaded_config = None;
 
     match std::fs::read_to_string(path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(_) => {
+        Err(error) => {
             config.state = ConfigState::Unreadable;
-            config.diagnostic = Some("configuration file cannot be read");
+            config.diagnostic = Some(format!("configuration file cannot be read: {error}"));
         }
         Ok(text) => match toml::from_str::<toml::Value>(&text) {
-            Err(_) => {
+            Err(error) => {
                 config.state = ConfigState::Unparsable;
-                config.diagnostic = Some("configuration is not valid TOML");
+                config.diagnostic = Some(format!(
+                    "configuration is not valid TOML: {}",
+                    toml_diagnostic(&error, &text)
+                ));
             }
             Ok(root) => {
                 config.state = ConfigState::Invalid;
-                config.diagnostic = Some("configuration is incomplete or does not validate");
+                config.diagnostic = Some("configuration is incomplete or does not validate".to_owned());
                 let includes: Vec<_> = root
                     .get("include")
                     .and_then(toml::Value::as_array)
@@ -306,7 +340,7 @@ fn inspect(path: &Path) -> (ConfigDescription, PolicyDescription) {
                     .collect();
                 config.batteries = includes
                     .iter()
-                    .filter_map(|include| battery_name(Path::new(include)))
+                    .filter_map(|include| crate::batteries::name_from_include(Path::new(include)))
                     .collect();
                 let mut seen_batteries = BTreeSet::new();
                 config
@@ -317,20 +351,26 @@ fn inspect(path: &Path) -> (ConfigDescription, PolicyDescription) {
                     describe_policy_value(root_policy, Bindings::Raw(&root), &mut policy);
                 }
 
-                if let Ok(loaded) = Config::load(path) {
-                    config.state = ConfigState::Loadable;
-                    config.diagnostic = None;
-                    describe_policy_value(
-                        loaded.policy_file().value(),
-                        Bindings::Loaded(&loaded.externals),
-                        &mut policy,
-                    );
+                match Config::load_from(path, battery_dirs) {
+                    Ok(loaded) => {
+                        config.state = ConfigState::Loadable;
+                        config.diagnostic = None;
+                        describe_policy_value(
+                            loaded.policy_file().value(),
+                            Bindings::Loaded(&loaded.externals),
+                            &mut policy,
+                        );
+                        loaded_config = Some(loaded);
+                    }
+                    Err(error) => {
+                        config.diagnostic = Some(format!("configuration does not load: {}", load_diagnostic(&error)));
+                    }
                 }
             }
         },
     }
 
-    (config, policy)
+    (config, policy, loaded_config)
 }
 
 fn describe_policy_value(policy_value: &toml::Value, bindings: Bindings<'_>, out: &mut PolicyDescription) {
@@ -348,7 +388,11 @@ fn describe_policy_value(policy_value: &toml::Value, bindings: Bindings<'_>, out
 
     let compiled = toml::to_string(policy_value)
         .map_err(|error| error.to_string())
-        .and_then(|source| appa_policy::Config::from_toml_str(&source).map_err(|error| error.to_string()));
+        .and_then(|source| {
+            let sources = bindings.source_registrations()?;
+            appa_policy::Config::from_toml_str_routed(&source, bindings.lookup_targets(), sources)
+                .map_err(|error| error.to_string())
+        });
     out.audience = match compiled {
         Ok(compiled) => {
             out.authorities = authority_descriptions(&compiled, bindings);
@@ -358,26 +402,47 @@ fn describe_policy_value(policy_value: &toml::Value, bindings: Bindings<'_>, out
     };
 }
 
-fn battery_name(path: &Path) -> Option<String> {
-    let parts: Vec<_> = path
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(part) => part.to_str(),
-            _ => None,
-        })
-        .collect();
-    parts
-        .windows(3)
-        .find_map(|window| (window[0] == "batteries" && window[2] == "appa.toml").then(|| window[1].to_string()))
+pub struct Description {
+    pub text: String,
+    pub valid: bool,
 }
 
-pub fn render(path: &Path, adapter: &'static str) -> String {
-    let (config, policy) = inspect(path);
+pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: &'static str) -> Description {
+    let (mut config, mut policy, loaded) = inspect(path, battery_dirs);
+    let served = match adapter {
+        "claude-code" => Some(appa_adapter_claude_code::adapter()),
+        "kagent" => Some(appa_adapter_kagent::adapter()),
+        _ => None,
+    };
+    if let Some(loaded) = &loaded
+        && let Some(served) = served
+    {
+        let resolved = crate::tool_validation::resolve(
+            loaded.policy_file().value(),
+            served,
+            &loaded.inventory,
+            &loaded.server_aliases,
+        );
+        let authored_tools = policy.tools.clone();
+        describe_policy_value(&resolved.policy, Bindings::Loaded(&loaded.externals), &mut policy);
+        policy.tools = authored_tools;
+    }
+    let validation = match (loaded, served) {
+        (Some(loaded), Some(served)) => {
+            crate::api::Runtime::validate_served(loaded, served).map_err(|error| error.to_string())
+        }
+        (_, None) => Err(format!("unsupported adapter {adapter:?}")),
+        (None, _) => Err("configuration cannot be loaded; check the configuration diagnostics above".to_string()),
+    };
+    let valid = validation.is_ok();
+    if !valid && config.state == ConfigState::Loadable {
+        config.state = ConfigState::Invalid;
+    }
     let mut output = String::new();
     let _ = writeln!(output, "OpenAPPA world");
     let _ = writeln!(output, "Adapter: {adapter}");
     let _ = writeln!(output, "Config: {} ({})", config.path.display(), config.state.as_str());
-    if let Some(diagnostic) = config.diagnostic {
+    if let Some(diagnostic) = &config.diagnostic {
         let _ = writeln!(output, "  {diagnostic}");
     }
     let _ = writeln!(output, "Batteries: {}", list_or_none(&config.batteries));
@@ -425,9 +490,14 @@ pub fn render(path: &Path, adapter: &'static str) -> String {
                     } else {
                         "binding missing"
                     };
+                    let lookups = source
+                        .lookup
+                        .as_deref()
+                        .map(|target| format!("; lookups via {target}"))
+                        .unwrap_or_default();
                     let _ = writeln!(
                         output,
-                        "  {}: {} ({binding})",
+                        "  {}: {} ({binding}{lookups})",
                         source.provider,
                         source.templates.join(", ")
                     );
@@ -442,22 +512,6 @@ pub fn render(path: &Path, adapter: &'static str) -> String {
                 for group in &audience.groups {
                     let within = group.within.map(|target| format!(" ⊆ {target}")).unwrap_or_default();
                     let _ = writeln!(output, "  {}{} from {}", group.name, within, group.from.join(", "));
-                }
-            }
-            match &audience.identity {
-                IdentityDescription::VerifiedEmail => {
-                    let _ = writeln!(output, "Identity: verified-email (built-in)");
-                }
-                IdentityDescription::Custom {
-                    name,
-                    binding_configured,
-                } => {
-                    let binding = if *binding_configured {
-                        "binding configured"
-                    } else {
-                        "binding missing"
-                    };
-                    let _ = writeln!(output, "Identity: {name} ({binding})");
                 }
             }
         }
@@ -475,7 +529,58 @@ pub fn render(path: &Path, adapter: &'static str) -> String {
         output,
         "Session integrations/tools/accounts: unavailable to this command"
     );
-    output
+    match validation {
+        Ok(report) => {
+            let _ = writeln!(output, "Validation: {}", report.summary());
+            // Without a host inventory every declared tool is unknown for the
+            // same reason, so one line says so instead of one per tool.
+            let mut unobserved = 0usize;
+            for check in &report.tools {
+                match &check.status {
+                    crate::tool_validation::ToolStatus::Valid => {}
+                    crate::tool_validation::ToolStatus::Invalid { reason } => {
+                        let _ = writeln!(output, "  invalid {}: {reason}", check.tool);
+                    }
+                    crate::tool_validation::ToolStatus::Unknown { .. } if !report.inventory_complete => {
+                        unobserved += 1;
+                    }
+                    crate::tool_validation::ToolStatus::Unknown { reason } => {
+                        let _ = writeln!(output, "  unknown {}: {reason}", check.tool);
+                    }
+                }
+            }
+            if unobserved > 0 {
+                let _ = writeln!(
+                    output,
+                    "  {unobserved} declared tools have no host observation to compare against; run inside a protected session to check them"
+                );
+            }
+            for diagnostic in report.diagnostics {
+                let _ = writeln!(output, "  {diagnostic}");
+            }
+        }
+        Err(error) => {
+            let _ = writeln!(output, "Validation failed: {error}");
+        }
+    }
+    Description { text: output, valid }
+}
+
+#[cfg(test)]
+fn validation(
+    path: &Path,
+    battery_dirs: &[PathBuf],
+    adapter: &str,
+) -> Result<crate::tool_validation::ValidationReport, String> {
+    let adapter = match adapter {
+        "claude-code" => appa_adapter_claude_code::adapter(),
+        "kagent" => appa_adapter_kagent::adapter(),
+        _ => return Err(format!("unsupported adapter {adapter:?}")),
+    };
+    // Config parse errors may quote credentials from the source document.
+    let config = Config::load_from(path, battery_dirs)
+        .map_err(|_| "configuration cannot be loaded; check the configuration diagnostics above".to_string())?;
+    crate::api::Runtime::validate_served(config, adapter).map_err(|error| error.to_string())
 }
 
 fn list_or_none(items: &[String]) -> String {
@@ -491,21 +596,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn preflight_allows_unknown_tools_but_rejects_known_coverage_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("appa.toml");
+        let policy = "[policy]\nversion = 2\n[[policy.tool]]\nname = \"read_secret\"\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n";
+        std::fs::write(&path, policy).unwrap();
+        let report = validation(&path, &[], "kagent").unwrap();
+        assert!(!report.inventory_complete);
+        assert!(report.tools_may_change);
+        assert!(matches!(
+            report.tools[0].status,
+            crate::tool_validation::ToolStatus::Unknown { .. }
+        ));
+        let description = render(&path, &[], "kagent");
+        assert!(description.valid);
+        assert!(
+            description.text.contains("1 declared tools have no host observation"),
+            "{}",
+            description.text
+        );
+        assert!(!description.text.contains("unknown read_secret:"));
+
+        std::fs::write(
+            &path,
+            format!("{policy}\n[[appa_inventory.tools]]\nname = \"write_secret\"\ntool = \"mcp:demo/write_secret\"\n"),
+        )
+        .unwrap();
+        assert!(!render(&path, &[], "kagent").valid);
+    }
+
+    #[test]
+    fn preflight_compiles_the_policy_not_only_the_configuration_envelope() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("appa.toml");
+        std::fs::write(&path, "[policy]\nversion = 2\n[[policy.tool]]\nname = \"read\"\nannotator = \"missing\"\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n").unwrap();
+        assert!(Config::load_from(&path, &[]).is_ok());
+        assert!(!render(&path, &[], "kagent").valid);
+    }
+
+    #[test]
     fn missing_config_is_described_without_creating_it() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("missing.toml");
 
-        let (config, policy) = inspect(&path);
+        let (config, policy, loaded) = inspect(&path, &[]);
 
         assert_eq!(config.state, ConfigState::Missing);
+        assert!(loaded.is_none());
         assert!(!path.exists());
         assert!(policy.tools.is_empty());
     }
 
     #[test]
-    fn loadable_config_reports_batteries_tools_authorities_sources_and_identity() {
+    fn loadable_config_reports_batteries_tools_authorities_and_sources() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let battery = directory.path().join("batteries/mail");
+        let batteries = directory.path().join("bundled-batteries");
+        let battery = batteries.join("mail");
         std::fs::create_dir_all(&battery).expect("battery directory");
         std::fs::write(
             battery.join("appa.toml"),
@@ -515,15 +661,17 @@ mod tests {
         let root = directory.path().join("appa.toml");
         std::fs::write(
             &root,
-            "include = [\"batteries/mail/appa.toml\"]\n[policy]\nversion = 2\n[policy.audience.self]\nfrom = [\"slack:viewer\"]\n[[policy.audience.group]]\nname = \"finance\"\nwithin = \"internal\"\nfrom = [\"slack:user-group/finance\"]\n[policy.identity]\nimplementation = \"corp-identity\"\n[[policy.authority]]\nname = \"operator\"\n[policy.authority.permits]\ntrust_below = \"trusted\"\naudience_missing = [\"public\"]\neffects_containing = [\"mail.sent\"]\nattention = [\"hitl\"]\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n[externals.authorities.operator]\nbuiltin = \"hitl\"\n[externals.audience.slack]\ncommand = [\"true\"]\n[externals.identity.corp-identity]\ncommand = [\"true\"]\n",
+            "include = [\"batteries/mail/appa.toml\"]\n[policy]\nversion = 2\n[policy.audience]\nself = [\"slack:viewer\"]\n[policy.audience.group.finance]\nwithin = \"internal\"\nfrom = [\"slack:user-group/finance\"]\n[[policy.authority]]\nname = \"operator\"\n[policy.authority.permits]\ntrust_below = \"trusted\"\naudience_missing = [\"public\"]\neffects_containing = [\"mail.sent\"]\nattention = [\"hitl\"]\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n[externals.authorities.operator]\nbuiltin = \"hitl\"\n[externals.audience.slack]\ncommand = [\"true\"]\nlookup = \"people\"\nselectors = [{ template = \"viewer\", feeds = \"self\" }, { template = \"full-members\", feeds = \"internal\" }, { template = \"user-group/<handle>\" }]\n[externals.audience.people]\nreaders = { \"slack:U1\" = \"alice@corp.example\" }\n",
         )
         .expect("root config");
 
-        Config::load(&root).unwrap_or_else(|error| panic!("fixture must load: {error}"));
+        Config::load_from(&root, std::slice::from_ref(&batteries))
+            .unwrap_or_else(|error| panic!("fixture must load: {error}"));
 
-        let (config, policy) = inspect(&root);
+        let (config, policy, loaded) = inspect(&root, std::slice::from_ref(&batteries));
 
         assert_eq!(config.state, ConfigState::Loadable);
+        assert!(loaded.is_some());
         assert_eq!(config.batteries, ["mail"]);
         assert_eq!(policy.tools, ["mail_read"]);
         assert_eq!(
@@ -550,6 +698,7 @@ mod tests {
                     "user-group/<handle>".to_string()
                 ],
                 binding_configured: true,
+                lookup: Some("people".to_string()),
             }]
         );
         assert_eq!(audience.self_from, ["slack:viewer"]);
@@ -562,16 +711,15 @@ mod tests {
                 from: vec!["slack:user-group/finance".to_string()],
             }]
         );
-        assert_eq!(
-            audience.identity,
-            IdentityDescription::Custom {
-                name: "corp-identity".to_string(),
-                binding_configured: true,
-            }
-        );
-        assert!(render(&root, "claude-code").contains(
+        let rendered = render(&root, &[batteries], "claude-code").text;
+        assert!(rendered.contains(
             "operator: builtin hitl; permits trust_below=trusted, audience_missing=public, effects_containing=[mail.sent], attention=[hitl]"
         ));
+        assert!(
+            rendered
+                .contains("slack: viewer, full-members, user-group/<handle> (binding configured; lookups via people)"),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -581,17 +729,32 @@ mod tests {
         let secret = "super-secret-token";
         std::fs::write(&path, format!("token = \\\"{secret}")).expect("malformed config");
 
-        let (config, _) = inspect(&path);
-        let output = render(&path, "claude-code");
+        let (config, _, _) = inspect(&path, &[]);
+        let output = render(&path, &[], "claude-code").text;
 
         assert_eq!(config.state, ConfigState::Unparsable);
         assert!(!output.contains(secret));
+        assert!(output.contains("line 1, column"), "{output}");
+    }
+
+    #[test]
+    fn a_config_that_parses_but_does_not_load_names_the_reason() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("appa.toml");
+        std::fs::write(&path, "[policy]\nversion = 2\n[externals]\nmax_body_bytes = 65536\n").expect("config");
+
+        let (config, _, _) = inspect(&path, &[]);
+        let output = render(&path, &[], "claude-code").text;
+
+        assert_eq!(config.state, ConfigState::Invalid);
+        assert!(output.contains("configuration does not load: "), "{output}");
+        assert!(output.contains("timeout_ms"), "{output}");
     }
 
     #[test]
     fn human_output_is_small_and_explicit_about_unknown_session_facts() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let output = render(&directory.path().join("appa.toml"), "claude-code");
+        let output = render(&directory.path().join("appa.toml"), &[], "claude-code").text;
 
         assert!(output.contains("Config:"));
         assert!(output.contains("Batteries: none"));

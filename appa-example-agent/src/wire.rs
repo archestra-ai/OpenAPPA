@@ -120,14 +120,43 @@ pub struct WireToolSchema {
     pub parameters: Option<serde_json::Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct ChatCompletionResponse {
     pub choices: Vec<WireChoice>,
+    #[serde(default)]
+    pub usage: Option<WireUsage>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct WireChoice {
     pub message: WireMessage,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct WireUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    #[serde(default)]
+    pub prompt_tokens_details: Option<WirePromptTokenDetails>,
+    #[serde(default)]
+    pub completion_tokens_details: Option<WireCompletionTokenDetails>,
+    #[serde(default)]
+    pub cost: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct WirePromptTokenDetails {
+    #[serde(default)]
+    pub cached_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_write_tokens: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct WireCompletionTokenDetails {
+    #[serde(default)]
+    pub reasoning_tokens: Option<u64>,
 }
 
 #[cfg(test)]

@@ -36,12 +36,11 @@ impl Trust {
 
 /// A literal reader identity — an opaque atom to the pure algebra. Restricted audiences
 /// intersect and compare readers exactly, so equality is exact string equality; a
-/// provider-qualified reader (`slack:U012345`) is canonicalized to its principal by the
-/// deployment's identity implementation *before* it reaches a comparison, and the pinned
-/// principal is what an audience holds. An email address is that principal already: a
-/// reader written as one denotes the same person a verified-email claim resolves to, so
-/// `alice@corp.com` in a policy, in a tool argument, and behind a directory's verified
-/// claim are one reader. Four spellings are reserved and never readers: `public` (the
+/// provider-qualified reader (`slack:U012345`) is canonicalized to its principal by a
+/// pinned member lookup *before* it reaches a comparison, and the pinned principal is what
+/// an audience holds. An email address is that principal already: a source reports a
+/// member as the address the provider verified for it, so `alice@corp.com` in a policy, in
+/// a tool argument, and in a directory's answer are one reader. Four spellings are reserved and never readers: `public` (the
 /// universal audience state), `self` and `internal` (the built-in chain), and any leading
 /// `@` (a group reference). The constructor cannot enforce that, so the rule is
 /// [`is_literal`](ReaderId::is_literal), applied on every ingress that builds a reader set:
@@ -97,7 +96,7 @@ impl ReaderId {
 
     /// A reader that denotes itself under *every* deployment: it carries no provider prefix
     /// a source could own. Email principals qualify — an address holds no `:` — which is
-    /// why a directory's verified claim and a policy-written address compare directly. Only
+    /// why a directory-reported address and a policy-written address compare directly. Only
     /// stable readers may participate in permanent canonicalization's exact intersection: a
     /// qualified reader's meaning is an operation-pinned principal, and canonical label
     /// equality must never depend on it.
@@ -183,14 +182,19 @@ pub enum GroupRef {
 
 impl GroupRef {
     /// Parse the text after the `@` mark. Empty, a bare provider (`slack:`), or a bare
-    /// selector (`:x`) are malformed and read as nothing.
+    /// selector (`:x`) are malformed and read as nothing. So is a selector with a segment
+    /// starting with `$`: that spelling is a selector placeholder, never a static mention, and
+    /// a collection whose selector begins with `$` cannot be written in a policy.
     pub fn parse(after_at: &str) -> Option<GroupRef> {
         if after_at.is_empty() {
             return None;
         }
         match after_at.split_once(':') {
             Some((provider, selector)) => {
-                if provider.is_empty() || selector.is_empty() {
+                if provider.is_empty()
+                    || selector.is_empty()
+                    || selector.split('/').any(|segment| segment.starts_with('$'))
+                {
                     None
                 } else {
                     Some(GroupRef::Source {
@@ -455,9 +459,73 @@ pub enum DeclaredAudience {
     Union(Clause),
 }
 
+/// Why a written audience list does not read as one audience. The one grammar for every list
+/// a policy writes and every list an annotation answers.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum AudienceSpelling {
+    #[error("empty reader set")]
+    Empty,
+    #[error(
+        "placeholder {0:?} is valid only as the sole entry of `contains` or `delta`, or in an annotator's `audiences`"
+    )]
+    Placeholder(String),
+    #[error("`public` is the whole universe and cannot be combined with other entries")]
+    PublicCombined,
+    #[error("`public` is always an admissible annotation audience and is never listed")]
+    PublicListed,
+    #[error("two built-in audiences in one union: the outer one already contains the inner")]
+    SecondChain,
+    #[error("`{0}` is listed twice")]
+    Duplicate(String),
+    #[error("`{0}` names no audience")]
+    Unknown(String),
+}
+
 impl DeclaredAudience {
     pub fn restricted(readers: impl IntoIterator<Item = ReaderId>) -> DeclaredAudience {
         DeclaredAudience::Union(Clause::of_readers(readers.into_iter().collect()))
+    }
+
+    /// One written audience list: the union of its entries. `public` stands alone; `self` and
+    /// `internal` are the built-in symbolic audiences (at most one — the union of two chain
+    /// levels is the outer one, so writing both is a mistake); `@name` mentions a configured
+    /// named audience and `@provider:selector` a source collection directly; everything else
+    /// is a literal reader. An empty list, a placeholder, and a repeated entry — repeated as
+    /// the one reader it names, whatever its spelling — are refused.
+    pub fn parse_entries(list: &[String]) -> Result<DeclaredAudience, AudienceSpelling> {
+        if list.is_empty() {
+            return Err(AudienceSpelling::Empty);
+        }
+        if let Some(placeholder) = list.iter().find(|entry| entry.starts_with('$')) {
+            return Err(AudienceSpelling::Placeholder(placeholder.clone()));
+        }
+        let mut chain = None;
+        let mut groups = BTreeSet::new();
+        let mut readers = BTreeSet::new();
+        for entry in list {
+            let fresh = match crate::names::AudienceArgument::parse(entry) {
+                Some(crate::names::AudienceArgument::Public) if list.len() == 1 => {
+                    return Ok(DeclaredAudience::Public);
+                }
+                Some(crate::names::AudienceArgument::Public) => return Err(AudienceSpelling::PublicCombined),
+                Some(crate::names::AudienceArgument::Chain(level)) => match chain.replace(level) {
+                    Some(previous) if previous == level => false,
+                    Some(_) => return Err(AudienceSpelling::SecondChain),
+                    None => true,
+                },
+                Some(crate::names::AudienceArgument::Group(group)) => groups.insert(group),
+                Some(crate::names::AudienceArgument::Placeholder(_)) => {
+                    return Err(AudienceSpelling::Placeholder(entry.clone()));
+                }
+                Some(crate::names::AudienceArgument::Reader(reader)) => readers.insert(reader),
+                None => return Err(AudienceSpelling::Unknown(entry.clone())),
+            };
+            if !fresh {
+                return Err(AudienceSpelling::Duplicate(entry.clone()));
+            }
+        }
+        let clause = Clause::new(chain, groups, readers).expect("every parsed reader is literal");
+        Ok(DeclaredAudience::Union(clause))
     }
 
     /// Test fixture: the declared spelling of a public or single-clause audience.
@@ -525,9 +593,9 @@ pub struct MembershipNeeded {
 }
 
 /// The membership answers one operation reads: one exact reader set per group or chain
-/// atom, post-identity and post-closure, and one principal per canonicalized reader. Built
-/// by the operation's driver from pinned primitive evidence — source answers, member
-/// lookups, identity mappings — and rebuilt identically on replay, so a live decision and
+/// atom, post-lookup and post-closure, and one principal per canonicalized reader. Built
+/// by the operation's driver from pinned primitive evidence — source answers and member
+/// lookups — and rebuilt identically on replay, so a live decision and
 /// its replay read the same directory answers. An empty set is a valid answer.
 ///
 /// Every ask — answered or not — lands in the reads log, so after a decision runs the log
@@ -1349,8 +1417,8 @@ mod tests {
             Trust::new(1),
             Audience::of_clauses([clause([ChainAudience::Internal], [], [])]),
         );
-        // $recipient = slack:U012345, where Slack reports Alice's verified corporate email
-        // and the internal closure holds her principal: the cross-provider case end-to-end.
+        // $recipient = slack:U012345, where Slack's lookup reports Alice's corporate
+        // address and the internal closure holds it: the cross-provider case end-to-end.
         let recipient = DeclaredAudience::restricted([reader("slack:U012345")]);
         let unanswered = Expansions::new(
             [(

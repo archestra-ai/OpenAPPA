@@ -1,40 +1,171 @@
-//! The hook dispatcher: one typed `HookEvent` in, one `HookDecision`
-//! out.
+//! The hook dispatcher: one canonical wire event in, one wire decision
+//! out; between them, one typed `HookEvent` and one `HookDecision`.
 
-use appa_runtime_api::{Actor, Codec, HookDecision, HookEvent, ParseRefusal, ProposedCall, Ruling, TrajectoryId};
+use appa_engine::value::DispatchId as EngineDispatchId;
+use appa_runtime_api::{
+    Accepted, Actor, Adapter, HookDecision, HookEvent, ParseRefusal, ProposedCall, Ruling, TrajectoryId, WireDecision,
+    WireEvent,
+};
 
 use crate::api::{
     ChildReturnDecision, EventError, LateOpen, OfferId, Runtime, Session, SpawnResultDecision, ToolCallDecision,
     ToolResultDecision, is_control_tool,
 };
 
-/// One hook call, wire to wire: parse through the codec, dispatch,
-/// render back, with the HTTP status the answer travels under. A
+fn wire(decision: &HookDecision) -> serde_json::Value {
+    serde_json::to_value(WireDecision::of(decision)).expect("a wire decision serializes")
+}
+
+/// One hook call: validate the canonical wire, dispatch, and record its outcome. A
 /// non-2xx status makes the hook command exit 2, which blocks the
 /// action — hooks fail closed.
-pub async fn answer(runtime: &Runtime, codec: &Codec, body: &[u8]) -> (u16, serde_json::Value) {
-    let event = match (codec.parse)(body) {
-        Ok(Some(event)) => event,
-        Ok(None) => return (200, serde_json::json!({})),
-        Err(ParseRefusal::Unreadable { detail }) => return (400, serde_json::json!({ "error": detail })),
-        Err(ParseRefusal::Malformed { detail }) => return (409, serde_json::json!({ "error": detail })),
+pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> (u16, serde_json::Value) {
+    use crate::events::{HookKind, HookOutcome};
+
+    // Every way a hook can end leaves exactly one entry, including the three that never
+    // reach the dispatcher. Those are the answers a reader is most likely to be confused
+    // by: nothing happened, and the trajectory's facts say nothing about why. None of them
+    // has an actor yet, so they are recorded deployment-wide.
+    let accepted = match WireEvent::read(body).and_then(|event| event.into_event(adapter)) {
+        Ok(Some(accepted)) => accepted,
+        Ok(None) => {
+            runtime.record(None, bare_hook(HookKind::Ignored, HookOutcome::Ignored, None));
+            return (200, wire(&HookDecision::Ack));
+        }
+        Err(ParseRefusal::Unreadable { detail }) => {
+            runtime.record(None, bare_hook(HookKind::Unparsable, HookOutcome::Unreadable, None));
+            return (400, serde_json::json!({ "error": detail }));
+        }
+        Err(ParseRefusal::Malformed { detail }) => {
+            runtime.record(None, bare_hook(HookKind::Unparsable, HookOutcome::Malformed, None));
+            return (409, serde_json::json!({ "error": detail }));
+        }
     };
-    if let HookEvent::ToolCall { actor, call, .. } = &event {
-        match runtime.opened_among(&actor.root, &(codec.names_children)(actor, call)) {
-            Ok(Some(child)) => {
-                tracing::debug!(root = %actor.root.0, child = %child.0, "a call names a family child's transcript");
-                return (200, (codec.render)(&event, &deny(NAMED_TRANSCRIPT.to_string())));
+    let Accepted {
+        event,
+        names_children,
+        inventory,
+    } = accepted;
+    let root = hook_root(&event).clone();
+    if let Some(inventory) = inventory {
+        if matches!(event, HookEvent::ChildStart { .. }) {
+            let checked = runtime.check_inventory(&root, *adapter, &inventory).and_then(|report| {
+                if report.is_valid() {
+                    Ok(())
+                } else {
+                    let mut errors = report.errors;
+                    errors.extend(report.tools.into_iter().filter_map(|tool| match tool.status {
+                        crate::tool_validation::ToolStatus::Invalid { reason } => {
+                            Some(format!("{}: {reason}", tool.tool))
+                        }
+                        _ => None,
+                    }));
+                    Err(EventError::InventoryRefused(errors.join("; ")))
+                }
+            });
+            if let Err(error) = checked {
+                let (kind, tool) = hook_shape(&event);
+                runtime.record(Some(&root), bare_hook(kind, HookOutcome::Refused, tool));
+                return (409, wire(&refuse(error.to_string())));
             }
-            Ok(None) => {}
-            Err(error) => return (409, (codec.render)(&event, &refuse(error.to_string()))),
+        }
+        let actor = match &event {
+            HookEvent::SessionStart { root } => Actor {
+                root: root.clone(),
+                child: None,
+            },
+            HookEvent::ChildStart { root, child, .. } => Actor {
+                root: root.clone(),
+                child: Some(child.clone()),
+            },
+            HookEvent::ToolCall { actor, .. } => actor.clone(),
+            _ => unreachable!("wire validation restricts inventory to starts and tool calls"),
+        };
+        let observed = match runtime.session(&root, &root) {
+            Ok(_) => runtime.observe_inventory(&actor, *adapter, &inventory),
+            Err(EventError::UnknownTrajectory) if actor.child.is_none() => {
+                match runtime.create_session_with_inventory(root.clone(), inventory.clone()) {
+                    Ok(_) | Err(EventError::TrajectoryExists) => {
+                        runtime.observe_inventory(&actor, *adapter, &inventory)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        };
+        if let Err(error) = observed {
+            let (kind, tool) = hook_shape(&event);
+            runtime.record(Some(&root), bare_hook(kind, HookOutcome::Refused, tool));
+            return (409, wire(&refuse(error.to_string())));
         }
     }
-    let decision = handle(runtime, event.clone()).await;
-    let status = match decision {
+    if let HookEvent::ToolCall { actor, call, .. } = &event {
+        let early = match runtime.opened_among(&actor.root, &names_children) {
+            Ok(Some(child)) => {
+                tracing::debug!(root = %actor.root.0, child = %child.0, "a call names a family child's transcript");
+                Some((200, deny(NAMED_TRANSCRIPT.to_string())))
+            }
+            Ok(None) => None,
+            Err(error) => Some((409, refuse(error.to_string()))),
+        };
+        if let Some((status, decision)) = early {
+            let (outcome, offers) = hook_result(&decision);
+            runtime.record(
+                Some(&root),
+                crate::events::RuntimeEvent::Hook {
+                    event: HookKind::ToolCall,
+                    tool: Some(call.tool.clone()),
+                    dispatch: None,
+                    outcome,
+                    offers,
+                },
+            );
+            return (status, wire(&decision));
+        }
+    }
+    let handled = handle_internal(runtime, event).await;
+    runtime.record(Some(&root), handled.event);
+    let status = match handled.decision {
         HookDecision::Refuse { .. } => 409,
         _ => 200,
     };
-    (status, (codec.render)(&event, &decision))
+    (status, wire(&handled.decision))
+}
+
+/// A hook that ended before an actor existed, so there is nothing to attribute it to.
+fn bare_hook(
+    event: crate::events::HookKind,
+    outcome: crate::events::HookOutcome,
+    tool: Option<String>,
+) -> crate::events::RuntimeEvent {
+    crate::events::RuntimeEvent::Hook {
+        event,
+        tool,
+        dispatch: None,
+        outcome,
+        offers: Vec::new(),
+    }
+}
+
+/// The trajectory an entry belongs to. A child's events are kept under its own id, as the
+/// engine's facts are: a report about a subagent should not have to be found under its parent.
+/// The root this event's diagnostic entry is filed under.
+///
+/// The *root*, never the acting trajectory: the event log is keyed by family, because that is
+/// the unit a report is about and the unit its per-list bound must apply to. Filing a
+/// subagent's hooks under the subagent would put them outside the family's own account and
+/// leave `recent_root` naming something no log can be read for.
+fn hook_root(event: &HookEvent) -> &TrajectoryId {
+    match event {
+        HookEvent::SessionStart { root } => root,
+        HookEvent::ChildStart { root, .. } | HookEvent::ChildEnd { root, .. } => root,
+        HookEvent::Prompt { actor, .. }
+        | HookEvent::TurnEnd { actor }
+        | HookEvent::ToolCall { actor, .. }
+        | HookEvent::SpawnResume { actor, .. }
+        | HookEvent::ToolResult { actor, .. }
+        | HookEvent::SpawnResult { actor, .. } => &actor.root,
+    }
 }
 
 /// A subagent's words reach its parent through the checked return only; a call that
@@ -42,13 +173,101 @@ pub async fn answer(runtime: &Runtime, codec: &Codec, body: &[u8]) -> (u16, serd
 const NAMED_TRANSCRIPT: &str = "this call names a subagent's transcript or output file; a subagent's words \
                                 reach this session only through its checked return";
 
+/// Dispatch one typed event to its session and fold the outcome into one decision.
+///
+/// The wrapper every adapter, `replay`, and the MCP endpoint calls: it drops the diagnostic
+/// entry that [`handle_internal`] also builds. Only `answer` — the one path a live harness
+/// reaches — keeps it.
+pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
+    handle_internal(runtime, event).await.decision
+}
+
+/// One dispatched hook: the decision the adapters render, and the entry the runtime keeps
+/// about it.
+///
+/// The two travel together because the dispatch id belongs to exactly one of them.
+/// `HookDecision` is the public adapter wire type and carries no id — an adapter must not
+/// see one — but a diagnostic that cannot tie a hook to the dispatch it opened cannot be
+/// correlated with the trajectory's own facts. So the id is picked up here, where the
+/// release is still in scope, and never crosses the adapter boundary.
+pub(crate) struct Handled {
+    pub(crate) decision: HookDecision,
+    pub(crate) event: crate::events::RuntimeEvent,
+}
+
+pub(crate) async fn handle_internal(runtime: &Runtime, event: HookEvent) -> Handled {
+    let (kind, tool) = hook_shape(&event);
+    let mut dispatch = None;
+    let decision = dispatch_event(runtime, event, &mut dispatch).await;
+    let (outcome, offers) = hook_result(&decision);
+    Handled {
+        event: crate::events::RuntimeEvent::Hook {
+            event: kind,
+            tool,
+            dispatch,
+            outcome,
+            offers,
+        },
+        decision,
+    }
+}
+
+/// Which hook this is, and the tool it names where it names one.
+fn hook_shape(event: &HookEvent) -> (crate::events::HookKind, Option<String>) {
+    use crate::events::HookKind;
+    match event {
+        HookEvent::SessionStart { .. } => (HookKind::SessionStart, None),
+        HookEvent::Prompt { .. } => (HookKind::Prompt, None),
+        HookEvent::TurnEnd { .. } => (HookKind::TurnEnd, None),
+        HookEvent::ToolCall { call, .. } => (HookKind::ToolCall, Some(call.tool.clone())),
+        HookEvent::SpawnResume { call, .. } => (HookKind::SpawnResume, Some(call.tool.clone())),
+        HookEvent::ToolResult { call, .. } => (HookKind::ToolResult, Some(call.tool.clone())),
+        HookEvent::ChildStart { .. } => (HookKind::ChildStart, None),
+        HookEvent::ChildEnd { .. } => (HookKind::ChildEnd, None),
+        HookEvent::SpawnResult { call, .. } => (HookKind::SpawnResult, Some(call.tool.clone())),
+    }
+}
+
+/// How it was answered. `offers` are the remedy ids a block named, so a report can say
+/// which way out was on the table.
+fn hook_result(decision: &HookDecision) -> (crate::events::HookOutcome, Vec<String>) {
+    use crate::events::HookOutcome;
+    match decision {
+        HookDecision::Ack
+        | HookDecision::Context { .. }
+        | HookDecision::ChildReturn { .. }
+        | HookDecision::DeliverValue { .. } => (HookOutcome::Acked, Vec::new()),
+        HookDecision::AllowCall { .. } => (HookOutcome::Allowed, Vec::new()),
+        HookDecision::PassControl => (HookOutcome::PassControl, Vec::new()),
+        HookDecision::DenyCall { offers, .. } => (
+            HookOutcome::Denied,
+            offers.iter().map(|offered| offered.id.clone()).collect(),
+        ),
+        HookDecision::Block { .. } | HookDecision::ReplaceOutput { .. } => (HookOutcome::Blocked, Vec::new()),
+        HookDecision::Refuse { .. } => (HookOutcome::Refused, Vec::new()),
+    }
+}
+
 /// Dispatch one typed event to its session and fold the outcome into
 /// one decision. The dispatcher holds nothing between calls; every id
 /// it needs is in the event or in the runtime's persistence.
-pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
+async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Option<EngineDispatchId>) -> HookDecision {
     match event {
         HookEvent::SessionStart { root } => match open_or_reopen(runtime, &root) {
             Ok(_) => match runtime.live(&root, &root) {
+                Ok(()) if runtime.file_tracking_enabled() => HookDecision::Context {
+                    text: "APPA file-only mode: use appa_read_file(file_path), appa_write_file(file_path, content), \
+                           appa_edit_file(file_path, old_string, new_string), and \
+                           appa_copy_file/appa_move_file(source_path, destination_path) from this plugin's MCP server. \
+                           Paths resolve within the host-configured workspace. ToolSearch and native tools are \
+                           not supported in this mode. Native pre-hook observations are not tracked."
+                        .to_owned()
+                        + if runtime.file_process_enabled() {
+                            " appa_process_files(input_paths, output_path, command) runs in isolation: read inputs/<path> and write output/result."
+                        } else {
+                            ""
+                        },
+                },
                 Ok(()) => HookDecision::Ack,
                 Err(error) => refuse(error.to_string()),
             },
@@ -56,12 +275,18 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
         },
         HookEvent::Prompt { actor, .. } => {
             // The prompt text is not an engine event: nothing is reported,
-            // nothing is recorded, and offer freshness stays the engine's
-            // judgment. The prompt is only noted as the sign that the
+            // no fact is recorded, and offer freshness stays the engine's
+            // judgment. The prompt is only marked as the sign that the
             // previous turn is over; a queued message arrives here while
             // its turn's call still runs, so the call is settled at the
             // first proposal of the new turn, when that result is in.
-            runtime.note_prompt(&actor);
+            //
+            // The mark gates nothing, so this answers `Ack` whether or not it landed: a
+            // mark that did not land leaves the interrupted call open until the turn ends,
+            // which is what happens anyway when no prompt hook arrives at all.
+            if let Err(error) = runtime.record_prompt(&actor) {
+                tracing::warn!(root = %actor.root.0, %error, "the prompt left no mark");
+            }
             HookDecision::Ack
         }
         HookEvent::TurnEnd { actor } => {
@@ -70,7 +295,6 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             // turn" on this hook, which would hold the harness in a turn
             // it has finished; a close that failed leaves the call open
             // and the next proposal refuses on its own.
-            runtime.take_prompted(&actor);
             if let Err(error) = on_actor(runtime, &actor, MissingStart::Refuse, |session| async move {
                 session.on_turn_end().await
             })
@@ -78,40 +302,55 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             {
                 tracing::warn!(root = %actor.root.0, %error, "the turn end closed no abandoned call");
             }
-            runtime.release_vouches(&actor);
+            if let Err(error) = runtime.record_turn_end(&actor) {
+                tracing::warn!(root = %actor.root.0, %error, "the turn's end was not recorded");
+            }
             HookDecision::Ack
         }
         HookEvent::ToolCall {
             actor,
             call,
+            call_id,
             spawn,
             ruling,
         } => {
-            if runtime.take_prompted(&actor) {
+            if runtime.prompted(&actor) {
                 // The first proposal after a prompt that no turn end preceded:
                 // the user interrupted the previous turn, and whatever it left
                 // open is settled before this turn's first call, control tools
                 // included, so a vouch this turn records is never released here.
+                //
+                // A settle that does not complete writes nothing, so the mark survives and
+                // the next proposal tries the same close again.
                 if let Err(error) = on_actor(runtime, &actor, MissingStart::OpenLate, |session| async move {
                     session.on_turn_end().await
                 })
                 .await
                 {
-                    runtime.note_prompt(&actor);
                     return fold(error, deny);
                 }
-                runtime.release_vouches(&actor);
+                if let Err(error) = runtime.record_turn_end(&actor) {
+                    return fold(error, deny);
+                }
             }
             if is_control_tool(&call.tool) {
                 return control_call(runtime, &actor, &call, ruling);
             }
             match on_actor(runtime, &actor, MissingStart::OpenLate, |session| {
                 let call = call.clone();
-                async move { session.on_tool_call(call, spawn).await }
+                let call_id = call_id.clone();
+                async move { session.on_tool_call_identified(call, call_id, spawn).await }
             })
             .await
             {
-                Ok(ToolCallDecision::Allow { spawn }) => HookDecision::AllowCall { spawn },
+                Ok(ToolCallDecision::Allow {
+                    spawn,
+                    dispatch: opened,
+                }) => {
+                    *dispatch = Some(opened);
+                    vouch_call(runtime, &actor, &call);
+                    HookDecision::AllowCall { spawn }
+                }
                 Ok(ToolCallDecision::Deny {
                     feedback,
                     offers,
@@ -124,14 +363,44 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
                 Err(error) => fold(error, deny),
             }
         }
-        HookEvent::ToolResult { actor, call, outcome } => {
+        HookEvent::SpawnResume { actor, call, child } => {
+            match on_actor(runtime, &actor, MissingStart::Refuse, |session| {
+                let (call, child) = (call.clone(), child.clone());
+                async move { session.on_spawn_resume(call, child) }
+            })
+            .await
+            {
+                Ok(()) => {
+                    // The resume settled what the prompt interrupted, and only that: the
+                    // turn's standing survives a resume it approved.
+                    if runtime.prompted(&actor)
+                        && let Err(error) = runtime.record_prompt_settled(&actor)
+                    {
+                        tracing::warn!(root = %actor.root.0, %error, "the resumed prompt's mark stands");
+                    }
+                    HookDecision::Ack
+                }
+                Err(error) => fold(error, block),
+            }
+        }
+        HookEvent::ToolResult {
+            actor,
+            call,
+            call_id,
+            outcome,
+        } => {
             if is_control_tool(&call.tool) {
                 tracing::debug!(trajectory = %actor.root.0, "control tool outcome absorbed");
                 return HookDecision::Ack;
             }
+            if runtime.file_tracking_enabled() && crate::api::files::owns(&call) {
+                // The runtime-owned tool admitted its observation before returning via MCP.
+                // A transport/argument failure before execution leaves its reservation intact.
+                return HookDecision::Ack;
+            }
             match on_actor(runtime, &actor, MissingStart::Refuse, |session| {
-                let (call, outcome) = (call.clone(), outcome.clone());
-                async move { session.on_tool_result(call, outcome).await }
+                let (call, call_id, outcome) = (call.clone(), call_id.clone(), outcome.clone());
+                async move { session.on_tool_result_identified(call, call_id, outcome).await }
             })
             .await
             {
@@ -142,14 +411,25 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
         HookEvent::SpawnResult {
             actor,
             call,
+            call_id,
             outcome,
             child,
             value,
         } => {
             let said = value.clone();
             match on_actor(runtime, &actor, MissingStart::Refuse, |session| {
-                let (call, outcome, child, value) = (call.clone(), outcome.clone(), child.clone(), value.clone());
-                async move { session.on_spawn_result(call, outcome, child, value).await }
+                let (call, call_id, outcome, child, value) = (
+                    call.clone(),
+                    call_id.clone(),
+                    outcome.clone(),
+                    child.clone(),
+                    value.clone(),
+                );
+                async move {
+                    session
+                        .on_spawn_result_identified(call, call_id, outcome, child, value)
+                        .await
+                }
             })
             .await
             {
@@ -184,7 +464,21 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
             })
             .await
             {
-                Ok(decision) => return_decision(said, decision),
+                Ok(decision) => {
+                    // The child is finished unless it is being asked to return something
+                    // else, so what it still stands behind ends here: its vouches must not
+                    // outlive its return, and its parent's turn end is not its own.
+                    if !matches!(decision, ChildReturnDecision::Blocked { .. }) {
+                        let actor = Actor {
+                            root: root.clone(),
+                            child: Some(child.clone()),
+                        };
+                        if let Err(error) = runtime.record_turn_end(&actor) {
+                            tracing::warn!(root = %root.0, child = %child.0, %error, "the child's end was not recorded");
+                        }
+                    }
+                    return_decision(said, decision)
+                }
                 Err(error) => fold(error, block),
             }
         }
@@ -194,6 +488,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
 fn outcome_decision(decision: ToolResultDecision) -> HookDecision {
     match decision {
         ToolResultDecision::Keep => HookDecision::Ack,
+        ToolResultDecision::Deliver { value } => HookDecision::DeliverValue { value },
         ToolResultDecision::Replace { placeholder } => HookDecision::ReplaceOutput { output: placeholder },
     }
 }
@@ -232,7 +527,7 @@ fn control_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall, ruling: O
     let acting = actor.child.clone().unwrap_or_else(|| actor.root.clone());
     match runtime.resolve_in(&actor.root, &quoted) {
         Some((_, pursuer)) if pursuer == acting => {
-            runtime.vouch(&quoted, actor, ruling);
+            runtime.vouch(&crate::api::PermitKey::offer(&quoted), actor, ruling);
             tracing::debug!(trajectory = %acting.0, "control tool names an offer this trajectory pursues");
             HookDecision::PassControl
         }
@@ -241,6 +536,22 @@ fn control_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall, ruling: O
             deny("this offer no longer stands; re-propose the call".to_string())
         }
     }
+}
+
+/// Record who is making a released call to a tool this runtime serves — `yell`, or one of
+/// the management tools — so the tool, whose MCP request names no session, acts for the
+/// session the hook saw rather than whichever one this machine ran most recently.
+///
+/// Only a released call: the vouch is what lets the tool act at all, so a call the policy
+/// blocked must leave nothing behind for the tool to spend. Unlike the control tool, these
+/// are ordinary checked calls — flows like any other, and the policy decides them first. A
+/// lookalike on another server is an ordinary tool this never vouches for.
+fn vouch_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall) {
+    let Some(key) = crate::api::call_key(call) else {
+        return;
+    };
+    runtime.vouch(&key, actor, None);
+    tracing::debug!(trajectory = %actor.root.0, tool = %call.tool, "vouched for this trajectory");
 }
 
 fn quoted_offer(call: &ProposedCall) -> Option<OfferId> {
@@ -340,8 +651,24 @@ mod tests {
     use crate::api::Runtime;
     use crate::config::Config;
 
-    fn codec() -> Codec {
-        appa_adapter_claude_code::codec()
+    /// The client side of the wire, as `appa hook` runs it: the
+    /// Claude Code hook JSON these tests are written in is translated onto the wire,
+    /// and the wire decision is rendered back into Claude Code's hook answer.
+    async fn through_the_wire(runtime: &Runtime, claude_hook_json: &[u8]) -> (u16, serde_json::Value) {
+        let codec = appa_adapter_claude_code::codec();
+        let event = match (codec.parse)(claude_hook_json) {
+            Ok(Some(event)) => event,
+            Ok(None) => return (200, serde_json::json!({})),
+            Err(ParseRefusal::Unreadable { detail }) => return (400, serde_json::json!({ "error": detail })),
+            Err(ParseRefusal::Malformed { detail }) => return (409, serde_json::json!({ "error": detail })),
+        };
+        let wire = WireEvent::from_event(appa_runtime_api::AdapterName::ClaudeCode, &event).expect("translates");
+        let body = serde_json::to_vec(&wire).expect("serializes");
+        let (status, answer) = answer(runtime, &appa_adapter_claude_code::adapter(), &body).await;
+        match serde_json::from_value::<WireDecision>(answer.clone()).map(WireDecision::into_decision) {
+            Ok(Ok(decision)) => (status, (codec.render)(&event, &decision)),
+            _ => (status, answer),
+        }
     }
 
     fn config() -> Config {
@@ -350,22 +677,22 @@ mod tests {
             version = 2
 
             [[policy.tool]]
-            name = "Bash"
+            name = "host/claude-code/Bash"
 
             [[policy.tool]]
-            name = "Write"
+            name = "host/claude-code/Write"
 
             [[policy.tool]]
-            name = "AskUserQuestion"
+            name = "host/claude-code/AskUserQuestion"
 
             [[policy.tool]]
-            name = "Task"
+            name = "host/claude-code/Task"
 
             [[policy.tool]]
-            name = "Agent"
+            name = "host/claude-code/Agent"
 
             [[policy.tool]]
-            name = "Read"
+            name = "host/claude-code/Read"
 
             [policy.deployment]
             context_control = true
@@ -385,12 +712,12 @@ mod tests {
     }
 
     async fn call_hook(runtime: &Runtime, body: &[u8]) -> (u16, serde_json::Value) {
-        answer(runtime, &codec(), body).await
+        through_the_wire(runtime, body).await
     }
 
     fn spawn_call() -> crate::api::ProposedCall {
         crate::api::ProposedCall {
-            tool: "Task".to_string(),
+            tool: "host/claude-code/Task".to_string(),
             arguments: crate::api::raw(serde_json::json!({"prompt": "look it up"})),
         }
     }
@@ -427,6 +754,7 @@ mod tests {
                 child: None,
             },
             call: spawn_call(),
+            call_id: None,
             spawn: true,
             ruling: None,
         };
@@ -441,7 +769,7 @@ mod tests {
         binding
     }
 
-    const CONTROL_TOOL_FIXTURE_NAME: &str = "mcp__plugin_appa-runtime_appa__execute_remedy_plan";
+    const CONTROL_TOOL_FIXTURE_NAME: &str = "mcp__appa__execute_remedy_plan";
 
     fn fixtures() -> Vec<serde_json::Value> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hooks.jsonl");
@@ -587,6 +915,15 @@ mod tests {
         })
     }
 
+    /// The same proposal with the host's own id for the call, which is how Claude Code
+    /// reports one: an identified call names its own dispatch, so another identified call
+    /// being open does not refuse it.
+    fn identified_bash_call(command: &str, call_id: &str) -> serde_json::Value {
+        let mut call = bash_call(command);
+        call["tool_use_id"] = serde_json::Value::String(call_id.to_string());
+        call
+    }
+
     fn bash_result(command: &str) -> serde_json::Value {
         serde_json::json!({
             "hook_event_name": "PostToolUse",
@@ -638,7 +975,7 @@ mod tests {
             root: appa_runtime_api::TrajectoryId("cc:s1".to_string()),
             child: None,
         };
-        let quoted = OfferId("offer-1".to_string());
+        let quoted = crate::api::PermitKey::offer(&OfferId("0ffe000000000001".to_string()));
         runtime.vouch(&quoted, &actor, None);
 
         // Interrupted: neither PostToolUse nor Stop arrives.
@@ -650,7 +987,7 @@ mod tests {
         assert!(closed_as_unknown(&runtime), "the interrupted call closed as unreported");
         assert_eq!(
             runtime.take_vouched(&quoted),
-            None,
+            Err(crate::api::Unvouched::Nobody),
             "the interrupted turn's vouch is released"
         );
 
@@ -687,25 +1024,34 @@ mod tests {
         );
     }
 
-    /// A prompt writes nothing, so a store that refuses every append still
-    /// acknowledges it; the failure surfaces at the proposal that needs the
-    /// close, and the mark survives for the next proposal.
+    /// A prompt gates nothing, so a store that refuses every append still acknowledges it.
+    /// The mark is what does not land, and losing it costs only the early settle: the next
+    /// proposal is decided as any proposal is, and the interrupted call is closed at the
+    /// turn's end instead.
     #[tokio::test]
     async fn a_prompt_acknowledges_over_a_store_that_cannot_append() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
-        let released = hook(&runtime, &bash_call("ping -c 30 127.0.0.1")).await;
+        let released = hook(&runtime, &identified_bash_call("ping -c 30 127.0.0.1", "toolu_1")).await;
         assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
         runtime.store().fail_commit_after(0);
 
         assert_eq!(hook(&runtime, &prompt()).await, (200, serde_json::json!({})));
-
-        let (status, _) = hook(&runtime, &bash_call("ls")).await;
-        assert_eq!(status, 409, "the close the proposal needs is an operational refusal");
         runtime.store().fail_commit_after(u64::MAX - 1);
-        let freed = hook(&runtime, &bash_call("ls")).await;
-        assert_eq!(freed.1["hookSpecificOutput"]["permissionDecision"], "allow");
-        assert!(closed_as_unknown(&runtime));
+
+        let next = hook(&runtime, &identified_bash_call("ls", "toolu_2")).await;
+        assert_eq!(
+            next.1["hookSpecificOutput"]["permissionDecision"], "allow",
+            "the prompt left no mark, so the proposal is decided as any proposal is"
+        );
+        assert!(!closed_as_unknown(&runtime), "nothing settled the interrupted call yet");
+
+        let stop = serde_json::json!({"hook_event_name": "Stop", "session_id": "s1"});
+        assert_eq!(hook(&runtime, &stop).await, (200, serde_json::json!({})));
+        assert!(
+            closed_as_unknown(&runtime),
+            "the turn's end closed what the prompt left open"
+        );
     }
 
     /// A turn end settles the prompt's mark too: a proposal in the turn
@@ -874,7 +1220,7 @@ mod tests {
         let event = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "session_id": "s1",
-            "tool_name": "mcp__appa__execute_remedy_plan",
+            "tool_name": CONTROL_TOOL_FIXTURE_NAME,
             "tool_input": {},
         });
         let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
@@ -894,25 +1240,126 @@ mod tests {
         assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "allow");
     }
 
+    /// The wire carries the host's raw spelling; the served adapter derives which
+    /// call is the control tool. A lookalike on another server, and the bare name
+    /// a host tool could take, both derive an ordinary tool nothing covers.
     #[tokio::test]
     async fn a_lookalike_control_tool_is_checked() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
-        let event = serde_json::json!({
-            "hook_event_name": "PreToolUse",
-            "session_id": "s1",
-            "tool_name": "mcp__evil__execute_remedy_plan",
-            "tool_input": {"offer_id": "whatever"},
-        });
-        let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
-        // Not the exemption's allow: the lookalike reaches the engine, and nothing
-        // covers the name, so the refusal is typed and rides the error wire.
-        assert_eq!(status, 409, "a colliding name must reach the engine, not the exemption");
+        for (raw, canonical) in [
+            ("mcp__evil__execute_remedy_plan", "mcp/evil/execute_remedy_plan"),
+            (
+                "mcp__appa-guide__execute_remedy_plan",
+                "mcp/appa-guide/execute_remedy_plan",
+            ),
+            ("execute_remedy_plan", "host/claude-code/execute_remedy_plan"),
+        ] {
+            let event = serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "s1",
+                "tool_name": raw,
+                "tool_input": {"offer_id": "whatever"},
+            });
+            let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
+            // Not the exemption's allow: the lookalike reaches the engine, and nothing
+            // covers the name, so the refusal is typed and rides the error wire.
+            assert_eq!(status, 409, "{raw} must reach the engine, not the exemption: {answer}");
+            assert!(
+                answer["error"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains(canonical)),
+                "the refusal names the derived tool: {answer}"
+            );
+        }
+    }
+
+    /// The wire is one protocol and one adapter: an event under another protocol, or
+    /// for another host, is refused before any session is touched.
+    #[tokio::test]
+    async fn another_protocol_or_another_adapters_event_is_refused() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let adapter = appa_adapter_claude_code::adapter();
+        let foreign_protocol = br#"{"protocol":2,"adapter":"claude-code","event":"session_start","root_id":"s1"}"#;
+        let (status, reply) = answer(&runtime, &adapter, foreign_protocol).await;
+        assert_eq!(status, 409, "{reply}");
+        assert!(reply["error"].is_string(), "{reply}");
+
+        let foreign_adapter = br#"{"protocol":1,"adapter":"kagent","event":"session_start","root_id":"s1"}"#;
+        let (status, reply) = answer(&runtime, &adapter, foreign_adapter).await;
+        assert_eq!(status, 409, "{reply}");
+        assert!(reply["error"].is_string(), "{reply}");
         assert!(
-            answer["error"]
-                .as_str()
-                .is_some_and(|detail| detail.contains("mcp__evil__execute_remedy_plan")),
-            "the refusal names the tool: {answer}"
+            runtime.status(&TrajectoryId("cc:s1".to_string())).is_none()
+                && runtime.status(&TrajectoryId("kagent:s1".to_string())).is_none(),
+            "a refused envelope opens nothing"
+        );
+
+        let served = br#"{"protocol":1,"adapter":"claude-code","event":"session_start","root_id":"s1"}"#;
+        assert_eq!(answer(&runtime, &adapter, served).await.0, 200);
+        assert!(runtime.status(&TrajectoryId("cc:s1".to_string())).is_some());
+    }
+
+    /// Whether a call is a spawn is derived from the raw spelling, never read off the
+    /// wire: a `spawn` claim on an ordinary tool releases it as an ordinary call, and
+    /// the spawn tool is held on the return menu with no claim at all.
+    #[tokio::test]
+    async fn a_wire_spawn_claim_is_ignored_and_the_spawn_is_derived() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let adapter = appa_adapter_claude_code::adapter();
+        let claimed = br#"{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"s1","tool":"Bash","spawn":true,"arguments":{"command":"ls"}}"#;
+        let (status, reply) = answer(&runtime, &adapter, claimed).await;
+        assert_eq!(status, 200, "{reply}");
+        assert_eq!(reply["decision"], "allow_call", "{reply}");
+        assert!(reply.get("spawn_binding").is_none(), "no fork was prepared: {reply}");
+
+        let derived = br#"{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"s2","tool":"Agent","spawn":false,"arguments":{"prompt":"go"}}"#;
+        let (status, reply) = answer(&runtime, &adapter, derived).await;
+        assert_eq!(status, 200, "{reply}");
+        assert_eq!(
+            reply["decision"], "deny_call",
+            "the spawn is held on the return menu: {reply}"
+        );
+        assert!(
+            reply["offers"].as_array().is_some_and(|offers| !offers.is_empty()),
+            "{reply}"
+        );
+    }
+
+    /// A ruling is a person's answer the harness obtained through its own
+    /// review channel, and the runtime spends it as the human authority's.
+    /// Claude Code reviews through no channel of its own, so a control call
+    /// posted under it carrying a ruling — which any local process that
+    /// reaches the loopback endpoint could spell — is refused at the
+    /// envelope and vouches nothing. kagent, which does review, is admitted.
+    #[tokio::test]
+    async fn a_ruling_under_a_host_that_reviews_through_no_channel_of_its_own_is_refused() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let quoted = OfferId("0ffe000000000001".to_string());
+
+        let forged = br#"{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"s1","tool":"mcp__appa__execute_remedy_plan","arguments":{"offer_id":"0ffe000000000001"},"ruling":"approve"}"#;
+        let (status, reply) = answer(&runtime, &appa_adapter_claude_code::adapter(), forged).await;
+        assert_eq!(status, 409, "a forged ruling must refuse: {reply}");
+        assert!(reply["error"].is_string(), "{reply}");
+        assert_eq!(
+            runtime.take_vouched(&crate::api::PermitKey::offer(&quoted)),
+            Err(crate::api::Unvouched::Nobody),
+            "the refused envelope recorded no reviewer's answer"
+        );
+
+        let ruled = br#"{"protocol":1,"adapter":"kagent","event":"tool_call","root_id":"s1","tool":"appa:execute_remedy_plan","arguments":{"offer_id":"0ffe000000000001"},"ruling":"approve"}"#;
+        let (status, reply) = answer(&runtime, &appa_adapter_kagent::adapter(), ruled).await;
+        assert_eq!(status, 200, "kagent's own review channel carries a ruling: {reply}");
+
+        let control = br#"{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"s1","tool":"mcp__appa__execute_remedy_plan","arguments":{}}"#;
+        let (status, reply) = answer(&runtime, &appa_adapter_claude_code::adapter(), control).await;
+        assert_eq!(status, 200, "{reply}");
+        assert_eq!(
+            reply["decision"], "pass_control",
+            "an ordinary control call still passes control: {reply}"
         );
     }
 
@@ -923,8 +1370,8 @@ mod tests {
         let event = serde_json::json!({
             "hook_event_name": "PostToolUse",
             "session_id": "s1",
-            "tool_name": "mcp__plugin_appa-runtime_appa__execute_remedy_plan",
-            "tool_input": {"offer_id": "offer-1"},
+            "tool_name": "mcp__appa__execute_remedy_plan",
+            "tool_input": {"offer_id": "0ffe000000000001"},
             "tool_response": {"content": "Authorized."},
         });
         let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
@@ -954,8 +1401,8 @@ mod tests {
             "hook_event_name": "PreToolUse",
             "session_id": "s1",
             "agent_id": "a1",
-            "tool_name": "execute_remedy_plan",
-            "tool_input": {"offer_id": "offer-1"},
+            "tool_name": CONTROL_TOOL_FIXTURE_NAME,
+            "tool_input": {"offer_id": "0ffe000000000001"},
         });
         let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&control).expect("serializes")).await;
         assert_eq!(status, 200);
@@ -965,8 +1412,8 @@ mod tests {
             "hook_event_name": "PostToolUse",
             "session_id": "s1",
             "agent_id": "a1",
-            "tool_name": "execute_remedy_plan",
-            "tool_input": {"offer_id": "offer-1"},
+            "tool_name": CONTROL_TOOL_FIXTURE_NAME,
+            "tool_input": {"offer_id": "0ffe000000000001"},
             "tool_response": {"ok": true},
         });
         let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&outcome).expect("serializes")).await;
@@ -999,6 +1446,18 @@ mod tests {
             HookDecision::Ack,
         );
 
+        // A subagent's standing must not outlive its return: its parent's turn end is not
+        // its own, so nothing else would ever end it.
+        let quoted = crate::api::PermitKey::offer(&OfferId("0ffe000000000001".to_string()));
+        runtime.vouch(
+            &quoted,
+            &Actor {
+                root: root.clone(),
+                child: Some(child.clone()),
+            },
+            None,
+        );
+
         assert_eq!(
             handle(
                 &runtime,
@@ -1011,6 +1470,72 @@ mod tests {
             .await,
             HookDecision::Ack,
             "an unchanged crossing needs no answer",
+        );
+        assert_eq!(
+            runtime.take_vouched(&quoted),
+            Err(crate::api::Unvouched::Nobody),
+            "the child's return ended what it still stood behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_native_spawn_resume_keeps_the_dispatch_across_an_approval_prompt() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let root = TrajectoryId("cc:s1".to_string());
+        handle(&runtime, HookEvent::SessionStart { root: root.clone() }).await;
+        let binding = declared_spawn(&runtime, &root).await;
+        let child = TrajectoryId("cc:s1:c1".to_string());
+        handle(
+            &runtime,
+            HookEvent::ChildStart {
+                root: root.clone(),
+                child: child.clone(),
+                spawn: SpawnRef::Binding(binding),
+            },
+        )
+        .await;
+        let actor = Actor {
+            root: root.clone(),
+            child: None,
+        };
+        let original = runtime.open_dispatches(&root, &root)[0].id.clone();
+        let quoted = crate::api::PermitKey::offer(&OfferId("0ffe000000000001".to_string()));
+        runtime.vouch(&quoted, &actor, None);
+        handle(
+            &runtime,
+            HookEvent::Prompt {
+                actor: actor.clone(),
+                text: "approve".into(),
+            },
+        )
+        .await;
+        let wrong = handle(
+            &runtime,
+            HookEvent::SpawnResume {
+                actor: actor.clone(),
+                call: spawn_call(),
+                child: TrajectoryId("cc:s1:other".into()),
+            },
+        )
+        .await;
+        assert!(matches!(wrong, HookDecision::Block { .. }));
+        let resumed = handle(
+            &runtime,
+            HookEvent::SpawnResume {
+                actor: actor.clone(),
+                call: spawn_call(),
+                child,
+            },
+        )
+        .await;
+        assert_eq!(resumed, HookDecision::Ack);
+        assert_eq!(runtime.open_dispatches(&root, &root)[0].id, original);
+        assert!(!runtime.prompted(&actor), "successful resume settled the prompt marker");
+        assert_eq!(
+            runtime.take_vouched(&quoted),
+            Ok((actor, None)),
+            "a resume settles the prompt and nothing else: the turn's standing survives it"
         );
     }
 
@@ -1041,7 +1566,7 @@ mod tests {
         let runtime = open_runtime(&dir);
         let root = appa_runtime_api::TrajectoryId("cc:s1".to_string());
         let call = || crate::api::ProposedCall {
-            tool: "Agent".to_string(),
+            tool: "host/claude-code/Agent".to_string(),
             arguments: crate::api::raw(serde_json::json!({"prompt": "list files"})),
         };
         let result = || HookEvent::SpawnResult {
@@ -1050,6 +1575,7 @@ mod tests {
                 child: None,
             },
             call: call(),
+            call_id: None,
             outcome: appa_runtime_api::ToolOutcome::Success {
                 body: appa_runtime_api::OutcomeBody::Available(r#"{"agentId":"a1"}"#.to_string()),
             },
@@ -1068,6 +1594,7 @@ mod tests {
                     child: None,
                 },
                 call: call(),
+                call_id: None,
                 spawn: false,
                 ruling: None,
             },
@@ -1093,9 +1620,10 @@ mod tests {
                     child: Some(child.clone()),
                 },
                 call: crate::api::ProposedCall {
-                    tool: "Bash".to_string(),
+                    tool: "host/claude-code/Bash".to_string(),
                     arguments: crate::api::raw(serde_json::json!({"command": "ls"})),
                 },
+                call_id: None,
                 spawn: false,
                 ruling: None,
             },
@@ -1131,9 +1659,10 @@ mod tests {
                     child: Some(appa_runtime_api::TrajectoryId("cc:s1:a2".to_string())),
                 },
                 call: crate::api::ProposedCall {
-                    tool: "Bash".to_string(),
+                    tool: "host/claude-code/Bash".to_string(),
                     arguments: crate::api::raw(serde_json::json!({"command": "ls"})),
                 },
+                call_id: None,
                 spawn: false,
                 ruling: None,
             },
@@ -1177,5 +1706,116 @@ mod tests {
         let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
         assert_eq!(status, 409);
         assert_eq!(answer, serde_json::json!({"error": "PreToolUse without a tool call"}));
+    }
+
+    /// A deployment that declares the reporting tool, so a proposal of it is released rather
+    /// than refused as undeclared.
+    fn yelling_runtime(dir: &tempfile::TempDir) -> Runtime {
+        let text = r#"
+            [policy]
+            version = 2
+
+            [[policy.tool]]
+            name = "mcp/appa/yell"
+
+            [externals]
+            timeout_ms = 1000
+            max_body_bytes = 4096
+        "#;
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, text).expect("the fixture writes");
+        Runtime::open(
+            Config::load(&path).expect("the fixture validates"),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the fixture deployment opens")
+    }
+
+    fn yell_call(message: &str, with_trajectory: bool) -> serde_json::Value {
+        serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s1",
+            "tool_name": "mcp__appa__yell",
+            "tool_input": {"message": message, "with_trajectory": with_trajectory},
+        })
+    }
+
+    fn ticket(message: &str, with_trajectory: bool) -> crate::api::PermitKey {
+        crate::yell::YellArgs {
+            message: message.to_string(),
+            with_trajectory,
+        }
+        .ticket()
+    }
+
+    /// An MCP request names no session, so the report a `yell` builds is about whatever the
+    /// hook before it attested. Two sessions on one machine are what makes this matter.
+    #[tokio::test]
+    async fn a_released_yell_vouches_for_the_trajectory_that_made_it() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = yelling_runtime(&dir);
+        let released = hook(&runtime, &yell_call("the hook blocked", true)).await;
+        assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
+
+        assert_eq!(
+            runtime.take_vouched(&ticket("the hook blocked", true)),
+            Ok((
+                Actor {
+                    root: TrajectoryId("cc:s1".to_string()),
+                    child: None,
+                },
+                None
+            ))
+        );
+    }
+
+    /// The vouch is what lets a report be built at all, so a call the policy refused must
+    /// leave nothing behind for the tool to spend.
+    #[tokio::test]
+    async fn a_blocked_yell_vouches_for_nobody() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        // The default fixture declares no `yell` and has no wildcard: undeclared is refused.
+        let runtime = open_runtime(&dir);
+        let refused = hook(&runtime, &yell_call("the hook blocked", true)).await;
+        assert_ne!(refused.1["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(
+            runtime.take_vouched(&ticket("the hook blocked", true)),
+            Err(crate::api::Unvouched::Nobody)
+        );
+    }
+
+    /// The standing is for the call the hook saw. A tool that then reports something else is
+    /// spending a vouch that was never given for it.
+    #[tokio::test]
+    async fn a_yell_vouch_answers_only_the_call_it_was_given_for() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = yelling_runtime(&dir);
+        let released = hook(&runtime, &yell_call("the hook blocked", true)).await;
+        assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
+
+        let nobody = Err(crate::api::Unvouched::Nobody);
+        assert_eq!(runtime.take_vouched(&ticket("the hook blocked", false)), nobody);
+        assert_eq!(runtime.take_vouched(&ticket("something else", true)), nobody);
+        assert!(runtime.take_vouched(&ticket("the hook blocked", true)).is_ok());
+    }
+
+    /// One turn's standing, like the control tool's: the harness may decline the call after
+    /// the hook released it, and nothing later may spend what that turn left behind.
+    #[tokio::test]
+    async fn an_unspent_yell_vouch_does_not_outlive_its_turn() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = yelling_runtime(&dir);
+        hook(&runtime, &yell_call("the hook blocked", true)).await;
+
+        let actor = Actor {
+            root: TrajectoryId("cc:s1".to_string()),
+            child: None,
+        };
+        crate::hooks::handle(&runtime, HookEvent::TurnEnd { actor }).await;
+        assert_eq!(
+            runtime.take_vouched(&ticket("the hook blocked", true)),
+            Err(crate::api::Unvouched::Nobody)
+        );
     }
 }

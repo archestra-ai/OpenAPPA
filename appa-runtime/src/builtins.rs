@@ -3,9 +3,10 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use appa_builtin::{ABI_VERSION, DescriptorV1, KIND_AUTHORITY, KIND_SANITIZER};
+use regex::Regex;
 
 use crate::config::{CLAUDE_CODE_BUILTIN, LLM_BUILTIN, Section};
 use crate::consult::{Consult, ConsultBody, ModelPrompt};
@@ -16,11 +17,12 @@ use crate::external::NoAnswerReason;
 /// only — the HTTP path's cap behavior is untouched.
 pub(crate) const MODULE_OUTPUT_CEILING: usize = 16 * 1024 * 1024;
 
-const REFUSED_MODULE_NAMES: [&str; 6] = [
+const REFUSED_MODULE_NAMES: [&str; 7] = [
     "hitl",
     "attest-schema",
     "approve",
     "redact-email",
+    "redact-secrets",
     CLAUDE_CODE_BUILTIN,
     LLM_BUILTIN,
 ];
@@ -45,6 +47,11 @@ pub(crate) enum Stock {
     /// fixed placeholder. A deliberately simple scan (registration is a trust decision,
     /// not verification).
     RedactEmail,
+    /// `redact-secrets` — a sanitizer replacing credentials in the body with a fixed
+    /// placeholder: private-key blocks, tokens of well-known shapes, the value of an
+    /// assignment whose key names a secret, and any long high-entropy run. Same trust
+    /// decision as `redact-email`: a detector, not a proof of absence.
+    RedactSecrets,
 }
 
 impl Stock {
@@ -52,6 +59,7 @@ impl Stock {
         match (section, name) {
             (Section::Authorities, "approve") => Some(Stock::Approve),
             (Section::Sanitizers, "redact-email") => Some(Stock::RedactEmail),
+            (Section::Sanitizers, "redact-secrets") => Some(Stock::RedactSecrets),
             _ => None,
         }
     }
@@ -64,9 +72,127 @@ impl Stock {
             (Stock::RedactEmail, ConsultBody::Sanitizer { artifact, .. }) => {
                 Some(serde_json::json!({ "body": redact_email(&artifact.body) }))
             }
+            (Stock::RedactSecrets, ConsultBody::Sanitizer { artifact, .. }) => {
+                Some(serde_json::json!({ "body": redact_secrets(&artifact.body) }))
+            }
             _ => None,
         }
     }
+}
+
+const SECRET_PLACEHOLDER: &str = "[redacted-secret]";
+
+/// A PEM-armored private key, the whole block.
+static PRIVATE_KEY_BLOCK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----").expect("a fixed pattern")
+});
+
+/// Tokens whose issuer fixes their shape: AWS access keys, GitHub, Anthropic, OpenAI,
+/// Slack, Google, GitLab and npm tokens, and JWTs.
+static KNOWN_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?x)
+          AKIA[0-9A-Z]{16}
+        | gh[pousr]_[A-Za-z0-9]{36,}
+        | github_pat_[A-Za-z0-9_]{22,}
+        | sk-ant-[A-Za-z0-9_-]{20,}
+        | sk-[A-Za-z0-9_-]{20,}
+        | xox[abprs]-[A-Za-z0-9-]{10,}
+        | AIza[0-9A-Za-z_-]{35}
+        | glpat-[A-Za-z0-9_-]{20,}
+        | npm_[A-Za-z0-9]{36}
+        | eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+
+        ",
+    )
+    .expect("a fixed pattern")
+});
+
+/// The password of a URL with credentials in its authority: `scheme://user:password@host`.
+static URL_PASSWORD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(://[^/?#@:\s"']*:)([^/?#@\s"']+)@"#).expect("a fixed pattern"));
+
+/// An assignment whose key names a secret: `KEY=value`, `key: value`, or JSON's
+/// `"key": "value"`. A key names a secret when it contains one of the longer words, or
+/// when `key`, `pass`, `pwd` or `auth` is one of its segments, separated or camel-cased.
+/// The value is masked whatever its shape: a quoted value to its closing quote, an HTTP
+/// credential with its scheme word, a bare one to the next space or delimiter; its
+/// quotes stay.
+static SECRET_ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?ix)
+        ( ["']?
+          (?: [A-Za-z0-9_.-]* (?: password | passwd | passphrase | secret | token | api_?key | private_?key | access_?key | credential | authorization ) [A-Za-z0-9_.-]*
+            | \b (?: [A-Za-z0-9]+ [_.-] )* (?: key | pass | pwd | auth ) (?: [_.-] [A-Za-z0-9]+ )*
+            | \b (?-i: [A-Za-z0-9]+ (?: Key | Pass | Pwd | Auth ) ) [A-Za-z0-9]* )
+          ["']? \s*[=:]\s* )
+        ( "[^"]*" | '[^']*' | (?: bearer | basic ) \s+ [^\s"'`,;&)\]}]+ | [^\s"'`,;&)\]}]+ )
+        "#,
+    )
+    .expect("a fixed pattern")
+});
+
+/// A netrc `password` entry, on its own line or after the machine and login it belongs to.
+static NETRC_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^(\s*(?:machine\s+\S+\s+(?:login\s+\S+\s+)?)?password\s+)(\S+)").expect("a fixed pattern")
+});
+
+/// A run long enough to be a credential and shaped like one; the entropy test decides. `=`
+/// is a separator here, not base64 padding: the run before it is what carries the entropy.
+static CANDIDATE_RUN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z0-9+_-]{20,}").expect("a fixed pattern"));
+
+fn redact_secrets(input: &str) -> String {
+    // Keyed passes run before the shape passes: a value keyed by a secret name is masked
+    // whole, and a placeholder never becomes a later pass's value.
+    let masked = PRIVATE_KEY_BLOCK.replace_all(input, SECRET_PLACEHOLDER);
+    let masked = URL_PASSWORD.replace_all(&masked, |found: &regex::Captures<'_>| {
+        format!("{}{SECRET_PLACEHOLDER}@", &found[1])
+    });
+    let masked = SECRET_ASSIGNMENT.replace_all(&masked, |found: &regex::Captures<'_>| {
+        let quote = match found[2].as_bytes().first() {
+            Some(b'"') => "\"",
+            Some(b'\'') => "'",
+            _ => "",
+        };
+        format!("{}{quote}{SECRET_PLACEHOLDER}{quote}", &found[1])
+    });
+    let masked = NETRC_PASSWORD.replace_all(&masked, |found: &regex::Captures<'_>| {
+        format!("{}{SECRET_PLACEHOLDER}", &found[1])
+    });
+    let masked = KNOWN_TOKEN.replace_all(&masked, SECRET_PLACEHOLDER);
+    CANDIDATE_RUN
+        .replace_all(&masked, |found: &regex::Captures<'_>| {
+            let run = &found[0];
+            if looks_random(run) {
+                SECRET_PLACEHOLDER.to_string()
+            } else {
+                run.to_string()
+            }
+        })
+        .into_owned()
+}
+
+/// Shannon entropy over the run's bytes, against a floor that depends on its alphabet: a
+/// hex string cannot exceed 4 bits per byte, so it clears a lower bar over a longer run.
+fn looks_random(run: &str) -> bool {
+    let hex = run.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let (floor, minimum_length) = if hex { (3.0, 32) } else { (4.0, 20) };
+    run.len() >= minimum_length && shannon_entropy(run.as_bytes()) >= floor
+}
+
+fn shannon_entropy(bytes: &[u8]) -> f64 {
+    let mut counts = [0usize; 256];
+    for byte in bytes {
+        counts[usize::from(*byte)] += 1;
+    }
+    let total = bytes.len() as f64;
+    counts
+        .iter()
+        .filter(|count| **count > 0)
+        .map(|count| {
+            let p = *count as f64 / total;
+            -p * p.log2()
+        })
+        .sum()
 }
 
 fn redact_email(input: &str) -> String {
@@ -104,9 +230,9 @@ fn is_emailish(token: &str) -> bool {
     }
 }
 
-/// Which of the two module-capable kinds a module implements. Annotators,
-/// audience sources, and identity implementations take no module — a
-/// descriptor naming any other kind is refused.
+/// Which of the two module-capable kinds a module implements. Annotators and
+/// audience sources take no module — a descriptor naming any other kind is
+/// refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModuleKind {
     Authority,
@@ -349,10 +475,30 @@ fn open_library(path: &Path) -> Result<libloading::Library, libloading::Error> {
     unsafe { libloading::Library::new(path) }
 }
 
+/// The CLI's `--output-format json` result. On a failure the CLI still exits through
+/// this envelope: `is_error` set and its own message — "Not logged in · Please run
+/// /login" — in `result`, on stdout rather than stderr.
 #[cfg(unix)]
 #[derive(Debug, serde::Deserialize)]
 struct ClaudeResultEnvelope {
     structured_output: Option<serde_json::Value>,
+    #[serde(default)]
+    is_error: bool,
+    result: Option<String>,
+}
+
+#[cfg(unix)]
+impl ClaudeResultEnvelope {
+    /// The message the CLI reported a failure with, where the output is that envelope.
+    fn reported_error(output: &[u8]) -> Option<String> {
+        let envelope: ClaudeResultEnvelope = serde_json::from_slice(output).ok()?;
+        envelope
+            .is_error
+            .then_some(envelope.result)
+            .flatten()
+            .map(|result| crate::external::error_line(&result))
+            .filter(|line| !line.is_empty())
+    }
 }
 
 /// The stock `claude-code` model transport: one isolated, tool-less `claude` process per
@@ -389,7 +535,7 @@ pub(crate) async fn run_claude_code(
     use std::os::unix::process::CommandExt as _;
     use std::process::Stdio;
 
-    use crate::external::{CommandProcess, exchange_with_child};
+    use crate::external::{CommandProcess, exchange_with_child, finished_tail, stderr_tail};
 
     let schema = serde_json::to_string(&prompt.schema).map_err(|_| NoAnswerReason::Malformed)?;
     let work = tempfile::tempdir().map_err(|_| NoAnswerReason::Transport)?;
@@ -416,15 +562,18 @@ pub(crate) async fn run_claude_code(
         .current_dir(work.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
     command.as_std_mut().process_group(0);
     isolate_claude_environment(&mut command);
     tracing::debug!("claude consult starts");
-    let child = command.spawn().map_err(|_| {
+    let mut child = command.spawn().map_err(|_| {
         tracing::warn!(command = %backend.command.display(), "the claude executable did not start");
         NoAnswerReason::Unreachable
     })?;
+    // The CLI's own error — a bad model name — is the one line an operator needs when
+    // every consult fails; it is read to the end so the pipe never blocks the answer.
+    let tail = child.stderr.take().map(stderr_tail);
     // The guard ends the consult's whole process group on every outcome, a dropped future
     // included: no helper the CLI spawned outlives the answer.
     let mut process = CommandProcess::spawned(child)?;
@@ -453,9 +602,21 @@ pub(crate) async fn run_claude_code(
     };
     let status = process.terminate_and_reap().await?;
     if !status.success() {
-        tracing::debug!(code = ?status.code(), "claude exited without an answer");
+        let stderr = match tail {
+            Some(tail) => finished_tail(tail).await,
+            None => None,
+        };
+        // The envelope's own message first: the CLI reports a login failure there and
+        // writes nothing to stderr.
+        let detail = ClaudeResultEnvelope::reported_error(&output).or(stderr);
+        tracing::warn!(
+            code = ?status.code(),
+            error = detail.as_deref().unwrap_or(""),
+            "claude exited without an answer"
+        );
         return Err(NoAnswerReason::NonSuccess {
             status: status.code().and_then(|code| u16::try_from(code).ok()).unwrap_or(0),
+            detail,
         });
     }
     let envelope: ClaudeResultEnvelope = serde_json::from_slice(&output).map_err(|_| NoAnswerReason::Malformed)?;
@@ -468,7 +629,7 @@ fn isolate_claude_environment(command: &mut tokio::process::Command) {
     // while that marker is present. This consult is deliberately isolated,
     // tool-less, and non-persistent, so it is safe and necessary to clear the
     // harness marker before launching it.
-    command.env_remove("CLAUDECODE");
+    command.env_remove(appa_adapter_claude_code::environment::SESSION_MARKER);
     // A consult is one answer, not a session: the CLI's background traffic (telemetry,
     // bootstrap fetches, the session-title call) is one more connection per consult
     // on a host that may run many consults at once, and none of it reaches the answer.
@@ -519,6 +680,66 @@ mod tests {
                 name == "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" && value.is_some_and(|value| value == "1")
             }),
             "the consult runs without the CLI's background traffic"
+        );
+    }
+
+    /// A fake `claude` that reads its input and exits 1 after `script`.
+    #[cfg(unix)]
+    async fn failed_consult(script: &str) -> Result<serde_json::Value, NoAnswerReason> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let fake = dir.path().join("fake-claude");
+        std::fs::write(&fake, format!("#!/bin/sh\ncat > /dev/null\n{script}\nexit 1\n"))
+            .expect("the fake claude writes");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("the fake is executable");
+        let backend = ClaudeCodeBackend {
+            command: fake,
+            model: "m".to_string(),
+            timeout: std::time::Duration::from_secs(5),
+            max_body_bytes: 65_536,
+        };
+        let prompt = ModelPrompt {
+            system: "rule".to_string(),
+            input: "{}".to_string(),
+            schema: serde_json::json!({"type": "object"}),
+        };
+        backend
+            .consult(&prompt, tokio::time::Instant::now() + std::time::Duration::from_secs(5))
+            .await
+    }
+
+    /// A CLI that exits without an answer names its own error, so a failed consult is
+    /// not just `status=1`: the message of an error envelope on stdout — how the CLI
+    /// reports a logged-out session — or else the last stderr line.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_claude_consult_carries_the_clis_own_error() {
+        let logged_out = r#"echo '{"type":"result","is_error":true,"result":"Not logged in · Please run /login"}'"#;
+        assert_eq!(
+            failed_consult(logged_out).await,
+            Err(NoAnswerReason::NonSuccess {
+                status: 1,
+                detail: Some("Not logged in · Please run /login".to_string()),
+            })
+        );
+
+        let bad_model =
+            "echo 'warning: something else' >&2\necho '[claude-code:unrecognized_model] {\"model\":\"m\"}' >&2";
+        assert_eq!(
+            failed_consult(bad_model).await,
+            Err(NoAnswerReason::NonSuccess {
+                status: 1,
+                detail: Some("[claude-code:unrecognized_model] {\"model\":\"m\"}".to_string()),
+            })
+        );
+
+        assert_eq!(
+            failed_consult("").await,
+            Err(NoAnswerReason::NonSuccess {
+                status: 1,
+                detail: None
+            })
         );
     }
 
@@ -602,15 +823,129 @@ mod tests {
             Stock::for_section(Section::Sanitizers, "redact-email"),
             Some(Stock::RedactEmail)
         );
+        assert_eq!(
+            Stock::for_section(Section::Sanitizers, "redact-secrets"),
+            Some(Stock::RedactSecrets)
+        );
         for (section, name) in [
+            (Section::Authorities, "redact-secrets"),
             (Section::Authorities, "hitl"),
             (Section::Authorities, "redact-email"),
             (Section::Sanitizers, "approve"),
             (Section::Annotators, "redact-email"),
             (Section::Audience, "approve"),
-            (Section::Identity, "approve"),
         ] {
             assert_eq!(Stock::for_section(section, name), None, "{section:?}/{name}");
+        }
+    }
+
+    #[test]
+    fn redact_secrets_masks_keys_tokens_secret_assignments_and_random_runs() {
+        let masked = "[redacted-secret]";
+        let cases = [
+            (
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXkt\ndjEAAAAABG5vbmU=\n-----END OPENSSH PRIVATE KEY-----\n",
+                format!("{masked}\n"),
+            ),
+            (
+                "aws_access_key_id = AKIAIOSFODNN7EXAMPLE",
+                format!("aws_access_key_id = {masked}"),
+            ),
+            (
+                "export GITHUB_TOKEN=ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+                format!("export GITHUB_TOKEN={masked}"),
+            ),
+            (
+                "ANTHROPIC_API_KEY=\"sk-ant-api03-abcdefghijklmnopqrstuvwxyz\"",
+                format!("ANTHROPIC_API_KEY=\"{masked}\""),
+            ),
+            (
+                "SLACK_BOT_TOKEN: xoxb-1234567890-abcdefghij",
+                format!("SLACK_BOT_TOKEN: {masked}"),
+            ),
+            (
+                "jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+                format!("jwt={masked}"),
+            ),
+            (
+                "machine api.example.com login me password hunter2",
+                format!("machine api.example.com login me password {masked}"),
+            ),
+            ("DB_PASSWORD='p@ss'", format!("DB_PASSWORD='{masked}'")),
+            (
+                "{\"password\": \"hunter2\", \"user\": \"me\"}",
+                format!("{{\"password\": \"{masked}\", \"user\": \"me\"}}"),
+            ),
+            (
+                "{\"auths\": {\"ghcr.io\": {\"auth\": \"dXNlcjpwYXNzd29yZA==\"}}}",
+                format!("{{\"auths\": {{\"ghcr.io\": {{\"auth\": \"{masked}\"}}}}}}"),
+            ),
+            ("GITHUB_KEY=abc123", format!("GITHUB_KEY={masked}")),
+            ("db.pass: hunter2", format!("db.pass: {masked}")),
+            (
+                "DB_PASSWORD=\"correct horse battery staple\"\nNEXT=1",
+                format!("DB_PASSWORD=\"{masked}\"\nNEXT=1"),
+            ),
+            (
+                "{\"privateKey\": \"hunter2\", \"accessKey\": \"hunter2\", \"sshKey\": \"hunter2\"}",
+                format!("{{\"privateKey\": \"{masked}\", \"accessKey\": \"{masked}\", \"sshKey\": \"{masked}\"}}"),
+            ),
+            ("PASSPHRASE=hunter2", format!("PASSPHRASE={masked}")),
+            ("SshKey=hunter2", format!("SshKey={masked}")),
+            (
+                "Authorization: Bearer hunter2\nAUTHORIZATION=hunter2\n",
+                format!("Authorization: {masked}\nAUTHORIZATION={masked}\n"),
+            ),
+            (
+                "https://example.com/?token=abc&foo=bar",
+                format!("https://example.com/?token={masked}&foo=bar"),
+            ),
+            ("{\"token\": 12345}", format!("{{\"token\": {masked}}}")),
+            (
+                "https://example.com:8080?q=a@b",
+                "https://example.com:8080?q=a@b".to_string(),
+            ),
+            (
+                "machine api.example.com\n  login me\n  password hunter2\n",
+                format!("machine api.example.com\n  login me\n  password {masked}\n"),
+            ),
+            (
+                "the password is hunter2 and the secret sauce is good",
+                "the password is hunter2 and the secret sauce is good".to_string(),
+            ),
+            (
+                "DATABASE_URL=postgres://app:Sup3r-Secret-123@db.internal:5432/app",
+                format!("DATABASE_URL=postgres://app:{masked}@db.internal:5432/app"),
+            ),
+            (
+                "redis://:hunter2@cache.internal:6379/0",
+                format!("redis://:{masked}@cache.internal:6379/0"),
+            ),
+            (
+                "monkey=banana\nkeyboard=us\nAUTHOR=me\nPASSPORT_OFFICE=closed\nhttps://host:8080/path\n",
+                "monkey=banana\nkeyboard=us\nAUTHOR=me\nPASSPORT_OFFICE=closed\nhttps://host:8080/path\n".to_string(),
+            ),
+            (
+                "SESSION=c3VwZXJzZWNyZXQtcmFuZG9tLXZhbHVl",
+                format!("SESSION={masked}"),
+            ),
+            (
+                "COMMIT=3f7a9c2e1b8d4f6a0c5e7b9d1f3a5c7e9b2d4f68",
+                format!("COMMIT={masked}"),
+            ),
+            (
+                "DATABASE_HOST=db.internal.example.com\nLOG_LEVEL=debug\nFEATURE_FLAGS=configuration_management_enabled\n",
+                "DATABASE_HOST=db.internal.example.com\nLOG_LEVEL=debug\nFEATURE_FLAGS=configuration_management_enabled\n"
+                    .to_string(),
+            ),
+            (
+                "see https://docs.example.com/reference/authentication for the flow",
+                "see https://docs.example.com/reference/authentication for the flow".to_string(),
+            ),
+            ("", String::new()),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(redact_secrets(input), expected, "input {input:?}");
         }
     }
 

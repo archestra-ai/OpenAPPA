@@ -11,6 +11,27 @@ name = "appa_runtime"
 [[bin]]
 name = "appa"
 path = "src/bin/appa.rs"
+required-features = ["daemon"]
+
+[features]
+default = ["daemon"]
+# The server stack: the MCP endpoint, the HTTP surface, the CLI and its log
+# setup. An in-process host links the library without any of it.
+daemon = ["dep:rmcp", "dep:axum", "dep:clap", "dep:tracing-subscriber"]
+
+# These integration tests drive the server stack: the MCP endpoint, the
+# installer CLI and `appa replay`. Without `daemon` there is nothing to drive.
+[[test]]
+name = "hitl_elicitation"
+required-features = ["daemon"]
+
+[[test]]
+name = "marketplace_cli"
+required-features = ["daemon"]
+
+[[test]]
+name = "replay"
+required-features = ["daemon"]
 
 [dependencies]
 appa-adapter-claude-code = { path = "../appa-adapter-claude-code" }
@@ -20,21 +41,27 @@ appa-adapter-kagent = { path = "../appa-adapter-kagent" }
 appa-builtin = { path = "../appa-builtin" }
 appa-engine = { workspace = true }
 appa-eventlog = { workspace = true }
+appa-package = { workspace = true }
 appa-policy = { workspace = true }
 appa-runtime-api = { path = "../appa-runtime-api" }
 # `query` decodes the statusline's one GET parameter (`/status`).
-axum = { workspace = true, features = ["query"] }
-clap = { version = "4", features = ["derive", "env"] }
+axum = { workspace = true, features = ["query"], optional = true }
+# One job: rendering a runtime event's wall time as RFC 3339 in a diagnostic export.
+# Already in the tree through rmcp and schemars, so this adds nothing to the build.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+clap = { version = "4", features = ["derive", "env"], optional = true }
+base64 = "0.22"
 # `join_all` runs one evidence batch's independent consults concurrently.
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 libloading = "0.9"
 libc = "0.2"
+hmac = "0.13"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 rand = "0.10"
 reqwest = { workspace = true }
 # `server` carries the tool macros' schema derive; `transport-streamable-http-server`
 # is the HTTP transport Claude Code's MCP client speaks.
-rmcp = { version = "3", features = ["server", "macros", "transport-streamable-http-server", "elicitation"] }
+rmcp = { version = "3", features = ["server", "macros", "transport-streamable-http-server", "transport-io", "elicitation"], optional = true }
 # Must stay 1.x to match rmcp's `#[tool]` schema derive.
 schemars = "1"
 serde = { workspace = true }
@@ -45,28 +72,49 @@ tar = "0.4"
 tempfile = "3"
 tokio = { workspace = true }
 toml = { workspace = true }
+toml_edit = "0.25"
+zip = { version = "6", default-features = false, features = ["deflate-flate2"] }
 tracing = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 url = "2"
+# The report id: a v4 UUID the receiver stores one object under.
+uuid = { version = "1", features = ["v4"] }
 # Not rig-core's `rustls` feature: it pins reqwest to aws-lc-rs, which would put a
 # second crypto provider beside the workspace's ring. TLS still comes from reqwest.
 rig-core = { version = "0.42", default-features = false, features = ["reqwest"] }
 rig-agent = { version = "0.42", default-features = false }
 # Depended on only to name the crypto provider; see the workspace manifest.
 rustls = { workspace = true }
+regex = "1.13.1"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+# `build.rs` includes `src/plugin_layout.rs`, which re-exports the canonical
+# tree digest from the marketplace crate.
 [build-dependencies]
+appa-package = { workspace = true }
 sha2 = { workspace = true }
 tar = "0.4"
+# The release gate checks the compiled yell endpoint the way the client parses
+# it. A prefix test would pass URLs the client then refuses.
+url = "2"
 
 [dev-dependencies]
 # The fail points the orchestration tests drive. A dev-dependency, so they are
 # absent from the binary.
 appa-eventlog = { workspace = true, features = ["fault-injection"] }
+# `start_paused`: a test that must exhaust a retry table should not spend the
+# table's backoff in real seconds.
+tokio = { workspace = true, features = ["test-util"] }
+jsonschema = { version = "0.53.0", default-features = false }
 # The elicitation round trip is only real with a real client on the
 # other end: these features exist for `tests/hitl_elicitation.rs` and
 # never ship in the binary.
 rmcp = { version = "3", features = ["client", "transport-streamable-http-client-reqwest"] }
+# The stub servers the core unit tests run against: unconditional, so those
+# tests compile without the `daemon` feature.
+axum = { workspace = true, features = ["query"] }
 
 [lints]
 workspace = true

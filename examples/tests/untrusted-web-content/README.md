@@ -1,7 +1,7 @@
 # untrusted-web-content
 
-A web page can contain unsafe instructions. After `WebFetch`, the trust level is
-`suspicious`. `Bash` needs `trusted`. `Write` has no trust requirement.
+A web page can contain unsafe instructions. After `mcp/web/fetch`, the trust level is
+`suspicious`. `mcp/shell/bash` needs `trusted`. `mcp/files/write` has no trust requirement.
 
 `untrusted-web-content.appa`, step by step:
 

@@ -5,6 +5,7 @@ members = [
     "appa-agent-python",
     "appa-builtin",
     "appa-engine",
+    "appa-package",
     "appa-eventlog",
     "appa-policy",
     "appa-adapter-claude-code",
@@ -21,7 +22,7 @@ exclude = ["bench/corp-systems"]
 [workspace.package]
 edition = "2024"
 publish = false
-version = "0.8.0"
+version = "0.21.0"
 
 [workspace.lints.rust]
 dead_code = "deny"
@@ -49,6 +50,13 @@ opt-level = 3
 [profile.release.package.sha2]
 opt-level = 3
 
+# A served runtime digests its own executable before it binds, and a debug build is
+# well over a hundred megabytes: through an unoptimized sha2 that is tens of seconds
+# of startup, past the served tests' health deadline. Optimizing the one crate keeps
+# the debug build's startup under a second.
+[profile.dev.package.sha2]
+opt-level = 3
+
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -73,6 +81,9 @@ tokio-util = { version = "0.7", default-features = false }
 appa-engine = { path = "appa-engine" }
 appa-eventlog = { path = "appa-eventlog" }
 appa-policy = { path = "appa-policy" }
+appa-package = { path = "appa-package" }
 appa-runtime-api = { path = "appa-runtime-api" }
-appa-runtime = { package = "appa", path = "appa-runtime" }
+# Every workspace member that links the runtime embeds it in its own process:
+# the server stack behind the `daemon` feature belongs to the binary alone.
+appa-runtime = { package = "appa", path = "appa-runtime", default-features = false }
 appa-example-agent = { path = "appa-example-agent" }

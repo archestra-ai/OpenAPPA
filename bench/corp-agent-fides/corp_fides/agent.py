@@ -34,6 +34,8 @@ from agent_framework import Agent
 from agent_framework.openai import OpenAIChatCompletionClient
 from agent_framework.security import SecureAgentConfig
 
+from .usage import UsageCollector, UsageMiddleware
+
 # The agent's system prompt. This is *agent* configuration, not policy — FIDES
 # governs flows (labels, gates), never the model's instructions. Kept verbatim
 # from the sibling APPA demo so the two runs differ only in the defense.
@@ -68,6 +70,7 @@ class BuiltAgent:
     agent: Agent
     config: SecureAgentConfig | None  # None in the unmediated contrast
     sink_root: Path
+    usage: UsageCollector
 
 
 class ExecutionMode(StrEnum):
@@ -95,20 +98,24 @@ def build_agent(
     """
     if not isinstance(mode, ExecutionMode):
         raise TypeError("mode must be an ExecutionMode")
+    usage = UsageCollector()
     client = make_chat_client(model, api_key)
+    client.chat_middleware.append(UsageMiddleware(usage))
     instructions = PREAMBLE
     if system_prompt_addendum.strip():
         instructions = f"{instructions}\n\n{system_prompt_addendum.strip()}"
 
     if mode is ExecutionMode.UNMEDIATED:
         agent = Agent(client, instructions=instructions, name="corp_assistant_fides", tools=tools)
-        return BuiltAgent(agent=agent, config=None, sink_root=sink_root)
+        return BuiltAgent(agent=agent, config=None, sink_root=sink_root, usage=usage)
 
     # Native FIDES uses a second, tool-less client to process hidden untrusted
     # content. The middleware-only comparison deliberately keeps the same label
     # tracking and policy enforcement while exposing the raw result.
     auto_hide_untrusted = mode is ExecutionMode.NATIVE_AUTO_HIDE
     quarantine = make_chat_client(quarantine_model or model, api_key) if auto_hide_untrusted else None
+    if quarantine is not None:
+        quarantine.chat_middleware.append(UsageMiddleware(usage))
     allow_untrusted_tools = {
         candidate.name
         for candidate in tools
@@ -129,4 +136,4 @@ def build_agent(
         tools=tools,
         context_providers=[config],
     )
-    return BuiltAgent(agent=agent, config=config, sink_root=sink_root)
+    return BuiltAgent(agent=agent, config=config, sink_root=sink_root, usage=usage)

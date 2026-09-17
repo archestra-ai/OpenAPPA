@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,8 +28,9 @@ from kagent.adk import cli as stock_cli  # noqa: E402
 from appa_kagent_adk import entrypoint  # noqa: E402
 from appa_kagent_adk.config_guard import ConfigRefused  # noqa: E402
 from appa_kagent_adk.gates import GatedCodeExecutor  # noqa: E402
+from appa_kagent_adk.inventory import ToolInventory  # noqa: E402
 from appa_kagent_adk.plugin import AppaPluginKagent  # noqa: E402
-from appa_kagent_adk.wire import RESERVED_TOOL  # noqa: E402
+from appa_kagent_adk.wire import RESERVED_TOOL, RUNTIME_TOOLS  # noqa: E402
 
 RUNTIME_URL = "http://127.0.0.1:8787"
 
@@ -48,6 +50,44 @@ CARD = {
     "defaultOutputModes": ["text"],
     "skills": [],
 }
+
+
+@pytest.mark.parametrize("approved", [True, False])
+async def test_isolated_remote_uses_the_pinned_transport_approval_payload(approved):
+    from a2a.types import Task, TaskState, TaskStatus
+    from kagent.adk._remote_a2a_tool import KAgentRemoteA2ATool
+
+    from appa_kagent_adk.remote_agents import IsolatedRemoteTool
+
+    sent = []
+    confirmations = []
+
+    class Client:
+        async def send_message(self, *, request, context):
+            sent.append(request)
+            state = TaskState.input_required if len(sent) == 1 else TaskState.completed
+            yield Task(id="paused-task", context_id=request.context_id, status=TaskStatus(state=state)), None
+
+    delegate = KAgentRemoteA2ATool(name="analyst", description="test", agent_card_url="http://unused")
+    delegate._a2a_client = Client()
+    context = SimpleNamespace(
+        tool_confirmation=None,
+        session=SimpleNamespace(user_id="test-user", id="parent-context", state={}),
+        request_confirmation=lambda **kwargs: confirmations.append(kwargs),
+    )
+    tool = IsolatedRemoteTool(delegate)
+    pending = await tool.run_async(args={"request": "request approval"}, tool_context=context)
+    assert pending["status"] == "pending"
+    payload = confirmations[0]["payload"]
+    assert payload["context_id"] == sent[0].context_id
+    assert payload["task_id"] == "paused-task"
+    assert payload["context_id"] != delegate._last_context_id
+    context.tool_confirmation = SimpleNamespace(payload=payload, confirmed=approved)
+    result = await tool.run_async(args={"request": "resume"}, tool_context=context)
+    assert sent[1].context_id == sent[0].context_id
+    assert sent[1].task_id == "paused-task"
+    assert sent[1].parts[0].root.data["decision_type"] == ("approve" if approved else "reject")
+    assert result["subagent_session_id"] == sent[0].context_id
 
 
 @pytest.fixture()
@@ -98,24 +138,17 @@ def served(monkeypatch) -> list:
     return servers
 
 
-def build_agent(filepath: str):
-    """Build the server, then run the factory the way KAgentApp does."""
-    server = entrypoint.build_server(filepath, RUNTIME_URL)
-    assert server is not None
-    return server
+def test_a_stock_config_builds_and_the_appa_plugin_is_registered_last(config_dir, built_apps):
+    """The deltas are read off the app the entrypoint built, and its own factory
+    is what runs: KAgentApp calls that factory per session, so the agent it
+    returns is the agent the model gets."""
+    entrypoint.build_server(config_dir(CONFIG), RUNTIME_URL)
+    app = built_apps[-1]
 
-
-def test_a_stock_config_builds_and_the_appa_plugin_is_registered_last(config_dir):
-    from kagent.adk import AgentConfig
-    from kagent.core import KAgentConfig
-
-    filepath = config_dir(CONFIG)
-    build_agent(filepath)
-    # The construction deltas are observable on a factory-built agent.
-    agent_config = AgentConfig.model_validate(CONFIG)
-    app_cfg = KAgentConfig()
-    agent = agent_config.to_agent(app_cfg.name, None, False)
+    assert isinstance(app.plugins[-1], AppaPluginKagent), "the gate is the last plugin"
+    agent = app.root_agent_factory()
     assert agent.code_executor is None, "no executeCodeBlocks, no wrapper"
+    assert isinstance(agent.tools[-1], McpToolset), "the reserved toolset is the last tool"
 
 
 def test_an_unknown_field_refuses_the_start(config_dir):
@@ -123,9 +156,37 @@ def test_an_unknown_field_refuses_the_start(config_dir):
         entrypoint.build_server(config_dir({**CONFIG, "surprise": True}), RUNTIME_URL)
 
 
+def test_only_the_gated_factory_isolates_remote_agents(config_dir, built_apps):
+    from kagent.adk._remote_a2a_tool import KAgentRemoteA2AToolset
+
+    from appa_kagent_adk.remote_agents import IsolatedRemoteToolset
+
+    config = {**CONFIG, "remote_agents": [{"name": "kagent__NS__analyst", "url": "http://analyst:8080"}]}
+    path = config_dir(config)
+    entrypoint.build_server(path, RUNTIME_URL)
+    gated = built_apps[-1].root_agent_factory()
+    assert any(isinstance(tool, IsolatedRemoteToolset) for tool in gated.tools)
+    assert not any(isinstance(tool, KAgentRemoteA2AToolset) for tool in gated.tools)
+    entrypoint.build_stock_server(path)
+    stock = built_apps[-1].root_agent_factory()
+    assert any(isinstance(tool, KAgentRemoteA2AToolset) for tool in stock.tools)
+    assert not any(isinstance(tool, IsolatedRemoteToolset) for tool in stock.tools)
+
+
 def test_compiled_sub_agents_refuse_with_the_runtime_mismatch(config_dir):
     with pytest.raises(ConfigRefused, match="Go-compiled"):
         entrypoint.build_server(config_dir({**CONFIG, "sub_agents": []}), RUNTIME_URL)
+
+
+def test_an_mcp_entry_without_a_tool_filter_is_discovered_before_use(config_dir, built_apps):
+    unfiltered = {**CONFIG, "http_tools": [{"params": {"url": "http://demo-tools:3000/mcp"}}]}
+    from appa_kagent_adk.mcp_lifecycle import MCPDiscovery
+
+    entrypoint.build_server(config_dir(unfiltered), RUNTIME_URL)
+    app = built_apps[-1]
+    discovery = next(tool for tool in app.root_agent_factory().tools if isinstance(tool, MCPDiscovery))
+    assert len(discovery.sources) == 1
+    assert not discovery.sources[0].tool_filter
 
 
 def test_a_divergent_summarizer_refuses_the_start(config_dir):
@@ -143,37 +204,36 @@ def test_a_divergent_summarizer_refuses_the_start(config_dir):
         entrypoint.build_server(config_dir(divergent), RUNTIME_URL)
 
 
-def test_the_factory_wraps_code_execution_and_appends_the_reserved_toolset(config_dir):
-    from kagent.adk import AgentConfig
-    from kagent.core import KAgentConfig
+def test_the_factory_wraps_code_execution_and_appends_the_reserved_toolset(config_dir, built_apps):
+    entrypoint.build_server(config_dir({**CONFIG, "execute_code": True}), RUNTIME_URL)
+    app = built_apps[-1]
 
-    config = {**CONFIG, "execute_code": True}
-    filepath = config_dir(config)
-    entrypoint.build_server(filepath, RUNTIME_URL)
-
-    # Replay the factory deltas directly, the way build_server wires them.
-    from appa_kagent_adk import gates
-    from appa_kagent_adk.identity import SessionIdentity
-
-    agent_config = AgentConfig.model_validate(config)
-    app_cfg = KAgentConfig()
-    agent = agent_config.to_agent(app_cfg.name, None, False)
-    assert agent.code_executor is not None, "execute_code installs the sandboxed executor"
-    identity = SessionIdentity()
-    agent.code_executor = gates.GatedCodeExecutor(agent.code_executor, gates.SyncHookGate(RUNTIME_URL, identity))
-    assert isinstance(agent.code_executor, GatedCodeExecutor)
-    before = len(agent.tools)
-    agent.tools.append(entrypoint._reserved_toolset(RUNTIME_URL))
-    assert len(agent.tools) == before + 1
+    agent = app.root_agent_factory()
+    assert isinstance(agent.code_executor, GatedCodeExecutor), "the sandboxed executor runs behind the gate"
     reserved = agent.tools[-1]
+    assert isinstance(reserved, McpToolset) and reserved.tool_filter == [RESERVED_TOOL], (
+        "the reserved toolset is appended last"
+    )
     assert reserved._connection_params.timeout == entrypoint.REMEDY_CALL_TIMEOUT_SECONDS, (
         "the remedy call outlasts a parked consult; ADK's five-second default would fail it at the client"
     )
 
 
+def test_only_appa_guide_receives_the_management_toolset(monkeypatch):
+    monkeypatch.setenv("APPA_GUIDE", "true")
+    monkeypatch.setenv("APPA_GUIDE_MCP_URL", "http://runtime:18788/guide-mcp")
+    guide = entrypoint._runtime_toolset(RUNTIME_URL)
+    assert guide.tool_filter == RUNTIME_TOOLS
+    assert guide._connection_params.url == "http://runtime:18788/guide-mcp"
+
+    monkeypatch.delenv("APPA_GUIDE_MCP_URL")
+    with pytest.raises(ConfigRefused, match="APPA_GUIDE_MCP_URL"):
+        entrypoint._runtime_toolset(RUNTIME_URL)
+
+
 def test_the_appa_plugin_needs_a_runtime_url():
     with pytest.raises(ValueError, match="APPA_RUNTIME_URL"):
-        AppaPluginKagent("")
+        AppaPluginKagent("", inventory=ToolInventory.from_config(CONFIG, environ={}))
 
 
 # -- the knob: APPA_ENABLED selects the mode --------------------------------
@@ -416,7 +476,12 @@ def test_the_gated_mode_serves_the_gated_construction(config_dir, monkeypatch, b
     reserved = app.root_agent_factory().tools[-1]
     assert isinstance(reserved, McpToolset) and reserved.tool_filter == [RESERVED_TOOL]
 
-    assert entrypoint_lines(caplog) == [entrypoint.GATED_STARTUP % RUNTIME_URL], "one line names the mode"
+    # The plain config spells two names: the always builtin and the reserved tool.
+    inventory = ToolInventory.from_config(CONFIG, environ={})
+    assert entrypoint_lines(caplog) == [
+        entrypoint.GATED_STARTUP % RUNTIME_URL,
+        entrypoint.GATED_INVENTORY % len(inventory.spellings),
+    ], "one line names the mode, and one more the inventory it fixed"
     assert entrypoint_levels(caplog) == {logging.INFO}
     assert not any("UNGATED" in record.getMessage() for record in caplog.records)
 

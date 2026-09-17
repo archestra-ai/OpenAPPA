@@ -1,11 +1,11 @@
 ---
 name: appa-debug
-description: Explain what the APPA runtime recorded for a gated Claude Code session — which tool calls ran, which were blocked, and why — in plain language, by reading the runtime's SQLite database and the session transcript. Use when the user asks why a tool call was blocked, what happened in a gated session, or wants an APPA decision log explained.
+description: Explain what the APPA runtime recorded for a protected Claude Code session — which tool calls ran, which were blocked, and why — in plain language, by reading the runtime's SQLite store and the session transcript. Use when the user asks why a tool call was blocked, what happened in a protected session, or wants an APPA decision log explained.
 ---
 
 # appa-debug
 
-Reconstruct and explain a gated session from the APPA runtime store.
+Reconstruct and explain a protected session from the APPA runtime store.
 The audience is a person, possibly not an APPA expert: the final
 explanation must be plain language, with wire terms shown only where the
 user will see them in errors.
@@ -21,33 +21,50 @@ You need to identify the session before anything else. Accept either:
 
 - a **Claude Code session id** (a UUID — from the transcript filename,
   `/status`, or a trajectory id in the store), or
-- a **screenshot or pasted excerpt** of the gated session showing the
-  calls and the `[appa]` error text.
+- a **screenshot or pasted excerpt** of the protected session showing
+  the calls and the `[appa]` error text.
 
 If the user gave neither, ask for one before proceeding. A screenshot
 alone is workable: match its prompt/tool names against the store's
 recorded requests to find the session. If several sessions match or
 none does, show the candidates (id + first line of prompt) and ask.
 
-## 1. Find the store and the policy
+## 1. Find the deployment: config, store, logs
 
-The db and config paths are flags of the running process:
+Start from the installed deployment, not from `ps`:
 
 ```sh
-ps ax -o command | grep 'appa-runtime --config' | grep -v grep
+appa describe
 ```
 
-If no process is running, ask the user for the `.db` path. Read the
-config file it names: every explanation must be grounded in what the
+Its `Config:` line names the live config (honouring `APPA_CONFIG` and
+`APPA_CONFIG_DIR`), and the rest lists the effective policy tools,
+included batteries, Authorities, audience sources, and named audiences.
+Then confirm which runtime is actually serving:
+
+```sh
+ps ax -o command | grep '[a]ppa runtime'
+```
+
+The process is `appa runtime --listen … --config <path> --db <path>`.
+Take the store path from its `--db` argument. If it names a different
+config than `appa describe`, ask the user which deployment they mean. If
+no runtime is running, ask the user for the `.db` path; the installed
+one is `appa.db` in the deployment's data directory.
+
+Read the config file: every explanation must be grounded in what the
 policy actually declares for the tools involved (their `[[policy.tool]]`
 entries, `delta`, `requires`, and any annotators/authorities/sanitizers).
 
-If the runtime wrote a log (`-v`), find it too — it records one line per
-decision, in order, and is the quickest released/blocked timeline.
+The runtime always writes `runtime.stderr.log` and `runtime.stdout.log`
+beside the store in the data directory (`-v`/`-vv` only raise the level).
+The stderr log records one line per decision, in order, and is the
+quickest released/blocked timeline.
 
 ## 2. Explore the store
 
-Discover the schema instead of assuming it:
+The store is owned by `appa-eventlog` (repository root). Discover the
+schema instead of assuming it:
 
 ```sh
 sqlite3 <db> .schema
@@ -61,17 +78,19 @@ request text to match the session from step 0.
 
 ## 3. Decode the recorded trail
 
-The log rows are the actual record — decode their bytes (inspect the
-format; deserialize accordingly, one fact per line). For what each fact
-kind means, read the fact definitions in `appa-engine/src/fact.rs`;
-do not guess from names.
+The log rows are the actual record — inspect the encoding of the facts
+column (`appa-eventlog/src/lib.rs` says how a batch is serialized: an
+engine batch is a bare JSON array of facts, and a batch carrying a host
+observation is a JSON object with `facts` and `host`) and decode
+accordingly, one fact per line. For what each fact kind means,
+read the fact definitions in `appa-engine/src/fact.rs`; do not guess
+from names.
 
 While decoding, build:
 
 - the ordered list of released calls and their outcomes;
-- every admitted value with its label, numbered in admission order
-  (errors cite `ValueId(N)` — map N back to the producing tool via its
-  provenance);
+- every admitted value with its label, numbered in admission order, and
+  the producing tool from its provenance;
 - any subagent starts and returns.
 
 Compare against the harness's view (step 4): a proposed call that left
@@ -113,8 +132,14 @@ A block can have several reasons at once while the error text surfaces
 only one — check for the others and explain all that hold.
 
 Before stating whether a block is final or liftable, check what the
-current runtime actually supports (annotators, authorities, offers):
-`appa-runtime/CLAUDE.md` records the current state. Do not assert capabilities or gaps from memory.
+policy language and this deployment actually support: the policy-review
+guide `website/content/docs/contracts.md` for annotators, authorities,
+sanitizers and offers, and the `appa describe` output for what this
+config binds. Do not assert capabilities or gaps from memory.
+
+To reproduce a decision without a live session, write the calls as a
+trace and run `appa replay --config <path> <trace>`; the shipped traces
+in `examples/tests/` show the format.
 
 ## 6. Explain in plain language
 
@@ -141,11 +166,13 @@ Rules for the explanation:
 
 - Ground every claim in a specific fact, dispatch row, policy line, or
   transcript line; quote the exact `[appa]` error the user saw.
-- If the surfaced error names a `ValueId`, always resolve it to "the
-  result of tool X" — the number alone explains nothing.
+- Name every value the explanation relies on as "the result of tool X";
+  an admission number or id alone explains nothing.
 - Name the concrete change that would lift a liftable block (annotate
-  the tool with `delta`, declare the tool, widen an audience), and note
-  when a policy change means restarting on a fresh `--db`.
+  the tool with `delta`, declare the tool, widen an audience). A policy
+  change takes effect after a runtime reload (`POST /reload`) and only
+  for sessions started afterwards; a running session keeps the policy it
+  started with.
 - Do not speculate beyond the log. If the db and transcript disagree or
   a row is missing, say so.
 - Plain language means literal language: no metaphors or imagery ("the

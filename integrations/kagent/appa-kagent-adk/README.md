@@ -35,14 +35,16 @@ call and its result.
 
 The [Dockerfile](Dockerfile) builds the package into the
 `appa-kagent-adk` image, one layer over kagent's published runtime
-image. The plan names that image `ghcr.io/archestra-ai/appa-kagent-adk`.
+image. The plan names that image `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk`.
 
 The operator guide lives at `website/content/docs/kagent.md`; the
 implementation plan, per-version mapping tables, and verification
-matrix live in [`../IMPLEMENTATION.md`](../IMPLEMENTATION.md). The
-adapter wire this package emits is parsed by the `appa-adapter-kagent`
-crate, and the shared fixtures in
-[`../fixtures/`](../fixtures/) hold both sides to one spelling.
+matrix live in [`../IMPLEMENTATION.md`](../IMPLEMENTATION.md). This
+package posts the canonical hook envelope
+(`appa-runtime-api/src/wire.rs`), with every tool under the structured
+spelling its inventory gives it (`inventory.py`), and the shared
+fixtures in [`../fixtures/`](../fixtures/) hold the python and Go
+plugins to one spelling.
 
 One plugin codebase serves both locked ADK majors — google-adk 1.31.1
 (kagent v0.9.12) and 2.8.0 (the v0.10 line). CI runs the tests twice,

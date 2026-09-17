@@ -1,0 +1,11 @@
+schema = 1
+name = "claude-code"
+description = "Gates a Claude Code session's flows through the appa-runtime process: every prompt, tool call, tool result, and child return is checked before it proceeds."
+
+[plugin]
+host = "claude-code"
+protocol = 1
+default_policy = "default.appa.toml"
+# A session's own tools are gated by this battery; every other battery is the
+# person's choice, and an install suggests the ones matching their MCP servers.
+batteries = ["claude-code"]

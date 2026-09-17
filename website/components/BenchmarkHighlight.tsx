@@ -43,7 +43,7 @@ export function BenchmarkHighlight() {
       </div>
 
       <p className="bench-panel-foot">
-        Across 600 evaluated episodes over three frontier models in Bench-Corp, guarded OpenAPPA
+        Across 600 evaluated episodes with three language models in Bench-Corp, guarded OpenAPPA
         retained 89% task completion without a single observed policy breach. Full model breakdown
         and methodology are reported in the paper.
       </p>
