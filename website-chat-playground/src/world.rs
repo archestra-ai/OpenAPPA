@@ -3,8 +3,6 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use appa_runtime::config::{Binding, ExternalBindings};
-
 use crate::systems::System;
 
 use crate::params::{InjectError, tool_parameters};
@@ -134,12 +132,12 @@ pub const ANNOTATOR_PATH: &str = "/annotator";
 /// The one annotator the playground implements: the email recipient directory.
 pub const DIRECTORY_ANNOTATOR: &str = "email-recipient-readers";
 
-const CONSULT_TIMEOUT: Duration = Duration::from_secs(300);
+pub const CONSULT_TIMEOUT: Duration = Duration::from_secs(300);
 const REVIEW_WINDOW: Duration = Duration::from_secs(365 * 24 * 60 * 60);
-const MAX_CONSULT_BYTES: usize = 256 * 1024;
+pub const MAX_CONSULT_BYTES: usize = 256 * 1024;
 
-/// Bind every component the visitor's policy registered to this session's
-/// own endpoint.
+/// The `[externals]` table binding every component the visitor's policy
+/// registered to this session's own endpoint.
 ///
 /// The policy says what a component may do; the deployment says who
 /// performs it, and on this box the deployment is never the
@@ -153,15 +151,19 @@ const MAX_CONSULT_BYTES: usize = 256 * 1024;
 /// misses would be refused by `Runtime::open` as unbound, which
 /// is a contained failure but a failure — a visitor's own policy would not
 /// start.
-pub fn externals_for(policy: &appa_policy::Config, base: &str) -> ExternalBindings {
+pub fn externals_for(policy: &appa_policy::Config, base: &str) -> toml::Table {
     let registry = policy.registry_config();
-    let endpoint = |path: String| Binding::Url {
-        url: path,
-        token_env: None,
+    let endpoint = |url: String| {
+        let mut binding = toml::Table::new();
+        binding.insert("url".to_string(), toml::Value::String(url));
+        toml::Value::Table(binding)
     };
-    let mut bindings = ExternalBindings::new(CONSULT_TIMEOUT, MAX_CONSULT_BYTES);
-    bindings.review_timeout_ms = REVIEW_WINDOW.as_millis() as u64;
-    bindings.authorities = registry
+    let mut externals = toml::Table::new();
+    externals.insert(
+        "review_timeout_ms".to_string(),
+        toml::Value::Integer(REVIEW_WINDOW.as_millis() as i64),
+    );
+    let authorities: toml::Table = registry
         .authorities
         .iter()
         .map(|authority| {
@@ -170,7 +172,8 @@ pub fn externals_for(policy: &appa_policy::Config, base: &str) -> ExternalBindin
             (name, endpoint(url))
         })
         .collect();
-    bindings.sanitizers = registry
+    externals.insert("authorities".to_string(), toml::Value::Table(authorities));
+    let sanitizers: toml::Table = registry
         .sanitizers
         .iter()
         .filter(|sanitizer| !sanitizer.name.is_attest_schema())
@@ -180,15 +183,17 @@ pub fn externals_for(policy: &appa_policy::Config, base: &str) -> ExternalBindin
             (name, endpoint(url))
         })
         .collect();
+    externals.insert("sanitizers".to_string(), toml::Value::Table(sanitizers));
     // The playground implements one annotator. Binding only it lets a visitor policy
     // that names any other refuse at open — where the message names the annotator —
     // instead of failing operationally on every call.
-    bindings.annotators = policy
+    let annotators: toml::Table = policy
         .annotator_names()
         .filter(|name| name.as_str() == DIRECTORY_ANNOTATOR)
         .map(|name| (name.as_str().to_string(), endpoint(format!("{base}{ANNOTATOR_PATH}"))))
         .collect();
-    bindings
+    externals.insert("annotators".to_string(), toml::Value::Table(annotators));
+    externals
 }
 
 #[cfg(test)]

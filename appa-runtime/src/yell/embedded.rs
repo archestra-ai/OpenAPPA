@@ -73,7 +73,7 @@ pub async fn send(runtime: &Arc<Runtime>, request: Request) -> Result<String, St
 mod tests {
     use super::*;
     use crate::{
-        config::{Config, ExternalBindings},
+        config::{Config, HostDefaults},
         hooks,
     };
     use appa_eventlog::{Backend, LogStore};
@@ -81,9 +81,12 @@ mod tests {
     use std::time::Duration;
 
     fn runtime(enabled: bool) -> Arc<Runtime> {
-        let mut config = Config::embedded(
-            "version=2\n[[tool]]\nname='yell'\ndelta={}\n".into(),
-            ExternalBindings::new(Duration::from_secs(1), 4096),
+        let mut config = Config::hosted(
+            "[policy]\nversion=2\n[[policy.tool]]\nname='yell'\ndelta={}\n",
+            HostDefaults {
+                consult_timeout: Duration::from_secs(1),
+                max_body_bytes: 4096,
+            },
         )
         .unwrap();
         config.reporting.agent_yell = enabled;
