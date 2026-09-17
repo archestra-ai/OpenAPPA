@@ -1,0 +1,7356 @@
+{
+  "format_version": 2,
+  "scope": "Two post-fix parallel-tool-call arms matched to each other and to the 2026-09-15 sequential-tool-call arms by task, trial, and seed.",
+  "method": "Matched identities compare observed stochastic trajectories; differences are associations, not causal estimates.",
+  "arms": {
+    "guarded": "guarded-run-summary.json",
+    "permissive": "permissive-run-summary.json"
+  },
+  "configs": {
+    "guarded": "guarded-config.json",
+    "permissive": "permissive-config.json"
+  },
+  "mean_rewards": {
+    "guarded": 0.38917525773195877,
+    "permissive": 0.3943298969072165
+  },
+  "cost_usd": {
+    "guarded": {
+      "agent": 24.56443084,
+      "visible_agent": 24.55489254,
+      "hidden_agent": 0.009538300000000001,
+      "user": 7.10614275,
+      "user_review": 4.056581999999999,
+      "nl_assertion_judge": 0.625908,
+      "nl_assertion_atomic_audit": 0.639164,
+      "nl_assertion_preflight": 0.011487999999999998,
+      "discarded_attempt_evaluators": 0.017679999999999998,
+      "discarded_agent_attempts": 1.34123178,
+      "recorded_total": 38.36262737
+    },
+    "permissive": {
+      "agent": 23.82454386,
+      "visible_agent": 23.80486158,
+      "hidden_agent": 0.01968228,
+      "user": 6.86013335,
+      "user_review": 3.8355339999999982,
+      "nl_assertion_judge": 0.7614939999999999,
+      "nl_assertion_atomic_audit": 0.775462,
+      "nl_assertion_preflight": 0.005704,
+      "discarded_attempt_evaluators": 0,
+      "discarded_agent_attempts": 1.73651292,
+      "recorded_total": 37.79938413
+    }
+  },
+  "token_overhead": {
+    "method": "mean agent tokens per simulation, matched task/trial/seed identities; agent totals include the completions a policy block discarded",
+    "per_arm": {
+      "guarded": {
+        "simulations": 388,
+        "agent_prompt_per_simulation": 1289599.2345360825,
+        "agent_completion_per_simulation": 18164.170103092783,
+        "agent_total_per_simulation": 1307763.4046391752,
+        "hidden_agent_total_per_simulation": 685.5618556701031,
+        "user_total_per_simulation": 18365.909793814433,
+        "agent_calls_per_simulation": 19.79123711340206,
+        "hidden_agent_completions_per_simulation": 0.010309278350515464,
+        "policy_checks_per_simulation": 29.265463917525775,
+        "policy_blocks_per_simulation": 0.010309278350515464,
+        "token_usage_source": [
+          "appa-audit"
+        ]
+      },
+      "permissive": {
+        "simulations": 388,
+        "agent_prompt_per_simulation": 1254828.5025773195,
+        "agent_completion_per_simulation": 17299.422680412372,
+        "agent_total_per_simulation": 1272127.925257732,
+        "hidden_agent_total_per_simulation": 938.7835051546392,
+        "user_total_per_simulation": 17990.288659793816,
+        "agent_calls_per_simulation": 19.286082474226806,
+        "hidden_agent_completions_per_simulation": 0.010309278350515464,
+        "policy_checks_per_simulation": 28.780927835051546,
+        "policy_blocks_per_simulation": 0.010309278350515464,
+        "token_usage_source": [
+          "appa-audit"
+        ]
+      }
+    },
+    "deltas": {
+      "guarded_minus_permissive": {
+        "agent_prompt_per_simulation": 34770.731958762975,
+        "agent_completion_per_simulation": 864.7474226804115,
+        "agent_total_per_simulation": 35635.479381443234,
+        "hidden_agent_total_per_simulation": -253.2216494845361,
+        "agent_calls_per_simulation": 0.5051546391752559
+      }
+    },
+    "ratios": {
+      "guarded_over_permissive": 1.0280124967575281
+    }
+  },
+  "run_summaries": {
+    "guarded": {
+      "format_version": 1,
+      "status": "validated",
+      "policy_mode": "guarded",
+      "run_config": {
+        "retrieval_config": "alltools-qwen",
+        "policy_mode": "guarded",
+        "model": "openrouter/openai/gpt-5.6-luna",
+        "user_model": "openrouter/openai/gpt-5.2",
+        "judge_model": "openrouter/openai/gpt-4.1",
+        "review_model": "openrouter/openai/gpt-4.1",
+        "num_trials": 4,
+        "max_steps": 200,
+        "max_concurrency": 20,
+        "seed": 300,
+        "trial_seeds": [
+          626729,
+          373753,
+          361454,
+          1567
+        ],
+        "task_ids": [
+          "task_001",
+          "task_002",
+          "task_003",
+          "task_004",
+          "task_005",
+          "task_006",
+          "task_007",
+          "task_008",
+          "task_010",
+          "task_012",
+          "task_014",
+          "task_015",
+          "task_016",
+          "task_017",
+          "task_018",
+          "task_019",
+          "task_020",
+          "task_021",
+          "task_022",
+          "task_023",
+          "task_024",
+          "task_025",
+          "task_026",
+          "task_027",
+          "task_028",
+          "task_029",
+          "task_031",
+          "task_032",
+          "task_033",
+          "task_034",
+          "task_035",
+          "task_036",
+          "task_037",
+          "task_038",
+          "task_039",
+          "task_040",
+          "task_041",
+          "task_043",
+          "task_044",
+          "task_045",
+          "task_046",
+          "task_047",
+          "task_048",
+          "task_049",
+          "task_050",
+          "task_051",
+          "task_052",
+          "task_053",
+          "task_054",
+          "task_055",
+          "task_056",
+          "task_057",
+          "task_058",
+          "task_059",
+          "task_060",
+          "task_061",
+          "task_062",
+          "task_063",
+          "task_064",
+          "task_065",
+          "task_066",
+          "task_067",
+          "task_068",
+          "task_069",
+          "task_070",
+          "task_071",
+          "task_072",
+          "task_073",
+          "task_074",
+          "task_075",
+          "task_076",
+          "task_077",
+          "task_078",
+          "task_079",
+          "task_080",
+          "task_081",
+          "task_082",
+          "task_083",
+          "task_084",
+          "task_085",
+          "task_086",
+          "task_087",
+          "task_088",
+          "task_089",
+          "task_090",
+          "task_091",
+          "task_092",
+          "task_093",
+          "task_094",
+          "task_095",
+          "task_096",
+          "task_097",
+          "task_098",
+          "task_099",
+          "task_100",
+          "task_101",
+          "task_102"
+        ],
+        "publication_run": true,
+        "policy_sha256": "756f427d92b561eda676729928c7025b36065fd63a8a3abceafe9ab7cb132415",
+        "implementation_sha256": "521484361e16585f611f89358622c1339a76794c040e451309e6d98cfca7bf5a",
+        "retrieval_index_sha256": "0776cec691c9b04d4892d8a6ecf0058992bdef454fa2e7c7f602293d0c603eb4",
+        "agent_prompt_profile": "standard",
+        "binding_identity": "appa-agent-python-v8",
+        "tau2_revision": "93ee97b8303ce0e89e0ad17e6207591a1846f84b",
+        "domain": "banking_knowledge",
+        "task_split_name": "base",
+        "model_args": {
+          "reasoning_effort": "max"
+        },
+        "user_model_args": {
+          "reasoning_effort": "low"
+        },
+        "judge_model_args": {
+          "temperature": 0
+        },
+        "review_model_args": {
+          "temperature": 0
+        },
+        "max_retries": 0,
+        "auto_review": true,
+        "review_mode": "user",
+        "verbose_logs": true,
+        "hallucination_retries": 0
+      },
+      "provider_models": {
+        "agent": [
+          "openai/gpt-5.6-luna"
+        ],
+        "nl_assertion": [
+          "openai/gpt-4.1"
+        ],
+        "nl_assertion_atomic_audit": [
+          "openai/gpt-4.1"
+        ],
+        "nl_assertion_preflight": [
+          "openai/gpt-4.1"
+        ],
+        "user": [
+          "openai/gpt-5.2"
+        ],
+        "user_review": [
+          "openai/gpt-4.1"
+        ]
+      },
+      "simulation_count": 388,
+      "utility": {
+        "mean_reward": 0.38917525773195877,
+        "passes": 151,
+        "evaluated": 388
+      },
+      "terminations": {
+        "user_stop": 388
+      },
+      "execution_failures": 0,
+      "policy": {
+        "checks": 11355,
+        "blocks": 4,
+        "hidden_completions": 4,
+        "terminal_refusals": 3
+      },
+      "retrieval": {
+        "calls": 6623,
+        "dense_calls": 1699,
+        "exact_duplicate_calls": 0,
+        "retrieved_document_hits": 41849,
+        "repeated_retrieved_document_hits": 23681,
+        "embedding_cost_usd": null,
+        "embedding_cost_note": "Tau 1.0.1 does not expose embedding response usage or cost"
+      },
+      "tool_results": {
+        "assistant_execution_errors": 0,
+        "user_execution_errors": 0,
+        "assistant_reported_failures": 81,
+        "user_reported_failures": 120
+      },
+      "user_simulator": {
+        "tool_execution_errors": 0,
+        "reported_tool_failures": 120,
+        "reviewed": 388,
+        "episodes_with_errors": 240,
+        "critical_errors": 153
+      },
+      "tokens": {
+        "cumulative_agent_prompt": 500364503,
+        "cumulative_agent_prompt_visible": 500101893,
+        "cumulative_agent_prompt_hidden": 262610,
+        "cumulative_user_prompt": 6867245,
+        "cumulative_agent_completion": 7047698,
+        "cumulative_agent_completion_visible": 7044310,
+        "cumulative_agent_completion_hidden": 3388,
+        "cumulative_user_completion": 258728,
+        "mean_agent_prompt_per_simulation": 1289599.2345360825,
+        "mean_agent_completion_per_simulation": 18164.170103092783,
+        "agent_token_usage_source": [
+          "appa-audit"
+        ],
+        "max_agent_prompt_per_call": 246726,
+        "max_user_prompt_per_call": 8604
+      },
+      "model_calls": {
+        "visible_agent": 7679,
+        "hidden_agent": 4,
+        "user": 2648,
+        "user_review": 390,
+        "nl_assertion_judge": 4,
+        "nl_assertion_atomic_audit": 4,
+        "nl_assertion_preflight": 8,
+        "discarded_agent_attempts": 535
+      },
+      "cost_usd": {
+        "agent": 24.56443084,
+        "visible_agent": 24.55489254,
+        "hidden_agent": 0.009538300000000001,
+        "user": 7.10614275,
+        "user_review": 4.056581999999999,
+        "nl_assertion_judge": 0.625908,
+        "nl_assertion_atomic_audit": 0.639164,
+        "nl_assertion_preflight": 0.011487999999999998,
+        "discarded_attempt_evaluators": 0.017679999999999998,
+        "discarded_agent_attempts": 1.34123178,
+        "recorded_total": 38.36262737
+      },
+      "duration_seconds": 93466.619837689
+    },
+    "permissive": {
+      "format_version": 1,
+      "status": "validated",
+      "policy_mode": "permissive",
+      "run_config": {
+        "retrieval_config": "alltools-qwen",
+        "policy_mode": "permissive",
+        "model": "openrouter/openai/gpt-5.6-luna",
+        "user_model": "openrouter/openai/gpt-5.2",
+        "judge_model": "openrouter/openai/gpt-4.1",
+        "review_model": "openrouter/openai/gpt-4.1",
+        "num_trials": 4,
+        "max_steps": 200,
+        "max_concurrency": 20,
+        "seed": 300,
+        "trial_seeds": [
+          626729,
+          373753,
+          361454,
+          1567
+        ],
+        "task_ids": [
+          "task_001",
+          "task_002",
+          "task_003",
+          "task_004",
+          "task_005",
+          "task_006",
+          "task_007",
+          "task_008",
+          "task_010",
+          "task_012",
+          "task_014",
+          "task_015",
+          "task_016",
+          "task_017",
+          "task_018",
+          "task_019",
+          "task_020",
+          "task_021",
+          "task_022",
+          "task_023",
+          "task_024",
+          "task_025",
+          "task_026",
+          "task_027",
+          "task_028",
+          "task_029",
+          "task_031",
+          "task_032",
+          "task_033",
+          "task_034",
+          "task_035",
+          "task_036",
+          "task_037",
+          "task_038",
+          "task_039",
+          "task_040",
+          "task_041",
+          "task_043",
+          "task_044",
+          "task_045",
+          "task_046",
+          "task_047",
+          "task_048",
+          "task_049",
+          "task_050",
+          "task_051",
+          "task_052",
+          "task_053",
+          "task_054",
+          "task_055",
+          "task_056",
+          "task_057",
+          "task_058",
+          "task_059",
+          "task_060",
+          "task_061",
+          "task_062",
+          "task_063",
+          "task_064",
+          "task_065",
+          "task_066",
+          "task_067",
+          "task_068",
+          "task_069",
+          "task_070",
+          "task_071",
+          "task_072",
+          "task_073",
+          "task_074",
+          "task_075",
+          "task_076",
+          "task_077",
+          "task_078",
+          "task_079",
+          "task_080",
+          "task_081",
+          "task_082",
+          "task_083",
+          "task_084",
+          "task_085",
+          "task_086",
+          "task_087",
+          "task_088",
+          "task_089",
+          "task_090",
+          "task_091",
+          "task_092",
+          "task_093",
+          "task_094",
+          "task_095",
+          "task_096",
+          "task_097",
+          "task_098",
+          "task_099",
+          "task_100",
+          "task_101",
+          "task_102"
+        ],
+        "publication_run": true,
+        "policy_sha256": "340b80559e380d089e69620eb55fa6edeb97087e5d50b8381d2fb18ab544b288",
+        "implementation_sha256": "521484361e16585f611f89358622c1339a76794c040e451309e6d98cfca7bf5a",
+        "retrieval_index_sha256": "0776cec691c9b04d4892d8a6ecf0058992bdef454fa2e7c7f602293d0c603eb4",
+        "agent_prompt_profile": "standard",
+        "binding_identity": "appa-agent-python-v8",
+        "tau2_revision": "93ee97b8303ce0e89e0ad17e6207591a1846f84b",
+        "domain": "banking_knowledge",
+        "task_split_name": "base",
+        "model_args": {
+          "reasoning_effort": "max"
+        },
+        "user_model_args": {
+          "reasoning_effort": "low"
+        },
+        "judge_model_args": {
+          "temperature": 0
+        },
+        "review_model_args": {
+          "temperature": 0
+        },
+        "max_retries": 0,
+        "auto_review": true,
+        "review_mode": "user",
+        "verbose_logs": true,
+        "hallucination_retries": 0
+      },
+      "provider_models": {
+        "agent": [
+          "openai/gpt-5.6-luna"
+        ],
+        "nl_assertion": [
+          "openai/gpt-4.1"
+        ],
+        "nl_assertion_atomic_audit": [
+          "openai/gpt-4.1"
+        ],
+        "nl_assertion_preflight": [
+          "openai/gpt-4.1"
+        ],
+        "user": [
+          "openai/gpt-5.2"
+        ],
+        "user_review": [
+          "openai/gpt-4.1"
+        ]
+      },
+      "simulation_count": 388,
+      "utility": {
+        "mean_reward": 0.3943298969072165,
+        "passes": 153,
+        "evaluated": 388
+      },
+      "terminations": {
+        "user_stop": 388
+      },
+      "execution_failures": 0,
+      "policy": {
+        "checks": 11167,
+        "blocks": 4,
+        "hidden_completions": 4,
+        "terminal_refusals": 4
+      },
+      "retrieval": {
+        "calls": 6428,
+        "dense_calls": 1722,
+        "exact_duplicate_calls": 2,
+        "retrieved_document_hits": 40361,
+        "repeated_retrieved_document_hits": 22422,
+        "embedding_cost_usd": null,
+        "embedding_cost_note": "Tau 1.0.1 does not expose embedding response usage or cost"
+      },
+      "tool_results": {
+        "assistant_execution_errors": 0,
+        "user_execution_errors": 0,
+        "assistant_reported_failures": 69,
+        "user_reported_failures": 74
+      },
+      "user_simulator": {
+        "tool_execution_errors": 0,
+        "reported_tool_failures": 74,
+        "reviewed": 388,
+        "episodes_with_errors": 242,
+        "critical_errors": 168
+      },
+      "tokens": {
+        "cumulative_agent_prompt": 486873459,
+        "cumulative_agent_prompt_visible": 486519480,
+        "cumulative_agent_prompt_hidden": 353979,
+        "cumulative_user_prompt": 6727201,
+        "cumulative_agent_completion": 6712176,
+        "cumulative_agent_completion_visible": 6701907,
+        "cumulative_agent_completion_hidden": 10269,
+        "cumulative_user_completion": 253031,
+        "mean_agent_prompt_per_simulation": 1254828.5025773195,
+        "mean_agent_completion_per_simulation": 17299.422680412372,
+        "agent_token_usage_source": [
+          "appa-audit"
+        ],
+        "max_agent_prompt_per_call": 241387,
+        "max_user_prompt_per_call": 8821
+      },
+      "model_calls": {
+        "visible_agent": 7483,
+        "hidden_agent": 4,
+        "user": 2604,
+        "user_review": 388,
+        "nl_assertion_judge": 4,
+        "nl_assertion_atomic_audit": 4,
+        "nl_assertion_preflight": 4,
+        "discarded_agent_attempts": 520
+      },
+      "cost_usd": {
+        "agent": 23.82454386,
+        "visible_agent": 23.80486158,
+        "hidden_agent": 0.01968228,
+        "user": 6.86013335,
+        "user_review": 3.8355339999999982,
+        "nl_assertion_judge": 0.7614939999999999,
+        "nl_assertion_atomic_audit": 0.775462,
+        "nl_assertion_preflight": 0.005704,
+        "discarded_attempt_evaluators": 0,
+        "discarded_agent_attempts": 1.73651292,
+        "recorded_total": 37.79938413
+      },
+      "duration_seconds": 87198.885537044
+    }
+  },
+  "parallel_call_diagnostics": {
+    "guarded": {
+      "scored_appa_audits": 388,
+      "multi_call_completions": 2624,
+      "calls_in_multi_call_completions": 8211,
+      "maximum_calls_in_completion": 16,
+      "policy_allows": 11351,
+      "policy_blocks": 4,
+      "policy_blocks_classified_as_scaffold_input_validation": 3,
+      "policy_blocks_classified_as_contract_enforcement": 1,
+      "tool_results": 11345,
+      "blocked_sibling_abandons": 6,
+      "terminal_refusals": 3,
+      "duplicate_call_ids_by_event_kind": {
+        "policy_allow": 0,
+        "policy_block": 0,
+        "tool_result": 0,
+        "policy_abandon": 0
+      }
+    },
+    "permissive": {
+      "scored_appa_audits": 388,
+      "multi_call_completions": 2588,
+      "calls_in_multi_call_completions": 8105,
+      "maximum_calls_in_completion": 15,
+      "policy_allows": 11163,
+      "policy_blocks": 4,
+      "policy_blocks_classified_as_scaffold_input_validation": 4,
+      "policy_blocks_classified_as_contract_enforcement": 0,
+      "tool_results": 11134,
+      "blocked_sibling_abandons": 29,
+      "terminal_refusals": 4,
+      "duplicate_call_ids_by_event_kind": {
+        "policy_allow": 0,
+        "policy_block": 0,
+        "tool_result": 0,
+        "policy_abandon": 0
+      }
+    }
+  },
+  "sequential_to_parallel": {
+    "guarded": {
+      "transitions": {
+        "pass_to_fail": 27,
+        "pass_to_pass": 106,
+        "fail_to_pass": 45,
+        "fail_to_fail": 210
+      },
+      "metrics": {
+        "passes": {
+          "sequential": 133,
+          "parallel": 151,
+          "difference": 18,
+          "parallel_change_fraction": 0.13533834586466176
+        },
+        "mean_reward": {
+          "sequential": 0.3427835051546392,
+          "parallel": 0.38917525773195877,
+          "difference": 0.04639175257731959,
+          "parallel_change_fraction": 0.13533834586466176
+        },
+        "agent_tokens": {
+          "sequential": 362576324,
+          "parallel": 507412201,
+          "difference": 144835877,
+          "parallel_change_fraction": 0.3994631403455897
+        },
+        "visible_agent_model_calls": {
+          "sequential": 9854,
+          "parallel": 7679,
+          "difference": -2175,
+          "parallel_change_fraction": -0.22072254921859147
+        },
+        "retrieval_calls": {
+          "sequential": 3629,
+          "parallel": 6623,
+          "difference": 2994,
+          "parallel_change_fraction": 0.8250206668503719
+        },
+        "dense_retrieval_calls": {
+          "sequential": 122,
+          "parallel": 1699,
+          "difference": 1577,
+          "parallel_change_fraction": 12.926229508196721
+        },
+        "repeated_retrieved_document_hits": {
+          "sequential": 10380,
+          "parallel": 23681,
+          "difference": 13301,
+          "parallel_change_fraction": 1.2814065510597303
+        },
+        "duration_seconds": {
+          "sequential": 114950.41387439799,
+          "parallel": 93466.619837689,
+          "difference": -21483.79403670899,
+          "parallel_change_fraction": -0.18689618690876164
+        },
+        "recorded_cost_usd": {
+          "sequential": 30.327921599999996,
+          "parallel": 38.36262737,
+          "difference": 8.034705770000002,
+          "parallel_change_fraction": 0.2649276754263308
+        }
+      }
+    },
+    "permissive": {
+      "transitions": {
+        "pass_to_pass": 105,
+        "pass_to_fail": 29,
+        "fail_to_pass": 48,
+        "fail_to_fail": 206
+      },
+      "metrics": {
+        "passes": {
+          "sequential": 134,
+          "parallel": 153,
+          "difference": 19,
+          "parallel_change_fraction": 0.14179104477611948
+        },
+        "mean_reward": {
+          "sequential": 0.34536082474226804,
+          "parallel": 0.3943298969072165,
+          "difference": 0.048969072164948446,
+          "parallel_change_fraction": 0.14179104477611948
+        },
+        "agent_tokens": {
+          "sequential": 346641191,
+          "parallel": 493585635,
+          "difference": 146944444,
+          "parallel_change_fraction": 0.4239093558849445
+        },
+        "visible_agent_model_calls": {
+          "sequential": 9692,
+          "parallel": 7483,
+          "difference": -2209,
+          "parallel_change_fraction": -0.22791993396615762
+        },
+        "retrieval_calls": {
+          "sequential": 3480,
+          "parallel": 6428,
+          "difference": 2948,
+          "parallel_change_fraction": 0.8471264367816091
+        },
+        "dense_retrieval_calls": {
+          "sequential": 99,
+          "parallel": 1722,
+          "difference": 1623,
+          "parallel_change_fraction": 16.393939393939394
+        },
+        "repeated_retrieved_document_hits": {
+          "sequential": 9995,
+          "parallel": 22422,
+          "difference": 12427,
+          "parallel_change_fraction": 1.2433216608304152
+        },
+        "duration_seconds": {
+          "sequential": 107672.29470799102,
+          "parallel": 87198.885537044,
+          "difference": -20473.409170947023,
+          "parallel_change_fraction": -0.19014556368907376
+        },
+        "recorded_cost_usd": {
+          "sequential": 30.5018051,
+          "parallel": 37.79938413,
+          "difference": 7.297579030000001,
+          "parallel_change_fraction": 0.2392507265086421
+        }
+      }
+    }
+  },
+  "comparisons": [
+    {
+      "task_id": "task_002",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 251980,
+        "permissive": 13875
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 238105,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_012",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 239322,
+        "permissive": 422291
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -182969,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_003",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 134007,
+        "permissive": 190798
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -56791,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_014",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 137992,
+        "permissive": 87363
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 50629,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_015",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 300022,
+        "permissive": 692645
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -392623,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_004",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 63024,
+        "permissive": 64015
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -991,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_006",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 312336,
+        "permissive": 258636
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 53700,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_005",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 143506,
+        "permissive": 109783
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 33723,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_001",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 271348,
+        "permissive": 174430
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": 96918,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_007",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 341914,
+        "permissive": 322783
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": 19131,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_021",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 187866,
+        "permissive": 414779
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -226913,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_035",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 267736,
+        "permissive": 655988
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -388252,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_008",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 553317,
+        "permissive": 695436
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -142119,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_017",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 204130,
+        "permissive": 167681
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 36449,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_032",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 145396,
+        "permissive": 155023
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -9627,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_023",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 354908,
+        "permissive": 252675
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 102233,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_033",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 124053,
+        "permissive": 602195
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -478142,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_016",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 269397,
+        "permissive": 429197
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -159800,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_031",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 597641,
+        "permissive": 842830
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -245189,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_036",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 821696,
+        "permissive": 621628
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 200068,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_034",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 59201,
+        "permissive": 42665
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 16536,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_010",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 294406,
+        "permissive": 198061
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 96345,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_038",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 459623,
+        "permissive": 1034508
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": -574885,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_018",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 634585,
+        "permissive": 300332
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 334253,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_037",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1002515,
+        "permissive": 509693
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": 492822,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_020",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 253336,
+        "permissive": 169469
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 83867,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_045",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 534471,
+        "permissive": 1565842
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -1031371,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_040",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 493833,
+        "permissive": 331203
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 162630,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_024",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 414724,
+        "permissive": 700063
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -285339,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_028",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1141681,
+        "permissive": 897062
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 244619,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_026",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 416858,
+        "permissive": 871080
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -454222,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_046",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 644164,
+        "permissive": 508297
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 135867,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_039",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 712061,
+        "permissive": 546491
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 165570,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_027",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 416508,
+        "permissive": 627942
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -211434,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_019",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1404746,
+        "permissive": 399130
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 1005616,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_043",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1936502,
+        "permissive": 949971
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 986531,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_050",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 757336,
+        "permissive": 821283
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -63947,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_044",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1265213,
+        "permissive": 1196170
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 69043,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_029",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1179390,
+        "permissive": 636486
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 542904,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_053",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1181506,
+        "permissive": 1233854
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -52348,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_051",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1064621,
+        "permissive": 2078632
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -1014011,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_047",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 2220985,
+        "permissive": 1911503
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 309482,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_041",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1017488,
+        "permissive": 248302
+      },
+      "guarded_policy_blocks": 1,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 769186,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_058",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1432292,
+        "permissive": 1849219
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -416927,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_061",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1161779,
+        "permissive": 641503
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 520276,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_025",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 816627,
+        "permissive": 800485
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": 16142,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_054",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1396817,
+        "permissive": 1451061
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -54244,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_052",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1197911,
+        "permissive": 1197761
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 150,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_056",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 2267149,
+        "permissive": 2309107
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -41958,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_049",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2565814,
+        "permissive": 478752
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 2087062,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_022",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 3841295,
+        "permissive": 1442638
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 2398657,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_057",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1490036,
+        "permissive": 1914469
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -424433,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_060",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1184584,
+        "permissive": 375674
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 808910,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_048",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2884848,
+        "permissive": 1479480
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 1405368,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_064",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 2283116,
+        "permissive": 1542087
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 741029,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_072",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 840318,
+        "permissive": 974097
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -133779,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_055",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 4089511,
+        "permissive": 3851615
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 237896,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_081",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 39702,
+        "permissive": 209977
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -170275,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_073",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1553304,
+        "permissive": 2079414
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -526110,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_062",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2902589,
+        "permissive": 3249692
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -347103,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_065",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 3015158,
+        "permissive": 1706276
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 1308882,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_066",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2229465,
+        "permissive": 3404395
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -1174930,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_076",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1114676,
+        "permissive": 1133800
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -19124,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_071",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2446949,
+        "permissive": 2004910
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 442039,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_079",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 780227,
+        "permissive": 1302639
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -522412,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_078",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 958371,
+        "permissive": 986237
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -27866,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_067",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2869100,
+        "permissive": 3214121
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -345021,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_070",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2286012,
+        "permissive": 1310048
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 975964,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_077",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2260180,
+        "permissive": 1708234
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 551946,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_063",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2340778,
+        "permissive": 1741578
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 599200,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_059",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 2294058,
+        "permissive": 2199233
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": 94825,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_074",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 887671,
+        "permissive": 1627657
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -739986,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_092",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 501635,
+        "permissive": 498632
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 3003,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_085",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1081095,
+        "permissive": 1638162
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": -557067,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_093",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 691970,
+        "permissive": 627921
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 64049,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_069",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 3468201,
+        "permissive": 3118407
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 349794,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_068",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 3917386,
+        "permissive": 3611816
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 305570,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_099",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 349807,
+        "permissive": 515740
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -165933,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_087",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1842640,
+        "permissive": 726388
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 1116252,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_082",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2281529,
+        "permissive": 127065
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 2154464,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_089",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1573732,
+        "permissive": 1441635
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 132097,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_083",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2869620,
+        "permissive": 3309688
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -440068,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_002",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 66987,
+        "permissive": 194401
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -127414,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_098",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1070046,
+        "permissive": 330730
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 739316,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_001",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 264277,
+        "permissive": 187732
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 76545,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_090",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1720159,
+        "permissive": 968887
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": 751272,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_080",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 4200225,
+        "permissive": 5844243
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -1644018,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_084",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1625620,
+        "permissive": 903447
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 722173,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_006",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 138185,
+        "permissive": 225974
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -87789,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_004",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 199126,
+        "permissive": 90085
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 109041,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_075",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 2104159,
+        "permissive": 1255385
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 848774,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_094",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2290979,
+        "permissive": 1656693
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 634286,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_005",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 203690,
+        "permissive": 90099
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 113591,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_100",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 954134,
+        "permissive": 1188305
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": -234171,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_095",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1807571,
+        "permissive": 1488843
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 318728,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_012",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 291424,
+        "permissive": 393369
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -101945,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_014",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 237834,
+        "permissive": 225045
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": 12789,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_016",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 256948,
+        "permissive": 301557
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -44609,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_003",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 484809,
+        "permissive": 183729
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 301080,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_007",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 529791,
+        "permissive": 274478
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 255313,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_091",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2278787,
+        "permissive": 1642198
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 636589,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_017",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 168597,
+        "permissive": 257243
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": -88646,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_023",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 84261,
+        "permissive": 322494
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -238233,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_010",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 154058,
+        "permissive": 75365
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 78693,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_008",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 399865,
+        "permissive": 831234
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": -431369,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_086",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2392008,
+        "permissive": 1238361
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 1153647,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_102",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1184969,
+        "permissive": 333727
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 851242,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_024",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 396420,
+        "permissive": 446789
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -50369,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_033",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 68768,
+        "permissive": 283087
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -214319,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_088",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 3963696,
+        "permissive": 4335024
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -371328,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_032",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 122803,
+        "permissive": 132001
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -9198,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_018",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 345873,
+        "permissive": 312772
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 33101,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_025",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 275503,
+        "permissive": 547722
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -272219,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_021",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 545465,
+        "permissive": 294014
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 251451,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_035",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 411727,
+        "permissive": 589410
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -177683,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_034",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 52318,
+        "permissive": 154581
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -102263,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_031",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 814468,
+        "permissive": 263072
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 551396,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_036",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 136671,
+        "permissive": 467492
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -330821,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_101",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1142221,
+        "permissive": 403191
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 739030,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_019",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1191362,
+        "permissive": 823356
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 368006,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_020",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 336820,
+        "permissive": 803141
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -466321,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_043",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 933133,
+        "permissive": 1867619
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -934486,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_044",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 494505,
+        "permissive": 988534
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -494029,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_046",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 620140,
+        "permissive": 1572667
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -952527,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_037",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 726902,
+        "permissive": 1473191
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -746289,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_039",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 523216,
+        "permissive": 278352
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 244864,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_050",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 520293,
+        "permissive": 673779
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -153486,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_027",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1217004,
+        "permissive": 549763
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 667241,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_028",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 856338,
+        "permissive": 1714772
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -858434,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_047",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 818900,
+        "permissive": 926652
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -107752,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_038",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 801686,
+        "permissive": 1287861
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -486175,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_097",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2329407,
+        "permissive": 1650656
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 678751,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_045",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1036876,
+        "permissive": 897907
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 138969,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_026",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1091176,
+        "permissive": 753411
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 337765,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_015",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 176859,
+        "permissive": 237076
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -60217,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_051",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1189898,
+        "permissive": 1329212
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -139314,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_040",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 837531,
+        "permissive": 439367
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 398164,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_029",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2115863,
+        "permissive": 1467218
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 648645,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_041",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 506604,
+        "permissive": 1875247
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -1368643,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_052",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1510991,
+        "permissive": 1324492
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 186499,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_049",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1800755,
+        "permissive": 2097126
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -296371,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_022",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1466256,
+        "permissive": 2058429
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -592173,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_053",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 590045,
+        "permissive": 1485922
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -895877,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_054",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1505898,
+        "permissive": 368059
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 1137839,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_048",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1481720,
+        "permissive": 2021417
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -539697,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_058",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1478539,
+        "permissive": 2073189
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -594650,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_060",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 654557,
+        "permissive": 884590
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -230033,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_056",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1894514,
+        "permissive": 2401944
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -507430,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_096",
+      "trial": 0,
+      "seed": 626729,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 3022395,
+        "permissive": 1640531
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": 1381864,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_061",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1414499,
+        "permissive": 3581951
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -2167452,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_057",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 3727888,
+        "permissive": 1731693
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 1996195,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_059",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 2032298,
+        "permissive": 2237508
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -205210,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_055",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 3971278,
+        "permissive": 2371655
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 1599623,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_064",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 2584500,
+        "permissive": 1806110
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 778390,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_065",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2119497,
+        "permissive": 2405661
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -286164,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_067",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2388530,
+        "permissive": 2886569
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -498039,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_062",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1949684,
+        "permissive": 3257450
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -1307766,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_070",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1580498,
+        "permissive": 2558349
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -977851,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_066",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 3066443,
+        "permissive": 2744382
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 322061,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_063",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 4298806,
+        "permissive": 1980424
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 2318382,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_076",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1122416,
+        "permissive": 176273
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 946143,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_075",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 963673,
+        "permissive": 1878871
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -915198,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_073",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 581328,
+        "permissive": 985233
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -403905,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_069",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2705786,
+        "permissive": 2734042
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -28256,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_072",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1016229,
+        "permissive": 759584
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": 256645,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_081",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 121528,
+        "permissive": 40937
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 80591,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_079",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 389555,
+        "permissive": 1125205
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -735650,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_071",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 3563328,
+        "permissive": 1697147
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 1866181,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_082",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2391963,
+        "permissive": 39292
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 2352671,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_089",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1950128,
+        "permissive": 953484
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 996644,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_068",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2628770,
+        "permissive": 4211623
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -1582853,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_078",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1233957,
+        "permissive": 731044
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 502913,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_085",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1601668,
+        "permissive": 863755
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 737913,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_077",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2946266,
+        "permissive": 5458485
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -2512219,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_084",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1398792,
+        "permissive": 755219
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 643573,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_090",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 4666760,
+        "permissive": 2114638
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 2552122,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_080",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 4926385,
+        "permissive": 5783017
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -856632,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_093",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 529870,
+        "permissive": 924330
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": -394460,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_092",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 522264,
+        "permissive": 957626
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -435362,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_087",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2477402,
+        "permissive": 1573598
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 903804,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_098",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 750894,
+        "permissive": 546289
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 204605,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_083",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1490767,
+        "permissive": 2867371
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -1376604,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_074",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1342110,
+        "permissive": 1501102
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -158992,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_091",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1574373,
+        "permissive": 1720174
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -145801,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_099",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 287373,
+        "permissive": 333443
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -46070,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_094",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1532423,
+        "permissive": 1296515
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 235908,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_001",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 227488,
+        "permissive": 290819
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -63331,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_002",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 126603,
+        "permissive": 114412
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 12191,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_004",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 61565,
+        "permissive": 62969
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -1404,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_097",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2328267,
+        "permissive": 2190822
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 137445,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_086",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2041922,
+        "permissive": 3050461
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -1008539,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_100",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1096019,
+        "permissive": 1117636
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -21617,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_005",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 35236,
+        "permissive": 167147
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -131911,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_003",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 257339,
+        "permissive": 375124
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -117785,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_088",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 3982775,
+        "permissive": 563186
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 3419589,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_101",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 600974,
+        "permissive": 1075826
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -474852,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_006",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 195713,
+        "permissive": 58811
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 136902,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_014",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 85183,
+        "permissive": 107276
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": -22093,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_015",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 149961,
+        "permissive": 156101
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -6140,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_012",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 602081,
+        "permissive": 287203
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 314878,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_007",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 243998,
+        "permissive": 239758
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": 4240,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_102",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 933330,
+        "permissive": 1292451
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -359121,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_016",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 274666,
+        "permissive": 562514
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -287848,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_033",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 119456,
+        "permissive": 306061
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": -186605,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_032",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 166196,
+        "permissive": 135707
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 30489,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_031",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 312315,
+        "permissive": 845930
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -533615,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_021",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 162769,
+        "permissive": 691652
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -528883,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_010",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 125684,
+        "permissive": 258221
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -132537,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_008",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 400615,
+        "permissive": 847746
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -447131,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_023",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 251916,
+        "permissive": 268406
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -16490,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_025",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 634294,
+        "permissive": 570572
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 63722,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_017",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 278986,
+        "permissive": 256761
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": 22225,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_024",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 407960,
+        "permissive": 421420
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -13460,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_019",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 347724,
+        "permissive": 409476
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -61752,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_036",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 194127,
+        "permissive": 608417
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -414290,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_035",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 322350,
+        "permissive": 185439
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 136911,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_020",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 296244,
+        "permissive": 176362
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 119882,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_018",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1146791,
+        "permissive": 940659
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 206132,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_029",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 554027,
+        "permissive": 2803160
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -2249133,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_026",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 539273,
+        "permissive": 1170016
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -630743,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_027",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 582422,
+        "permissive": 2049353
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -1466931,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_046",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 474577,
+        "permissive": 615159
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -140582,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_045",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 609719,
+        "permissive": 1433973
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -824254,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_050",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 746086,
+        "permissive": 924975
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -178889,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_034",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 103472,
+        "permissive": 96974
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 6498,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_043",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 813757,
+        "permissive": 1646419
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -832662,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_044",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1216493,
+        "permissive": 1765734
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": -549241,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_040",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 361880,
+        "permissive": 389168
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -27288,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_038",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 631692,
+        "permissive": 558698
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 72994,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_047",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 928420,
+        "permissive": 1349485
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -421065,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_051",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 967563,
+        "permissive": 1015635
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -48072,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_048",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1456637,
+        "permissive": 2966474
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -1509837,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_054",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 334886,
+        "permissive": 983702
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -648816,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_052",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1654685,
+        "permissive": 1580021
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 74664,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_037",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1746604,
+        "permissive": 1188353
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 558251,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_060",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 647299,
+        "permissive": 725849
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -78550,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_039",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1689168,
+        "permissive": 424443
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 1264725,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_053",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 675966,
+        "permissive": 1400129
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -724163,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_095",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1657801,
+        "permissive": 2841375
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -1183574,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_049",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 2538327,
+        "permissive": 2348522
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": 189805,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_028",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1805191,
+        "permissive": 2092738
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": -287547,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_041",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1655257,
+        "permissive": 1014632
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 640625,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_058",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1679295,
+        "permissive": 1744027
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -64732,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_055",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 2109106,
+        "permissive": 2376830
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -267724,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_061",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2029097,
+        "permissive": 2775097
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -746000,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_057",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2179898,
+        "permissive": 3191382
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -1011484,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_056",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 2359160,
+        "permissive": 2352156
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": 7004,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_070",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1275404,
+        "permissive": 689502
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 585902,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_071",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2900994,
+        "permissive": 1848206
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 1052788,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_067",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2528585,
+        "permissive": 2763673
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -235088,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_064",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 2069517,
+        "permissive": 1973844
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 95673,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_076",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 841300,
+        "permissive": 1297812
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -456512,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_059",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 2846002,
+        "permissive": 1584316
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": 1261686,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_062",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1607507,
+        "permissive": 3294511
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -1687004,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_081",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 273607,
+        "permissive": 85242
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 188365,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_082",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 124301,
+        "permissive": 101459
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 22842,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_096",
+      "trial": 1,
+      "seed": 373753,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2993037,
+        "permissive": 3701322
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -708285,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_072",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 862952,
+        "permissive": 1873030
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -1010078,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_078",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1467453,
+        "permissive": 1212155
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 255298,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_069",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2574769,
+        "permissive": 4122831
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -1548062,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_022",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2103076,
+        "permissive": 1698914
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 404162,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_077",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2292653,
+        "permissive": 1378178
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 914475,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_068",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2909446,
+        "permissive": 2644420
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 265026,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_079",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1355758,
+        "permissive": 528900
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 826858,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_073",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1406398,
+        "permissive": 1810412
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -404014,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_065",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 3325057,
+        "permissive": 2345305
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 979752,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_087",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 987470,
+        "permissive": 1012851
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -25381,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_092",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 676693,
+        "permissive": 477605
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 199088,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_075",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 2292439,
+        "permissive": 1760738
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 531701,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_080",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 3346053,
+        "permissive": 3883840
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -537787,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_099",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 243809,
+        "permissive": 439342
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -195533,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_093",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 777342,
+        "permissive": 319649
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 457693,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_089",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 2109823,
+        "permissive": 2198045
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -88222,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_097",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 805191,
+        "permissive": 1291079
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -485888,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_001",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 119231,
+        "permissive": 402353
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": -283122,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_085",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1981645,
+        "permissive": 979326
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 1002319,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_100",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 513764,
+        "permissive": 994229
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -480465,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_090",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2399081,
+        "permissive": 826257
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 1572824,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_098",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 717845,
+        "permissive": 548192
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 169653,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_084",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1526935,
+        "permissive": 1363369
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 163566,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_088",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1116691,
+        "permissive": 956837
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 159854,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_083",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2372574,
+        "permissive": 1971415
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 401159,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_004",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 121606,
+        "permissive": 263920
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -142314,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_005",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 159783,
+        "permissive": 207480
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -47697,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_006",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 303990,
+        "permissive": 159905
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 144085,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_003",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 239271,
+        "permissive": 209676
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 29595,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_063",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 4187347,
+        "permissive": 2812571
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 1374776,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_012",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 104684,
+        "permissive": 318572
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -213888,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_002",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 376458,
+        "permissive": 202985
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 173473,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_094",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1672504,
+        "permissive": 2639743
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -967239,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_091",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1689501,
+        "permissive": 1745070
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -55569,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_096",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1534715,
+        "permissive": 2994412
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -1459697,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_007",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 214601,
+        "permissive": 392895
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": -178294,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_014",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 192300,
+        "permissive": 116450
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 75850,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_023",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 120331,
+        "permissive": 390856
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -270525,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_086",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1327714,
+        "permissive": 3308235
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -1980521,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_095",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2478319,
+        "permissive": 2179753
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 298566,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_010",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 446195,
+        "permissive": 152861
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 293334,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_017",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 757165,
+        "permissive": 193516
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 563649,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_102",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 795683,
+        "permissive": 894563
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -98880,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_024",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 376996,
+        "permissive": 869726
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -492730,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_021",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 307387,
+        "permissive": 246044
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 61343,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_074",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2411655,
+        "permissive": 1405690
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 1005965,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_066",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 6172413,
+        "permissive": 4110325
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 2062088,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_101",
+      "trial": 2,
+      "seed": 361454,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1568780,
+        "permissive": 615203
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 953577,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_020",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 390638,
+        "permissive": 407007
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -16369,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_035",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 239670,
+        "permissive": 509458
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -269788,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_033",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 72108,
+        "permissive": 49457
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 22651,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_032",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 177781,
+        "permissive": 107186
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 70595,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_016",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 506022,
+        "permissive": 288157
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 217865,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_031",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 883872,
+        "permissive": 614829
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 269043,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_018",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1001167,
+        "permissive": 817155
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 184012,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_036",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 558937,
+        "permissive": 575711
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -16774,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_034",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 103969,
+        "permissive": 117365
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -13396,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_026",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 468164,
+        "permissive": 658294
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -190130,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_019",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 576623,
+        "permissive": 383072
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 193551,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_025",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 759563,
+        "permissive": 676710
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 82853,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_044",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1322867,
+        "permissive": 1076976
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": 245891,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_046",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 371574,
+        "permissive": 1400441
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -1028867,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_050",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 635211,
+        "permissive": 1303670
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -668459,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_043",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 880767,
+        "permissive": 1047952
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -167185,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_029",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1399269,
+        "permissive": 1727556
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -328287,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_040",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 932720,
+        "permissive": 1257454
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -324734,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_045",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2634958,
+        "permissive": 2386498
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 248460,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_027",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1088171,
+        "permissive": 636762
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 451409,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_037",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1774358,
+        "permissive": 1056552
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": 717806,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_039",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 580185,
+        "permissive": 1174445
+      },
+      "guarded_policy_blocks": 1,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -594260,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_047",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1416906,
+        "permissive": 978669
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 438237,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_038",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1769243,
+        "permissive": 1350660
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 418583,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_041",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1087952,
+        "permissive": 1153850
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -65898,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_053",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1120464,
+        "permissive": 1342330
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -221866,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_049",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 3142946,
+        "permissive": 3336050
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -193104,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_051",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1189561,
+        "permissive": 1086725
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 102836,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_054",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1068731,
+        "permissive": 1426672
+      },
+      "guarded_policy_blocks": 1,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -357941,
+      "policy_associated_difference": true
+    },
+    {
+      "task_id": "task_048",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 3390730,
+        "permissive": 3175714
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 215016,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_052",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 824556,
+        "permissive": 1252714
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -428158,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_061",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1225034,
+        "permissive": 1872756
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -647722,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_060",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1515239,
+        "permissive": 875003
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 640236,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_022",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 2621102,
+        "permissive": 2120344
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": 500758,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_056",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 2180112,
+        "permissive": 2293320
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -113208,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_062",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1981926,
+        "permissive": 1865153
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 116773,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_065",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2034386,
+        "permissive": 2512209
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -477823,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_070",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1563163,
+        "permissive": 1180482
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 382681,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_055",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 2959325,
+        "permissive": 3187686
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -228361,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_071",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1466832,
+        "permissive": 2696370
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -1229538,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_081",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 143908,
+        "permissive": 1218965
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -1075057,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_058",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 2751592,
+        "permissive": 2090407
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 661185,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_082",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 39900,
+        "permissive": 122510
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -82610,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_063",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2030558,
+        "permissive": 2407276
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -376718,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_075",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1473561,
+        "permissive": 1377609
+      },
+      "guarded_policy_blocks": 1,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 95952,
+      "policy_associated_difference": true
+    },
+    {
+      "task_id": "task_064",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 3078708,
+        "permissive": 1906463
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 1172245,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_079",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 2293530,
+        "permissive": 2710286
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -416756,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_078",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 894608,
+        "permissive": 908753
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -14145,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_067",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2878806,
+        "permissive": 2760844
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 117962,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_076",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1412305,
+        "permissive": 890021
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 522284,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_069",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2441375,
+        "permissive": 1726411
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 714964,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_057",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 3583783,
+        "permissive": 2422444
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 1161339,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_074",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1687884,
+        "permissive": 1838598
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -150714,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_073",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1091668,
+        "permissive": 1068827
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 22841,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_077",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 3711134,
+        "permissive": 2314852
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 1396282,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_059",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2104016,
+        "permissive": 2016443
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 87573,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_072",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1393714,
+        "permissive": 789569
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 604145,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_068",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2610374,
+        "permissive": 3356353
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -745979,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_080",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 3277571,
+        "permissive": 3920652
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -643081,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_099",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 261830,
+        "permissive": 304042
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -42212,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_083",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1722674,
+        "permissive": 1449114
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 273560,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_085",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2407575,
+        "permissive": 1499424
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 908151,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_087",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1328479,
+        "permissive": 532523
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 795956,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_084",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2098341,
+        "permissive": 906223
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 1192118,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_098",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 966955,
+        "permissive": 678334
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 288621,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_086",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 2285658,
+        "permissive": 1469021
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 816637,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_089",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 2890351,
+        "permissive": 2508067
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 382284,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_096",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1238247,
+        "permissive": 1819254
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -581007,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_091",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1368638,
+        "permissive": 3765718
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -2397080,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_100",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1386232,
+        "permissive": 505074
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 881158,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_092",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1209174,
+        "permissive": 356211
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 852963,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_066",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 4084609,
+        "permissive": 1590500
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 2494109,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_088",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1377803,
+        "permissive": 1560451
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -182648,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_093",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1346612,
+        "permissive": 611642
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": 734970,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_090",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1668976,
+        "permissive": 3206547
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": -1537571,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_102",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 712291,
+        "permissive": 1652745
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": -940454,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_101",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1052733,
+        "permissive": 498295
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 554438,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_094",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1885006,
+        "permissive": 3682244
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -1797238,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_097",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1544627,
+        "permissive": 1663062
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": -118435,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_095",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 4227235,
+        "permissive": 2403790
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 1823445,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_015",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 0.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 35165,
+        "permissive": 267705
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": -1.0,
+      "guarded_minus_permissive_agent_tokens": -232540,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_008",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 1.0
+      },
+      "agent_tokens": {
+        "guarded": 1039654,
+        "permissive": 767630
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 0.0,
+      "guarded_minus_permissive_agent_tokens": 272024,
+      "policy_associated_difference": false
+    },
+    {
+      "task_id": "task_028",
+      "trial": 3,
+      "seed": 1567,
+      "rewards": {
+        "guarded": 1.0,
+        "permissive": 0.0
+      },
+      "agent_tokens": {
+        "guarded": 1795584,
+        "permissive": 1749877
+      },
+      "guarded_policy_blocks": 0,
+      "guarded_minus_permissive": 1.0,
+      "guarded_minus_permissive_agent_tokens": 45707,
+      "policy_associated_difference": false
+    }
+  ]
+}

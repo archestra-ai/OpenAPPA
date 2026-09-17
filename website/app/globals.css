@@ -733,6 +733,7 @@ samp {
 /* Anchor targets stop below the sticky header instead of underneath it. */
 .prose :is(h1, h2, h3, h4, h5)[id] {
   scroll-margin-top: calc(var(--header-h) + 1.5rem);
+  text-wrap: balance;
 }
 
 .prose h1 {
@@ -773,6 +774,7 @@ samp {
 
 .prose p {
   margin: 0.75rem 0;
+  text-wrap: pretty;
 }
 
 .prose strong {
@@ -807,6 +809,7 @@ samp {
   position: relative;
   padding-left: 1.4em;
   margin: 0.4rem 0;
+  text-wrap: pretty;
 }
 
 .prose ul > li::before {
