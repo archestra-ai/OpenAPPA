@@ -1410,7 +1410,11 @@ impl Session {
                 }
                 _ => None,
             });
-            if policy.engine().opens_a_second_dispatch(&view, &self.trajectory, facts)
+            // Only a batch that opens a dispatch can be the second one. An outcome closes a
+            // dispatch and drives the count down, so refusing it would leave a parallel batch
+            // with no way to drain: every report would be refused for the calls it is settling.
+            if opens_dispatch.is_some()
+                && policy.engine().opens_a_second_dispatch(&view, &self.trajectory, facts)
                 && ((opening_call_id.is_none() && !remedy_opens_unbound) || context.has_unbound_open_dispatch())
             {
                 return Err(EventError::CallOutstanding);
@@ -2152,6 +2156,47 @@ name = "appa/execute_remedy_plan"
                         Some(call_id.to_string()),
                         ToolOutcome::Success {
                             body: OutcomeBody::Available(body.to_string()),
+                        },
+                    )
+                    .await
+                    .expect("the identified result is correlated"),
+                ToolResultDecision::Keep,
+            );
+        }
+        assert!(runtime.open_dispatches(&root(), &root()).is_empty());
+    }
+
+    /// A fan-out wider than two drains. The outcome closing the third of five leaves four
+    /// dispatches open, and the count alone must not refuse it: a batch that opens nothing
+    /// is never the second call.
+    #[tokio::test]
+    async fn a_wide_parallel_fan_out_reports_every_call() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let call = fetch(serde_json::json!({"a": 1}));
+        let ids = ["toolu-1", "toolu-2", "toolu-3", "toolu-4", "toolu-5"];
+
+        for call_id in ids {
+            assert!(matches!(
+                session
+                    .on_tool_call_identified(call.clone(), Some(call_id.to_string()), false)
+                    .await
+                    .expect("the identified call releases"),
+                ToolCallDecision::Allow { spawn: None, .. }
+            ));
+        }
+        assert_eq!(runtime.open_dispatches(&root(), &root()).len(), ids.len());
+
+        for call_id in ids {
+            assert_eq!(
+                session
+                    .on_tool_result_identified(
+                        call.clone(),
+                        Some(call_id.to_string()),
+                        ToolOutcome::Success {
+                            body: OutcomeBody::Available(call_id.to_string()),
                         },
                     )
                     .await

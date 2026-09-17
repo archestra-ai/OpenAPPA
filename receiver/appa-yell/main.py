@@ -274,10 +274,15 @@ def format_slack_payload(document: dict[str, Any], digest: str, kind: str, bucke
     runtime = document.get("runtime")
     serving = runtime.get("serving") if isinstance(runtime, dict) else None
     serving = serving if isinstance(serving, dict) else {}
-    source = {"archestra": "Archestra", "claude-code": "Claude Code", "kagent": "kagent"}.get(
+    harness = {"archestra": "Archestra", "claude-code": "Claude Code", "kagent": "kagent"}.get(
         serving.get("harness") if isinstance(serving.get("harness"), str) else "", "Unknown"
     )
-    metadata = f"Source: {source}"
+    origin = document.get("origin")
+    origin = origin if isinstance(origin, dict) else {}
+    filed_by = {"cli": "CLI", "agent": "agent"}.get(
+        origin.get("kind") if isinstance(origin.get("kind"), str) else "", "Unknown"
+    )
+    metadata = f"Harness: {harness} | Filed by: {filed_by}"
     hostname = serving.get("hostname")
     if isinstance(hostname, str) and re.fullmatch(r"[A-Za-z0-9.-]{1,253}", hostname):
         metadata += f" | Host: {hostname}"

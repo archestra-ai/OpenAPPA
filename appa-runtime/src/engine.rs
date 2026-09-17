@@ -823,8 +823,9 @@ impl RuntimeEngine {
     }
 
     /// Would applying this batch leave the trajectory with more than one
-    /// dispatch open? The runtime asks only when a host supplied no identity
-    /// for the new call or an older open call has no identity.
+    /// dispatch open? The runtime asks only of a batch that opens one, and
+    /// only when the host supplied no identity for the new call or an older
+    /// open call has no identity.
     pub(crate) fn opens_a_second_dispatch(&self, view: &EngineView, trajectory: &TrajectoryId, facts: &[Fact]) -> bool {
         let owner = engine_id(trajectory);
         let mut open: std::collections::BTreeSet<_> = view
@@ -3317,7 +3318,7 @@ fn return_instruction(
     include_display_plan: bool,
 ) -> String {
     let ReturnSpelling { floor, ranks } = spelling;
-    match sanitizer {
+    let body = match sanitizer {
         None => {
             let call = remedy_call(
                 control,
@@ -3365,7 +3366,10 @@ fn return_instruction(
                 terminal_safe(name.as_str()),
             )
         }
-    }
+    };
+    // The declaration binds one subagent call, not the session. A fan-out that reads it as a
+    // session-wide commitment budgets one authorization and then meets the same block N times.
+    format!("{body}\n    This declaration covers this one subagent call. Each call in a fan-out declares its own.")
 }
 
 fn return_description(sanitizer: Option<&appa_engine::names::SanitizerName>) -> String {
