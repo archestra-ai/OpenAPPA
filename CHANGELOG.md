@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.22.0...v0.23.0) (2026-09-17)
+
+
+### Features
+
+* **eventlog:** persist typed receipts on sqlite and memory ([#368](https://github.com/archestra-ai/OpenAPPA/issues/368)) ([31b7fb6](https://github.com/archestra-ai/OpenAPPA/commit/31b7fb6bc1e66723a1e9d05c8876022ab4a50edb))
+
 ## [0.22.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.21.0...v0.22.0) (2026-09-17)
 
 
