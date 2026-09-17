@@ -40,6 +40,10 @@ jobs:
           prompt: "/review-pr REPO: ${{ github.repository }} PR_NUMBER: ${{ inputs.pr_number }}"
           allowed_tools: "Read,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          use_sticky_comment: "true"
+          # OpenAPPA does not have the Claude GitHub App. Passing GITHUB_TOKEN
+          # skips the OIDC app-token exchange that would 401 without it.
+          # Comments post as github-actions[bot], not claude[bot].
+          github_token: ${{ github.token }}
+          use_sticky_comment: "false"
           track_progress: "true"
           show_full_output: "true"
