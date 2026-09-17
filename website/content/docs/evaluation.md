@@ -125,12 +125,3 @@ OpenAPPA policy engine alone.
   comparison covers all 97 `banking_knowledge` tasks, with four trials for each
   agent configuration. Matching tasks and random seeds makes the comparison
   fairer, but separate model sessions can still differ.
-
-## Reproduce and inspect the evidence
-
-The [OpenAPPA paper](/paper) contains the complete Bench-Corp and
-AgentThreatBench results. It also explains the method, model differences,
-scoring changes, and limitations. The Tau summary and exact settings are in the
-[Tau evidence bundle](https://github.com/archestra-ai/OpenAPPA/tree/main/bench/taubench/results/parallel-2026-09-16),
-and all benchmark code and scenarios are under
-[`bench/`](https://github.com/archestra-ai/OpenAPPA/tree/main/bench).
