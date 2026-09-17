@@ -2105,11 +2105,7 @@ impl Runtime {
     /// partial view cannot tell a lone holder from one of two and would answer the ambiguous
     /// case with one session's standing.
     fn live_holder(&self, key: &PermitKey, folded: Option<&TrajectoryId>) -> Result<Option<TrajectoryId>, Unvouched> {
-        let candidates = match self
-            .inner
-            .store
-            .roots_mentioning(&HostObservation::names_key(&key.wire()))
-        {
+        let candidates = match self.inner.store.roots_mentioning(&key.wire()) {
             Ok(candidates) => candidates,
             Err(error) => {
                 tracing::warn!(%error, "the families standing behind this key did not read, so nothing stands");
@@ -4179,7 +4175,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert!(
             !runtime
                 .store()
-                .roots_mentioning(&HostObservation::names_key(&ticket.wire()))
+                .roots_mentioning(&ticket.wire())
                 .expect("the families that named the key still read")
                 .is_empty(),
             "the damaged row names no key, so this family is still a candidate"

@@ -1,6 +1,15 @@
 //! PostgreSQL storage for embedded hosts. The host installs the schema; Rust
 //! retains the SQLite event encoding and policy-file validation. A dedicated
 //! connection thread keeps the synchronous log API usable from async hooks.
+//!
+//! The schema the host's migrations must provide:
+//!
+//! ```sql
+//! CREATE TABLE openappa_events (root TEXT NOT NULL, seq BIGINT NOT NULL, payload BYTEA NOT NULL,
+//!                               PRIMARY KEY (root, seq));
+//! CREATE TABLE openappa_policy_files (hash TEXT PRIMARY KEY, bytes BYTEA NOT NULL);
+//! CREATE TABLE openappa_host_keys (key TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (key, root));
+//! ```
 
 use std::sync::mpsc;
 
@@ -45,6 +54,7 @@ impl PostgresStore {
                     client.batch_execute(
                         "SELECT root, seq, payload FROM openappa_events LIMIT 0;
                     SELECT hash, bytes FROM openappa_policy_files LIMIT 0;
+                    SELECT key, root FROM openappa_host_keys LIMIT 0;
                     SET lock_timeout = '30s'; SET statement_timeout = '60s'",
                     )?;
                     Ok(client)
@@ -224,15 +234,13 @@ impl PostgresStore {
     }
 
     /// See [`LogStore::roots_mentioning`].
-    pub(super) fn roots_mentioning(&self, needle: &str) -> Result<Vec<TrajectoryId>, ReadError> {
-        let needle = needle.as_bytes().to_vec();
+    pub(super) fn roots_mentioning(&self, key: &str) -> Result<Vec<TrajectoryId>, ReadError> {
+        let key = key.to_owned();
         let roots = self.with_client(move |client| {
             Ok(client
                 .query(
-                    "SELECT DISTINCT root FROM openappa_events \
-                     WHERE substring(payload from 1 for 1) = '\\x7b'::bytea AND position($1::bytea in payload) > 0 \
-                     ORDER BY root",
-                    &[&needle],
+                    "SELECT root FROM openappa_host_keys WHERE key = $1 ORDER BY root",
+                    &[&key],
                 )?
                 .into_iter()
                 .map(|row| row.get::<_, String>(0))
@@ -241,8 +249,15 @@ impl PostgresStore {
         Ok(roots.into_iter().map(TrajectoryId::new).collect())
     }
 
-    pub(super) fn append(&self, root: &TrajectoryId, basis: u64, bytes: Vec<u8>) -> Result<(), AppendError> {
+    pub(super) fn append(
+        &self,
+        root: &TrajectoryId,
+        basis: u64,
+        bytes: Vec<u8>,
+        key: Option<&str>,
+    ) -> Result<(), AppendError> {
         let root = root.as_str().to_owned();
+        let key = key.map(str::to_owned);
         let conflict = self.with_tx(Some(root.clone()), move |client| {
             let current = client
                 .query_one("SELECT count(*) FROM openappa_events WHERE root = $1", &[&root])?
@@ -254,6 +269,12 @@ impl PostgresStore {
                 "INSERT INTO openappa_events (root, seq, payload) VALUES ($1, $2, $3)",
                 &[&root, &(current as i64), &bytes],
             )?;
+            if let Some(key) = key {
+                client.execute(
+                    "INSERT INTO openappa_host_keys (key, root) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                    &[&key, &root],
+                )?;
+            }
             Ok(None)
         })?;
         if let Some(current) = conflict {
