@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.22.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.21.0...v0.22.0) (2026-09-17)
+
+
+### ⚠ BREAKING CHANGES
+
+* **eventlog:** index host keys instead of scanning payloads ([#365](https://github.com/archestra-ai/OpenAPPA/issues/365))
+* **runtime:** hosts pass the document text, not bindings ([#364](https://github.com/archestra-ai/OpenAPPA/issues/364))
+
+### Features
+
+* **eventlog:** index host keys instead of scanning payloads ([#365](https://github.com/archestra-ai/OpenAPPA/issues/365)) ([8bb7c61](https://github.com/archestra-ai/OpenAPPA/commit/8bb7c612f806a0b60a04b8fc828964288a4a657d))
+
+
+### Documentation
+
+* update benchmark results on the website ([#363](https://github.com/archestra-ai/OpenAPPA/issues/363)) ([801a1df](https://github.com/archestra-ai/OpenAPPA/commit/801a1dfbcf4c7ddad4a0828c1171bdeb0ab5ca2b))
+
+
+### Dependencies
+
+* bump sha2 from 0.10.9 to 0.11.0 ([#75](https://github.com/archestra-ai/OpenAPPA/issues/75)) ([37577ab](https://github.com/archestra-ai/OpenAPPA/commit/37577ab118730a6d79ad03d2b6ace3ef87882a1e))
+
+
+### Code Refactoring
+
+* **eventlog, runtime:** host stream in the log, one host reducer ([#360](https://github.com/archestra-ai/OpenAPPA/issues/360)) ([6cbf8a9](https://github.com/archestra-ai/OpenAPPA/commit/6cbf8a9ccbc851121e562c5425fd8b48b3ad1ae2))
+* **runtime:** expose typed embedded remedies and durable receipts ([#366](https://github.com/archestra-ai/OpenAPPA/issues/366)) ([11d8d53](https://github.com/archestra-ai/OpenAPPA/commit/11d8d53aba0d6cc25b4882166c02fe567c49c12d))
+* **runtime:** hosts pass the document text, not bindings ([#364](https://github.com/archestra-ai/OpenAPPA/issues/364)) ([35be0c3](https://github.com/archestra-ai/OpenAPPA/commit/35be0c36ab257e02acdff9a527c4de96ff314efc))
+* **runtime:** the server stack behind a `daemon` feature ([#362](https://github.com/archestra-ai/OpenAPPA/issues/362)) ([2fc46ff](https://github.com/archestra-ai/OpenAPPA/commit/2fc46ff96e0105be5d8b91f7da2064fa4c048f63))
+
 ## [0.21.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.20.0...v0.21.0) (2026-09-16)
 
 
