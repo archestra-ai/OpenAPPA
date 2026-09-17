@@ -635,8 +635,8 @@ struct RawExternals {
 }
 
 impl RawExternals {
-    /// Every command entry, by origin key.
-    fn command_keys(&self) -> std::collections::BTreeSet<String> {
+    /// Every entry that declares a `command`, by section and name.
+    fn commanded(&self) -> impl Iterator<Item = (Section, &str)> {
         let bindings = [
             (Section::Authorities, &self.authorities),
             (Section::Sanitizers, &self.sanitizers),
@@ -648,14 +648,20 @@ impl RawExternals {
                 table
                     .iter()
                     .filter(|(_, binding)| binding.command.is_some())
-                    .map(move |(name, _)| section.origin_key(name))
+                    .map(move |(name, _)| (section, name.as_str()))
             })
             .chain(
                 self.audience
                     .iter()
                     .filter(|(_, binding)| binding.command.is_some())
-                    .map(|(name, _)| Section::Audience.origin_key(name)),
+                    .map(|(name, _)| (Section::Audience, name.as_str())),
             )
+    }
+
+    /// Every command entry, by origin key.
+    fn command_keys(&self) -> std::collections::BTreeSet<String> {
+        self.commanded()
+            .map(|(section, name)| section.origin_key(name))
             .collect()
     }
 }
@@ -993,30 +999,10 @@ impl Config {
 /// A hosted document's author runs nothing on the machine that holds it: no binding takes
 /// a `command`, and the `claude-code` builtin stays on the executable the host installed.
 fn refuse_hosted_commands(externals: &RawExternals) -> Result<(), ConfigError> {
-    let commanded = [
-        (Section::Authorities, &externals.authorities),
-        (Section::Sanitizers, &externals.sanitizers),
-        (Section::Annotators, &externals.annotators),
-    ]
-    .into_iter()
-    .flat_map(|(section, entries)| {
-        entries
-            .iter()
-            .filter(|(_, binding)| binding.command.is_some())
-            .map(move |(name, _)| (section, name))
-    })
-    .chain(
-        externals
-            .audience
-            .iter()
-            .filter(|(_, binding)| binding.command.is_some())
-            .map(|(name, _)| (Section::Audience, name)),
-    )
-    .next();
-    if let Some((section, name)) = commanded {
+    if let Some((section, name)) = externals.commanded().next() {
         return Err(ConfigError::HostedCommand {
             section: section.name(),
-            name: name.clone(),
+            name: name.to_string(),
         });
     }
     match externals.claude_code.as_ref().and_then(|table| table.command.as_ref()) {
