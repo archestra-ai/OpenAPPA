@@ -1,6 +1,16 @@
 # Tau benchmark results
 
-The [2026-09-15 standard three-arm evaluation](full-2026-09-15/README.md) contains the current-engine guarded, permissive, and stock results, with matched task/trial/seed identities, exact configurations, and retry evidence. ChaosMonkey was not evaluated in that run.
+The [2026-09-16 parallel-tool-call evaluation](parallel-2026-09-16/README.md) adds new guarded and permissive rows without replacing the [2026-09-15 sequential results](full-2026-09-15/README.md). The comparison uses matched task, trial, and seed identities. Stock already supported multi-call completions, so only the two custom-scaffold arms required reruns.
+
+| Policy mode | Tool calling | Successful simulations | Mean reward | Mean agent tokens per simulation | Recorded cost |
+|---|---|---:|---:|---:|---:|
+| Guarded | Sequential | 133/388 | 34.28% | 934,475 | $30.33 |
+| Guarded | Parallel | 151/388 | 38.92% | 1,307,763 | $38.36 |
+| Permissive | Sequential | 134/388 | 34.54% | 893,405 | $30.50 |
+| Permissive | Parallel | 153/388 | 39.43% | 1,272,128 | $37.80 |
+| Stock | Native parallel | 156/388 | 40.21% | 1,254,821 | $35.62 |
+
+The parallel rows are fresh stochastic measurements, not replacements or causal estimates. See the evaluation documents for integrity checks, retry evidence, security scope, and exact artifacts.
 
 ## 2026-08-05 measurements
 
