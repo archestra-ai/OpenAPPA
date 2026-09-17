@@ -541,6 +541,7 @@ impl EngineRefusal {
     /// Every `detail` here is a `Display` from the engine, and those messages format raw tool,
     /// authority, sanitizer and selector names, member ids and verified email addresses. A
     /// diagnostic that leaves this machine reads the class and never the message.
+    #[cfg(feature = "daemon")]
     pub(crate) fn class(&self) -> ReplayRefusalClass {
         match self {
             EngineRefusal::UntrustedLog { class, .. } | EngineRefusal::OpeningMismatch { class, .. } => *class,
@@ -742,6 +743,7 @@ impl RuntimeEngine {
     /// on whatever the model asked for, and APPA records the hook either way. Under a
     /// wildcard the policy writes no name at all, so a wildcard deployment vouches for none
     /// and every tool in its reports is a token.
+    #[cfg(feature = "daemon")]
     pub(crate) fn vouched_tools(&self) -> std::collections::BTreeSet<String> {
         let registry = self.engine.registry();
         // Two lists, because policy compilation splits an exactly written name by what kind of
@@ -851,6 +853,7 @@ impl RuntimeEngine {
     /// Whom taking this offer involves, read without taking it: nobody (the plain narrowing
     /// acceptance), an authority, or a sanitizer. `None` for an offer that no longer stands.
     /// `appa replay` reads it to take the offer a trace expects, the way the model would.
+    #[cfg(feature = "daemon")]
     pub(crate) fn offer_kind(
         &self,
         view: &EngineView,

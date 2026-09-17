@@ -25,6 +25,7 @@ use crate::config::Config;
 use crate::elicit::Elicitation;
 use crate::engine::{EngineRefusal, Liveness, PolicyEngine, RuntimeEngine};
 use crate::external::{ConsultGates, ExternalServices};
+#[cfg(feature = "daemon")]
 use crate::yell;
 use appa_eventlog::{Backend, HostObservation, Log, LogStore};
 use appa_runtime_api::{Adapter, AdapterName};
@@ -885,6 +886,7 @@ impl Inner {
     }
 
     /// See [`crate::events::EventLog::events`].
+    #[cfg(feature = "daemon")]
     pub(crate) fn events(&self, root: &TrajectoryId) -> crate::events::Events {
         self.events
             .lock()
@@ -893,6 +895,7 @@ impl Inner {
     }
 
     /// See [`crate::events::EventLog::recent_root`].
+    #[cfg(feature = "daemon")]
     pub(crate) fn recent_root(&self, window: std::time::Duration) -> crate::events::Recent {
         self.events
             .lock()
@@ -1049,6 +1052,7 @@ fn read_refused(error: appa_eventlog::ReadError) -> EventError {
 }
 
 impl Runtime {
+    #[cfg(feature = "daemon")]
     pub(crate) fn file_initial_label(
         &self,
         trust: &str,
@@ -1131,6 +1135,7 @@ impl Runtime {
             store,
             policy_key,
             workspace,
+            #[cfg(feature = "daemon")]
             ledger,
             process_backend: None,
         });
@@ -1179,6 +1184,7 @@ impl Runtime {
     /// served adapter comes in because a served deployment answers exactly one host: its
     /// spelling of a tool is what the runtime says where it addresses that host's model,
     /// and its rule is which contracts release a spawn.
+    #[cfg(feature = "daemon")]
     pub(crate) fn open_served(
         config: Config,
         db: PathBuf,
@@ -1211,6 +1217,7 @@ impl Runtime {
     /// against the key of the configuration it just validated: a process that kept
     /// running across the install serves the policy it loaded at startup, and only a
     /// difference here is worth reloading.
+    #[cfg(feature = "daemon")]
     pub(crate) fn serving_policy_key(&self) -> String {
         let serving = self
             .inner
@@ -1602,6 +1609,7 @@ impl Runtime {
     /// as [`crate::yell::report::MAX_PLAIN_BYTES`], and the same runtime serves the hooks that gate
     /// an agent's every tool call. A report is never worth stalling the sessions it is about,
     /// so every async caller goes through here and the synchronous builder stays synchronous.
+    #[cfg(feature = "daemon")]
     pub(crate) async fn report_off_thread(
         self: &Arc<Self>,
         request: yell::ReportRequest,
@@ -1619,6 +1627,7 @@ impl Runtime {
     /// process can rebuild a smaller export. So an oversized report is built again from the
     /// source under half the counts — never trimmed as a document, which would leave its token
     /// numbering full of holes — until it fits.
+    #[cfg(feature = "daemon")]
     pub(crate) fn report(&self, request: yell::ReportRequest) -> Result<yell::Finished, yell::Oversize> {
         let report_id = yell::ReportId::generate();
         let origin = yell::Origin::new(request.author, request.mode);
@@ -1655,6 +1664,7 @@ impl Runtime {
     /// it survives a log the engine refuses — a refused log is the very thing worth reporting
     /// — and carries the refusal as a closed class instead of the facts a view would have
     /// given. What may leave is decided in [`crate::yell::tables`], never here.
+    #[cfg(feature = "daemon")]
     pub(crate) fn projection(
         &self,
         selection: yell::Selection,
@@ -1737,15 +1747,138 @@ impl Runtime {
     ) -> RemedyOutcome {
         self.remedy(acting, offer, arguments, None, None).await
     }
+
+    /// The remedy entry point for an in-process host. The host first dispatches
+    /// ToolCall and supplies its authenticated actor. Authorities bound in the
+    /// policy still work; an interactive review without a channel to a person
+    /// returns NoAnswer through the existing consult mechanism.
+    pub async fn execute_embedded_remedy(&self, actor: &Actor, args: ExecuteRemedyPlanArgs) -> RemedyReply {
+        self.execute_remedy_plan(args, None, Some(actor)).await
+    }
+
+    /// The whole control call, from the standing the preceding hook left to the
+    /// text the model reads. Both the MCP tool and an in-process host arrive
+    /// here; what differs is only whether a review can reach a person.
+    pub(crate) async fn execute_remedy_plan(
+        &self,
+        args: ExecuteRemedyPlanArgs,
+        elicitation: Option<&Elicitation>,
+        expected_actor: Option<&Actor>,
+    ) -> RemedyReply {
+        let quoted = OfferId(args.offer_id.clone());
+        let arguments = RemedyArguments::from(args);
+        // Requires the vouched trajectory from the preceding hook.
+        let Ok((acting, ruling)) = self.take_vouched(&PermitKey::offer(&quoted)) else {
+            return self.remedy_reply(RemedyOutcome::Refused {
+                detail: "no live offer with this id exists".to_string(),
+            });
+        };
+        if expected_actor.is_some_and(|expected| expected != &acting) {
+            return self.remedy_reply(RemedyOutcome::Refused {
+                detail: "offer belongs to a different session".into(),
+            });
+        }
+        let started = std::time::Instant::now();
+        let outcome = self
+            .remedy(&acting, quoted.clone(), arguments, elicitation, ruling)
+            .await;
+        // Recorded from the typed outcome, before `remedy_reply` turns it into the text the
+        // model reads: a remedy that takes a minute and then declines is the shape of "APPA
+        // is in the way", and neither the duration nor the offer it quoted is in the
+        // trajectory.
+        self.record(
+            // The family, never the acting trajectory: see `Session::timed_consult`.
+            Some(&acting.root),
+            crate::events::RuntimeEvent::Control {
+                call: crate::events::ControlCall::Remedy {
+                    offer: quoted.0,
+                    dispatch: None,
+                },
+                outcome: (&outcome).into(),
+                duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            },
+        );
+        self.remedy_reply(outcome)
+    }
+
+    /// The runtime keys the released call on its canonical identity, which is not a name any
+    /// host advertises. What the model is told to call is that identity spelled the way its own
+    /// harness dispatches it ([`Runtime::model_spelling`]).
+    pub(crate) fn remedy_reply(&self, outcome: RemedyOutcome) -> RemedyReply {
+        let answer = |text: String| RemedyReply { text, is_error: false };
+        match outcome {
+            RemedyOutcome::Authorized { call } => answer(format!(
+                "[appa] Authorized. Call the {} tool again with exactly these arguments: {}",
+                self.model_spelling(&call.tool),
+                call.arguments.get(),
+            )),
+            RemedyOutcome::Substituted { call } => answer(format!(
+                "[appa] Substituted. The sanitizer replaced the arguments and the call is released. \
+                 Call the {} tool with exactly these arguments to run it: {}",
+                self.model_spelling(&call.tool),
+                call.arguments.get(),
+            )),
+            RemedyOutcome::Returned { value } => answer(value),
+            RemedyOutcome::Declined { feedback } | RemedyOutcome::NoAnswer { feedback } => answer(feedback),
+            RemedyOutcome::Refused { detail } => RemedyReply {
+                text: detail,
+                is_error: true,
+            },
+        }
+    }
 }
 
 /// The control call's arguments as a model spells them — `offer_id`, and for a plan
 /// declaring a subagent's return `label` and `return_schema` — for a harness that routes the
 /// control tool itself.
 pub fn parse_control_arguments(arguments: &str) -> Result<(OfferId, RemedyArguments), String> {
-    let args: crate::mcp::ExecuteRemedyPlanArgs =
+    let args: ExecuteRemedyPlanArgs =
         serde_json::from_str(arguments).map_err(|error| format!("execute_remedy_plan arguments: {error}"))?;
     Ok((OfferId(args.offer_id.clone()), RemedyArguments::from(args)))
+}
+
+/// The arguments the control tool takes. The schema derive is what the MCP tool
+/// declaration is built from, and one reading of them serves every caller.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ExecuteRemedyPlanArgs {
+    pub offer_id: String,
+    /// For a plan that declares a subagent's return: the lowest label this session accepts
+    /// from the return, in the policy's `delta` spelling. An omitted dimension keeps this
+    /// session's current value.
+    #[serde(default)]
+    pub label: Option<LabelArgs>,
+    /// For a plan that attests a subagent's return: the JSON schema the return must match.
+    #[serde(default)]
+    pub return_schema: Option<serde_json::Value>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct LabelArgs {
+    #[serde(default)]
+    pub trust: Option<String>,
+    #[serde(default)]
+    pub audience: Option<Vec<String>>,
+}
+
+impl From<ExecuteRemedyPlanArgs> for RemedyArguments {
+    fn from(args: ExecuteRemedyPlanArgs) -> RemedyArguments {
+        RemedyArguments {
+            label: args.label.map(|label| LabelSpelling {
+                trust: label.trust,
+                audience: label.audience,
+            }),
+            return_schema: args.return_schema,
+        }
+    }
+}
+
+/// One control call's answer as the model reads it: the text, and whether the
+/// call failed. A transport turns it into whatever its own protocol calls a
+/// tool result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemedyReply {
+    pub text: String,
+    pub is_error: bool,
 }
 
 impl Runtime {
@@ -1854,6 +1987,7 @@ impl Runtime {
 
     /// What taking a quoted offer in this root's family would consult, or `None` for an
     /// offer that no longer stands.
+    #[cfg(feature = "daemon")]
     pub(crate) fn offer_kind(&self, root: &TrajectoryId, quoted: &OfferId) -> Option<OfferKind> {
         let log = self.inner.log(root).ok()?;
         let offer = crate::engine::resolve_rendered(&log, quoted)?;
@@ -2156,7 +2290,7 @@ impl Runtime {
 
     /// Leave the claim an execution that never returned would have left, for the tests
     /// that pin how one is read back.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "daemon"))]
     pub(crate) fn claim_until(&self, acting: &Actor, offer: &OfferId, until: std::time::SystemTime) {
         self.inner
             .append_host(
@@ -2186,6 +2320,7 @@ impl Runtime {
     /// Whether this deployment lets an agent report on its own. Read from the deployment
     /// this runtime serves *now*, so a `/reload` that flips the knob decides the next MCP
     /// session rather than the next restart.
+    #[cfg(feature = "daemon")]
     pub(crate) fn agent_yell(&self) -> bool {
         self.inner.deployment().config.reporting.agent_yell
     }
@@ -2420,6 +2555,7 @@ fn compile_policy(config: &Config, naming: ToolNaming) -> Result<appa_policy::Co
 /// trajectory: the log pins its policy file, so a reload since the session opened does not
 /// rewrite the rules a report explains. The key comes from the same bytes, so the document and
 /// its fingerprint are one snapshot.
+#[cfg(feature = "daemon")]
 fn policy_section(bytes: &[u8]) -> Option<(toml::Value, String)> {
     let text = std::str::from_utf8(bytes).ok()?;
     let composed: toml::Value = toml::from_str(text).ok()?;
@@ -2971,6 +3107,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         );
     }
 
+    #[cfg(feature = "daemon")]
     /// Two stored policies that differ only in how their `[deployment]` field spells the
     /// tool it confines. The wildcard contract covers every name, so either spelling passes
     /// coverage at load; the contract permits the call, and only the confinement reads the
@@ -2993,6 +3130,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         ))
     }
 
+    #[cfg(feature = "daemon")]
     /// The canonical policy the served deployment serves now: different bytes from either
     /// stored one, so a trajectory recorded under those reopens through the retired branch.
     fn served_policy() -> Config {
@@ -3009,6 +3147,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         )
     }
 
+    #[cfg(feature = "daemon")]
     /// A trajectory recorded before the upgrade carries its own policy bytes, and reopening
     /// it compiles them. A served deployment derives a canonical identity for every call, so
     /// a stored policy naming a tool the host's raw way in a `[deployment]` field confines
@@ -3061,6 +3200,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         }
     }
 
+    #[cfg(feature = "daemon")]
     /// Native policy names remain usable; normalization is internal and applies equally
     /// to startup and candidate reloads.
     #[test]
@@ -3086,6 +3226,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         served.reload(served_policy()).expect("a canonical policy reloads");
     }
 
+    #[cfg(feature = "daemon")]
     #[test]
     fn a_known_uncovered_candidate_inventory_cannot_replace_the_serving_policy() {
         use appa_runtime_api::inventory::{ObservedTool, ToolInventory};
@@ -3115,6 +3256,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert_eq!(before.tools, after.tools);
     }
 
+    #[cfg(feature = "daemon")]
     #[test]
     fn observed_native_bindings_survive_reload_and_process_reopen() {
         use appa_runtime_api::inventory::{ObservedTool, ToolInventory};
@@ -3146,6 +3288,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         reopened.live(&id, &id).unwrap();
     }
 
+    #[cfg(feature = "daemon")]
     #[test]
     fn late_inventory_is_scoped_idempotent_and_cannot_rebind_after_reopen() {
         use appa_runtime_api::inventory::{ObservedTool, ToolInventory};
@@ -3201,6 +3344,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         runtime.live(&actor.root, &actor.root).unwrap();
     }
 
+    #[cfg(feature = "daemon")]
     #[test]
     fn inventory_retries_contention_and_only_one_racing_identity_wins() {
         use appa_runtime_api::inventory::{ObservedTool, ToolInventory};
@@ -3251,6 +3395,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert_eq!(log.basis(), 3, "opening, injected competing batch, accepted inventory");
     }
 
+    #[cfg(feature = "daemon")]
     #[test]
     fn remote_preflight_is_read_only_and_uses_the_requested_policy() {
         use crate::tool_validation::{ToolStatus, ValidationReport};
@@ -3311,6 +3456,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         );
     }
 
+    #[cfg(feature = "daemon")]
     #[test]
     fn remote_preflight_returns_only_this_actors_durable_reservations() {
         use appa_runtime_api::inventory::{ObservedTool, ToolInventory};
@@ -3355,6 +3501,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert_eq!(runtime.inner.log(&root).unwrap().basis(), before);
     }
 
+    #[cfg(feature = "daemon")]
     #[test]
     fn remote_preflight_rejects_bad_envelopes_and_host_name_aliases() {
         let dir = tempfile::tempdir().unwrap();
@@ -3382,6 +3529,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert!(!report.errors.is_empty());
     }
 
+    #[cfg(feature = "daemon")]
     #[test]
     fn known_uncovered_inventory_does_not_open_a_trajectory() {
         use appa_runtime_api::inventory::{ObservedTool, ToolInventory};
@@ -3405,6 +3553,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert!(matches!(runtime.session(&id, &id), Err(EventError::UnknownTrajectory)));
     }
 
+    #[cfg(feature = "daemon")]
     #[tokio::test]
     async fn a_late_discovered_tool_uses_its_existing_native_rule_without_reopening() {
         let dir = tempfile::tempdir().unwrap();
@@ -3468,6 +3617,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert_eq!(inventories(&after), inventories(&before));
     }
 
+    #[cfg(feature = "daemon")]
     #[tokio::test]
     async fn a_remote_child_discovers_its_own_server_under_the_same_opening_registry() {
         async fn send(runtime: &Runtime, mut event: serde_json::Value) -> serde_json::Value {
@@ -3559,6 +3709,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert_eq!(reopened.inner.log(&root).unwrap().facts(), after.facts());
     }
 
+    #[cfg(feature = "daemon")]
     #[test]
     fn the_serving_policy_key_names_the_deployment_answering_now() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -3581,6 +3732,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         );
     }
 
+    #[cfg(feature = "daemon")]
     /// The inventory evidence one log holds, in append order.
     fn inventories(log: &Log) -> Vec<&appa_runtime_api::inventory::ToolInventory> {
         log.host_records()
@@ -4070,6 +4222,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         );
     }
 
+    #[cfg(feature = "daemon")]
     #[tokio::test]
     async fn a_management_vouch_is_exact_one_shot_and_turn_bounded() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -4147,7 +4300,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
 
 /// Spawn coverage is the deployment's, not a caller's: a served runtime reads it off the
 /// adapter it answers, so it cannot serve one host under another host's rule.
-#[cfg(test)]
+#[cfg(all(test, feature = "daemon"))]
 mod spawn_coverage_tests {
     use std::sync::{Arc, Mutex};
 

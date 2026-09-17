@@ -2,23 +2,12 @@
 //! carries, and the tree the build digests for its identity.
 //!
 //! This module is also compiled by `build.rs`. One source drives build-time
-//! identity and the staging of a development build's own archive.
+//! identity and the staging of a development build's own archive
+//! ([`crate::batteries_staging`]).
 
 use std::fs;
 use std::io;
 use std::path::Path;
-
-/// The host-side code of a protected session is the deployed binary, so the
-/// archive carries only the batteries a policy may include: the repository's
-/// batteries tree, at the archive's `batteries/`.
-pub const SOURCE: &str = "marketplace/batteries";
-const TARGET: &str = "batteries";
-
-/// Stage the batteries archive's tree from an OpenAPPA repository checkout.
-pub fn stage_repository(repository: &Path, destination: &Path) -> io::Result<()> {
-    fs::create_dir_all(destination)?;
-    copy_entry(&repository.join(SOURCE), &destination.join(TARGET))
-}
 
 pub(crate) fn copy_entry(source: &Path, destination: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(source)?;

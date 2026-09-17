@@ -9,6 +9,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+use crate::api::files::Deployment;
+
 #[derive(Debug, clap::Args)]
 pub struct Args {
     #[arg(long, default_value = "http://127.0.0.1:8787")]
@@ -20,24 +22,37 @@ pub struct Args {
     prompt: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, clap::Args)]
-pub(crate) struct Deployment {
+/// The same paths as [`Deployment`], as this binary's flags.
+#[derive(Debug, clap::Args)]
+pub struct DeploymentArgs {
     #[arg(long)]
-    pub config: PathBuf,
+    config: PathBuf,
     #[arg(long)]
-    pub db: PathBuf,
+    db: PathBuf,
     #[arg(long)]
-    pub workspace: PathBuf,
+    workspace: PathBuf,
     #[arg(long)]
-    pub ledger: PathBuf,
+    ledger: PathBuf,
     #[arg(long)]
-    pub process_backend: Option<PathBuf>,
+    process_backend: Option<PathBuf>,
+}
+
+impl From<DeploymentArgs> for Deployment {
+    fn from(args: DeploymentArgs) -> Deployment {
+        Deployment {
+            config: args.config,
+            db: args.db,
+            workspace: args.workspace,
+            ledger: args.ledger,
+            process_backend: args.process_backend,
+        }
+    }
 }
 
 #[derive(Debug, clap::Args)]
 pub struct ServeArgs {
     #[command(flatten)]
-    deployment: Deployment,
+    deployment: DeploymentArgs,
     #[arg(long)]
     trajectory: uuid::Uuid,
 }
@@ -45,7 +60,7 @@ pub struct ServeArgs {
 pub fn serve(args: ServeArgs) -> ExitCode {
     crate::tls::install_crypto_provider();
     let result = (|| {
-        let deployment = args.deployment;
+        let deployment = Deployment::from(args.deployment);
         let config = crate::config::Config::load(&deployment.config).map_err(|error| error.to_string())?;
         let runtime =
             crate::api::Runtime::open_served(config, deployment.db, None, appa_adapter_claude_code::adapter())

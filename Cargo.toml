@@ -83,5 +83,7 @@ appa-eventlog = { path = "appa-eventlog" }
 appa-policy = { path = "appa-policy" }
 appa-package = { path = "appa-package" }
 appa-runtime-api = { path = "appa-runtime-api" }
-appa-runtime = { package = "appa", path = "appa-runtime" }
+# Every workspace member that links the runtime embeds it in its own process:
+# the server stack behind the `daemon` feature belongs to the binary alone.
+appa-runtime = { package = "appa", path = "appa-runtime", default-features = false }
 appa-example-agent = { path = "appa-example-agent" }

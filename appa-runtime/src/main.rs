@@ -13,7 +13,6 @@ use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
 use appa_runtime_api::AdapterName;
-pub use appa_runtime_api::AdapterName as Adapter;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
@@ -271,7 +270,7 @@ async fn hook(
     (status, axum::Json(body))
 }
 
-async fn file_tools(State(state): State<AppState>) -> Result<axum::Json<crate::claude_files::Deployment>, StatusCode> {
+async fn file_tools(State(state): State<AppState>) -> Result<axum::Json<crate::api::files::Deployment>, StatusCode> {
     state
         .runtime
         .file_deployment(state.config)

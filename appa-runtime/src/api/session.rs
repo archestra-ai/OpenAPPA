@@ -671,6 +671,7 @@ impl Session {
     /// The file work runs on the blocking pool: it reads and hashes files, and a Process call
     /// may run a sandboxed command for two minutes. The runtime serves hooks and MCP on this
     /// executor, so none of that belongs on an async worker.
+    #[cfg(feature = "daemon")]
     pub(super) async fn execute_file(&self, call: ProposedCall) -> Result<super::files::FileReply, EventError> {
         if self.inner.files.is_none() {
             return Err(super::files::refused("file tools are not enabled"));

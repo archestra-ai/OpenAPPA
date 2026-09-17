@@ -244,7 +244,7 @@ impl Acquired {
             tempfile::tempdir().map_err(|error| io("stage acquisition", Path::new("temporary directory"), error))?;
         let repository = source_at_commit(&commit, stage.path())?;
         let staged = stage.path().join("plugin");
-        crate::batteries_layout::stage_repository(&repository, &staged)
+        crate::batteries_staging::stage_repository(&repository, &staged)
             .map_err(|error| InstallError::Invalid(format!("cannot stage the batteries tree: {error}")))?;
         let actual = appa_package::canonical_tree_digest(&staged)
             .map_err(|error| InstallError::Invalid(error.to_string()))?

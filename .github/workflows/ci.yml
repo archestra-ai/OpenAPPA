@@ -411,6 +411,9 @@ jobs:
       - name: Rust lint
         run: cargo clippy --workspace --all-targets --features appa-eventlog/postgres --locked -- -D warnings
 
+      - name: Rust lint (runtime without the daemon feature)
+        run: cargo clippy -p appa --lib --tests --no-default-features --locked -- -D warnings
+
   rust-tests:
     name: Rust Tests
     needs: [changes, cargo-release-age]
