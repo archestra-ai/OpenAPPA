@@ -72,71 +72,12 @@ impl PolicyFile {
     }
 }
 
-/// The declared bindings, as a deployment writes them: one entry per registered
-/// component under its kind's section, and the deployment-wide tables. This is the one
-/// input shape both load paths share — `appa.toml` composes into it, and an embedded host
-/// hands it in — and it carries no secret: a token is named by its `APPA_*` variable and
-/// resolved from the environment when the deployment validates.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExternalBindings {
-    pub timeout_ms: u64,
-    pub review_timeout_ms: u64,
+/// The two mandatory `[externals]` settings a host supplies for a hosted document that
+/// states neither. A document that states one keeps its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostDefaults {
+    pub consult_timeout: Duration,
     pub max_body_bytes: usize,
-    pub authorities: BTreeMap<String, Binding>,
-    pub sanitizers: BTreeMap<String, Binding>,
-    pub annotators: BTreeMap<String, Binding>,
-    /// An embedded host binds an audience source by URL or command; `lookup` and `readers`
-    /// are written in a file.
-    pub audience: BTreeMap<String, Binding>,
-    pub claude_code: ClaudeCode,
-    pub llm: Option<LlmBinding>,
-}
-
-impl ExternalBindings {
-    /// No bindings and the default review window; the two mandatory settings are the
-    /// caller's.
-    pub fn new(timeout: Duration, max_body_bytes: usize) -> ExternalBindings {
-        ExternalBindings {
-            timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
-            review_timeout_ms: default_review_timeout_ms(),
-            max_body_bytes,
-            authorities: BTreeMap::new(),
-            sanitizers: BTreeMap::new(),
-            annotators: BTreeMap::new(),
-            audience: BTreeMap::new(),
-            claude_code: ClaudeCode::default(),
-            llm: None,
-        }
-    }
-}
-
-/// How one registered component is served, as declared: exactly one of an HTTP endpoint,
-/// a local command, or a builtin name. A command's `cwd` is the directory of the file that
-/// declared it — an embedded host supplies an absolute one itself.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Binding {
-    Url {
-        url: String,
-        token_env: Option<String>,
-    },
-    Command {
-        argv: Vec<String>,
-        cwd: PathBuf,
-        token_env: Option<String>,
-    },
-    Builtin(String),
-}
-
-/// The `[externals.llm]` table as declared: the one API-key model profile every
-/// `builtin = "llm"` entry in the deployment consults.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LlmBinding {
-    pub provider: LlmProvider,
-    pub model: String,
-    pub url: Option<String>,
-    pub token_env: Option<String>,
-    pub timeout_ms: Option<u64>,
-    pub max_concurrent: Option<u32>,
 }
 
 /// The API providers the `llm` builtin speaks to. Closed: the transport is compiled in
@@ -270,9 +211,9 @@ pub struct ClaudeCode {
 const DEFAULT_CLAUDE_CODE_TIMEOUT: Duration = Duration::from_secs(60);
 
 impl Default for ClaudeCode {
-    /// The usable defaults every construction path shares — an embedded host building
-    /// its bindings by hand gets the same `claude` on `PATH`, `sonnet` alias, and consult
-    /// budget the file loader fills in, never an empty command.
+    /// The usable defaults every construction path shares — the `claude` on `PATH`, the
+    /// `sonnet` alias, and the consult budget the file loader fills in, never an empty
+    /// command.
     fn default() -> ClaudeCode {
         ClaudeCode {
             command: "claude".into(),
@@ -533,10 +474,12 @@ pub enum ConfigError {
         "the {section} entry {name:?} names the builtin \"claude-code\", which runs a local process this platform does not support"
     )]
     UnsupportedClaudeCodePlatform { section: &'static str, name: String },
-    #[error("the embedded {section} command {name:?} has a relative working directory")]
-    RelativeCommandCwd { section: &'static str, name: String },
-    #[error("embedded setting {field} cannot be represented in TOML")]
-    UnrepresentableEmbeddedSetting { field: &'static str },
+    #[error("a hosted document declares {key:?}, which is the host's to declare, not the policy's")]
+    HostedKey { key: String },
+    #[error("the hosted {section} entry {name:?} runs a local command, which a hosted document cannot declare")]
+    HostedCommand { section: &'static str, name: String },
+    #[error("the host default {setting} is too large to write into a policy document")]
+    UnrepresentableHostDefault { setting: &'static str },
 }
 
 /// The four sections a component binds under. Every section takes a URL or a command;
@@ -692,8 +635,8 @@ struct RawExternals {
 }
 
 impl RawExternals {
-    /// Every command entry, by origin key.
-    fn command_keys(&self) -> std::collections::BTreeSet<String> {
+    /// Every entry that declares a `command`, by section and name.
+    fn commanded(&self) -> impl Iterator<Item = (Section, &str)> {
         let bindings = [
             (Section::Authorities, &self.authorities),
             (Section::Sanitizers, &self.sanitizers),
@@ -705,14 +648,20 @@ impl RawExternals {
                 table
                     .iter()
                     .filter(|(_, binding)| binding.command.is_some())
-                    .map(move |(name, _)| section.origin_key(name))
+                    .map(move |(name, _)| (section, name.as_str()))
             })
             .chain(
                 self.audience
                     .iter()
                     .filter(|(_, binding)| binding.command.is_some())
-                    .map(|(name, _)| Section::Audience.origin_key(name)),
+                    .map(|(name, _)| (Section::Audience, name.as_str())),
             )
+    }
+
+    /// Every command entry, by origin key.
+    fn command_keys(&self) -> std::collections::BTreeSet<String> {
+        self.commanded()
+            .map(|(section, name)| section.origin_key(name))
             .collect()
     }
 }
@@ -877,19 +826,59 @@ impl Config {
         )
     }
 
-    /// The configuration of a host that composes its policy in memory
-    /// rather than reading `appa.toml`: the policy text it composed, and
-    /// the bindings it declares. Validation is the file loader's, tokens
-    /// included: a `token_env` resolves from this process's environment.
-    pub fn embedded(policy: String, bindings: ExternalBindings) -> Result<Config, ConfigError> {
-        let value: toml::Value = toml::from_str(&policy).map_err(|source| ConfigError::UnparsablePolicy { source })?;
-        let document = embedded_document(value, &bindings)?;
-        let text = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
-        let raw: RawConfig = toml::from_str(&text).map_err(|source| ConfigError::UnparsablePolicy { source })?;
-        let origins = root_command_origins(&raw, Path::new("."))?;
-        Config::validate_composed(text, raw, Reporting::default(), origins, Vec::new(), |var| {
-            std::env::var(var).ok()
-        })
+    /// The configuration of a host that holds its document in memory rather than reading
+    /// `appa.toml`: a `[policy]` table and an optional `[externals]` table, the root
+    /// file's own shape, plus the two settings the host fills in where the document states
+    /// neither. The document comes from an author who may run nothing on this machine and
+    /// read none of its files, so every top-level key the host owns and every `command`
+    /// binding is refused. Validation is otherwise the file loader's, tokens included: a
+    /// `token_env` resolves from this process's environment.
+    pub fn hosted(text: &str, defaults: HostDefaults) -> Result<Config, ConfigError> {
+        let mut document: toml::Value =
+            toml::from_str(text).map_err(|source| ConfigError::UnparsablePolicy { source })?;
+        let document_table = document.as_table_mut().expect("a TOML document parses as a table");
+        if let Some(key) = document_table
+            .keys()
+            .find(|key| !matches!(key.as_str(), "policy" | "externals"))
+        {
+            return Err(ConfigError::HostedKey { key: key.clone() });
+        }
+        let timeout_ms = i64::try_from(defaults.consult_timeout.as_millis()).map_err(|_| {
+            ConfigError::UnrepresentableHostDefault {
+                setting: "consult_timeout",
+            }
+        })?;
+        let max_body_bytes =
+            i64::try_from(defaults.max_body_bytes).map_err(|_| ConfigError::UnrepresentableHostDefault {
+                setting: "max_body_bytes",
+            })?;
+        // A document whose `externals` is not a table takes no defaults; parsing it as a
+        // configuration below is what refuses it.
+        if let Some(externals) = document_table
+            .entry("externals")
+            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()))
+            .as_table_mut()
+        {
+            externals
+                .entry("timeout_ms")
+                .or_insert(toml::Value::Integer(timeout_ms));
+            externals
+                .entry("max_body_bytes")
+                .or_insert(toml::Value::Integer(max_body_bytes));
+        }
+
+        let rendered = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
+        let raw: RawConfig = toml::from_str(&rendered).map_err(|source| ConfigError::UnparsablePolicy { source })?;
+        refuse_hosted_commands(&raw.externals)?;
+        // No command survives the refusal above, so no entry has a working directory.
+        Config::validate_composed(
+            rendered,
+            raw,
+            Reporting::default(),
+            BTreeMap::new(),
+            Vec::new(),
+            |var| std::env::var(var).ok(),
+        )
     }
 
     pub fn policy_file(&self) -> &PolicyFile {
@@ -1007,164 +996,22 @@ impl Config {
     }
 }
 
-fn embedded_document(policy: toml::Value, bindings: &ExternalBindings) -> Result<toml::Value, ConfigError> {
-    let mut external_table = toml::value::Table::new();
-    external_table.insert(
-        "timeout_ms".to_string(),
-        embedded_integer("externals.timeout_ms", u128::from(bindings.timeout_ms))?,
-    );
-    // Defaults and empty sections are left unwritten, as an authored file leaves them:
-    // the same bindings persist as the same bytes whichever path declared them.
-    if bindings.review_timeout_ms != default_review_timeout_ms() {
-        external_table.insert(
-            "review_timeout_ms".to_string(),
-            embedded_integer("externals.review_timeout_ms", u128::from(bindings.review_timeout_ms))?,
-        );
+/// A hosted document's author runs nothing on the machine that holds it: no binding takes
+/// a `command`, and the `claude-code` builtin stays on the executable the host installed.
+fn refuse_hosted_commands(externals: &RawExternals) -> Result<(), ConfigError> {
+    if let Some((section, name)) = externals.commanded().next() {
+        return Err(ConfigError::HostedCommand {
+            section: section.name(),
+            name: name.to_string(),
+        });
     }
-    external_table.insert(
-        "max_body_bytes".to_string(),
-        embedded_integer("externals.max_body_bytes", bindings.max_body_bytes as u128)?,
-    );
-
-    let mut command_cwds = toml::value::Table::new();
-    for (section, entries) in [
-        (Section::Authorities, &bindings.authorities),
-        (Section::Sanitizers, &bindings.sanitizers),
-        (Section::Annotators, &bindings.annotators),
-        (Section::Audience, &bindings.audience),
-    ] {
-        if entries.is_empty() {
-            continue;
-        }
-        let mut table = toml::value::Table::new();
-        for (name, binding) in entries {
-            table.insert(
-                name.clone(),
-                embedded_binding(section, name, binding, &mut command_cwds)?,
-            );
-        }
-        external_table.insert(section.name().to_string(), toml::Value::Table(table));
+    match externals.claude_code.as_ref().and_then(|table| table.command.as_ref()) {
+        Some(_) => Err(ConfigError::HostedCommand {
+            section: "claude_code",
+            name: "claude_code".to_string(),
+        }),
+        None => Ok(()),
     }
-
-    if bindings.claude_code != ClaudeCode::default() {
-        let mut claude_code = toml::value::Table::new();
-        let claude_command =
-            bindings
-                .claude_code
-                .command
-                .to_str()
-                .ok_or(ConfigError::UnrepresentableEmbeddedSetting {
-                    field: "externals.claude_code.command",
-                })?;
-        claude_code.insert("command".to_string(), toml::Value::String(claude_command.to_string()));
-        claude_code.insert(
-            "model".to_string(),
-            toml::Value::String(bindings.claude_code.model.clone()),
-        );
-        // Only a budget that differs from the default is written, so a host that leaves it
-        // alone composes the same bytes — and so the same policy key — as an authored table
-        // that names `command` and `model` and omits `timeout_ms`.
-        if bindings.claude_code.timeout != DEFAULT_CLAUDE_CODE_TIMEOUT {
-            claude_code.insert(
-                "timeout_ms".to_string(),
-                embedded_integer(
-                    "externals.claude_code.timeout_ms",
-                    bindings.claude_code.timeout.as_millis(),
-                )?,
-            );
-        }
-        external_table.insert("claude_code".to_string(), toml::Value::Table(claude_code));
-    }
-
-    if let Some(llm) = &bindings.llm {
-        let mut table = toml::value::Table::new();
-        table.insert(
-            "provider".to_string(),
-            toml::Value::String(llm.provider.as_str().to_string()),
-        );
-        table.insert("model".to_string(), toml::Value::String(llm.model.clone()));
-        if let Some(url) = &llm.url {
-            table.insert("url".to_string(), toml::Value::String(url.clone()));
-        }
-        if let Some(token_env) = &llm.token_env {
-            table.insert("token_env".to_string(), toml::Value::String(token_env.clone()));
-        }
-        if let Some(timeout_ms) = llm.timeout_ms {
-            table.insert(
-                "timeout_ms".to_string(),
-                embedded_integer("externals.llm.timeout_ms", u128::from(timeout_ms))?,
-            );
-        }
-        if let Some(max_concurrent) = llm.max_concurrent {
-            table.insert(
-                "max_concurrent".to_string(),
-                toml::Value::Integer(i64::from(max_concurrent)),
-            );
-        }
-        external_table.insert("llm".to_string(), toml::Value::Table(table));
-    }
-
-    let mut document = toml::value::Table::new();
-    if !command_cwds.is_empty() {
-        document.insert(
-            "appa_composed".to_string(),
-            toml::Value::Table(
-                [("command_cwd".to_string(), toml::Value::Table(command_cwds))]
-                    .into_iter()
-                    .collect(),
-            ),
-        );
-    }
-    document.insert("policy".to_string(), policy);
-    document.insert("externals".to_string(), toml::Value::Table(external_table));
-    Ok(toml::Value::Table(document))
-}
-
-fn embedded_integer(field: &'static str, value: u128) -> Result<toml::Value, ConfigError> {
-    i64::try_from(value)
-        .map(toml::Value::Integer)
-        .map_err(|_| ConfigError::UnrepresentableEmbeddedSetting { field })
-}
-
-fn embedded_binding(
-    section: Section,
-    name: &str,
-    binding: &Binding,
-    command_cwds: &mut toml::value::Table,
-) -> Result<toml::Value, ConfigError> {
-    let entry: Vec<(&str, toml::Value)> = match binding {
-        Binding::Url { url, token_env } => {
-            let mut entry = vec![("url", toml::Value::String(url.clone()))];
-            if let Some(token_env) = token_env {
-                entry.push(("token_env", toml::Value::String(token_env.clone())));
-            }
-            entry
-        }
-        Binding::Builtin(builtin) => vec![("builtin", toml::Value::String(builtin.clone()))],
-        Binding::Command { argv, cwd, token_env } => {
-            if !cwd.is_absolute() {
-                return Err(ConfigError::RelativeCommandCwd {
-                    section: section.name(),
-                    name: name.to_string(),
-                });
-            }
-            let cwd = cwd.to_str().ok_or(ConfigError::UnrepresentableEmbeddedSetting {
-                field: "externals command cwd",
-            })?;
-            command_cwds.insert(section.origin_key(name), toml::Value::String(cwd.to_string()));
-            let mut entry = vec![(
-                "command",
-                toml::Value::Array(argv.iter().cloned().map(toml::Value::String).collect()),
-            )];
-            if let Some(token_env) = token_env {
-                entry.push(("token_env", toml::Value::String(token_env.clone())));
-            }
-            entry
-        }
-    };
-    Ok(toml::Value::Table(
-        entry.into_iter().map(|(key, value)| (key.to_string(), value)).collect(),
-    ))
 }
 
 fn policy_version(policy: &toml::Value) -> Option<i64> {
@@ -2702,132 +2549,137 @@ mod tests {
         ));
     }
 
-    fn embedded(bindings: ExternalBindings) -> Result<Config, ConfigError> {
-        Config::embedded("version = 2".to_string(), bindings)
-    }
-
-    #[test]
-    fn an_embedded_default_budget_stores_what_an_authored_table_omitting_it_stores() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let mut bindings = ExternalBindings::new(Duration::from_millis(5000), 65_536);
-        bindings.claude_code = ClaudeCode {
-            command: PathBuf::from("/opt/claude/bin/claude"),
-            model: "pinned".to_string(),
-            timeout: DEFAULT_CLAUDE_CODE_TIMEOUT,
-        };
-        let host = Config::embedded(
-            "version = 2\nanything = \"the runtime does not interpret this\"\n".to_string(),
-            bindings,
-        )
-        .expect("the embedded claude bindings load");
-
-        // Both sides come back through the file loader, so only their content can differ,
-        // never their serialization.
-        let from_host = dir.path().join("host.toml");
-        std::fs::write(&from_host, host.policy_file().bytes()).expect("write the stored embedded config");
-        let from_host = Config::load(&from_host).expect("the stored embedded config reloads");
-
-        let authored_path = dir.path().join("authored.toml");
-        std::fs::write(
-            &authored_path,
-            "[policy]\nversion = 2\nanything = \"the runtime does not interpret this\"\n\n\
-             [externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n\n\
-             [externals.claude_code]\ncommand = \"/opt/claude/bin/claude\"\nmodel = \"pinned\"\n",
-        )
-        .expect("write the authored config");
-        let authored = Config::load(&authored_path).expect("the authored claude table loads");
-
-        // A budget neither side states must not be stated by one of them: an install
-        // compares these policy keys, so equal deployments must compose equal bytes.
-        assert_eq!(from_host.policy_file().bytes(), authored.policy_file().bytes());
-        assert_eq!(from_host.externals.claude_code, authored.externals.claude_code);
-        assert_eq!(authored.externals.claude_code.timeout, DEFAULT_CLAUDE_CODE_TIMEOUT);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn embedded_command_bindings_are_stored_and_reloadable() {
-        let first_dir = tempfile::tempdir().expect("first command directory");
-        let second_dir = tempfile::tempdir().expect("second command directory");
-        let make = |argument: &str, cwd: &Path| {
-            let mut bindings = ExternalBindings::new(Duration::from_millis(5000), 65_536);
-            bindings.sanitizers.insert(
-                "classifier".to_string(),
-                Binding::Command {
-                    argv: vec!["python3".to_string(), argument.to_string()],
-                    cwd: std::fs::canonicalize(cwd).expect("canonical command directory"),
-                    token_env: None,
-                },
-            );
-            embedded(bindings).expect("embedded command config loads")
-        };
-
-        let first = make("resolver.py", first_dir.path());
-        let changed_argv = make("other.py", first_dir.path());
-        let changed_cwd = make("resolver.py", second_dir.path());
-        assert_ne!(first.policy_file().bytes(), changed_argv.policy_file().bytes());
-        assert_ne!(first.policy_file().bytes(), changed_cwd.policy_file().bytes());
-
-        let stored = first_dir.path().join("stored.toml");
-        std::fs::write(&stored, first.policy_file().bytes()).expect("write stored embedded config");
-        let reloaded = Config::load(&stored).expect("stored embedded config reloads");
-        assert_eq!(reloaded.policy_file().bytes(), first.policy_file().bytes());
-        let Some(Implementation::Command(command)) = reloaded.externals.sanitizers.get("classifier") else {
-            panic!("reloaded classifier is a command")
-        };
-        assert_eq!(command.argv, ["python3", "resolver.py"]);
-        assert_eq!(command.cwd, std::fs::canonicalize(first_dir.path()).unwrap());
-
-        let mut relative = ExternalBindings::new(Duration::from_millis(5000), 65_536);
-        relative.annotators.insert(
-            "classifier".to_string(),
-            Binding::Command {
-                argv: vec!["python3".to_string()],
-                cwd: PathBuf::from("battery"),
-                token_env: None,
+    fn hosted(text: &str) -> Result<Config, ConfigError> {
+        Config::hosted(
+            text,
+            HostDefaults {
+                consult_timeout: Duration::from_millis(5000),
+                max_body_bytes: 65_536,
             },
-        );
+        )
+    }
+
+    /// A hosted document declares its externals the way a file does, and they resolve to
+    /// the same implementations.
+    #[test]
+    fn a_hosted_document_resolves_the_externals_it_declares() {
+        let config = hosted(
+            r#"
+            [policy]
+            version = 2
+
+            [externals.llm]
+            provider = "ollama"
+            model = "llama"
+
+            [externals.claude_code]
+            model = "pinned"
+
+            [externals.audience.slack]
+            url = "https://slack.internal"
+            lookup = "people"
+            selectors = [{ template = "channel/<id>" }]
+
+            [externals.audience.people]
+            readers = { "slack:alice" = "alice@corp.example" }
+            "#,
+        )
+        .expect("the hosted document validates");
+
+        let llm = config.externals.llm.as_ref().expect("the profile is declared");
+        assert_eq!(llm.provider, LlmProvider::Ollama);
+        assert_eq!(llm.model, "llama");
+        assert_eq!(config.externals.claude_code.model, "pinned");
+        let slack = &config.externals.audience["slack"];
+        assert!(matches!(slack.implementation, AudienceImplementation::Resolver(_)));
+        assert_eq!(slack.lookup.as_deref(), Some("people"));
+        assert_eq!(slack.templates.len(), 1);
         assert!(matches!(
-            embedded(relative),
-            Err(ConfigError::RelativeCommandCwd {
-                section: "annotators",
+            config.externals.audience["people"].implementation,
+            AudienceImplementation::Readers(_)
+        ));
+    }
+
+    /// Everything outside `[policy]` and `[externals]` describes the deployment the host
+    /// runs, not the policy its author wrote.
+    #[test]
+    fn a_hosted_document_cannot_declare_what_the_host_declares() {
+        for (key, declaration) in [
+            ("include", "include = [\"battery.toml\"]"),
+            ("appa_composed", "[appa_composed]\ncommand_cwd = {}"),
+            ("reporting", "[reporting]\nagent_yell = true"),
+            ("bundle", "[bundle]\nfiles = []"),
+            ("server_aliases", "[server_aliases]\ndemo = [\"mcp:demo\"]"),
+            ("appa_inventory", "[appa_inventory]\ntools = []"),
+        ] {
+            let text = format!("{declaration}\n[policy]\nversion = 2\n");
+            assert!(
+                matches!(hosted(&text), Err(ConfigError::HostedKey { key: refused }) if refused == key),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hosted_document_cannot_run_a_local_command() {
+        for section in Section::ALL {
+            let text = format!(
+                "[policy]\nversion = 2\n[externals.{}.local]\ncommand = [\"python3\", \"resolver.py\"]\n",
+                section.name()
+            );
+            assert!(
+                matches!(
+                    hosted(&text),
+                    Err(ConfigError::HostedCommand { section: refused, name }) if refused == section.name() && name == "local"
+                ),
+                "{}",
+                section.name()
+            );
+        }
+        assert!(matches!(
+            hosted("[policy]\nversion = 2\n[externals.claude_code]\ncommand = \"/opt/claude/bin/claude\"\n"),
+            Err(ConfigError::HostedCommand {
+                section: "claude_code",
                 ..
             })
         ));
     }
 
-    /// An embedded host names its secrets like a file does: the variable is persisted,
-    /// the value is resolved from the environment, and the bytes match a file that
-    /// declares the same bindings.
     #[test]
-    fn embedded_tokens_persist_as_variable_names_and_resolve_from_the_environment() {
-        const VAR: &str = "APPA_CONFIG_TEST_EMBEDDED_TOKEN";
-        let mut bindings = ExternalBindings::new(Duration::from_millis(5000), 65_536);
-        bindings.authorities.insert(
-            "desk".to_string(),
-            Binding::Url {
-                url: "https://desk.internal".to_string(),
-                token_env: Some(VAR.to_string()),
-            },
+    fn a_hosted_document_takes_the_host_settings_it_states_none_of() {
+        let host = hosted("[policy]\nversion = 2\n").expect("a document without an externals table validates");
+        assert_eq!(host.externals.timeout, Duration::from_millis(5000));
+        assert_eq!(host.externals.max_body_bytes, 65_536);
+
+        let stated = hosted("[policy]\nversion = 2\n[externals]\ntimeout_ms = 1500\nmax_body_bytes = 1024\n")
+            .expect("a document stating both validates");
+        assert_eq!(stated.externals.timeout, Duration::from_millis(1500));
+        assert_eq!(stated.externals.max_body_bytes, 1024);
+    }
+
+    /// A hosted document names its secrets like a file does: the variable is persisted,
+    /// the value is resolved from the environment, and the same text read from a file
+    /// composes the same bytes.
+    #[test]
+    fn hosted_tokens_persist_as_variable_names_and_resolve_from_the_environment() {
+        const VAR: &str = "APPA_CONFIG_TEST_HOSTED_TOKEN";
+        let text = format!(
+            "[policy]\nversion = 2\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n\
+             [externals.authorities.desk]\nurl = \"https://desk.internal\"\ntoken_env = \"{VAR}\"\n\
+             [externals.llm]\nprovider = \"anthropic\"\nmodel = \"claude-sonnet-4-5\"\ntoken_env = \"{VAR}\"\ntimeout_ms = 30000\nmax_concurrent = 2\n"
         );
-        bindings.llm = Some(LlmBinding {
-            provider: LlmProvider::Anthropic,
-            model: "claude-sonnet-4-5".to_string(),
-            url: None,
-            token_env: Some(VAR.to_string()),
-            timeout_ms: Some(30_000),
-            max_concurrent: Some(2),
-        });
 
         unsafe { std::env::remove_var(VAR) };
-        assert!(matches!(
-            embedded(bindings.clone()),
-            Err(ConfigError::MissingSecret { .. })
-        ));
+        assert!(matches!(hosted(&text), Err(ConfigError::MissingSecret { .. })));
 
         unsafe { std::env::set_var(VAR, "sekret") };
-        let config = embedded(bindings).expect("the embedded bindings validate against the environment");
+        let config = hosted(&text).expect("the hosted document validates against the environment");
+        let dir = tempfile::tempdir().expect("temp directory");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, &text).expect("write file config");
+        let from_file = Config::load(&path).expect("the file config loads");
         unsafe { std::env::remove_var(VAR) };
+
         let Some(Implementation::Resolver(endpoint)) = config.externals.authorities.get("desk") else {
             panic!("desk is an endpoint")
         };
@@ -2838,21 +2690,6 @@ mod tests {
         let stored = String::from_utf8_lossy(config.policy_file().bytes()).into_owned();
         assert!(stored.contains(VAR), "the variable name is persisted");
         assert!(!stored.contains("sekret"), "the secret never reaches the stored bytes");
-
-        let dir = tempfile::tempdir().expect("temp directory");
-        let path = dir.path().join("appa.toml");
-        std::fs::write(
-            &path,
-            format!(
-                "[policy]\nversion = 2\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n\
-                 [externals.authorities.desk]\nurl = \"https://desk.internal\"\ntoken_env = \"{VAR}\"\n\
-                 [externals.llm]\nprovider = \"anthropic\"\nmodel = \"claude-sonnet-4-5\"\ntoken_env = \"{VAR}\"\ntimeout_ms = 30000\nmax_concurrent = 2\n"
-            ),
-        )
-        .expect("write file config");
-        unsafe { std::env::set_var(VAR, "sekret") };
-        let from_file = Config::load(&path).expect("the file config loads");
-        unsafe { std::env::remove_var(VAR) };
         assert_eq!(from_file.policy_file().bytes(), config.policy_file().bytes());
     }
 

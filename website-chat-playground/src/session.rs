@@ -11,7 +11,7 @@ use appa_example_agent::{
     CatalogueError, Endpoint, HttpClient, OpenAiCompatible, OpenAiConfig, ToolCatalogue, Transcript, TranscriptHead,
 };
 use appa_runtime::api::{OpenError, Runtime, TrajectoryId};
-use appa_runtime::config::{Config, ConfigError};
+use appa_runtime::config::{Config, ConfigError, HostDefaults};
 
 use crate::approvals::Approvals;
 use crate::derive::Derivations;
@@ -19,7 +19,7 @@ use crate::events::LabelText;
 use crate::lint::{PolicyError, check_policy};
 use crate::shim::{self, World};
 use crate::systems::System;
-use crate::world::{TOOLS_PATH, externals_for};
+use crate::world::{CONSULT_TIMEOUT, MAX_CONSULT_BYTES, TOOLS_PATH, externals_for};
 
 const SYSTEM_PROMPT: &str = "You are the company assistant at a vendor of an AI agent platform. Depending on \
 configuration you may have access to the CRM, the public GitHub issue tracker, outbound email, finance, and meeting \
@@ -111,6 +111,10 @@ pub enum CreateError {
     Open(#[from] Box<OpenError>),
     #[error("composing the deployment: {0}")]
     Deployment(#[from] Box<ConfigError>),
+    #[error("reading the checked policy: {0}")]
+    Document(#[from] Box<toml::de::Error>),
+    #[error("rendering the deployment: {0}")]
+    Rendered(#[from] Box<toml::ser::Error>),
     #[error("the policy's tools cannot be advertised: {0}")]
     Catalogue(#[from] CatalogueError),
 }
@@ -194,8 +198,22 @@ impl Sessions {
         .await?;
         let base = format!("http://{address}");
 
-        let config =
-            Config::embedded(checked.merged_toml.clone(), externals_for(&checked.config, &base)).map_err(Box::new)?;
+        let policy: toml::Value = toml::from_str(&checked.merged_toml).map_err(Box::new)?;
+        let mut document = toml::Table::new();
+        document.insert("policy".to_string(), policy);
+        document.insert(
+            "externals".to_string(),
+            toml::Value::Table(externals_for(&checked.config, &base)),
+        );
+        let rendered = toml::to_string(&document).map_err(Box::new)?;
+        let config = Config::hosted(
+            &rendered,
+            HostDefaults {
+                consult_timeout: CONSULT_TIMEOUT,
+                max_body_bytes: MAX_CONSULT_BYTES,
+            },
+        )
+        .map_err(Box::new)?;
         let runtime = Runtime::open(config, session_dir.join("appa.db"), None).map_err(Box::new)?;
 
         let session = Arc::new(DemoSession {

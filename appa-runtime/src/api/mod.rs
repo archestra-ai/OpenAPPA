@@ -2657,7 +2657,7 @@ mod deployment_tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::config::{AnnotatorImplementation, Endpoint, ExternalBindings, LlmBinding, LlmProvider};
+    use crate::config::{AnnotatorImplementation, Endpoint, HostDefaults};
 
     #[test]
     fn the_undeclared_tool_fallback_refusal_names_the_recovery_action() {
@@ -2707,9 +2707,15 @@ mod deployment_tests {
 
     /// A deployment with no `[externals.annotators]` bindings: the policy under test names
     /// `builtin = "claude-code"` on the declarations it wants answered by Claude Code.
-    fn claude_config(policy: &str) -> Config {
-        let bindings = ExternalBindings::new(Duration::from_secs(30), 65_536);
-        Config::embedded(policy.to_string(), bindings).expect("the embedded configuration parses")
+    fn claude_config(document: &str) -> Config {
+        Config::hosted(
+            document,
+            HostDefaults {
+                consult_timeout: Duration::from_secs(30),
+                max_body_bytes: 65_536,
+            },
+        )
+        .expect("the hosted document validates")
     }
 
     fn endpoint() -> AnnotatorImplementation {
@@ -2738,14 +2744,15 @@ mod deployment_tests {
         let policy = |field: &str, tool: &str| {
             format!(
                 r#"
+                [policy]
                 version = 2
-                [[annotator]]
+                [[policy.annotator]]
                 name = "any"
                 builtin = "claude-code"
-                [[tool]]
+                [[policy.tool]]
                 name = "*"
                 annotator = "any"
-                [deployment]
+                [policy.deployment]
                 {field} = ["{tool}"]
             "#
             )
@@ -2774,11 +2781,12 @@ mod deployment_tests {
     fn a_claude_builtin_deployment_opens_without_an_endpoint() {
         let tool_level = claude_config(
             r#"
+                [policy]
                 version = 2
-                [[annotator]]
+                [[policy.annotator]]
                 name = "classifier"
                 builtin = "claude-code"
-                [[tool]]
+                [[policy.tool]]
                 name = "lookup"
                 description = "Looks one record up."
                 annotator = "classifier"
@@ -2801,11 +2809,12 @@ mod deployment_tests {
         let config = || {
             claude_config(
                 r#"
+                [policy]
                 version = 2
-                [[annotator]]
+                [[policy.annotator]]
                 name = "classifier"
                 builtin = "claude-code"
-                [[tool]]
+                [[policy.tool]]
                 name = "fetch"
                 description = "Fetches one URL."
                 annotator = "classifier"
@@ -2847,17 +2856,18 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     fn every_annotator_has_its_own_implementation() {
         let mut config = claude_config(
             r#"
+                [policy]
                 version = 2
-                [[annotator]]
+                [[policy.annotator]]
                 name = "bash-classifier"
                 builtin = "claude-code"
-                [[annotator]]
+                [[policy.annotator]]
                 name = "other-classifier"
-                [[tool]]
+                [[policy.tool]]
                 name = "Bash"
                 description = "Runs one shell command."
                 annotator = "bash-classifier"
-                [[tool]]
+                [[policy.tool]]
                 name = "Other"
                 description = "Does something else."
                 annotator = "other-classifier"
@@ -2874,10 +2884,11 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     #[test]
     fn an_authority_may_stay_unbound_but_its_binding_must_be_declared() {
         let policy = r#"
+            [policy]
             version = 2
-            [[authority]]
+            [[policy.authority]]
             name = "reviewer"
-            [authority.permits]
+            [policy.authority.permits]
             attention = ["irreversible"]
         "#;
         assert!(
@@ -2899,10 +2910,11 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     #[test]
     fn missing_and_undeclared_annotator_implementations_are_refused() {
         let policy = r#"
+            [policy]
             version = 2
-            [[annotator]]
+            [[policy.annotator]]
             name = "classifier"
-            [[tool]]
+            [[policy.tool]]
             name = "lookup"
             description = "Looks one record up."
             annotator = "classifier"
@@ -2926,11 +2938,12 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     fn a_builtin_annotator_takes_no_deployment_binding() {
         let mut bound = claude_config(
             r#"
+                [policy]
                 version = 2
-                [[annotator]]
+                [[policy.annotator]]
                 name = "classifier"
                 builtin = "claude-code"
-                [[tool]]
+                [[policy.tool]]
                 name = "lookup"
                 description = "Looks one record up."
                 annotator = "classifier"
@@ -2948,26 +2961,20 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     #[test]
     fn a_declared_llm_annotator_needs_the_llm_table_at_open_and_reload() {
         let policy = r#"
+            [policy]
             version = 2
-            [[annotator]]
+            [[policy.annotator]]
             name = "classifier"
             builtin = "llm"
-            [[tool]]
+            [[policy.tool]]
             name = "lookup"
             description = "Looks one record up."
             annotator = "classifier"
         "#;
         let with_profile = || {
-            let mut bindings = ExternalBindings::new(Duration::from_secs(30), 65_536);
-            bindings.llm = Some(LlmBinding {
-                provider: LlmProvider::Ollama,
-                model: "llama".to_string(),
-                url: None,
-                token_env: None,
-                timeout_ms: None,
-                max_concurrent: None,
-            });
-            Config::embedded(policy.to_string(), bindings).expect("the embedded configuration parses")
+            claude_config(&format!(
+                "{policy}\n[externals.llm]\nprovider = \"ollama\"\nmodel = \"llama\"\n"
+            ))
         };
         assert!(matches!(
             load(claude_config(policy)),
@@ -2986,30 +2993,24 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     #[test]
     fn the_llm_gate_follows_the_serving_deployment_and_never_a_refused_one() {
         let policy = r#"
+            [policy]
             version = 2
-            [[annotator]]
+            [[policy.annotator]]
             name = "classifier"
             builtin = "llm"
-            [[tool]]
+            [[policy.tool]]
             name = "lookup"
             description = "Looks one record up."
             annotator = "classifier"
-            [[authority]]
+            [[policy.authority]]
             name = "auditor"
-            [authority.permits]
+            [policy.authority.permits]
             attention = ["irreversible"]
         "#;
         let with_pool = |max_concurrent: u32| {
-            let mut bindings = ExternalBindings::new(Duration::from_secs(30), 65_536);
-            bindings.llm = Some(LlmBinding {
-                provider: LlmProvider::Ollama,
-                model: "llama".to_string(),
-                url: None,
-                token_env: None,
-                timeout_ms: None,
-                max_concurrent: Some(max_concurrent),
-            });
-            Config::embedded(policy.to_string(), bindings).expect("the embedded configuration parses")
+            claude_config(&format!(
+                "{policy}\n[externals.llm]\nprovider = \"ollama\"\nmodel = \"llama\"\nmax_concurrent = {max_concurrent}\n"
+            ))
         };
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(with_pool(2), dir.path().join("appa.db"), None).expect("the deployment opens");
@@ -3062,8 +3063,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     fn versioned_policy(description: &str) -> Config {
         claude_config(&format!(
             r#"
+            [policy]
             version = 2
-            [[tool]]
+            [[policy.tool]]
             name = "fetch"
             description = "{description}"
             "#
@@ -3115,16 +3117,17 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     fn confining_policy(confined: &str) -> Config {
         claude_config(&format!(
             r#"
+            [policy]
             version = 2
-            [[annotator]]
+            [[policy.annotator]]
             name = "any"
             builtin = "claude-code"
-            [[tool]]
+            [[policy.tool]]
             name = "host/claude-code/Bash"
-            [[tool]]
+            [[policy.tool]]
             name = "*"
             annotator = "any"
-            [deployment]
+            [policy.deployment]
             confined_results = ["{confined}"]
             "#
         ))
@@ -3136,12 +3139,13 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     fn served_policy() -> Config {
         claude_config(
             r#"
+            [policy]
             version = 2
-            [[tool]]
+            [[policy.tool]]
             name = "host/claude-code/Bash"
-            [[tool]]
+            [[policy.tool]]
             name = "host/claude-code/Read"
-            [deployment]
+            [policy.deployment]
             confined_results = ["host/claude-code/Bash"]
             "#,
         )
@@ -3210,8 +3214,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let raw = || {
             claude_config(
                 r#"
+                [policy]
                 version = 2
-                [[tool]]
+                [[policy.tool]]
                 name = "Bash"
                 "#,
             )
@@ -3241,7 +3246,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let before = runtime
             .preflight_inventory(None, appa_adapter_claude_code::adapter(), &ToolInventory::default())
             .unwrap();
-        let mut candidate = claude_config("version = 2\n[[tool]]\nname = 'Read'\n");
+        let mut candidate = claude_config("[policy]\nversion = 2\n[[policy.tool]]\nname = 'Read'\n");
         candidate.inventory = ToolInventory {
             tools: vec![ObservedTool {
                 name: "Bash".into(),
@@ -3262,7 +3267,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         use appa_runtime_api::inventory::{ObservedTool, ToolInventory};
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("appa.db");
-        let config = || claude_config("version = 2\n[[tool]]\nname = \"read_secret\"\n");
+        let config = || claude_config("[policy]\nversion = 2\n[[policy.tool]]\nname = \"read_secret\"\n");
         let adapter = appa_adapter_kagent::adapter();
         let runtime = Runtime::open_served(config(), db.clone(), None, adapter).unwrap();
         let id = TrajectoryId("inventory-root".into());
@@ -3275,7 +3280,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         };
         runtime.create_session_with_inventory(id.clone(), inventory).unwrap();
         runtime
-            .reload(claude_config("version = 2\n[[tool]]\nname = \"other\"\n"))
+            .reload(claude_config(
+                "[policy]\nversion = 2\n[[policy.tool]]\nname = \"other\"\n",
+            ))
             .unwrap();
         runtime.live(&id, &id).unwrap();
         let log = runtime.inner.log(&id).unwrap();
@@ -3294,8 +3301,11 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         use appa_runtime_api::inventory::{ObservedTool, ToolInventory};
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("appa.db");
-        let config =
-            || claude_config("version = 2\n[[tool]]\nname = 'mcp/demo/read'\n[[tool]]\nname = 'mcp/other/read'\n");
+        let config = || {
+            claude_config(
+                "[policy]\nversion = 2\n[[policy.tool]]\nname = 'mcp/demo/read'\n[[policy.tool]]\nname = 'mcp/other/read'\n",
+            )
+        };
         let adapter = appa_adapter_kagent::adapter();
         let runtime = Runtime::open_served(config(), db.clone(), None, adapter).unwrap();
         let actor = Actor {
@@ -3351,7 +3361,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let dir = tempfile::tempdir().unwrap();
         let adapter = appa_adapter_kagent::adapter();
         let runtime = Runtime::open_served(
-            claude_config("version = 2\n[[tool]]\nname = 'read'\n"),
+            claude_config("[policy]\nversion = 2\n[[policy.tool]]\nname = 'read'\n"),
             dir.path().join("appa.db"),
             None,
             adapter,
@@ -3402,7 +3412,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let dir = tempfile::tempdir().unwrap();
         let adapter = appa_adapter_kagent::adapter();
         let runtime = Runtime::open_served(
-            claude_config("version = 2\n[[tool]]\nname = 'read'\n"),
+            claude_config("[policy]\nversion = 2\n[[policy.tool]]\nname = 'read'\n"),
             dir.path().join("appa.db"),
             None,
             adapter,
@@ -3431,7 +3441,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         runtime.create_session(root.clone()).unwrap();
         let before = runtime.inner.log(&root).unwrap();
         runtime
-            .reload(claude_config("version = 2\n[[tool]]\nname = 'write'\n"))
+            .reload(claude_config(
+                "[policy]\nversion = 2\n[[policy.tool]]\nname = 'write'\n",
+            ))
             .unwrap();
         assert!(report(None, "write").is_valid());
         assert!(!report(None, "read").is_valid());
@@ -3463,7 +3475,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let dir = tempfile::tempdir().unwrap();
         let adapter = appa_adapter_kagent::adapter();
         let db = dir.path().join("appa.db");
-        let config = || claude_config("version = 2\n[[tool]]\nname = 'read'\n");
+        let config = || claude_config("[policy]\nversion = 2\n[[policy.tool]]\nname = 'read'\n");
         let runtime = Runtime::open_served(config(), db.clone(), None, adapter).unwrap();
         let root = adapter.name.root("family");
         let inventory = |server| ToolInventory {
@@ -3507,7 +3519,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let dir = tempfile::tempdir().unwrap();
         let adapter = appa_adapter_kagent::adapter();
         let runtime = Runtime::open_served(
-            claude_config("version = 2\n[[tool]]\nname = 'read'\n"),
+            claude_config("[policy]\nversion = 2\n[[policy.tool]]\nname = 'read'\n"),
             dir.path().join("appa.db"),
             None,
             adapter,
@@ -3535,7 +3547,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         use appa_runtime_api::inventory::{ObservedTool, ToolInventory};
         let dir = tempfile::tempdir().unwrap();
         let runtime = Runtime::open_served(
-            claude_config("version = 2\n[[tool]]\nname = \"read\"\n"),
+            claude_config("[policy]\nversion = 2\n[[policy.tool]]\nname = \"read\"\n"),
             dir.path().join("appa.db"),
             None,
             appa_adapter_kagent::adapter(),
@@ -3561,7 +3573,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let db = dir.path().join("appa.db");
         let runtime = Runtime::open_served(
             claude_config(
-                "version = 2\n[[tool]]\nname = \"read_secret\"\n[deployment]\nconfined_results = ['read_secret']\n",
+                "[policy]\nversion = 2\n[[policy.tool]]\nname = \"read_secret\"\n[policy.deployment]\nconfined_results = ['read_secret']\n",
             ),
             db.clone(),
             None,
@@ -3604,7 +3616,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             .unwrap();
         drop(runtime);
         let reopened = Runtime::open_served(
-            claude_config("version = 2\n[[tool]]\nname = 'different'\n"),
+            claude_config("[policy]\nversion = 2\n[[policy.tool]]\nname = 'different'\n"),
             db,
             None,
             adapter,
@@ -3636,7 +3648,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let dir = tempfile::tempdir().unwrap();
         let config = || {
             claude_config(
-                "version = 2\n[[tool]]\nname = 'read'\n[[tool]]\nname = 'team__NS__child'\n[deployment]\ncontext_control = true\n",
+                "[policy]\nversion = 2\n[[policy.tool]]\nname = 'read'\n[[policy.tool]]\nname = 'team__NS__child'\n[policy.deployment]\ncontext_control = true\n",
             )
         };
         let db = dir.path().join("appa.db");

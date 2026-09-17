@@ -1,11 +1,11 @@
 //! Synchronous Python adapter over the runtime.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use appa_runtime::api::{LabelSpelling, OfferId, OfferedRemedy, RemedyArguments, RemedyOutcome, Runtime};
-use appa_runtime::config::{Binding, Config, ExternalBindings};
+use appa_runtime::config::{Config, HostDefaults};
 use appa_runtime::hooks;
 use appa_runtime_api::{
     ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OfferedReturn, OutcomeBody, ProposedCall, SpawnBinding,
@@ -150,28 +150,6 @@ struct SessionInner {
     _store: tempfile::TempDir,
 }
 
-#[derive(serde::Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct ExternalsConfig {
-    #[serde(default)]
-    timeout_ms: Option<u64>,
-    #[serde(default)]
-    review_timeout_ms: Option<u64>,
-    #[serde(default)]
-    max_body_bytes: Option<usize>,
-    #[serde(default)]
-    annotators: BTreeMap<String, EndpointConfig>,
-    /// The endpoint of each registered audience source, by provider name.
-    #[serde(default)]
-    audience: BTreeMap<String, EndpointConfig>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EndpointConfig {
-    url: String,
-}
-
 impl SessionInner {
     fn open(
         policy_toml: &str,
@@ -193,45 +171,39 @@ impl SessionInner {
                 return Err(format!("{name} is a reserved control tool name; rename the host tool"));
             }
         }
-        let policy = toml::to_string(&compose_policy(policy_toml, &tools, bridge_url.is_some(), spawn_tool)?)
-            .map_err(|error| format!("the composed policy does not render: {error}"))?;
+        let policy = compose_policy(policy_toml, &tools, bridge_url.is_some(), spawn_tool)?;
 
         let tokio = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(|error| format!("could not create Tokio runtime: {error}"))?;
         let store = tempfile::tempdir().map_err(|error| format!("could not create the session store: {error}"))?;
-        let externals = if let Some(externals_toml) = externals_toml {
-            let parsed: ExternalsConfig =
-                toml::from_str(externals_toml).map_err(|error| format!("invalid externals TOML: {error}"))?;
-            let mut bindings = ExternalBindings::new(
-                Duration::from_millis(parsed.timeout_ms.unwrap_or(30_000)),
-                parsed.max_body_bytes.unwrap_or(MAX_BODY_BYTES),
-            );
-            bindings.review_timeout_ms = parsed.review_timeout_ms.unwrap_or(600_000);
-            let bound = |endpoints: BTreeMap<String, EndpointConfig>| -> BTreeMap<String, Binding> {
-                endpoints
-                    .into_iter()
-                    .map(|(name, endpoint)| {
-                        (
-                            name,
-                            Binding::Url {
-                                url: endpoint.url,
-                                token_env: None,
-                            },
-                        )
-                    })
-                    .collect()
-            };
-            bindings.annotators = bound(parsed.annotators);
-            bindings.audience = bound(parsed.audience);
-            bindings
-        } else {
-            let mut bindings = ExternalBindings::new(CONSULT_TIMEOUT, MAX_BODY_BYTES);
-            bindings.review_timeout_ms = CONSULT_TIMEOUT.as_millis() as u64;
-            bindings
+        let externals = match externals_toml {
+            Some(externals_toml) => {
+                toml::from_str(externals_toml).map_err(|error| format!("invalid externals TOML: {error}"))?
+            }
+            None => {
+                let mut externals = toml::value::Table::new();
+                externals.insert(
+                    "review_timeout_ms".to_string(),
+                    toml::Value::Integer(CONSULT_TIMEOUT.as_millis() as i64),
+                );
+                externals
+            }
         };
-        let config = Config::embedded(policy, externals).map_err(|error| error.to_string())?;
+        let mut document = toml::value::Table::new();
+        document.insert("policy".to_string(), policy);
+        document.insert("externals".to_string(), toml::Value::Table(externals));
+        let rendered = toml::to_string(&toml::Value::Table(document))
+            .map_err(|error| format!("the composed policy does not render: {error}"))?;
+        let config = Config::hosted(
+            &rendered,
+            HostDefaults {
+                consult_timeout: CONSULT_TIMEOUT,
+                max_body_bytes: MAX_BODY_BYTES,
+            },
+        )
+        .map_err(|error| error.to_string())?;
         let runtime = Runtime::open(config, store.path().join("appa.db"), None).map_err(|error| error.to_string())?;
 
         let trajectory = TrajectoryId("episode".to_string());

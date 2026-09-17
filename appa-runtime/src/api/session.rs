@@ -3886,30 +3886,27 @@ trust = { from = "suspicious", to = "trusted" }
 context_control = true
 "#;
 
-    const ATTESTED_CHILD_COMPOSED: &str = r#"
-version = 2
-
-[[sanitizer]]
-name = "attest-schema"
-on = ["tool_output"]
-[sanitizer.permits]
-trust = { from = "suspicious", to = "trusted" }
-
-[deployment]
-context_control = true
-"#;
-
-    fn attested_config(policy: &str, binding: Option<&str>) -> Config {
+    fn attested_text(policy: &str, binding: Option<&str>) -> String {
         let binding = match binding {
             Some(url) => format!("[externals.sanitizers.attest-schema]\nurl = \"{url}\"\n"),
             None => String::new(),
         };
-        let text = format!("[policy]\n{policy}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n{binding}");
-        config_from(&text)
+        format!("[policy]\n{policy}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n{binding}")
     }
 
-    fn bare_externals() -> crate::config::ExternalBindings {
-        crate::config::ExternalBindings::new(std::time::Duration::from_millis(2000), 65536)
+    fn attested_config(policy: &str, binding: Option<&str>) -> Config {
+        config_from(&attested_text(policy, binding))
+    }
+
+    fn hosted_config(policy: &str, binding: Option<&str>) -> Config {
+        Config::hosted(
+            &attested_text(policy, binding),
+            crate::config::HostDefaults {
+                consult_timeout: std::time::Duration::from_millis(2000),
+                max_body_bytes: 65536,
+            },
+        )
+        .expect("the hosted document validates")
     }
 
     #[test]
@@ -3932,25 +3929,16 @@ context_control = true
     }
 
     #[test]
-    fn an_embedded_attest_schema_policy_needs_no_externals_binding() {
+    fn a_hosted_attest_schema_policy_needs_no_externals_binding() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let config =
-            Config::embedded(ATTESTED_CHILD_COMPOSED.to_string(), bare_externals()).expect("the policy embeds");
+        let config = hosted_config(ATTESTED_CHILD, None);
         assert!(Runtime::open(config, dir.path().join("appa.db"), None).is_ok());
     }
 
     #[test]
-    fn an_embedded_binding_on_the_reserved_attest_schema_refuses_open() {
+    fn a_hosted_binding_on_the_reserved_attest_schema_refuses_open() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let mut externals = bare_externals();
-        externals.sanitizers.insert(
-            "attest-schema".to_string(),
-            crate::config::Binding::Url {
-                url: "http://127.0.0.1:1/".to_string(),
-                token_env: None,
-            },
-        );
-        let config = Config::embedded(ATTESTED_CHILD_COMPOSED.to_string(), externals).expect("the policy embeds");
+        let config = hosted_config(ATTESTED_CHILD, Some("http://127.0.0.1:1/"));
         assert!(matches!(
             Runtime::open(config, dir.path().join("appa.db"), None),
             Err(OpenError::UnsupportedPolicy(_)),
@@ -3960,19 +3948,10 @@ context_control = true
     #[test]
     fn an_unregistered_attest_schema_binding_still_refuses_open() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let mut externals = bare_externals();
-        externals.sanitizers.insert(
-            "attest-schema".to_string(),
-            crate::config::Binding::Url {
-                url: "http://127.0.0.1:1/".to_string(),
-                token_env: None,
-            },
+        let config = hosted_config(
+            "version = 2\n\n[policy.deployment]\ncontext_control = true\n",
+            Some("http://127.0.0.1:1/"),
         );
-        let config = Config::embedded(
-            "version = 2\n\n[deployment]\ncontext_control = true\n".to_string(),
-            externals,
-        )
-        .expect("the policy embeds");
         assert!(matches!(
             Runtime::open(config, dir.path().join("appa.db"), None),
             Err(OpenError::UnsupportedPolicy(_)),
