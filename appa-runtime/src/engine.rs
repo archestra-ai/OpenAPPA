@@ -75,13 +75,13 @@ use appa_engine::value::{
 use appa_eventlog::Log;
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::api::{EmbeddedPresentationOptions, OutcomeBody, RemedyDisplay, RemedyDisplayPlan, ToolNaming};
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
-use crate::api::{OutcomeBody, ToolNaming};
 use crate::consult::{
     AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, HistoryEntry,
     Requirement, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
 };
-use appa_runtime_api::{OfferedRemedy, OfferedReturn};
+use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn};
 
 /// One fresh 256-bit random number per act that can surface offers; the
 /// runtime mixes it into every `OfferId` it mints.
@@ -109,6 +109,7 @@ pub struct ReleasedCall {
 pub struct Feedback {
     pub text: String,
     pub offers: Vec<OfferedRemedy>,
+    pub display: Option<RemedyDisplay>,
     /// Every authority an offered plan would consult, with the review a person would read.
     /// The engine lists them all; the session keeps the ones whose backend is a person.
     pub review: Vec<PendingReview>,
@@ -330,7 +331,8 @@ pub enum Presentation {
     NoValue,
     Blocked {
         feedback: String,
-        offers: Vec<OfferId>,
+        offers: Vec<OfferedRemedy>,
+        review: Vec<PendingReview>,
     },
 }
 
@@ -730,6 +732,7 @@ pub struct RuntimeEngine {
     /// model to run one names it the way that model's harness dispatches it. A property of
     /// the deployment, not of the policy: a retired engine decides under the same one.
     naming: ToolNaming,
+    presentation: EmbeddedPresentationOptions,
 }
 
 impl RuntimeEngine {
@@ -775,6 +778,16 @@ impl RuntimeEngine {
                 .map(|(name, binding)| (name.as_str().to_string(), binding.clone()))
                 .collect(),
             naming,
+            presentation: EmbeddedPresentationOptions::default(),
+        }
+    }
+
+    pub(crate) fn with_presentation(&self, presentation: EmbeddedPresentationOptions) -> Self {
+        Self {
+            engine: self.engine.clone(),
+            annotators: self.annotators.clone(),
+            naming: self.naming,
+            presentation,
         }
     }
 
@@ -853,7 +866,6 @@ impl RuntimeEngine {
     /// Whom taking this offer involves, read without taking it: nobody (the plain narrowing
     /// acceptance), an authority, or a sanitizer. `None` for an offer that no longer stands.
     /// `appa replay` reads it to take the offer a trace expects, the way the model would.
-    #[cfg(feature = "daemon")]
     pub(crate) fn offer_kind(
         &self,
         view: &EngineView,
@@ -1330,43 +1342,86 @@ impl RuntimeEngine {
     }
 
     fn block_delivery(&self, block: &CoreBlocked, bounds: &ReturnBounds) -> Feedback {
-        let (text, offers, review) = self.rendered_block(block, bounds);
-        let offers = offers
-            .into_iter()
-            .map(|offer| {
-                let returns = block
-                    .offers
-                    .iter()
-                    .find(|(id, _)| offer_id(id) == offer)
-                    .and_then(|(_, plan)| {
-                        block.block.plans.iter().find_map(|candidate| match candidate {
-                            RemedyPlan::Executable(executable) if executable.id == *plan => {
-                                executable.return_step().map(|sanitizer| match sanitizer {
-                                    None => OfferedReturn::AsSpoken,
-                                    Some(name) => OfferedReturn::Sanitized {
-                                        sanitizer: name.as_str().to_string(),
-                                    },
-                                })
-                            }
-                            _ => None,
-                        })
-                    });
-                OfferedRemedy { id: offer.0, returns }
-            })
-            .collect();
-        Feedback { text, offers, review }
+        let (text, offers, review, display) = self.rendered_block(block, bounds);
+        let offers = self.offered_remedies(block, offers);
+        Feedback {
+            text,
+            offers,
+            display,
+            review,
+        }
     }
 
-    fn rendered_block(&self, block: &CoreBlocked, bounds: &ReturnBounds) -> (String, Vec<OfferId>, Vec<PendingReview>) {
+    fn rendered_block(
+        &self,
+        block: &CoreBlocked,
+        bounds: &ReturnBounds,
+    ) -> (String, Vec<OfferId>, Vec<PendingReview>, Option<RemedyDisplay>) {
         let offers: Vec<(OfferId, PlanId)> = block
             .offers
             .iter()
             .map(|(offer, plan)| (offer_id(offer), *plan))
             .collect();
         let registry = self.engine.registry();
-        let text = block_feedback(&block.block, &offers, registry, bounds, self.naming);
+        let rendered = block_feedback(
+            &block.block,
+            &offers,
+            registry,
+            bounds,
+            self.naming,
+            block.call.tool().as_str(),
+            &self.presentation,
+        );
         let review = self.pending_reviews(block, &offers);
-        (text, offers.into_iter().map(|(offer, _)| offer).collect(), review)
+        (
+            rendered.text,
+            offers.into_iter().map(|(offer, _)| offer).collect(),
+            review,
+            rendered.display,
+        )
+    }
+
+    fn offered_remedies(&self, block: &CoreBlocked, offers: Vec<OfferId>) -> Vec<OfferedRemedy> {
+        offers
+            .into_iter()
+            .map(|offer| {
+                let plan = block
+                    .offers
+                    .iter()
+                    .find(|(id, _)| offer_id(id) == offer)
+                    .and_then(|(_, plan)| {
+                        block.block.plans.iter().find_map(|candidate| match candidate {
+                            RemedyPlan::Executable(executable) if executable.id == *plan => Some(executable),
+                            _ => None,
+                        })
+                    });
+                let returns = plan.and_then(|plan| {
+                    plan.return_step().map(|sanitizer| match sanitizer {
+                        None => OfferedReturn::AsSpoken,
+                        Some(name) => OfferedReturn::Sanitized {
+                            sanitizer: name.as_str().to_string(),
+                        },
+                    })
+                });
+                let input_sanitizer = plan.and_then(|plan| {
+                    plan.hop().map(|sanitizer| OfferedInputSanitizer {
+                        name: sanitizer.as_str().to_string(),
+                        target: self.naming.model_spelling(block.call.tool().as_str()),
+                        description: self
+                            .engine
+                            .registry()
+                            .sanitizer(sanitizer)
+                            .and_then(|registered| registered.hint.as_ref())
+                            .map(|hint| hint.as_str().to_string()),
+                    })
+                });
+                OfferedRemedy {
+                    id: offer.0,
+                    returns,
+                    input_sanitizer,
+                }
+            })
+            .collect()
     }
 
     /// The reviews the offered plans would raise: for each plan element that consults an
@@ -1706,8 +1761,12 @@ impl RuntimeEngine {
     }
 
     fn offer_block_delivery(&self, block: &CoreBlocked, bounds: &ReturnBounds) -> Presentation {
-        let (feedback, offers, _) = self.rendered_block(block, bounds);
-        Presentation::Blocked { feedback, offers }
+        let (feedback, offers, review, _) = self.rendered_block(block, bounds);
+        Presentation::Blocked {
+            feedback,
+            offers: self.offered_remedies(block, offers),
+            review,
+        }
     }
 
     fn return_bounds(&self, views: &Views) -> ReturnBounds {
@@ -1846,8 +1905,20 @@ impl RuntimeEngine {
             &offers,
             self.engine.registry().trust_chain(),
             self.naming,
+            &self.presentation,
         );
-        Presentation::Blocked { feedback, offers }
+        Presentation::Blocked {
+            feedback,
+            offers: offers
+                .into_iter()
+                .map(|offer| OfferedRemedy {
+                    id: offer.0,
+                    returns: None,
+                    input_sanitizer: None,
+                })
+                .collect(),
+            review: Vec::new(),
+        }
     }
 
     fn bind_fork(
@@ -1901,6 +1972,7 @@ impl RuntimeEngine {
             Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
                 feedback,
                 offers: Vec::new(),
+                review: Vec::new(),
             })))
         };
         let judged = self.judge_under_audience(evidence, withheld, |audience| {
@@ -2180,6 +2252,7 @@ impl RuntimeEngine {
             Ok(Next::PresentToModel(Presentation::Blocked {
                 feedback: withheld.to_string(),
                 offers: Vec::new(),
+                review: Vec::new(),
             }))
         };
         match request {
@@ -2577,6 +2650,7 @@ impl UnresolvedAudience<'_> {
                 EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
                     feedback: format!("[appa] {detail}; the {subject} is withheld and may be retried"),
                     offers: Vec::new(),
+                    review: Vec::new(),
                 }))
             }
             UnresolvedAudience::OfferStands => {
@@ -2598,6 +2672,7 @@ impl UnresolvedAudience<'_> {
                 EngineDecision::deliver(Next::PresentToModel(Presentation::Blocked {
                     feedback: format!("[appa] {detail}; the {subject} is withheld"),
                     offers: Vec::new(),
+                    review: Vec::new(),
                 }))
             }
             UnresolvedAudience::OfferStands => declined(format!("[appa] {detail}; the offer is declined")),
@@ -2658,6 +2733,7 @@ fn deny_next(text: String) -> Next {
         feedback: vec![Feedback {
             text,
             offers: Vec::new(),
+            display: None,
             review: Vec::new(),
         }],
     }
@@ -2894,7 +2970,10 @@ const BARE_CONTROL_TOOL: &str = appa_runtime_api::ADVERTISED_CONTROL_TOOL;
 /// runtime's MCP server as `mcp__appa__execute_remedy_plan`. A host
 /// that embeds the runtime names its own tools, and there the tool's bare name is what the
 /// model has to go on.
-fn control_spelling(naming: ToolNaming) -> String {
+fn control_spelling(naming: ToolNaming, presentation: &EmbeddedPresentationOptions) -> String {
+    if presentation.control_tool != BARE_CONTROL_TOOL {
+        return terminal_safe(&presentation.control_tool);
+    }
     match naming {
         ToolNaming::AsAuthored => BARE_CONTROL_TOOL.to_string(),
         ToolNaming::Canonical { .. } => naming.model_spelling(appa_runtime_api::CONTROL_TOOL),
@@ -2907,6 +2986,7 @@ fn stage_feedback(
     offers: &[OfferId],
     chain: &TrustChain,
     naming: ToolNaming,
+    presentation: &EmbeddedPresentationOptions,
 ) -> String {
     let mut lines = vec![headline.to_string()];
     lines.extend(
@@ -2915,7 +2995,7 @@ fn stage_feedback(
             .map(|change| format!("  - {change}")),
     );
     if !offers.is_empty() {
-        let control = control_spelling(naming);
+        let control = control_spelling(naming, presentation);
         lines.push(String::new());
         lines.push("To accept this change and receive the output:".to_string());
         for offer in offers {
@@ -3209,61 +3289,158 @@ fn return_instruction(
     id: &OfferId,
     spelling: &ReturnSpelling,
     control: &str,
+    description: &str,
+    include_display_plan: bool,
 ) -> String {
-    let id = terminal_safe(&id.0);
     let ReturnSpelling { floor, ranks } = spelling;
     match sanitizer {
-        None => format!(
-            "  - Declare the lowest label this session accepts from the subagent's return, then call the subagent \
+        None => {
+            let call = remedy_call(
+                control,
+                id,
+                ", label: {trust: \"<rank>\"}",
+                description,
+                include_display_plan,
+            );
+            format!(
+                "  - Declare the lowest label this session accepts from the subagent's return, then call the subagent \
              tool again with the same arguments. The subagent starts at this session's label, now {floor}, and can \
              accept no change below the floor it is given: a subagent that must read below this session's trust needs \
              the floor at that rank, and its return may then narrow this session that far. An omitted dimension keeps \
-             its current value.\n    {control}(offer_id: \"{id}\", label: {{trust: \"<rank>\"}}), with \
+             its current value.\n    {call}, with \
              <rank> one of {ranks} (lowest first)"
-        ),
-        Some(name) if name.is_attest_schema() => format!(
-            "  - Attest the subagent's return: declare the floor and the JSON schema its return must match. The \
+            )
+        }
+        Some(name) if name.is_attest_schema() => {
+            let call = remedy_call(
+                control,
+                id,
+                &format!(", label: {floor}, return_schema: {{type: \"object\", ...}}"),
+                description,
+                include_display_plan,
+            );
+            format!(
+                "  - Attest the subagent's return: declare the floor and the JSON schema its return must match. The \
              schema is strict: an object lists its `properties`, every one `required`, and is closed as written \
              (no `additionalProperties`); an integer carries `minimum` and `maximum`; a string leaf carries \
              `enum`, `const`, or `format`, never free text. The return is delivered at the attestation's \
-             label.\n    {control}(offer_id: \"{id}\", label: {floor}, return_schema: {{type: \
-             \"object\", ...}})"
-        ),
+             label.\n    {call}"
+            )
+        }
+        Some(name) => {
+            let call = remedy_call(
+                control,
+                id,
+                &format!(", label: {floor}"),
+                description,
+                include_display_plan,
+            );
+            format!(
+                "  - Have sanitizer {} rewrite the subagent's return before this session receives it, and declare the \
+             floor.\n    {call}",
+                terminal_safe(name.as_str()),
+            )
+        }
+    }
+}
+
+fn return_description(sanitizer: Option<&appa_engine::names::SanitizerName>) -> String {
+    match sanitizer {
+        None => "Declare the lowest label this session accepts from the subagent's return".to_string(),
+        Some(name) if name.is_attest_schema() => {
+            "Declare the return label and the JSON schema it must satisfy".to_string()
+        }
         Some(name) => format!(
-            "  - Have sanitizer {} rewrite the subagent's return before this session receives it, and declare the \
-             floor.\n    {control}(offer_id: \"{id}\", label: {floor})",
+            "Have sanitizer {} rewrite the subagent's return and declare the floor",
             terminal_safe(name.as_str())
         ),
     }
 }
 
-fn remedy_instruction(plan: &ExecutableRemedyPlan, id: &OfferId, spelling: &ReturnSpelling, control: &str) -> String {
-    if let Some(sanitizer) = plan.return_step() {
-        return return_instruction(sanitizer, id, spelling, control);
-    }
+fn remedy_action(plan: &ExecutableRemedyPlan, registry: Option<&Registry>, target: &str) -> String {
     let needs_approval = !plan.required.is_empty();
-    let action = match (needs_approval, plan.narrowing().is_some(), plan.sanitizer()) {
-        (true, _, Some(sanitizer)) => {
-            format!(
-                "Submit for approval and use sanitizer {}'s result",
-                terminal_safe(sanitizer.as_str())
-            )
-        }
-        (false, _, Some(sanitizer)) => {
-            format!("Use sanitizer {}'s result", terminal_safe(sanitizer.as_str()))
-        }
-        (true, true, None) => "Submit for approval and accept this change for the rest of this session".to_string(),
-        (false, true, None) => "Accept this change for the rest of this session".to_string(),
-        (true, false, None) => "Submit for approval".to_string(),
-        (false, false, None) => "Apply the offered remedy".to_string(),
-    };
-    let mut instruction = format!("  - {action}:\n    {control}(offer_id: \"{}\")", terminal_safe(&id.0));
-    if needs_approval {
-        instruction.push_str(
-            "\n    The confirmation card is not open yet. Make this call now; only then wait for the ruling.",
+    if let Some(sanitizer) = plan.hop() {
+        let mut action = format!(
+            "Use sanitizer {} to rewrite the arguments for {}",
+            terminal_safe(sanitizer.as_str()),
+            terminal_safe(target),
         );
+        if let Some(hint) = registry
+            .and_then(|registry| registry.sanitizer(sanitizer))
+            .and_then(|sanitizer| sanitizer.hint.as_ref())
+        {
+            action.push_str(": ");
+            action.push_str(&terminal_safe(hint.as_str()));
+        }
+        action
+    } else {
+        match (needs_approval, plan.narrowing().is_some(), plan.sanitizer()) {
+            (true, _, Some(sanitizer)) => {
+                format!(
+                    "Submit for approval and use sanitizer {}'s result",
+                    terminal_safe(sanitizer.as_str())
+                )
+            }
+            (false, _, Some(sanitizer)) => {
+                format!("Use sanitizer {}'s result", terminal_safe(sanitizer.as_str()))
+            }
+            (true, true, None) => "Submit for approval and accept this change for the rest of this session".to_string(),
+            (false, true, None) => "Accept this change for the rest of this session".to_string(),
+            (true, false, None) => "Submit for approval".to_string(),
+            (false, false, None) => "Apply the offered remedy".to_string(),
+        }
+    }
+}
+
+fn remedy_description(plan: &ExecutableRemedyPlan, registry: Option<&Registry>, target: &str) -> String {
+    match plan.return_step() {
+        Some(sanitizer) => return_description(sanitizer),
+        None => remedy_action(plan, registry, target),
+    }
+}
+
+fn remedy_call(control: &str, id: &OfferId, arguments: &str, description: &str, include_display_plan: bool) -> String {
+    let plan = include_display_plan
+        .then(|| serde_json::to_string(description).expect("a plan description serializes"))
+        .map(|plan| format!(", plan: {plan}"))
+        .unwrap_or_default();
+    format!("{control}(offer_id: \"{}\"{arguments}{plan})", terminal_safe(&id.0))
+}
+
+fn remedy_instruction(
+    plan: &ExecutableRemedyPlan,
+    id: &OfferId,
+    spelling: &ReturnSpelling,
+    control: &str,
+    registry: Option<&Registry>,
+    target: &str,
+    include_display_plan: bool,
+) -> String {
+    let description = remedy_description(plan, registry, target);
+    if let Some(sanitizer) = plan.return_step() {
+        return return_instruction(sanitizer, id, spelling, control, &description, include_display_plan);
+    }
+    let mut instruction = format!(
+        "  - {description}:\n    {}",
+        remedy_call(control, id, "", &description, include_display_plan)
+    );
+    let needs_approval = !plan.required.is_empty();
+    if needs_approval {
+        if include_display_plan {
+            instruction.push_str("\n    The runtime asks the configured authority and returns its ruling.");
+        } else {
+            instruction.push_str(
+                "\n    The confirmation card is not open yet. Make this call now; only then wait for the ruling.",
+            );
+        }
     }
     instruction
+}
+
+struct RemedyRenderContext<'a> {
+    registry: Option<&'a Registry>,
+    target: &'a str,
+    presentation: &'a EmbeddedPresentationOptions,
 }
 
 fn remedy_lines(
@@ -3272,19 +3449,27 @@ fn remedy_lines(
     spelling: &ReturnSpelling,
     chain: &TrustChain,
     naming: ToolNaming,
+    context: RemedyRenderContext<'_>,
 ) -> Vec<String> {
     // Both lines name a call this model has to make: the remedy through the runtime's own
     // control tool, the redispatch through the tool itself. Each is spelled the way this
     // deployment's harness dispatches it, not by the identity the runtime keys facts on.
-    let control = control_spelling(naming);
+    let control = control_spelling(naming, context.presentation);
     planned
         .plans
         .iter()
         .filter_map(|plan| match plan {
-            RemedyPlan::Executable(plan) => offers
-                .iter()
-                .find(|(_, offered)| *offered == plan.id)
-                .map(|(id, _)| remedy_instruction(plan, id, spelling, &control)),
+            RemedyPlan::Executable(plan) => offers.iter().find(|(_, offered)| *offered == plan.id).map(|(id, _)| {
+                remedy_instruction(
+                    plan,
+                    id,
+                    spelling,
+                    &control,
+                    context.registry,
+                    context.target,
+                    context.presentation.include_display_plan,
+                )
+            }),
             RemedyPlan::Redispatch(redispatch) => Some(format!(
                 "  - Run {} first; it clears: {}.",
                 terminal_safe(&naming.model_spelling(redispatch.tool().as_str())),
@@ -3301,13 +3486,47 @@ fn remedy_lines(
         .collect()
 }
 
+fn display_plans(
+    planned: &PlannedBlock,
+    offers: &[(OfferId, PlanId)],
+    reasons: &[String],
+    registry: Option<&Registry>,
+    target: &str,
+) -> Vec<RemedyDisplayPlan> {
+    planned
+        .plans
+        .iter()
+        .filter_map(|plan| match plan {
+            RemedyPlan::Executable(plan) => offers.iter().find(|(_, offered)| *offered == plan.id).map(|(id, _)| {
+                let description = remedy_description(plan, registry, target);
+                RemedyDisplayPlan {
+                    offer_id: id.0.clone(),
+                    text: if reasons.is_empty() {
+                        description
+                    } else {
+                        format!("{description}\nWhy: {}", reasons.join("; "))
+                    },
+                }
+            }),
+            RemedyPlan::Redispatch(_) => None,
+        })
+        .collect()
+}
+
+struct RenderedBlock {
+    text: String,
+    display: Option<RemedyDisplay>,
+}
+
 fn block_feedback(
     planned: &PlannedBlock,
     offers: &[(OfferId, PlanId)],
     registry: &Registry,
     bounds: &ReturnBounds,
     naming: ToolNaming,
-) -> String {
+    target: &str,
+    presentation: &EmbeddedPresentationOptions,
+) -> RenderedBlock {
     let chain = registry.trust_chain();
     let mut reasons = Vec::new();
     for gap in &planned.raw.requirement_gaps {
@@ -3359,15 +3578,33 @@ fn block_feedback(
         String::new(),
         "Why:".to_string(),
     ];
-    lines.extend(reasons.into_iter().map(|reason| format!("  - {reason}")));
+    lines.extend(reasons.iter().map(|reason| format!("  - {reason}")));
 
-    let remedies = remedy_lines(planned, offers, &ReturnSpelling::of(chain, bounds), chain, naming);
+    let spelling = ReturnSpelling::of(chain, bounds);
+    let remedies = remedy_lines(
+        planned,
+        offers,
+        &spelling,
+        chain,
+        naming,
+        RemedyRenderContext {
+            registry: Some(registry),
+            target,
+            presentation,
+        },
+    );
     if !remedies.is_empty() {
         lines.push(String::new());
         lines.push("Continue:".to_string());
         lines.extend(remedies);
     }
-    if let Some(advice) = planned.fork_advice {
+    let display = presentation.include_display_plan.then(|| {
+        let plans = display_plans(planned, offers, &reasons, Some(registry), target);
+        RemedyDisplay { reasons, plans }
+    });
+    if presentation.supports_delegation
+        && let Some(advice) = planned.fork_advice
+    {
         let remedies_required = !planned.raw.requirement_gaps.is_empty();
         lines.push(String::new());
         lines.push(fork_heading(advice).to_string());
@@ -3376,7 +3613,10 @@ fn block_feedback(
             fork_advice_text(advice, remedies_required).replace('\n', "\n  ")
         ));
     }
-    lines.join("\n")
+    RenderedBlock {
+        text: lines.join("\n"),
+        display,
+    }
 }
 
 fn fork_heading(advice: ForkAdvice) -> &'static str {
@@ -3461,13 +3701,13 @@ mod tests {
         ProposedCall, Resolution, ReturnBounds, RuntimeEngine, SanitizerSubject, TrajectoryId, audience_wire,
         block_feedback, engine_id, remedy_instruction, remedy_lines, terminal_safe,
     };
-    use crate::api::ToolNaming;
+    use crate::api::{EmbeddedPresentationOptions, ToolNaming};
     use crate::consult::{AnnotationAnswer, HistoryEntry, RequiredAudienceAnswer, SanitizerPoint};
     use appa_engine::check::{Gap, RawBlock};
     use appa_engine::contract::{AudienceRequirement, DeltaAudience, HistoryRequirement, RecipientSpec};
     use appa_engine::fact::{EffectKind, EffectSet};
     use appa_engine::label::{Audience, DeclaredAudience, ReaderId, Trust};
-    use appa_engine::names::{AnnotatorName, MarkName};
+    use appa_engine::names::{AnnotatorName, MarkName, SanitizerName};
     use appa_engine::plan::{ExecutableRemedyPlan, PlanId, PlannedBlock, RemedyPlan, RemedyStep};
     use appa_engine::value::{RawResultDigest, ToolName, ValueBody};
 
@@ -3856,14 +4096,72 @@ mod tests {
                 &offers,
                 &spelling,
                 &TrustChain::new(Vec::new()),
-                ToolNaming::AsAuthored
+                ToolNaming::AsAuthored,
+                super::RemedyRenderContext {
+                    registry: None,
+                    target: "tool",
+                    presentation: &EmbeddedPresentationOptions::default(),
+                },
             ),
             vec![
-                remedy_instruction(&plan(3), &offers[1].0, &spelling, BARE_CONTROL_TOOL),
-                remedy_instruction(&plan(8), &offers[0].0, &spelling, BARE_CONTROL_TOOL),
+                remedy_instruction(
+                    &plan(3),
+                    &offers[1].0,
+                    &spelling,
+                    BARE_CONTROL_TOOL,
+                    None,
+                    "tool",
+                    false
+                ),
+                remedy_instruction(
+                    &plan(8),
+                    &offers[0].0,
+                    &spelling,
+                    BARE_CONTROL_TOOL,
+                    None,
+                    "tool",
+                    false
+                ),
             ],
             "the plan with no offer is not shown; the rest carry their own offer"
         );
+    }
+
+    #[test]
+    fn an_input_sanitizer_remedy_names_its_action_target_and_policy_hint() {
+        let policy = appa_policy::Config::from_toml_str(
+            r#"
+                version = 2
+                [[sanitizer]]
+                name = "redact-command"
+                on = ["tool_input"]
+                hint = "Replace credential values with redaction markers."
+                [sanitizer.permits]
+                audience = { from = ["secret"], to = ["internal"] }
+            "#,
+        )
+        .expect("the sanitizer policy compiles");
+        let plan = ExecutableRemedyPlan {
+            id: PlanId::new(1),
+            steps: vec![RemedyStep::Derive(SanitizerName::new("redact-command"))],
+            required: vec![],
+        };
+        let instruction = remedy_instruction(
+            &plan,
+            &OfferId("offer-1".to_string()),
+            &super::ReturnSpelling {
+                floor: "{}".to_string(),
+                ranks: String::new(),
+            },
+            BARE_CONTROL_TOOL,
+            Some(policy.registry()),
+            "shell",
+            false,
+        );
+
+        assert!(instruction.contains("Use sanitizer redact-command to rewrite the arguments for shell"));
+        assert!(instruction.contains("Replace credential values with redaction markers."));
+        assert!(!instruction.contains("Apply the offered remedy"));
     }
 
     /// A redispatch line tells the model to run a tool itself, so a served deployment
@@ -3888,7 +4186,21 @@ mod tests {
             floor: "{}".to_string(),
             ranks: String::new(),
         };
-        let lines = |naming| remedy_lines(&planned, &[], &spelling, &TrustChain::new(Vec::new()), naming).join("\n");
+        let lines = |naming| {
+            remedy_lines(
+                &planned,
+                &[],
+                &spelling,
+                &TrustChain::new(Vec::new()),
+                naming,
+                super::RemedyRenderContext {
+                    registry: None,
+                    target: "tool",
+                    presentation: &EmbeddedPresentationOptions::default(),
+                },
+            )
+            .join("\n")
+        };
         assert_eq!(
             lines(ToolNaming::Canonical {
                 adapter: appa_adapter_claude_code::adapter()
@@ -3929,12 +4241,29 @@ mod tests {
             floor: "{}".to_string(),
             ranks: String::new(),
         };
-        let blocked =
-            |naming| remedy_lines(&planned, &offers, &spelling, &TrustChain::new(Vec::new()), naming).join("\n");
+        let blocked = |naming| {
+            remedy_lines(
+                &planned,
+                &offers,
+                &spelling,
+                &TrustChain::new(Vec::new()),
+                naming,
+                super::RemedyRenderContext {
+                    registry: None,
+                    target: "tool",
+                    presentation: &EmbeddedPresentationOptions::default(),
+                },
+            )
+            .join("\n")
+        };
         assert_eq!(
             blocked(claude_code),
             served_spelling(blocked(ToolNaming::AsAuthored)),
             "the served remedy line differs from the embedded one only in the control tool's spelling",
+        );
+        assert!(
+            !blocked(ToolNaming::AsAuthored).contains("plan:"),
+            "the default CLI rendering stays wire-compatible"
         );
 
         let residual = appa_engine::check::Narrowing {
@@ -3948,6 +4277,7 @@ mod tests {
                 &[OfferId("offer-1".to_string())],
                 &TrustChain::new(Vec::new()),
                 naming,
+                &EmbeddedPresentationOptions::default(),
             )
         };
         assert_eq!(
@@ -3960,6 +4290,83 @@ mod tests {
             staged(ToolNaming::AsAuthored),
             "the deployments name different spellings",
         );
+    }
+
+    #[test]
+    fn display_plans_describe_return_remedies_in_the_rendered_call() {
+        let plan = ExecutableRemedyPlan {
+            id: PlanId::new(1),
+            steps: vec![RemedyStep::Return(None)],
+            required: Vec::new(),
+        };
+        let instruction = remedy_instruction(
+            &plan,
+            &OfferId("0123456789abcdef".to_string()),
+            &super::ReturnSpelling {
+                floor: "{trust: \"internal\"}".to_string(),
+                ranks: "\"internal\"".to_string(),
+            },
+            "approve_remedy",
+            None,
+            "subagent",
+            true,
+        );
+
+        assert!(
+            instruction.contains("plan: \"Declare the lowest label this session accepts from the subagent's return\"")
+        );
+        assert!(instruction.contains("label: {trust: \"<rank>\"}"));
+    }
+
+    #[test]
+    fn embedded_presentation_uses_the_host_control_name_and_omits_delegation_advice() {
+        let options = EmbeddedPresentationOptions {
+            control_tool: "approve_remedy".to_string(),
+            supports_delegation: false,
+            include_display_plan: true,
+        };
+        let planned = PlannedBlock {
+            raw: RawBlock {
+                requirement_gaps: vec![],
+                narrowing: None,
+            },
+            plans: vec![RemedyPlan::Executable(ExecutableRemedyPlan {
+                id: PlanId::new(1),
+                steps: vec![RemedyStep::Authorize(appa_engine::names::AuthorityName::new("officer"))],
+                required: vec![appa_engine::plan::RequiredRuling {
+                    authority: appa_engine::names::AuthorityName::new("officer"),
+                    covers: Vec::new(),
+                }],
+            })],
+            fork_advice: Some(super::ForkAdvice::SameLabel),
+        };
+        let policy = appa_policy::Config::from_toml_str("version = 2").expect("the policy compiles");
+        let feedback = block_feedback(
+            &planned,
+            &[(OfferId("0123456789abcdef".to_string()), PlanId::new(1))],
+            policy.registry(),
+            &ReturnBounds {
+                label: appa_engine::label::Label::top(),
+                lowest: Trust::new(0),
+            },
+            ToolNaming::AsAuthored,
+            "tool",
+            &options,
+        );
+        assert!(feedback.text.contains("approve_remedy(offer_id"));
+        assert!(feedback.text.contains("plan: \"Submit for approval\""));
+        assert!(
+            feedback
+                .text
+                .contains("The runtime asks the configured authority and returns its ruling.")
+        );
+        assert!(!feedback.text.contains("confirmation card"));
+        assert!(!feedback.text.contains(BARE_CONTROL_TOOL));
+        assert!(!feedback.text.contains("Alternative:"));
+        assert!(!feedback.text.contains("Delegation:"));
+        let display = feedback.display.expect("the opt-in carries a typed display plan");
+        assert_eq!(display.plans[0].offer_id, "0123456789abcdef");
+        assert_eq!(display.plans[0].text, "Submit for approval");
     }
 
     #[test]
@@ -4003,12 +4410,14 @@ mod tests {
                     lowest: Trust::new(0),
                 },
                 ToolNaming::AsAuthored,
+                "tool",
+                &EmbeddedPresentationOptions::default(),
             )
         };
         let diagnostic = "Fresh review is configured for this call, but no authority can review the required expansion to the public audience.";
 
-        assert!(feedback(false).contains(diagnostic));
-        assert!(!feedback(true).contains(diagnostic));
+        assert!(feedback(false).text.contains(diagnostic));
+        assert!(!feedback(true).text.contains(diagnostic));
     }
 
     fn restricted(ids: &[&str]) -> Audience {

@@ -529,6 +529,16 @@ pub enum HookDecision {
 pub struct OfferedRemedy {
     pub id: String,
     pub returns: Option<OfferedReturn>,
+    /// Input sanitizer that rewrites call arguments before re-proposing the tool.
+    pub input_sanitizer: Option<OfferedInputSanitizer>,
+}
+
+/// Typed metadata for an input-sanitizer remedy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfferedInputSanitizer {
+    pub name: String,
+    pub target: String,
+    pub description: Option<String>,
 }
 
 /// How a return-declaring plan crosses the child's return: as the child

@@ -553,11 +553,14 @@ async fn an_embedded_host_ruling_survives_without_any_mcp_request_context() {
     )
     .await;
     assert!(matches!(gate, HookDecision::PassControl));
-    let reply = deployment
+    let result = deployment
         .runtime
         .execute_embedded_remedy(&actor, serde_json::from_value(args).unwrap())
         .await;
-    assert!(reply.text.contains("Authorized"), "{reply:?}");
+    assert!(
+        matches!(result, appa_runtime::api::RemedyOutcome::Authorized { .. }),
+        "{result:?}"
+    );
 }
 
 #[tokio::test]

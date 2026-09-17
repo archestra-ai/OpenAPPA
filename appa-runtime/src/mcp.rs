@@ -786,7 +786,9 @@ fn server_config(allowed_hosts: &[String]) -> StreamableHttpServerConfig {
 mod tests {
     use super::*;
     use crate::api::raw;
-    use crate::api::{OfferId, ProposedCall, RemedyOutcome, Runtime, ToolCallDecision};
+    use crate::api::{
+        EmbeddedPresentationOptions, OfferId, ProposedCall, RemedyOutcome, RemedyRefusal, Runtime, ToolCallDecision,
+    };
     use crate::config::Config;
     use appa_runtime_api::HookDecision;
 
@@ -1162,10 +1164,10 @@ mod tests {
         assert_eq!(
             outcome,
             RemedyOutcome::Refused {
-                detail: "no live offer with this id exists".to_string(),
+                reason: RemedyRefusal::UnknownOffer,
             },
         );
-        assert_eq!(remedy_result(runtime.remedy_reply(outcome)).is_error, Some(true));
+        assert_eq!(remedy_result(runtime.render_remedy(outcome)).is_error, Some(true));
     }
 
     /// One offer executes at a time, and what says so is a record: an execution that never
@@ -1177,7 +1179,7 @@ mod tests {
         let (runtime, root, quoted) = blocked_offer(&dir).await;
         let actor = acting(root.0.as_str());
         let already = RemedyOutcome::Refused {
-            detail: "this offer is already being executed".to_string(),
+            reason: RemedyRefusal::AlreadyExecuting,
         };
 
         let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(600);
@@ -1263,7 +1265,7 @@ mod tests {
         let (runtime, root, quoted, _dir) = blocked_under(&url, "cc:mcp-dropped", 4000).await;
         let actor = acting(root.0.as_str());
         let already = RemedyOutcome::Refused {
-            detail: "this offer is already being executed".to_string(),
+            reason: RemedyRefusal::AlreadyExecuting,
         };
 
         let mut executing = Box::pin(runtime.execute_remedy(&actor, quoted.clone()));
@@ -1330,7 +1332,7 @@ mod tests {
             matches!(outcome, RemedyOutcome::Authorized { .. }),
             "accepting the narrowing releases the call: {outcome:?}"
         );
-        let rendered = remedy_result(runtime.remedy_reply(outcome));
+        let rendered = remedy_result(runtime.render_remedy(outcome));
         rendered
             .content
             .first()
@@ -1481,7 +1483,7 @@ mod tests {
         assert_eq!(
             runtime.execute_remedy(&acting("cc:mcp-stranger"), offer.clone()).await,
             RemedyOutcome::Refused {
-                detail: "no live offer with this id exists".to_string(),
+                reason: RemedyRefusal::UnknownOffer,
             },
             "an offer executes only for the trajectory that pursues it",
         );
@@ -1523,6 +1525,253 @@ mod tests {
             runtime.take_vouched(&PermitKey::offer(&quoted)).is_err(),
             "executing the act spends its vouch on every transport"
         );
+    }
+
+    #[tokio::test]
+    async fn an_embedded_remedy_keeps_the_vouch_and_actor_checks_typed() {
+        let (runtime, root, quoted, _dir) = blocked_deployment().await;
+        let owner = acting(root.0.as_str());
+        let stranger = acting("cc:mcp-embedded-stranger");
+        let args = ExecuteRemedyPlanArgs {
+            offer_id: quoted.0.clone(),
+            label: None,
+            return_schema: None,
+        };
+
+        assert!(matches!(
+            crate::hooks::handle(&runtime, control_act(&owner, &quoted)).await,
+            HookDecision::PassControl
+        ));
+        assert_eq!(
+            runtime.execute_embedded_remedy(&stranger, args).await,
+            RemedyOutcome::Refused {
+                reason: RemedyRefusal::ActorMismatch,
+            },
+            "the embedded path must spend a hook vouch and compare its actor"
+        );
+
+        assert!(matches!(
+            crate::hooks::handle(&runtime, control_act(&owner, &quoted)).await,
+            HookDecision::PassControl
+        ));
+        let outcome = runtime
+            .execute_embedded_remedy(
+                &owner,
+                ExecuteRemedyPlanArgs {
+                    offer_id: quoted.0,
+                    label: None,
+                    return_schema: None,
+                },
+            )
+            .await;
+        assert!(matches!(
+            outcome,
+            RemedyOutcome::Declined { .. } | RemedyOutcome::NoAnswer { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn malformed_embedded_offer_ids_refuse_without_spending_a_valid_vouch() {
+        let (runtime, root, quoted, _dir) = blocked_deployment().await;
+        let actor = acting(root.0.as_str());
+        assert!(matches!(
+            crate::hooks::handle(&runtime, control_act(&actor, &quoted)).await,
+            HookDecision::PassControl
+        ));
+
+        assert_eq!(
+            runtime
+                .execute_embedded_remedy(
+                    &actor,
+                    ExecuteRemedyPlanArgs {
+                        offer_id: "not-an-offer".to_owned(),
+                        label: None,
+                        return_schema: None,
+                    },
+                )
+                .await,
+            RemedyOutcome::Refused {
+                reason: RemedyRefusal::InvalidOfferId(crate::api::OfferIdRefusal::WrongLength),
+            }
+        );
+
+        let outcome = runtime
+            .execute_embedded_remedy(
+                &actor,
+                ExecuteRemedyPlanArgs {
+                    offer_id: quoted.0,
+                    label: None,
+                    return_schema: None,
+                },
+            )
+            .await;
+        assert!(matches!(
+            outcome,
+            RemedyOutcome::Declined { .. } | RemedyOutcome::NoAnswer { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_fresh_embedded_invocation_does_not_replay_a_spent_offer() {
+        let dir = tempfile::tempdir().expect("a test directory");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(
+            &path,
+            r#"
+[policy]
+version = 2
+[[policy.tool]]
+name = "read"
+delta = { trust = "suspicious" }
+[policy.deployment]
+context_control = true
+[externals]
+timeout_ms = 1000
+max_body_bytes = 4096
+"#,
+        )
+        .expect("write the fixture");
+        let runtime = Runtime::open(
+            Config::load(&path).expect("valid policy"),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("open the runtime");
+        let actor = acting("cc:embedded-fresh-offer");
+        let session = runtime.create_session(actor.root.clone()).expect("create the root");
+        assert!(matches!(
+            session
+                .on_tool_call(
+                    ProposedCall {
+                        tool: "read".to_owned(),
+                        arguments: raw(serde_json::json!({})),
+                    },
+                    false
+                )
+                .await
+                .expect("propose the read"),
+            ToolCallDecision::Deny { .. }
+        ));
+        let offer = runtime
+            .minted_offers(&actor.root, &actor.root)
+            .into_iter()
+            .next()
+            .expect("an offered narrowing");
+        let args = || ExecuteRemedyPlanArgs {
+            offer_id: offer.0.clone(),
+            label: None,
+            return_schema: None,
+        };
+        assert!(matches!(
+            crate::hooks::handle(&runtime, control_act(&actor, &offer)).await,
+            HookDecision::PassControl
+        ));
+        assert!(matches!(
+            runtime.execute_embedded_remedy(&actor, args()).await,
+            RemedyOutcome::Authorized { .. }
+        ));
+        assert!(matches!(
+            crate::hooks::handle(&runtime, control_act(&actor, &offer)).await,
+            HookDecision::PassControl
+        ));
+        assert_eq!(
+            runtime.execute_embedded_remedy(&actor, args()).await,
+            RemedyOutcome::Refused {
+                reason: RemedyRefusal::UnknownOffer
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn embedded_call_denials_expose_offers_without_reading_feedback() {
+        let (runtime, root, _quoted, _dir) = blocked_deployment().await;
+        let actor = acting(root.0.as_str());
+        let outcome = crate::hooks::handle_embedded(
+            &runtime,
+            appa_runtime_api::HookEvent::ToolCall {
+                actor,
+                call: ProposedCall {
+                    tool: "wire".to_string(),
+                    arguments: raw(serde_json::json!({"amount": 501})),
+                },
+                call_id: None,
+                spawn: false,
+                ruling: None,
+            },
+        )
+        .await;
+        let HookDecision::DenyCall { offers, .. } = &outcome.decision else {
+            panic!("the policy must block the call: {:?}", outcome.decision);
+        };
+        let presentation = outcome.presentation.expect("a denial carries typed offers");
+        assert_eq!(presentation.offers, *offers);
+        assert!(!presentation.offers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn embedded_presentation_options_are_scoped_to_each_hook_request() {
+        let (runtime, root, _quoted, _dir) = blocked_deployment().await;
+        let event = |amount| appa_runtime_api::HookEvent::ToolCall {
+            actor: acting(root.0.as_str()),
+            call: ProposedCall {
+                tool: "wire".to_string(),
+                arguments: raw(serde_json::json!({"amount": amount})),
+            },
+            call_id: None,
+            spawn: false,
+            ruling: None,
+        };
+        let first = crate::hooks::handle_embedded_with_options(
+            &runtime,
+            event(501),
+            EmbeddedPresentationOptions {
+                control_tool: "client_one_remedy".to_owned(),
+                supports_delegation: false,
+                include_display_plan: false,
+            },
+        )
+        .await;
+        let second = crate::hooks::handle_embedded_with_options(
+            &runtime,
+            event(502),
+            EmbeddedPresentationOptions {
+                control_tool: "client_two_remedy".to_owned(),
+                supports_delegation: false,
+                include_display_plan: false,
+            },
+        )
+        .await;
+        let feedback = |outcome: crate::api::EmbeddedHookOutcome| match outcome.decision {
+            HookDecision::DenyCall { feedback, .. } => feedback,
+            decision => panic!("the policy must block the call: {decision:?}"),
+        };
+        let first = feedback(first);
+        let second = feedback(second);
+        assert!(first.contains("client_one_remedy(offer_id"));
+        assert!(!first.contains("client_two_remedy"));
+        assert!(second.contains("client_two_remedy(offer_id"));
+        assert!(!second.contains("client_one_remedy"));
+    }
+
+    #[test]
+    fn rendering_a_typed_remedy_outcome_does_not_change_its_state() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config(), dir.path().join("appa.db"), None).expect("the runtime opens");
+        let outcome = RemedyOutcome::Refused {
+            reason: RemedyRefusal::ActorMismatch,
+        };
+        let original = outcome.clone();
+        let rendered = runtime.render_remedy(outcome.clone());
+        assert_eq!(outcome, original);
+        assert!(rendered.is_error);
+        assert!(rendered.text.contains("different session"));
+    }
+
+    #[test]
+    fn typed_offer_ids_reject_non_rendered_spellings() {
+        assert!(OfferId::parse("0123456789abcdef").is_ok());
+        assert!(OfferId::parse("0123456789ABCDEF").is_err());
+        assert!(OfferId::parse("0123456789abcde").is_err());
     }
 
     /// A network caller names the offer id, so an id no minting could have produced is

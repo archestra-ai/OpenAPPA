@@ -17,7 +17,7 @@ pub use crate::engine::{
     AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, LabelSpelling, RemedyArguments, TrajectoryStatus,
 };
 pub use appa_runtime_api::{
-    Actor, OfferedRemedy, OutcomeBody, ProposedCall, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
+    Actor, OfferedRemedy, OutcomeBody, ProposedCall, Review, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
 };
 pub(crate) use session::{LateOpen, Session, is_control_tool};
 
@@ -34,6 +34,28 @@ use host::{HostState, host_actor, inventory_at};
 /// One remedy offer as it is quoted and carried.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OfferId(pub String);
+
+impl OfferId {
+    /// Parses the fixed-width lowercase hexadecimal spelling the runtime renders in feedback.
+    pub fn parse(value: &str) -> Result<Self, OfferIdRefusal> {
+        if value.len() != 16 {
+            return Err(OfferIdRefusal::WrongLength);
+        }
+        if !value.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')) {
+            return Err(OfferIdRefusal::NotLowercaseHex);
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+/// Why an externally supplied rendered offer id cannot identify an offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum OfferIdRefusal {
+    #[error("an offer id must contain exactly 16 characters")]
+    WrongLength,
+    #[error("an offer id must use lowercase hexadecimal characters")]
+    NotLowercaseHex,
+}
 
 /// The exact call the harness must now propose: the engine's canonical
 /// bytes, never re-rendered and never edited.
@@ -183,6 +205,7 @@ pub(crate) enum ToolCallDecision {
     Deny {
         feedback: String,
         offers: Vec<OfferedRemedy>,
+        display: Vec<RemedyDisplay>,
         review: Vec<appa_runtime_api::Review>,
     },
 }
@@ -195,8 +218,13 @@ pub(crate) enum ToolCallDecision {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ToolResultDecision {
     Keep,
-    Deliver { value: String },
-    Replace { placeholder: String },
+    Deliver {
+        value: String,
+    },
+    Replace {
+        placeholder: String,
+        presentation: Option<RemedyPresentation>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -204,8 +232,92 @@ pub(crate) enum RemedyDecision {
     Authorized { call: ExactCall },
     Substituted { call: ExactCall },
     Returned { value: String },
-    Declined { feedback: String },
+    Declined { presentation: RemedyPresentation },
     NoAnswer { feedback: String },
+}
+
+/// Structured presentation for policy decisions offering remedies.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemedyPresentation {
+    /// Model-facing explanation in plain text.
+    pub feedback: String,
+    /// Machine-readable remedy offers available for this block.
+    pub offers: Vec<OfferedRemedy>,
+    /// Active human-in-the-loop reviews associated with this block.
+    pub review: Vec<Review>,
+    /// Optional display plans formatted for embedded client presentation.
+    pub display: Vec<RemedyDisplay>,
+}
+
+/// Formatted policy reasons and display plans for a blocked call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemedyDisplay {
+    pub reasons: Vec<String>,
+    pub plans: Vec<RemedyDisplayPlan>,
+}
+
+/// Human-readable description paired with its corresponding offer ID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemedyDisplayPlan {
+    pub offer_id: String,
+    pub text: String,
+}
+
+/// Display configuration for an embedded host.
+/// Configures control tool names and formats without altering policy engine state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddedPresentationOptions {
+    pub control_tool: String,
+    pub supports_delegation: bool,
+    /// Formats remedy call lines with an explicit plan parameter.
+    pub include_display_plan: bool,
+}
+
+impl Default for EmbeddedPresentationOptions {
+    fn default() -> Self {
+        Self {
+            control_tool: appa_runtime_api::ADVERTISED_CONTROL_TOOL.to_owned(),
+            supports_delegation: true,
+            include_display_plan: false,
+        }
+    }
+}
+
+/// A hook outcome for an embedded host.
+/// Returns the standard wire decision alongside optional structured remedy presentations.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmbeddedHookOutcome {
+    pub decision: appa_runtime_api::HookDecision,
+    pub presentation: Option<RemedyPresentation>,
+}
+
+/// Explains why a remedy call was refused execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemedyRefusal {
+    /// The offer ID does not match the 16-character lowercase hex format.
+    InvalidOfferId(OfferIdRefusal),
+    /// No preceding control hook vouched for this offer.
+    Unvouched,
+    /// The offer belongs to a different session or actor.
+    ActorMismatch,
+    /// The offer is expired, already terminal, or from another trajectory.
+    UnknownOffer,
+    /// The offer is currently being executed by another caller.
+    AlreadyExecuting,
+    /// Runtime storage or execution failure.
+    Runtime { detail: String },
+}
+
+impl RemedyRefusal {
+    pub fn detail(&self) -> &str {
+        match self {
+            Self::InvalidOfferId(_) => "the offer id must be exactly 16 lowercase hexadecimal characters",
+            Self::Unvouched | Self::UnknownOffer => "no live offer with this id exists",
+            Self::ActorMismatch => "offer belongs to a different session",
+            Self::AlreadyExecuting => "this offer is already being executed",
+            Self::Runtime { detail } => detail,
+        }
+    }
 }
 
 /// What one whole `execute_remedy_plan` act produced: the engine's
@@ -218,15 +330,31 @@ pub enum RemedyOutcome {
     Authorized { call: ProposedCall },
     Substituted { call: ProposedCall },
     Returned { value: String },
-    Declined { feedback: String },
+    Declined { presentation: RemedyPresentation },
     NoAnswer { feedback: String },
-    Refused { detail: String },
+    Refused { reason: RemedyRefusal },
+}
+
+/// Authorization token binding one vouched remedy offer to an executing actor.
+#[derive(Debug)]
+pub(crate) struct RemedyAuthorization {
+    actor: Actor,
+    quoted: OfferId,
+    ruling: Option<appa_runtime_api::Ruling>,
+}
+
+impl RemedyAuthorization {
+    pub(crate) fn actor(&self) -> &Actor {
+        &self.actor
+    }
 }
 
 impl From<EventError> for RemedyOutcome {
     fn from(error: EventError) -> RemedyOutcome {
         RemedyOutcome::Refused {
-            detail: error.to_string(),
+            reason: RemedyRefusal::Runtime {
+                detail: error.to_string(),
+            },
         }
     }
 }
@@ -1495,6 +1623,15 @@ impl Runtime {
     /// Reopens a persisted trajectory. There is no stored view: the next
     /// event rebuilds the engine's picture from the log.
     pub(crate) fn session(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Result<Session, EventError> {
+        self.session_with_presentation(root, trajectory, EmbeddedPresentationOptions::default())
+    }
+
+    pub(crate) fn session_with_presentation(
+        &self,
+        root: &TrajectoryId,
+        trajectory: &TrajectoryId,
+        presentation: EmbeddedPresentationOptions,
+    ) -> Result<Session, EventError> {
         let known = self
             .inner
             .store
@@ -1507,11 +1644,12 @@ impl Runtime {
         if !known {
             return Err(EventError::UnknownTrajectory);
         }
-        Ok(Session::attach(
+        Ok(Session::attach_with_presentation(
             Arc::clone(&self.inner),
             self.inner.deployment(),
             trajectory.clone(),
             root.clone(),
+            presentation,
         ))
     }
 
@@ -1748,41 +1886,76 @@ impl Runtime {
         self.remedy(acting, offer, arguments, None, None).await
     }
 
-    /// The remedy entry point for an in-process host. The host first dispatches
-    /// ToolCall and supplies its authenticated actor. Authorities bound in the
-    /// policy still work; an interactive review without a channel to a person
-    /// returns NoAnswer through the existing consult mechanism.
-    pub async fn execute_embedded_remedy(&self, actor: &Actor, args: ExecuteRemedyPlanArgs) -> RemedyReply {
-        self.execute_remedy_plan(args, None, Some(actor)).await
+    /// Executes an embedded remedy plan for an authenticated actor.
+    /// Returns a structured `RemedyOutcome`.
+    pub async fn execute_embedded_remedy(&self, actor: &Actor, args: ExecuteRemedyPlanArgs) -> RemedyOutcome {
+        self.execute_embedded_remedy_with_options(actor, args, EmbeddedPresentationOptions::default())
+            .await
     }
 
-    /// The whole control call, from the standing the preceding hook left to the
-    /// text the model reads. Both the MCP tool and an in-process host arrive
-    /// here; what differs is only whether a review can reach a person.
+    /// Executes one admitted embedded remedy with request-scoped display capabilities.
+    pub async fn execute_embedded_remedy_with_options(
+        &self,
+        actor: &Actor,
+        args: ExecuteRemedyPlanArgs,
+        presentation: EmbeddedPresentationOptions,
+    ) -> RemedyOutcome {
+        self.execute_remedy_outcome(args, None, Some(actor), presentation, true)
+            .await
+    }
+
+    /// Executes a remedy plan for the MCP daemon, returning an MCP tool reply.
+    #[cfg(feature = "daemon")]
     pub(crate) async fn execute_remedy_plan(
         &self,
         args: ExecuteRemedyPlanArgs,
         elicitation: Option<&Elicitation>,
         expected_actor: Option<&Actor>,
     ) -> RemedyReply {
-        let quoted = OfferId(args.offer_id.clone());
-        let arguments = RemedyArguments::from(args);
-        // Requires the vouched trajectory from the preceding hook.
-        let Ok((acting, ruling)) = self.take_vouched(&PermitKey::offer(&quoted)) else {
-            return self.remedy_reply(RemedyOutcome::Refused {
-                detail: "no live offer with this id exists".to_string(),
-            });
+        self.render_remedy(
+            self.execute_remedy_outcome(
+                args,
+                elicitation,
+                expected_actor,
+                EmbeddedPresentationOptions::default(),
+                false,
+            )
+            .await,
+        )
+    }
+
+    async fn execute_remedy_outcome(
+        &self,
+        args: ExecuteRemedyPlanArgs,
+        elicitation: Option<&Elicitation>,
+        expected_actor: Option<&Actor>,
+        presentation: EmbeddedPresentationOptions,
+        strict_freshness: bool,
+    ) -> RemedyOutcome {
+        let quoted = match OfferId::parse(&args.offer_id) {
+            Ok(quoted) => quoted,
+            Err(reason) => {
+                return RemedyOutcome::Refused {
+                    reason: RemedyRefusal::InvalidOfferId(reason),
+                };
+            }
         };
-        if expected_actor.is_some_and(|expected| expected != &acting) {
-            return self.remedy_reply(RemedyOutcome::Refused {
-                detail: "offer belongs to a different session".into(),
-            });
-        }
+        let arguments = RemedyArguments::from(args);
+        let authorization = match self.take_vouched_remedy(quoted.clone(), expected_actor) {
+            Ok(authorization) => authorization,
+            Err(reason) => return RemedyOutcome::Refused { reason },
+        };
+        let acting = authorization.actor().clone();
         let started = std::time::Instant::now();
-        let outcome = self
-            .remedy(&acting, quoted.clone(), arguments, elicitation, ruling)
-            .await;
-        // Recorded from the typed outcome, before `remedy_reply` turns it into the text the
+        let outcome = if strict_freshness && self.offer_kind(&acting.root, &quoted).is_none() {
+            RemedyOutcome::Refused {
+                reason: RemedyRefusal::UnknownOffer,
+            }
+        } else {
+            self.execute_authorized_remedy_with_presentation(authorization, arguments, elicitation, presentation)
+                .await
+        };
+        // Recorded from the typed outcome, before rendering turns it into the text the
         // model reads: a remedy that takes a minute and then declines is the shape of "APPA
         // is in the way", and neither the duration nor the offer it quoted is in the
         // trajectory.
@@ -1798,13 +1971,13 @@ impl Runtime {
                 duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
             },
         );
-        self.remedy_reply(outcome)
+        outcome
     }
 
     /// The runtime keys the released call on its canonical identity, which is not a name any
     /// host advertises. What the model is told to call is that identity spelled the way its own
     /// harness dispatches it ([`Runtime::model_spelling`]).
-    pub(crate) fn remedy_reply(&self, outcome: RemedyOutcome) -> RemedyReply {
+    pub fn render_remedy(&self, outcome: RemedyOutcome) -> RemedyReply {
         let answer = |text: String| RemedyReply { text, is_error: false };
         match outcome {
             RemedyOutcome::Authorized { call } => answer(format!(
@@ -1819,9 +1992,10 @@ impl Runtime {
                 call.arguments.get(),
             )),
             RemedyOutcome::Returned { value } => answer(value),
-            RemedyOutcome::Declined { feedback } | RemedyOutcome::NoAnswer { feedback } => answer(feedback),
-            RemedyOutcome::Refused { detail } => RemedyReply {
-                text: detail,
+            RemedyOutcome::Declined { presentation } => answer(presentation.feedback),
+            RemedyOutcome::NoAnswer { feedback } => answer(feedback),
+            RemedyOutcome::Refused { reason } => RemedyReply {
+                text: reason.detail().to_string(),
                 is_error: true,
             },
         }
@@ -1834,7 +2008,8 @@ impl Runtime {
 pub fn parse_control_arguments(arguments: &str) -> Result<(OfferId, RemedyArguments), String> {
     let args: ExecuteRemedyPlanArgs =
         serde_json::from_str(arguments).map_err(|error| format!("execute_remedy_plan arguments: {error}"))?;
-    Ok((OfferId(args.offer_id.clone()), RemedyArguments::from(args)))
+    let offer = OfferId::parse(&args.offer_id).map_err(|error| format!("execute_remedy_plan offer_id: {error}"))?;
+    Ok((offer, RemedyArguments::from(args)))
 }
 
 /// The arguments the control tool takes. The schema derive is what the MCP tool
@@ -1893,8 +2068,28 @@ impl Runtime {
         elicitation: Option<&Elicitation>,
         ruling: Option<appa_runtime_api::Ruling>,
     ) -> RemedyOutcome {
+        self.remedy_with_presentation(
+            acting,
+            quoted,
+            arguments,
+            elicitation,
+            ruling,
+            EmbeddedPresentationOptions::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn remedy_with_presentation(
+        &self,
+        acting: &Actor,
+        quoted: OfferId,
+        arguments: RemedyArguments,
+        elicitation: Option<&Elicitation>,
+        ruling: Option<appa_runtime_api::Ruling>,
+        presentation: EmbeddedPresentationOptions,
+    ) -> RemedyOutcome {
         let unknown = || RemedyOutcome::Refused {
-            detail: "no live offer with this id exists".to_string(),
+            reason: RemedyRefusal::UnknownOffer,
         };
         let root = acting.root.clone();
         let trajectory = acting.child.clone().unwrap_or_else(|| root.clone());
@@ -1917,7 +2112,7 @@ impl Runtime {
             self.inner
                 .append_host_with::<RemedyOutcome, _>(&root, |log| match reduced(log).claimed(&claimed) {
                     true => Err(RemedyOutcome::Refused {
-                        detail: "this offer is already being executed".to_string(),
+                        reason: RemedyRefusal::AlreadyExecuting,
                     }),
                     false => Ok((
                         Some(HostObservation::Claimed {
@@ -1939,7 +2134,7 @@ impl Runtime {
             released: false,
         };
         let outcome = self
-            .run_remedy(&root, &pursuer, offer, arguments, elicitation, ruling)
+            .run_remedy(acting, offer, arguments, elicitation, ruling, presentation)
             .await;
         claim.release();
         outcome
@@ -1947,18 +2142,22 @@ impl Runtime {
 
     async fn run_remedy(
         &self,
-        root: &TrajectoryId,
-        pursuer: &TrajectoryId,
+        acting: &Actor,
         offer: OfferId,
         arguments: RemedyArguments,
         elicitation: Option<&Elicitation>,
         ruling: Option<appa_runtime_api::Ruling>,
+        presentation: EmbeddedPresentationOptions,
     ) -> RemedyOutcome {
-        let session = match self.session(root, pursuer) {
+        let root = &acting.root;
+        let pursuer = acting.child.as_ref().unwrap_or(root);
+        let session = match self.session_with_presentation(root, pursuer, presentation) {
             Ok(session) => session,
             Err(error) => {
                 return RemedyOutcome::Refused {
-                    detail: error.to_string(),
+                    reason: RemedyRefusal::Runtime {
+                        detail: error.to_string(),
+                    },
                 };
             }
         };
@@ -1966,12 +2165,50 @@ impl Runtime {
             Ok(RemedyDecision::Authorized { call }) => RemedyOutcome::Authorized { call: call.proposed() },
             Ok(RemedyDecision::Substituted { call }) => RemedyOutcome::Substituted { call: call.proposed() },
             Ok(RemedyDecision::Returned { value }) => RemedyOutcome::Returned { value },
-            Ok(RemedyDecision::Declined { feedback }) => RemedyOutcome::Declined { feedback },
+            Ok(RemedyDecision::Declined { presentation }) => RemedyOutcome::Declined { presentation },
             Ok(RemedyDecision::NoAnswer { feedback }) => RemedyOutcome::NoAnswer { feedback },
             Err(error) => RemedyOutcome::Refused {
-                detail: error.to_string(),
+                reason: RemedyRefusal::Runtime {
+                    detail: error.to_string(),
+                },
             },
         }
+    }
+
+    /// Binds a one-turn remedy vouch to an actor before execution begins.
+    pub(crate) fn take_vouched_remedy(
+        &self,
+        quoted: OfferId,
+        expected_actor: Option<&Actor>,
+    ) -> Result<RemedyAuthorization, RemedyRefusal> {
+        let (actor, ruling) = self
+            .take_vouched(&PermitKey::offer(&quoted))
+            .map_err(|_| RemedyRefusal::Unvouched)?;
+        if expected_actor.is_some_and(|expected| expected != &actor) {
+            return Err(RemedyRefusal::ActorMismatch);
+        }
+        Ok(RemedyAuthorization { actor, quoted, ruling })
+    }
+
+    /// Executes an authorization created by [`Self::take_vouched_remedy`].
+    /// Consuming the capability makes a second attempt impossible even before
+    /// the persisted offer's own single-execution checks run.
+    pub(crate) async fn execute_authorized_remedy_with_presentation(
+        &self,
+        authorization: RemedyAuthorization,
+        arguments: RemedyArguments,
+        elicitation: Option<&Elicitation>,
+        presentation: EmbeddedPresentationOptions,
+    ) -> RemedyOutcome {
+        self.remedy_with_presentation(
+            &authorization.actor,
+            authorization.quoted,
+            arguments,
+            elicitation,
+            authorization.ruling,
+            presentation,
+        )
+        .await
     }
 
     /// How long one execution's claim stands without word from the execution itself: the
@@ -1987,7 +2224,6 @@ impl Runtime {
 
     /// What taking a quoted offer in this root's family would consult, or `None` for an
     /// offer that no longer stands.
-    #[cfg(feature = "daemon")]
     pub(crate) fn offer_kind(&self, root: &TrajectoryId, quoted: &OfferId) -> Option<OfferKind> {
         let log = self.inner.log(root).ok()?;
         let offer = crate::engine::resolve_rendered(&log, quoted)?;

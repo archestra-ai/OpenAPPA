@@ -8,8 +8,8 @@ use appa_runtime_api::{
 };
 
 use crate::api::{
-    ChildReturnDecision, EventError, LateOpen, OfferId, Runtime, Session, SpawnResultDecision, ToolCallDecision,
-    ToolResultDecision, is_control_tool,
+    ChildReturnDecision, EmbeddedHookOutcome, EmbeddedPresentationOptions, EventError, LateOpen, OfferId,
+    RemedyPresentation, Runtime, Session, SpawnResultDecision, ToolCallDecision, ToolResultDecision, is_control_tool,
 };
 
 fn wire(decision: &HookDecision) -> serde_json::Value {
@@ -182,6 +182,24 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
     handle_internal(runtime, event).await.decision
 }
 
+/// Dispatches one hook for an embedded host, returning a typed `EmbeddedHookOutcome`.
+pub async fn handle_embedded(runtime: &Runtime, event: HookEvent) -> EmbeddedHookOutcome {
+    handle_embedded_with_options(runtime, event, EmbeddedPresentationOptions::default()).await
+}
+
+/// Dispatches an embedded hook with request-scoped presentation options.
+pub async fn handle_embedded_with_options(
+    runtime: &Runtime,
+    event: HookEvent,
+    presentation: EmbeddedPresentationOptions,
+) -> EmbeddedHookOutcome {
+    let handled = handle_internal_with_options(runtime, event, presentation).await;
+    EmbeddedHookOutcome {
+        decision: handled.decision,
+        presentation: handled.presentation,
+    }
+}
+
 /// One dispatched hook: the decision the adapters render, and the entry the runtime keeps
 /// about it.
 ///
@@ -192,15 +210,30 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
 /// release is still in scope, and never crosses the adapter boundary.
 pub(crate) struct Handled {
     pub(crate) decision: HookDecision,
+    pub(crate) presentation: Option<RemedyPresentation>,
     pub(crate) event: crate::events::RuntimeEvent,
 }
 
 pub(crate) async fn handle_internal(runtime: &Runtime, event: HookEvent) -> Handled {
+    handle_internal_with_options(runtime, event, EmbeddedPresentationOptions::default()).await
+}
+
+async fn handle_internal_with_options(
+    runtime: &Runtime,
+    event: HookEvent,
+    presentation_options: EmbeddedPresentationOptions,
+) -> Handled {
     let (kind, tool) = hook_shape(&event);
     let mut dispatch = None;
-    let decision = dispatch_event(runtime, event, &mut dispatch).await;
-    let (outcome, offers) = hook_result(&decision);
+    let mut presentation = None;
+    let decision = dispatch_event(runtime, event, &mut dispatch, &mut presentation, &presentation_options).await;
+    let presentation = presentation.or_else(|| presentation_for(&decision));
+    let (outcome, mut offers) = hook_result(&decision);
+    if let Some(presentation) = &presentation {
+        offers = presentation.offers.iter().map(|offer| offer.id.clone()).collect();
+    }
     Handled {
+        presentation,
         event: crate::events::RuntimeEvent::Hook {
             event: kind,
             tool,
@@ -251,7 +284,13 @@ fn hook_result(decision: &HookDecision) -> (crate::events::HookOutcome, Vec<Stri
 /// Dispatch one typed event to its session and fold the outcome into
 /// one decision. The dispatcher holds nothing between calls; every id
 /// it needs is in the event or in the runtime's persistence.
-async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Option<EngineDispatchId>) -> HookDecision {
+async fn dispatch_event(
+    runtime: &Runtime,
+    event: HookEvent,
+    dispatch: &mut Option<EngineDispatchId>,
+    presentation: &mut Option<RemedyPresentation>,
+    presentation_options: &EmbeddedPresentationOptions,
+) -> HookDecision {
     match event {
         HookEvent::SessionStart { root } => match open_or_reopen(runtime, &root) {
             Ok(_) => match runtime.live(&root, &root) {
@@ -295,9 +334,13 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
             // turn" on this hook, which would hold the harness in a turn
             // it has finished; a close that failed leaves the call open
             // and the next proposal refuses on its own.
-            if let Err(error) = on_actor(runtime, &actor, MissingStart::Refuse, |session| async move {
-                session.on_turn_end().await
-            })
+            if let Err(error) = on_actor(
+                runtime,
+                &actor,
+                MissingStart::Refuse,
+                presentation_options,
+                |session| async move { session.on_turn_end().await },
+            )
             .await
             {
                 tracing::warn!(root = %actor.root.0, %error, "the turn end closed no abandoned call");
@@ -319,12 +362,15 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
                 // the user interrupted the previous turn, and whatever it left
                 // open is settled before this turn's first call, control tools
                 // included, so a vouch this turn records is never released here.
-                //
                 // A settle that does not complete writes nothing, so the mark survives and
                 // the next proposal tries the same close again.
-                if let Err(error) = on_actor(runtime, &actor, MissingStart::OpenLate, |session| async move {
-                    session.on_turn_end().await
-                })
+                if let Err(error) = on_actor(
+                    runtime,
+                    &actor,
+                    MissingStart::OpenLate,
+                    presentation_options,
+                    |session| async move { session.on_turn_end().await },
+                )
                 .await
                 {
                     return fold(error, deny);
@@ -336,11 +382,17 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
             if is_control_tool(&call.tool) {
                 return control_call(runtime, &actor, &call, ruling);
             }
-            match on_actor(runtime, &actor, MissingStart::OpenLate, |session| {
-                let call = call.clone();
-                let call_id = call_id.clone();
-                async move { session.on_tool_call_identified(call, call_id, spawn).await }
-            })
+            match on_actor(
+                runtime,
+                &actor,
+                MissingStart::OpenLate,
+                presentation_options,
+                |session| {
+                    let call = call.clone();
+                    let call_id = call_id.clone();
+                    async move { session.on_tool_call_identified(call, call_id, spawn).await }
+                },
+            )
             .await
             {
                 Ok(ToolCallDecision::Allow {
@@ -354,17 +406,26 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
                 Ok(ToolCallDecision::Deny {
                     feedback,
                     offers,
+                    display,
                     review,
-                }) => HookDecision::DenyCall {
-                    feedback,
-                    offers,
-                    review,
-                },
+                }) => {
+                    *presentation = Some(RemedyPresentation {
+                        feedback: feedback.clone(),
+                        offers: offers.clone(),
+                        review: review.clone(),
+                        display,
+                    });
+                    HookDecision::DenyCall {
+                        feedback,
+                        offers,
+                        review,
+                    }
+                }
                 Err(error) => fold(error, deny),
             }
         }
         HookEvent::SpawnResume { actor, call, child } => {
-            match on_actor(runtime, &actor, MissingStart::Refuse, |session| {
+            match on_actor(runtime, &actor, MissingStart::Refuse, presentation_options, |session| {
                 let (call, child) = (call.clone(), child.clone());
                 async move { session.on_spawn_resume(call, child) }
             })
@@ -398,13 +459,13 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
                 // A transport/argument failure before execution leaves its reservation intact.
                 return HookDecision::Ack;
             }
-            match on_actor(runtime, &actor, MissingStart::Refuse, |session| {
+            match on_actor(runtime, &actor, MissingStart::Refuse, presentation_options, |session| {
                 let (call, call_id, outcome) = (call.clone(), call_id.clone(), outcome.clone());
                 async move { session.on_tool_result_identified(call, call_id, outcome).await }
             })
             .await
             {
-                Ok(decision) => outcome_decision(decision),
+                Ok(decision) => outcome_decision(decision, presentation),
                 Err(error) => fold(error, block),
             }
         }
@@ -417,7 +478,7 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
             value,
         } => {
             let said = value.clone();
-            match on_actor(runtime, &actor, MissingStart::Refuse, |session| {
+            match on_actor(runtime, &actor, MissingStart::Refuse, presentation_options, |session| {
                 let (call, call_id, outcome, child, value) = (
                     call.clone(),
                     call_id.clone(),
@@ -434,7 +495,7 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
             .await
             {
                 Ok(SpawnResultDecision::Return(decision)) => return_decision(said, decision),
-                Ok(SpawnResultDecision::Outcome(decision)) => outcome_decision(decision),
+                Ok(SpawnResultDecision::Outcome(decision)) => outcome_decision(decision, presentation),
                 Err(error) => fold(error, block),
             }
         }
@@ -442,7 +503,7 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
             // The child is told what its return must look like where the
             // fork's policy shapes it; a return that crosses as spoken
             // needs no word.
-            let root = match open_or_reopen(runtime, &root) {
+            let root = match open_or_reopen_with_presentation(runtime, &root, presentation_options.clone()) {
                 Ok(session) => session,
                 Err(error) => return refuse(error.to_string()),
             };
@@ -458,10 +519,17 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
             // returns what may. A child the family never saw start is
             // blocked too: its return has no fork to cross on.
             let said = value.clone();
-            match on_child(runtime, &root, &child, MissingStart::Refuse, |session| {
-                let value = value.clone();
-                async move { session.on_child_end(value).await }
-            })
+            match on_child(
+                runtime,
+                &root,
+                &child,
+                MissingStart::Refuse,
+                presentation_options,
+                |session| {
+                    let value = value.clone();
+                    async move { session.on_child_end(value).await }
+                },
+            )
             .await
             {
                 Ok(decision) => {
@@ -485,11 +553,36 @@ async fn dispatch_event(runtime: &Runtime, event: HookEvent, dispatch: &mut Opti
     }
 }
 
-fn outcome_decision(decision: ToolResultDecision) -> HookDecision {
+fn outcome_decision(
+    decision: ToolResultDecision,
+    embedded_presentation: &mut Option<RemedyPresentation>,
+) -> HookDecision {
     match decision {
         ToolResultDecision::Keep => HookDecision::Ack,
         ToolResultDecision::Deliver { value } => HookDecision::DeliverValue { value },
-        ToolResultDecision::Replace { placeholder } => HookDecision::ReplaceOutput { output: placeholder },
+        ToolResultDecision::Replace {
+            placeholder,
+            presentation,
+        } => {
+            *embedded_presentation = presentation;
+            HookDecision::ReplaceOutput { output: placeholder }
+        }
+    }
+}
+
+fn presentation_for(decision: &HookDecision) -> Option<RemedyPresentation> {
+    match decision {
+        HookDecision::DenyCall {
+            feedback,
+            offers,
+            review,
+        } => Some(RemedyPresentation {
+            feedback: feedback.clone(),
+            offers: offers.clone(),
+            review: review.clone(),
+            display: Vec::new(),
+        }),
+        _ => None,
     }
 }
 
@@ -508,11 +601,19 @@ fn return_decision(said: Option<String>, decision: ChildReturnDecision) -> HookD
 }
 
 fn open_or_reopen(runtime: &Runtime, root: &appa_runtime_api::TrajectoryId) -> Result<Session, EventError> {
-    match runtime.session(root, root) {
+    open_or_reopen_with_presentation(runtime, root, EmbeddedPresentationOptions::default())
+}
+
+fn open_or_reopen_with_presentation(
+    runtime: &Runtime,
+    root: &appa_runtime_api::TrajectoryId,
+    presentation: EmbeddedPresentationOptions,
+) -> Result<Session, EventError> {
+    match runtime.session_with_presentation(root, root, presentation.clone()) {
         Ok(session) => Ok(session),
         Err(EventError::UnknownTrajectory) => match runtime.create_session(root.clone()) {
-            Ok(session) => Ok(session),
-            Err(EventError::TrajectoryExists) => runtime.session(root, root),
+            Ok(_) => runtime.session_with_presentation(root, root, presentation),
+            Err(EventError::TrajectoryExists) => runtime.session_with_presentation(root, root, presentation),
             Err(error) => Err(error),
         },
         Err(error) => Err(error),
@@ -520,9 +621,16 @@ fn open_or_reopen(runtime: &Runtime, root: &appa_runtime_api::TrajectoryId) -> R
 }
 
 fn control_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall, ruling: Option<Ruling>) -> HookDecision {
-    let Some(quoted) = quoted_offer(call) else {
-        tracing::debug!(trajectory = %actor.root.0, "control tool quotes no offer id");
-        return HookDecision::PassControl;
+    let quoted = match quoted_offer(call) {
+        Ok(Some(quoted)) => quoted,
+        Ok(None) => {
+            tracing::debug!(trajectory = %actor.root.0, "control tool quotes no offer id");
+            return HookDecision::PassControl;
+        }
+        Err(reason) => {
+            tracing::debug!(trajectory = %actor.root.0, ?reason, "control tool quotes a malformed offer id");
+            return deny("this offer no longer stands; re-propose the call".to_string());
+        }
     };
     let acting = actor.child.clone().unwrap_or_else(|| actor.root.clone());
     match runtime.resolve_in(&actor.root, &quoted) {
@@ -554,9 +662,14 @@ fn vouch_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall) {
     tracing::debug!(trajectory = %actor.root.0, tool = %call.tool, "vouched for this trajectory");
 }
 
-fn quoted_offer(call: &ProposedCall) -> Option<OfferId> {
-    let arguments: serde_json::Value = serde_json::from_str(call.arguments.get()).ok()?;
-    Some(OfferId(arguments.get("offer_id")?.as_str()?.to_string()))
+fn quoted_offer(call: &ProposedCall) -> Result<Option<OfferId>, crate::api::OfferIdRefusal> {
+    let Ok(arguments) = serde_json::from_str::<serde_json::Value>(call.arguments.get()) else {
+        return Ok(None);
+    };
+    let Some(offer_id) = arguments.get("offer_id").and_then(serde_json::Value::as_str) else {
+        return Ok(None);
+    };
+    OfferId::parse(offer_id).map(Some)
 }
 
 /// What a child's event does when the family has not opened that child.
@@ -575,14 +688,22 @@ async fn on_actor<T, Run>(
     runtime: &Runtime,
     actor: &Actor,
     missing_start: MissingStart,
+    presentation: &EmbeddedPresentationOptions,
     event: impl Fn(Session) -> Run,
 ) -> Result<T, EventError>
 where
     Run: Future<Output = Result<T, EventError>>,
 {
     match &actor.child {
-        Some(child) => on_child(runtime, &actor.root, child, missing_start, event).await,
-        None => event(open_or_reopen(runtime, &actor.root)?).await,
+        Some(child) => on_child(runtime, &actor.root, child, missing_start, presentation, event).await,
+        None => {
+            event(open_or_reopen_with_presentation(
+                runtime,
+                &actor.root,
+                presentation.clone(),
+            )?)
+            .await
+        }
     }
 }
 
@@ -591,13 +712,17 @@ async fn on_child<T, Run>(
     root: &TrajectoryId,
     child: &TrajectoryId,
     missing_start: MissingStart,
+    presentation: &EmbeddedPresentationOptions,
     event: impl Fn(Session) -> Run,
 ) -> Result<T, EventError>
 where
     Run: Future<Output = Result<T, EventError>>,
 {
-    let root_session = open_or_reopen(runtime, root)?;
-    match (event(runtime.session(root, child)?).await, missing_start) {
+    let root_session = open_or_reopen_with_presentation(runtime, root, presentation.clone())?;
+    match (
+        event(runtime.session_with_presentation(root, child, presentation.clone())?).await,
+        missing_start,
+    ) {
         (Err(EventError::SpawnNotTaken), MissingStart::OpenLate) => {
             // `AlreadyOpen` means the start hook landed between the two
             // attempts; the event now finds its child, so it is not
@@ -808,6 +933,7 @@ mod tests {
                 let offers = vec![appa_runtime_api::OfferedRemedy {
                     id: quoted.0,
                     returns: Some(appa_runtime_api::OfferedReturn::AsSpoken),
+                    input_sanitizer: None,
                 }];
                 declare_return(&runtime, &root, &offers).await;
             }
