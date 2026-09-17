@@ -201,8 +201,15 @@ fn outcome_decision(
             feedback,
             offers,
             review,
+            display,
         }) => {
-            let presentation = remedy_presentation(feedback.clone(), offers, review, Vec::new(), externals);
+            let presentation = remedy_presentation(
+                feedback.clone(),
+                offers,
+                review,
+                display.into_iter().collect(),
+                externals,
+            );
             Ok(ToolResultDecision::Replace {
                 placeholder: feedback,
                 presentation: Some(presentation),
@@ -289,11 +296,8 @@ impl Session {
         }
     }
 
-    fn policy(&self, log: &appa_eventlog::Log) -> Result<crate::engine::PolicyEngine<'static>, EventError> {
-        let base = self.inner.resolve_policy(&self.deployment, log)?;
-        Ok(crate::engine::PolicyEngine::Retired(Arc::new(
-            base.engine().with_presentation(self.presentation.clone()),
-        )))
+    fn policy(&self, log: &appa_eventlog::Log) -> Result<crate::engine::PolicyEngine<'_>, EventError> {
+        self.inner.resolve_policy(&self.deployment, log)
     }
 
     #[cfg(test)]
@@ -1079,8 +1083,15 @@ impl Session {
                 feedback,
                 offers,
                 review,
+                display,
             }) => Ok(RemedyDecision::Declined {
-                presentation: remedy_presentation(feedback, offers, review, Vec::new(), &self.deployment.externals),
+                presentation: remedy_presentation(
+                    feedback,
+                    offers,
+                    review,
+                    display.into_iter().collect(),
+                    &self.deployment.externals,
+                ),
             }),
             _ => Err(EventError::UnexpectedDecision),
         }
@@ -1385,7 +1396,7 @@ impl Session {
             }
             let decision = policy
                 .engine()
-                .handle(&view, &self.trajectory, event)
+                .handle(&view, &self.trajectory, event, &self.presentation)
                 .map_err(EventError::from)?;
 
             let Some(facts) = decision.append.as_ref() else {

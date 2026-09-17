@@ -13,7 +13,7 @@
 //! dispatched by `match`: SQLite for standalone use and optional PostgreSQL for
 //! embedded hosts that install the schema through their own migrations.
 //!
-//! Three tables:
+//! Six tables:
 //!
 //! - the log itself, one row per appended batch, keyed by the root trajectory;
 //! - the stored policy files, content addressed by the SHA-256 of their exact bytes, write-once
@@ -21,18 +21,20 @@
 //! - the host keys, one row per (key, root) pair a host record ever named, written in the
 //!   same transaction as the record that names it. This is the one derived table: it answers
 //!   which families stand behind a key without a pass over every family's rows, and it cannot
-//!   disagree with the log because a record and its key row commit or roll back together.
+//!   disagree with the log because a record and its key row commit or roll back together;
+//! - offer owners, operations, and processed results — typed receipts for authenticated offer
+//!   routing and idempotent claims. They are not engine facts. Offer validity still rehydrates
+//!   from the log. SQLite and Memory keep them beside the log; PostgreSQL hosts install the
+//!   equivalent `openappa_*` tables through their own migrations.
 //!
 //! ### Storage Backend Scope & Retention
 //!
-//! PostgreSQL embedding hosts may additionally install the typed receipt tables exposed by the
-//! PostgreSQL storage API (`openappa_offer_owners`, `openappa_operations`, `openappa_processed_results`).
-//! These tables hold authenticated routing and idempotent operation claim state across multiple
-//! backend processes; offer validity and terminal lifecycle still rehydrate from engine facts.
-//!
-//! In-memory and SQLite backends do not persist cross-process routing tables; they resolve offers
-//! in-process via actor vouches. For PostgreSQL deployments, hosts should clean up routing records
-//! when a session or root trajectory terminates using `expire_offer_owners` or `expire_offer_owners_for_root`.
+//! Typed receipts (`offer_owners`, `operations`, `processed_results`) hold authenticated routing
+//! and idempotent operation claim state across process restarts. SQLite persists them in the
+//! daemon's database file; Memory holds them until the store drops. PostgreSQL embedding hosts
+//! install the same contract as `openappa_offer_owners`, `openappa_operations`, and
+//! `openappa_processed_results`. Hosts should clean up routing records when a session or root
+//! trajectory terminates using `expire_offer_owners`.
 //!
 //! There is no index from a branch to its root. Every caller already knows the root: a harness
 //! event names it, and a surfaced offer's identity carries it. An index would be a third place
@@ -67,8 +69,14 @@ use appa_runtime_api::{AdapterName, Ruling, inventory::ToolInventory};
 pub mod files;
 #[cfg(feature = "postgres")]
 pub mod postgres;
+pub mod receipts;
 
-const SCHEMA_VERSION: i64 = 2;
+pub use receipts::{
+    OfferOwnerKey, OfferOwnerRecord, OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim,
+    ProcessedResultKey, ProcessedResultRequest, ReceiptBinding, ReceiptError, ReceiptScope, ReceiptStorageError,
+};
+
+const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Backend {
@@ -484,6 +492,41 @@ impl LogStore {
                          key  TEXT NOT NULL,
                          root TEXT NOT NULL,
                          PRIMARY KEY (key, root)
+                     );
+                     CREATE TABLE offer_owners (
+                         organization_id TEXT NOT NULL,
+                         caller_id TEXT,
+                         session_id TEXT NOT NULL,
+                         binding TEXT NOT NULL,
+                         offer_id TEXT NOT NULL,
+                         root TEXT NOT NULL,
+                         parent_id TEXT,
+                         arguments TEXT,
+                         tool TEXT,
+                         spelling TEXT,
+                         PRIMARY KEY (organization_id, offer_id)
+                     );
+                     CREATE TABLE operations (
+                         organization_id TEXT NOT NULL,
+                         caller_id TEXT,
+                         session_id TEXT NOT NULL,
+                         operation_id TEXT NOT NULL,
+                         root TEXT NOT NULL,
+                         input TEXT NOT NULL,
+                         status TEXT NOT NULL,
+                         decision TEXT,
+                         PRIMARY KEY (session_id, operation_id)
+                     );
+                     CREATE TABLE processed_results (
+                         organization_id TEXT NOT NULL,
+                         caller_id TEXT,
+                         session_id TEXT NOT NULL,
+                         tool_call_id TEXT NOT NULL,
+                         root TEXT NOT NULL,
+                         status TEXT NOT NULL,
+                         approved_output TEXT,
+                         decision TEXT,
+                         PRIMARY KEY (session_id, tool_call_id)
                      );",
                 )?;
                 transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -807,11 +850,11 @@ fn consume(counter: &std::sync::atomic::AtomicU64) -> Option<u64> {
 
 fn has_schema(connection: &Connection) -> Result<bool, rusqlite::Error> {
     let found: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('logs', 'policy_files', 'host_keys')",
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('logs', 'policy_files', 'host_keys', 'offer_owners', 'operations', 'processed_results')",
         [],
         |row| row.get(0),
     )?;
-    Ok(found == 3)
+    Ok(found == 6)
 }
 
 fn is_empty(connection: &Connection) -> Result<bool, rusqlite::Error> {
@@ -1432,6 +1475,218 @@ mod tests {
         assert!(matches!(memory().log(&root()), Err(ReadError::UnknownRoot { .. })));
     }
 
+    fn receipt_scope(suffix: &str) -> ReceiptScope {
+        ReceiptScope {
+            organization_id: format!("receipt-org:{suffix}"),
+            caller_id: Some("caller".to_owned()),
+            session_id: format!("receipt-session:{suffix}"),
+            binding: ReceiptBinding::Caller,
+        }
+    }
+
+    fn typed_receipts_are_idempotent_and_fail_closed(store: &LogStore, suffix: &str) {
+        let scope = receipt_scope(suffix);
+        let owner = OfferOwnerRecord {
+            scope: scope.clone(),
+            offer_id: "0123456789abcdef".to_owned(),
+            root: format!("receipt-root:{suffix}"),
+            parent_id: None,
+            arguments: Some("{}".to_owned()),
+            tool: Some("wire".to_owned()),
+            spelling: Some("Wire".to_owned()),
+        };
+        store.store_offer_owner(owner.clone()).expect("the owner stores");
+        store
+            .store_offer_owner(owner.clone())
+            .expect("the exact owner replay is idempotent");
+        let mut session_owner = owner.clone();
+        session_owner.offer_id = "fedcba9876543210".to_owned();
+        session_owner.scope.binding = ReceiptBinding::Session;
+        store
+            .store_offer_owner(session_owner.clone())
+            .expect("the session-bound owner stores");
+        store
+            .store_offer_owner(session_owner.clone())
+            .expect("the session-bound owner replay is idempotent");
+        assert_eq!(
+            store
+                .offer_owner(OfferOwnerKey {
+                    organization_id: scope.organization_id.clone(),
+                    offer_id: session_owner.offer_id.clone(),
+                })
+                .expect("the session-bound owner reads"),
+            Some(session_owner.clone())
+        );
+        assert_eq!(
+            store
+                .offer_owner(OfferOwnerKey {
+                    organization_id: scope.organization_id.clone(),
+                    offer_id: owner.offer_id.clone(),
+                })
+                .expect("the owner reads"),
+            Some(owner.clone())
+        );
+        let mut colliding = owner.clone();
+        colliding.root.push_str(":other");
+        assert!(matches!(
+            store.store_offer_owner(colliding),
+            Err(ReceiptError::Collision)
+        ));
+
+        let request = OperationRequest {
+            key: OperationKey {
+                scope: scope.clone(),
+                operation_id: "remedy-1".to_owned(),
+            },
+            root: owner.root.clone(),
+            input: serde_json::json!({"offer_id": owner.offer_id}),
+            context: None,
+        };
+        assert!(matches!(
+            store.claim_operation(request.clone()),
+            Ok(OperationClaim::Claimed)
+        ));
+        assert!(matches!(
+            store.claim_operation(request.clone()),
+            Err(ReceiptError::Pending)
+        ));
+        let decision = serde_json::json!({"decision":"mcp_result"});
+        store
+            .complete_operation(request.key.clone(), decision.clone())
+            .expect("the claimed operation completes");
+        assert_eq!(
+            store
+                .claim_operation(request.clone())
+                .expect("the completed operation replays"),
+            OperationClaim::Complete {
+                decision: decision.clone()
+            }
+        );
+        let mut changed = request.clone();
+        changed.input = serde_json::json!({"offer_id": "other"});
+        assert!(matches!(
+            store.claim_operation(changed),
+            Err(ReceiptError::InputMismatch)
+        ));
+
+        let result = ProcessedResultRequest {
+            key: ProcessedResultKey {
+                scope: ReceiptScope {
+                    binding: ReceiptBinding::Session,
+                    ..scope.clone()
+                },
+                tool_call_id: "call-1".to_owned(),
+            },
+            root: owner.root.clone(),
+        };
+        assert!(matches!(
+            store.claim_processed_result(result.clone()),
+            Ok(ProcessedResultClaim::Claimed)
+        ));
+        assert!(
+            store
+                .has_pending_receipts(owner.root.clone())
+                .expect("the pending receipt checks")
+        );
+        store
+            .complete_processed_result(result.key.clone(), "approved".to_owned(), decision.clone())
+            .expect("the processed result completes");
+        assert_eq!(
+            store
+                .claim_processed_result(result)
+                .expect("the processed result replays"),
+            ProcessedResultClaim::Complete {
+                approved_output: "approved".to_owned(),
+                decision,
+            }
+        );
+        assert!(
+            !store
+                .has_pending_receipts(owner.root.clone())
+                .expect("all receipts are terminal")
+        );
+
+        assert_eq!(
+            store
+                .expire_offer_owners(scope.clone())
+                .expect("the turn expires owners"),
+            2
+        );
+        assert_eq!(
+            store
+                .offer_owner(OfferOwnerKey {
+                    organization_id: scope.organization_id.clone(),
+                    offer_id: owner.offer_id,
+                })
+                .expect("the expired owner reads"),
+            None
+        );
+    }
+
+    #[test]
+    fn memory_typed_offer_owners_and_receipts_are_idempotent_and_fail_closed() {
+        typed_receipts_are_idempotent_and_fail_closed(&memory(), "memory");
+    }
+
+    #[test]
+    fn sqlite_typed_offer_owners_and_receipts_are_idempotent_and_fail_closed() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.db");
+        let store = LogStore::open(Backend::Sqlite { path: path.clone() }).expect("a fresh store opens");
+        typed_receipts_are_idempotent_and_fail_closed(&store, "sqlite");
+        drop(store);
+        let reopened = LogStore::open(Backend::Sqlite { path }).expect("the store reopens");
+        assert!(matches!(
+            reopened.claim_operation(OperationRequest {
+                key: OperationKey {
+                    scope: receipt_scope("sqlite"),
+                    operation_id: "remedy-1".to_owned(),
+                },
+                root: "receipt-root:sqlite".to_owned(),
+                input: serde_json::json!({"offer_id": "0123456789abcdef"}),
+                context: None,
+            }),
+            Ok(OperationClaim::Complete { .. })
+        ));
+        assert!(
+            reopened
+                .offer_owner(OfferOwnerKey {
+                    organization_id: "receipt-org:sqlite".to_owned(),
+                    offer_id: "0123456789abcdef".to_owned(),
+                })
+                .expect("the expired owner reads after reopen")
+                .is_none(),
+            "expired owners stay gone after reopen"
+        );
+    }
+
+    #[test]
+    fn memory_receipts_do_not_leak_across_stores() {
+        let first = memory();
+        let scope = receipt_scope("private");
+        first
+            .store_offer_owner(OfferOwnerRecord {
+                scope: scope.clone(),
+                offer_id: "0123456789abcdef".to_owned(),
+                root: "receipt-root:private".to_owned(),
+                parent_id: None,
+                arguments: None,
+                tool: None,
+                spelling: None,
+            })
+            .expect("the owner stores");
+        assert!(
+            memory()
+                .offer_owner(OfferOwnerKey {
+                    organization_id: scope.organization_id,
+                    offer_id: "0123456789abcdef".to_owned(),
+                })
+                .expect("the other store reads")
+                .is_none(),
+            "Memory receipts are private to the store that wrote them"
+        );
+    }
+
     /// Run against an Archestra-migrated, disposable PostgreSQL database:
     /// OPENAPPA_TEST_DATABASE_URL=... cargo test -p appa-eventlog --features postgres -- --ignored
     #[cfg(feature = "postgres")]
@@ -1615,9 +1870,8 @@ mod tests {
     #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host receipt migrations"]
     fn postgres_typed_offer_owners_and_receipts_are_idempotent_and_fail_closed() {
         use crate::postgres::{
-            OfferOwnerError, OfferOwnerKey, OfferOwnerRecord, OperationClaim, OperationKey, OperationReceiptError,
-            OperationRequest, ProcessedResultClaim, ProcessedResultKey, ProcessedResultRequest, ReceiptBinding,
-            ReceiptScope,
+            OfferOwnerKey, OfferOwnerRecord, OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim,
+            ProcessedResultKey, ProcessedResultRequest, ReceiptBinding, ReceiptError, ReceiptScope,
         };
 
         let url = std::env::var("OPENAPPA_TEST_DATABASE_URL").expect("test database URL");
@@ -1643,6 +1897,13 @@ mod tests {
         pg.store_offer_owner(owner.clone()).expect("the owner stores");
         pg.store_offer_owner(owner.clone())
             .expect("the exact owner replay is idempotent");
+        let mut session_owner = owner.clone();
+        session_owner.offer_id = "fedcba9876543210".to_owned();
+        session_owner.scope.binding = ReceiptBinding::Session;
+        pg.store_offer_owner(session_owner.clone())
+            .expect("the session-bound owner stores");
+        pg.store_offer_owner(session_owner.clone())
+            .expect("the session-bound owner replay is idempotent");
         assert_eq!(
             pg.offer_owner(OfferOwnerKey {
                 organization_id: scope.organization_id.clone(),
@@ -1653,10 +1914,7 @@ mod tests {
         );
         let mut colliding = owner.clone();
         colliding.root.push_str(":other");
-        assert!(matches!(
-            pg.store_offer_owner(colliding),
-            Err(OfferOwnerError::Collision)
-        ));
+        assert!(matches!(pg.store_offer_owner(colliding), Err(ReceiptError::Collision)));
 
         let request = OperationRequest {
             key: OperationKey {
@@ -1673,7 +1931,7 @@ mod tests {
         ));
         assert!(matches!(
             pg.claim_operation(request.clone()),
-            Err(OperationReceiptError::Pending)
+            Err(ReceiptError::Pending)
         ));
         let decision = serde_json::json!({"decision":"mcp_result"});
         pg.complete_operation(request.key.clone(), decision.clone())
@@ -1687,10 +1945,7 @@ mod tests {
         );
         let mut changed = request.clone();
         changed.input = serde_json::json!({"offer_id": "other"});
-        assert!(matches!(
-            pg.claim_operation(changed),
-            Err(OperationReceiptError::InputMismatch)
-        ));
+        assert!(matches!(pg.claim_operation(changed), Err(ReceiptError::InputMismatch)));
 
         let result = ProcessedResultRequest {
             key: ProcessedResultKey {
@@ -1759,12 +2014,12 @@ mod tests {
         );
         assert!(matches!(
             pg.claim_operation(rollback_request),
-            Err(OperationReceiptError::Pending)
+            Err(ReceiptError::Pending)
         ));
 
         assert_eq!(
             pg.expire_offer_owners(scope.clone()).expect("the turn expires owners"),
-            1
+            2
         );
 
         pg.with_client(move |client| {
