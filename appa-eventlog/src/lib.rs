@@ -13,15 +13,19 @@
 //! dispatched by `match`: SQLite for standalone use and optional PostgreSQL for
 //! embedded hosts that install the schema through their own migrations.
 //!
-//! Two tables, and no derived state:
+//! Three tables:
 //!
 //! - the log itself, one row per appended batch, keyed by the root trajectory;
 //! - the stored policy files, content addressed by the SHA-256 of their exact bytes, write-once
-//!   and shared by every root that opened under them.
+//!   and shared by every root that opened under them;
+//! - the host keys, one row per (key, root) pair a host record ever named, written in the
+//!   same transaction as the record that names it. This is the one derived table: it answers
+//!   which families stand behind a key without a pass over every family's rows, and it cannot
+//!   disagree with the log because a record and its key row commit or roll back together.
 //!
 //! There is no index from a branch to its root. Every caller already knows the root: a harness
 //! event names it, and a surfaced offer's identity carries it. An index would be a third place
-//! for the truth to live, and this crate has none.
+//! for the truth to live.
 //!
 //! ## The compare-and-swap is a value, not a number
 //!
@@ -53,7 +57,7 @@ pub mod files;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Backend {
@@ -148,14 +152,18 @@ pub enum HostObservation {
 }
 
 impl HostObservation {
-    /// The text a stored row contains exactly when its observation names this key.
-    ///
-    /// Derived from the encoding rather than spelled beside it, so a key whose wire form
-    /// changes moves the query that finds it. Pass the result to
-    /// [`LogStore::roots_mentioning`].
-    pub fn names_key(key: &str) -> String {
-        let quoted = serde_json::to_string(key).expect("a string serializes");
-        format!("\"key\":{quoted}")
+    /// The key this observation names, where it names one: a standing taken, held, or spent.
+    /// The store writes it beside the record so [`LogStore::roots_mentioning`] can find the
+    /// families that recorded it.
+    pub fn key(&self) -> Option<&str> {
+        match self {
+            Self::Vouched { key, .. } | Self::Claimed { key, .. } | Self::Released { key, .. } => Some(key),
+            Self::Inventory { .. }
+            | Self::CallBound { .. }
+            | Self::PromptSeen { .. }
+            | Self::PromptSettled { .. }
+            | Self::TurnEnded { .. } => None,
+        }
     }
 }
 
@@ -460,6 +468,11 @@ impl LogStore {
                      CREATE TABLE policy_files (
                          key   TEXT PRIMARY KEY,
                          bytes BLOB NOT NULL
+                     );
+                     CREATE TABLE host_keys (
+                         key  TEXT NOT NULL,
+                         root TEXT NOT NULL,
+                         PRIMARY KEY (key, root)
                      );",
                 )?;
                 transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -571,7 +584,7 @@ impl LogStore {
     /// Append records to the log `based_on` was read from, only if it still stands where that
     /// read left it. A conflict writes nothing; the caller reads again and replays.
     pub fn append(&self, based_on: &Log, facts: &[Fact]) -> Result<(), AppendError> {
-        self.append_bytes(based_on, encode(facts, None))
+        self.append_at(&based_on.root, based_on.basis, encode(facts, None), None)
     }
 
     /// Append one host observation, and the engine facts it belongs with. The observation is
@@ -582,50 +595,42 @@ impl LogStore {
         facts: &[Fact],
         observation: &HostObservation,
     ) -> Result<(), AppendError> {
-        self.append_bytes(based_on, encode(facts, Some(observation)))
+        self.append_at(
+            &based_on.root,
+            based_on.basis,
+            encode(facts, Some(observation)),
+            observation.key(),
+        )
     }
 
-    /// Every root whose host records contain `needle`, and nothing of what they recorded.
+    /// Every root whose host records ever named `key`, and nothing of what they recorded.
     ///
-    /// The store answers "which families may have recorded this" without the caller naming
+    /// The store answers "which families may stand behind this" without the caller naming
     /// them and without decoding a single row: the caller reads the families it gets back.
-    /// The answer stays small by what a needle is for — a root is here only if it once
-    /// recorded this exact key, which is at most one root for an offer, and one root per
-    /// session that quoted an identical ticket. Build the needle with
-    /// [`HostObservation::names_key`] so the query and the encoding can never disagree about
-    /// how a key is spelled.
-    ///
-    /// The scan itself is every family's host records: there is no index over what
-    /// a row holds, because this store owns no DDL a deployment's PostgreSQL would have to
-    /// be given. So a key that is spelled right and stands for nothing still costs one pass,
-    /// and a caller that can be asked about keys it never minted checks the spelling before
-    /// it asks here.
-    pub fn roots_mentioning(&self, needle: &str) -> Result<Vec<TrajectoryId>, ReadError> {
+    /// The answer stays small by what a key is for — at most one root for an offer, and one
+    /// root per session that quoted an identical ticket. The lookup is one index probe on the
+    /// host keys table, whatever the log holds, so a key that stands for nothing costs the
+    /// same as one that does.
+    pub fn roots_mentioning(&self, key: &str) -> Result<Vec<TrajectoryId>, ReadError> {
         #[cfg(feature = "fault-injection")]
         self.read_refused()?;
         #[cfg(feature = "postgres")]
         if let Some(pg) = &self.postgres {
-            return pg.roots_mentioning(needle);
+            return pg.roots_mentioning(key);
         }
         let connection = self.lock();
-        let mut statement = connection.prepare(
-            "SELECT DISTINCT root FROM logs \
-             WHERE substr(facts, 1, 1) = x'7b' AND instr(facts, ?1) > 0 ORDER BY root ASC",
-        )?;
+        let mut statement = connection.prepare("SELECT root FROM host_keys WHERE key = ?1 ORDER BY root ASC")?;
         let roots = statement
-            .query_map(params![needle.as_bytes()], |row| row.get::<_, String>(0))?
+            .query_map(params![key], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(roots.into_iter().map(TrajectoryId::new).collect())
     }
 
-    fn append_bytes(&self, based_on: &Log, bytes: Vec<u8>) -> Result<(), AppendError> {
-        self.append_at(&based_on.root, based_on.basis, bytes)
-    }
-
-    fn append_at(&self, root: &TrajectoryId, basis: u64, bytes: Vec<u8>) -> Result<(), AppendError> {
+    /// One batch at one position, and the key row beside it where the batch names a key.
+    fn append_at(&self, root: &TrajectoryId, basis: u64, bytes: Vec<u8>, key: Option<&str>) -> Result<(), AppendError> {
         #[cfg(feature = "postgres")]
         if let Some(pg) = &self.postgres {
-            return pg.append(root, basis, bytes);
+            return pg.append(root, basis, bytes, key);
         }
         let mut connection = self.lock();
         #[cfg(feature = "fault-injection")]
@@ -646,22 +651,18 @@ impl LogStore {
                 .take()
                 .filter(|(racing, _, _)| racing == root);
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let write = |into: &TrajectoryId, bytes: Vec<u8>| -> Result<(), rusqlite::Error> {
+            let write = |into: &TrajectoryId, bytes: Vec<u8>, key: Option<&str>| -> Result<(), rusqlite::Error> {
                 let at = position(&transaction, into)?;
-                transaction.execute(
-                    "INSERT INTO logs (root, seq, facts) VALUES (?1, ?2, ?3)",
-                    params![into.as_str(), at as i64, bytes],
-                )?;
-                Ok(())
+                insert_batch(&transaction, into, at, &bytes, key)
             };
             match &armed {
                 Some((_, recorded_in, observation)) => {
-                    write(recorded_in, encode(&[], Some(observation)))?;
+                    write(recorded_in, encode(&[], Some(observation)), observation.key())?;
                     if recorded_in != root {
-                        write(root, encode(&[], None))?;
+                        write(root, encode(&[], None), None)?;
                     }
                 }
-                None => write(root, encode(&[], None))?,
+                None => write(root, encode(&[], None), None)?,
             }
             transaction.commit()?;
         }
@@ -670,10 +671,7 @@ impl LogStore {
         if current != basis {
             return Err(AppendError::Conflict { current });
         }
-        transaction.execute(
-            "INSERT INTO logs (root, seq, facts) VALUES (?1, ?2, ?3)",
-            params![root.as_str(), current as i64, bytes],
-        )?;
+        insert_batch(&transaction, root, current, &bytes, key)?;
         #[cfg(feature = "fault-injection")]
         if self.failure_fires() {
             return Err(AppendError::Injected);
@@ -798,11 +796,11 @@ fn consume(counter: &std::sync::atomic::AtomicU64) -> Option<u64> {
 
 fn has_schema(connection: &Connection) -> Result<bool, rusqlite::Error> {
     let found: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('logs', 'policy_files')",
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('logs', 'policy_files', 'host_keys')",
         [],
         |row| row.get(0),
     )?;
-    Ok(found == 2)
+    Ok(found == 3)
 }
 
 fn is_empty(connection: &Connection) -> Result<bool, rusqlite::Error> {
@@ -828,6 +826,26 @@ fn opened_by(opening: &[Fact]) -> Result<(TrajectoryId, PolicyFileKey), CreateEr
             detail: "the batch is empty".to_string(),
         }),
     }
+}
+
+fn insert_batch(
+    connection: &Connection,
+    root: &TrajectoryId,
+    at: u64,
+    bytes: &[u8],
+    key: Option<&str>,
+) -> Result<(), rusqlite::Error> {
+    connection.execute(
+        "INSERT INTO logs (root, seq, facts) VALUES (?1, ?2, ?3)",
+        params![root.as_str(), at as i64, bytes],
+    )?;
+    if let Some(key) = key {
+        connection.execute(
+            "INSERT OR IGNORE INTO host_keys (key, root) VALUES (?1, ?2)",
+            params![key, root.as_str()],
+        )?;
+    }
+    Ok(())
 }
 
 fn position(connection: &Connection, root: &TrajectoryId) -> Result<u64, rusqlite::Error> {
@@ -1202,7 +1220,7 @@ mod tests {
     /// The query a reader uses when it knows the key but not the family that recorded it:
     /// the roots that named the key, and no root that named another.
     #[test]
-    fn the_needle_finds_the_roots_that_name_a_key_and_no_others() {
+    fn a_key_finds_the_roots_that_named_it_and_no_others() {
         let store = opened();
         let second = TrajectoryId::new("cc:second");
         store.create_root(opening(&second), POLICY.as_bytes()).unwrap();
@@ -1231,23 +1249,19 @@ mod tests {
         store.append(&store.log(&second).unwrap(), &punctuation()).unwrap();
 
         assert_eq!(
-            store
-                .roots_mentioning(&HostObservation::names_key("offer:one"))
-                .unwrap(),
+            store.roots_mentioning("offer:one").unwrap(),
             vec![root(), second.clone()],
             "one entry per root, however many of its rows name the key"
         );
         assert_eq!(
-            store
-                .roots_mentioning(&HostObservation::names_key("offer:two"))
-                .unwrap(),
+            store.roots_mentioning("offer:two").unwrap(),
             vec![second.clone()],
             "a key nothing else names answers with the one root that does"
         );
         assert_eq!(
-            store.roots_mentioning(&HostObservation::names_key("offer:on")).unwrap(),
+            store.roots_mentioning("offer:on").unwrap(),
             Vec::new(),
-            "the needle carries the closing quote, so one key is never a prefix of another"
+            "a key matches whole, so one key is never a prefix of another"
         );
     }
 
@@ -1488,18 +1502,13 @@ mod tests {
             "a host observation is appended against its read position on this backend too"
         );
         assert!(
-            second
-                .roots_mentioning(&HostObservation::names_key("offer:one"))
-                .unwrap()
-                .contains(&id),
-            "the needle names the root that recorded the key"
+            second.roots_mentioning("offer:one").unwrap().contains(&id),
+            "the key names the root that recorded it"
         );
         assert_eq!(
-            second
-                .roots_mentioning(&HostObservation::names_key("offer:two"))
-                .unwrap(),
+            second.roots_mentioning("offer:two").unwrap(),
             Vec::new(),
-            "and nothing for a key no row names"
+            "and nothing for a key no record named"
         );
         assert_eq!(
             second
@@ -1579,6 +1588,7 @@ mod tests {
             .unwrap()
             .with_client(move |client| {
                 client.execute("DELETE FROM openappa_events WHERE root=$1", &[&id.as_str()])?;
+                client.execute("DELETE FROM openappa_host_keys WHERE root=$1", &[&id.as_str()])?;
                 Ok(())
             })
             .unwrap();
