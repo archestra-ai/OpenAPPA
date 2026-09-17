@@ -25,6 +25,7 @@ delta = {}
 [[policy.sanitizer]]
 name = "redactor"
 on = ["tool_input"]
+hint = "Remove email addresses before sending."
 permits = { audience = { from = ["hr"], to = ["public"] } }
 
 [externals]
@@ -96,8 +97,45 @@ async fn narrowed_and_blocked(dir: &tempfile::TempDir) -> (Arc<Runtime>, OfferId
     );
     assert_eq!(report(&runtime, read_hr(), "Alice Chen").await, HookDecision::Ack);
 
-    let blocked = propose(&runtime, send(RAW_BODY)).await;
-    let hop = last_offer(&feedback_of(&blocked));
+    let blocked = hooks::handle_embedded(
+        &runtime,
+        HookEvent::ToolCall {
+            actor: actor(),
+            call: send(RAW_BODY),
+            call_id: None,
+            spawn: false,
+            ruling: None,
+        },
+    )
+    .await;
+    let presentation = blocked
+        .presentation
+        .expect("the input block carries typed remedy metadata");
+    let sanitizer = presentation
+        .offers
+        .iter()
+        .find_map(|offer| offer.input_sanitizer.as_ref())
+        .expect("the input-sanitizer offer identifies its sanitizer");
+    assert_eq!(sanitizer.name, "redactor");
+    assert_eq!(sanitizer.target, "send");
+    assert_eq!(
+        sanitizer.description.as_deref(),
+        Some("Remove email addresses before sending.")
+    );
+    assert!(
+        presentation
+            .feedback
+            .contains("Use sanitizer redactor to rewrite the arguments for send")
+    );
+    assert!(!presentation.feedback.contains("Apply the offered remedy"));
+    let hop = OfferId(
+        presentation
+            .offers
+            .first()
+            .expect("the block offers the input rewrite")
+            .id
+            .clone(),
+    );
     (runtime, hop)
 }
 

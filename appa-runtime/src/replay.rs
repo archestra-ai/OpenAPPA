@@ -532,10 +532,16 @@ async fn take_offer(runtime: &Runtime, actor: &Actor, offer: OfferId) -> Result<
     let call = match runtime.execute_remedy(actor, offer).await {
         RemedyOutcome::Authorized { call } | RemedyOutcome::Substituted { call } => call,
         RemedyOutcome::Returned { .. } => return Ok(()),
-        RemedyOutcome::Declined { feedback } | RemedyOutcome::NoAnswer { feedback } => {
+        RemedyOutcome::Declined { presentation } => {
+            return Err(format!(
+                "taking the offer did not release the call: {}",
+                presentation.feedback
+            ));
+        }
+        RemedyOutcome::NoAnswer { feedback } => {
             return Err(format!("taking the offer did not release the call: {feedback}"));
         }
-        RemedyOutcome::Refused { detail } => return Err(detail),
+        RemedyOutcome::Refused { reason } => return Err(reason.detail().to_string()),
     };
     match propose(runtime, actor, call).await {
         Proposed::Allowed(call) => report_empty_output(runtime, actor, call).await,

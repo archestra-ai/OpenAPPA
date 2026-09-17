@@ -13,6 +13,14 @@ name = "appa"
 path = "src/bin/appa.rs"
 required-features = ["daemon"]
 
+[[example]]
+name = "installation_fixture"
+required-features = ["daemon"]
+
+[[example]]
+name = "kagent_installation_fixture"
+required-features = ["daemon"]
+
 [features]
 default = ["daemon"]
 # The server stack: the MCP endpoint, the HTTP surface, the CLI and its log

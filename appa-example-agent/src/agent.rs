@@ -724,7 +724,17 @@ impl Run<'_> {
                 .await;
                 value
             }
-            RemedyOutcome::Declined { feedback } | RemedyOutcome::NoAnswer { feedback } => {
+            RemedyOutcome::Declined { presentation } => {
+                self.record(
+                    frame,
+                    Record::OfferRefused {
+                        feedback: presentation.feedback.clone(),
+                    },
+                )
+                .await;
+                presentation.feedback
+            }
+            RemedyOutcome::NoAnswer { feedback } => {
                 self.record(
                     frame,
                     Record::OfferRefused {
@@ -734,7 +744,8 @@ impl Run<'_> {
                 .await;
                 feedback
             }
-            RemedyOutcome::Refused { detail } => {
+            RemedyOutcome::Refused { reason } => {
+                let detail = reason.detail().to_string();
                 self.record(
                     frame,
                     Record::OfferRefused {

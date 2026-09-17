@@ -226,11 +226,16 @@ async fn the_declared_remedy_entry(runtime: &Runtime, acting: &Actor, offer: Off
         RemedyOutcome::Returned { value } => {
             let _: String = value;
         }
-        RemedyOutcome::Declined { feedback } | RemedyOutcome::NoAnswer { feedback } => {
+        RemedyOutcome::Declined { presentation } => {
+            let _: String = presentation.feedback;
+            let _: Vec<appa_runtime_api::OfferedRemedy> = presentation.offers;
+            let _: Vec<appa_runtime_api::Review> = presentation.review;
+        }
+        RemedyOutcome::NoAnswer { feedback } => {
             let _: String = feedback;
         }
-        RemedyOutcome::Refused { detail } => {
-            let _: String = detail;
+        RemedyOutcome::Refused { reason } => {
+            let _: appa_runtime::api::RemedyRefusal = reason;
         }
     }
 }

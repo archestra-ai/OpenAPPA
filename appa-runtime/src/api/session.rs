@@ -10,14 +10,15 @@ use crate::consult::{
 };
 use crate::engine::{
     AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback, ForkStatus,
-    Liveness, Next, OfferNonce, OpenDispatch, Presentation, RemedyArguments, engine_id,
+    Liveness, Next, OfferNonce, OpenDispatch, PendingReview, Presentation, RemedyArguments, engine_id,
 };
 use crate::external::ConsultOutcome;
 use appa_engine::label::ReaderId;
 
 use super::{
-    ChildReturnDecision, Deployment, EventError, ExactCall, Inner, OfferId, OutcomeBody, ProposedCall, RemedyDecision,
-    SpawnRef, SpawnResultDecision, ToolCallDecision, ToolOutcome, ToolResultDecision, TrajectoryId,
+    ChildReturnDecision, Deployment, EmbeddedPresentationOptions, EventError, ExactCall, Inner, OfferId, OutcomeBody,
+    ProposedCall, RemedyDecision, RemedyPresentation, SpawnRef, SpawnResultDecision, ToolCallDecision, ToolOutcome,
+    ToolResultDecision, TrajectoryId,
 };
 
 /// The runtime's own control tool, recognized by its one canonical
@@ -182,18 +183,30 @@ const UNCHECKED_RETURN: &str = "[appa] the subagent ended outside the return che
 const ENDED_CHILD: &str = "[appa] this subagent ended without a return; nothing it says now can cross. Stop with an \
                            empty final message (send no text or explanation).";
 
-fn outcome_decision(decision: EngineDecision) -> Result<ToolResultDecision, EventError> {
+fn outcome_decision(
+    decision: EngineDecision,
+    externals: &crate::external::ExternalServices,
+) -> Result<ToolResultDecision, EventError> {
     match decision.then {
         Next::PresentToModel(Presentation::KeepOutput) => Ok(ToolResultDecision::Keep),
-        Next::PresentToModel(Presentation::ReplaceOutput { placeholder, .. }) => {
-            Ok(ToolResultDecision::Replace { placeholder })
-        }
+        Next::PresentToModel(Presentation::ReplaceOutput { placeholder, .. }) => Ok(ToolResultDecision::Replace {
+            placeholder,
+            presentation: None,
+        }),
         // An admitted value delivered in place of the raw output, as it crossed.
         Next::PresentToModel(Presentation::Value { value }) => Ok(ToolResultDecision::Deliver { value }),
         // The runtime's own words: the narrowing this result causes and the control call
         // that accepts it.
-        Next::PresentToModel(Presentation::Blocked { feedback, .. }) => {
-            Ok(ToolResultDecision::Replace { placeholder: feedback })
+        Next::PresentToModel(Presentation::Blocked {
+            feedback,
+            offers,
+            review,
+        }) => {
+            let presentation = remedy_presentation(feedback.clone(), offers, review, Vec::new(), externals);
+            Ok(ToolResultDecision::Replace {
+                placeholder: feedback,
+                presentation: Some(presentation),
+            })
         }
         _ => Err(EventError::UnexpectedDecision),
     }
@@ -241,6 +254,7 @@ pub struct Session {
     inner: Arc<Inner>,
     trajectory: TrajectoryId,
     root: TrajectoryId,
+    presentation: EmbeddedPresentationOptions,
 }
 
 impl Session {
@@ -250,12 +264,36 @@ impl Session {
         trajectory: TrajectoryId,
         root: TrajectoryId,
     ) -> Session {
+        Self::attach_with_presentation(
+            inner,
+            deployment,
+            trajectory,
+            root,
+            EmbeddedPresentationOptions::default(),
+        )
+    }
+
+    pub(super) fn attach_with_presentation(
+        inner: Arc<Inner>,
+        deployment: Arc<Deployment>,
+        trajectory: TrajectoryId,
+        root: TrajectoryId,
+        presentation: EmbeddedPresentationOptions,
+    ) -> Session {
         Session {
             deployment,
             inner,
             trajectory,
             root,
+            presentation,
         }
+    }
+
+    fn policy(&self, log: &appa_eventlog::Log) -> Result<crate::engine::PolicyEngine<'static>, EventError> {
+        let base = self.inner.resolve_policy(&self.deployment, log)?;
+        Ok(crate::engine::PolicyEngine::Retired(Arc::new(
+            base.engine().with_presentation(self.presentation.clone()),
+        )))
     }
 
     #[cfg(test)]
@@ -361,7 +399,7 @@ impl Session {
     /// remedy that minted it.
     fn carried_calls(&self) -> Result<Vec<OpenDispatch>, EventError> {
         let log = self.inner.log(&self.root)?;
-        let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+        let policy = self.policy(&log)?;
         let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
         match policy.engine().liveness(&view, &self.trajectory) {
             Liveness::Ended | Liveness::Unopened => Ok(Vec::new()),
@@ -393,7 +431,7 @@ impl Session {
                 "the workspace ledger and trajectory must use the same policy",
             ));
         }
-        let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+        let policy = self.policy(&log)?;
         let view = policy.engine().rebuild_view(&log)?;
         let expected = policy.engine().file_dispatch(&view, &self.trajectory, &call)?;
         let key = super::files::key(&expected)?;
@@ -537,6 +575,7 @@ impl Session {
                     Ok(ToolCallDecision::Deny {
                         feedback: join_feedback(feedback),
                         offers: feedback.iter().flat_map(|entry| entry.offers.clone()).collect(),
+                        display: feedback.iter().filter_map(|entry| entry.display.clone()).collect(),
                         review: join_review(feedback, &self.deployment.externals),
                     })
                 }
@@ -550,13 +589,13 @@ impl Session {
     /// wildcard does not count. What a spawn needs under [`super::SpawnCoverage::Declared`].
     fn names_tool(&self, tool: &str) -> Result<bool, EventError> {
         let log = self.inner.log(&self.root)?;
-        let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+        let policy = self.policy(&log)?;
         Ok(policy.engine().names_tool(tool))
     }
 
     fn substituted_release(&self, call: &ProposedCall) -> Result<Option<Standing>, EventError> {
         let log = self.inner.log(&self.root)?;
-        let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+        let policy = self.policy(&log)?;
         let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
         match policy.engine().liveness(&view, &self.trajectory) {
             Liveness::Ended => return Err(EventError::TrajectoryEnded),
@@ -681,7 +720,7 @@ impl Session {
             return Err(EventError::UnknownDispatch);
         };
         let log = self.inner.log(&self.root)?;
-        let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+        let policy = self.policy(&log)?;
         if !is_open_call(&call, || policy.engine().canonical_bytes(&call), open) {
             return Err(EventError::OutcomeMismatch);
         }
@@ -717,7 +756,9 @@ impl Session {
         let value = match decision {
             ToolResultDecision::Keep => result.unwrap_or_else(|error| error),
             ToolResultDecision::Deliver { value } => value,
-            ToolResultDecision::Replace { placeholder } => return Ok(super::files::FileReply::Failure(placeholder)),
+            ToolResultDecision::Replace { placeholder, .. } => {
+                return Ok(super::files::FileReply::Failure(placeholder));
+            }
         };
         Ok(if succeeded {
             super::files::FileReply::Value(value)
@@ -740,7 +781,7 @@ impl Session {
         if self.inner.files.is_some() {
             super::files::operation(&call)?;
             let log = self.inner.log(&self.root)?;
-            let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+            let policy = self.policy(&log)?;
             let open = self.carried_calls()?;
             let dispatch = classify_report_identified(
                 &call,
@@ -788,10 +829,13 @@ impl Session {
                 }
                 ToolOutcome::Success { .. } => {}
             }
-            return outcome_decision(decision);
+            return outcome_decision(decision, &self.deployment.externals);
         }
         let o = self.cap_outcome(o);
-        outcome_decision(self.report_outcome(&call, call_id.as_deref(), &o).await?)
+        outcome_decision(
+            self.report_outcome(&call, call_id.as_deref(), &o).await?,
+            &self.deployment.externals,
+        )
     }
 
     async fn report_outcome(
@@ -825,7 +869,7 @@ impl Session {
     /// Rebinding the same pair inherits the parent's current label in the child.
     pub fn on_spawn_resume(&self, call: ProposedCall, child: TrajectoryId) -> Result<(), EventError> {
         let opened = self.inner.log(&self.root)?;
-        let policy = self.inner.resolve_policy(&self.deployment, &opened)?;
+        let policy = self.policy(&opened)?;
         let decision = self.drive(&policy, Some(opened), true, None, |context| {
             let open = context.open_dispatches();
             let dispatch = context
@@ -952,7 +996,9 @@ impl Session {
                 .await?;
             // The engine decided on an event this handler built from the view.
             match plan.expect("the spawn result is typed before the engine decides") {
-                SpawnPlan::Outcome => return outcome_decision(decision).map(SpawnResultDecision::Outcome),
+                SpawnPlan::Outcome => {
+                    return outcome_decision(decision, &self.deployment.externals).map(SpawnResultDecision::Outcome);
+                }
                 SpawnPlan::Close(refusal) => return Err(refusal),
                 SpawnPlan::Bind { child, .. } => match decision.then {
                     Next::Done => {
@@ -961,13 +1007,13 @@ impl Session {
                     _ => return Err(EventError::UnexpectedDecision),
                 },
                 SpawnPlan::Replay => {
-                    outcome_decision(decision)?;
+                    outcome_decision(decision, &self.deployment.externals)?;
                     return Ok(SpawnResultDecision::Return(ChildReturnDecision::Returned {
                         value: value.expect("a replay repeats a delivered message"),
                     }));
                 }
                 SpawnPlan::Withheld => {
-                    outcome_decision(decision)?;
+                    outcome_decision(decision, &self.deployment.externals)?;
                     return Ok(SpawnResultDecision::Return(ChildReturnDecision::Blocked {
                         feedback: UNCHECKED_RETURN.to_string(),
                     }));
@@ -1020,9 +1066,22 @@ impl Session {
                 },
             }),
             Next::PresentToModel(Presentation::Value { value }) => Ok(RemedyDecision::Returned { value }),
-            Next::PresentToModel(Presentation::Declined { feedback }) => Ok(RemedyDecision::Declined { feedback }),
+            Next::PresentToModel(Presentation::Declined { feedback }) => Ok(RemedyDecision::Declined {
+                presentation: RemedyPresentation {
+                    feedback,
+                    offers: Vec::new(),
+                    review: Vec::new(),
+                    display: Vec::new(),
+                },
+            }),
             Next::PresentToModel(Presentation::NoAnswer { feedback }) => Ok(RemedyDecision::NoAnswer { feedback }),
-            Next::PresentToModel(Presentation::Blocked { feedback, .. }) => Ok(RemedyDecision::Declined { feedback }),
+            Next::PresentToModel(Presentation::Blocked {
+                feedback,
+                offers,
+                review,
+            }) => Ok(RemedyDecision::Declined {
+                presentation: remedy_presentation(feedback, offers, review, Vec::new(), &self.deployment.externals),
+            }),
             _ => Err(EventError::UnexpectedDecision),
         }
     }
@@ -1075,7 +1134,7 @@ impl Session {
     ) -> Result<(Session, Option<String>), EventError> {
         let child = id.clone();
         let opened = self.inner.log(&self.root)?;
-        let policy = self.inner.resolve_policy(&self.deployment, &opened)?;
+        let policy = self.policy(&opened)?;
         let mut contract = None;
         let decision = self.drive(&policy, Some(opened), true, None, |context| {
             let fork = fork(context)?;
@@ -1124,7 +1183,7 @@ impl Session {
     /// replays, a message is held until the child gives it up.
     pub async fn on_child_end(&self, value: Option<String>) -> Result<ChildReturnDecision, EventError> {
         let log = self.inner.log(&self.root)?;
-        let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+        let policy = self.policy(&log)?;
         let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
         if policy.engine().liveness(&view, &self.trajectory) == Liveness::Ended {
             return Ok(match value {
@@ -1201,7 +1260,7 @@ impl Session {
 
     fn liveness_of(&self, trajectory: &TrajectoryId) -> Result<Liveness, EventError> {
         let log = self.inner.log(&self.root)?;
-        let policy = self.inner.resolve_policy(&self.deployment, &log)?;
+        let policy = self.policy(&log)?;
         let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
         Ok(policy.engine().liveness(&view, trajectory))
     }
@@ -1237,7 +1296,7 @@ impl Session {
         opening_call_id: Option<&str>,
     ) -> Result<EngineDecision, EventError> {
         let opened = self.inner.log(&self.root)?;
-        let policy = self.inner.resolve_policy(&self.deployment, &opened)?;
+        let policy = self.policy(&opened)?;
         let mut opened = Some(opened);
         // External answers carry the exact call or group they answered for, and the
         // engine matches them only while that is still the one in front of it — a
@@ -1653,12 +1712,41 @@ impl Decided<'_> {
     }
 }
 
+fn remedy_presentation(
+    feedback: String,
+    offers: Vec<appa_runtime_api::OfferedRemedy>,
+    pending: Vec<PendingReview>,
+    display: Vec<super::RemedyDisplay>,
+    externals: &crate::external::ExternalServices,
+) -> RemedyPresentation {
+    RemedyPresentation {
+        feedback,
+        offers,
+        review: reviews(&pending, externals),
+        display,
+    }
+}
+
 /// The reviews a harness with its own channel shows: one per offer whose plan consults a
 /// `hitl` authority, the texts of several such authorities joined. Authorities of every
 /// other backend answer themselves and need no person here.
 fn join_review(feedback: &[Feedback], externals: &crate::external::ExternalServices) -> Vec<appa_runtime_api::Review> {
+    reviews(
+        &feedback
+            .iter()
+            .flat_map(|entry| entry.review.iter())
+            .cloned()
+            .collect::<Vec<_>>(),
+        externals,
+    )
+}
+
+fn reviews(
+    pending_reviews: &[PendingReview],
+    externals: &crate::external::ExternalServices,
+) -> Vec<appa_runtime_api::Review> {
     let mut reviews: Vec<appa_runtime_api::Review> = Vec::new();
-    for pending in feedback.iter().flat_map(|entry| entry.review.iter()) {
+    for pending in pending_reviews {
         if !externals.is_hitl(&pending.authority) {
             continue;
         }
@@ -4111,7 +4199,11 @@ confined_results = ["leak"]
             ToolCallDecision::Deny { .. },
         ));
         let before = runtime.minted_offers(&root(), &root()).len();
-        let ToolResultDecision::Replace { placeholder } = run_sanitize_offer(&runtime, &mut session).await else {
+        let ToolResultDecision::Replace {
+            placeholder,
+            presentation,
+        } = run_sanitize_offer(&runtime, &mut session).await
+        else {
             panic!("a staged derivation is delivered as a replacement, not kept");
         };
         assert!(
@@ -4122,6 +4214,9 @@ confined_results = ["leak"]
             runtime.minted_offers(&root(), &root()).len() > before,
             "the stage surfaced its own remedy for the narrowing the sanitizer left",
         );
+        let presentation = presentation.expect("a result-time block preserves its remedy state");
+        assert!(!presentation.offers.is_empty());
+        assert_eq!(presentation.feedback, placeholder);
     }
 
     const PARTLY_CLEARED_CHILD: &str = r#"
@@ -4240,7 +4335,7 @@ context_control = true
             ToolCallDecision::Deny { .. },
         ));
         let decision = run_sanitize_offer(&runtime, &mut session).await;
-        let ToolResultDecision::Replace { placeholder } = decision else {
+        let ToolResultDecision::Replace { placeholder, .. } = decision else {
             panic!("the raw must be withheld");
         };
         assert!(!placeholder.contains("pii"), "the raw body never reaches the model");

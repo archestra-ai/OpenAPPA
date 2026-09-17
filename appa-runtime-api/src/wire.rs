@@ -44,8 +44,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use crate::{
-    Actor, AdapterName, CanonicalTool, HookDecision, HookEvent, OfferedRemedy, OfferedReturn, OutcomeBody,
-    ParseRefusal, ProposedCall, Review, ReviewChannel, Ruling, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
+    Actor, AdapterName, CanonicalTool, HookDecision, HookEvent, OfferedInputSanitizer, OfferedRemedy, OfferedReturn,
+    OutcomeBody, ParseRefusal, ProposedCall, Review, ReviewChannel, Ruling, SpawnBinding, SpawnRef, ToolOutcome,
+    TrajectoryId,
 };
 
 /// The protocol this crate speaks. A wire event or decision carrying
@@ -909,6 +910,16 @@ pub struct WireOffer {
     pub offer_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub returns: Option<WireReturn>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_sanitizer: Option<WireInputSanitizer>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireInputSanitizer {
+    pub name: String,
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -997,6 +1008,11 @@ impl WireDecision {
                                     sanitizer: sanitizer.clone(),
                                 },
                             }),
+                            input_sanitizer: offer.input_sanitizer.as_ref().map(|sanitizer| WireInputSanitizer {
+                                name: sanitizer.name.clone(),
+                                target: sanitizer.target.clone(),
+                                description: sanitizer.description.clone(),
+                            }),
                         })
                         .collect(),
                 ),
@@ -1068,6 +1084,11 @@ impl WireDecision {
                         returns: offer.returns.map(|returns| match returns {
                             WireReturn::AsSpoken(_) => OfferedReturn::AsSpoken,
                             WireReturn::Sanitized { sanitizer } => OfferedReturn::Sanitized { sanitizer },
+                        }),
+                        input_sanitizer: offer.input_sanitizer.map(|sanitizer| OfferedInputSanitizer {
+                            name: sanitizer.name,
+                            target: sanitizer.target,
+                            description: sanitizer.description,
                         }),
                     })
                     .collect(),
@@ -1888,16 +1909,23 @@ mod tests {
                     OfferedRemedy {
                         id: "o1".to_string(),
                         returns: None,
+                        input_sanitizer: Some(OfferedInputSanitizer {
+                            name: "redact-command".to_string(),
+                            target: "shell".to_string(),
+                            description: Some("Replace credential values with redaction markers.".to_string()),
+                        }),
                     },
                     OfferedRemedy {
                         id: "o2".to_string(),
                         returns: Some(OfferedReturn::AsSpoken),
+                        input_sanitizer: None,
                     },
                     OfferedRemedy {
                         id: "o3".to_string(),
                         returns: Some(OfferedReturn::Sanitized {
                             sanitizer: "s".to_string(),
                         }),
+                        input_sanitizer: None,
                     },
                 ],
                 review: vec![Review {
@@ -1929,6 +1957,7 @@ mod tests {
             offers: vec![OfferedRemedy {
                 id: "o2".to_string(),
                 returns: Some(OfferedReturn::AsSpoken),
+                input_sanitizer: None,
             }],
             review: Vec::new(),
         }))

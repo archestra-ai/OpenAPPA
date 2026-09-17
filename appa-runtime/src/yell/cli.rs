@@ -338,9 +338,13 @@ mod tests {
     #[tokio::test]
     async fn a_runtime_that_is_not_there_is_a_class_and_not_a_panic() {
         let message = YellMessage::new("nobody is home").expect("a message");
-        let refusal = build("http://127.0.0.1:1", &message, Mode::Baseline)
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral loopback port");
+        let addr = listener.local_addr().expect("local addr");
+        drop(listener);
+        let url = format!("http://{addr}");
+        let refusal = build(&url, &message, Mode::Baseline)
             .await
-            .expect_err("nothing is listening on port 1");
+            .expect_err("nothing is listening on closed port");
         assert_eq!(refusal, UnreachableClass::NotListening);
         assert!(
             local(message, Mode::Baseline, refusal).is_ok(),

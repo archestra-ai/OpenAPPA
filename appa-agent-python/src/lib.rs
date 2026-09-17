@@ -367,8 +367,9 @@ impl SessionInner {
                 call.arguments.get(),
             ),
             RemedyOutcome::Returned { value } => value,
-            RemedyOutcome::Declined { feedback } | RemedyOutcome::NoAnswer { feedback } => feedback,
-            RemedyOutcome::Refused { detail } => detail,
+            RemedyOutcome::Declined { presentation } => presentation.feedback,
+            RemedyOutcome::NoAnswer { feedback } => feedback,
+            RemedyOutcome::Refused { reason } => reason.detail().to_string(),
         }
     }
 
@@ -624,10 +625,14 @@ impl SessionInner {
             arguments,
         )) {
             RemedyOutcome::Authorized { call } => Ok(Some(call)),
-            RemedyOutcome::Declined { feedback } | RemedyOutcome::NoAnswer { feedback } => {
-                Err(format!("the return declaration was not taken: {feedback}"))
+            RemedyOutcome::Declined { presentation } => Err(format!(
+                "the return declaration was not taken: {}",
+                presentation.feedback
+            )),
+            RemedyOutcome::NoAnswer { feedback } => Err(format!("the return declaration was not taken: {feedback}")),
+            RemedyOutcome::Refused { reason } => {
+                Err(format!("the return declaration was refused: {}", reason.detail()))
             }
-            RemedyOutcome::Refused { detail } => Err(format!("the return declaration was refused: {detail}")),
             RemedyOutcome::Substituted { .. } | RemedyOutcome::Returned { .. } => {
                 Err("the return declaration answered with something other than an approval".to_string())
             }

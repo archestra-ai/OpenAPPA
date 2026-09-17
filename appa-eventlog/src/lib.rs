@@ -23,6 +23,17 @@
 //!   which families stand behind a key without a pass over every family's rows, and it cannot
 //!   disagree with the log because a record and its key row commit or roll back together.
 //!
+//! ### Storage Backend Scope & Retention
+//!
+//! PostgreSQL embedding hosts may additionally install the typed receipt tables exposed by the
+//! PostgreSQL storage API (`openappa_offer_owners`, `openappa_operations`, `openappa_processed_results`).
+//! These tables hold authenticated routing and idempotent operation claim state across multiple
+//! backend processes; offer validity and terminal lifecycle still rehydrate from engine facts.
+//!
+//! In-memory and SQLite backends do not persist cross-process routing tables; they resolve offers
+//! in-process via actor vouches. For PostgreSQL deployments, hosts should clean up routing records
+//! when a session or root trajectory terminates using `expire_offer_owners` or `expire_offer_owners_for_root`.
+//!
 //! There is no index from a branch to its root. Every caller already knows the root: a harness
 //! event names it, and a surfaced offer's identity carries it. An index would be a third place
 //! for the truth to live.
@@ -1519,7 +1530,7 @@ mod tests {
                 .rev()
                 .find(|record| matches!(&record.observation, HostObservation::Vouched { .. })),
             Some(&HostRecord {
-                seq: 4,
+                seq: before_vouch.basis(),
                 observation: vouched,
             }),
             "and the record reads the same through the connection thread"
@@ -1542,11 +1553,13 @@ mod tests {
         assert_eq!(
             outcomes
                 .iter()
-                .filter(|result| matches!(result, Err(AppendError::Conflict { current: 4 })))
+                .filter(
+                    |result| matches!(result, Err(AppendError::Conflict { current }) if *current == stale.basis() + 1)
+                )
                 .count(),
             1
         );
-        assert_eq!(second.log(&id).unwrap().basis(), 4);
+        assert_eq!(second.log(&id).unwrap().basis(), stale.basis() + 1);
 
         let bound = HostObservation::CallBound {
             trajectory: id.clone(),
@@ -1580,7 +1593,7 @@ mod tests {
         assert_eq!(restored.facts().len(), before.facts().len() + facts.len());
         assert!(matches!(
             second.append_host(&before, &facts, &bound),
-            Err(AppendError::Conflict { current: 5 })
+            Err(AppendError::Conflict { current }) if current == before.basis() + 1
         ));
 
         first
@@ -1592,5 +1605,179 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    /// Run against a host schema that includes the OpenAPPA integration
+    /// receipts. The test leaves no rows behind and is intentionally opt-in:
+    /// its contract is the typed host-storage API, not a shared development DB.
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host receipt migrations"]
+    fn postgres_typed_offer_owners_and_receipts_are_idempotent_and_fail_closed() {
+        use crate::postgres::{
+            OfferOwnerError, OfferOwnerKey, OfferOwnerRecord, OperationClaim, OperationKey, OperationReceiptError,
+            OperationRequest, ProcessedResultClaim, ProcessedResultKey, ProcessedResultRequest, ReceiptBinding,
+            ReceiptScope,
+        };
+
+        let url = std::env::var("OPENAPPA_TEST_DATABASE_URL").expect("test database URL");
+        let store = LogStore::open(Backend::Postgres { url }).expect("the PostgreSQL store opens");
+        let pg = store.postgres().expect("the PostgreSQL API is present");
+        let unique = tempfile::tempdir().expect("a unique receipt namespace exists");
+        let suffix = unique.path().display().to_string();
+        let scope = ReceiptScope {
+            organization_id: format!("receipt-org:{suffix}"),
+            caller_id: Some("caller".to_owned()),
+            session_id: format!("receipt-session:{suffix}"),
+            binding: ReceiptBinding::Caller,
+        };
+        let owner = OfferOwnerRecord {
+            scope: scope.clone(),
+            offer_id: "0123456789abcdef".to_owned(),
+            root: format!("receipt-root:{suffix}"),
+            parent_id: None,
+            arguments: Some("{}".to_owned()),
+            tool: Some("wire".to_owned()),
+            spelling: Some("Wire".to_owned()),
+        };
+        pg.store_offer_owner(owner.clone()).expect("the owner stores");
+        pg.store_offer_owner(owner.clone())
+            .expect("the exact owner replay is idempotent");
+        assert_eq!(
+            pg.offer_owner(OfferOwnerKey {
+                organization_id: scope.organization_id.clone(),
+                offer_id: owner.offer_id.clone(),
+            })
+            .expect("the owner reads"),
+            Some(owner.clone())
+        );
+        let mut colliding = owner.clone();
+        colliding.root.push_str(":other");
+        assert!(matches!(
+            pg.store_offer_owner(colliding),
+            Err(OfferOwnerError::Collision)
+        ));
+
+        let request = OperationRequest {
+            key: OperationKey {
+                scope: scope.clone(),
+                operation_id: "remedy-1".to_owned(),
+            },
+            root: owner.root.clone(),
+            input: serde_json::json!({"offer_id": owner.offer_id}),
+            context: None,
+        };
+        assert!(matches!(
+            pg.claim_operation(request.clone()),
+            Ok(OperationClaim::Claimed)
+        ));
+        assert!(matches!(
+            pg.claim_operation(request.clone()),
+            Err(OperationReceiptError::Pending)
+        ));
+        let decision = serde_json::json!({"decision":"mcp_result"});
+        pg.complete_operation(request.key.clone(), decision.clone())
+            .expect("the claimed operation completes");
+        assert_eq!(
+            pg.claim_operation(request.clone())
+                .expect("the completed operation replays"),
+            OperationClaim::Complete {
+                decision: decision.clone()
+            }
+        );
+        let mut changed = request.clone();
+        changed.input = serde_json::json!({"offer_id": "other"});
+        assert!(matches!(
+            pg.claim_operation(changed),
+            Err(OperationReceiptError::InputMismatch)
+        ));
+
+        let result = ProcessedResultRequest {
+            key: ProcessedResultKey {
+                scope: ReceiptScope {
+                    binding: ReceiptBinding::Session,
+                    ..scope.clone()
+                },
+                tool_call_id: "call-1".to_owned(),
+            },
+            root: owner.root.clone(),
+        };
+        assert!(matches!(
+            pg.claim_processed_result(result.clone()),
+            Ok(ProcessedResultClaim::Claimed)
+        ));
+        assert!(
+            pg.has_pending_receipts(owner.root.clone())
+                .expect("the pending receipt checks")
+        );
+        pg.complete_processed_result(result.key.clone(), "approved".to_owned(), decision.clone())
+            .expect("the processed result completes");
+        assert_eq!(
+            pg.claim_processed_result(result).expect("the processed result replays"),
+            ProcessedResultClaim::Complete {
+                approved_output: "approved".to_owned(),
+                decision,
+            }
+        );
+        assert!(
+            !pg.has_pending_receipts(owner.root.clone())
+                .expect("all receipts are terminal")
+        );
+
+        let mut rollback_owner = owner.clone();
+        rollback_owner.offer_id = "fedcba9876543210".to_owned();
+        let rollback_request = OperationRequest {
+            key: OperationKey {
+                scope: scope.clone(),
+                operation_id: "remedy-rollback".to_owned(),
+            },
+            root: owner.root.clone(),
+            input: serde_json::json!({"offer_id": rollback_owner.offer_id}),
+            context: None,
+        };
+        assert!(matches!(
+            pg.claim_operation(rollback_request.clone()),
+            Ok(OperationClaim::Claimed)
+        ));
+        let transaction = pg.begin().expect("the outer transaction starts");
+        pg.store_offer_owner(rollback_owner.clone())
+            .expect("the tentative owner stores");
+        pg.complete_operation(
+            rollback_request.key.clone(),
+            serde_json::json!({"decision": "mcp_result"}),
+        )
+        .expect("the tentative result stores");
+        drop(transaction);
+        assert_eq!(
+            pg.offer_owner(OfferOwnerKey {
+                organization_id: scope.organization_id.clone(),
+                offer_id: rollback_owner.offer_id,
+            })
+            .expect("the rolled-back owner reads"),
+            None,
+            "ownership cannot escape a failed event/receipt transaction"
+        );
+        assert!(matches!(
+            pg.claim_operation(rollback_request),
+            Err(OperationReceiptError::Pending)
+        ));
+
+        assert_eq!(
+            pg.expire_offer_owners(scope.clone()).expect("the turn expires owners"),
+            1
+        );
+
+        pg.with_client(move |client| {
+            client.execute(
+                "DELETE FROM openappa_operations WHERE session_id=$1",
+                &[&scope.session_id],
+            )?;
+            client.execute(
+                "DELETE FROM openappa_processed_results WHERE session_id=$1",
+                &[&scope.session_id],
+            )?;
+            Ok(())
+        })
+        .expect("the isolated test receipts clean up");
     }
 }
