@@ -13,7 +13,7 @@
 
 use std::time::Duration;
 
-use hmac::Mac;
+use hmac::{KeyInit, Mac};
 
 use super::report::Finished;
 
@@ -270,6 +270,10 @@ mod tests {
         let one = signature(b"{\"schema\":\"openappa.yell.v1\"}");
         let same = signature(b"{\"schema\":\"openappa.yell.v1\"}");
         let other = signature(b"{\"schema\":\"openappa.yell.v2\"}");
+        assert_eq!(
+            one,
+            "v1=1d82b2edcbbe88cd999d6f8cdccff3814b3b64938142d1dc503b63323d506208"
+        );
         assert_eq!(one, same);
         assert_ne!(one, other);
         assert!(one.starts_with("v1="), "{one}");

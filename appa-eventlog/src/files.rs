@@ -882,7 +882,7 @@ fn hash(path: &Path) -> Result<String, FileStoreError> {
         }
         h.update(&b[..n]);
     }
-    Ok(format!("{:x}", h.finalize()))
+    Ok(h.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
 }
 fn state_digest(path: &Path) -> Result<String, FileStoreError> {
     if path.exists() { hash(path) } else { Ok(ABSENT.into()) }
@@ -1006,6 +1006,17 @@ fn current_connection(c: &Connection, p: &str) -> Result<Option<FileVersion>, Fi
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn file_digest_preserves_sha256_lowercase_hex() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("value.txt");
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(
+            hash(&path).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 
     struct Fixture {
         _root: TempDir,

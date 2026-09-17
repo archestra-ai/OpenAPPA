@@ -87,7 +87,7 @@ impl PermitKey {
         hasher.update(tool.as_bytes());
         hasher.update([0]);
         hasher.update(appa_engine::params::canonical_bytes(arguments));
-        Self::Call(format!("{:x}", hasher.finalize()))
+        Self::Call(hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
     }
 
     /// How a record spells this key. The two variants can never mean each other, so the

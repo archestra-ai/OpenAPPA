@@ -55,7 +55,7 @@ base64 = "0.22"
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 libloading = "0.9"
 libc = "0.2"
-hmac = "0.12"
+hmac = "0.13"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 rand = "0.10"
 reqwest = { workspace = true }

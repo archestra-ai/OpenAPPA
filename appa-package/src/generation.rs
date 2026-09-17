@@ -85,7 +85,8 @@ impl ArtifactDigest {
     }
 
     pub fn of_bytes(bytes: &[u8]) -> Self {
-        Self(format!("sha256:{:x}", Sha256::digest(bytes)))
+        let hex: String = Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect();
+        Self(format!("sha256:{hex}"))
     }
 
     pub fn of_reader(mut reader: impl Read, limit: u64) -> io::Result<Self> {
@@ -106,7 +107,8 @@ impl ArtifactDigest {
             }
             hasher.update(&buffer[..read]);
         }
-        Ok(Self(format!("sha256:{:x}", hasher.finalize())))
+        let hex: String = hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect();
+        Ok(Self(format!("sha256:{hex}")))
     }
 
     pub fn as_str(&self) -> &str {

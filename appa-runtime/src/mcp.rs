@@ -614,7 +614,11 @@ fn source_coverage(
         {
             return Err("endpoint must be an HTTP(S) URL without userinfo or a fragment".into());
         }
-        let server = format!("server-{:x}", Sha256::digest(endpoint.as_bytes()));
+        let hex: String = Sha256::digest(endpoint.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let server = format!("server-{hex}");
         inventory.tools = observed
             .iter()
             .map(|name| ObservedTool {
@@ -1021,9 +1025,8 @@ mod tests {
     #[test]
     fn coverage_uses_policy_bindings_and_explicit_delegation_contracts() {
         use crate::tool_validation::ToolStatus;
-        use sha2::{Digest, Sha256};
         let endpoint = "https://github.example/mcp";
-        let server = format!("server-{:x}", Sha256::digest(endpoint.as_bytes()));
+        let server = "server-8f9bc50cf907a42a97f5dd5a81e428c594a34d0713e83ac279a5be860a4db652";
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("appa.toml");
         std::fs::write(
@@ -1050,7 +1053,7 @@ mod tests {
         let runtime = Runtime::open(Config::load(&path).unwrap(), dir.path().join("appa.db"), None).unwrap();
         let names = vec!["get_file_contents".into(), "list_pods".into()];
         let (identity, covered) = source_coverage(&runtime, "kagent/github", Some(endpoint), &names).unwrap();
-        assert_eq!(identity.as_deref(), Some(server.as_str()));
+        assert_eq!(identity.as_deref(), Some(server));
         assert!(
             covered
                 .tools
