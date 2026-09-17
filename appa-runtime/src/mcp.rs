@@ -1547,13 +1547,8 @@ mod tests {
             RemedyOutcome::Refused {
                 reason: RemedyRefusal::ActorMismatch,
             },
-            "the embedded path must spend a hook vouch and compare its actor"
+            "a stranger is refused before the owner's vouch is spent"
         );
-
-        assert!(matches!(
-            crate::hooks::handle(&runtime, control_act(&owner, &quoted)).await,
-            HookDecision::PassControl
-        ));
         let outcome = runtime
             .execute_embedded_remedy(
                 &owner,

@@ -335,20 +335,6 @@ pub enum RemedyOutcome {
     Refused { reason: RemedyRefusal },
 }
 
-/// Authorization token binding one vouched remedy offer to an executing actor.
-#[derive(Debug)]
-pub(crate) struct RemedyAuthorization {
-    actor: Actor,
-    quoted: OfferId,
-    ruling: Option<appa_runtime_api::Ruling>,
-}
-
-impl RemedyAuthorization {
-    pub(crate) fn actor(&self) -> &Actor {
-        &self.actor
-    }
-}
-
 impl From<EventError> for RemedyOutcome {
     fn from(error: EventError) -> RemedyOutcome {
         RemedyOutcome::Refused {
@@ -1941,18 +1927,37 @@ impl Runtime {
             }
         };
         let arguments = RemedyArguments::from(args);
-        let authorization = match self.take_vouched_remedy(quoted.clone(), expected_actor) {
-            Ok(authorization) => authorization,
-            Err(reason) => return RemedyOutcome::Refused { reason },
+        let key = PermitKey::offer(&quoted);
+        if let Some(expected) = expected_actor {
+            match self.peek_vouched(&key) {
+                Ok((actor, _)) if actor != *expected => {
+                    return RemedyOutcome::Refused {
+                        reason: RemedyRefusal::ActorMismatch,
+                    };
+                }
+                Err(_) => {
+                    return RemedyOutcome::Refused {
+                        reason: RemedyRefusal::Unvouched,
+                    };
+                }
+                Ok(_) => {}
+            }
+        }
+        let (acting, ruling) = match self.take_vouched(&key) {
+            Ok(consumed) => consumed,
+            Err(_) => {
+                return RemedyOutcome::Refused {
+                    reason: RemedyRefusal::Unvouched,
+                };
+            }
         };
-        let acting = authorization.actor().clone();
         let started = std::time::Instant::now();
         let outcome = if strict_freshness && self.offer_kind(&acting.root, &quoted).is_none() {
             RemedyOutcome::Refused {
                 reason: RemedyRefusal::UnknownOffer,
             }
         } else {
-            self.execute_authorized_remedy_with_presentation(authorization, arguments, elicitation, presentation)
+            self.remedy_with_presentation(&acting, quoted.clone(), arguments, elicitation, ruling, presentation)
                 .await
         };
         // Recorded from the typed outcome, before rendering turns it into the text the
@@ -2175,42 +2180,6 @@ impl Runtime {
         }
     }
 
-    /// Binds a one-turn remedy vouch to an actor before execution begins.
-    pub(crate) fn take_vouched_remedy(
-        &self,
-        quoted: OfferId,
-        expected_actor: Option<&Actor>,
-    ) -> Result<RemedyAuthorization, RemedyRefusal> {
-        let (actor, ruling) = self
-            .take_vouched(&PermitKey::offer(&quoted))
-            .map_err(|_| RemedyRefusal::Unvouched)?;
-        if expected_actor.is_some_and(|expected| expected != &actor) {
-            return Err(RemedyRefusal::ActorMismatch);
-        }
-        Ok(RemedyAuthorization { actor, quoted, ruling })
-    }
-
-    /// Executes an authorization created by [`Self::take_vouched_remedy`].
-    /// Consuming the capability makes a second attempt impossible even before
-    /// the persisted offer's own single-execution checks run.
-    pub(crate) async fn execute_authorized_remedy_with_presentation(
-        &self,
-        authorization: RemedyAuthorization,
-        arguments: RemedyArguments,
-        elicitation: Option<&Elicitation>,
-        presentation: EmbeddedPresentationOptions,
-    ) -> RemedyOutcome {
-        self.remedy_with_presentation(
-            &authorization.actor,
-            authorization.quoted,
-            arguments,
-            elicitation,
-            authorization.ruling,
-            presentation,
-        )
-        .await
-    }
-
     /// How long one execution's claim stands without word from the execution itself: the
     /// person's budget where a review reaches one, and the machine-consult budget — every
     /// resolution round of it — otherwise. Only a hard crash ever reaches the bound.
@@ -2283,6 +2252,19 @@ impl Runtime {
     /// A read that fails answers nobody. A partial view of who stands behind a key cannot
     /// tell a lone holder from one of two, so authorizing from it would answer the ambiguous
     /// case with one session's standing.
+    /// Who currently stands behind this key, without spending the standing.
+    fn peek_vouched(&self, key: &PermitKey) -> Result<(Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
+        if PermitKey::parse(&key.wire()).as_ref() != Some(key) {
+            return Err(Unvouched::Nobody);
+        }
+        let root = self.sole_holder(key)?;
+        let log = self.inner.log(&root).map_err(|_| Unvouched::Nobody)?;
+        if self.live_holder(key, Some(&root))?.is_some() {
+            return Err(Unvouched::Ambiguous);
+        }
+        reduced(&log).vouched(key)
+    }
+
     pub(crate) fn take_vouched(&self, key: &PermitKey) -> Result<(Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
         // The spelling is read before the store is asked anything. An MCP request names the
         // key, so a caller over a non-loopback listener can ask about ids this runtime never
@@ -2503,7 +2485,7 @@ impl Runtime {
         EventError::from(
             policy
                 .engine()
-                .handle(&view, trajectory, event)
+                .handle(&view, trajectory, event, &EmbeddedPresentationOptions::default())
                 .expect_err("the moved subject refuses the event"),
         )
     }
@@ -4464,6 +4446,73 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             Err(Unvouched::Nobody),
             "and taking it is still one-shot"
         );
+    }
+
+    #[cfg(feature = "daemon")]
+    #[test]
+    fn daemon_sqlite_receipts_outlive_the_runtime_that_recorded_them() {
+        use appa_eventlog::{
+            OfferOwnerKey, OfferOwnerRecord, OperationClaim, OperationKey, OperationRequest, ReceiptBinding,
+            ReceiptScope,
+        };
+
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let db = dir.path().join("appa.db");
+        let scope = ReceiptScope {
+            organization_id: "daemon".to_owned(),
+            caller_id: Some("caller".to_owned()),
+            session_id: "session".to_owned(),
+            binding: ReceiptBinding::Caller,
+        };
+        let owner = OfferOwnerRecord {
+            scope: scope.clone(),
+            offer_id: "0123456789abcdef".to_owned(),
+            root: "cc:daemon-receipts".to_owned(),
+            parent_id: None,
+            arguments: None,
+            tool: None,
+            spelling: None,
+        };
+        let request = OperationRequest {
+            key: OperationKey {
+                scope: scope.clone(),
+                operation_id: "remedy-1".to_owned(),
+            },
+            root: owner.root.clone(),
+            input: serde_json::json!({"offer_id": owner.offer_id}),
+            context: None,
+        };
+        {
+            let runtime = Runtime::open(versioned_policy("first"), db.clone(), None).expect("the deployment opens");
+            runtime
+                .store()
+                .store_offer_owner(owner.clone())
+                .expect("the owner stores");
+            assert!(matches!(
+                runtime.store().claim_operation(request.clone()),
+                Ok(OperationClaim::Claimed)
+            ));
+            runtime
+                .store()
+                .complete_operation(request.key.clone(), serde_json::json!({"decision":"mcp_result"}))
+                .expect("the operation completes");
+        }
+        let reopened = Runtime::open(versioned_policy("first"), db, None).expect("the deployment reopens");
+        assert_eq!(
+            reopened
+                .store()
+                .offer_owner(OfferOwnerKey {
+                    organization_id: scope.organization_id,
+                    offer_id: owner.offer_id.clone(),
+                })
+                .expect("the owner reads"),
+            Some(owner),
+            "the daemon's SQLite receipts survive a process restart"
+        );
+        assert!(matches!(
+            reopened.store().claim_operation(request),
+            Ok(OperationClaim::Complete { .. })
+        ));
     }
 
     #[cfg(feature = "daemon")]

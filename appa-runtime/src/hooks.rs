@@ -735,7 +735,7 @@ where
                     tracing::debug!(root = %root.0, child = %child.0, "the child's start landed while its event was in flight");
                 }
             }
-            event(runtime.session(root, child)?).await
+            event(runtime.session_with_presentation(root, child, presentation.clone())?).await
         }
         (outcome, _) => outcome,
     }

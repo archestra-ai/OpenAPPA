@@ -333,6 +333,7 @@ pub enum Presentation {
         feedback: String,
         offers: Vec<OfferedRemedy>,
         review: Vec<PendingReview>,
+        display: Option<RemedyDisplay>,
     },
 }
 
@@ -732,7 +733,6 @@ pub struct RuntimeEngine {
     /// model to run one names it the way that model's harness dispatches it. A property of
     /// the deployment, not of the policy: a retired engine decides under the same one.
     naming: ToolNaming,
-    presentation: EmbeddedPresentationOptions,
 }
 
 impl RuntimeEngine {
@@ -778,16 +778,6 @@ impl RuntimeEngine {
                 .map(|(name, binding)| (name.as_str().to_string(), binding.clone()))
                 .collect(),
             naming,
-            presentation: EmbeddedPresentationOptions::default(),
-        }
-    }
-
-    pub(crate) fn with_presentation(&self, presentation: EmbeddedPresentationOptions) -> Self {
-        Self {
-            engine: self.engine.clone(),
-            annotators: self.annotators.clone(),
-            naming: self.naming,
-            presentation,
         }
     }
 
@@ -1201,6 +1191,7 @@ impl RuntimeEngine {
         view: &EngineView,
         trajectory: &TrajectoryId,
         event: EngineEvent,
+        presentation: &EmbeddedPresentationOptions,
     ) -> Result<EngineDecision, EngineRefusal> {
         match event {
             EngineEvent::ModelResponse {
@@ -1208,25 +1199,28 @@ impl RuntimeEngine {
                 evidence,
                 entropy,
                 spawn,
-            } => self.model_response(view, trajectory, &call, &evidence, &entropy, spawn),
+            } => self.model_response(view, trajectory, &call, &evidence, &entropy, spawn, presentation),
             EngineEvent::ToolOutcome {
                 dispatch,
                 outcome,
                 evidence,
                 entropy,
-            } => self.tool_outcome(view, &dispatch, &outcome, &evidence, &entropy),
+            } => self.tool_outcome(view, &dispatch, &outcome, &evidence, &entropy, presentation),
             EngineEvent::ExecuteOffer {
                 trajectory: owner,
                 offer,
                 arguments,
                 evidence,
                 entropy,
-            } => self.execute_offer(view, &owner, &offer, &arguments, &evidence, &entropy),
+            } => self.execute_offer(view, &owner, &offer, &arguments, &evidence, &entropy, presentation),
             EngineEvent::BindFork { fork, child } => self.bind_fork(view, &fork, &child),
-            EngineEvent::ChildReturn { child, value, evidence } => self.child_return(view, &child, value, &evidence),
+            EngineEvent::ChildReturn { child, value, evidence } => {
+                self.child_return(view, &child, value, &evidence, presentation)
+            }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn model_response(
         &self,
         view: &EngineView,
@@ -1235,6 +1229,7 @@ impl RuntimeEngine {
         evidence: &[ExternalEvidence],
         entropy: &OfferNonce,
         spawn: bool,
+        presentation: &EmbeddedPresentationOptions,
     ) -> Result<EngineDecision, EngineRefusal> {
         let resolved = match self
             .engine
@@ -1299,11 +1294,16 @@ impl RuntimeEngine {
             AudienceRound::Failed(error) => return Err(proposal_refusal(error)),
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
-        let then = self.deliver_proposals(decision.follow_up, &self.return_bounds(&views))?;
+        let then = self.deliver_proposals(decision.follow_up, &self.return_bounds(&views), presentation)?;
         Ok(EngineDecision { append, then })
     }
 
-    fn deliver_proposals(&self, follow_up: FollowUp, bounds: &ReturnBounds) -> Result<Next, EngineRefusal> {
+    fn deliver_proposals(
+        &self,
+        follow_up: FollowUp,
+        bounds: &ReturnBounds,
+        presentation: &EmbeddedPresentationOptions,
+    ) -> Result<Next, EngineRefusal> {
         match follow_up {
             FollowUp::Proposals {
                 released: releases,
@@ -1319,7 +1319,7 @@ impl RuntimeEngine {
                     });
                 }
                 if let Some(block) = blocked.into_iter().next() {
-                    let feedback = self.block_delivery(&block, bounds);
+                    let feedback = self.block_delivery(&block, bounds, presentation);
                     return Ok(Next::ModelResponse {
                         invocations: Vec::new(),
                         feedback: vec![feedback],
@@ -1341,8 +1341,13 @@ impl RuntimeEngine {
         }
     }
 
-    fn block_delivery(&self, block: &CoreBlocked, bounds: &ReturnBounds) -> Feedback {
-        let (text, offers, review, display) = self.rendered_block(block, bounds);
+    fn block_delivery(
+        &self,
+        block: &CoreBlocked,
+        bounds: &ReturnBounds,
+        presentation: &EmbeddedPresentationOptions,
+    ) -> Feedback {
+        let (text, offers, review, display) = self.rendered_block(block, bounds, presentation);
         let offers = self.offered_remedies(block, offers);
         Feedback {
             text,
@@ -1356,6 +1361,7 @@ impl RuntimeEngine {
         &self,
         block: &CoreBlocked,
         bounds: &ReturnBounds,
+        presentation: &EmbeddedPresentationOptions,
     ) -> (String, Vec<OfferId>, Vec<PendingReview>, Option<RemedyDisplay>) {
         let offers: Vec<(OfferId, PlanId)> = block
             .offers
@@ -1370,7 +1376,7 @@ impl RuntimeEngine {
             bounds,
             self.naming,
             block.call.tool().as_str(),
-            &self.presentation,
+            presentation,
         );
         let review = self.pending_reviews(block, &offers);
         (
@@ -1469,6 +1475,7 @@ impl RuntimeEngine {
         outcome: &ToolOutcome,
         evidence: &[ExternalEvidence],
         entropy: &OfferNonce,
+        presentation: &EmbeddedPresentationOptions,
     ) -> Result<EngineDecision, EngineRefusal> {
         let judged = self.judge_under_audience(
             evidence,
@@ -1518,6 +1525,7 @@ impl RuntimeEngine {
                 "[appa] the cleaned result still narrows this session.",
                 &confined.residual,
                 &confined.offers,
+                presentation,
             )),
             other => {
                 return Err(EngineRefusal::Invariant {
@@ -1528,6 +1536,7 @@ impl RuntimeEngine {
         Ok(EngineDecision { append, then })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_offer(
         &self,
         view: &EngineView,
@@ -1536,6 +1545,7 @@ impl RuntimeEngine {
         arguments: &RemedyArguments,
         evidence: &[ExternalEvidence],
         entropy: &OfferNonce,
+        presentation: &EmbeddedPresentationOptions,
     ) -> Result<EngineDecision, EngineRefusal> {
         let Some(engine_offer) = parse_offer(offer) else {
             return Ok(declined(
@@ -1675,15 +1685,16 @@ impl RuntimeEngine {
                 feedback: "[appa] the state changed and this offer no longer applies; re-propose the call".to_string(),
             }),
             FollowUp::Offer(OfferFollowUp::Denied { block }) => {
-                Next::PresentToModel(self.offer_block_delivery(&block, &self.return_bounds(&views)))
+                Next::PresentToModel(self.offer_block_delivery(&block, &self.return_bounds(&views), presentation))
             }
             FollowUp::Offer(OfferFollowUp::Substituted { block }) => {
-                Next::PresentToModel(self.offer_block_delivery(&block, &self.return_bounds(&views)))
+                Next::PresentToModel(self.offer_block_delivery(&block, &self.return_bounds(&views), presentation))
             }
             FollowUp::Offer(OfferFollowUp::Staged(confined)) => Next::PresentToModel(self.stage_delivery(
                 "[appa] the cleaned result still narrows this session.",
                 &confined.residual,
                 &confined.offers,
+                presentation,
             )),
             FollowUp::Offer(OfferFollowUp::Released(release)) => Next::InvokeTool(released(&release)),
             FollowUp::Offer(OfferFollowUp::Settled(_)) => Next::PresentToModel(Presentation::Declined {
@@ -1760,12 +1771,18 @@ impl RuntimeEngine {
         AuthorityOutcome::Outcome(OfferOutcome::Approved(approvals))
     }
 
-    fn offer_block_delivery(&self, block: &CoreBlocked, bounds: &ReturnBounds) -> Presentation {
-        let (feedback, offers, review, _) = self.rendered_block(block, bounds);
+    fn offer_block_delivery(
+        &self,
+        block: &CoreBlocked,
+        bounds: &ReturnBounds,
+        presentation: &EmbeddedPresentationOptions,
+    ) -> Presentation {
+        let (feedback, offers, review, display) = self.rendered_block(block, bounds, presentation);
         Presentation::Blocked {
             feedback,
             offers: self.offered_remedies(block, offers),
             review,
+            display,
         }
     }
 
@@ -1897,6 +1914,7 @@ impl RuntimeEngine {
         headline: &str,
         residual: &appa_engine::check::Narrowing,
         staged: &[(EngineOfferId, PlanId)],
+        presentation: &EmbeddedPresentationOptions,
     ) -> Presentation {
         let offers: Vec<OfferId> = staged.iter().map(|(offer, _)| offer_id(offer)).collect();
         let feedback = stage_feedback(
@@ -1905,7 +1923,7 @@ impl RuntimeEngine {
             &offers,
             self.engine.registry().trust_chain(),
             self.naming,
-            &self.presentation,
+            presentation,
         );
         Presentation::Blocked {
             feedback,
@@ -1918,6 +1936,7 @@ impl RuntimeEngine {
                 })
                 .collect(),
             review: Vec::new(),
+            display: None,
         }
     }
 
@@ -1954,6 +1973,7 @@ impl RuntimeEngine {
         child: &TrajectoryId,
         value: Option<String>,
         evidence: &[ExternalEvidence],
+        _presentation: &EmbeddedPresentationOptions,
     ) -> Result<EngineDecision, EngineRefusal> {
         let fork = self
             .engine
@@ -1973,6 +1993,7 @@ impl RuntimeEngine {
                 feedback,
                 offers: Vec::new(),
                 review: Vec::new(),
+                display: None,
             })))
         };
         let judged = self.judge_under_audience(evidence, withheld, |audience| {
@@ -2253,6 +2274,7 @@ impl RuntimeEngine {
                 feedback: withheld.to_string(),
                 offers: Vec::new(),
                 review: Vec::new(),
+                display: None,
             }))
         };
         match request {
@@ -2651,6 +2673,7 @@ impl UnresolvedAudience<'_> {
                     feedback: format!("[appa] {detail}; the {subject} is withheld and may be retried"),
                     offers: Vec::new(),
                     review: Vec::new(),
+                    display: None,
                 }))
             }
             UnresolvedAudience::OfferStands => {
@@ -2673,6 +2696,7 @@ impl UnresolvedAudience<'_> {
                     feedback: format!("[appa] {detail}; the {subject} is withheld"),
                     offers: Vec::new(),
                     review: Vec::new(),
+                    display: None,
                 }))
             }
             UnresolvedAudience::OfferStands => declined(format!("[appa] {detail}; the offer is declined")),
@@ -3838,6 +3862,7 @@ mod tests {
                         entropy: OfferNonce([7u8; 32]),
                         spawn: false,
                     },
+                    &EmbeddedPresentationOptions::default(),
                 )
                 .expect("the proposal is handled")
         };

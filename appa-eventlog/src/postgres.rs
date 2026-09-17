@@ -9,6 +9,10 @@
 //!                               PRIMARY KEY (root, seq));
 //! CREATE TABLE openappa_policy_files (hash TEXT PRIMARY KEY, bytes BYTEA NOT NULL);
 //! CREATE TABLE openappa_host_keys (key TEXT NOT NULL, root TEXT NOT NULL, PRIMARY KEY (key, root));
+//! CREATE TABLE openappa_offer_owners (
+//!     organization_id TEXT NOT NULL, caller_id TEXT, session_id TEXT NOT NULL, binding TEXT NOT NULL,
+//!     offer_id TEXT NOT NULL, root TEXT NOT NULL, parent_id TEXT, arguments TEXT, tool TEXT, spelling TEXT,
+//!     PRIMARY KEY (organization_id, offer_id));
 //! ```
 
 use std::sync::mpsc;
@@ -18,6 +22,12 @@ use postgres_native_tls::MakeTlsConnector;
 use serde_json::Value;
 
 use super::*;
+use crate::receipts::{StoredOperationInput, binding_name, parse_binding, scope_matches};
+
+pub use crate::receipts::{
+    OfferOwnerKey, OfferOwnerRecord, OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim,
+    ProcessedResultKey, ProcessedResultRequest, ReceiptBinding, ReceiptError, ReceiptScope, ReceiptStorageError,
+};
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -29,168 +39,9 @@ impl From<::postgres::Error> for PostgresError {
     }
 }
 
-/// Scope binding for a durable receipt: conversation session or authenticated caller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReceiptBinding {
-    Session,
-    Caller,
-}
-
-/// Authenticated scope associated with a durable integration receipt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReceiptScope {
-    pub organization_id: String,
-    pub caller_id: Option<String>,
-    pub session_id: String,
-    pub binding: ReceiptBinding,
-}
-
-/// Routing metadata for a typed remedy offer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OfferOwnerRecord {
-    pub scope: ReceiptScope,
-    pub offer_id: String,
-    pub root: String,
-    pub parent_id: Option<String>,
-    pub arguments: Option<String>,
-    pub tool: Option<String>,
-    pub spelling: Option<String>,
-}
-
-/// The stable lookup key for a durable offer owner.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OfferOwnerKey {
-    pub organization_id: String,
-    pub offer_id: String,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum OfferOwnerError {
-    #[error("offer owner storage failed: {0}")]
-    Storage(PostgresError),
-    #[error("a different owner record already exists for this offer")]
-    Collision,
-}
-
-/// The durable request key for an operation receipt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OperationKey {
-    pub scope: ReceiptScope,
-    pub operation_id: String,
-}
-
-/// Immutable request recorded before executing work to ensure idempotent replay.
-#[derive(Debug, Clone, PartialEq)]
-pub struct OperationRequest {
-    pub key: OperationKey,
-    pub root: String,
-    /// The stable part used to detect a conflicting retry.
-    pub input: Value,
-    /// Optional non-semantic host context retained for a later result hook.
-    /// Changes here never alter the idempotency contract.
-    pub context: Option<Value>,
-}
-
-/// The result of claiming one operation receipt.
-#[derive(Debug, Clone, PartialEq)]
-pub enum OperationClaim {
-    Claimed,
-    Complete { decision: Value },
-}
-
-/// A completed operation with its semantic request and host context restored.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CompletedOperation {
-    pub root: String,
-    pub input: Value,
-    pub context: Option<Value>,
-    pub decision: Value,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum OperationReceiptError {
-    #[error("operation receipt storage failed: {0}")]
-    Storage(PostgresError),
-    #[error("operation id belongs to another authenticated scope")]
-    ScopeMismatch,
-    #[error("operation id was reused with different input")]
-    InputMismatch,
-    #[error("operation is pending recovery and must not be replayed")]
-    Pending,
-    #[error("operation receipt is absent or no longer pending")]
-    NotPending,
-    #[error("operation was completed with a different decision")]
-    CompletionMismatch,
-}
-
-/// The durable key for a processed tool result receipt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProcessedResultKey {
-    pub scope: ReceiptScope,
-    pub tool_call_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProcessedResultRequest {
-    pub key: ProcessedResultKey,
-    pub root: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum ProcessedResultClaim {
-    Claimed,
-    Complete { approved_output: String, decision: Value },
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ProcessedResultError {
-    #[error("processed result receipt storage failed: {0}")]
-    Storage(PostgresError),
-    #[error("tool call id belongs to another authenticated scope")]
-    ScopeMismatch,
-    #[error("tool result is pending recovery and must not be replayed")]
-    Pending,
-    #[error("tool result receipt is absent or no longer pending")]
-    NotPending,
-    #[error("tool result was completed with a different receipt")]
-    CompletionMismatch,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoredOperationInput {
-    version: u8,
-    binding: ReceiptBinding,
-    semantic: Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    context: Option<Value>,
-}
-
-impl StoredOperationInput {
-    fn from_request(request: &OperationRequest) -> Self {
-        Self {
-            version: 1,
-            binding: request.key.scope.binding,
-            semantic: request.input.clone(),
-            context: request.context.clone(),
-        }
-    }
-
-    /// Decodes stored input, maintaining backwards compatibility with raw JSON inputs.
-    fn decode(value: Value) -> Result<Self, ReceiptMutationError> {
-        match serde_json::from_value::<Self>(value.clone()) {
-            Ok(stored) if stored.version == 1 => Ok(stored),
-            Ok(_) => Err(ReceiptMutationError::Storage(PostgresError(
-                "operation receipt has an unsupported version".into(),
-            ))),
-            Err(_) => Ok(Self {
-                version: 0,
-                binding: ReceiptBinding::Session,
-                semantic: value,
-                context: None,
-            }),
-        }
+impl From<PostgresError> for ReceiptStorageError {
+    fn from(error: PostgresError) -> Self {
+        Self(error.0)
     }
 }
 
@@ -272,19 +123,21 @@ impl PostgresStore {
     }
 
     /// Stores an offer owner record. Repeated writes with identical data are idempotent.
-    pub fn store_offer_owner(&self, record: OfferOwnerRecord) -> Result<(), OfferOwnerError> {
+    pub fn store_offer_owner(&self, record: OfferOwnerRecord) -> Result<(), ReceiptError> {
         let lock = offer_owner_lock(&record.scope.organization_id, &record.offer_id);
         self.mutate_receipt(lock, move |client| {
+            let binding = binding_name(record.scope.binding).to_owned();
             let inserted = client
                 .query_opt(
-                    "INSERT INTO openappa_offer_owners (organization_id, caller_id, session_id, offer_id, root, parent_id, arguments, tool, spelling) \
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) \
+                    "INSERT INTO openappa_offer_owners (organization_id, caller_id, session_id, binding, offer_id, root, parent_id, arguments, tool, spelling) \
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) \
                      ON CONFLICT (organization_id, offer_id) DO NOTHING \
                      RETURNING organization_id",
                     &[
                         &record.scope.organization_id,
                         &record.scope.caller_id,
                         &record.scope.session_id,
+                        &binding,
                         &record.offer_id,
                         &record.root,
                         &record.parent_id,
@@ -305,10 +158,10 @@ impl PostgresStore {
             if existing == record {
                 Ok(())
             } else {
-                Err(ReceiptMutationError::OwnerCollision)
+                Err(ReceiptMutationError::Collision)
             }
         })
-        .map_err(OfferOwnerError::from)
+        .map_err(ReceiptError::from)
     }
 
     /// Reads an offer owner record by key.
@@ -331,25 +184,8 @@ impl PostgresStore {
         })
     }
 
-    /// Deletes stored offer owner records for a specific root trajectory.
-    pub fn expire_offer_owners_for_root(&self, organization_id: &str, root: &str) -> Result<u64, PostgresError> {
-        let lock = format!("openappa-offer-root:{organization_id}:{root}");
-        let org = organization_id.to_owned();
-        let rt = root.to_owned();
-        self.mutate_receipt(lock, move |client| {
-            Ok(client.execute(
-                "DELETE FROM openappa_offer_owners WHERE organization_id=$1 AND root=$2",
-                &[&org, &rt],
-            )?)
-        })
-        .map_err(|error| match error {
-            ReceiptMutationError::Storage(error) => error,
-            other => PostgresError(other.to_string()),
-        })
-    }
-
     /// Claims an operation receipt before starting work. Completed receipts return saved decisions.
-    pub fn claim_operation(&self, request: OperationRequest) -> Result<OperationClaim, OperationReceiptError> {
+    pub fn claim_operation(&self, request: OperationRequest) -> Result<OperationClaim, ReceiptError> {
         let lock = operation_lock(&request.key.scope.session_id, &request.key.operation_id);
         self.mutate_receipt(lock, move |client| {
             let existing = client.query_opt(
@@ -374,7 +210,8 @@ impl PostgresStore {
                 )?;
                 return Ok(OperationClaim::Claimed);
             };
-            let stored = StoredOperationInput::decode(row.get(4))?;
+            let stored = StoredOperationInput::decode(row.get(4))
+                .map_err(|error| ReceiptMutationError::Storage(PostgresError(error)))?;
             if !scope_matches(
                 &ReceiptScope {
                     organization_id: row.get(0),
@@ -399,11 +236,11 @@ impl PostgresStore {
                 _ => Err(ReceiptMutationError::Storage(PostgresError("operation receipt has an invalid status".into()))),
             }
         })
-        .map_err(OperationReceiptError::from)
+        .map_err(ReceiptError::from)
     }
 
     /// Completes a claimed operation receipt with its final decision.
-    pub fn complete_operation(&self, key: OperationKey, decision: Value) -> Result<(), OperationReceiptError> {
+    pub fn complete_operation(&self, key: OperationKey, decision: Value) -> Result<(), ReceiptError> {
         let lock = operation_lock(&key.scope.session_id, &key.operation_id);
         self.mutate_receipt(lock, move |client| {
             let existing = client.query_opt(
@@ -414,7 +251,8 @@ impl PostgresStore {
             let Some(row) = existing else {
                 return Err(ReceiptMutationError::NotPending);
             };
-            let stored = StoredOperationInput::decode(row.get(3))?;
+            let stored = StoredOperationInput::decode(row.get(3))
+                .map_err(|error| ReceiptMutationError::Storage(PostgresError(error)))?;
             let scope = ReceiptScope {
                 organization_id: row.get(0),
                 caller_id: row.get(1),
@@ -437,54 +275,14 @@ impl PostgresStore {
                 _ => Err(ReceiptMutationError::Storage(PostgresError("operation receipt has an invalid status".into()))),
             }
         })
-        .map_err(OperationReceiptError::from)
-    }
-
-    /// Reads a completed operation receipt by key.
-    pub fn completed_operation(&self, key: OperationKey) -> Result<Option<CompletedOperation>, OperationReceiptError> {
-        let lock = operation_lock(&key.scope.session_id, &key.operation_id);
-        self.mutate_receipt(lock, move |client| {
-            let row = client.query_opt(
-                "SELECT organization_id, caller_id, session_id, root, input, status, decision \
-                 FROM openappa_operations WHERE session_id=$1 AND operation_id=$2",
-                &[&key.scope.session_id, &key.operation_id],
-            )?;
-            let Some(row) = row else {
-                return Ok(None);
-            };
-            let stored = StoredOperationInput::decode(row.get(4))?;
-            let saved_scope = ReceiptScope {
-                organization_id: row.get(0),
-                caller_id: row.get(1),
-                session_id: row.get(2),
-                binding: stored.binding,
-            };
-            if !scope_matches(&saved_scope, &key.scope) {
-                return Err(ReceiptMutationError::ScopeMismatch);
-            }
-            match row.get::<_, String>(5).as_str() {
-                "complete" => Ok(Some(CompletedOperation {
-                    root: row.get(3),
-                    input: stored.semantic,
-                    context: stored.context,
-                    decision: row.get::<_, Option<Value>>(6).ok_or_else(|| {
-                        ReceiptMutationError::Storage(PostgresError("complete operation lacks a decision".into()))
-                    })?,
-                })),
-                "pending" => Err(ReceiptMutationError::Pending),
-                _ => Err(ReceiptMutationError::Storage(PostgresError(
-                    "operation receipt has an invalid status".into(),
-                ))),
-            }
-        })
-        .map_err(OperationReceiptError::from)
+        .map_err(ReceiptError::from)
     }
 
     /// Claims a durable processed-result receipt before result processing.
     pub fn claim_processed_result(
         &self,
         request: ProcessedResultRequest,
-    ) -> Result<ProcessedResultClaim, ProcessedResultError> {
+    ) -> Result<ProcessedResultClaim, ReceiptError> {
         let lock = result_lock(&request.key.scope.session_id, &request.key.tool_call_id);
         self.mutate_receipt(lock, move |client| {
             let existing = client.query_opt(
@@ -528,7 +326,7 @@ impl PostgresStore {
                 _ => Err(ReceiptMutationError::Storage(PostgresError("processed result has an invalid status".into()))),
             }
         })
-        .map_err(ProcessedResultError::from)
+        .map_err(ReceiptError::from)
     }
 
     /// Completes a processed-result receipt with its approved output and decision.
@@ -537,7 +335,7 @@ impl PostgresStore {
         key: ProcessedResultKey,
         approved_output: String,
         decision: Value,
-    ) -> Result<(), ProcessedResultError> {
+    ) -> Result<(), ReceiptError> {
         let lock = result_lock(&key.scope.session_id, &key.tool_call_id);
         self.mutate_receipt(lock, move |client| {
             let existing = client.query_opt(
@@ -578,7 +376,7 @@ impl PostgresStore {
                 ))),
             }
         })
-        .map_err(ProcessedResultError::from)
+        .map_err(ReceiptError::from)
     }
 
     /// Checks whether pending receipts exist for a root trajectory.
@@ -806,7 +604,7 @@ enum ReceiptMutationError {
     #[error("receipt storage failed: {0}")]
     Storage(#[from] PostgresError),
     #[error("a different owner record already exists for this offer")]
-    OwnerCollision,
+    Collision,
     #[error("receipt belongs to another authenticated scope")]
     ScopeMismatch,
     #[error("receipt key was reused with different input")]
@@ -825,66 +623,44 @@ impl From<::postgres::Error> for ReceiptMutationError {
     }
 }
 
-impl From<ReceiptMutationError> for OfferOwnerError {
+impl From<ReceiptMutationError> for ReceiptError {
     fn from(error: ReceiptMutationError) -> Self {
         match error {
-            ReceiptMutationError::OwnerCollision => Self::Collision,
-            ReceiptMutationError::Storage(error) => Self::Storage(error),
-            other => Self::Storage(PostgresError(other.to_string())),
-        }
-    }
-}
-
-impl From<ReceiptMutationError> for OperationReceiptError {
-    fn from(error: ReceiptMutationError) -> Self {
-        match error {
-            ReceiptMutationError::Storage(error) => Self::Storage(error),
+            ReceiptMutationError::Storage(error) => Self::Storage(error.into()),
+            ReceiptMutationError::Collision => Self::Collision,
             ReceiptMutationError::ScopeMismatch => Self::ScopeMismatch,
             ReceiptMutationError::InputMismatch => Self::InputMismatch,
             ReceiptMutationError::Pending => Self::Pending,
             ReceiptMutationError::NotPending => Self::NotPending,
             ReceiptMutationError::CompletionMismatch => Self::CompletionMismatch,
-            ReceiptMutationError::OwnerCollision => Self::Storage(PostgresError(error.to_string())),
-        }
-    }
-}
-
-impl From<ReceiptMutationError> for ProcessedResultError {
-    fn from(error: ReceiptMutationError) -> Self {
-        match error {
-            ReceiptMutationError::Storage(error) => Self::Storage(error),
-            ReceiptMutationError::ScopeMismatch => Self::ScopeMismatch,
-            ReceiptMutationError::Pending => Self::Pending,
-            ReceiptMutationError::NotPending => Self::NotPending,
-            ReceiptMutationError::CompletionMismatch => Self::CompletionMismatch,
-            ReceiptMutationError::OwnerCollision | ReceiptMutationError::InputMismatch => {
-                Self::Storage(PostgresError(error.to_string()))
-            }
         }
     }
 }
 
 fn read_offer_owner(client: &mut Client, key: &OfferOwnerKey) -> Result<Option<OfferOwnerRecord>, PostgresError> {
-    Ok(client
-        .query_opt(
-            "SELECT caller_id, session_id, root, parent_id, arguments, tool, spelling \
-             FROM openappa_offer_owners WHERE organization_id=$1 AND offer_id=$2",
-            &[&key.organization_id, &key.offer_id],
-        )?
-        .map(|row| OfferOwnerRecord {
-            scope: ReceiptScope {
-                organization_id: key.organization_id.clone(),
-                caller_id: row.get(0),
-                session_id: row.get(1),
-                binding: ReceiptBinding::Caller,
-            },
-            offer_id: key.offer_id.clone(),
-            root: row.get(2),
-            parent_id: row.get(3),
-            arguments: row.get(4),
-            tool: row.get(5),
-            spelling: row.get(6),
-        }))
+    let row = client.query_opt(
+        "SELECT caller_id, session_id, binding, root, parent_id, arguments, tool, spelling \
+         FROM openappa_offer_owners WHERE organization_id=$1 AND offer_id=$2",
+        &[&key.organization_id, &key.offer_id],
+    )?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let binding = parse_binding(row.get::<_, String>(2).as_str()).map_err(PostgresError)?;
+    Ok(Some(OfferOwnerRecord {
+        scope: ReceiptScope {
+            organization_id: key.organization_id.clone(),
+            caller_id: row.get(0),
+            session_id: row.get(1),
+            binding,
+        },
+        offer_id: key.offer_id.clone(),
+        root: row.get(3),
+        parent_id: row.get(4),
+        arguments: row.get(5),
+        tool: row.get(6),
+        spelling: row.get(7),
+    }))
 }
 
 fn offer_owner_lock(organization_id: &str, offer_id: &str) -> String {
@@ -906,19 +682,6 @@ fn session_lock(scope: &ReceiptScope) -> String {
         scope.caller_id.as_deref().unwrap_or(""),
         scope.session_id
     )
-}
-
-fn scope_matches(saved: &ReceiptScope, requested: &ReceiptScope) -> bool {
-    if saved.organization_id != requested.organization_id
-        || saved.session_id != requested.session_id
-        || saved.binding != requested.binding
-    {
-        return false;
-    }
-    match saved.binding {
-        ReceiptBinding::Session => true,
-        ReceiptBinding::Caller => saved.caller_id == requested.caller_id,
-    }
 }
 
 pub struct PostgresTransaction {
