@@ -48,9 +48,10 @@ pub(crate) enum Stock {
     /// not verification).
     RedactEmail,
     /// `redact-secrets` — a sanitizer replacing credentials in the body with a fixed
-    /// placeholder: private-key blocks, tokens of well-known shapes, the value of an
-    /// assignment whose key names a secret, and any long high-entropy run. Same trust
-    /// decision as `redact-email`: a detector, not a proof of absence.
+    /// placeholder: private-key blocks, tokens of well-known shapes, the AWS secret
+    /// access key, the value of an assignment whose key names a secret, and any long
+    /// high-entropy run. Same trust decision as `redact-email`: a detector, not a proof
+    /// of absence.
     RedactSecrets,
 }
 
@@ -107,6 +108,18 @@ static KNOWN_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
     .expect("a fixed pattern")
 });
 
+/// The AWS secret access key: the one well-known credential with no prefix to recognize
+/// it by, and 40 characters of base64 instead. `/` belongs to that alphabet, so the
+/// candidate run below cannot see such a key whole — the run breaks at every slash and
+/// each piece falls under the length floor. The pattern takes a whole run of the alphabet
+/// and the caller keeps the length exact: a longer run, which is what a path or a URL is,
+/// is no 40-character match. Every character outside the alphabet ends a run, `=`, `-`,
+/// `_` and `.` included, and the match consumes none of them, so a key is found whatever
+/// stands next to it.
+static AWS_SECRET_KEY_RUN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z0-9+/]+").expect("a fixed pattern"));
+
+const AWS_SECRET_KEY_LENGTH: usize = 40;
+
 /// The password of a URL with credentials in its authority: `scheme://user:password@host`.
 static URL_PASSWORD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(://[^/?#@:\s"']*:)([^/?#@\s"']+)@"#).expect("a fixed pattern"));
@@ -159,6 +172,14 @@ fn redact_secrets(input: &str) -> String {
         format!("{}{SECRET_PLACEHOLDER}", &found[1])
     });
     let masked = KNOWN_TOKEN.replace_all(&masked, SECRET_PLACEHOLDER);
+    let masked = AWS_SECRET_KEY_RUN.replace_all(&masked, |found: &regex::Captures<'_>| {
+        let run = &found[0];
+        if run.len() == AWS_SECRET_KEY_LENGTH && is_base64_key(run) {
+            SECRET_PLACEHOLDER.to_string()
+        } else {
+            run.to_string()
+        }
+    });
     CANDIDATE_RUN
         .replace_all(&masked, |found: &regex::Captures<'_>| {
             let run = &found[0];
@@ -169,6 +190,17 @@ fn redact_secrets(input: &str) -> String {
             }
         })
         .into_owned()
+}
+
+/// Whether a run the length of an AWS secret access key is one, rather than a path of the
+/// same length: base64 over 40 characters draws on all three of the alphabet's classes,
+/// and clears the entropy floor. A path long enough to reach 40 characters between two
+/// delimiters rarely carries both an upper-case letter and a digit.
+fn is_base64_key(run: &str) -> bool {
+    run.bytes().any(|byte| byte.is_ascii_digit())
+        && run.bytes().any(|byte| byte.is_ascii_uppercase())
+        && run.bytes().any(|byte| byte.is_ascii_lowercase())
+        && looks_random(run)
 }
 
 /// Shannon entropy over the run's bytes, against a floor that depends on its alphabet: a
@@ -941,6 +973,50 @@ mod tests {
             (
                 "see https://docs.example.com/reference/authentication for the flow",
                 "see https://docs.example.com/reference/authentication for the flow".to_string(),
+            ),
+            // The AWS secret access key names no issuer and carries slashes, so only its
+            // own shape finds it. Bare is the case the candidate run cannot reach.
+            (
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                masked.to_string(),
+            ),
+            (
+                "error: signature mismatch for wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY here",
+                format!("error: signature mismatch for {masked} here"),
+            ),
+            (
+                "{\"SecretAccessKey\": \"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\"}",
+                format!("{{\"SecretAccessKey\": \"{masked}\"}}"),
+            ),
+            // `=` ends a run like any other delimiter, under a name that names no secret.
+            (
+                "Sig=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                format!("Sig={masked}"),
+            ),
+            // One delimiter between two runs serves both: the run before a key may be
+            // another key or a commit id.
+            (
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY Zq3/tVb8LmXw2Rk/9pHsYcD4nGfJ7uEoA1iTz/Bx",
+                format!("{masked} {masked}"),
+            ),
+            (
+                "3f7a9c2e1b8d4f6a0c5e7b9d1f3a5c7e9b2d4f68,Zq3/tVb8LmXw2Rk/9pHsYcD4nGfJ7uEoA1iTz/Bx",
+                format!("{masked},{masked}"),
+            ),
+            // A path and a URL are runs of the same alphabet; neither holds 40 characters
+            // of it between two delimiters.
+            (
+                "/Users/person/dev/OpenAPPA-public/appa-runtime/src/builtins.rs",
+                "/Users/person/dev/OpenAPPA-public/appa-runtime/src/builtins.rs".to_string(),
+            ),
+            (
+                "https://github.com/anthropics/claude-code/blob/main/README.md",
+                "https://github.com/anthropics/claude-code/blob/main/README.md".to_string(),
+            ),
+            // Exactly 40 characters of the alphabet, and still a path: no digit.
+            (
+                "Sources/Adapters/ClaudeCode/Renders/Body",
+                "Sources/Adapters/ClaudeCode/Renders/Body".to_string(),
             ),
             ("", String::new()),
         ];

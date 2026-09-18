@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.23.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.23.0...v0.23.1) (2026-09-18)
+
+
+### Bug Fixes
+
+* find the AWS secret access key next to `=` and after an adjacent run ([#375](https://github.com/archestra-ai/OpenAPPA/issues/375)) ([1ae5487](https://github.com/archestra-ai/OpenAPPA/commit/1ae5487d6a4e9e1ef65850d26d6dceeaae0da95f))
+* mask the AWS secret access key in redact-secrets ([#373](https://github.com/archestra-ai/OpenAPPA/issues/373)) ([4dd3036](https://github.com/archestra-ai/OpenAPPA/commit/4dd3036895f30cb33c155d5b3ae0dc9e25d074ed))
+* **runtime:** do not treat parallel result close as an unidentified call ([#370](https://github.com/archestra-ai/OpenAPPA/issues/370)) ([835e5dc](https://github.com/archestra-ai/OpenAPPA/commit/835e5dcde74e65544723033bd69d2cb07b08983b))
+* **runtime:** mask the AWS secret access key in redact-secrets ([4dd3036](https://github.com/archestra-ai/OpenAPPA/commit/4dd3036895f30cb33c155d5b3ae0dc9e25d074ed))
+
+
+### Code Refactoring
+
+* split the Claude Code integration layer into the jobs it does ([#372](https://github.com/archestra-ai/OpenAPPA/issues/372)) ([53a9b63](https://github.com/archestra-ai/OpenAPPA/commit/53a9b6344c7d6635bba932e04fccf4cb2d8385f1))
+
+## [0.23.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.22.0...v0.23.0) (2026-09-17)
+
+
+### Features
+
+* **eventlog:** persist typed receipts on sqlite and memory ([#368](https://github.com/archestra-ai/OpenAPPA/issues/368)) ([31b7fb6](https://github.com/archestra-ai/OpenAPPA/commit/31b7fb6bc1e66723a1e9d05c8876022ab4a50edb))
+
 ## [0.22.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.21.0...v0.22.0) (2026-09-17)
 
 

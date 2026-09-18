@@ -1,10 +1,10 @@
-# Optional Claude Code rules for Bash and Read.
+# Optional Claude Code rules for Bash, Read, Grep, Write and Edit.
 #
 # Order matters: the first matching rule wins, so the argument-selected
-# credential rules come before the bare `Bash` and `Read` rules. A name written
+# credential rules come before each tool's bare rule. A name written
 # with a selector is declared, and a call no selector matches is refused rather
 # than sent to a root's `*` fallback, so the bare rules at the end of each
-# group are what keep ordinary commands and reads running.
+# group are what keep ordinary commands, reads, searches and writes running.
 
 [policy]
 version = 2
@@ -130,12 +130,13 @@ delta = { audience = ["self"] }
 tags = ["credentials"]
 
 # The stock `redact-secrets` sanitizer masks private-key blocks, tokens of
-# well-known shapes, the value of any assignment whose key names a secret, and
-# long high-entropy runs. It carries no tags, so it is offered for every
-# withheld Bash result the session cannot read as it is, whether a static
-# `credentials` rule or the Annotator narrowed it: an Annotator's answer cannot
-# tag a call, so a tagged sanitizer would never reach a command the static
-# rules do not name. Without tags it is also offered for a subagent's return.
+# well-known shapes, the AWS secret access key, the value of any assignment
+# whose key names a secret, and long high-entropy runs. It carries no tags, so
+# it is offered for every withheld Bash result the session cannot read as it
+# is, whether a static `credentials` rule or the Annotator narrowed it: an
+# Annotator's answer cannot tag a call, so a tagged sanitizer would never reach
+# a command the static rules do not name. Without tags it is also offered for a
+# subagent's return.
 [[policy.sanitizer]]
 name = "redact-secrets"
 on = ["tool_output"]

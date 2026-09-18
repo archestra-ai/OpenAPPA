@@ -238,15 +238,22 @@ def hook_settings(url: str, config: Path, data_dir: Path) -> dict[str, Any]:
             }
         ]
     }
-    for event, matcher in (
-        ("UserPromptSubmit", None),
-        ("PreToolUse", "*"),
-        ("PostToolUse", "*"),
-        ("PostToolUseFailure", "*"),
-        ("SubagentStart", None),
-        ("SubagentStop", None),
+    # A subagent opens a model context of its own, so its start prints the
+    # session context beside the post; the parent's does not reach it.
+    for event, matcher, opens_context in (
+        ("UserPromptSubmit", None, False),
+        ("PreToolUse", "*", False),
+        ("PostToolUse", "*", False),
+        ("PostToolUseFailure", "*", False),
+        ("SubagentStart", None, True),
+        ("SubagentStop", None, False),
     ):
-        group: dict[str, Any] = {"hooks": [entry(post, 130)]}
+        entries = [entry(post, 130)]
+        if opens_context:
+            entries.append(
+                {"type": "command", "command": binary, "args": ["session-context", "--subagent"]}
+            )
+        group: dict[str, Any] = {"hooks": entries}
         if matcher is not None:
             group = {"matcher": matcher, **group}
         hooks[event] = [group]
