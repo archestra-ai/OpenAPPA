@@ -887,6 +887,19 @@ mod tests {
     /// The client side of the wire, as `appa hook` runs it: the
     /// Claude Code hook JSON these tests are written in is translated onto the wire,
     /// and the wire decision is rendered back into Claude Code's hook answer.
+    /// The event the served runtime reads from one Claude Code hook body: parsed by the
+    /// codec and derived on the wire, exactly as [`answer`] does it, so a test can put the
+    /// same event in front of the dispatcher and read what it recorded.
+    fn through_the_codec(hook: &serde_json::Value) -> Option<HookEvent> {
+        let body = serde_json::to_vec(hook).expect("the fixture serializes");
+        let event = (appa_adapter_claude_code::codec().parse)(&body).expect("the fixture parses")?;
+        let wire = WireEvent::from_event(appa_runtime_api::AdapterName::ClaudeCode, &event).expect("translates");
+        let accepted = wire
+            .into_event(&appa_adapter_claude_code::adapter())
+            .expect("the wire event is accepted")?;
+        Some(accepted.event)
+    }
+
     async fn through_the_wire(runtime: &Runtime, claude_hook_json: &[u8]) -> (u16, serde_json::Value) {
         let codec = appa_adapter_claude_code::codec();
         let event = match (codec.parse)(claude_hook_json) {
@@ -1050,21 +1063,36 @@ mod tests {
             assert_eq!(status, 200, "hook {name} refused: {answer}");
             match name {
                 "PreToolUse" => {
-                    let (decision, reason) = if control {
-                        ("deny", "[appa] this offer no longer stands; re-propose the call")
-                    } else {
-                        ("allow", "appa: the call is released")
-                    };
+                    // The wire shape is what the harness reads; the reason is what it shows
+                    // the model, in whatever words the runtime chose.
+                    let slot = answer
+                        .as_object()
+                        .expect("a hook answer is an object")
+                        .get("hookSpecificOutput")
+                        .and_then(serde_json::Value::as_object)
+                        .expect("a pre-use answer renders inside hookSpecificOutput");
                     assert_eq!(
-                        answer,
-                        serde_json::json!({
-                            "hookSpecificOutput": {
-                                "hookEventName": "PreToolUse",
-                                "permissionDecision": decision,
-                                "permissionDecisionReason": reason,
-                            }
-                        }),
-                        "the call must render as exactly its allow answer",
+                        answer.as_object().expect("an object").keys().collect::<Vec<_>>(),
+                        ["hookSpecificOutput"],
+                        "a pre-use answer carries nothing beside it: {answer}",
+                    );
+                    assert_eq!(
+                        slot.keys().collect::<Vec<_>>(),
+                        ["hookEventName", "permissionDecision", "permissionDecisionReason"],
+                        "a pre-use answer carries exactly these three fields: {answer}",
+                    );
+                    assert_eq!(slot["hookEventName"], "PreToolUse", "{answer}");
+                    assert_eq!(
+                        slot["permissionDecision"],
+                        if control { "deny" } else { "allow" },
+                        "a stale control offer is denied and every recorded call is released: {answer}",
+                    );
+                    assert!(
+                        !slot["permissionDecisionReason"]
+                            .as_str()
+                            .expect("the reason is a string")
+                            .is_empty(),
+                        "the answer says why: {answer}",
                     );
                 }
                 other => assert_eq!(
@@ -1460,18 +1488,42 @@ mod tests {
         let (status, answer) = call_hook(&runtime, &serde_json::to_vec(&event).expect("serializes")).await;
         assert_eq!(status, 200);
         assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "allow");
-        assert_eq!(
-            answer["hookSpecificOutput"]["permissionDecisionReason"],
-            "appa: the runtime's own control tool",
+
+        // The control call is passed through rather than released: the engine never sees it,
+        // so its entry names no dispatch, where an ordinary call's names the one it opened.
+        let parsed = through_the_codec(&event).expect("the control call parses");
+        let control = handle_internal(&runtime, parsed).await;
+        assert!(
+            matches!(control.decision, HookDecision::PassControl),
+            "the control tool is passed through, not checked: {:?}",
+            control.decision
         );
+        assert!(
+            matches!(control.event, crate::events::RuntimeEvent::Hook { dispatch: None, .. }),
+            "a passed-through call opens no dispatch: {:?}",
+            control.event
+        );
+
         let call = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "session_id": "s1",
             "tool_name": "Bash",
             "tool_input": {"command": "ls"},
         });
-        let (_, answer) = call_hook(&runtime, &serde_json::to_vec(&call).expect("serializes")).await;
-        assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "allow");
+        let ordinary = handle_internal(&runtime, through_the_codec(&call).expect("the call parses")).await;
+        assert!(
+            matches!(ordinary.decision, HookDecision::AllowCall { .. }),
+            "an ordinary call in the same session is released: {:?}",
+            ordinary.decision
+        );
+        assert!(
+            matches!(
+                ordinary.event,
+                crate::events::RuntimeEvent::Hook { dispatch: Some(_), .. }
+            ),
+            "a released call opens one: {:?}",
+            ordinary.event
+        );
     }
 
     /// The wire carries the host's raw spelling; the served adapter derives which

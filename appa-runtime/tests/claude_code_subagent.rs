@@ -547,10 +547,17 @@ async fn an_agent_result_naming_another_subagent_is_withheld() {
         "a mismatch is a decision the model hears, not a fault: {answer}"
     );
     assert_eq!(answer["decision"], "block");
-    let text = answer["hookSpecificOutput"]["updatedToolOutput"]["content"][0]["text"]
+    answer["hookSpecificOutput"]["updatedToolOutput"]["content"][0]["text"]
         .as_str()
         .expect("the withheld result restates the delivered shape");
-    assert!(text.starts_with("[appa] the tool result was withheld: "), "{answer}");
+    let stopped = child_stop(&events);
+    let said = stopped["last_assistant_message"]
+        .as_str()
+        .expect("the recorded stop carries the child's message");
+    assert!(
+        !answer.to_string().contains(said),
+        "a result naming a child the family never bound carries none of what that child said: {answer}"
+    );
     assert_eq!(
         answer["hookSpecificOutput"]["updatedToolOutput"]["agentId"], "someone-else",
         "the rest of the response is restated as delivered",
