@@ -1604,6 +1604,162 @@ mod tests {
         );
     }
 
+    /// A start that carries the host's tool inventory opens its trajectory with that
+    /// inventory, and a later one extends it. The two paths differ in more than their
+    /// spelling: an unknown root is created together with what it observed, while a known
+    /// one only observes, and only a root may do either — a child's start has no inventory
+    /// of its own to open a session with. Nothing else in this suite reaches this path, so
+    /// a session created without its inventory would otherwise be found in production.
+    #[tokio::test]
+    async fn a_start_carrying_an_inventory_opens_its_trajectory_with_it() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let adapter = appa_adapter_claude_code::adapter();
+        let root = TrajectoryId("cc:inv".to_string());
+
+        let opening = br#"{"protocol":1,"adapter":"claude-code","event":"session_start","root_id":"inv","inventory":{"tools":[{"name":"Bash","tool":"Bash"}],"sources":[{"server":"builtin","status":"complete","dynamic":false}]}}"#;
+        let (status, reply) = answer(&runtime, &adapter, opening).await;
+        assert_eq!(status, 200, "an opening inventory is admitted: {reply}");
+        assert!(
+            runtime.status(&root).is_some(),
+            "the trajectory is created together with what it observed",
+        );
+
+        let later = br#"{"protocol":1,"adapter":"claude-code","event":"session_start","root_id":"inv","inventory":{"tools":[{"name":"Read","tool":"Read"}],"sources":[{"server":"builtin","status":"complete","dynamic":false}]}}"#;
+        let (status, reply) = answer(&runtime, &adapter, later).await;
+        assert_eq!(status, 200, "a later observation extends the open one: {reply}");
+
+        // What proves the opening inventory was kept rather than dropped on the floor: a
+        // name cannot be rebound to another tool, which is only decidable against what the
+        // trajectory already observed.
+        let rebinding = br#"{"protocol":1,"adapter":"claude-code","event":"session_start","root_id":"inv","inventory":{"tools":[{"name":"Bash","tool":"Read"}],"sources":[{"server":"builtin","status":"complete","dynamic":false}]}}"#;
+        let (status, reply) = answer(&runtime, &adapter, rebinding).await;
+        assert_eq!(
+            status, 409,
+            "rebinding a name the opening inventory bound is refused: {reply}",
+        );
+
+        // The trajectory is live either way: the inventory is observed beside the session,
+        // never instead of opening it.
+        let call = through_the_wire(
+            &runtime,
+            br#"{"hook_event_name":"PreToolUse","session_id":"inv","tool_name":"Bash","tool_input":{"command":"ls"}}"#,
+        )
+        .await;
+        assert_eq!(call.0, 200, "the opened trajectory decides calls: {:?}", call.1);
+    }
+
+    /// What a child's stop can be answered with, and what it can never be answered with. A
+    /// stop is where a return crosses, and no hook rewrites what a subagent delivers: the
+    /// runtime can acknowledge it, substitute the bytes the child must echo, hold it, or
+    /// refuse operationally — but it never replaces or delivers an output there, because
+    /// that is the parent's result channel, not the child's. The adapter relies on this: a
+    /// replacement rendered on a stop would be dropped by the harness with the return still
+    /// in front of the parent.
+    #[tokio::test]
+    async fn a_child_end_is_answered_only_as_a_return_a_hold_or_a_refusal() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let root = appa_runtime_api::TrajectoryId("cc:s1".to_string());
+        let child = appa_runtime_api::TrajectoryId("cc:s1:a1".to_string());
+
+        let binding = declared_spawn(&runtime, &root).await;
+        handle(
+            &runtime,
+            HookEvent::ChildStart {
+                root: root.clone(),
+                child: child.clone(),
+                spawn: SpawnRef::Binding(binding),
+            },
+        )
+        .await;
+
+        let ends = [
+            ("a crossing return", Some("the report".to_string())),
+            ("a return of nothing", None),
+        ];
+        for (name, value) in ends {
+            let decision = handle(
+                &runtime,
+                HookEvent::ChildEnd {
+                    root: root.clone(),
+                    child: child.clone(),
+                    value,
+                },
+            )
+            .await;
+            assert!(
+                matches!(
+                    decision,
+                    HookDecision::Ack
+                        | HookDecision::ChildReturn { .. }
+                        | HookDecision::Block { .. }
+                        | HookDecision::Refuse { .. }
+                ),
+                "{name} answered with {decision:?}, which a stop has no channel for",
+            );
+        }
+
+        // An unopened child's stop claims a return no start could supply.
+        let stranger = handle(
+            &runtime,
+            HookEvent::ChildEnd {
+                root: root.clone(),
+                child: appa_runtime_api::TrajectoryId("cc:s1:nobody".to_string()),
+                value: Some("a return from nowhere".to_string()),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                stranger,
+                HookDecision::Ack
+                    | HookDecision::ChildReturn { .. }
+                    | HookDecision::Block { .. }
+                    | HookDecision::Refuse { .. }
+            ),
+            "an unopened child's stop answered with {stranger:?}",
+        );
+    }
+
+    /// The operational path out of a child's stop. A store that cannot append decides
+    /// nothing about the flow, so the answer is a refusal the harness reports rather than
+    /// feedback the model reads as a judgement about its return.
+    #[tokio::test]
+    async fn a_child_end_over_a_store_that_cannot_append_refuses() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let root = appa_runtime_api::TrajectoryId("cc:s1".to_string());
+        let child = appa_runtime_api::TrajectoryId("cc:s1:a1".to_string());
+
+        let binding = declared_spawn(&runtime, &root).await;
+        handle(
+            &runtime,
+            HookEvent::ChildStart {
+                root: root.clone(),
+                child: child.clone(),
+                spawn: SpawnRef::Binding(binding),
+            },
+        )
+        .await;
+
+        runtime.store().fail_commit_after(0);
+        let decision = handle(
+            &runtime,
+            HookEvent::ChildEnd {
+                root,
+                child,
+                value: Some("the report".to_string()),
+            },
+        )
+        .await;
+        runtime.store().fail_commit_after(u64::MAX - 1);
+        assert!(
+            matches!(decision, HookDecision::Refuse { .. }),
+            "an operational failure refuses rather than answering the model: {decision:?}",
+        );
+    }
+
     #[tokio::test]
     async fn a_native_spawn_resume_keeps_the_dispatch_across_an_approval_prompt() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
