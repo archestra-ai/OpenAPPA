@@ -6,9 +6,10 @@ use std::sync::Arc;
 use appa_runtime::api::Runtime;
 use appa_runtime::{config::Config, hooks, mcp};
 use appa_runtime_api::{Actor, HookDecision, HookEvent, ProposedCall, Ruling, TrajectoryId};
+use rmcp::ClientHandler;
+use rmcp::model::ProtocolVersion;
 use rmcp::model::{ElicitRequestParams, ElicitResult, ElicitationAction};
-use rmcp::service::{RequestContext, RoleClient};
-use rmcp::{ClientHandler, ServiceExt};
+use rmcp::service::{ClientLifecycleMode, ClientServiceExt, RequestContext, RoleClient};
 
 fn policy(review_timeout_ms: u64) -> String {
     POLICY.replace("REVIEW_TIMEOUT_MS", &review_timeout_ms.to_string())
@@ -318,6 +319,15 @@ async fn execute<H: ClientHandler>(deployment: &Deployment, reviewer: H) -> Stri
 /// The control call, vouched with a ruling the harness obtained through its own
 /// review channel — or none, leaving the ruling to the elicitation.
 async fn execute_with<H: ClientHandler>(deployment: &Deployment, reviewer: H, ruling: Option<Ruling>) -> String {
+    execute_over(deployment, reviewer, ruling, ClientLifecycleMode::Initialize).await
+}
+
+async fn execute_over<H: ClientHandler>(
+    deployment: &Deployment,
+    reviewer: H,
+    ruling: Option<Ruling>,
+    lifecycle: ClientLifecycleMode,
+) -> String {
     let vouched = hooks::handle(
         &deployment.runtime,
         HookEvent::ToolCall {
@@ -340,7 +350,10 @@ async fn execute_with<H: ClientHandler>(deployment: &Deployment, reviewer: H, ru
         "the root's own offer is admitted: {vouched:?}"
     );
     let transport = rmcp::transport::StreamableHttpClientTransport::from_uri(deployment.url.clone());
-    let client = reviewer.serve(transport).await.expect("the client initializes");
+    let client = reviewer
+        .serve_with_lifecycle(transport, lifecycle)
+        .await
+        .expect("the client starts");
     let mut params = rmcp::model::CallToolRequestParams::default();
     params.name = "execute_remedy_plan".into();
     params.arguments = serde_json::json!({ "offer_id": deployment.offer }).as_object().cloned();
@@ -372,6 +385,82 @@ async fn accepting_authorizes_the_exact_call() {
     assert!(
         review.contains("signoff"),
         "the review states the gap the ruling would cover: {review}",
+    );
+}
+
+/// From MCP 2026-07-28 there is no `initialize` and no session: the client declares its
+/// capabilities on each request, and the review travels as an input request the retried
+/// call answers.
+async fn execute_by_round_trip<H: ClientHandler>(deployment: &Deployment, reviewer: H) -> String {
+    let lifecycle = ClientLifecycleMode::Discover {
+        preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+    };
+    execute_over(deployment, reviewer, None, lifecycle).await
+}
+
+#[tokio::test]
+async fn a_round_trip_client_is_asked_and_its_approval_authorizes() {
+    let deployment = deployment().await;
+    let reviewer = Reviewer::new(ElicitationAction::Accept);
+    let answer = execute_by_round_trip(&deployment, reviewer.clone()).await;
+    assert!(answer.contains("Authorized"), "an approval authorizes: {answer}");
+
+    let reviews = reviewer.reviews();
+    assert_eq!(reviews.len(), 1, "one decision asks one time");
+    assert!(
+        reviews[0].contains("the quarterly figures"),
+        "the review carries the exact arguments the engine would dispatch: {}",
+        reviews[0],
+    );
+}
+
+#[tokio::test]
+async fn a_round_trip_decline_denies_and_retires_the_offer() {
+    let deployment = deployment().await;
+    let answer = execute_by_round_trip(&deployment, Reviewer::new(ElicitationAction::Decline)).await;
+    assert!(!answer.contains("Authorized"), "a denial authorizes nothing: {answer}");
+
+    let again = execute_by_round_trip(&deployment, Reviewer::new(ElicitationAction::Accept)).await;
+    assert!(
+        !again.contains("Authorized"),
+        "a denied offer is gone; a second review cannot revive it: {again}",
+    );
+}
+
+#[tokio::test]
+async fn a_round_trip_dismissal_leaves_the_offer_standing() {
+    let deployment = deployment().await;
+    let answer = execute_by_round_trip(&deployment, Reviewer::new(ElicitationAction::Cancel)).await;
+    assert!(
+        !answer.contains("Authorized"),
+        "a dismissal authorizes nothing: {answer}"
+    );
+
+    let retried = execute_by_round_trip(&deployment, Reviewer::new(ElicitationAction::Accept)).await;
+    assert!(
+        retried.contains("Authorized"),
+        "the offer still stood, so the same id rules on a second try: {retried}",
+    );
+}
+
+#[tokio::test]
+async fn no_review_channel_reads_differently_from_an_unanswered_review() {
+    let deployment = deployment().await;
+    let unreachable = execute_by_round_trip(&deployment, Absent).await;
+    let dismissed = execute_by_round_trip(&deployment, Reviewer::new(ElicitationAction::Cancel)).await;
+    assert!(
+        !unreachable.contains("Authorized"),
+        "no channel is not an approval: {unreachable}"
+    );
+    assert_ne!(
+        unreachable, dismissed,
+        "the model can tell a session no retry helps from a review worth asking again",
+    );
+
+    let reached = execute_by_round_trip(&deployment, Reviewer::new(ElicitationAction::Accept)).await;
+    assert!(
+        reached.contains("Authorized"),
+        "no channel left the offer standing, so a reachable reviewer still rules: {reached}",
     );
 }
 

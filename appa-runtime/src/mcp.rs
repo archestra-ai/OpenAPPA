@@ -21,8 +21,9 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, RwLock};
 
 use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::tool::InputResponses;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig};
+use rmcp::model::{CallToolResponse, CallToolResult, ContentBlock, ServerCapabilities, ServerConfig};
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
@@ -32,7 +33,7 @@ use appa_runtime_api::AdapterName;
 
 use crate::api::{ExecuteRemedyPlanArgs, PermitKey, RemedyReply, Runtime};
 use crate::batteries::{BatteriesResponse, BundledBattery};
-use crate::elicit::Elicitation;
+use crate::elicit::{Elicitation, Review};
 use crate::yell::YellArgs;
 
 /// The tools this runtime serves, and the router that decides which of them exist for this
@@ -169,6 +170,28 @@ fn remedy_result(reply: RemedyReply) -> CallToolResult {
     }
 }
 
+/// One `execute_remedy_plan` request. A review that must first be asked ends the call
+/// before anything executes: the vouch is read, not spent, so it stands for the retry
+/// that carries the answer.
+async fn execute_remedy(
+    runtime: &Runtime,
+    args: ExecuteRemedyPlanArgs,
+    responses: Option<rmcp::model::InputResponses>,
+    request: RequestContext<RoleServer>,
+    expected_actor: Option<&appa_runtime_api::Actor>,
+) -> CallToolResponse {
+    let pending = || runtime.pending_hitl_review(&args.offer_id);
+    match Elicitation::open(request, responses, runtime.review_timeout(), pending) {
+        Review::Ask(review) => review.into(),
+        Review::Proceed(elicitation) => remedy_result(
+            runtime
+                .execute_remedy_plan(args, elicitation.as_ref(), expected_actor)
+                .await,
+        )
+        .into(),
+    }
+}
+
 #[tool_router]
 impl RuntimeTools {
     /// The tools this deployment serves right now. `yell` is dropped from the router where
@@ -204,14 +227,10 @@ impl RuntimeTools {
     pub async fn execute_remedy_plan(
         &self,
         Parameters(args): Parameters<ExecuteRemedyPlanArgs>,
+        InputResponses(responses): InputResponses,
         request: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let elicitation = Elicitation::new(request, self.runtime.review_timeout());
-        remedy_result(
-            self.runtime
-                .execute_remedy_plan(args, Some(&elicitation), self.file_actor.as_ref())
-                .await,
-        )
+    ) -> CallToolResponse {
+        execute_remedy(&self.runtime, args, responses, request, self.file_actor.as_ref()).await
     }
 
     #[tool(
@@ -379,10 +398,10 @@ impl RuntimeToolService {
     pub async fn execute_remedy_plan(
         &self,
         Parameters(args): Parameters<ExecuteRemedyPlanArgs>,
+        InputResponses(responses): InputResponses,
         request: RequestContext<RoleServer>,
-    ) -> CallToolResult {
-        let elicitation = Elicitation::new(request, self.runtime.review_timeout());
-        remedy_result(self.runtime.execute_remedy_plan(args, Some(&elicitation), None).await)
+    ) -> CallToolResponse {
+        execute_remedy(&self.runtime, args, responses, request, None).await
     }
 
     #[tool(

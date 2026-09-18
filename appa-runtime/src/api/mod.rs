@@ -2203,6 +2203,30 @@ impl Runtime {
         policy.engine().offer_kind(&view, &pursuer, &offer)
     }
 
+    /// The review a person must rule on before this vouched offer executes, read without
+    /// spending the vouch. `None` when no person is asked: nothing stands behind the offer,
+    /// the harness already attached a ruling, the offer no longer stands, or it consults no
+    /// `hitl` authority.
+    #[cfg(feature = "daemon")]
+    pub(crate) fn pending_hitl_review(&self, offer_id: &str) -> Option<String> {
+        let quoted = OfferId::parse(offer_id).ok()?;
+        let (acting, ruling) = self.peek_vouched(&PermitKey::offer(&quoted)).ok()?;
+        if ruling.is_some() {
+            return None;
+        }
+        let log = self.inner.log(&acting.root).ok()?;
+        let offer = crate::engine::resolve_rendered(&log, &quoted)?;
+        let deployment = self.inner.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log).ok()?;
+        let view = policy.engine().rebuild_view(&log).ok()?;
+        let pursuer = policy.engine().offer_pursuer(&view, &offer)?;
+        let pending = policy.engine().offer_reviews(&view, &pursuer, &offer);
+        session::reviews(&pending, &deployment.externals)
+            .into_iter()
+            .next()
+            .map(|review| review.text)
+    }
+
     /// The canonical identity a quoted id names in this family, and the
     /// trajectory that may execute it.
     pub(crate) fn resolve_in(&self, root: &TrajectoryId, quoted: &OfferId) -> Option<(OfferId, TrajectoryId)> {
