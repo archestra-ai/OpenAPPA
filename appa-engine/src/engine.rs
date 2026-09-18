@@ -1356,6 +1356,15 @@ impl Engine {
                     })
                     .map(|(offer, _)| offer)
             },
+            &|views, call, taken| {
+                views
+                    .call_candidates_for(call)
+                    .find(|(subject, recorded)| {
+                        !taken.contains(*subject)
+                            && recorded.generation == views.basis_after(&admissions, subject).subject
+                    })
+                    .map(|(subject, _)| subject.clone())
+            },
             act,
         )
         .map_err(|refusal| match refusal {
@@ -2096,16 +2105,14 @@ impl Engine {
         let staged = Sequence::advance_of(self, view, &facts);
         let act = crate::basis::DecidedAct::Offer(execution.offer);
         let follow_up = match after {
-            CheckOutcome::Allow => {
-                let (dispatch, opening) =
-                    opened_dispatch(&contract, views, &substituted, recorded.subject.clone(), under);
-                facts.push(opening);
-                OfferFollowUp::Released(Box::new(Released {
-                    dispatch,
-                    call: substituted,
-                    fork: None,
-                }))
-            }
+            // The rewrite clears the block, and the derivation it staged is what says so. No
+            // dispatch opens here: the model proposes the substituted call, and that proposal
+            // takes the derivation and is judged against the state it arrives at. Releasing the
+            // call here instead would decide it once, in advance, against state that can have
+            // moved by the time the harness delivers it.
+            CheckOutcome::Allow => OfferFollowUp::Approved {
+                call: Box::new(substituted),
+            },
             CheckOutcome::Block(raw) => {
                 let role = views.call_role(&recorded.subject);
                 require_atoms(under, plan::block_atoms(&self.registry, &contract, &raw))?;
@@ -2159,20 +2166,15 @@ impl Engine {
                 None => OfferFollowUp::Invalidated,
             });
         }
-        Ok(match views.subject_dispatch(&recorded.subject).cloned() {
-            Some(dispatch) if views.is_open(&dispatch) && !views.is_succeeded(&dispatch) => {
-                OfferFollowUp::Released(Box::new(Released {
-                    dispatch,
-                    call: candidate,
-                    fork: None,
-                }))
-            }
-            Some(dispatch) => OfferFollowUp::Settled(Box::new(Settled {
-                outcome: settled_outcome(views, &dispatch),
-                dispatch,
-                call: candidate,
-            })),
-            None => OfferFollowUp::Invalidated,
+        // A hop opens no dispatch, so its subject never has one: the derivation it staged is
+        // the whole of what it did. While that derivation is current the repeat answers with the
+        // same approved call — executing an offer twice must not change what the model is told
+        // to do — and once something has taken or replaced it the offer no longer stands.
+        Ok(match views.recorded_candidate(&recorded.subject) {
+            Some(held) if held.generation == views.basis_for(&recorded.subject).subject => OfferFollowUp::Approved {
+                call: Box::new(candidate),
+            },
+            Some(_) | None => OfferFollowUp::Invalidated,
         })
     }
 
@@ -2866,6 +2868,8 @@ pub(crate) fn opened_dispatch(
 pub(crate) struct SiblingRelease {
     pub(crate) dispatch: DispatchId,
     pub(crate) consumes: Option<crate::value::OfferId>,
+    /// The staged derivation this release took, by the subject that staged it.
+    pub(crate) takes: Option<crate::basis::SubjectKey>,
     pub(crate) prepares_fork: Option<ForkId>,
     pub(crate) facts: Vec<Fact>,
     /// The pinned audience evidence this release's check read under: the act's, behind the
@@ -3000,6 +3004,11 @@ pub(crate) fn compose_batch<'a>(
     proposals: &[ResolvedCall],
     spawn: Option<SpawnMark>,
     approval: &impl Fn(&Views, &ResolvedCall) -> Option<crate::value::OfferId>,
+    staged: &impl Fn(
+        &Views,
+        &ResolvedCall,
+        &std::collections::BTreeSet<crate::basis::SubjectKey>,
+    ) -> Option<crate::basis::SubjectKey>,
     act: &ActEvidence,
 ) -> Result<Vec<Option<SiblingRelease>>, ComposeRefusal> {
     let trajectory = batch.trajectory;
@@ -3062,6 +3071,10 @@ pub(crate) fn compose_batch<'a>(
     let mut composed = Vec::with_capacity(proposals.len());
     // Whether any earlier sibling was refused, and so will be re-planned against the final state.
     let mut refused = false;
+    // What earlier siblings of this batch have already taken. One derivation releases one call,
+    // and a sibling's take does not reach `working` — only the batch's own `BasisAdvanced` does —
+    // so two identical proposals would otherwise both stand on it.
+    let mut taken: std::collections::BTreeSet<crate::basis::SubjectKey> = std::collections::BTreeSet::new();
     for (position, call) in proposals.iter().enumerate() {
         let (under, spends) = &per_call[position];
         let release = {
@@ -3076,11 +3089,30 @@ pub(crate) fn compose_batch<'a>(
                 true => CallRole::MarkedSpawn,
                 false => CallRole::Ordinary,
             };
+            // A derivation an earlier block's remedy staged for exactly these bytes. Taking it
+            // puts the call at the sanitizer's stage — its derived label and spent lineage —
+            // while every other term is judged against current state, so a trajectory that
+            // narrowed since the derivation landed re-gates the call rather than releasing it
+            // on the terms it was staged under. A marked spawn takes none: its fork's return
+            // policy rides on an approval, which a derivation does not carry.
+            let takes = match role {
+                CallRole::MarkedSpawn => None,
+                CallRole::Ordinary => staged(&views, call, &taken).and_then(|subject| {
+                    let recorded = views.recorded_candidate(&subject)?;
+                    Some((
+                        subject.clone(),
+                        CallStage::of(Some(&recorded.derived), recorded.lineage.clone()),
+                    ))
+                }),
+            };
+            let stage = takes
+                .as_ref()
+                .map_or_else(CallStage::default, |(_, stage)| stage.clone());
             let consumes = match check::evaluate(
                 &contract,
                 &views,
                 call,
-                &CallStage::default(),
+                &stage,
                 role,
                 &membership_context(registry, under),
             ) {
@@ -3098,6 +3130,13 @@ pub(crate) fn compose_batch<'a>(
             let subject = batch.subject(position);
             let (dispatch, opening) = opened_dispatch(&contract, &views, call, subject, under);
             let mut facts = Vec::new();
+            if let Some((staged, _)) = &takes {
+                facts.push(Fact::CandidateConsumed {
+                    trajectory: trajectory.clone(),
+                    subject: staged.clone(),
+                    dispatch: dispatch.clone(),
+                });
+            }
             if let Some(offer) = consumes {
                 let prepared = views
                     .approval(&offer)
@@ -3131,9 +3170,13 @@ pub(crate) fn compose_batch<'a>(
             } else {
                 None
             };
+            if let Some((subject, _)) = &takes {
+                taken.insert(subject.clone());
+            }
             SiblingRelease {
                 dispatch,
                 consumes,
+                takes: takes.map(|(subject, _)| subject),
                 prepares_fork,
                 facts,
                 evidence: under.pinned().clone(),
@@ -5373,7 +5416,7 @@ mod tests {
     }
 
     #[test]
-    fn a_substitution_that_clears_the_last_gap_dispatches_in_the_hops_own_batch() {
+    fn a_substitution_that_clears_the_last_gap_approves_the_call_the_model_then_proposes() {
         let e = substituting_engine(TRUSTED);
         let proposal = call("post", json!({ "body": "ssn 123" }));
         let log = internal_log(&e);
@@ -5382,11 +5425,8 @@ mod tests {
         let log = [log, facts].concat();
 
         let hopped = execute_offer(&e, &log, offers[0].0, substitution(&proposal, REDACTED)).expect("the hop runs");
-        let released = match offer_answer(&hopped) {
-            OfferFollowUp::Released(released) => (**released).clone(),
-            other => panic!("an immediately admissible substitution dispatches, got {other:?}"),
-        };
-        assert_eq!(released.call.canonical_arguments().canonical_text(), REDACTED);
+        let approved = approved_by(&hopped);
+        assert_eq!(approved.canonical_arguments().canonical_text(), REDACTED);
         let facts = appended_facts(hopped);
         assert!(
             matches!(
@@ -5399,35 +5439,23 @@ mod tests {
                         derived: DerivedCandidate::Call { call, .. },
                         ..
                     },
-                    Fact::DispatchOpened { dispatch, .. },
-                ] if offer == &offers[1].0 && call == &released.call && dispatch == &released.dispatch
+                ] if offer == &offers[1].0 && call == &approved
             ),
-            "the hop commits its candidate, ends the sibling standing on the predecessor it \
-             replaced, and opens the dispatch: {facts:?}"
+            "the hop commits its candidate and ends the sibling standing on the predecessor it \
+             replaced, and opens no dispatch: {facts:?}"
         );
         let before = basis_of(&e, &log);
         let log = [log, facts].concat();
         assert_eq!(e.validate_replay(&log), Ok(()));
         assert_eq!(
             basis_of(&e, &log).family,
-            before.family.next(),
-            "the release the hop earned reserves its effect, and the act declared that advance"
+            before.family,
+            "nothing ran, so the hop reserves no effect"
         );
 
-        let mut forged = log.clone();
-        let mut second = forged.last().expect("the opening is the batch's last record").clone();
-        let Fact::DispatchOpened { dispatch, .. } = &mut second else {
-            panic!("the hop's batch ends with its opening")
-        };
-        *dispatch = DispatchId::new(traj(), *dispatch.digest(), 1);
-        forged.push(second);
-        assert_eq!(
-            e.validate_replay(&forged),
-            Err(crate::transition::TransitionRefusal::UnbackedDecision)
-        );
-
-        let plain = proposed(&e, &log, "b2", nonce(), call("post", json!({ "body": "[redacted]" })))
-            .expect("the batch decides");
+        // The derivation releases the bytes it staged and nothing else: the same block's
+        // original arguments are still blocked.
+        let plain = proposed(&e, &log, "b2", nonce(), proposal.clone()).expect("the batch decides");
         match &plain.follow_up {
             FollowUp::Proposals { released, blocked, .. } => {
                 assert!(released.is_empty());
@@ -5440,6 +5468,9 @@ mod tests {
             }
             other => panic!("a fresh proposal decides as proposals, got {other:?}"),
         }
+
+        let facts = taken(&e, &log, "b3", &approved);
+        assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
     }
 
     #[test]
@@ -5459,14 +5490,14 @@ mod tests {
         let answer = || pinned_for(plain_tool("post"), "ghost", &proposal);
 
         let mut forged = log.clone();
-        let candidate = forged.len() - 2;
-        let Fact::CandidateDerived {
+        let Some(Fact::CandidateDerived {
             derived: DerivedCandidate::Call { call, .. },
             ..
-        } = &mut forged[candidate]
+        }) = forged.last_mut()
         else {
-            panic!("the hop's batch records its candidate before the opening")
+            panic!("the hop's batch ends with its candidate")
         };
+        let substituted = call.clone();
         *call = call.clone().with_annotation(Some(answer()));
         assert_eq!(
             e.validate_replay(&forged),
@@ -5474,11 +5505,15 @@ mod tests {
             "a static declaration is its own annotation: a pinned candidate under it is forged"
         );
 
+        // The opening the taking proposal earns is held to the same rule.
+        let log = [log.clone(), taken(&e, &log, "b2", &substituted)].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
         let mut forged = log.clone();
-        let Fact::DispatchOpened { annotation, .. } =
-            forged.last_mut().expect("the opening is the batch's last record")
+        let Some(Fact::DispatchOpened { annotation, .. }) = forged
+            .iter_mut()
+            .find(|fact| matches!(fact, Fact::DispatchOpened { .. }))
         else {
-            panic!("the hop's batch ends with its opening")
+            panic!("the taking batch opens the dispatch")
         };
         *annotation = Some(answer());
         assert_eq!(
@@ -5489,7 +5524,7 @@ mod tests {
     }
 
     #[test]
-    fn a_repeat_of_a_hop_names_the_dispatch_that_hop_opened() {
+    fn a_repeat_of_a_hop_answers_with_the_same_call_until_a_proposal_takes_it() {
         let e = substituting_engine(TRUSTED);
         let proposal = call("post", json!({ "body": "ssn 123" }));
         let log = internal_log(&e);
@@ -5499,39 +5534,115 @@ mod tests {
             let offer = opened_offers(&facts)[0].0;
             ([log.clone(), facts].concat(), offer)
         };
-        let released_by = |log: &Vec<Fact>, offer| match offer_answer(
-            &execute_offer(&e, log, offer, substitution(&proposal, REDACTED)).expect("the hop runs"),
-        ) {
-            OfferFollowUp::Released(released) => released.dispatch.clone(),
-            other => panic!("an immediately admissible substitution dispatches, got {other:?}"),
+        let run = |log: &Vec<Fact>, offer| {
+            execute_offer(&e, log, offer, substitution(&proposal, REDACTED)).expect("the hop runs")
         };
 
         let (log, first) = hop_of(&log, "b1");
-        let ran = released_by(&log, first);
-        let log = [
-            log.clone(),
-            appended_facts(execute_offer(&e, &log, first, substitution(&proposal, REDACTED)).expect("the hop runs")),
-        ]
-        .concat();
+        let approved = approved_by(&run(&log, first));
+        let log = [log.clone(), appended_facts(run(&log, first))].concat();
 
+        // A second block over the same bytes derives its own candidate on its own subject.
         let (log, second) = hop_of(&log, "b2");
-        let again = released_by(&log, second);
-        assert_ne!(ran, again, "each candidate earns its own dispatch");
-        let log = [
-            log.clone(),
-            appended_facts(execute_offer(&e, &log, second, substitution(&proposal, REDACTED)).expect("the hop runs")),
-        ]
-        .concat();
+        assert_eq!(approved_by(&run(&log, second)), approved);
+        let log = [log.clone(), appended_facts(run(&log, second))].concat();
 
-        let repeat = |offer| match offer_answer(
-            &execute_offer(&e, &log, offer, substitution(&proposal, REDACTED)).expect("the repeat answers"),
-        ) {
-            OfferFollowUp::Released(released) => released.dispatch.clone(),
-            OfferFollowUp::Settled(settled) => settled.dispatch.clone(),
-            other => panic!("a spent hop answers from its record, got {other:?}"),
+        let repeat = |log: &Vec<Fact>, offer| {
+            let decision =
+                execute_offer(&e, log, offer, substitution(&proposal, REDACTED)).expect("the repeat answers");
+            assert_eq!(decision.append, None, "a repeat writes nothing");
+            offer_answer(&decision).clone()
         };
-        assert_eq!(repeat(first), ran);
-        assert_eq!(repeat(second), again, "the second hop's repeat names its own dispatch");
+        let same = OfferFollowUp::Approved {
+            call: Box::new(approved.clone()),
+        };
+        assert_eq!(repeat(&log, first), same);
+        assert_eq!(
+            repeat(&log, second),
+            same,
+            "an unspent derivation answers its repeat with the same call"
+        );
+
+        // One proposal takes one derivation. The hop whose derivation it spent no longer stands;
+        // the other still answers, so one rewrite never releases the call twice.
+        let facts = taken(&e, &log, "b3", &approved);
+        let spent = facts
+            .iter()
+            .find_map(|fact| match fact {
+                Fact::CandidateConsumed { subject, dispatch, .. } => Some((subject.clone(), dispatch.clone())),
+                _ => None,
+            })
+            .expect("the batch spends a derivation");
+        let opened = facts
+            .iter()
+            .find_map(|fact| match fact {
+                Fact::DispatchOpened { dispatch, .. } => Some(dispatch.clone()),
+                _ => None,
+            })
+            .expect("the batch opens its dispatch");
+        assert_eq!(
+            spent.1, opened,
+            "the record ties the emission to the derivation it stood on"
+        );
+        assert!(
+            matches!(
+                &spent.0,
+                crate::basis::SubjectKey::Call { batch, .. }
+                    if batch == &crate::transition::ProposalBatchId::new("b1")
+                        || batch == &crate::transition::ProposalBatchId::new("b2")
+            ),
+            "the record names the original call the derivation came from: {:?}",
+            spent.0
+        );
+
+        let log = [log, facts].concat();
+        let answers = [repeat(&log, first), repeat(&log, second)];
+        assert_eq!(
+            answers
+                .iter()
+                .filter(|answer| **answer == OfferFollowUp::Invalidated)
+                .count(),
+            1,
+            "exactly one hop's derivation was spent: {answers:?}"
+        );
+    }
+
+    /// One derivation releases one call. A sibling's take does not reach the working projection —
+    /// only the batch's own `BasisAdvanced` does — so the batch has to exclude what it already
+    /// took, or two identical proposals would both stand on the one rewrite the model paid for.
+    #[test]
+    fn a_derivation_releases_one_of_two_identical_siblings_and_blocks_the_other() {
+        let e = substituting_engine(TRUSTED);
+        let proposal = call("post", json!({ "body": "ssn 123" }));
+        let log = internal_log(&e);
+        let facts = appended_facts(proposed(&e, &log, "b1", nonce(), proposal.clone()).expect("the batch decides"));
+        let hop = opened_offers(&facts)[0].0;
+        let log = [log, facts].concat();
+        let hopped = execute_offer(&e, &log, hop, substitution(&proposal, REDACTED)).expect("the hop runs");
+        let approved = approved_by(&hopped);
+        let log = [log, appended_facts(hopped)].concat();
+
+        let decided = e
+            .handle(
+                &viewing(&e, &log),
+                batch("b2", Vec::new(), vec![raw(&approved), raw(&approved)]),
+            )
+            .expect("the batch decides");
+        let (released, blocked) = answered(&decided);
+        assert_eq!(released.len(), 1, "the one derivation released one of the two");
+        assert_eq!(blocked.len(), 1, "the other is judged at the origin stage and blocks");
+        assert_eq!(blocked[0].call, approved);
+
+        let facts = appended_facts(decided);
+        assert_eq!(
+            facts
+                .iter()
+                .filter(|fact| matches!(fact, Fact::CandidateConsumed { .. }))
+                .count(),
+            1,
+            "the derivation is spent once: {facts:?}"
+        );
+        assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
     }
 
     #[test]
@@ -5744,7 +5855,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hop_goes_stale_with_its_basis_and_a_spent_one_answers_from_the_record() {
+    fn a_hop_goes_stale_with_its_basis_and_a_taken_one_stops_answering() {
         let e = substituting_engine(TRUSTED);
         let proposal = call("post", json!({ "body": "ssn 123" }));
         let log = internal_log(&e);
@@ -5762,13 +5873,10 @@ mod tests {
             Err(TransitionError::StaleOffer)
         );
 
-        let taken = execute_offer(&e, &log, hop, substitution(&proposal, REDACTED)).expect("the hop runs");
-        let answer = offer_answer(&taken).clone();
-        let dispatch = match &answer {
-            OfferFollowUp::Released(released) => released.dispatch.clone(),
-            other => panic!("an immediately admissible substitution dispatches, got {other:?}"),
-        };
-        let log = [log, appended_facts(taken)].concat();
+        let hopped = execute_offer(&e, &log, hop, substitution(&proposal, REDACTED)).expect("the hop runs");
+        let answer = offer_answer(&hopped).clone();
+        let approved = approved_by(&hopped);
+        let log = [log, appended_facts(hopped)].concat();
         let repeat = execute_offer(&e, &log, hop, substitution(&proposal, REDACTED)).expect("the repeat answers");
         assert_eq!(repeat.append, None);
         assert_eq!(offer_answer(&repeat), &answer);
@@ -5777,14 +5885,29 @@ mod tests {
             Err(TransitionError::PlanOutcomeMismatch)
         );
 
-        let body = ValueBody::new("posted");
+        // The proposal that takes the derivation spends it. From here the hop has nothing left
+        // to hand out, before the call runs and after it closes alike: a second run of the
+        // substituted call needs a second rewrite.
+        let facts = taken(&e, &log, "b3", &approved);
+        let dispatch = facts
+            .iter()
+            .find_map(|fact| match fact {
+                Fact::DispatchOpened { dispatch, .. } => Some(dispatch.clone()),
+                _ => None,
+            })
+            .expect("the taking batch opens the dispatch");
+        let log = [log, facts].concat();
+        let spent = execute_offer(&e, &log, hop, substitution(&proposal, REDACTED)).expect("the repeat answers");
+        assert_eq!(spent.append, None);
+        assert_eq!(offer_answer(&spent), &OfferFollowUp::Invalidated);
+
         let reported = e
             .handle(
                 &e.view(&traj(), log.clone(), log.len() as u64).unwrap(),
                 EngineEvent::Outcome(ToolReport {
                     dispatch,
                     outcome: ToolOutcome::Success {
-                        body: OutcomeBody::Available(body.clone()),
+                        body: OutcomeBody::Available(ValueBody::new("posted")),
                     },
                     evidence: Vec::new(),
                     offer_nonce: nonce(),
@@ -5795,15 +5918,8 @@ mod tests {
         let log = [log, appended_facts(reported)].concat();
         let settled = execute_offer(&e, &log, hop, substitution(&proposal, REDACTED)).expect("the repeat answers");
         assert_eq!(settled.append, None);
-        assert!(
-            matches!(
-                offer_answer(&settled),
-                OfferFollowUp::Settled(settled)
-                    if settled.outcome == crate::transition::SettledOutcome::Closed { admitted: Some(body.clone()) }
-            ),
-            "got {:?}",
-            offer_answer(&settled)
-        );
+        assert_eq!(offer_answer(&settled), &OfferFollowUp::Invalidated);
+        assert_eq!(e.validate_replay(&log), Ok(()));
     }
 
     #[test]
@@ -6284,6 +6400,24 @@ mod tests {
         nonce: crate::value::OfferNonce,
         proposal: ResolvedCall,
     ) -> Result<EngineDecision, TransitionError> {
+        proposed_with(
+            e,
+            log,
+            id,
+            nonce,
+            proposal,
+            crate::audience::AudienceEvidence::default(),
+        )
+    }
+
+    fn proposed_with(
+        e: &Engine,
+        log: &[Fact],
+        id: &str,
+        nonce: crate::value::OfferNonce,
+        proposal: ResolvedCall,
+        audience: crate::audience::AudienceEvidence,
+    ) -> Result<EngineDecision, TransitionError> {
         let view = e
             .view(&traj(), log.to_vec(), log.len() as u64)
             .expect("the log replays");
@@ -6297,7 +6431,7 @@ mod tests {
                 spawn: None,
                 offer_nonce: nonce,
                 evidence: Vec::new(),
-                audience: crate::audience::AudienceEvidence::default(),
+                audience,
             }),
         )
     }
@@ -8786,11 +8920,42 @@ mod tests {
             .unwrap_or_else(|| panic!("the {name} hop is offered"))
     }
 
-    fn released_by(decision: &EngineDecision) -> Released {
+    /// The call a hop that cleared the last gap approved. It opens no dispatch: the model
+    /// proposes it, and that proposal takes the derivation.
+    fn approved_by(decision: &EngineDecision) -> ResolvedCall {
         match offer_answer(decision) {
-            OfferFollowUp::Released(released) => (**released).clone(),
-            other => panic!("the rewrite clears the last gap and dispatches, got {other:?}"),
+            OfferFollowUp::Approved { call } => (**call).clone(),
+            other => panic!("the rewrite clears the last gap and approves the call, got {other:?}"),
         }
+    }
+
+    /// The facts of the batch in which the model proposes a call a hop approved.
+    fn taken(e: &Engine, log: &[Fact], id: &str, call: &ResolvedCall) -> Vec<Fact> {
+        taken_with(e, log, id, call, crate::audience::AudienceEvidence::default())
+    }
+
+    fn taken_with(
+        e: &Engine,
+        log: &[Fact],
+        id: &str,
+        call: &ResolvedCall,
+        audience: crate::audience::AudienceEvidence,
+    ) -> Vec<Fact> {
+        let decision =
+            proposed_with(e, log, id, nonce(), call.clone(), audience).expect("the approved call is proposed");
+        match &decision.follow_up {
+            FollowUp::Proposals { released, blocked, .. } => {
+                assert!(blocked.is_empty(), "the proposal takes the derivation the hop staged");
+                assert_eq!(released[0].call, *call);
+            }
+            other => panic!("a proposal decides as proposals, got {other:?}"),
+        }
+        let facts = appended_facts(decision);
+        assert!(
+            facts.iter().any(|fact| matches!(fact, Fact::CandidateConsumed { .. })),
+            "the proposal spends the derivation it stood on: {facts:?}"
+        );
+        facts
     }
 
     fn opened_contract_of(
@@ -8850,24 +9015,26 @@ mod tests {
             rewrite(&proposal, "redact", public, Some(answer.clone())),
         )
         .expect("the hop runs");
-        let released = released_by(&hopped);
+        let approved = approved_by(&hopped);
         assert_eq!(
-            released.call.declaration_id(),
+            approved.declaration_id(),
             crate::value::ToolDeclarationId::new(0).unwrap()
         );
-        assert_eq!(released.call.annotation(), Some(&answer));
-        let facts = appended_facts(hopped);
+        assert_eq!(approved.annotation(), Some(&answer));
+        let log = [log, appended_facts(hopped)].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+
+        let facts = taken(&e, &log, "b2", &approved);
         assert_eq!(
             opened_contract_of(&facts),
             (
                 crate::value::ToolDeclarationId::new(0).unwrap(),
                 EffectSet::default(),
-                released.call.annotation().cloned()
+                approved.annotation().cloned()
             ),
             "the opening records the public declaration: its effects, not the classified read's, and its annotation"
         );
-        let log = [log, facts].concat();
-        assert_eq!(e.validate_replay(&log), Ok(()));
+        assert_eq!(e.validate_replay(&[log.clone(), facts].concat()), Ok(()));
 
         // Replay holds the record to the same rule: the persisted declaration is the one the
         // arguments select, and the tool is the one the sanitizer rewrote — another tool's open
@@ -8881,7 +9048,7 @@ mod tests {
                 ResolvedCall::new_keyed(
                     ToolName::new("note"),
                     crate::value::ToolDeclarationId::new(0).unwrap(),
-                    released.call.canonical_arguments().clone(),
+                    approved.canonical_arguments().clone(),
                 ),
                 TransitionRefusal::ForgedLabel,
             ),
@@ -8889,7 +9056,7 @@ mod tests {
                 ResolvedCall::new_keyed(
                     ToolName::new("read"),
                     crate::value::ToolDeclarationId::new(1).unwrap(),
-                    released.call.canonical_arguments().clone(),
+                    approved.canonical_arguments().clone(),
                 ),
                 TransitionRefusal::SanitizerUnapplicable,
             ),
@@ -8930,16 +9097,18 @@ mod tests {
             rewrite(&proposal, "redact", r#"{"path":"private/q3.md"}"#, None),
         )
         .expect("the hop runs");
-        let released = released_by(&hopped);
+        let approved = approved_by(&hopped);
         assert_eq!(
-            released.call.declaration_id(),
+            approved.declaration_id(),
             crate::value::ToolDeclarationId::new(1).unwrap()
         );
         assert!(
-            released.call.annotation().is_none(),
+            approved.annotation().is_none(),
             "the classified declaration is statically declared; the public annotation does not ride along"
         );
-        let facts = appended_facts(hopped);
+        let hopped_log = [log.clone(), appended_facts(hopped)].concat();
+        assert_eq!(e.validate_replay(&hopped_log), Ok(()));
+        let facts = taken(&e, &hopped_log, "b2", &approved);
         assert_eq!(
             opened_contract_of(&facts),
             (
@@ -8949,7 +9118,7 @@ mod tests {
             ),
             "the opening records the classified read the selected declaration emits"
         );
-        assert_eq!(e.validate_replay(&[log.clone(), facts].concat()), Ok(()));
+        assert_eq!(e.validate_replay(&[hopped_log, facts].concat()), Ok(()));
 
         // A rewrite that stays in the annotated declaration is annotated afresh or not at all:
         // the proposal's annotation never rides through, and none means the rewrite still owes one.
@@ -8961,15 +9130,12 @@ mod tests {
             })
         );
         let fresh = read_pin(&read_of(&e, "public/q4.md"), &["partner"]);
-        let kept = released_by(
+        let kept = approved_by(
             &execute_offer(&e, &log, hop, rewrite(&proposal, "redact", public, Some(fresh.clone())))
                 .expect("the hop runs"),
         );
-        assert_eq!(
-            kept.call.declaration_id(),
-            crate::value::ToolDeclarationId::new(0).unwrap()
-        );
-        assert_eq!(kept.call.annotation(), Some(&fresh));
+        assert_eq!(kept.declaration_id(), crate::value::ToolDeclarationId::new(0).unwrap());
+        assert_eq!(kept.annotation(), Some(&fresh));
     }
 
     #[test]
@@ -9061,14 +9227,18 @@ mod tests {
             ),
         )
         .expect("the hop runs");
-        let released = released_by(&hopped);
+        let approved = approved_by(&hopped);
         assert_eq!(
-            released.call.declaration_id(),
+            approved.declaration_id(),
             crate::value::ToolDeclarationId::new(0).unwrap()
         );
-        assert_eq!(released.call.annotation(), Some(&widened));
+        assert_eq!(approved.annotation(), Some(&widened));
         let log = [log, appended_facts(hopped)].concat();
         assert_eq!(e.validate_replay(&log), Ok(()));
+        assert_eq!(
+            e.validate_replay(&[log.clone(), taken(&e, &log, "b2", &approved)].concat()),
+            Ok(())
+        );
     }
 
     #[test]
@@ -9171,12 +9341,17 @@ mod tests {
         )]);
         let hopped = execute_offer_with(&e, &log, hop, rewrite(&proposal, "redact", group, None), answer.clone())
             .expect("the hop runs");
-        let released = released_by(&hopped);
+        let approved = approved_by(&hopped);
         assert_eq!(
-            released.call.declaration_id(),
+            approved.declaration_id(),
             crate::value::ToolDeclarationId::new(0).unwrap()
         );
-        let facts = appended_facts(hopped);
+        let log = [log, appended_facts(hopped)].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+
+        // The proposal that takes the derivation owes the group's answer on its own account:
+        // the derivation carries the stage, never the membership the check reads now.
+        let facts = taken_with(&e, &log, "b2", &approved, answer.clone());
         assert!(facts.iter().any(|fact| matches!(
             fact,
             Fact::DispatchOpened { evidence, .. } if evidence == &answer

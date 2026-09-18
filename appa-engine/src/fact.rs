@@ -404,6 +404,16 @@ pub enum Fact {
         offer: crate::value::OfferId,
         dispatch: DispatchId,
     },
+    /// The proposal that took a staged call candidate: an input sanitizer's rewrite, spent by
+    /// the dispatch the proposal released. The candidate's subject advances, so a second
+    /// proposal of the same bytes cannot take it again. The parallel of
+    /// [`Fact::CallApprovalConsumed`] for a derivation rather than an approval, and what names
+    /// the original call each substituted emission came from.
+    CandidateConsumed {
+        trajectory: TrajectoryId,
+        subject: SubjectKey,
+        dispatch: DispatchId,
+    },
     BasisAdvanced {
         trajectory: TrajectoryId,
         act: crate::basis::DecidedAct,
@@ -464,6 +474,7 @@ impl Fact {
             | Fact::OfferInvalidated { trajectory, .. }
             | Fact::CallApproved { trajectory, .. }
             | Fact::CallApprovalConsumed { trajectory, .. }
+            | Fact::CandidateConsumed { trajectory, .. }
             | Fact::BasisAdvanced { trajectory, .. }
             | Fact::ForkPrepared { trajectory, .. }
             | Fact::ForkOpened { trajectory, .. }

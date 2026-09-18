@@ -230,7 +230,6 @@ pub(crate) enum ToolResultDecision {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RemedyDecision {
     Authorized { call: ExactCall },
-    Substituted { call: ExactCall },
     Returned { value: String },
     Declined { presentation: RemedyPresentation },
     NoAnswer { feedback: String },
@@ -328,7 +327,6 @@ impl RemedyRefusal {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RemedyOutcome {
     Authorized { call: ProposedCall },
-    Substituted { call: ProposedCall },
     Returned { value: String },
     Declined { presentation: RemedyPresentation },
     NoAnswer { feedback: String },
@@ -450,10 +448,6 @@ pub(crate) enum EventError {
     SpawnOutstanding,
     #[error("the host reused a call id")]
     CallIdReused,
-    #[error(
-        "the substituted {tool} call did not run and is now closed; propose your call again (a substituted call needs a fresh offer)"
-    )]
-    SubstitutionAbandoned { tool: String },
     #[error("the trajectory has ended")]
     TrajectoryEnded,
     #[error("the child has a call still open; report its outcome before the child ends")]
@@ -545,7 +539,6 @@ impl EventError {
             EventError::CallOutstanding
             | EventError::SpawnOutstanding
             | EventError::CallIdReused
-            | EventError::SubstitutionAbandoned { .. }
             | EventError::TrajectoryEnded
             | EventError::ChildDispatchOpen
             | EventError::RemedyArguments { .. }
@@ -1986,13 +1979,7 @@ impl Runtime {
         let answer = |text: String| RemedyReply { text, is_error: false };
         match outcome {
             RemedyOutcome::Authorized { call } => answer(format!(
-                "[appa] Authorized. Call the {} tool again with exactly these arguments: {}",
-                self.model_spelling(&call.tool),
-                call.arguments.get(),
-            )),
-            RemedyOutcome::Substituted { call } => answer(format!(
-                "[appa] Substituted. The sanitizer replaced the arguments and the call is released. \
-                 Call the {} tool with exactly these arguments to run it: {}",
+                "[appa] Authorized. Call the {} tool with exactly these arguments to run it: {}",
                 self.model_spelling(&call.tool),
                 call.arguments.get(),
             )),
@@ -2168,7 +2155,6 @@ impl Runtime {
         };
         match session.on_remedy(offer, arguments, elicitation, ruling).await {
             Ok(RemedyDecision::Authorized { call }) => RemedyOutcome::Authorized { call: call.proposed() },
-            Ok(RemedyDecision::Substituted { call }) => RemedyOutcome::Substituted { call: call.proposed() },
             Ok(RemedyDecision::Returned { value }) => RemedyOutcome::Returned { value },
             Ok(RemedyDecision::Declined { presentation }) => RemedyOutcome::Declined { presentation },
             Ok(RemedyDecision::NoAnswer { feedback }) => RemedyOutcome::NoAnswer { feedback },
@@ -2447,19 +2433,6 @@ impl Runtime {
         let deployment = self.inner.deployment();
         let (policy, view) = self.rebuilt(&deployment, root);
         policy.engine().liveness(&view, trajectory) != Liveness::Unopened
-    }
-
-    /// The substituted call a trajectory has standing, for the tests
-    /// that assert on it: the open dispatch no proposal released.
-    #[cfg(test)]
-    pub(crate) fn substituted_release(
-        &self,
-        root: &TrajectoryId,
-        trajectory: &TrajectoryId,
-    ) -> Option<crate::engine::OpenDispatch> {
-        let deployment = self.inner.deployment();
-        let (policy, view) = self.rebuilt(&deployment, root);
-        policy.engine().substituted_release(&view, trajectory)
     }
 
     /// Rebuild one root's view, scoped to a trajectory in it, for the tests

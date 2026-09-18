@@ -598,6 +598,17 @@ impl ResolvedCall {
     pub(crate) fn substituting(&self, arguments: CanonicalArguments) -> ResolvedCall {
         ResolvedCall::new_keyed(self.tool.clone(), self.declaration, arguments)
     }
+
+    /// Is this the call another proposal renders, up to the host-pinned file basis? The callee,
+    /// the declaration it selects, its canonical arguments and its annotation are the call; the
+    /// basis is evidence the host pins for one proposal, and a record of a call carries none.
+    /// A staged derivation is matched this way so a file-mediated call can take one at all.
+    pub(crate) fn renders(&self, other: &ResolvedCall) -> bool {
+        self.tool == other.tool
+            && self.declaration == other.declaration
+            && self.arguments == other.arguments
+            && self.annotation == other.annotation
+    }
 }
 
 #[cfg(test)]

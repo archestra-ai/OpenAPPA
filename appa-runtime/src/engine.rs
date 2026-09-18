@@ -297,7 +297,6 @@ pub enum Next {
         feedback: Vec<Feedback>,
     },
     PresentToModel(Presentation),
-    InvokeTool(ReleasedCall),
     Approved {
         tool: String,
         bytes: Vec<u8>,
@@ -441,6 +440,7 @@ impl From<&TransitionRefusal> for ReplayRefusalClass {
             TransitionRefusal::UndischargedAcceptance => ReplayRefusalClass("undischarged_acceptance"),
             TransitionRefusal::UnbackedDenial => ReplayRefusalClass("unbacked_denial"),
             TransitionRefusal::UnknownApproval => ReplayRefusalClass("unknown_approval"),
+            TransitionRefusal::UnknownCandidate => ReplayRefusalClass("unknown_candidate"),
             TransitionRefusal::StaleSpend => ReplayRefusalClass("stale_spend"),
         }
     }
@@ -924,25 +924,6 @@ impl RuntimeEngine {
             .collect()
     }
 
-    /// The substituted call this trajectory has standing, if it has one:
-    /// the one open dispatch no proposal batch released. An
-    /// offer execution releases a replaced call on its own,
-    /// so that dispatch names a call the harness never proposed — which
-    /// is exactly what tells the runtime to hand it out rather than to
-    /// refuse the next proposal as a second call in flight.
-    pub(crate) fn substituted_release(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<OpenDispatch> {
-        let owner = engine_id(trajectory);
-        let views = view.views(&owner)?;
-        views
-            .open_dispatches()
-            .find(|(dispatch, _)| !views.released_by_proposal(dispatch))
-            .map(|(dispatch, call)| OpenDispatch {
-                id: dispatch.clone(),
-                tool: call.tool().as_str().to_string(),
-                bytes: call.canonical_arguments().canonical_bytes().to_vec(),
-            })
-    }
-
     /// Where one fork stands in the rebuilt view. The runtime uses it
     /// to find the family's forks still open for binding, and the child
     /// a spawn's fork was bound to when that spawn's result arrives.
@@ -1181,6 +1162,7 @@ impl RuntimeEngine {
             | Fact::OfferInvalidated { .. }
             | Fact::CallApproved { .. }
             | Fact::CallApprovalConsumed { .. }
+            | Fact::CandidateConsumed { .. }
             | Fact::BasisAdvanced { .. } => return Some(None),
             Fact::ForkPrepared { .. } | Fact::ForkOpened { .. } => return Some(None),
         };
@@ -1697,10 +1679,6 @@ impl RuntimeEngine {
                 &confined.offers,
                 presentation,
             )),
-            FollowUp::Offer(OfferFollowUp::Released(release)) => Next::InvokeTool(released(&release)),
-            FollowUp::Offer(OfferFollowUp::Settled(_)) => Next::PresentToModel(Presentation::Declined {
-                feedback: "[appa] the call this offer released is already settled; propose a fresh call".to_string(),
-            }),
             other => {
                 return Err(EngineRefusal::Invariant {
                     detail: format!("an offer produced a non-offer follow-up: {other:?}"),
