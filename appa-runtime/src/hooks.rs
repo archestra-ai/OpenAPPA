@@ -3,8 +3,8 @@
 
 use appa_engine::value::DispatchId as EngineDispatchId;
 use appa_runtime_api::{
-    Accepted, Actor, Adapter, HookDecision, HookEvent, ParseRefusal, ProposedCall, Ruling, TrajectoryId, WireDecision,
-    WireEvent,
+    Accepted, Actor, Adapter, HookDecision, HookEvent, ParseRefusal, ProposedCall, Ruling, SpawnRef, ToolOutcome,
+    TrajectoryId, WireDecision, WireEvent,
 };
 
 use crate::api::{
@@ -291,8 +291,63 @@ async fn dispatch_event(
     presentation: &mut Option<RemedyPresentation>,
     presentation_options: &EmbeddedPresentationOptions,
 ) -> HookDecision {
+    let mut dispatcher = Dispatcher {
+        runtime,
+        dispatch,
+        presentation,
+        options: presentation_options,
+    };
     match event {
-        HookEvent::SessionStart { root } => match open_or_reopen(runtime, &root) {
+        HookEvent::SessionStart { root } => dispatcher.session_start(root),
+        HookEvent::Prompt { actor, .. } => dispatcher.prompt(actor),
+        HookEvent::TurnEnd { actor } => dispatcher.turn_end(actor).await,
+        HookEvent::ToolCall {
+            actor,
+            call,
+            call_id,
+            spawn,
+            ruling,
+        } => dispatcher.tool_call(actor, call, call_id, spawn, ruling).await,
+        HookEvent::SpawnResume { actor, call, child } => dispatcher.spawn_resume(actor, call, child).await,
+        HookEvent::ToolResult {
+            actor,
+            call,
+            call_id,
+            outcome,
+        } => dispatcher.tool_result(actor, call, call_id, outcome).await,
+        HookEvent::SpawnResult {
+            actor,
+            call,
+            call_id,
+            outcome,
+            child,
+            value,
+        } => {
+            dispatcher
+                .spawn_result(actor, call, call_id, outcome, child, value)
+                .await
+        }
+        HookEvent::ChildStart { root, child, spawn } => dispatcher.child_start(root, child, spawn),
+        HookEvent::ChildEnd { root, child, value } => dispatcher.child_end(root, child, value).await,
+    }
+}
+
+/// One event's dispatch: the runtime it runs against, what it may write back to the caller
+/// besides its decision, and how an embedded harness wants a presentation rendered. It
+/// lives for one event, so every method below takes exactly that hook's own payload.
+struct Dispatcher<'a> {
+    runtime: &'a Runtime,
+    /// The engine dispatch a released call opened.
+    dispatch: &'a mut Option<EngineDispatchId>,
+    /// What a denial or a replacement carries for an embedded harness.
+    presentation: &'a mut Option<RemedyPresentation>,
+    options: &'a EmbeddedPresentationOptions,
+}
+
+impl Dispatcher<'_> {
+    fn session_start(&mut self, root: TrajectoryId) -> HookDecision {
+        let runtime = self.runtime;
+        match open_or_reopen(runtime, &root) {
             Ok(_) => match runtime.live(&root, &root) {
                 Ok(()) if runtime.file_tracking_enabled() => HookDecision::Context {
                     text: "APPA file-only mode: use appa_read_file(file_path), appa_write_file(file_path, content), \
@@ -312,244 +367,245 @@ async fn dispatch_event(
                 Err(error) => refuse(error.to_string()),
             },
             Err(error) => refuse(error.to_string()),
-        },
-        HookEvent::Prompt { actor, .. } => {
-            // The prompt text is not an engine event: nothing is reported,
-            // no fact is recorded, and offer freshness stays the engine's
-            // judgment. The prompt is only marked as the sign that the
-            // previous turn is over; a queued message arrives here while
-            // its turn's call still runs, so the call is settled at the
-            // first proposal of the new turn, when that result is in.
-            //
-            // The mark gates nothing, so this answers `Ack` whether or not it landed: a
-            // mark that did not land leaves the interrupted call open until the turn ends,
-            // which is what happens anyway when no prompt hook arrives at all.
-            if let Err(error) = runtime.record_prompt(&actor) {
-                tracing::warn!(root = %actor.root.0, %error, "the prompt left no mark");
-            }
-            HookDecision::Ack
         }
-        HookEvent::TurnEnd { actor } => {
-            // A turn end gates nothing, so it answers `Ack` whatever
-            // happens. The refusal families both mean "do not end the
-            // turn" on this hook, which would hold the harness in a turn
-            // it has finished; a close that failed leaves the call open
-            // and the next proposal refuses on its own.
+    }
+
+    /// The prompt text is not an engine event: nothing is reported, no fact is recorded,
+    /// and offer freshness stays the engine's judgment. The prompt is only marked as the
+    /// sign that the previous turn is over; a queued message arrives here while its turn's
+    /// call still runs, so the call is settled at the first proposal of the new turn, when
+    /// that result is in.
+    ///
+    /// The mark gates nothing, so this answers `Ack` whether or not it landed: a mark that
+    /// did not land leaves the interrupted call open until the turn ends, which is what
+    /// happens anyway when no prompt hook arrives at all.
+    fn prompt(&mut self, actor: Actor) -> HookDecision {
+        if let Err(error) = self.runtime.record_prompt(&actor) {
+            tracing::warn!(root = %actor.root.0, %error, "the prompt left no mark");
+        }
+        HookDecision::Ack
+    }
+
+    /// A turn end gates nothing, so it answers `Ack` whatever happens. The refusal families
+    /// both mean "do not end the turn" on this hook, which would hold the harness in a turn
+    /// it has finished; a close that failed leaves the call open and the next proposal
+    /// refuses on its own.
+    async fn turn_end(&mut self, actor: Actor) -> HookDecision {
+        if let Err(error) = on_actor(
+            self.runtime,
+            &actor,
+            MissingStart::Refuse,
+            self.options,
+            |session| async move { session.on_turn_end().await },
+        )
+        .await
+        {
+            tracing::warn!(root = %actor.root.0, %error, "the turn end closed no abandoned call");
+        }
+        if let Err(error) = self.runtime.record_turn_end(&actor) {
+            tracing::warn!(root = %actor.root.0, %error, "the turn's end was not recorded");
+        }
+        HookDecision::Ack
+    }
+
+    async fn tool_call(
+        &mut self,
+        actor: Actor,
+        call: ProposedCall,
+        call_id: Option<String>,
+        spawn: bool,
+        ruling: Option<Ruling>,
+    ) -> HookDecision {
+        if self.runtime.prompted(&actor) {
+            // The first proposal after a prompt that no turn end preceded:
+            // the user interrupted the previous turn, and whatever it left
+            // open is settled before this turn's first call, control tools
+            // included, so a vouch this turn records is never released here.
+            // A settle that does not complete writes nothing, so the mark survives and
+            // the next proposal tries the same close again.
             if let Err(error) = on_actor(
-                runtime,
+                self.runtime,
                 &actor,
-                MissingStart::Refuse,
-                presentation_options,
+                MissingStart::OpenLate,
+                self.options,
                 |session| async move { session.on_turn_end().await },
             )
             .await
             {
-                tracing::warn!(root = %actor.root.0, %error, "the turn end closed no abandoned call");
+                return fold(error, Refusal::Deny);
             }
-            if let Err(error) = runtime.record_turn_end(&actor) {
-                tracing::warn!(root = %actor.root.0, %error, "the turn's end was not recorded");
+            if let Err(error) = self.runtime.record_turn_end(&actor) {
+                return fold(error, Refusal::Deny);
             }
-            HookDecision::Ack
         }
-        HookEvent::ToolCall {
-            actor,
-            call,
-            call_id,
-            spawn,
-            ruling,
-        } => {
-            if runtime.prompted(&actor) {
-                // The first proposal after a prompt that no turn end preceded:
-                // the user interrupted the previous turn, and whatever it left
-                // open is settled before this turn's first call, control tools
-                // included, so a vouch this turn records is never released here.
-                // A settle that does not complete writes nothing, so the mark survives and
-                // the next proposal tries the same close again.
-                if let Err(error) = on_actor(
-                    runtime,
-                    &actor,
-                    MissingStart::OpenLate,
-                    presentation_options,
-                    |session| async move { session.on_turn_end().await },
-                )
-                .await
-                {
-                    return fold(error, deny);
-                }
-                if let Err(error) = runtime.record_turn_end(&actor) {
-                    return fold(error, deny);
-                }
+        if is_control_tool(&call.tool) {
+            return control_call(self.runtime, &actor, &call, ruling);
+        }
+        match on_actor(self.runtime, &actor, MissingStart::OpenLate, self.options, |session| {
+            let call = call.clone();
+            let call_id = call_id.clone();
+            async move { session.on_tool_call_identified(call, call_id, spawn).await }
+        })
+        .await
+        {
+            Ok(ToolCallDecision::Allow {
+                spawn,
+                dispatch: opened,
+            }) => {
+                *self.dispatch = Some(opened);
+                vouch_call(self.runtime, &actor, &call);
+                HookDecision::AllowCall { spawn }
             }
-            if is_control_tool(&call.tool) {
-                return control_call(runtime, &actor, &call, ruling);
-            }
-            match on_actor(
-                runtime,
-                &actor,
-                MissingStart::OpenLate,
-                presentation_options,
-                |session| {
-                    let call = call.clone();
-                    let call_id = call_id.clone();
-                    async move { session.on_tool_call_identified(call, call_id, spawn).await }
-                },
-            )
-            .await
-            {
-                Ok(ToolCallDecision::Allow {
-                    spawn,
-                    dispatch: opened,
-                }) => {
-                    *dispatch = Some(opened);
-                    vouch_call(runtime, &actor, &call);
-                    HookDecision::AllowCall { spawn }
-                }
-                Ok(ToolCallDecision::Deny {
+            Ok(ToolCallDecision::Deny {
+                feedback,
+                offers,
+                display,
+                review,
+            }) => {
+                *self.presentation = Some(RemedyPresentation {
+                    feedback: feedback.clone(),
+                    offers: offers.clone(),
+                    review: review.clone(),
+                    display,
+                });
+                HookDecision::DenyCall {
                     feedback,
                     offers,
-                    display,
                     review,
-                }) => {
-                    *presentation = Some(RemedyPresentation {
-                        feedback: feedback.clone(),
-                        offers: offers.clone(),
-                        review: review.clone(),
-                        display,
-                    });
-                    HookDecision::DenyCall {
-                        feedback,
-                        offers,
-                        review,
+                }
+            }
+            Err(error) => fold(error, Refusal::Deny),
+        }
+    }
+
+    async fn spawn_resume(&mut self, actor: Actor, call: ProposedCall, child: TrajectoryId) -> HookDecision {
+        match on_actor(self.runtime, &actor, MissingStart::Refuse, self.options, |session| {
+            let (call, child) = (call.clone(), child.clone());
+            async move { session.on_spawn_resume(call, child) }
+        })
+        .await
+        {
+            Ok(()) => {
+                // The resume settled what the prompt interrupted, and only that: the
+                // turn's standing survives a resume it approved.
+                if self.runtime.prompted(&actor)
+                    && let Err(error) = self.runtime.record_prompt_settled(&actor)
+                {
+                    tracing::warn!(root = %actor.root.0, %error, "the resumed prompt's mark stands");
+                }
+                HookDecision::Ack
+            }
+            Err(error) => fold(error, Refusal::Block),
+        }
+    }
+
+    async fn tool_result(
+        &mut self,
+        actor: Actor,
+        call: ProposedCall,
+        call_id: Option<String>,
+        outcome: ToolOutcome,
+    ) -> HookDecision {
+        if is_control_tool(&call.tool) {
+            tracing::debug!(trajectory = %actor.root.0, "control tool outcome absorbed");
+            return HookDecision::Ack;
+        }
+        if self.runtime.file_tracking_enabled() && crate::api::files::owns(&call) {
+            // The runtime-owned tool admitted its observation before returning via MCP.
+            // A transport/argument failure before execution leaves its reservation intact.
+            return HookDecision::Ack;
+        }
+        match on_actor(self.runtime, &actor, MissingStart::Refuse, self.options, |session| {
+            let (call, call_id, outcome) = (call.clone(), call_id.clone(), outcome.clone());
+            async move { session.on_tool_result_identified(call, call_id, outcome).await }
+        })
+        .await
+        {
+            Ok(decision) => outcome_decision(decision, self.presentation),
+            Err(error) => fold(error, Refusal::Block),
+        }
+    }
+
+    async fn spawn_result(
+        &mut self,
+        actor: Actor,
+        call: ProposedCall,
+        call_id: Option<String>,
+        outcome: ToolOutcome,
+        child: Option<TrajectoryId>,
+        value: Option<String>,
+    ) -> HookDecision {
+        let said = value.clone();
+        match on_actor(self.runtime, &actor, MissingStart::Refuse, self.options, |session| {
+            let (call, call_id, outcome, child, value) = (
+                call.clone(),
+                call_id.clone(),
+                outcome.clone(),
+                child.clone(),
+                value.clone(),
+            );
+            async move {
+                session
+                    .on_spawn_result_identified(call, call_id, outcome, child, value)
+                    .await
+            }
+        })
+        .await
+        {
+            Ok(SpawnResultDecision::Return(decision)) => return_decision(said, decision),
+            Ok(SpawnResultDecision::Outcome(decision)) => outcome_decision(decision, self.presentation),
+            Err(error) => fold(error, Refusal::Block),
+        }
+    }
+
+    /// The child is told what its return must look like where the fork's policy shapes it;
+    /// a return that crosses as spoken needs no word.
+    fn child_start(&mut self, root: TrajectoryId, child: TrajectoryId, spawn: SpawnRef) -> HookDecision {
+        let root = match open_or_reopen_with_presentation(self.runtime, &root, self.options.clone()) {
+            Ok(session) => session,
+            Err(error) => return refuse(error.to_string()),
+        };
+        match root.start_child(child, spawn) {
+            Ok((_, Some(text))) => HookDecision::Context { text },
+            Ok((_, None)) => HookDecision::Ack,
+            Err(error) => refuse(error.to_string()),
+        }
+    }
+
+    /// The subagent's return is checked here and blocked when it may not cross; a block
+    /// keeps the subagent running until it returns what may. A child the family never saw
+    /// start is blocked too: its return has no fork to cross on.
+    async fn child_end(&mut self, root: TrajectoryId, child: TrajectoryId, value: Option<String>) -> HookDecision {
+        let said = value.clone();
+        match on_child(
+            self.runtime,
+            &root,
+            &child,
+            MissingStart::Refuse,
+            self.options,
+            |session| {
+                let value = value.clone();
+                async move { session.on_child_end(value).await }
+            },
+        )
+        .await
+        {
+            Ok(decision) => {
+                // The child is finished unless it is being asked to return something
+                // else, so what it still stands behind ends here: its vouches must not
+                // outlive its return, and its parent's turn end is not its own.
+                if !matches!(decision, ChildReturnDecision::Blocked { .. }) {
+                    let actor = Actor {
+                        root: root.clone(),
+                        child: Some(child.clone()),
+                    };
+                    if let Err(error) = self.runtime.record_turn_end(&actor) {
+                        tracing::warn!(root = %root.0, child = %child.0, %error, "the child's end was not recorded");
                     }
                 }
-                Err(error) => fold(error, deny),
+                return_decision(said, decision)
             }
-        }
-        HookEvent::SpawnResume { actor, call, child } => {
-            match on_actor(runtime, &actor, MissingStart::Refuse, presentation_options, |session| {
-                let (call, child) = (call.clone(), child.clone());
-                async move { session.on_spawn_resume(call, child) }
-            })
-            .await
-            {
-                Ok(()) => {
-                    // The resume settled what the prompt interrupted, and only that: the
-                    // turn's standing survives a resume it approved.
-                    if runtime.prompted(&actor)
-                        && let Err(error) = runtime.record_prompt_settled(&actor)
-                    {
-                        tracing::warn!(root = %actor.root.0, %error, "the resumed prompt's mark stands");
-                    }
-                    HookDecision::Ack
-                }
-                Err(error) => fold(error, block),
-            }
-        }
-        HookEvent::ToolResult {
-            actor,
-            call,
-            call_id,
-            outcome,
-        } => {
-            if is_control_tool(&call.tool) {
-                tracing::debug!(trajectory = %actor.root.0, "control tool outcome absorbed");
-                return HookDecision::Ack;
-            }
-            if runtime.file_tracking_enabled() && crate::api::files::owns(&call) {
-                // The runtime-owned tool admitted its observation before returning via MCP.
-                // A transport/argument failure before execution leaves its reservation intact.
-                return HookDecision::Ack;
-            }
-            match on_actor(runtime, &actor, MissingStart::Refuse, presentation_options, |session| {
-                let (call, call_id, outcome) = (call.clone(), call_id.clone(), outcome.clone());
-                async move { session.on_tool_result_identified(call, call_id, outcome).await }
-            })
-            .await
-            {
-                Ok(decision) => outcome_decision(decision, presentation),
-                Err(error) => fold(error, block),
-            }
-        }
-        HookEvent::SpawnResult {
-            actor,
-            call,
-            call_id,
-            outcome,
-            child,
-            value,
-        } => {
-            let said = value.clone();
-            match on_actor(runtime, &actor, MissingStart::Refuse, presentation_options, |session| {
-                let (call, call_id, outcome, child, value) = (
-                    call.clone(),
-                    call_id.clone(),
-                    outcome.clone(),
-                    child.clone(),
-                    value.clone(),
-                );
-                async move {
-                    session
-                        .on_spawn_result_identified(call, call_id, outcome, child, value)
-                        .await
-                }
-            })
-            .await
-            {
-                Ok(SpawnResultDecision::Return(decision)) => return_decision(said, decision),
-                Ok(SpawnResultDecision::Outcome(decision)) => outcome_decision(decision, presentation),
-                Err(error) => fold(error, block),
-            }
-        }
-        HookEvent::ChildStart { root, child, spawn } => {
-            // The child is told what its return must look like where the
-            // fork's policy shapes it; a return that crosses as spoken
-            // needs no word.
-            let root = match open_or_reopen_with_presentation(runtime, &root, presentation_options.clone()) {
-                Ok(session) => session,
-                Err(error) => return refuse(error.to_string()),
-            };
-            match root.start_child(child, spawn) {
-                Ok((_, Some(text))) => HookDecision::Context { text },
-                Ok((_, None)) => HookDecision::Ack,
-                Err(error) => refuse(error.to_string()),
-            }
-        }
-        HookEvent::ChildEnd { root, child, value } => {
-            // The subagent's return is checked here and blocked when it
-            // may not cross; a block keeps the subagent running until it
-            // returns what may. A child the family never saw start is
-            // blocked too: its return has no fork to cross on.
-            let said = value.clone();
-            match on_child(
-                runtime,
-                &root,
-                &child,
-                MissingStart::Refuse,
-                presentation_options,
-                |session| {
-                    let value = value.clone();
-                    async move { session.on_child_end(value).await }
-                },
-            )
-            .await
-            {
-                Ok(decision) => {
-                    // The child is finished unless it is being asked to return something
-                    // else, so what it still stands behind ends here: its vouches must not
-                    // outlive its return, and its parent's turn end is not its own.
-                    if !matches!(decision, ChildReturnDecision::Blocked { .. }) {
-                        let actor = Actor {
-                            root: root.clone(),
-                            child: Some(child.clone()),
-                        };
-                        if let Err(error) = runtime.record_turn_end(&actor) {
-                            tracing::warn!(root = %root.0, child = %child.0, %error, "the child's end was not recorded");
-                        }
-                    }
-                    return_decision(said, decision)
-                }
-                Err(error) => fold(error, block),
-            }
+            Err(error) => fold(error, Refusal::Block),
         }
     }
 }
@@ -742,11 +798,20 @@ where
     }
 }
 
-fn fold(error: EventError, family: fn(String) -> HookDecision) -> HookDecision {
-    if error.is_operational() {
-        refuse(error.to_string())
-    } else {
-        family(error.to_string())
+/// Which refusal a policy error becomes at the hook that met it. An operational error is
+/// neither: nothing was decided there, so it refuses whatever the hook was.
+enum Refusal {
+    /// The call has not run: it is denied, and the feedback reaches the model.
+    Deny,
+    /// The result or the return is already in hand: it is blocked out of the model's way.
+    Block,
+}
+
+fn fold(error: EventError, refusal: Refusal) -> HookDecision {
+    match (error.is_operational(), refusal) {
+        (true, _) => refuse(error.to_string()),
+        (false, Refusal::Deny) => deny(error.to_string()),
+        (false, Refusal::Block) => block(error.to_string()),
     }
 }
 
