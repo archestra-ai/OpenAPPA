@@ -9,8 +9,8 @@ use crate::consult::{
     AnnotationAnswer, AnnotationArtifact, Consult, ConsultBody, LookupAnswer, MembersAnswer, SanitizerAnswer,
 };
 use crate::engine::{
-    AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback, ForkStatus,
-    Liveness, Next, OfferNonce, OpenDispatch, PendingReview, Presentation, RemedyArguments, engine_id,
+    Abstention, AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback,
+    ForkStatus, Liveness, Next, OfferNonce, OpenDispatch, PendingReview, Presentation, RemedyArguments, engine_id,
 };
 use crate::external::ConsultOutcome;
 use appa_engine::label::ReaderId;
@@ -1522,7 +1522,13 @@ impl Session {
                 };
                 let verdict = match self.timed_consult(&consult, elicitation, ruling).await {
                     ConsultOutcome::Answer(answer) => AuthorityVerdict::from_wire(&answer),
-                    ConsultOutcome::NoAnswer(_) => AuthorityVerdict::Abstain,
+                    ConsultOutcome::NoAnswer(crate::external::NoAnswerReason::Unreachable) => {
+                        AuthorityVerdict::Abstain(Abstention::Unreachable)
+                    }
+                    ConsultOutcome::NoAnswer(crate::external::NoAnswerReason::Unregistered) => {
+                        AuthorityVerdict::Abstain(Abstention::Unregistered)
+                    }
+                    ConsultOutcome::NoAnswer(_) => AuthorityVerdict::Abstain(Abstention::Unanswered),
                 };
                 ExternalEvidence::Authority {
                     authority: authority.clone(),
@@ -1754,7 +1760,7 @@ fn join_review(feedback: &[Feedback], externals: &crate::external::ExternalServi
     )
 }
 
-fn reviews(
+pub(super) fn reviews(
     pending_reviews: &[PendingReview],
     externals: &crate::external::ExternalServices,
 ) -> Vec<appa_runtime_api::Review> {

@@ -354,6 +354,17 @@ pub enum OfferKind {
     Sanitizer { name: String },
 }
 
+/// One offer that still stands, with what reading it needs: the engine and view of the
+/// policy its log resolves to, its canonical identity, and the trajectory that may execute it.
+struct StandingOffer<'a> {
+    engine: &'a crate::engine::RuntimeEngine,
+    view: &'a crate::engine::EngineView,
+    #[cfg(feature = "daemon")]
+    externals: &'a crate::external::ExternalServices,
+    offer: OfferId,
+    pursuer: TrajectoryId,
+}
+
 /// What happens to the child's final message: delivered to the parent,
 /// nothing returned, or delivery stopped. The child
 /// is finished, so `feedback` goes to the parent as the spawn call's
@@ -2245,25 +2256,64 @@ impl Runtime {
     /// What taking a quoted offer in this root's family would consult, or `None` for an
     /// offer that no longer stands.
     pub(crate) fn offer_kind(&self, root: &TrajectoryId, quoted: &OfferId) -> Option<OfferKind> {
+        self.read_offer(root, quoted, |standing| {
+            standing
+                .engine
+                .offer_kind(standing.view, &standing.pursuer, &standing.offer)
+        })
+    }
+
+    /// Read a quoted offer in this root's family under the policy the log resolves to, or
+    /// `None` for an offer that no longer stands. The policy borrows the deployment, so the
+    /// read happens inside.
+    fn read_offer<T>(
+        &self,
+        root: &TrajectoryId,
+        quoted: &OfferId,
+        read: impl FnOnce(StandingOffer<'_>) -> Option<T>,
+    ) -> Option<T> {
         let log = self.inner.log(root).ok()?;
         let offer = crate::engine::resolve_rendered(&log, quoted)?;
         let deployment = self.inner.deployment();
         let policy = self.inner.resolve_policy(&deployment, &log).ok()?;
         let view = policy.engine().rebuild_view(&log).ok()?;
         let pursuer = policy.engine().offer_pursuer(&view, &offer)?;
-        policy.engine().offer_kind(&view, &pursuer, &offer)
+        read(StandingOffer {
+            engine: policy.engine(),
+            view: &view,
+            #[cfg(feature = "daemon")]
+            externals: &deployment.externals,
+            offer,
+            pursuer,
+        })
+    }
+
+    /// The review a person must rule on before this vouched offer executes, read without
+    /// spending the vouch. `None` when no person is asked: nothing stands behind the offer,
+    /// the harness already attached a ruling, the offer no longer stands, or it consults no
+    /// `hitl` authority.
+    #[cfg(feature = "daemon")]
+    pub(crate) fn pending_hitl_review(&self, offer_id: &str) -> Option<String> {
+        let quoted = OfferId::parse(offer_id).ok()?;
+        let (acting, ruling) = self.peek_vouched(&PermitKey::offer(&quoted)).ok()?;
+        if ruling.is_some() {
+            return None;
+        }
+        self.read_offer(&acting.root, &quoted, |standing| {
+            let pending = standing
+                .engine
+                .offer_reviews(standing.view, &standing.pursuer, &standing.offer);
+            session::reviews(&pending, standing.externals)
+                .into_iter()
+                .next()
+                .map(|review| review.text)
+        })
     }
 
     /// The canonical identity a quoted id names in this family, and the
     /// trajectory that may execute it.
     pub(crate) fn resolve_in(&self, root: &TrajectoryId, quoted: &OfferId) -> Option<(OfferId, TrajectoryId)> {
-        let log = self.inner.log(root).ok()?;
-        let offer = crate::engine::resolve_rendered(&log, quoted)?;
-        let deployment = self.inner.deployment();
-        let policy = self.inner.resolve_policy(&deployment, &log).ok()?;
-        let view = policy.engine().rebuild_view(&log).ok()?;
-        let pursuer = policy.engine().offer_pursuer(&view, &offer)?;
-        Some((offer, pursuer))
+        self.read_offer(root, quoted, |standing| Some((standing.offer, standing.pursuer)))
     }
 
     /// Record that this trajectory stands behind this key, for the request

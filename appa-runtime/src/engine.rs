@@ -79,7 +79,7 @@ use crate::api::{EmbeddedPresentationOptions, OutcomeBody, RemedyDisplay, Remedy
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
 use crate::consult::{
     AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, HistoryEntry,
-    Requirement, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
+    Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
 };
 use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn};
 
@@ -215,7 +215,21 @@ pub enum ExternalEvidence {
 pub enum AuthorityVerdict {
     Approve,
     Deny,
-    Abstain,
+    Abstain(Abstention),
+}
+
+/// Why an authority gave no ruling, as far as the model's next step depends on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Abstention {
+    /// No channel reaches this authority from here, so executing the offer again obtains
+    /// nothing.
+    Unreachable,
+    /// The deployment binds no implementation to this authority, so nothing can be asked
+    /// until its configuration does.
+    Unregistered,
+    /// The authority was asked and did not rule: a timeout, a dismissal, a failed or
+    /// unreadable answer.
+    Unanswered,
 }
 
 impl AuthorityVerdict {
@@ -232,7 +246,7 @@ impl AuthorityVerdict {
                     Ruling::Deny => AuthorityVerdict::Deny,
                 }
             }
-            None => AuthorityVerdict::Abstain,
+            None => AuthorityVerdict::Abstain(Abstention::Unanswered),
         }
     }
 }
@@ -1434,8 +1448,6 @@ impl RuntimeEngine {
     /// authority, the consult artifact rendered as the person reads it. Built here, at the
     /// block, so a harness with its own review channel can show it before the execution.
     fn pending_reviews(&self, block: &CoreBlocked, offers: &[(OfferId, PlanId)]) -> Vec<PendingReview> {
-        let registry = self.engine.registry();
-        let chain = registry.trust_chain();
         let mut reviews = Vec::new();
         for plan in &block.block.plans {
             let RemedyPlan::Executable(plan) = plan else {
@@ -1444,28 +1456,44 @@ impl RuntimeEngine {
             let Some((offer, _)) = offers.iter().find(|(_, planned)| *planned == plan.id) else {
                 continue;
             };
-            for requirement in &plan.required {
-                let Some(registered) = registry.authority(&requirement.authority) else {
-                    continue;
-                };
-                let declaration = AuthorityDeclaration::of(registered, chain);
-                let artifact = AuthorityArtifact {
-                    tool: block.call.tool().as_str().to_string(),
-                    arguments: block.call.arguments().clone(),
-                    requirements: requirement
-                        .covers
-                        .iter()
-                        .map(|gap| Requirement::of(gap, chain))
-                        .collect(),
-                };
-                reviews.push(PendingReview {
+            reviews.extend(self.reviews_of(offer, &block.call, &plan.required));
+        }
+        reviews
+    }
+
+    /// The reviews executing this standing offer would raise, read without executing it.
+    /// Empty for an offer that no longer stands or consults no authority.
+    #[cfg(feature = "daemon")]
+    pub(crate) fn offer_reviews(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        offer: &OfferId,
+    ) -> Vec<PendingReview> {
+        let Some(engine_offer) = parse_offer(offer) else {
+            return Vec::new();
+        };
+        match self.engine.offer_consults(view, &engine_id(trajectory), &engine_offer) {
+            Ok(OfferConsult::Authorities { call, required }) => self.reviews_of(offer, &call, &required),
+            _ => Vec::new(),
+        }
+    }
+
+    fn reviews_of(&self, offer: &OfferId, call: &ResolvedCall, required: &[RequiredRuling]) -> Vec<PendingReview> {
+        let registry = self.engine.registry();
+        let chain = registry.trust_chain();
+        required
+            .iter()
+            .filter_map(|requirement| {
+                let declaration = AuthorityDeclaration::of(registry.authority(&requirement.authority)?, chain);
+                let artifact = AuthorityArtifact::of(call, requirement, chain);
+                Some(PendingReview {
                     offer: offer.clone(),
                     authority: requirement.authority.as_str().to_string(),
                     text: crate::elicit::review_text(requirement.authority.as_str(), &declaration, &artifact),
-                });
-            }
-        }
-        reviews
+                })
+            })
+            .collect()
     }
 
     fn tool_outcome(
@@ -1735,15 +1763,7 @@ impl RuntimeEngine {
                     requests.push(ExternalRequest::Authority {
                         authority: name,
                         declaration: AuthorityDeclaration::of(registered, chain),
-                        artifact: AuthorityArtifact {
-                            tool: call.tool().as_str().to_string(),
-                            arguments: call.arguments().clone(),
-                            requirements: requirement
-                                .covers
-                                .iter()
-                                .map(|gap| Requirement::of(gap, chain))
-                                .collect(),
-                        },
+                        artifact: AuthorityArtifact::of(call, requirement, chain),
                         review,
                     });
                 }
@@ -1758,9 +1778,22 @@ impl RuntimeEngine {
                         authority: requirement.authority.clone(),
                     });
                 }
-                Some((AuthorityVerdict::Abstain, _)) => {
+                Some((AuthorityVerdict::Abstain(Abstention::Unanswered), _)) => {
                     return AuthorityOutcome::NoAnswer(format!(
                         "[appa] authority {name} gave no answer; the offer stands and may be executed again"
+                    ));
+                }
+                Some((AuthorityVerdict::Abstain(Abstention::Unreachable), _)) => {
+                    return AuthorityOutcome::NoAnswer(format!(
+                        "[appa] authority {name} cannot be reached from this session, so executing the offer \
+                         again obtains no ruling. Tell the user that the call waits on {name}."
+                    ));
+                }
+                Some((AuthorityVerdict::Abstain(Abstention::Unregistered), _)) => {
+                    return AuthorityOutcome::NoAnswer(format!(
+                        "[appa] this deployment binds no implementation to authority {name}, so executing the \
+                         offer again obtains no ruling. Tell the user that the deployment's configuration must \
+                         bind {name} under [externals.authorities]."
                     ));
                 }
             }

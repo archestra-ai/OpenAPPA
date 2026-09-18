@@ -2,13 +2,27 @@
 //!
 //! An authority consult happens only while an offer executes, and an
 //! offer executes only inside the `execute_remedy_plan` MCP call
-//! ([`crate::mcp`]). That call is still open when the engine asks for
-//! the ruling, so the runtime can ask the harness's own user through
-//! the client request already in flight. This is the one window MCP
-//! allows: from protocol version 2026-07-28 a server-to-client request
-//! MUST be issued while handling a client request, and the association
-//! is task-local — it does not survive a `tokio::spawn`. That rule is
-//! MCP's own SEP-2260, not an APPA rule id.
+//! ([`crate::mcp`]). How the review reaches the person depends on the
+//! protocol version the request speaks.
+//!
+//! Before 2026-07-28 that call is still open when the engine asks for
+//! the ruling, so the runtime asks the harness's own user through the
+//! client request already in flight. The association is task-local —
+//! it does not survive a `tokio::spawn`.
+//!
+//! From 2026-07-28 there is no session, so an answer to a request sent
+//! inside the open call has nowhere to return. The call instead ends
+//! with the review as an input request, before anything executes and
+//! without spending the vouch; the client shows it and repeats the call
+//! carrying the answer, which that execution spends. A client declares
+//! its capabilities on each such request, never once at `initialize`.
+//! The returned answer is bound to the review by the retried call's own
+//! `offer_id`: an offer names one exact call and the requirements its
+//! rulings cover, and an offer that no longer stands is refused. The
+//! answer carries no further proof that the person saw the review, as
+//! an in-call answer carries none: either way the harness is trusted
+//! to have asked.
+//! Both rules are MCP's own (SEP-2322, SEP-2567), not APPA rule ids.
 //!
 //! What crosses is the same consult every other authority receives:
 //! the authority's declaration and the artifact — the exact tool, the
@@ -50,10 +64,11 @@ const WITHDRAW_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(feature = "daemon")]
 use rmcp::model::{
-    ClientResult, ElicitRequest, ElicitRequestParams, ElicitationAction, ElicitationSchema, ServerRequest,
+    ClientResult, ElicitRequest, ElicitRequestParams, ElicitResult, ElicitationAction, ElicitationSchema, InputRequest,
+    InputRequiredResult, InputResponses, ProtocolVersion, ServerRequest,
 };
 #[cfg(feature = "daemon")]
-use rmcp::service::{ElicitationMode, PeerRequestOptions, RequestContext, RoleServer, ServiceError};
+use rmcp::service::{PeerRequestOptions, RequestContext, RoleServer, ServiceError};
 
 use crate::consult::{AudienceRequirement, AuthorityArtifact, AuthorityDeclaration, Requirement};
 use crate::external::ConsultOutcome;
@@ -74,6 +89,23 @@ pub enum Elicitation {
         request: RequestContext<RoleServer>,
         timeout: Duration,
     },
+    /// The person's answer, returned with the retried call. From MCP 2026-07-28 a server
+    /// asks by ending the call with the review as an input request ([`Elicitation::open`]);
+    /// the client shows it and repeats the call carrying this action.
+    #[cfg(feature = "daemon")]
+    Returned(ElicitationAction),
+    /// The retried call carried an answer this runtime cannot read, which is no answer.
+    #[cfg(feature = "daemon")]
+    Unreadable,
+}
+
+/// What one `execute_remedy_plan` request does about its review.
+#[cfg(feature = "daemon")]
+pub enum Review {
+    /// End the call with the review; nothing executes until the answer returns.
+    Ask(InputRequiredResult),
+    /// Execute, with the channel this request has.
+    Proceed(Option<Elicitation>),
 }
 
 #[cfg(feature = "daemon")]
@@ -84,9 +116,37 @@ enum Ending {
 }
 
 impl Elicitation {
+    /// How this `execute_remedy_plan` request reaches the person. Before MCP 2026-07-28 the
+    /// open request is the channel. From that version there is no session to return an
+    /// answer to a request still open, so the call first ends with the review as an input
+    /// request, and the retried call carries the answer. `pending` is the review this
+    /// offer would raise, read only when it may be asked.
     #[cfg(feature = "daemon")]
-    pub fn new(request: RequestContext<RoleServer>, timeout: Duration) -> Elicitation {
-        Elicitation::Mcp { request, timeout }
+    pub fn open(
+        request: RequestContext<RoleServer>,
+        responses: Option<InputResponses>,
+        timeout: Duration,
+        pending: impl FnOnce() -> Option<String>,
+    ) -> Review {
+        if !asks_by_round_trip(&request) {
+            return Review::Proceed(Some(Elicitation::Mcp { request, timeout }));
+        }
+        if let Some(answer) = responses.and_then(|mut responses| responses.remove(REVIEW_KEY)) {
+            return Review::Proceed(Some(match serde_json::from_value::<ElicitResult>(answer) {
+                Ok(result) => Elicitation::Returned(result.action),
+                Err(error) => {
+                    tracing::warn!(%error, "the returned review is unreadable");
+                    Elicitation::Unreadable
+                }
+            }));
+        }
+        let review = if asks_by_form(&request) { pending() } else { None };
+        match review {
+            Some(review) => Review::Ask(InputRequiredResult::from_input_requests(
+                [(REVIEW_KEY.to_string(), InputRequest::Elicitation(review_form(review)))].into(),
+            )),
+            None => Review::Proceed(None),
+        }
     }
 
     /// No channel is compiled in, so no caller can hold one of these.
@@ -110,26 +170,22 @@ impl Elicitation {
         declaration: &AuthorityDeclaration,
         artifact: &AuthorityArtifact,
     ) -> ConsultOutcome {
-        let Elicitation::Mcp { request, timeout } = self;
+        let (request, timeout) = match self {
+            Elicitation::Mcp { request, timeout } => (request, timeout),
+            Elicitation::Returned(action) => return ruled(action.clone()),
+            Elicitation::Unreadable => return ConsultOutcome::NoAnswer(NoAnswerReason::Malformed),
+        };
         let peer = &request.peer;
-        if !peer.supported_elicitation_modes().contains(&ElicitationMode::Form) {
+        if !asks_by_form(request) {
             tracing::warn!(
-                client = ?peer.peer_info().map(|info| info.client_info.clone()),
+                client = ?request.client_info(),
                 "this client declares no elicitation capability: no human ruling is available here",
             );
             return ConsultOutcome::NoAnswer(NoAnswerReason::Unreachable);
         }
-        let params = ElicitRequestParams::FormElicitationParams {
-            meta: None,
-            message: review_text(authority, declaration, artifact),
-            // No fields: the action is the answer.
-            requested_schema: ElicitationSchema::builder()
-                .build()
-                .expect("an empty schema declares no required property"),
-        };
         let mut handle = match peer
             .send_cancellable_request(
-                ServerRequest::ElicitRequest(ElicitRequest::new(params)),
+                ServerRequest::ElicitRequest(review_form(review_text(authority, declaration, artifact))),
                 PeerRequestOptions::no_options(),
             )
             .await
@@ -156,7 +212,9 @@ impl Elicitation {
             Ending::Answered(answered) => answered,
             ended => {
                 let (reason, outcome) = match ended {
-                    Ending::Cancelled => ("the call that asked for this ruling ended", NoAnswerReason::Unreachable),
+                    // Not `Unreachable`: that reason tells the model no retry reaches the
+                    // person, and a fresh call opens a fresh request.
+                    Ending::Cancelled => ("the call that asked for this ruling ended", NoAnswerReason::Transport),
                     _ => ("the review window closed", NoAnswerReason::Timeout),
                 };
                 tracing::debug!(reason, "withdrawing the review");
@@ -174,30 +232,71 @@ impl Elicitation {
             _ => Err(ServiceError::UnexpectedResponse),
         });
         match answered {
-            Ok(result) => match result.action {
-                ElicitationAction::Accept => {
-                    tracing::debug!("the reviewer approved");
-                    ConsultOutcome::Answer(serde_json::json!({ "ruling": "approve" }))
-                }
-                ElicitationAction::Decline => {
-                    tracing::debug!("the reviewer refused");
-                    ConsultOutcome::Answer(serde_json::json!({ "ruling": "deny" }))
-                }
-                ElicitationAction::Cancel => {
-                    tracing::debug!("the reviewer dismissed the review");
-                    ConsultOutcome::NoAnswer(NoAnswerReason::Dismissed)
-                }
-                action => {
-                    tracing::warn!(?action, "an unreadable elicitation action is no answer");
-                    ConsultOutcome::NoAnswer(NoAnswerReason::Malformed)
-                }
-            },
+            Ok(result) => ruled(result.action),
             Err(error) => {
                 tracing::warn!(%error, "the elicitation produced no answer: no human ruling in this session");
                 ConsultOutcome::NoAnswer(NoAnswerReason::Transport)
             }
         }
     }
+}
+
+/// The name of the one input request a review round trip carries.
+#[cfg(feature = "daemon")]
+const REVIEW_KEY: &str = "appa-review";
+
+/// The person's action as the authority wire's answer.
+#[cfg(feature = "daemon")]
+fn ruled(action: ElicitationAction) -> ConsultOutcome {
+    match action {
+        ElicitationAction::Accept => {
+            tracing::debug!("the reviewer approved");
+            ConsultOutcome::Answer(serde_json::json!({ "ruling": "approve" }))
+        }
+        ElicitationAction::Decline => {
+            tracing::debug!("the reviewer refused");
+            ConsultOutcome::Answer(serde_json::json!({ "ruling": "deny" }))
+        }
+        ElicitationAction::Cancel => {
+            tracing::debug!("the reviewer dismissed the review");
+            ConsultOutcome::NoAnswer(NoAnswerReason::Dismissed)
+        }
+        action => {
+            tracing::warn!(?action, "an unreadable elicitation action is no answer");
+            ConsultOutcome::NoAnswer(NoAnswerReason::Malformed)
+        }
+    }
+}
+
+#[cfg(feature = "daemon")]
+fn review_form(message: String) -> ElicitRequest {
+    ElicitRequest::new(ElicitRequestParams::FormElicitationParams {
+        meta: None,
+        message,
+        // No fields: the action is the answer.
+        requested_schema: ElicitationSchema::builder()
+            .build()
+            .expect("an empty schema declares no required property"),
+    })
+}
+
+#[cfg(feature = "daemon")]
+fn asks_by_round_trip(request: &RequestContext<RoleServer>) -> bool {
+    request
+        .protocol_version()
+        .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28)
+}
+
+/// Whether the client behind this request shows a form elicitation. The capabilities are
+/// the request's own: from MCP 2026-07-28 a client declares them on each request and
+/// there is no `initialize` to read them from, so the peer's session info says nothing.
+#[cfg(feature = "daemon")]
+fn asks_by_form(request: &RequestContext<RoleServer>) -> bool {
+    request
+        .client_capabilities()
+        .and_then(|capabilities| capabilities.elicitation)
+        // A capability naming neither mode predates the split and means form.
+        .is_some_and(|elicitation| elicitation.form.is_some() || elicitation.url.is_none())
 }
 
 /// The review as the person reads it: a pure rendering of the consult, nothing from the
