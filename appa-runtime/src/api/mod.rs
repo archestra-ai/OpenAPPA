@@ -882,34 +882,26 @@ impl Prepared {
     fn with_store(self, store: Arc<LogStore>, state_path: Option<PathBuf>) -> Runtime {
         Runtime {
             inner: Arc::new(Inner {
-                shared: Arc::new(Shared {
-                    deployment: std::sync::RwLock::new(Arc::new(self.deployment)),
-                    retired: std::sync::Mutex::new(std::collections::BTreeMap::new()),
-                    modules: self.modules,
-                    events: std::sync::Mutex::new(crate::events::EventLog::default()),
-                    gates: self.gates,
-                    naming: self.naming,
-                    files: None,
-                    state_path,
-                }),
+                deployment: std::sync::RwLock::new(Arc::new(self.deployment)),
+                retired: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 store,
+                modules: self.modules,
+                events: std::sync::Mutex::new(crate::events::EventLog::default()),
+                gates: self.gates,
+                naming: self.naming,
+                files: None,
+                state_path,
             }),
         }
     }
 }
 
 struct Inner {
-    shared: Arc<Shared>,
-    store: Arc<LogStore>,
-}
-
-/// Everything of a runtime but its store: one object, held by the runtime and by every
-/// view [`Runtime::on`] makes of it, so a reload through any of them serves them all.
-struct Shared {
     files: Option<files::FileTracking>,
     state_path: Option<PathBuf>,
     deployment: std::sync::RwLock<Arc<Deployment>>,
     retired: std::sync::Mutex<std::collections::BTreeMap<String, Arc<RuntimeEngine>>>,
+    store: Arc<LogStore>,
     modules: crate::builtins::ModuleRegistry,
     /// What this runtime did, as opposed to what the engine decided: bounded, in this
     /// process, and gone on restart. A diagnostic only — see [`crate::events`].
@@ -943,19 +935,6 @@ impl Runtime {
         modules: Option<PathBuf>,
     ) -> Result<Runtime, OpenError> {
         Ok(Prepared::new(config, modules, ToolNaming::AsAuthored)?.with_store(store, None))
-    }
-
-    /// This runtime over another store: the same deployment, consult gates and diagnostics,
-    /// with every log read and write going to `store`. A host that leases a connection for
-    /// one dispatch ([`LogStore::lease`]) handles that dispatch through such a view, so the
-    /// engine's records land in the transaction the lease holds.
-    pub fn on(&self, store: Arc<LogStore>) -> Runtime {
-        Runtime {
-            inner: Arc::new(Inner {
-                shared: Arc::clone(&self.inner.shared),
-                store,
-            }),
-        }
     }
 
     /// Run the serving load checks without opening a store, making network requests,
@@ -1014,8 +993,7 @@ impl Inner {
     /// See [`Runtime::record`]. Lives here because a `Session` holds the `Inner`, not the
     /// `Runtime`, and the consults worth timing happen inside a session.
     pub(crate) fn record(&self, root: Option<&TrajectoryId>, event: crate::events::RuntimeEvent) {
-        self.shared
-            .events
+        self.events
             .lock()
             .expect("the event mutex is never poisoned: no panic runs while it is held")
             .record(root, event);
@@ -1024,8 +1002,7 @@ impl Inner {
     /// See [`crate::events::EventLog::events`].
     #[cfg(feature = "daemon")]
     pub(crate) fn events(&self, root: &TrajectoryId) -> crate::events::Events {
-        self.shared
-            .events
+        self.events
             .lock()
             .expect("the event mutex is never poisoned: no panic runs while it is held")
             .events(root)
@@ -1034,8 +1011,7 @@ impl Inner {
     /// See [`crate::events::EventLog::recent_root`].
     #[cfg(feature = "daemon")]
     pub(crate) fn recent_root(&self, window: std::time::Duration) -> crate::events::Recent {
-        self.shared
-            .events
+        self.events
             .lock()
             .expect("the event mutex is never poisoned: no panic runs while it is held")
             .recent_root(window)
@@ -1044,7 +1020,6 @@ impl Inner {
     fn deployment(&self) -> Arc<Deployment> {
         Arc::clone(
             &self
-                .shared
                 .deployment
                 .read()
                 .expect("the deployment lock is never poisoned: no panic runs while it is held"),
@@ -1094,7 +1069,6 @@ impl Inner {
     /// excepts nothing, while a wildcard contract still permits the call.
     fn retired_engine(&self, key: &str, bytes: &[u8]) -> Result<Arc<RuntimeEngine>, EventError> {
         if let Some(engine) = self
-            .shared
             .retired
             .lock()
             .expect("the retired-engine mutex is never poisoned: no panic runs while it is held")
@@ -1102,12 +1076,10 @@ impl Inner {
         {
             return Ok(Arc::clone(engine));
         }
-        let naming = self.shared.naming;
-        let compiled = compile_stored_for_host(bytes, naming).map_err(EventError::PolicyUnavailable)?;
-        let engine = Arc::new(RuntimeEngine::from_policy(&compiled, naming));
+        let compiled = compile_stored_for_host(bytes, self.naming).map_err(EventError::PolicyUnavailable)?;
+        let engine = Arc::new(RuntimeEngine::from_policy(&compiled, self.naming));
         Ok(Arc::clone(
-            self.shared
-                .retired
+            self.retired
                 .lock()
                 .expect("the retired-engine mutex is never poisoned: no panic runs while it is held")
                 .entry(key.to_string())
@@ -1228,7 +1200,6 @@ impl Runtime {
         initial: Option<appa_engine::label::Label>,
     ) -> Result<Self, OpenError> {
         let inner = Arc::get_mut(&mut self.inner)
-            .and_then(|inner| Arc::get_mut(&mut inner.shared))
             .ok_or_else(|| OpenError::Storage("enable file tracking before sharing the runtime".into()))?;
         if !matches!(inner.naming, ToolNaming::Canonical { adapter } if adapter.name == AdapterName::ClaudeCode) {
             return Err(OpenError::Storage(
@@ -1245,12 +1216,7 @@ impl Runtime {
                 "the runtime database must be outside the tracked workspace".into(),
             ));
         }
-        let deployment = Arc::clone(
-            inner
-                .deployment
-                .get_mut()
-                .expect("the deployment lock is never poisoned: no panic runs while it is held"),
-        );
+        let deployment = inner.deployment();
         if deployment.resident.registry().sanitizers().next().is_some() {
             return Err(OpenError::Storage(
                 "file tracking does not support sanitizer or rewrite routes".into(),
@@ -1297,7 +1263,6 @@ impl Runtime {
     /// The backend and system toolchain are trusted host code, outside the managed workspace.
     pub fn with_file_process_backend(mut self, backend: PathBuf) -> Result<Self, OpenError> {
         let inner = Arc::get_mut(&mut self.inner)
-            .and_then(|inner| Arc::get_mut(&mut inner.shared))
             .ok_or_else(|| OpenError::Storage("enable processing before sharing the runtime".into()))?;
         let files = inner
             .files
@@ -1349,7 +1314,7 @@ impl Runtime {
     /// the recorded name itself. Every text the runtime addresses to the model names a
     /// tool this way.
     pub(crate) fn model_spelling(&self, recorded: &str) -> String {
-        self.inner.shared.naming.model_spelling(recorded)
+        self.inner.naming.model_spelling(recorded)
     }
 
     /// The deployment `appa replay` runs: the same session and engine over a log that lives
@@ -1370,7 +1335,6 @@ impl Runtime {
     pub(crate) fn serving_policy_key(&self) -> String {
         let serving = self
             .inner
-            .shared
             .deployment
             .read()
             .expect("the deployment lock is never poisoned: no panic runs while it is held");
@@ -1402,12 +1366,7 @@ impl Runtime {
     /// Load the deployment a configuration declares without installing it: every open-time
     /// gate runs, and the result is held for a probe before [`Runtime::install`] swaps it in.
     pub fn prepare_reload(&self, config: Config) -> Result<PreparedReload, OpenError> {
-        let deployment = Deployment::load(
-            config,
-            &self.inner.shared.modules,
-            self.inner.shared.gates.clone(),
-            self.inner.shared.naming,
-        )?;
+        let deployment = Deployment::load(config, &self.inner.modules, self.inner.gates.clone(), self.inner.naming)?;
         Ok(PreparedReload {
             deployment: Arc::new(deployment),
         })
@@ -1423,21 +1382,16 @@ impl Runtime {
         let previous = {
             let mut serving = self
                 .inner
-                .shared
                 .deployment
                 .write()
                 .expect("the deployment lock is never poisoned: no panic runs while it is held");
-            self.inner
-                .shared
-                .gates
-                .serve_llm(deployment.config.externals.llm_bound());
+            self.inner.gates.serve_llm(deployment.config.externals.llm_bound());
             std::mem::replace(&mut *serving, Arc::clone(&deployment))
         };
         // Every reload retires at most one more policy, so clearing here bounds the
         // cache by the reloads since the last one instead of by the life of the
         // process. A trajectory still replaying under a dropped entry recompiles it.
         self.inner
-            .shared
             .retired
             .lock()
             .expect("the retired-engine mutex is never poisoned: no panic runs while it is held")
@@ -1488,13 +1442,8 @@ impl Runtime {
             .config
             .with_inventory(inventory)
             .map_err(EventError::PolicyUnavailable)?;
-        let deployment = Deployment::load(
-            config,
-            &self.inner.shared.modules,
-            self.inner.shared.gates.clone(),
-            self.inner.shared.naming,
-        )
-        .map_err(|error| EventError::PolicyUnavailable(error.to_string()))?;
+        let deployment = Deployment::load(config, &self.inner.modules, self.inner.gates.clone(), self.inner.naming)
+            .map_err(|error| EventError::PolicyUnavailable(error.to_string()))?;
         self.create_session_under(id, Arc::new(deployment))
     }
 
@@ -3279,7 +3228,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         };
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(with_pool(2), dir.path().join("appa.db"), None).expect("the deployment opens");
-        assert_eq!(runtime.inner.shared.gates.llm_permits(), 2);
+        assert_eq!(runtime.inner.gates.llm_permits(), 2);
 
         // A candidate that validates but cannot build its externals declares a wider pool
         // and never serves: the gate stays as the serving deployment declared it.
@@ -3289,15 +3238,15 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             crate::config::Implementation::Builtin("no-such".to_string()),
         );
         assert!(matches!(runtime.reload(refused), Err(OpenError::Modules(_))));
-        assert_eq!(runtime.inner.shared.gates.llm_permits(), 2);
+        assert_eq!(runtime.inner.gates.llm_permits(), 2);
 
         assert!(runtime.reload(with_pool(3)).is_ok());
-        assert_eq!(runtime.inner.shared.gates.llm_permits(), 3);
+        assert_eq!(runtime.inner.gates.llm_permits(), 3);
         assert!(
             runtime.reload(claude_config(policy)).is_err(),
             "no profile, no declared llm"
         );
-        assert_eq!(runtime.inner.shared.gates.llm_permits(), 3);
+        assert_eq!(runtime.inner.gates.llm_permits(), 3);
 
         // Reloads racing from several threads: whichever deployment ends up serving, the
         // gate is bound as that deployment declares.
@@ -3314,14 +3263,13 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         });
         let serving = runtime
             .inner
-            .shared
             .deployment
             .read()
             .expect("the deployment lock is never poisoned")
             .config
             .externals
             .llm_bound();
-        assert_eq!(runtime.inner.shared.gates.llm_permits(), serving);
+        assert_eq!(runtime.inner.gates.llm_permits(), serving);
     }
 
     /// Two policies that differ only in a tool's description, so a root opened
@@ -3336,83 +3284,6 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             description = "{description}"
             "#
         ))
-    }
-
-    #[tokio::test]
-    async fn a_view_records_in_its_own_store_under_the_deployment_it_shares() {
-        let runtime = Runtime::open_in_memory(versioned_policy("first"), None).expect("the deployment opens");
-        let other = Arc::new(LogStore::open(appa_eventlog::Backend::Memory).expect("a second store opens"));
-        let view = runtime.on(Arc::clone(&other));
-        let root = TrajectoryId("viewed".to_string());
-        assert_eq!(
-            crate::hooks::handle(&view, appa_runtime_api::HookEvent::SessionStart { root: root.clone() }).await,
-            appa_runtime_api::HookDecision::Ack
-        );
-        let id = crate::engine::engine_id(&root);
-        assert!(other.has_root(&id).expect("the view's store reads"));
-        assert!(
-            !runtime.store().has_root(&id).expect("the runtime's store reads"),
-            "a view writes nothing to the store of the runtime it was made from"
-        );
-
-        let reloaded = runtime
-            .reload(versioned_policy("second"))
-            .expect("the second deployment loads");
-        let later = TrajectoryId("viewed-after-reload".to_string());
-        crate::hooks::handle(&view, appa_runtime_api::HookEvent::SessionStart { root: later.clone() }).await;
-        let opened_under = other
-            .log(&crate::engine::engine_id(&later))
-            .expect("the later root reads");
-        assert_eq!(
-            crate::engine::policy_file_key(opened_under.policy_file()),
-            reloaded.policy_key,
-            "a reload through the runtime serves the views made before it"
-        );
-    }
-
-    /// OPENAPPA_TEST_DATABASE_URL=... cargo test -p appa --features postgres -- --ignored
-    #[cfg(feature = "postgres")]
-    #[tokio::test]
-    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
-    async fn a_view_on_a_lease_records_inside_the_transaction_the_lease_holds() {
-        let url = std::env::var("OPENAPPA_TEST_DATABASE_URL").expect("test database URL");
-        let store = Arc::new(
-            LogStore::open(appa_eventlog::Backend::Postgres {
-                url,
-                max_connections: std::num::NonZeroUsize::new(2).expect("a pool holds a connection"),
-            })
-            .expect("the PostgreSQL store opens"),
-        );
-        let runtime =
-            Runtime::open_with_store(versioned_policy("leased"), Arc::clone(&store), None).expect("the runtime opens");
-        let unique = tempfile::tempdir().expect("a unique root name exists");
-        let root = TrajectoryId(format!("leased:{}", unique.path().display()));
-        let id = crate::engine::engine_id(&root);
-
-        let lease = Arc::new(store.lease().expect("a connection leases"));
-        let transaction = lease
-            .postgres()
-            .expect("the PostgreSQL API is present")
-            .begin()
-            .expect("the outer transaction starts");
-        assert_eq!(
-            crate::hooks::handle(
-                &runtime.on(Arc::clone(&lease)),
-                appa_runtime_api::HookEvent::SessionStart { root: root.clone() }
-            )
-            .await,
-            appa_runtime_api::HookDecision::Ack
-        );
-        assert!(lease.has_root(&id).expect("the lease reads its own transaction"));
-        assert!(
-            !store.has_root(&id).expect("the store reads"),
-            "the engine's records wait for the host's commit"
-        );
-        drop(transaction);
-        assert!(
-            !lease.has_root(&id).expect("the lease reads after the rollback"),
-            "and leave with the host's rollback"
-        );
     }
 
     #[tokio::test]
@@ -4102,7 +3973,6 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     fn retired_len(runtime: &Runtime) -> usize {
         runtime
             .inner
-            .shared
             .retired
             .lock()
             .expect("the retired-engine mutex is never poisoned")

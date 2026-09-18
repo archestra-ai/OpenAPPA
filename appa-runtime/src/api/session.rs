@@ -80,7 +80,6 @@ async fn ledger<T: Send + 'static>(
 ) -> Result<T, EventError> {
     let joined = tokio::task::spawn_blocking(move || {
         let files = inner
-            .shared
             .files
             .as_ref()
             .ok_or_else(|| appa_eventlog::files::FileStoreError::Corrupt("file tools are not enabled".into()))?;
@@ -363,7 +362,7 @@ impl Session {
     /// blocked by bookkeeping rather than by a policy decision, and the reservation it could
     /// not read stays exactly as it was.
     async fn release_file_reservation(&self, dispatch: &appa_engine::value::DispatchId) {
-        if self.inner.shared.files.is_none() {
+        if self.inner.files.is_none() {
             return;
         }
         let key = match super::files::key(dispatch) {
@@ -424,7 +423,7 @@ impl Session {
         call_id: Option<String>,
         spawn: bool,
     ) -> Result<ToolCallDecision, EventError> {
-        let Some(files) = &self.inner.shared.files else {
+        let Some(files) = &self.inner.files else {
             return self.propose_tool_call(call, call_id, spawn, None).await;
         };
         let (operation, path) = super::files::operation(&call)?;
@@ -534,7 +533,7 @@ impl Session {
             return self.claim_or_abandon(call, call_id, open).await;
         }
         if spawn
-            && self.inner.shared.naming.spawn_coverage() == super::SpawnCoverage::Declared
+            && self.inner.naming.spawn_coverage() == super::SpawnCoverage::Declared
             && !self.names_tool(&call.tool)?
         {
             tracing::debug!(trajectory = %self.trajectory.0, tool = %call.tool, "spawn denied: the policy names no such agent");
@@ -717,7 +716,7 @@ impl Session {
     /// executor, so none of that belongs on an async worker.
     #[cfg(feature = "daemon")]
     pub(super) async fn execute_file(&self, call: ProposedCall) -> Result<super::files::FileReply, EventError> {
-        if self.inner.shared.files.is_none() {
+        if self.inner.files.is_none() {
             return Err(super::files::refused("file tools are not enabled"));
         }
         let open = self.carried_calls()?;
@@ -739,7 +738,7 @@ impl Session {
         let result = {
             let inner = self.inner.clone();
             let (call, pin) = (call.clone(), pin.clone());
-            tokio::task::spawn_blocking(move || match inner.shared.files.as_ref() {
+            tokio::task::spawn_blocking(move || match inner.files.as_ref() {
                 Some(files) => super::files::perform(files, &call, &pin),
                 None => Err("file tools are not enabled".to_string()),
             })
@@ -783,7 +782,7 @@ impl Session {
         call_id: Option<String>,
         o: ToolOutcome,
     ) -> Result<ToolResultDecision, EventError> {
-        if self.inner.shared.files.is_some() {
+        if self.inner.files.is_some() {
             super::files::operation(&call)?;
             let log = self.inner.log(&self.root)?;
             let policy = self.policy(&log)?;

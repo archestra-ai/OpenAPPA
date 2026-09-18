@@ -409,7 +409,7 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Rust lint
-        run: cargo clippy --workspace --all-targets --features appa-eventlog/postgres,appa/postgres --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --features appa-eventlog/postgres --locked -- -D warnings
 
       - name: Rust lint (runtime without the daemon feature)
         run: cargo clippy -p appa --lib --tests --no-default-features --locked -- -D warnings
@@ -457,18 +457,17 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Rust tests
-        run: cargo test --workspace --features appa-eventlog/postgres,appa/postgres --locked
+        run: cargo test --workspace --features appa-eventlog/postgres --locked
 
       - name: Install the host schema
         run: psql "$OPENAPPA_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f appa-eventlog/tests/fixtures/host_schema.sql
 
-      # These tests are ignored by default because they need a database. The
-      # name filters keep the run off the other ignored tests in the workspace.
+      # Ignored by default because they need a database.
       - name: Rust tests (PostgreSQL)
         run: >-
-          cargo test -p appa-eventlog -p appa --lib
-          --features appa-eventlog/postgres,appa-eventlog/fault-injection,appa/postgres --locked
-          -- --ignored postgres_ a_view_on_a_lease
+          cargo test -p appa-eventlog --lib
+          --features postgres,fault-injection --locked
+          -- --ignored
 
   # Stable-named gate so a required check named "Rust Checks" still
   # covers the split jobs. Both jobs skipped is success: their paths
