@@ -298,8 +298,9 @@ async fn dispatch_event(
                     text: "APPA file-only mode: use appa_read_file(file_path), appa_write_file(file_path, content), \
                            appa_edit_file(file_path, old_string, new_string), and \
                            appa_copy_file/appa_move_file(source_path, destination_path) from this plugin's MCP server. \
-                           Paths resolve within the host-configured workspace. ToolSearch and native tools are \
-                           not supported in this mode. Native pre-hook observations are not tracked."
+                           Paths resolve within the host-configured workspace. The harness's own file tools and \
+                           its tool discovery are not used in this mode. Observations the harness makes before a \
+                           call are not tracked."
                         .to_owned()
                         + if runtime.file_process_enabled() {
                             " appa_process_files(input_paths, output_path, command) runs in isolation: read inputs/<path> and write output/result."
