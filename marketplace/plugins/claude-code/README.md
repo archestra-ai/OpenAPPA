@@ -242,10 +242,14 @@ explicit about the checked boundary and its unobserved inputs.
 
 ## What is here
 
-- `appa-package.toml` — the package manifest: the starting policy.
-- `default.appa.toml` — a complete starting policy: every built-in Claude
-  Code tool released with the neutral annotation, web tool results marked
-  suspicious, and subagents run as children of the session.
+- `appa-package.toml` — the package manifest: the starting policy and the
+  `claude-code` battery a first install includes with it.
+- `default.appa.toml` — a complete starting policy: the harness's other
+  built-in tools released with the neutral annotation, web tool results
+  marked suspicious, subagents run as children of the session, and a bounded
+  per-call fallback for every tool the policy does not name. Bash, Read,
+  Grep, Write and Edit are left to the battery, whose argument selectors a
+  bare rule here would shadow.
 - `live-gate-check.py` — the harness conformance check described below.
 
 The `appa-guide` skill, which builds the initial tool policy and guides

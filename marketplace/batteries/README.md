@@ -8,7 +8,7 @@ so a deployment can customize its hint without editing the battery.
 
 | Battery | Covers | Externals |
 | --- | --- | --- |
-| `claude-code/` | `host/claude-code/Bash` and `host/claude-code/Read` in a Claude Code session | The Claude Code model annotates Bash calls; static rules label the requester's secrets `self`, the Databricks CLI's credential commands among them |
+| `claude-code/` | five built-in tools of a Claude Code session: `host/claude-code/Bash`, `Read`, `Grep`, `Write` and `Edit` | The Claude Code model annotates Bash calls; the stock `redact-secrets` sanitizer masks each withheld Bash result; static rules label the requester's secrets `self`, the Databricks CLI's credential commands among them |
 | `slack/` | the claude.ai Slack connector, all 19 tools: read, search, send, canvases | the `slack` audience source: viewer, full members, user groups, one conversation's members |
 | `github/` | the GitHub MCP server's default tool sets: profile, repositories, issues, pull requests, users (44 tools) | two annotators asking GitHub for a repository's visibility; the `github` audience source: viewer, org members, teams, a repository's collaborators |
 | `google-workspace/` | no tools yet; audiences only | the `google-workspace` audience source: viewer, active Workspace users, a Workspace group with nested groups expanded |
@@ -24,10 +24,12 @@ so a deployment can customize its hint without editing the battery.
 | `huggingface/` | the hosted Hugging Face MCP server, all 11 built-in tools: account, search, repository reads and writes, Spaces, Jobs, sandbox; each repository's Hub visibility decides its readers, code run with the token reviewed | two annotators asking the Hub for each named repository's visibility and resource group; the `huggingface` audience source: viewer, one resource group's members |
 | `databricks/` | Databricks' managed MCP servers Genie One (5 tools) and Databricks SQL (`execute_sql`), one namespace bound to both host servers; internal Genie reads, each SQL statement classified before it runs | the Claude Code model classifies each statement; the `databricks` audience source: viewer, active users, a group with nested groups expanded, a Genie space's readers |
 
-Include a battery with a path relative to the root config:
+Include a battery with a path relative to the including file. An install
+replaces the deployment's battery store beside the root config, so the line it
+writes reads:
 
 ```toml
-include = ["../../batteries/claude-code/appa.toml"]
+include = ["batteries/claude-code/appa.toml"]
 ```
 
 A battery names each tool by its canonical tool id (`mcp/<server>/<tool>`,
