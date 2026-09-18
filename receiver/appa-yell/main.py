@@ -281,7 +281,9 @@ def format_slack_payload(document: dict[str, Any], digest: str, kind: str, bucke
     serving = serving if isinstance(serving, dict) else {}
     origin = document.get("origin")
     origin = origin if isinstance(origin, dict) else {}
-    harness = label({"archestra": "Archestra", "claude-code": "Claude Code", "kagent": "kagent"}, serving.get("harness"))
+    harness = label(
+        {"archestra": "Archestra", "claude-code": "Claude Code", "kagent": "kagent"}, serving.get("harness")
+    )
     filed_by = label({"cli": "CLI", "agent": "agent"}, origin.get("kind"))
     metadata = f"Harness: {harness} | Filed by: {filed_by}"
     hostname = serving.get("hostname")
