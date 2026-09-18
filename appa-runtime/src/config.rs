@@ -753,15 +753,7 @@ impl Config {
             .remove("include");
 
         let root_version = policy_version(&root.policy).ok_or(ConfigError::InvalidPolicyVersion)?;
-        let root_annotators = root
-            .policy
-            .get("annotator")
-            .and_then(toml::Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(declaration_name)
-            .map(str::to_owned)
-            .collect::<std::collections::BTreeSet<_>>();
+        let root_annotators = declared_annotators(&root.policy);
         let mut origins = root_command_origins(&root, &source_dir)?;
         let mut seen = std::collections::BTreeSet::new();
         let mut included_batteries = std::collections::BTreeSet::new();
@@ -872,14 +864,7 @@ impl Config {
         }
         let root_policy = document_table.get("policy").ok_or(ConfigError::InvalidPolicyVersion)?;
         let root_version = policy_version(root_policy).ok_or(ConfigError::InvalidPolicyVersion)?;
-        let root_annotators = root_policy
-            .get("annotator")
-            .and_then(toml::Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(declaration_name)
-            .map(str::to_owned)
-            .collect::<std::collections::BTreeSet<_>>();
+        let root_annotators = declared_annotators(root_policy);
         // Composition appends included externals to the root's table, so an absent one
         // is the empty table it would be in a file loaded with none.
         document_table
@@ -1165,6 +1150,19 @@ fn add_composed_metadata(
 
 fn declaration_name(declaration: &toml::Value) -> Option<&str> {
     declaration.as_table()?.get("name")?.as_str()
+}
+
+/// The annotator names a policy declares; a root's set decides which included
+/// defaults its own declarations replace.
+fn declared_annotators(policy: &toml::Value) -> std::collections::BTreeSet<String> {
+    policy
+        .get("annotator")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(declaration_name)
+        .map(str::to_owned)
+        .collect()
 }
 
 fn compose_include(
