@@ -1703,8 +1703,9 @@ mod tests {
         );
     }
 
-    /// Run against an Archestra-migrated, disposable PostgreSQL database:
-    /// OPENAPPA_TEST_DATABASE_URL=... cargo test -p appa-eventlog --features postgres -- --ignored
+    /// Run against a disposable PostgreSQL database that holds the host schema,
+    /// from a host's migrations or from `tests/fixtures/host_schema.sql`:
+    /// OPENAPPA_TEST_DATABASE_URL=... cargo test -p appa-eventlog --features postgres,fault-injection -- --ignored
     #[cfg(feature = "postgres")]
     #[test]
     #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
