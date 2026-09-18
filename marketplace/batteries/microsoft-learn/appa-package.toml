@@ -4,6 +4,6 @@ description = "Rules for the Microsoft Learn MCP Server's 3 read-only tools: pub
 
 [battery]
 policy = "appa.toml"
-hosts = ["claude-code", "kagent"]
+hosts = ["claude-code", "kagent", "archestra"]
 namespaces = ["microsoft-learn"]
 helpers = []

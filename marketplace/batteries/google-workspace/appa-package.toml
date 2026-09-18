@@ -4,6 +4,6 @@ description = "The google-workspace audience source, which builds audiences from
 
 [battery]
 policy = "appa.toml"
-hosts = ["claude-code"]
+hosts = ["claude-code", "archestra"]
 namespaces = ["google-workspace"]
 helpers = ["audience-source.py"]

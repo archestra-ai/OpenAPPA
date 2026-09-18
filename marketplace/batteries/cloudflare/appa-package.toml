@@ -4,7 +4,7 @@ description = "Rules for Cloudflare's documentation and Workers Observability MC
 
 [battery]
 policy = "appa.toml"
-hosts = ["claude-code", "kagent"]
+hosts = ["claude-code", "kagent", "archestra"]
 namespaces = ["cloudflare"]
 helpers = []
 setup = "Bind each Cloudflare server you run: appa battery install cloudflare --server <docs-server> --server <observability-server>. A deployment with one of them binds that one."

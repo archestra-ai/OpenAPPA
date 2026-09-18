@@ -4,6 +4,6 @@ description = "Rules for PostHog's MCP server, all 44 registry tools: end-user a
 
 [battery]
 policy = "appa.toml"
-hosts = ["claude-code", "kagent"]
+hosts = ["claude-code", "kagent", "archestra"]
 namespaces = ["posthog"]
 helpers = []

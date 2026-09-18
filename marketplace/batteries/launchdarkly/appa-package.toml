@@ -4,6 +4,6 @@ description = "Rules for LaunchDarkly's official MCP server, all 20 tools: inter
 
 [battery]
 policy = "appa.toml"
-hosts = ["claude-code", "kagent"]
+hosts = ["claude-code", "kagent", "archestra"]
 namespaces = ["launchdarkly"]
 helpers = []
