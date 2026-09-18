@@ -111,13 +111,14 @@ static KNOWN_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
 /// The AWS secret access key: the one well-known credential with no prefix to recognize
 /// it by, and 40 characters of base64 instead. `/` belongs to that alphabet, so the
 /// candidate run below cannot see such a key whole — the run breaks at every slash and
-/// each piece falls under the length floor. The bounds keep the length exact: a longer
-/// run of the same alphabet, which is what a path or a URL is, holds no 40-character
-/// match between two delimiters. `-`, `_` and `.` are outside the alphabet, so they end
-/// a run too.
-static AWS_SECRET_KEY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)(^|[^A-Za-z0-9+/=])([A-Za-z0-9+/]{40})($|[^A-Za-z0-9+/=])").expect("a fixed pattern")
-});
+/// each piece falls under the length floor. The pattern takes a whole run of the alphabet
+/// and the caller keeps the length exact: a longer run, which is what a path or a URL is,
+/// is no 40-character match. Every character outside the alphabet ends a run, `=`, `-`,
+/// `_` and `.` included, and the match consumes none of them, so a key is found whatever
+/// stands next to it.
+static AWS_SECRET_KEY_RUN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z0-9+/]+").expect("a fixed pattern"));
+
+const AWS_SECRET_KEY_LENGTH: usize = 40;
 
 /// The password of a URL with credentials in its authority: `scheme://user:password@host`.
 static URL_PASSWORD: LazyLock<Regex> =
@@ -171,10 +172,13 @@ fn redact_secrets(input: &str) -> String {
         format!("{}{SECRET_PLACEHOLDER}", &found[1])
     });
     let masked = KNOWN_TOKEN.replace_all(&masked, SECRET_PLACEHOLDER);
-    let masked = AWS_SECRET_KEY.replace_all(&masked, |found: &regex::Captures<'_>| {
-        let run = &found[2];
-        let run = if is_base64_key(run) { SECRET_PLACEHOLDER } else { run };
-        format!("{}{run}{}", &found[1], &found[3])
+    let masked = AWS_SECRET_KEY_RUN.replace_all(&masked, |found: &regex::Captures<'_>| {
+        let run = &found[0];
+        if run.len() == AWS_SECRET_KEY_LENGTH && is_base64_key(run) {
+            SECRET_PLACEHOLDER.to_string()
+        } else {
+            run.to_string()
+        }
     });
     CANDIDATE_RUN
         .replace_all(&masked, |found: &regex::Captures<'_>| {
@@ -983,6 +987,21 @@ mod tests {
             (
                 "{\"SecretAccessKey\": \"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\"}",
                 format!("{{\"SecretAccessKey\": \"{masked}\"}}"),
+            ),
+            // `=` ends a run like any other delimiter, under a name that names no secret.
+            (
+                "Sig=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                format!("Sig={masked}"),
+            ),
+            // One delimiter between two runs serves both: the run before a key may be
+            // another key or a commit id.
+            (
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY Zq3/tVb8LmXw2Rk/9pHsYcD4nGfJ7uEoA1iTz/Bx",
+                format!("{masked} {masked}"),
+            ),
+            (
+                "3f7a9c2e1b8d4f6a0c5e7b9d1f3a5c7e9b2d4f68,Zq3/tVb8LmXw2Rk/9pHsYcD4nGfJ7uEoA1iTz/Bx",
+                format!("{masked},{masked}"),
             ),
             // A path and a URL are runs of the same alphabet; neither holds 40 characters
             // of it between two delimiters.
