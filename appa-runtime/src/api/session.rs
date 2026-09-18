@@ -1521,9 +1521,12 @@ impl Session {
                 };
                 let verdict = match self.timed_consult(&consult, elicitation, ruling).await {
                     ConsultOutcome::Answer(answer) => AuthorityVerdict::from_wire(&answer),
-                    ConsultOutcome::NoAnswer(
-                        crate::external::NoAnswerReason::Unreachable | crate::external::NoAnswerReason::Unregistered,
-                    ) => AuthorityVerdict::Abstain(Abstention::Unreachable),
+                    ConsultOutcome::NoAnswer(crate::external::NoAnswerReason::Unreachable) => {
+                        AuthorityVerdict::Abstain(Abstention::Unreachable)
+                    }
+                    ConsultOutcome::NoAnswer(crate::external::NoAnswerReason::Unregistered) => {
+                        AuthorityVerdict::Abstain(Abstention::Unregistered)
+                    }
                     ConsultOutcome::NoAnswer(_) => AuthorityVerdict::Abstain(Abstention::Unanswered),
                 };
                 ExternalEvidence::Authority {

@@ -224,6 +224,9 @@ pub enum Abstention {
     /// No channel reaches this authority from here, so executing the offer again obtains
     /// nothing.
     Unreachable,
+    /// The deployment binds no implementation to this authority, so nothing can be asked
+    /// until its configuration does.
+    Unregistered,
     /// The authority was asked and did not rule: a timeout, a dismissal, a failed or
     /// unreadable answer.
     Unanswered,
@@ -1784,6 +1787,13 @@ impl RuntimeEngine {
                     return AuthorityOutcome::NoAnswer(format!(
                         "[appa] authority {name} cannot be reached from this session, so executing the offer \
                          again obtains no ruling. Tell the user that the call waits on {name}."
+                    ));
+                }
+                Some((AuthorityVerdict::Abstain(Abstention::Unregistered), _)) => {
+                    return AuthorityOutcome::NoAnswer(format!(
+                        "[appa] this deployment binds no implementation to authority {name}, so executing the \
+                         offer again obtains no ruling. Tell the user that the deployment's configuration must \
+                         bind {name} under [externals.authorities]."
                     ));
                 }
             }

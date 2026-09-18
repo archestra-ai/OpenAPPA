@@ -16,6 +16,12 @@
 //! without spending the vouch; the client shows it and repeats the call
 //! carrying the answer, which that execution spends. A client declares
 //! its capabilities on each such request, never once at `initialize`.
+//! The returned answer is bound to the review by the retried call's own
+//! `offer_id`: an offer names one exact call and the requirements its
+//! rulings cover, and an offer that no longer stands is refused. The
+//! answer carries no further proof that the person saw the review, as
+//! an in-call answer carries none: either way the harness is trusted
+//! to have asked.
 //! Both rules are MCP's own (SEP-2322, SEP-2567), not APPA rule ids.
 //!
 //! What crosses is the same consult every other authority receives:

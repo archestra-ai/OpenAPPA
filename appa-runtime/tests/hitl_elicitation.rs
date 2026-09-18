@@ -126,9 +126,13 @@ async fn deployment() -> Deployment {
 }
 
 async fn deployment_with(review_timeout_ms: u64) -> Deployment {
+    deployment_from(policy(review_timeout_ms)).await
+}
+
+async fn deployment_from(policy: String) -> Deployment {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let path = dir.path().join("appa.toml");
-    std::fs::write(&path, policy(review_timeout_ms)).expect("the fixture writes");
+    std::fs::write(&path, policy).expect("the fixture writes");
     let config = Config::load(&path).expect("the fixture validates");
     let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"));
 
@@ -461,6 +465,25 @@ async fn no_review_channel_reads_differently_from_an_unanswered_review() {
     assert!(
         reached.contains("Authorized"),
         "no channel left the offer standing, so a reachable reviewer still rules: {reached}",
+    );
+}
+
+#[tokio::test]
+async fn an_authority_the_deployment_binds_nothing_to_reads_as_a_configuration_gap() {
+    let unbound = policy(5000).replace("[externals.authorities.operator]\nbuiltin = \"hitl\"\n", "");
+    let unregistered = execute(
+        &deployment_from(unbound).await,
+        Reviewer::new(ElicitationAction::Accept),
+    )
+    .await;
+    let unreachable = execute(&deployment().await, Absent).await;
+    assert!(
+        !unregistered.contains("Authorized"),
+        "an authority nothing implements rules nothing: {unregistered}"
+    );
+    assert_ne!(
+        unregistered, unreachable,
+        "a configuration gap is not told to the model as a session without a review channel",
     );
 }
 
