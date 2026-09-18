@@ -16,112 +16,31 @@ fn wire(decision: &HookDecision) -> serde_json::Value {
     serde_json::to_value(WireDecision::of(decision)).expect("a wire decision serializes")
 }
 
-/// One hook call: validate the canonical wire, dispatch, and record its outcome. A
-/// non-2xx status makes the hook command exit 2, which blocks the
-/// action — hooks fail closed.
-pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> (u16, serde_json::Value) {
-    use crate::events::{HookKind, HookOutcome};
+/// One hook's answer: the status the hook command turns into an exit code, and the body it
+/// prints. A non-2xx status makes the command exit 2, which blocks the action — hooks fail
+/// closed.
+type Answered = (u16, serde_json::Value);
 
-    // Every way a hook can end leaves exactly one entry, including the three that never
-    // reach the dispatcher. Those are the answers a reader is most likely to be confused
-    // by: nothing happened, and the trajectory's facts say nothing about why. None of them
-    // has an actor yet, so they are recorded deployment-wide.
-    let accepted = match WireEvent::read(body).and_then(|event| event.into_event(adapter)) {
-        Ok(Some(accepted)) => accepted,
-        Ok(None) => {
-            runtime.record(None, bare_hook(HookKind::Ignored, HookOutcome::Ignored, None));
-            return (200, wire(&HookDecision::Ack));
-        }
-        Err(ParseRefusal::Unreadable { detail }) => {
-            runtime.record(None, bare_hook(HookKind::Unparsable, HookOutcome::Unreadable, None));
-            return (400, serde_json::json!({ "error": detail }));
-        }
-        Err(ParseRefusal::Malformed { detail }) => {
-            runtime.record(None, bare_hook(HookKind::Unparsable, HookOutcome::Malformed, None));
-            return (409, serde_json::json!({ "error": detail }));
-        }
-    };
+/// One hook call: validate the canonical wire, take in what the event observed, check what
+/// it names, dispatch, and record its outcome. Each step either hands the next one an event
+/// or answers the hook itself.
+pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> Answered {
     let Accepted {
         event,
         names_children,
         inventory,
-    } = accepted;
+    } = match accepted(runtime, adapter, body) {
+        Ok(accepted) => accepted,
+        Err(answered) => return answered,
+    };
     let root = hook_root(&event).clone();
-    if let Some(inventory) = inventory {
-        if matches!(event, HookEvent::ChildStart { .. }) {
-            let checked = runtime.check_inventory(&root, *adapter, &inventory).and_then(|report| {
-                if report.is_valid() {
-                    Ok(())
-                } else {
-                    let mut errors = report.errors;
-                    errors.extend(report.tools.into_iter().filter_map(|tool| match tool.status {
-                        crate::tool_validation::ToolStatus::Invalid { reason } => {
-                            Some(format!("{}: {reason}", tool.tool))
-                        }
-                        _ => None,
-                    }));
-                    Err(EventError::InventoryRefused(errors.join("; ")))
-                }
-            });
-            if let Err(error) = checked {
-                let (kind, tool) = hook_shape(&event);
-                runtime.record(Some(&root), bare_hook(kind, HookOutcome::Refused, tool));
-                return (409, wire(&refuse(error.to_string())));
-            }
-        }
-        let actor = match &event {
-            HookEvent::SessionStart { root } => Actor {
-                root: root.clone(),
-                child: None,
-            },
-            HookEvent::ChildStart { root, child, .. } => Actor {
-                root: root.clone(),
-                child: Some(child.clone()),
-            },
-            HookEvent::ToolCall { actor, .. } => actor.clone(),
-            _ => unreachable!("wire validation restricts inventory to starts and tool calls"),
-        };
-        let observed = match runtime.session(&root, &root) {
-            Ok(_) => runtime.observe_inventory(&actor, *adapter, &inventory),
-            Err(EventError::UnknownTrajectory) if actor.child.is_none() => {
-                match runtime.create_session_with_inventory(root.clone(), inventory.clone()) {
-                    Ok(_) | Err(EventError::TrajectoryExists) => {
-                        runtime.observe_inventory(&actor, *adapter, &inventory)
-                    }
-                    Err(error) => Err(error),
-                }
-            }
-            Err(error) => Err(error),
-        };
-        if let Err(error) = observed {
-            let (kind, tool) = hook_shape(&event);
-            runtime.record(Some(&root), bare_hook(kind, HookOutcome::Refused, tool));
-            return (409, wire(&refuse(error.to_string())));
-        }
+    if let Some(inventory) = inventory
+        && let Err(answered) = observed(runtime, adapter, &event, &root, &inventory)
+    {
+        return answered;
     }
-    if let HookEvent::ToolCall { actor, call, .. } = &event {
-        let early = match runtime.opened_among(&actor.root, &names_children) {
-            Ok(Some(child)) => {
-                tracing::debug!(root = %actor.root.0, child = %child.0, "a call names a family child's transcript");
-                Some((200, deny(NAMED_TRANSCRIPT.to_string())))
-            }
-            Ok(None) => None,
-            Err(error) => Some((409, refuse(error.to_string()))),
-        };
-        if let Some((status, decision)) = early {
-            let (outcome, offers) = hook_result(&decision);
-            runtime.record(
-                Some(&root),
-                crate::events::RuntimeEvent::Hook {
-                    event: HookKind::ToolCall,
-                    tool: Some(call.tool.clone()),
-                    dispatch: None,
-                    outcome,
-                    offers,
-                },
-            );
-            return (status, wire(&decision));
-        }
+    if let Some(answered) = names_a_childs_transcript(runtime, &event, &root, &names_children) {
+        return answered;
     }
     let handled = handle_internal(runtime, event).await;
     runtime.record(Some(&root), handled.event);
@@ -132,7 +51,131 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> (u16, 
     (status, wire(&handled.decision))
 }
 
-/// A hook that ended before an actor existed, so there is nothing to attribute it to.
+/// The event to dispatch, or the answer that ends the hook here. Every way a hook can end
+/// leaves exactly one entry, including the three below that never reach the dispatcher.
+/// Those are the answers a reader is most likely to be confused by: nothing happened, and
+/// the trajectory's facts say nothing about why. None of them has an actor yet, so they are
+/// recorded deployment-wide.
+fn accepted(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> Result<Accepted, Answered> {
+    use crate::events::{HookKind, HookOutcome};
+
+    match WireEvent::read(body).and_then(|event| event.into_event(adapter)) {
+        Ok(Some(accepted)) => Ok(accepted),
+        Ok(None) => {
+            runtime.record(None, bare_hook(HookKind::Ignored, HookOutcome::Ignored, None));
+            Err((200, wire(&HookDecision::Ack)))
+        }
+        Err(ParseRefusal::Unreadable { detail }) => {
+            runtime.record(None, bare_hook(HookKind::Unparsable, HookOutcome::Unreadable, None));
+            Err((400, serde_json::json!({ "error": detail })))
+        }
+        Err(ParseRefusal::Malformed { detail }) => {
+            runtime.record(None, bare_hook(HookKind::Unparsable, HookOutcome::Malformed, None));
+            Err((409, serde_json::json!({ "error": detail })))
+        }
+    }
+}
+
+/// Take in what a start or a call observed of the harness's tools. A child's start is
+/// checked against what the family already bound before anything is observed, because a
+/// subagent cannot rebind a name its parent's session decided. A session the inventory
+/// arrives before is created with it rather than after it, so no trajectory exists without
+/// what it observed; a child never creates one, since its family's own start does.
+fn observed(
+    runtime: &Runtime,
+    adapter: &Adapter,
+    event: &HookEvent,
+    root: &TrajectoryId,
+    inventory: &appa_runtime_api::inventory::ToolInventory,
+) -> Result<(), Answered> {
+    if matches!(event, HookEvent::ChildStart { .. }) {
+        let checked = runtime.check_inventory(root, *adapter, inventory).and_then(|report| {
+            if report.is_valid() {
+                Ok(())
+            } else {
+                let mut errors = report.errors;
+                errors.extend(report.tools.into_iter().filter_map(|tool| match tool.status {
+                    crate::tool_validation::ToolStatus::Invalid { reason } => Some(format!("{}: {reason}", tool.tool)),
+                    _ => None,
+                }));
+                Err(EventError::InventoryRefused(errors.join("; ")))
+            }
+        });
+        if let Err(error) = checked {
+            return Err(refused_hook(runtime, root, event, error));
+        }
+    }
+    let actor = match event {
+        HookEvent::SessionStart { root } => Actor {
+            root: root.clone(),
+            child: None,
+        },
+        HookEvent::ChildStart { root, child, .. } => Actor {
+            root: root.clone(),
+            child: Some(child.clone()),
+        },
+        HookEvent::ToolCall { actor, .. } => actor.clone(),
+        _ => unreachable!("wire validation restricts inventory to starts and tool calls"),
+    };
+    let observed = match runtime.session(root, root) {
+        Ok(_) => runtime.observe_inventory(&actor, *adapter, inventory),
+        Err(EventError::UnknownTrajectory) if actor.child.is_none() => {
+            match runtime.create_session_with_inventory(root.clone(), inventory.clone()) {
+                Ok(_) | Err(EventError::TrajectoryExists) => runtime.observe_inventory(&actor, *adapter, inventory),
+                Err(error) => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    };
+    match observed {
+        Ok(()) => Ok(()),
+        Err(error) => Err(refused_hook(runtime, root, event, error)),
+    }
+}
+
+/// One hook refused before it was dispatched, recorded against the trajectory it was about.
+fn refused_hook(runtime: &Runtime, root: &TrajectoryId, event: &HookEvent, error: EventError) -> Answered {
+    let (kind, tool) = hook_shape(event);
+    runtime.record(Some(root), bare_hook(kind, crate::events::HookOutcome::Refused, tool));
+    (409, wire(&refuse(error.to_string())))
+}
+
+/// A call whose arguments name a child of this family is refused before it runs: a
+/// subagent's words reach its parent through the checked return only.
+fn names_a_childs_transcript(
+    runtime: &Runtime,
+    event: &HookEvent,
+    root: &TrajectoryId,
+    names_children: &[TrajectoryId],
+) -> Option<Answered> {
+    let HookEvent::ToolCall { actor, call, .. } = event else {
+        return None;
+    };
+    let (status, decision) = match runtime.opened_among(&actor.root, names_children) {
+        Ok(Some(child)) => {
+            tracing::debug!(root = %actor.root.0, child = %child.0, "a call names a family child's transcript");
+            (200, deny(NAMED_TRANSCRIPT.to_string()))
+        }
+        Ok(None) => return None,
+        Err(error) => (409, refuse(error.to_string())),
+    };
+    let (outcome, offers) = hook_result(&decision);
+    runtime.record(
+        Some(root),
+        crate::events::RuntimeEvent::Hook {
+            event: crate::events::HookKind::ToolCall,
+            tool: Some(call.tool.clone()),
+            dispatch: None,
+            outcome,
+            offers,
+        },
+    );
+    Some((status, wire(&decision)))
+}
+
+/// One hook's diagnostic entry with nothing to say beyond how it ended: no dispatch was
+/// opened and no offer was made. Recorded deployment-wide where the hook ended before an
+/// actor existed, and against the trajectory where one did.
 fn bare_hook(
     event: crate::events::HookKind,
     outcome: crate::events::HookOutcome,
@@ -147,8 +190,6 @@ fn bare_hook(
     }
 }
 
-/// The trajectory an entry belongs to. A child's events are kept under its own id, as the
-/// engine's facts are: a report about a subagent should not have to be found under its parent.
 /// The root this event's diagnostic entry is filed under.
 ///
 /// The *root*, never the acting trajectory: the event log is keyed by family, because that is
@@ -173,7 +214,8 @@ fn hook_root(event: &HookEvent) -> &TrajectoryId {
 const NAMED_TRANSCRIPT: &str = "this call names a subagent's transcript or output file; a subagent's words \
                                 reach this session only through its checked return";
 
-/// Dispatch one typed event to its session and fold the outcome into one decision.
+/// Dispatch one typed event and answer it, without the wire around it: no body to validate,
+/// no inventory to take in, and no entry recorded.
 ///
 /// The wrapper every adapter, `replay`, and the MCP endpoint calls: it drops the diagnostic
 /// entry that [`handle_internal`] also builds. Only `answer` — the one path a live harness
