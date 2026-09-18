@@ -37,57 +37,39 @@
 //! withheld too, from the tool and response its bytes still carry: the
 //! result has run either way, and a hook that only exits non-zero leaves
 //! that output in front of the model.
-
 use appa_runtime_api::{HookEvent, OutcomeBody, ToolOutcome};
 
 use crate::identity::{is_mcp_tool, is_spawn_tool};
 
-pub(crate) fn is_fixed_value(key: &str, value: &str) -> bool {
-    let fixed: &[&str] = match key {
-        "type" => &[
-            "text",
-            "image",
-            "notebook",
-            "pdf",
-            "create",
-            "update",
-            "resource",
-            "resource_link",
-            "audio",
-        ],
-        "mode" => &["content", "files_with_matches", "count"],
-        "status" => &[
-            "completed",
-            "async_launched",
-            "remote_launched",
-            "pending",
-            "in_progress",
-            "running",
-            "failed",
-            "killed",
-            "paused",
-        ],
-        _ => &[],
-    };
-    fixed.contains(&value)
-}
-
 pub(crate) const REDACTED: &str = "[appa] redacted";
-
-pub(crate) fn content_slot(tool: &str) -> Option<&'static str> {
-    match tool {
-        "Bash" => Some("/stdout"),
-        "Read" => Some("/file/content"),
-        "Grep" => Some("/content"),
-        "WebFetch" => Some("/result"),
-        "Write" => Some("/content"),
-        _ => None,
-    }
-}
 
 pub(crate) struct Replacement {
     pub(crate) output: serde_json::Value,
     pub(crate) context: Option<String>,
+}
+
+/// Which restatement one result gets, keyed on the tool that produced it exactly as the
+/// runtime's own derivation is. The event a result arrived as decides nothing here: a
+/// spawn's response is restated as one under the spawn's tools and by the ordinary
+/// redaction under every other, so the two readings of one result cannot disagree.
+enum Restatement {
+    /// The spawn's own response: the text takes `content` and the run's metadata stays.
+    Spawn,
+    /// An MCP result, as one text block. Claude Code accepts any shape there, and an MCP
+    /// result's keys are content too.
+    TextBlock,
+    /// Every other tool's own output shape, with its leaves redacted.
+    Leaves,
+}
+
+impl Restatement {
+    fn of(tool: &str) -> Self {
+        match (is_spawn_tool(tool), is_mcp_tool(tool)) {
+            (true, _) => Self::Spawn,
+            (false, true) => Self::TextBlock,
+            (false, false) => Self::Leaves,
+        }
+    }
 }
 
 pub(crate) fn replacement(event: &HookEvent, text: &str) -> Option<Replacement> {
@@ -99,14 +81,24 @@ pub(crate) fn replacement(event: &HookEvent, text: &str) -> Option<Replacement> 
     }
 }
 
-/// One delivered response restated in place of itself, keyed on the tool that produced it
-/// exactly as the runtime's own derivation is. The event a result arrived as decides
-/// nothing here: a spawn's response is restated as one under the spawn's tools and by the
-/// ordinary redaction under every other, so the two readings of one result cannot disagree.
+/// One delivered response restated in place of itself.
 pub(crate) fn restated(tool: &str, response: serde_json::Value, text: &str) -> Replacement {
-    match is_spawn_tool(tool) {
-        true => spawn_replacement(response, text),
-        false => tool_replacement(tool, response, text),
+    match Restatement::of(tool) {
+        Restatement::Spawn => spawn_replacement(response, text),
+        Restatement::TextBlock => Replacement {
+            output: serde_json::json!([{ "type": "text", "text": text }]),
+            context: None,
+        },
+        Restatement::Leaves => swap_leaves(tool, response, text),
+    }
+}
+
+fn delivered(outcome: &ToolOutcome) -> Option<serde_json::Value> {
+    match outcome {
+        ToolOutcome::Success {
+            body: OutcomeBody::Available(body),
+        } => serde_json::from_str(body).ok(),
+        _ => None,
     }
 }
 
@@ -115,7 +107,7 @@ pub(crate) fn restated(tool: &str, response: serde_json::Value, text: &str) -> R
 /// `Agent` response in `runtime/tests/fixtures`, over the synchronous and the asynchronous
 /// shape. A key a later version adds is redacted until it is listed here, so the list
 /// going stale withholds more, never less.
-pub(crate) fn is_spawn_metadata(key: &str) -> bool {
+fn is_spawn_metadata(key: &str) -> bool {
     matches!(
         key,
         "agentId"
@@ -144,17 +136,17 @@ pub(crate) fn is_spawn_metadata(key: &str) -> bool {
 /// a payload this codec does not recognize, so its leaves are redacted as an ordinary
 /// tool's are: a response under the spawn's name that is not the spawn's own shape — the
 /// bytes a refused hook still carries included — crosses nothing.
-pub(crate) fn spawn_replacement(response: serde_json::Value, text: &str) -> Replacement {
+fn spawn_replacement(response: serde_json::Value, text: &str) -> Replacement {
     let output = match response {
         serde_json::Value::Object(fields) => {
-            // The text takes the `content` field, never a leaf.
-            let mut placed = true;
+            // The text takes the `content` field below, never a leaf.
+            let mut placement = Placement::Taken;
             let mut object: serde_json::Map<String, serde_json::Value> = fields
                 .into_iter()
                 .map(|(key, field)| match is_spawn_metadata(&key) {
                     true => (key, field),
                     false => {
-                        let redacted = redact(field, Some(&key), text, None, &mut placed);
+                        let redacted = redact(field, Some(&key), text, &mut placement);
                         (key, redacted)
                     }
                 })
@@ -170,46 +162,40 @@ pub(crate) fn spawn_replacement(response: serde_json::Value, text: &str) -> Repl
     Replacement { output, context: None }
 }
 
-/// One tool's result restated: an MCP result as a single text block, whose keys are content
-/// too, and every other tool's own output shape with its leaves redacted.
-pub(crate) fn tool_replacement(tool: &str, response: serde_json::Value, text: &str) -> Replacement {
-    match is_mcp_tool(tool) {
-        true => Replacement {
-            output: serde_json::json!([{ "type": "text", "text": text }]),
-            context: None,
-        },
-        false => swap_leaves(tool, response, text),
-    }
-}
-
-pub(crate) fn delivered(outcome: &ToolOutcome) -> Option<serde_json::Value> {
-    match outcome {
-        ToolOutcome::Success {
-            body: OutcomeBody::Available(body),
-        } => serde_json::from_str(body).ok(),
+/// The field of one builtin tool's response that carries the text the tool produced, which
+/// is where a restatement puts the text that stands in for it.
+fn content_slot(tool: &str) -> Option<&'static str> {
+    match tool {
+        "Bash" => Some("/stdout"),
+        "Read" => Some("/file/content"),
+        "Grep" => Some("/content"),
+        "WebFetch" => Some("/result"),
+        "Write" => Some("/content"),
         _ => None,
     }
 }
 
-pub(crate) fn swap_leaves(tool: &str, value: serde_json::Value, text: &str) -> Replacement {
+fn swap_leaves(tool: &str, value: serde_json::Value, text: &str) -> Replacement {
     let slot = content_slot(tool).filter(|slot| value.pointer(slot).is_some_and(serde_json::Value::is_string));
-    let longest = match slot {
-        Some(_) => None,
-        None => longest_content(&value, None),
+    let mut placement = match slot {
+        Some(_) => Placement::Taken,
+        None => match longest_content(&value, None) {
+            Some(length) => Placement::Seeking { length },
+            None => Placement::Nowhere,
+        },
     };
-    let mut placed = slot.is_some();
-    let mut output = redact(value, None, text, longest, &mut placed);
+    let mut output = redact(value, None, text, &mut placement);
     if let Some(slot) = slot {
         *output.pointer_mut(slot).expect("redaction keeps the response's shape") =
             serde_json::Value::String(text.to_string());
     }
     Replacement {
         output,
-        context: (!placed).then(|| text.to_string()),
+        context: (!matches!(placement, Placement::Taken)).then(|| text.to_string()),
     }
 }
 
-pub(crate) fn longest_content(value: &serde_json::Value, key: Option<&str>) -> Option<usize> {
+fn longest_content(value: &serde_json::Value, key: Option<&str>) -> Option<usize> {
     match value {
         serde_json::Value::String(text) => (!kept(key, text)).then_some(text.len()),
         serde_json::Value::Array(items) => items.iter().take(1).find_map(|item| longest_content(item, None)),
@@ -221,23 +207,40 @@ pub(crate) fn longest_content(value: &serde_json::Value, key: Option<&str>) -> O
     }
 }
 
-pub(crate) fn redact(
-    value: serde_json::Value,
-    key: Option<&str>,
-    text: &str,
-    longest: Option<usize>,
-    placed: &mut bool,
-) -> serde_json::Value {
+/// Where the text goes in the response being restated, as the redaction walks it. One
+/// question with three answers, and the walk answers it at most once.
+enum Placement {
+    /// The text has a home already — a named content slot, or the spawn's `content` — so
+    /// every string this walk meets is redacted.
+    Taken,
+    /// No named slot, so the first string of this length takes the text and the walk
+    /// becomes `Taken`. [`longest_content`] measured that string, so one exists.
+    Seeking { length: usize },
+    /// Nothing in this shape can carry the text: counts and flags only. Every string is
+    /// redacted, and the caller says the text on the hook's context channel instead.
+    Nowhere,
+}
+
+impl Placement {
+    /// Whether this string is the one the text takes, which it is at most once.
+    fn takes(&mut self, content: &str) -> bool {
+        match self {
+            Self::Seeking { length } if *length == content.len() => {
+                *self = Self::Taken;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+fn redact(value: serde_json::Value, key: Option<&str>, text: &str, placement: &mut Placement) -> serde_json::Value {
     match value {
         serde_json::Value::String(kept_text) if kept(key, &kept_text) => serde_json::Value::String(kept_text),
-        serde_json::Value::String(content) => {
-            if !*placed && Some(content.len()) == longest {
-                *placed = true;
-                serde_json::Value::String(text.to_string())
-            } else {
-                serde_json::Value::String(REDACTED.to_string())
-            }
-        }
+        serde_json::Value::String(content) => match placement.takes(&content) {
+            true => serde_json::Value::String(text.to_string()),
+            false => serde_json::Value::String(REDACTED.to_string()),
+        },
         serde_json::Value::Number(_) => serde_json::Value::from(0),
         serde_json::Value::Bool(_) => serde_json::Value::Bool(false),
         serde_json::Value::Null => serde_json::Value::Null,
@@ -245,14 +248,14 @@ pub(crate) fn redact(
             items
                 .into_iter()
                 .take(1)
-                .map(|item| redact(item, None, text, longest, placed))
+                .map(|item| redact(item, None, text, placement))
                 .collect(),
         ),
         serde_json::Value::Object(fields) => serde_json::Value::Object(
             fields
                 .into_iter()
                 .map(|(key, field)| {
-                    let redacted = redact(field, Some(&key), text, longest, placed);
+                    let redacted = redact(field, Some(&key), text, placement);
                     (key, redacted)
                 })
                 .collect(),
@@ -260,8 +263,40 @@ pub(crate) fn redact(
     }
 }
 
-pub(crate) fn kept(key: Option<&str>, text: &str) -> bool {
+/// Whether Claude Code validates this string as a fixed value of its output shape, in
+/// which case it is protocol rather than content and the redaction leaves it alone.
+fn kept(key: Option<&str>, text: &str) -> bool {
     key.is_some_and(|key| is_fixed_value(key, text))
+}
+
+fn is_fixed_value(key: &str, value: &str) -> bool {
+    let fixed: &[&str] = match key {
+        "type" => &[
+            "text",
+            "image",
+            "notebook",
+            "pdf",
+            "create",
+            "update",
+            "resource",
+            "resource_link",
+            "audio",
+        ],
+        "mode" => &["content", "files_with_matches", "count"],
+        "status" => &[
+            "completed",
+            "async_launched",
+            "remote_launched",
+            "pending",
+            "in_progress",
+            "running",
+            "failed",
+            "killed",
+            "paused",
+        ],
+        _ => &[],
+    };
+    fixed.contains(&value)
 }
 
 #[cfg(test)]
