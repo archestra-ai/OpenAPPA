@@ -2252,20 +2252,22 @@ mod tests {
     #[test]
     #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
     fn postgres_pool_replaces_a_terminated_connection() {
+        let terminate = |pid: i32| {
+            postgres_store(1)
+                .lease()
+                .unwrap()
+                .postgres()
+                .unwrap()
+                .with_client(move |client| {
+                    client.execute("SELECT pg_terminate_backend($1)", &[&pid])?;
+                    Ok(())
+                })
+                .expect("the server ends the connection");
+        };
         let store = postgres_store(1);
         let root = postgres_root(&store, "terminated");
         let lease = store.lease().unwrap();
-        let pid = backend_pid(&lease);
-        postgres_store(1)
-            .lease()
-            .unwrap()
-            .postgres()
-            .unwrap()
-            .with_client(move |client| {
-                client.execute("SELECT pg_terminate_backend($1)", &[&pid])?;
-                Ok(())
-            })
-            .expect("the server ends the leased connection");
+        terminate(backend_pid(&lease));
         assert!(lease.log(&root).is_err(), "work on a dead connection fails closed");
         drop(lease);
         assert!(
@@ -2277,16 +2279,7 @@ mod tests {
 
         // The same end while the connection sits idle costs no operation at all.
         let idle = backend_pid(&store.lease().unwrap());
-        postgres_store(1)
-            .lease()
-            .unwrap()
-            .postgres()
-            .unwrap()
-            .with_client(move |client| {
-                client.execute("SELECT pg_terminate_backend($1)", &[&idle])?;
-                Ok(())
-            })
-            .expect("the server ends the idle connection");
+        terminate(idle);
         // Past the window in which a connection that just came back is leased unasked.
         std::thread::sleep(std::time::Duration::from_millis(1100));
         assert!(
