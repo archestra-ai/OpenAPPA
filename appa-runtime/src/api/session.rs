@@ -1410,7 +1410,8 @@ impl Session {
                 }
                 _ => None,
             });
-            if policy.engine().opens_a_second_dispatch(&view, &self.trajectory, facts)
+            if opens_dispatch.is_some()
+                && policy.engine().opens_a_second_dispatch(&view, &self.trajectory, facts)
                 && ((opening_call_id.is_none() && !remedy_opens_unbound) || context.has_unbound_open_dispatch())
             {
                 return Err(EventError::CallOutstanding);
@@ -2156,6 +2157,43 @@ name = "appa/execute_remedy_plan"
                     )
                     .await
                     .expect("the identified result is correlated"),
+                ToolResultDecision::Keep,
+            );
+        }
+        assert!(runtime.open_dispatches(&root(), &root()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn three_identified_calls_report_results_while_siblings_remain_open() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let call = fetch(serde_json::json!({"a": 1}));
+
+        for call_id in ["toolu-1", "toolu-2", "toolu-3"] {
+            assert!(matches!(
+                session
+                    .on_tool_call_identified(call.clone(), Some(call_id.to_string()), false)
+                    .await
+                    .expect("the identified call releases"),
+                ToolCallDecision::Allow { spawn: None, .. }
+            ));
+        }
+        assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 3);
+
+        for (call_id, body) in [("toolu-2", "second"), ("toolu-3", "third"), ("toolu-1", "first")] {
+            assert_eq!(
+                session
+                    .on_tool_result_identified(
+                        call.clone(),
+                        Some(call_id.to_string()),
+                        ToolOutcome::Success {
+                            body: OutcomeBody::Available(body.to_string()),
+                        },
+                    )
+                    .await
+                    .expect("an identified result closes only its own dispatch"),
                 ToolResultDecision::Keep,
             );
         }
