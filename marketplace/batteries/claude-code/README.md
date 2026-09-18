@@ -13,8 +13,9 @@ and `host/claude-code/Edit`:
   `.claude.json`, `.aws/credentials`, a private key, ...) narrows the session
   to `self`, the requester. The battery withholds the command's result and
   offers the stock `redact-secrets` sanitizer, which masks private-key blocks,
-  tokens of well-known shapes, passwords inside URLs, the value of any
-  assignment whose key names a secret, and long high-entropy runs, then
+  tokens of well-known shapes, the AWS secret access key, passwords inside
+  URLs, the value of any assignment whose key names a secret, and long
+  high-entropy runs, then
   returns the masked output to `public`: the model reads the masked text and
   the session keeps its label.
   The sanitizer carries no tags: it is offered for any withheld Bash result
