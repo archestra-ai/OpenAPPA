@@ -122,14 +122,13 @@ async fn through_the_masker(runtime: &Runtime, proposal: &serde_json::Value) -> 
 /// narrowing, which would settle the session at `self` and leave the result unmasked; this
 /// test is about the other end, where the sanitizer runs instead.
 fn masker_offer(feedback: &str) -> OfferId {
-    let line = feedback
-        .lines()
-        .skip_while(|line| !line.contains("sanitizer redact-secrets"))
-        .nth(1)
-        .unwrap_or_else(|| panic!("no redact-secrets offer in the rendered denial: {feedback}"));
-    let after = line.split("offer_id:").nth(1).expect("the offer line names an id");
-    let rest = after.trim_start().strip_prefix('"').expect("the id is quoted");
-    OfferId(rest[..rest.find('"').expect("the id closes its quote")].to_string())
+    let offered = common::offers(feedback);
+    assert_eq!(
+        offered.len(),
+        2,
+        "the denial offers the plain narrowing and the masker: {feedback}"
+    );
+    common::last_offer(feedback)
 }
 
 /// A confined result released through the masker and rendered back as a hook answer, for
