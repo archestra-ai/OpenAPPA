@@ -2266,6 +2266,23 @@ mod tests {
                 .expect("the pool opens a connection in the dead one's place"),
             "the store serves again without reopening"
         );
+
+        // The same end while the connection sits idle costs no operation at all.
+        let idle = backend_pid(&store);
+        postgres_store(1)
+            .postgres()
+            .unwrap()
+            .with_client(move |client| {
+                client.execute("SELECT pg_terminate_backend($1)", &[&idle])?;
+                Ok(())
+            })
+            .expect("the server ends the idle connection");
+        assert!(
+            store
+                .has_root(&root)
+                .expect("the pool tells a dead idle connection from a live one"),
+        );
+        assert_ne!(backend_pid(&store), idle);
         forget_postgres_roots(&store, vec![root]);
     }
 

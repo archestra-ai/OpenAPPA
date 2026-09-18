@@ -169,6 +169,16 @@ impl Worker {
         }));
         sent.is_ok() && recv.recv_timeout(wait).unwrap_or(false)
     }
+
+    /// Whether an idle connection still serves. The client learns that the server ended
+    /// it, or left it inside a failed transaction, only by using it.
+    fn serves(&self, wait: Duration) -> bool {
+        let (send, recv) = mpsc::sync_channel(1);
+        let sent = self.sender.send(Box::new(move |state| {
+            let _ = send.send(state.client.batch_execute("SELECT 1").is_ok());
+        }));
+        sent.is_ok() && recv.recv_timeout(wait).unwrap_or(false)
+    }
 }
 
 struct Pool {
@@ -201,10 +211,18 @@ impl Pool {
         let deadline = Instant::now() + wait;
         loop {
             if let Some(worker) = state.idle.pop() {
-                return Ok(Lease {
-                    pool: Arc::clone(self),
-                    worker: Some(worker),
-                });
+                let wait = state.reset_wait;
+                drop(state);
+                if worker.serves(wait) {
+                    return Ok(Lease {
+                        pool: Arc::clone(self),
+                        worker: Some(worker),
+                    });
+                }
+                drop(worker);
+                self.forget();
+                state = self.state();
+                continue;
             }
             if state.open < self.max_connections.get() {
                 state.open += 1;
@@ -309,6 +327,10 @@ impl PostgresStore {
 
     /// A store pinned to one pooled connection. Every clone of it, and every transaction it
     /// begins, runs on that connection; an unleased store takes a connection per operation.
+    ///
+    /// A full pool blocks the calling thread until a connection returns, and refuses with
+    /// [`LeaseError::Exhausted`] after the checkout wait. A host that must not block admits
+    /// no more concurrent work than `max_connections` before it asks for a lease.
     pub fn lease(&self) -> Result<PostgresStore, LeaseError> {
         Ok(PostgresStore {
             pool: Arc::clone(&self.pool),
@@ -948,9 +970,11 @@ impl Drop for PostgresTransaction {
     fn drop(&mut self) {
         if !self.finished {
             let _ = self.store.run(|state| {
-                let result = state.client.batch_execute("ROLLBACK");
+                // A rollback that failed leaves the flag up, so the pool retries it and
+                // drops the connection rather than reusing one still inside a transaction.
+                state.client.batch_execute("ROLLBACK")?;
                 state.transaction = false;
-                result.map_err(Into::into)
+                Ok(())
             });
         }
     }
