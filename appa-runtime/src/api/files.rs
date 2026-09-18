@@ -277,11 +277,12 @@ pub(crate) struct Deployment {
 
 impl super::Runtime {
     pub(crate) fn file_tracking_enabled(&self) -> bool {
-        self.inner.files.is_some()
+        self.inner.shared.files.is_some()
     }
 
     pub(crate) fn file_process_enabled(&self) -> bool {
         self.inner
+            .shared
             .files
             .as_ref()
             .is_some_and(|files| files.process_backend.is_some())
@@ -289,10 +290,10 @@ impl super::Runtime {
 
     #[cfg(feature = "daemon")]
     pub(crate) fn file_deployment(&self, config: PathBuf) -> Option<Deployment> {
-        let files = self.inner.files.as_ref()?;
+        let files = self.inner.shared.files.as_ref()?;
         Some(Deployment {
             config: std::fs::canonicalize(config).ok()?,
-            db: std::fs::canonicalize(self.inner.state_path.as_ref()?).ok()?,
+            db: std::fs::canonicalize(self.inner.shared.state_path.as_ref()?).ok()?,
             workspace: files.workspace.clone(),
             ledger: std::fs::canonicalize(&files.ledger).ok()?,
             process_backend: files.process_backend.clone(),
@@ -566,6 +567,7 @@ max_body_bytes = 65536
         );
         let version = runtime
             .inner
+            .shared
             .files
             .as_ref()
             .unwrap()
@@ -591,6 +593,7 @@ max_body_bytes = 65536
         assert_eq!(
             runtime
                 .inner
+                .shared
                 .files
                 .as_ref()
                 .unwrap()
@@ -833,6 +836,7 @@ else:
     fn label(runtime: &Runtime, path: &str) -> Label {
         runtime
             .inner
+            .shared
             .files
             .as_ref()
             .unwrap()
@@ -880,6 +884,7 @@ else:
         assert!(
             runtime
                 .inner
+                .shared
                 .files
                 .as_ref()
                 .unwrap()
@@ -971,6 +976,7 @@ else:
         assert_eq!(label(&runtime, "clean.txt").trust, Trust::new(0));
         let version = runtime
             .inner
+            .shared
             .files
             .as_ref()
             .unwrap()
@@ -1050,7 +1056,7 @@ else:
                 serde_json::json!({"file_path": "elsewhere.txt", "content": "pinned content"}),
             ),
         };
-        let files = runtime.inner.files.as_ref().unwrap();
+        let files = runtime.inner.shared.files.as_ref().unwrap();
         let pin = FilePin {
             path: "source.txt".into(),
             operation: FileOperation::Replace,
@@ -1092,6 +1098,7 @@ else:
         assert!(
             runtime
                 .inner
+                .shared
                 .files
                 .as_ref()
                 .unwrap()

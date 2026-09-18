@@ -26,6 +26,8 @@ default = ["daemon"]
 # The server stack: the MCP endpoint, the HTTP surface, the CLI and its log
 # setup. An in-process host links the library without any of it.
 daemon = ["dep:rmcp", "dep:axum", "dep:clap", "dep:tracing-subscriber"]
+# PostgreSQL storage for an embedding host whose migrations install the schema.
+postgres = ["appa-eventlog/postgres"]
 
 # These integration tests drive the server stack: the MCP endpoint, the
 # installer CLI and `appa replay`. Without `daemon` there is nothing to drive.
