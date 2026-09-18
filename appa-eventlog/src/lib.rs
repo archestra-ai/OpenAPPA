@@ -1980,7 +1980,7 @@ mod tests {
         );
 
         let mut rollback_owner = owner.clone();
-        rollback_owner.offer_id = "fedcba9876543210".to_owned();
+        rollback_owner.offer_id = "0f1e2d3c4b5a6978".to_owned();
         let rollback_request = OperationRequest {
             key: OperationKey {
                 scope: scope.clone(),
