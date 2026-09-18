@@ -56,6 +56,7 @@
 //! empty, never another lifecycle the runtime would then contradict.
 //! Claude Code's own helper agents stop with an empty
 //! `agent_type`, no `SubagentStart` and no tool calls: their stop is the
+//! child's `TurnEnd`, and no return is claimed.
 //!
 //! Outcome mapping, which is the adapter's contract. This
 //! harness runs the tools itself, so the codec observes no HTTP status,
@@ -309,5 +310,571 @@ pub(crate) fn map_outcome(response: Option<&serde_json::Value>) -> ToolOutcome {
         Some(response) => ToolOutcome::Success {
             body: OutcomeBody::Available(response.to_string()),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixtures::*;
+    use appa_runtime_api::{
+        Actor, HookEvent, OutcomeBody, ParseRefusal, ProposedCall, SpawnRef, ToolOutcome, TrajectoryId,
+    };
+    #[test]
+    fn an_unreadable_body_is_refused_with_the_wire_detail() {
+        match parse(b"not json") {
+            Err(ParseRefusal::Unreadable { detail }) => {
+                assert!(
+                    detail.starts_with("unreadable hook event: "),
+                    "the detail must carry the wire prefix, got {detail:?}",
+                );
+            }
+            other => panic!("expected an Unreadable refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_turn_end_hook_names_the_actor_that_finished() {
+        let helper = Some(TrajectoryId("cc:s1:a1".to_string()));
+        for (hook, child, agent_type) in [
+            ("Stop", None, None),
+            ("StopFailure", None, None),
+            ("SubagentStop", helper.clone(), None),
+            ("SubagentStop", helper, Some("")),
+        ] {
+            let mut body = serde_json::json!({"hook_event_name": hook, "session_id": "s1"});
+            if child.is_some() {
+                body["agent_id"] = serde_json::Value::String("a1".to_string());
+                body["last_assistant_message"] = serde_json::Value::String("a prompt suggestion".to_string());
+            }
+            if let Some(agent_type) = agent_type {
+                body["agent_type"] = serde_json::Value::String(agent_type.to_string());
+            }
+            let parsed = parse(body.to_string().as_bytes()).expect("the turn end parses");
+            assert_eq!(
+                parsed,
+                Some(HookEvent::TurnEnd {
+                    actor: Actor { root: root(), child },
+                }),
+                "{hook} with agent_type {agent_type:?} did not cross as its actor's turn end",
+            );
+        }
+    }
+
+    #[test]
+    fn a_subagent_stop_is_the_childs_return() {
+        for (message, value) in [
+            (Some("the summary"), Some("the summary".to_string())),
+            (Some(""), None),
+            (None, None),
+        ] {
+            let mut stop = serde_json::json!({
+                "hook_event_name": "SubagentStop",
+                "session_id": "s1",
+                "agent_id": "a1",
+                "agent_type": "general-purpose",
+                "stop_hook_active": false,
+            });
+            if let Some(message) = message {
+                stop["last_assistant_message"] = serde_json::Value::String(message.to_string());
+            }
+            assert_eq!(
+                parse_value(&stop),
+                Ok(Some(HookEvent::ChildEnd {
+                    root: root(),
+                    child: TrajectoryId("cc:s1:a1".to_string()),
+                    value,
+                })),
+                "a stop with message {message:?} did not cross as the child's return",
+            );
+        }
+    }
+
+    #[test]
+    fn missing_required_fields_are_named_refusals() {
+        for (event, detail) in [
+            (
+                serde_json::json!({"hook_event_name": "UserPromptSubmit", "session_id": "s1"}),
+                "UserPromptSubmit without a prompt",
+            ),
+            (
+                serde_json::json!({"hook_event_name": "PreToolUse", "session_id": "s1"}),
+                "PreToolUse without a tool call",
+            ),
+            (
+                serde_json::json!({"hook_event_name": "PostToolUse", "session_id": "s1"}),
+                "a tool outcome without its tool call",
+            ),
+            (
+                serde_json::json!({"hook_event_name": "PostToolUseFailure", "session_id": "s1"}),
+                "a tool outcome without its tool call",
+            ),
+            (
+                serde_json::json!({"hook_event_name": "SubagentStart", "session_id": "s1"}),
+                "SubagentStart without an agent id",
+            ),
+            (
+                serde_json::json!({"hook_event_name": "SubagentStart", "session_id": "s1", "agent_id": ""}),
+                "SubagentStart without an agent id",
+            ),
+            (
+                serde_json::json!({"hook_event_name": "SubagentStop", "session_id": "s1"}),
+                "SubagentStop without an agent id",
+            ),
+            (
+                serde_json::json!({
+                    "hook_event_name": "SubagentStop",
+                    "session_id": "s1",
+                    "agent_id": "",
+                    "agent_type": "general-purpose",
+                    "last_assistant_message": "the summary",
+                }),
+                "SubagentStop without an agent id",
+            ),
+        ] {
+            assert_eq!(
+                parse_value(&event),
+                Err(ParseRefusal::Malformed {
+                    detail: detail.to_string()
+                }),
+                "the {} refusal drifted",
+                event["hook_event_name"],
+            );
+        }
+    }
+
+    #[test]
+    fn unmapped_hooks_parse_to_no_event() {
+        for name in ["PreCompact", "Notification", "SomethingNew"] {
+            let event = serde_json::json!({
+                "hook_event_name": name,
+                "session_id": "s1",
+                "agent_id": "a1",
+                "last_assistant_message": "the summary",
+            });
+            assert_eq!(parse_value(&event), Ok(None), "the {name} hook maps to no event");
+        }
+    }
+
+    #[test]
+    fn a_pre_tool_use_parses_to_a_tool_call_with_cc_ids() {
+        let event = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s1",
+            "tool_use_id": "toolu-1",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+        });
+        assert_eq!(
+            parse_value(&event),
+            Ok(Some(HookEvent::ToolCall {
+                actor: Actor {
+                    root: root(),
+                    child: None,
+                },
+                call: ProposedCall {
+                    tool: "Bash".to_string(),
+                    arguments: raw(serde_json::json!({"command": "ls"})),
+                },
+                call_id: Some("toolu-1".to_string()),
+                spawn: false,
+                ruling: None,
+            })),
+        );
+    }
+
+    #[test]
+    fn result_hooks_preserve_the_tool_use_id() {
+        for hook in ["PostToolUse", "PostToolUseFailure"] {
+            let event = serde_json::json!({
+                "hook_event_name": hook,
+                "session_id": "s1",
+                "tool_use_id": "toolu-1",
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls"},
+                "tool_response": {"stdout": "readme.txt"},
+            });
+            match parse_value(&event) {
+                Ok(Some(HookEvent::ToolResult { call_id, .. })) => {
+                    assert_eq!(call_id.as_deref(), Some("toolu-1"));
+                }
+                other => panic!("expected a ToolResult event for {hook}, got {other:?}"),
+            }
+        }
+
+        let mut event = agent_post_tool_use(agent_response());
+        event["tool_use_id"] = serde_json::json!("toolu-agent");
+        match parse_value(&event) {
+            Ok(Some(HookEvent::SpawnResult { call_id, .. })) => {
+                assert_eq!(call_id.as_deref(), Some("toolu-agent"));
+            }
+            other => panic!("expected a SpawnResult event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_agent_tool_call_is_the_spawn() {
+        for tool in ["Agent", "Task"] {
+            let event = serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "s1",
+                "tool_name": tool,
+                "tool_input": {"prompt": "list files", "subagent_type": "Explore"},
+            });
+            match parse_value(&event) {
+                Ok(Some(HookEvent::ToolCall { spawn, call, .. })) => {
+                    assert!(spawn, "{tool} is the spawn");
+                    assert_eq!(call.tool, tool);
+                }
+                other => panic!("expected a ToolCall event, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_argument_members_reach_the_runtime_unresolved() {
+        let body =
+            br#"{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash","tool_input":{"a":1,"a":2}}"#;
+        let Ok(Some(HookEvent::ToolCall { call, .. })) = parse(body) else {
+            panic!("the hook parses to a tool call");
+        };
+        assert_eq!(call.arguments.get(), r#"{"a":1,"a":2}"#);
+    }
+
+    #[test]
+    fn an_agent_id_attributes_the_event_to_the_child() {
+        let event = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "s1",
+            "agent_id": "a1",
+            "prompt": "work",
+        });
+        assert_eq!(
+            parse_value(&event),
+            Ok(Some(HookEvent::Prompt {
+                actor: Actor {
+                    root: root(),
+                    child: Some(TrajectoryId("cc:s1:a1".to_string())),
+                },
+                text: "work".to_string(),
+            })),
+        );
+    }
+
+    #[test]
+    fn a_subagent_start_names_the_spawn_in_flight() {
+        let start = serde_json::json!({
+            "hook_event_name": "SubagentStart",
+            "session_id": "s1",
+            "agent_id": "a1",
+            "agent_type": "Explore",
+        });
+        assert_eq!(
+            parse_value(&start),
+            Ok(Some(HookEvent::ChildStart {
+                root: root(),
+                child: TrajectoryId("cc:s1:a1".to_string()),
+                spawn: SpawnRef::InFlight,
+            })),
+        );
+    }
+
+    #[test]
+    fn an_agent_result_parses_to_the_spawn_result_naming_the_child() {
+        let response = agent_response();
+        assert_eq!(
+            parse_value(&agent_post_tool_use(response.clone())),
+            Ok(Some(HookEvent::SpawnResult {
+                actor: Actor {
+                    root: root(),
+                    child: None,
+                },
+                call: ProposedCall {
+                    tool: "Agent".to_string(),
+                    arguments: raw(serde_json::json!({"prompt": "List the files.", "subagent_type": "Explore"})),
+                },
+                call_id: None,
+                outcome: ToolOutcome::Success {
+                    body: OutcomeBody::Available(response.to_string()),
+                },
+                child: Some(TrajectoryId("cc:s1:a1".to_string())),
+                value: Some("one file: readme.txt".to_string()),
+            })),
+        );
+    }
+
+    #[test]
+    fn a_blank_agent_id_names_no_child() {
+        let event = agent_post_tool_use(serde_json::json!({"status": "async_launched", "agentId": ""}));
+        match parse_value(&event) {
+            Ok(Some(HookEvent::SpawnResult { child, value, .. })) => {
+                assert_eq!(child, None, "a blank agentId names no child");
+                assert_eq!(value, None);
+            }
+            other => panic!("the spawn's post-use hook is its result: {other:?}"),
+        }
+        let call = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "s1",
+            "agent_id": "",
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+        });
+        match parse_value(&call) {
+            Ok(Some(HookEvent::ToolCall { actor, .. })) => assert_eq!(actor.child, None),
+            other => panic!("a tool call parses: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_launch_acknowledgement_names_the_child_and_carries_no_message() {
+        let launched = serde_json::json!({
+            "isAsync": true,
+            "status": "async_launched",
+            "agentId": "a2",
+            "description": "Compute 6*7",
+            "prompt": "Compute 6*7",
+            "outputFile": "/tmp/a2.md",
+            "canReadOutputFile": false,
+        });
+        let mut without_content = launched.clone();
+        without_content["content"] = serde_json::Value::Null;
+        for (tool, response) in [
+            ("Agent", launched.clone()),
+            ("Task", launched.clone()),
+            ("Agent", without_content),
+        ] {
+            let mut event = agent_post_tool_use(response.clone());
+            event["tool_name"] = serde_json::Value::String(tool.to_string());
+            assert_eq!(
+                parse_value(&event),
+                Ok(Some(HookEvent::SpawnResult {
+                    actor: Actor {
+                        root: root(),
+                        child: None,
+                    },
+                    call: ProposedCall {
+                        tool: tool.to_string(),
+                        arguments: raw(serde_json::json!({"prompt": "List the files.", "subagent_type": "Explore"})),
+                    },
+                    call_id: None,
+                    outcome: ToolOutcome::Success {
+                        body: OutcomeBody::Available(response.to_string()),
+                    },
+                    child: Some(TrajectoryId("cc:s1:a2".to_string())),
+                    value: None,
+                })),
+                "the {tool} launch acknowledgement names its child and crosses nothing",
+            );
+        }
+        let mut anonymous = launched;
+        anonymous.as_object_mut().expect("an object").remove("agentId");
+        match parse_value(&agent_post_tool_use(anonymous)) {
+            Ok(Some(HookEvent::SpawnResult { child, value, .. })) => {
+                assert_eq!(child, None, "a response naming no subagent names no child");
+                assert_eq!(value, None);
+            }
+            other => panic!("the spawn's post-use hook is its result: {other:?}"),
+        }
+        let mut undelivered = agent_post_tool_use(serde_json::Value::Null);
+        undelivered
+            .as_object_mut()
+            .expect("the fixture is an object")
+            .remove("tool_response");
+        match parse_value(&undelivered) {
+            Ok(Some(HookEvent::SpawnResult {
+                outcome, child, value, ..
+            })) => {
+                assert_eq!(outcome, ToolOutcome::Indeterminate);
+                assert_eq!((child, value), (None, None));
+            }
+            other => panic!("the spawn's post-use hook is its result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_anonymous_or_empty_agent_result_carries_what_it_spells() {
+        match parse_value(&agent_post_tool_use(
+            serde_json::json!({"content": [{"type": "text", "text": "x"}]}),
+        )) {
+            Ok(Some(HookEvent::SpawnResult { child, value, .. })) => {
+                assert_eq!(child, None, "no agentId names no child");
+                assert_eq!(value, Some("x".to_string()));
+            }
+            other => panic!("expected a SpawnResult event, got {other:?}"),
+        }
+        match parse_value(&agent_post_tool_use(
+            serde_json::json!({"agentId": "a3", "content": []}),
+        )) {
+            Ok(Some(HookEvent::SpawnResult { value, .. })) => {
+                assert_eq!(value, None, "empty content is no message");
+            }
+            other => panic!("expected a SpawnResult event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_text_agent_content_is_the_message_as_spelled() {
+        for content in [
+            serde_json::json!([{"type": "image", "source": {"data": "iVBORw0"}}]),
+            serde_json::json!([{"type": "text", "text": "one"}, {"type": "text", "text": 7}]),
+            serde_json::json!({"text": "not an array"}),
+        ] {
+            match parse_value(&agent_post_tool_use(
+                serde_json::json!({"agentId": "a4", "content": content}),
+            )) {
+                Ok(Some(HookEvent::SpawnResult { child, value, .. })) => {
+                    assert_eq!(child, Some(TrajectoryId("cc:s1:a4".to_string())));
+                    assert_eq!(value, Some(content.to_string()), "the content crosses as spelled");
+                }
+                other => panic!("expected a SpawnResult event, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn ask_user_question_input_is_normalized_of_injected_answers() {
+        let questions = serde_json::json!({"questions": [{"question": "Proceed?"}]});
+        let post = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "s1",
+            "tool_name": "AskUserQuestion",
+            "tool_input": {
+                "questions": [{"question": "Proceed?"}],
+                "answers": {"Proceed?": "Yes"},
+                "annotations": {"Proceed?": {"notes": "ok"}},
+            },
+            "tool_response": {"answers": {"Proceed?": "Yes"}},
+        });
+        match parse_value(&post) {
+            Ok(Some(HookEvent::ToolResult { call, .. })) => {
+                let stripped: serde_json::Value =
+                    serde_json::from_str(call.arguments.get()).expect("the stripped input parses");
+                assert_eq!(stripped, questions, "the injected fields are stripped");
+            }
+            other => panic!("expected a ToolResult event, got {other:?}"),
+        }
+        let other = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "s1",
+            "tool_name": "SurveyTool",
+            "tool_input": {"answers": {"q": "kept"}},
+            "tool_response": "done",
+        });
+        match parse_value(&other) {
+            Ok(Some(HookEvent::ToolResult { call, .. })) => {
+                assert_eq!(call.arguments.get(), r#"{"answers":{"q":"kept"}}"#);
+            }
+            other => panic!("expected a ToolResult event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failed_tool_run_parses_to_a_typed_failure() {
+        for tool in ["Bash", "Agent"] {
+            let event = serde_json::json!({
+                "hook_event_name": "PostToolUseFailure",
+                "session_id": "s1",
+                "tool_name": tool,
+                "tool_input": {"command": "ls"},
+            });
+            match parse_value(&event) {
+                Ok(Some(HookEvent::ToolResult { outcome, .. })) => assert_eq!(
+                    outcome,
+                    ToolOutcome::Failure {
+                        message: "the tool run failed".to_string(),
+                    },
+                ),
+                other => panic!("expected a ToolResult event for {tool}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_edit_preserves_the_native_error_observation() {
+        let event = serde_json::json!({
+            "hook_event_name": "PostToolUseFailure",
+            "session_id": "s1",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "/work/secret.txt"},
+            "error": "old_string matched private content twice",
+        });
+        assert!(matches!(parse_value(&event), Ok(Some(HookEvent::ToolResult {
+            outcome: ToolOutcome::Failure { message }, ..
+        })) if message == "old_string matched private content twice"));
+    }
+
+    #[test]
+    fn a_post_tool_use_maps_its_response_shape_onto_one_outcome() {
+        let post = |response: Option<serde_json::Value>| {
+            let mut event = serde_json::json!({
+                "hook_event_name": "PostToolUse",
+                "session_id": "s1",
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls"},
+            });
+            if let Some(response) = response {
+                event["tool_response"] = response;
+            }
+            match parse_value(&event) {
+                Ok(Some(HookEvent::ToolResult { outcome, .. })) => outcome,
+                other => panic!("expected a ToolResult event, got {other:?}"),
+            }
+        };
+        assert_eq!(post(None), ToolOutcome::Indeterminate, "no response key at all");
+        assert_eq!(
+            post(Some(serde_json::Value::Null)),
+            ToolOutcome::Indeterminate,
+            "an explicit null response carries no result either",
+        );
+        assert_eq!(
+            post(Some(serde_json::json!({"stdout": "readme.txt"}))),
+            ToolOutcome::Success {
+                body: OutcomeBody::Available("{\"stdout\":\"readme.txt\"}".to_string()),
+            },
+        );
+        assert_eq!(
+            post(Some(serde_json::json!("plain text"))),
+            ToolOutcome::Success {
+                body: OutcomeBody::Available("\"plain text\"".to_string()),
+            },
+            "a scalar response is carried as its JSON rendering, like every other shape",
+        );
+        let big = serde_json::json!("x".repeat(5000));
+        assert_eq!(
+            post(Some(big.clone())),
+            ToolOutcome::Success {
+                body: OutcomeBody::Available(big.to_string()),
+            },
+        );
+    }
+
+    /// The codec's reading of a post-use hook and the derivation that decides the
+    /// lifecycle agree on every response shape: under the spawn's tools the event is the
+    /// spawn's result, with the child and the returned message each present only where the
+    /// response has one, and under any other tool it is never one.
+    #[test]
+    fn every_post_use_of_the_spawns_tool_is_a_spawn_result() {
+        let responses = [
+            agent_response(),
+            serde_json::json!({"agentId": "a1"}),
+            serde_json::json!({"content": [{"type": "text", "text": "x"}]}),
+            serde_json::json!({"result": "the secret"}),
+            serde_json::json!({}),
+            serde_json::Value::Null,
+        ];
+        for tool in ["Agent", "Task", "Bash"] {
+            let spawn = derived(tool).expect("derives").spawn;
+            for response in &responses {
+                let mut event = agent_post_tool_use(response.clone());
+                event["tool_name"] = serde_json::Value::String(tool.to_string());
+                let parsed = parse_value(&event);
+                assert_eq!(
+                    matches!(parsed, Ok(Some(HookEvent::SpawnResult { .. }))),
+                    spawn,
+                    "{tool} on {response}: the codec and the derivation disagree ({parsed:?})",
+                );
+            }
+        }
     }
 }

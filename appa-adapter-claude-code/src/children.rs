@@ -61,3 +61,83 @@ pub(crate) fn agent_file_ids(text: &str, prefix: &str, suffix: &str) -> Vec<Stri
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::fixtures::*;
+    use appa_runtime_api::TrajectoryId;
+    #[test]
+    fn a_calls_arguments_name_the_family_children_they_spell() {
+        assert!(named_children("Agent", serde_json::json!({"prompt": "list files"})).is_empty());
+        assert_eq!(
+            named_children(
+                "Bash",
+                serde_json::json!({"command": "cat tasks/a1.output; grep x subagents/agent-a2.jsonl tasks/a1.output"}),
+            ),
+            vec![
+                TrajectoryId("cc:s1:a1".to_string()),
+                TrajectoryId("cc:s1:a2".to_string())
+            ],
+        );
+        assert_eq!(
+            named_children(
+                "Read",
+                serde_json::json!({"file_path": "/home/u/.claude/subagents/agent-b7.jsonl", "meta": [{"p": "tasks/x-1.output"}]}),
+            ),
+            vec![
+                TrajectoryId("cc:s1:b7".to_string()),
+                TrajectoryId("cc:s1:x-1".to_string())
+            ],
+        );
+        assert!(
+            named_children("Read", serde_json::json!({"file_path": "tasks/a1.txt"})).is_empty(),
+            "another suffix names no child"
+        );
+    }
+
+    /// The scan reads one whole path token. A name that only contains the spelling —
+    /// another directory ending in `tasks`, a copy under another extension — is a
+    /// different file, and a call touching it names no child.
+    #[test]
+    fn a_path_that_merely_contains_the_spelling_names_no_child() {
+        for path in [
+            "mytasks/a1.output",
+            "tasks/a1.output.bak",
+            "notes/tasks/a1.outputs",
+            "mysubagents/agent-a1.jsonl",
+            "subagents/agent-a1.jsonl.gz",
+            "backup-subagents/agent-a1.jsonl",
+        ] {
+            assert!(
+                named_children("Read", serde_json::json!({ "file_path": path })).is_empty(),
+                "{path} names neither documented child file"
+            );
+            assert!(
+                named_children("Bash", serde_json::json!({ "command": format!("cat {path}") })).is_empty(),
+                "{path} names neither documented child file inside a command"
+            );
+        }
+    }
+
+    /// The boundary keeps the scan working where the path is one argument of a shell
+    /// command: quotes, separators and the ends of the string all end the token.
+    #[test]
+    fn a_child_file_is_found_wherever_a_path_token_ends() {
+        for command in [
+            "cat tasks/a1.output",
+            "cat \"tasks/a1.output\"",
+            "cat 'tasks/a1.output'",
+            "cat ./tasks/a1.output",
+            "cat ../run/tasks/a1.output",
+            "cat /home/u/tasks/a1.output | wc -l",
+            "cat $(ls tasks/a1.output)",
+            "cp tasks/a1.output,tasks/a1.output.bak",
+        ] {
+            assert_eq!(
+                named_children("Bash", serde_json::json!({ "command": command })),
+                vec![TrajectoryId("cc:s1:a1".to_string())],
+                "{command}"
+            );
+        }
+    }
+}

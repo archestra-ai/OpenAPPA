@@ -89,3 +89,188 @@ pub(crate) fn is_spawn_tool(tool: &str) -> bool {
 pub(crate) fn is_mcp_tool(tool: &str) -> bool {
     tool.starts_with(MCP_PREFIX)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapter;
+    use crate::fixtures::*;
+    use appa_runtime_api::{CanonicalTool, ParseRefusal};
+    #[test]
+    fn each_raw_spelling_maps_onto_its_canonical_identity() {
+        for (raw, expected) in [
+            ("Bash", "host/claude-code/Bash"),
+            ("Agent", "host/claude-code/Agent"),
+            ("Task", "host/claude-code/Task"),
+            ("mcp__github__create_issue", "mcp/github/create_issue"),
+            ("mcp__github__a__b", "mcp/github/a__b"),
+            ("mcp__appa__other", "mcp/appa/other"),
+            (
+                "mcp__appa-guide__execute_remedy_plan",
+                "mcp/appa-guide/execute_remedy_plan",
+            ),
+            ("mcp__a.b-c__T.o-o_l", "mcp/a.b-c/T.o-o_l"),
+            ("mcp_x", "host/claude-code/mcp_x"),
+            (CONTROL_TOOL_RAW, appa_runtime_api::CONTROL_TOOL),
+        ] {
+            let canonical = canonical(raw).unwrap_or_else(|refusal| panic!("{raw} maps: {refusal:?}"));
+            assert_eq!(canonical.as_str(), expected, "{raw}");
+            assert_eq!(canonical.is_control(), raw == CONTROL_TOOL_RAW, "{raw}");
+            assert_eq!(
+                (adapter().spell)(&canonical).as_deref(),
+                Some(raw),
+                "the inverse spells {expected} back as the name Claude Code dispatches"
+            );
+        }
+    }
+
+    /// A canonical id no Claude Code spelling derives to has no Claude Code spelling.
+    /// `mcp/appa/execute_remedy_plan` is the ordinary tool a policy may declare on the
+    /// runtime's own server: its rendering is the reserved control spelling, which names
+    /// another tool, so it has none.
+    #[test]
+    fn a_canonical_id_outside_the_range_has_no_host_spelling() {
+        for name in [
+            "agent/kagent/log-analyst",
+            "host/kagent/memory_persist",
+            "host/kagent-gate/outer",
+            "host/claude-code/mcp__github__x",
+            "mcp/appa/execute_remedy_plan",
+        ] {
+            let canonical = CanonicalTool::parse(name).expect("the fixture is canonical");
+            assert_eq!((adapter().spell)(&canonical), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_spelling_outside_the_domain_is_a_named_refusal() {
+        for raw in [
+            "",
+            "mcp__",
+            "mcp__github",
+            "mcp____x",
+            "mcp__github__",
+            "mcp__git hub__x",
+            "mcp__github__x(y)",
+            "Bash(command:ls)",
+            "a/b",
+            "host/claude-code/Bash",
+            "agent/kagent/x",
+            "appa/execute_remedy_plan",
+            "*",
+        ] {
+            match canonical(raw) {
+                Err(ParseRefusal::Malformed { detail }) => {
+                    assert!(
+                        detail.contains(&format!("{raw:?}")),
+                        "the refusal names {raw:?}: {detail}"
+                    );
+                }
+                other => panic!("{raw:?} must be refused, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_derivation_carries_the_canonical_identity_and_spawn() {
+        for tool in ["Agent", "Task"] {
+            let derived = derived(tool).expect("derives");
+            assert!(derived.spawn, "{tool} is the spawn");
+            assert_eq!(derived.canonical.as_str(), format!("host/claude-code/{tool}"));
+        }
+        assert!(!derived("Bash").expect("derives").spawn);
+        assert!(matches!(derived("mcp__github"), Err(ParseRefusal::Malformed { .. })));
+    }
+
+    mod laws {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn segment_chars() -> impl Strategy<Value = String> {
+            "[A-Za-z0-9_.-]{0,10}"
+        }
+
+        fn raw_spelling() -> impl Strategy<Value = String> {
+            prop_oneof![
+                segment_chars(),
+                (segment_chars(), segment_chars()).prop_map(|(server, tool)| format!("mcp__{server}__{tool}")),
+                (segment_chars(), segment_chars(), segment_chars())
+                    .prop_map(|(server, tool, more)| format!("mcp__{server}__{tool}__{more}")),
+                segment_chars().prop_map(|rest| format!("mcp__{rest}")),
+                Just(CONTROL_TOOL_RAW.to_string()),
+            ]
+        }
+
+        /// Every canonical identity a policy may declare, including the ones no Claude
+        /// Code spelling derives to: the control tool's own server and name, another
+        /// host's namespace, and a host tool named like an `mcp__` spelling.
+        fn canonical_id() -> impl Strategy<Value = CanonicalTool> {
+            let family = prop_oneof![Just("mcp"), Just("host"), Just("agent")];
+            let namespace = prop_oneof![
+                Just("appa".to_string()),
+                Just("claude-code".to_string()),
+                Just("kagent".to_string()),
+                segment_chars(),
+            ];
+            let name = prop_oneof![
+                Just("execute_remedy_plan".to_string()),
+                Just("mcp__github__x".to_string()),
+                segment_chars(),
+            ];
+            prop_oneof![
+                (family, namespace, name).prop_filter_map("a canonical identity", |(family, namespace, name)| {
+                    CanonicalTool::of(family, &namespace, &name).ok()
+                }),
+                raw_spelling().prop_filter_map("an accepted spelling", |raw| canonical(&raw).ok()),
+            ]
+        }
+
+        proptest! {
+            #[test]
+            fn an_accepted_spelling_parses_back_and_is_control_only_when_registered(raw in raw_spelling()) {
+                if let Ok(canonical) = canonical(&raw) {
+                    prop_assert_eq!(CanonicalTool::parse(canonical.as_str()), Ok(canonical.clone()));
+                    prop_assert_eq!(canonical.is_control(), raw == CONTROL_TOOL_RAW);
+                    prop_assert!(!canonical.as_str().starts_with("agent/"), "{}", canonical);
+                }
+            }
+
+            /// The inverse is total over the derivation's range and returns the exact
+            /// spelling Claude Code dispatches, so the runtime never has to keep one.
+            #[test]
+            fn the_inverse_spells_every_derived_identity_back(raw in raw_spelling()) {
+                if let Ok(canonical) = canonical(&raw) {
+                    let spelled = (adapter().spell)(&canonical);
+                    prop_assert_eq!(spelled.as_deref(), Some(raw.as_str()));
+                }
+            }
+
+            /// The other direction, over every canonical identity a policy may declare:
+            /// a spelling the inverse yields is one Claude Code dispatches to the very
+            /// identity it was asked about. An identity whose rendering would name
+            /// another tool is spelled `None` instead, never that rendering.
+            #[test]
+            fn a_spelled_identity_is_the_one_its_spelling_derives_to(tool in canonical_id()) {
+                if let Some(spelled) = (adapter().spell)(&tool) {
+                    prop_assert_eq!(canonical(&spelled), Ok(tool));
+                }
+            }
+
+            #[test]
+            fn an_mcp_server_segment_never_contains_a_double_underscore(server in segment_chars(), tool in segment_chars()) {
+                if let Ok(canonical) = canonical(&format!("mcp__{server}__{tool}")) {
+                    let namespace = canonical.as_str().split('/').nth(1).expect("a namespace segment");
+                    prop_assert!(!namespace.contains("__"), "{}", canonical);
+                    prop_assert!(canonical.as_str().starts_with("mcp/"), "{}", canonical);
+                }
+            }
+
+            #[test]
+            fn the_map_is_injective(left in raw_spelling(), right in raw_spelling()) {
+                if let (Ok(a), Ok(b)) = (canonical(&left), canonical(&right)) {
+                    prop_assert_eq!(a == b, left == right, "{} vs {}", left, right);
+                }
+            }
+        }
+    }
+}
