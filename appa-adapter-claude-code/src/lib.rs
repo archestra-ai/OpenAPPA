@@ -2401,4 +2401,286 @@ mod tests {
             serde_json::json!({"error": "storage failure: disk full"}),
         );
     }
+
+    /// A post-use hook too broken to name both a tool and its response is answered by the
+    /// reason alone. Half a shape is no shape to restate: the bytes name a tool with nothing
+    /// to redact, or a response with no tool to key its restatement on, and either way the
+    /// answer says so rather than inventing a replacement.
+    #[test]
+    fn a_post_use_hook_missing_either_half_of_its_result_is_answered_by_the_reason() {
+        let reason = "unreadable";
+        for (name, body) in [
+            (
+                "a tool with no response",
+                r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_name":"Bash"}"#,
+            ),
+            (
+                "a response with no tool",
+                r#"{"hook_event_name":"PostToolUse","session_id":"s1","tool_response":{"stdout":"readme.txt"}}"#,
+            ),
+        ] {
+            let answer = withholding(body.as_bytes(), reason).expect("a post-use hook reports a result");
+            assert_eq!(
+                answer,
+                serde_json::json!({"decision": "block", "reason": reason}),
+                "{name} is answered by the reason alone",
+            );
+            assert!(
+                !answer.to_string().contains("readme.txt"),
+                "{name} carries nothing of the response across",
+            );
+        }
+    }
+
+    /// The two content slots no test reached, and the three outcomes that deliver no body at
+    /// all. A slot puts the text where that tool's own output carries it; an outcome with
+    /// nothing delivered has no shape to restate, so the answer falls back to a bare block
+    /// and the result the tool produced is still taken out of the model's way by the reason.
+    #[test]
+    fn the_remaining_slots_carry_the_text_and_an_undelivered_outcome_falls_back() {
+        for (tool, response, slot) in [
+            ("WebFetch", serde_json::json!({"result": "the page body"}), "/result"),
+            ("Write", serde_json::json!({"content": "the file body"}), "/content"),
+        ] {
+            let replacement = swap_leaves(tool, response, "[appa] withheld");
+            assert_eq!(
+                replacement.output.pointer(slot).and_then(serde_json::Value::as_str),
+                Some("[appa] withheld"),
+                "{tool} carries the text in its own content field",
+            );
+            assert_eq!(replacement.context, None, "{tool} placed the text in its slot");
+        }
+
+        let undelivered = [
+            (
+                "a failed run",
+                ToolOutcome::Failure {
+                    message: "the tool run failed".to_string(),
+                },
+            ),
+            (
+                "a success with no body",
+                ToolOutcome::Success {
+                    body: OutcomeBody::Unavailable,
+                },
+            ),
+            (
+                "a body that is not JSON",
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("not json at all".to_string()),
+                },
+            ),
+        ];
+        for (name, outcome) in undelivered {
+            let event = HookEvent::ToolResult {
+                actor: Actor {
+                    root: root(),
+                    child: None,
+                },
+                call: ProposedCall {
+                    tool: "Bash".to_string(),
+                    arguments: raw(serde_json::json!({"command": "ls"})),
+                },
+                call_id: None,
+                outcome,
+            };
+            assert_eq!(
+                render(
+                    &event,
+                    &HookDecision::Block {
+                        reason: "held".to_string(),
+                    }
+                ),
+                serde_json::json!({"decision": "block", "reason": "held"}),
+                "{name} has no shape to restate, so the answer is the reason",
+            );
+        }
+    }
+
+    /// Which channel every answer takes, over every event this codec produces crossed with
+    /// every decision the runtime can answer it with. The four decisions that stand in for a
+    /// result — block, replace, deliver, return — each render a replacement where the event
+    /// carries a body to restate and fall back to a bare block where it does not, and only a
+    /// start has a slot for context. The table is the whole map: a change that moves one
+    /// answer onto another channel moves a cell here.
+    #[test]
+    fn every_event_and_decision_renders_on_one_channel() {
+        /// The channel a rendered body takes, read back out of its shape.
+        fn channel(body: &serde_json::Value) -> &'static str {
+            let slot = &body["hookSpecificOutput"];
+            let replacement = !slot["updatedToolOutput"].is_null();
+            let error = !body["error"].is_null();
+            match (replacement, error, body["decision"] == "block") {
+                (true, true, _) => "error+replacement",
+                (true, false, true) => "replacement+reason",
+                (true, false, false) => "replacement",
+                (false, true, _) => "error",
+                (false, false, true) => "block",
+                (false, false, false) => match (
+                    slot["additionalContext"].is_null(),
+                    slot["permissionDecision"].as_str(),
+                ) {
+                    (false, _) => "context",
+                    (_, Some("allow")) => "allow",
+                    (_, Some("deny")) => "deny",
+                    _ => "empty",
+                },
+            }
+        }
+
+        let decisions = [
+            HookDecision::Ack,
+            HookDecision::AllowCall { spawn: None },
+            HookDecision::PassControl,
+            HookDecision::DenyCall {
+                feedback: "denied".to_string(),
+                offers: Vec::new(),
+                review: Vec::new(),
+            },
+            HookDecision::Block {
+                reason: "held".to_string(),
+            },
+            HookDecision::ReplaceOutput {
+                output: "replaced".to_string(),
+            },
+            HookDecision::DeliverValue {
+                value: "delivered".to_string(),
+            },
+            HookDecision::ChildReturn {
+                value: "returned".to_string(),
+            },
+            HookDecision::Context {
+                text: "advice".to_string(),
+            },
+            HookDecision::Refuse {
+                detail: "refused".to_string(),
+            },
+        ];
+
+        // ack, allow, control, deny, block, replace, deliver, return, context, refuse
+        let table: [(&str, HookEvent, [&str; 10]); 9] = [
+            (
+                "session start",
+                HookEvent::SessionStart { root: root() },
+                [
+                    "empty", "allow", "allow", "deny", "block", "block", "block", "block", "context", "error",
+                ],
+            ),
+            (
+                "prompt",
+                HookEvent::Prompt {
+                    actor: Actor {
+                        root: root(),
+                        child: None,
+                    },
+                    text: "do the thing".to_string(),
+                },
+                [
+                    "empty", "allow", "allow", "deny", "block", "block", "block", "block", "empty", "error",
+                ],
+            ),
+            (
+                "tool call",
+                pre_tool_use(),
+                [
+                    "empty", "allow", "allow", "deny", "block", "block", "block", "block", "empty", "error",
+                ],
+            ),
+            (
+                "tool result with a delivered body",
+                tool_result(serde_json::json!({"stdout": "readme.txt"})),
+                [
+                    "empty",
+                    "allow",
+                    "allow",
+                    "deny",
+                    "replacement+reason",
+                    "replacement",
+                    "replacement",
+                    "replacement",
+                    "empty",
+                    "error+replacement",
+                ],
+            ),
+            (
+                "tool result with no delivered body",
+                HookEvent::ToolResult {
+                    actor: Actor {
+                        root: root(),
+                        child: None,
+                    },
+                    call: ProposedCall {
+                        tool: "Bash".to_string(),
+                        arguments: raw(serde_json::json!({"command": "ls"})),
+                    },
+                    call_id: None,
+                    outcome: ToolOutcome::Indeterminate,
+                },
+                [
+                    "empty", "allow", "allow", "deny", "block", "block", "block", "block", "empty", "error",
+                ],
+            ),
+            (
+                "spawn result with a delivered body",
+                spawn_result(agent_response()),
+                [
+                    "empty",
+                    "allow",
+                    "allow",
+                    "deny",
+                    "replacement+reason",
+                    "replacement",
+                    "replacement",
+                    "replacement",
+                    "empty",
+                    "error+replacement",
+                ],
+            ),
+            (
+                "child start",
+                HookEvent::ChildStart {
+                    root: root(),
+                    child: TrajectoryId("cc:s1:a1".to_string()),
+                    spawn: SpawnRef::InFlight,
+                },
+                [
+                    "empty", "allow", "allow", "deny", "block", "block", "block", "block", "context", "error",
+                ],
+            ),
+            (
+                "child end",
+                HookEvent::ChildEnd {
+                    root: root(),
+                    child: TrajectoryId("cc:s1:a1".to_string()),
+                    value: Some("the child's return".to_string()),
+                },
+                [
+                    "empty", "allow", "allow", "deny", "block", "block", "block", "block", "empty", "error",
+                ],
+            ),
+            (
+                "turn end",
+                HookEvent::TurnEnd {
+                    actor: Actor {
+                        root: root(),
+                        child: None,
+                    },
+                },
+                [
+                    "empty", "allow", "allow", "deny", "block", "block", "block", "block", "empty", "error",
+                ],
+            ),
+        ];
+
+        for (name, event, expected) in table {
+            for (decision, expected) in decisions.iter().zip(expected) {
+                let body = render(&event, decision);
+                assert_eq!(
+                    channel(&body),
+                    expected,
+                    "{name} answered with {decision:?} renders {body}",
+                );
+            }
+        }
+    }
 }
