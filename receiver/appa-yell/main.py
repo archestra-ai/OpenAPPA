@@ -267,6 +267,11 @@ def sanitize_message_for_slack(message: str) -> str:
     return neutered
 
 
+def label(names: dict[str, str], raw: Any) -> str:
+    """Name one enumerated field of an untrusted report, or "Unknown" for anything else."""
+    return names.get(raw, "Unknown") if isinstance(raw, str) else "Unknown"
+
+
 def format_slack_payload(document: dict[str, Any], digest: str, kind: str, bucket_name: str) -> dict[str, Any]:
     """Structure the Slack alert: plain_text message body, and a context footer with metadata."""
     raw_message = document.get("message", "")
@@ -274,14 +279,10 @@ def format_slack_payload(document: dict[str, Any], digest: str, kind: str, bucke
     runtime = document.get("runtime")
     serving = runtime.get("serving") if isinstance(runtime, dict) else None
     serving = serving if isinstance(serving, dict) else {}
-    harness = {"archestra": "Archestra", "claude-code": "Claude Code", "kagent": "kagent"}.get(
-        serving.get("harness") if isinstance(serving.get("harness"), str) else "", "Unknown"
-    )
     origin = document.get("origin")
     origin = origin if isinstance(origin, dict) else {}
-    filed_by = {"cli": "CLI", "agent": "agent"}.get(
-        origin.get("kind") if isinstance(origin.get("kind"), str) else "", "Unknown"
-    )
+    harness = label({"archestra": "Archestra", "claude-code": "Claude Code", "kagent": "kagent"}, serving.get("harness"))
+    filed_by = label({"cli": "CLI", "agent": "agent"}, origin.get("kind"))
     metadata = f"Harness: {harness} | Filed by: {filed_by}"
     hostname = serving.get("hostname")
     if isinstance(hostname, str) and re.fullmatch(r"[A-Za-z0-9.-]{1,253}", hostname):
