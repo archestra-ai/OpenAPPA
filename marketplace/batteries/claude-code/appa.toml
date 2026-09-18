@@ -130,8 +130,8 @@ delta = { audience = ["self"] }
 tags = ["credentials"]
 
 # The stock `redact-secrets` sanitizer masks private-key blocks, tokens of
-# well-known shapes, the value of any assignment whose key names a secret, and
-# long high-entropy runs. It carries no tags, so it is offered for every
+# well-known shapes, the AWS secret access key, the value of any assignment
+# whose key names a secret, and long high-entropy runs. It carries no tags, so it is offered for every
 # withheld Bash result the session cannot read as it is, whether a static
 # `credentials` rule or the Annotator narrowed it: an Annotator's answer cannot
 # tag a call, so a tagged sanitizer would never reach a command the static
