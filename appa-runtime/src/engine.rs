@@ -79,7 +79,7 @@ use crate::api::{EmbeddedPresentationOptions, OutcomeBody, RemedyDisplay, Remedy
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
 use crate::consult::{
     AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, HistoryEntry,
-    Requirement, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
+    Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
 };
 use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn};
 
@@ -1483,15 +1483,7 @@ impl RuntimeEngine {
             .iter()
             .filter_map(|requirement| {
                 let declaration = AuthorityDeclaration::of(registry.authority(&requirement.authority)?, chain);
-                let artifact = AuthorityArtifact {
-                    tool: call.tool().as_str().to_string(),
-                    arguments: call.arguments().clone(),
-                    requirements: requirement
-                        .covers
-                        .iter()
-                        .map(|gap| Requirement::of(gap, chain))
-                        .collect(),
-                };
+                let artifact = AuthorityArtifact::of(call, requirement, chain);
                 Some(PendingReview {
                     offer: offer.clone(),
                     authority: requirement.authority.as_str().to_string(),
@@ -1768,15 +1760,7 @@ impl RuntimeEngine {
                     requests.push(ExternalRequest::Authority {
                         authority: name,
                         declaration: AuthorityDeclaration::of(registered, chain),
-                        artifact: AuthorityArtifact {
-                            tool: call.tool().as_str().to_string(),
-                            arguments: call.arguments().clone(),
-                            requirements: requirement
-                                .covers
-                                .iter()
-                                .map(|gap| Requirement::of(gap, chain))
-                                .collect(),
-                        },
+                        artifact: AuthorityArtifact::of(call, requirement, chain),
                         review,
                     });
                 }

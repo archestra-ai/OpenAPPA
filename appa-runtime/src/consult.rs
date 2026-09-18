@@ -18,8 +18,10 @@ use serde::{Deserialize, Serialize};
 use appa_engine::authority::{Authority, DeclaredTransition, Sanitizer};
 use appa_engine::check::Gap;
 use appa_engine::label::{Clause, DeclaredAudience, Trust};
+use appa_engine::plan::RequiredRuling;
 use appa_engine::registry::AudienceVocabulary;
 use appa_engine::registry::TrustChain;
+use appa_engine::value::ResolvedCall;
 
 /// Which registered external a consult addresses. Closed: the wire
 /// format is per kind, not per deployment.
@@ -254,6 +256,20 @@ pub struct AuthorityArtifact {
     pub tool: String,
     pub arguments: serde_json::Value,
     pub requirements: Vec<Requirement>,
+}
+
+impl AuthorityArtifact {
+    pub fn of(call: &ResolvedCall, requirement: &RequiredRuling, chain: &TrustChain) -> AuthorityArtifact {
+        AuthorityArtifact {
+            tool: call.tool().as_str().to_string(),
+            arguments: call.arguments().clone(),
+            requirements: requirement
+                .covers
+                .iter()
+                .map(|gap| Requirement::of(gap, chain))
+                .collect(),
+        }
+    }
 }
 
 /// One requirement a ruling covers, projected from the gap the engine assigned. The

@@ -84,10 +84,13 @@ pub enum Elicitation {
         timeout: Duration,
     },
     /// The person's answer, returned with the retried call. From MCP 2026-07-28 a server
-    /// asks by ending the call with the review as an input request ([`review_request`]);
-    /// the client shows it and repeats the call carrying this `ElicitResult`.
+    /// asks by ending the call with the review as an input request ([`Elicitation::open`]);
+    /// the client shows it and repeats the call carrying this action.
     #[cfg(feature = "daemon")]
-    Returned(serde_json::Value),
+    Returned(ElicitationAction),
+    /// The retried call carried an answer this runtime cannot read, which is no answer.
+    #[cfg(feature = "daemon")]
+    Unreadable,
 }
 
 /// What one `execute_remedy_plan` request does about its review.
@@ -123,9 +126,16 @@ impl Elicitation {
             return Review::Proceed(Some(Elicitation::Mcp { request, timeout }));
         }
         if let Some(answer) = responses.and_then(|mut responses| responses.remove(REVIEW_KEY)) {
-            return Review::Proceed(Some(Elicitation::Returned(answer)));
+            return Review::Proceed(Some(match serde_json::from_value::<ElicitResult>(answer) {
+                Ok(result) => Elicitation::Returned(result.action),
+                Err(error) => {
+                    tracing::warn!(%error, "the returned review is unreadable");
+                    Elicitation::Unreadable
+                }
+            }));
         }
-        match asks_by_form(&request).then(pending).flatten() {
+        let review = if asks_by_form(&request) { pending() } else { None };
+        match review {
             Some(review) => Review::Ask(InputRequiredResult::from_input_requests(
                 [(REVIEW_KEY.to_string(), InputRequest::Elicitation(review_form(review)))].into(),
             )),
@@ -156,15 +166,8 @@ impl Elicitation {
     ) -> ConsultOutcome {
         let (request, timeout) = match self {
             Elicitation::Mcp { request, timeout } => (request, timeout),
-            Elicitation::Returned(answer) => {
-                return match serde_json::from_value::<ElicitResult>(answer.clone()) {
-                    Ok(result) => ruled(result.action),
-                    Err(error) => {
-                        tracing::warn!(%error, "an unreadable returned review is no answer");
-                        ConsultOutcome::NoAnswer(NoAnswerReason::Malformed)
-                    }
-                };
-            }
+            Elicitation::Returned(action) => return ruled(action.clone()),
+            Elicitation::Unreadable => return ConsultOutcome::NoAnswer(NoAnswerReason::Malformed),
         };
         let peer = &request.peer;
         if !asks_by_form(request) {
@@ -203,7 +206,9 @@ impl Elicitation {
             Ending::Answered(answered) => answered,
             ended => {
                 let (reason, outcome) = match ended {
-                    Ending::Cancelled => ("the call that asked for this ruling ended", NoAnswerReason::Unreachable),
+                    // Not `Unreachable`: that reason tells the model no retry reaches the
+                    // person, and a fresh call opens a fresh request.
+                    Ending::Cancelled => ("the call that asked for this ruling ended", NoAnswerReason::Transport),
                     _ => ("the review window closed", NoAnswerReason::Timeout),
                 };
                 tracing::debug!(reason, "withdrawing the review");
