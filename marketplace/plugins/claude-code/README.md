@@ -246,8 +246,6 @@ explicit about the checked boundary and its unobserved inputs.
 - `default.appa.toml` — a complete starting policy: every built-in Claude
   Code tool released with the neutral annotation, web tool results marked
   suspicious, and subagents run as children of the session.
-- `hitl.appa.toml` — the same plus GitHub MCP tools, with issue writes
-  requiring a human sign-off served over MCP elicitation.
 - `live-gate-check.py` — the harness conformance check described below.
 
 The `appa-guide` skill, which builds the initial tool policy and guides
