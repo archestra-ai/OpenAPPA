@@ -670,13 +670,19 @@ async fn a_withheld_result_reports_on_stderr_while_its_replacement_takes_stdout(
     let (code, stdout, stderr) = tokio::task::spawn_blocking(move || run_client_heard(&url, POST_TOOL_USE))
         .await
         .expect("the blocking task joins");
-    assert_eq!(code, 0, "the harness applies a replacement only from a zero exit: {stdout}");
+    assert_eq!(
+        code, 0,
+        "the harness applies a replacement only from a zero exit: {stdout}"
+    );
     let answer: serde_json::Value = serde_json::from_str(&stdout).expect("the withholding renders as JSON");
     assert!(
         !answer["hookSpecificOutput"]["updatedToolOutput"].is_null(),
         "the produced output is replaced: {answer}"
     );
-    assert!(!stderr.is_empty(), "a withholding says so on the channel the harness shows");
+    assert!(
+        !stderr.is_empty(),
+        "a withholding says so on the channel the harness shows"
+    );
     assert!(
         !stderr.contains("readme.txt") && !stdout.contains("readme.txt"),
         "the withheld body reaches neither channel: {stdout} {stderr}"
@@ -734,8 +740,7 @@ async fn an_unanswered_child_end_withholds_the_return_it_reports() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unreadable_stop_is_held_by_the_exit_code_with_nothing_printed() {
     let url = refused_url().await;
-    let nameless =
-        r#"{"hook_event_name":"SubagentStop","session_id":"client-test","last_assistant_message":"the child's secret"}"#;
+    let nameless = r#"{"hook_event_name":"SubagentStop","session_id":"client-test","last_assistant_message":"the child's secret"}"#;
     let (code, stdout) = tokio::task::spawn_blocking(move || run_client(&url, nameless))
         .await
         .expect("the blocking task joins");
