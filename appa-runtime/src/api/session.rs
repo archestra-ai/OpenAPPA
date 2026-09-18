@@ -400,15 +400,24 @@ impl Session {
     /// construction: no proposal released it, so no outcome hook is owed
     /// for it, and it ends only when the harness runs it or proposes
     /// past it (`claim_or_abandon`). Closing it here would discard the
-    /// remedy that minted it.
+    /// remedy that minted it. Only that one dispatch is spared: an
+    /// ordinary call open beside it is owed an outcome like any other,
+    /// and sparing those too would leave a turn end closing nothing.
     fn carried_calls(&self) -> Result<Vec<OpenDispatch>, EventError> {
         let log = self.inner.log(&self.root)?;
         let policy = self.policy(&log)?;
         let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
         match policy.engine().liveness(&view, &self.trajectory) {
             Liveness::Ended | Liveness::Unopened => Ok(Vec::new()),
-            Liveness::Live if policy.engine().substituted_release(&view, &self.trajectory).is_some() => Ok(Vec::new()),
-            Liveness::Live => Ok(policy.engine().open_dispatches(&view, &self.trajectory)),
+            Liveness::Live => {
+                let standing = policy.engine().substituted_release(&view, &self.trajectory);
+                Ok(policy
+                    .engine()
+                    .open_dispatches(&view, &self.trajectory)
+                    .into_iter()
+                    .filter(|open| standing.as_ref().is_none_or(|release| release.id != open.id))
+                    .collect())
+            }
         }
     }
 
@@ -3685,6 +3694,81 @@ context_control = true
             ));
             assert!(runtime.open_dispatches(&root(), &root()).is_empty());
         }
+    }
+
+    /// The standing release is spared, but only it. An ordinary call open beside it is owed an
+    /// outcome, and a turn end that closed nothing would strand it for the trajectory's life.
+    ///
+    /// The ordinary call is opened before the block that mints the offer: a proposal landing
+    /// between the block and the execution invalidates the offer instead.
+    #[tokio::test]
+    async fn a_turn_end_closes_an_ordinary_call_open_beside_a_standing_substituted_call() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(
+            substituting_config(SUBSTITUTED_SEND, None),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the deployment opens");
+        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let read = ProposedCall {
+            tool: "read_hr".to_string(),
+            arguments: raw(serde_json::json!({})),
+        };
+
+        // Narrow the trajectory to hr, the way `narrowed_and_blocked` does.
+        assert!(matches!(
+            session.on_tool_call(read.clone(), false).await,
+            Ok(ToolCallDecision::Deny { .. }),
+        ));
+        let accept = surfaced_offer_for(&runtime, &root(), &root());
+        assert!(matches!(
+            session.on_remedy(accept, RemedyArguments::default(), None, None).await,
+            Ok(RemedyDecision::Authorized { .. }),
+        ));
+        assert!(matches!(
+            session.on_tool_call(read.clone(), false).await.expect("the read releases"),
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
+        session
+            .on_tool_result(
+                read.clone(),
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("Alice Chen".to_string()),
+                },
+            )
+            .await
+            .expect("the read closes");
+
+        // The ordinary call that must still be closed at the turn's end.
+        session
+            .on_tool_call_identified(read, Some("toolu-1".to_string()), false)
+            .await
+            .expect("the identified read releases");
+
+        assert!(matches!(
+            session.on_tool_call(send(RAW_BODY), false).await,
+            Ok(ToolCallDecision::Deny { .. }),
+        ));
+        let quoted = runtime
+            .minted_offers(&root(), &root())
+            .pop()
+            .expect("the block surfaced an offer");
+        let hop = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
+        assert!(matches!(
+            session.on_remedy(hop, RemedyArguments::default(), None, None).await,
+            Ok(RemedyDecision::Substituted { .. }),
+        ));
+        let standing = standing_release(&runtime).expect("the substituted call stands");
+        assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 2);
+
+        session.on_turn_end().await.expect("the turn end acks");
+
+        assert_eq!(
+            runtime.open_dispatches(&root(), &root()),
+            vec![standing],
+            "the turn end closed the ordinary call and spared the substituted release"
+        );
     }
 
     /// No proposal released the substituted call, so no outcome hook is
