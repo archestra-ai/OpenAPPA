@@ -77,12 +77,18 @@ impl PolicyBasis {
             } else {
                 self.flow
             },
-            subject: advance
-                .subjects
-                .iter()
-                .filter(|moved| *moved == subject)
-                .fold(self.subject, |generation, _| generation.next()),
+            subject: advance.generation_of(subject, self.subject),
         }
+    }
+}
+
+impl BasisAdvance {
+    /// Where one subject's generation lands once this advance applies.
+    pub(crate) fn generation_of(&self, subject: &SubjectKey, from: SubjectGeneration) -> SubjectGeneration {
+        self.subjects
+            .iter()
+            .filter(|moved| *moved == subject)
+            .fold(from, |generation, _| generation.next())
     }
 }
 

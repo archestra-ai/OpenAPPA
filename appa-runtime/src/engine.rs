@@ -311,7 +311,6 @@ pub enum Next {
         feedback: Vec<Feedback>,
     },
     PresentToModel(Presentation),
-    InvokeTool(ReleasedCall),
     Approved {
         tool: String,
         bytes: Vec<u8>,
@@ -455,6 +454,7 @@ impl From<&TransitionRefusal> for ReplayRefusalClass {
             TransitionRefusal::UndischargedAcceptance => ReplayRefusalClass("undischarged_acceptance"),
             TransitionRefusal::UnbackedDenial => ReplayRefusalClass("unbacked_denial"),
             TransitionRefusal::UnknownApproval => ReplayRefusalClass("unknown_approval"),
+            TransitionRefusal::UnknownCandidate => ReplayRefusalClass("unknown_candidate"),
             TransitionRefusal::StaleSpend => ReplayRefusalClass("stale_spend"),
         }
     }
@@ -837,8 +837,9 @@ impl RuntimeEngine {
     }
 
     /// Would applying this batch leave the trajectory with more than one
-    /// dispatch open? The runtime asks only when a host supplied no identity
-    /// for the new call or an older open call has no identity.
+    /// dispatch open? The runtime asks only of a batch that opens one, and
+    /// only when the host supplied no identity for the new call or an older
+    /// open call has no identity.
     pub(crate) fn opens_a_second_dispatch(&self, view: &EngineView, trajectory: &TrajectoryId, facts: &[Fact]) -> bool {
         let owner = engine_id(trajectory);
         let mut open: std::collections::BTreeSet<_> = view
@@ -935,25 +936,6 @@ impl RuntimeEngine {
                 bytes: call.canonical_arguments().canonical_bytes().to_vec(),
             })
             .collect()
-    }
-
-    /// The substituted call this trajectory has standing, if it has one:
-    /// the one open dispatch no proposal batch released. An
-    /// offer execution releases a replaced call on its own,
-    /// so that dispatch names a call the harness never proposed — which
-    /// is exactly what tells the runtime to hand it out rather than to
-    /// refuse the next proposal as a second call in flight.
-    pub(crate) fn substituted_release(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<OpenDispatch> {
-        let owner = engine_id(trajectory);
-        let views = view.views(&owner)?;
-        views
-            .open_dispatches()
-            .find(|(dispatch, _)| !views.released_by_proposal(dispatch))
-            .map(|(dispatch, call)| OpenDispatch {
-                id: dispatch.clone(),
-                tool: call.tool().as_str().to_string(),
-                bytes: call.canonical_arguments().canonical_bytes().to_vec(),
-            })
     }
 
     /// Where one fork stands in the rebuilt view. The runtime uses it
@@ -1194,6 +1176,7 @@ impl RuntimeEngine {
             | Fact::OfferInvalidated { .. }
             | Fact::CallApproved { .. }
             | Fact::CallApprovalConsumed { .. }
+            | Fact::CandidateConsumed { .. }
             | Fact::BasisAdvanced { .. } => return Some(None),
             Fact::ForkPrepared { .. } | Fact::ForkOpened { .. } => return Some(None),
         };
@@ -1724,10 +1707,6 @@ impl RuntimeEngine {
                 &confined.offers,
                 presentation,
             )),
-            FollowUp::Offer(OfferFollowUp::Released(release)) => Next::InvokeTool(released(&release)),
-            FollowUp::Offer(OfferFollowUp::Settled(_)) => Next::PresentToModel(Presentation::Declined {
-                feedback: "[appa] the call this offer released is already settled; propose a fresh call".to_string(),
-            }),
             other => {
                 return Err(EngineRefusal::Invariant {
                     detail: format!("an offer produced a non-offer follow-up: {other:?}"),
@@ -3350,7 +3329,7 @@ fn return_instruction(
     include_display_plan: bool,
 ) -> String {
     let ReturnSpelling { floor, ranks } = spelling;
-    match sanitizer {
+    let body = match sanitizer {
         None => {
             let call = remedy_call(
                 control,
@@ -3398,7 +3377,10 @@ fn return_instruction(
                 terminal_safe(name.as_str()),
             )
         }
-    }
+    };
+    // The declaration binds one subagent call, not the session. A fan-out that reads it as a
+    // session-wide commitment budgets one authorization and then meets the same block N times.
+    format!("{body}\n    This declaration covers this one subagent call. Each call in a fan-out declares its own.")
 }
 
 fn return_description(sanitizer: Option<&appa_engine::names::SanitizerName>) -> String {

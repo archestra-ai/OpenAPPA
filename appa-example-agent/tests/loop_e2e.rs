@@ -770,6 +770,7 @@ async fn pursuing_an_input_sanitizer_offer_runs_the_replaced_call() {
             serde_json::json!({"body": "the figures, with Alice's salary"}),
         )
         .pursues_the_offer()
+        .calls("send_email", serde_json::json!({"body": "the figures, redacted"}))
         .says("Sent.");
 
     let agent = agent(
@@ -793,9 +794,9 @@ async fn pursuing_an_input_sanitizer_offer_runs_the_replaced_call() {
         "the host runs the sanitizer's replacement, once, and never the model's arguments",
     );
     assert_eq!(
-        provider.tool_result(5, "call_4"),
+        provider.tool_result(6, "call_5"),
         "queued",
-        "the replaced call's output answers the control call",
+        "the model proposes the arguments the remedy gave, and that call's output comes back",
     );
 }
 
@@ -846,6 +847,7 @@ async fn a_marked_spawn_is_offered_no_input_hop_while_an_ordinary_call_is() {
         .calls("read_hr", serde_json::json!({"who": "alice"}))
         .calls("send", serde_json::json!({"body": "the figures"}))
         .pursues_the_offer()
+        .calls("send", serde_json::json!({"body": "the figures, redacted"}))
         .calls("delegate", serde_json::json!({"task": "look up Alice's salary"}))
         .calls("read_hr", serde_json::json!({"who": "bob"}))
         .says("Done.");
@@ -860,7 +862,7 @@ async fn a_marked_spawn_is_offered_no_input_hop_while_an_ordinary_call_is() {
         .await,
     )
     .with_limits(Limits {
-        max_inference_rounds: 9,
+        max_inference_rounds: 10,
         ..Limits::default()
     });
     let outcome = agent.run(root(), "Delegate the lookup.", Default::default()).await;
@@ -871,9 +873,9 @@ async fn a_marked_spawn_is_offered_no_input_hop_while_an_ordinary_call_is() {
         "the ordinary call's block offers its hop",
     );
     assert!(
-        harness::offer_id(&provider.tool_result(6, "call_5")).is_none(),
+        harness::offer_id(&provider.tool_result(7, "call_6")).is_none(),
         "the marked spawn's block offers nothing: {}",
-        provider.tool_result(6, "call_5"),
+        provider.tool_result(7, "call_6"),
     );
     assert_eq!(
         host.sanitizer_consults(),

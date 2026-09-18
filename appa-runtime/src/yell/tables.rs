@@ -712,6 +712,15 @@ static CALL_APPROVAL_CONSUMED: Table = Table {
     ],
 };
 
+static CANDIDATE_CONSUMED: Table = Table {
+    name: "CandidateConsumed",
+    entries: &[
+        ("trajectory", TRAJECTORY),
+        ("subject", Rule::Table(&SUBJECT_KEY)),
+        ("dispatch", Rule::Table(&DISPATCH_ID)),
+    ],
+};
+
 static BASIS_ADVANCED: Table = Table {
     name: "BasisAdvanced",
     entries: &[
@@ -767,6 +776,7 @@ pub(crate) static FACT: Table = Table {
         ("OfferInvalidated", Rule::Table(&OFFER_LIFECYCLE)),
         ("CallApproved", Rule::Table(&CALL_APPROVED)),
         ("CallApprovalConsumed", Rule::Table(&CALL_APPROVAL_CONSUMED)),
+        ("CandidateConsumed", Rule::Table(&CANDIDATE_CONSUMED)),
         ("BasisAdvanced", Rule::Table(&BASIS_ADVANCED)),
         ("ForkPrepared", Rule::Table(&FORK_PREPARED)),
         ("ForkOpened", Rule::Table(&FORK_OPENED)),

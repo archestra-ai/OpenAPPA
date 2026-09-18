@@ -150,14 +150,23 @@ async fn narrowed(dir: &tempfile::TempDir, rewrite: serde_json::Value) -> (Arc<R
 }
 
 fn rewritten_path(outcome: RemedyOutcome) -> String {
-    let RemedyOutcome::Substituted { call } = outcome else {
-        panic!("the input sanitizer's hop substitutes the call, got {outcome:?}")
+    let RemedyOutcome::Authorized { call } = outcome else {
+        panic!("the input sanitizer's hop approves the substituted call, got {outcome:?}")
     };
     assert_eq!(call.tool, "read_file");
     serde_json::from_str::<serde_json::Value>(call.arguments.get()).expect("canonical JSON")["path"]
         .as_str()
         .expect("a path")
         .to_string()
+}
+
+/// Asserted before every re-proposal, so a regression that went back to releasing the call at
+/// remedy time cannot hide behind the assertions that follow it.
+fn nothing_ran(runtime: &Runtime) {
+    assert!(
+        released_effects(runtime).is_empty(),
+        "the remedy staged a derivation and released no call"
+    );
 }
 
 fn released_effects(runtime: &Runtime) -> Vec<Vec<String>> {
@@ -199,6 +208,7 @@ async fn a_rewrite_into_the_public_contract_consults_its_annotator_about_the_rew
         serde_json::json!({ "name": "read_file", "arguments": { "path": "public/q3.md" } })
     );
 
+    nothing_ran(&runtime);
     assert_eq!(
         propose(&runtime, read_file("public/q3.md")).await,
         HookDecision::AllowCall { spawn: None }
@@ -230,6 +240,7 @@ async fn a_rewrite_into_the_private_contract_records_the_classified_read_and_con
         "the private contract is static, and the proposal's annotation is not carried"
     );
 
+    nothing_ran(&runtime);
     assert_eq!(
         propose(&runtime, read_file("private/q3.md")).await,
         HookDecision::AllowCall { spawn: None }
@@ -272,9 +283,15 @@ async fn a_rewrite_within_the_public_contract_is_annotated_afresh() {
         consults[1]["artifact"]["args"],
         serde_json::json!({ "name": "read_file", "arguments": { "path": "public/q4.md" } })
     );
+    nothing_ran(&runtime);
     assert_eq!(
         propose(&runtime, read_file("public/q4.md")).await,
         HookDecision::AllowCall { spawn: None }
+    );
+    assert_eq!(
+        released_effects(&runtime).len(),
+        1,
+        "the derivation released the rewritten call once"
     );
 }
 
