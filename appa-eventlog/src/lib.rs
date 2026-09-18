@@ -2074,6 +2074,8 @@ mod tests {
     #[cfg(feature = "postgres")]
     fn forget_postgres_roots(store: &LogStore, roots: Vec<TrajectoryId>) {
         store
+            .lease()
+            .expect("a connection leases")
             .postgres()
             .expect("the PostgreSQL API is present")
             .with_client(move |client| {
@@ -2109,6 +2111,10 @@ mod tests {
         assert!(
             store.postgres().unwrap().begin().is_err(),
             "a store without a connection of its own holds no transaction"
+        );
+        assert!(
+            store.postgres().unwrap().with_client(|_| Ok(())).is_err(),
+            "nor anything else a host's SQL would leave on a connection"
         );
 
         let (a, b) = (store.lease().unwrap(), store.lease().unwrap());
@@ -2251,6 +2257,8 @@ mod tests {
         let lease = store.lease().unwrap();
         let pid = backend_pid(&lease);
         postgres_store(1)
+            .lease()
+            .unwrap()
             .postgres()
             .unwrap()
             .with_client(move |client| {
@@ -2268,8 +2276,10 @@ mod tests {
         );
 
         // The same end while the connection sits idle costs no operation at all.
-        let idle = backend_pid(&store);
+        let idle = backend_pid(&store.lease().unwrap());
         postgres_store(1)
+            .lease()
+            .unwrap()
             .postgres()
             .unwrap()
             .with_client(move |client| {
@@ -2277,12 +2287,14 @@ mod tests {
                 Ok(())
             })
             .expect("the server ends the idle connection");
+        // Past the window in which a connection that just came back is leased unasked.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
         assert!(
             store
                 .has_root(&root)
                 .expect("the pool tells a dead idle connection from a live one"),
         );
-        assert_ne!(backend_pid(&store), idle);
+        assert_ne!(backend_pid(&store.lease().unwrap()), idle);
         forget_postgres_roots(&store, vec![root]);
     }
 

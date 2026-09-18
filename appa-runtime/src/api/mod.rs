@@ -3403,6 +3403,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             .expect("the host's session lock is taken");
         let key = root.0.clone();
         let free_elsewhere = store
+            .lease()
+            .expect("a second connection leases")
             .postgres()
             .expect("the PostgreSQL API is present")
             .with_client(move |client| {

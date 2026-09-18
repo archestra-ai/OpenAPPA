@@ -89,7 +89,9 @@ struct Worker {
 }
 
 impl Worker {
-    fn connect(url: String) -> Result<Worker, PostgresError> {
+    /// `wait` bounds each connection attempt and the opening as a whole, unless the URL
+    /// sets its own `connect_timeout`.
+    fn connect(url: String, wait: Duration) -> Result<Worker, PostgresError> {
         let (sender, receiver) = mpsc::channel::<Job>();
         let (ready, initialized) = mpsc::sync_channel(1);
         std::thread::Builder::new()
@@ -97,7 +99,11 @@ impl Worker {
             .spawn(move || {
                 let connect = || -> Result<Client, PostgresError> {
                     let tls = native_tls::TlsConnector::new().map_err(|e| PostgresError(e.to_string()))?;
-                    let mut client = Client::connect(&url, MakeTlsConnector::new(tls))?;
+                    let mut config: ::postgres::Config = url.parse()?;
+                    if config.get_connect_timeout().is_none() {
+                        config.connect_timeout(wait);
+                    }
+                    let mut client = config.connect(MakeTlsConnector::new(tls))?;
                     // Deliberately no DDL: an incompatible/missing host migration refuses startup.
                     client.batch_execute(
                         "SELECT root, seq, payload FROM openappa_events LIMIT 0;
@@ -126,31 +132,43 @@ impl Worker {
             })
             .map_err(|e| PostgresError(e.to_string()))?;
         initialized
-            .recv()
-            .map_err(|_| PostgresError("connection worker stopped".into()))??;
+            .recv_timeout(wait)
+            .map_err(|_| PostgresError("the PostgreSQL connection did not open in time".into()))??;
         Ok(Worker { sender })
+    }
+
+    /// Run `job` on the connection's thread. `None`: the worker is gone, or it gave no
+    /// answer within `wait`.
+    fn ask<T: Send + 'static>(
+        &self,
+        wait: Option<Duration>,
+        job: impl FnOnce(&mut ConnectionState) -> T + Send + 'static,
+    ) -> Option<T> {
+        let (send, recv) = mpsc::sync_channel(1);
+        self.sender
+            .send(Box::new(move |state| {
+                let _ = send.send(job(state));
+            }))
+            .ok()?;
+        match wait {
+            Some(wait) => recv.recv_timeout(wait).ok(),
+            None => recv.recv().ok(),
+        }
     }
 
     fn run<T: Send + 'static>(
         &self,
         operation: impl FnOnce(&mut ConnectionState) -> Result<T, PostgresError> + Send + 'static,
     ) -> Result<T, PostgresError> {
-        let (send, recv) = mpsc::sync_channel(1);
-        self.sender
-            .send(Box::new(move |state| {
-                let _ = send.send(operation(state));
-            }))
-            .map_err(|_| PostgresError("connection worker stopped".into()))?;
-        recv.recv()
-            .map_err(|_| PostgresError("connection worker stopped".into()))?
+        self.ask(None, operation)
+            .ok_or_else(|| PostgresError("connection worker stopped".into()))?
     }
 
     /// Leave the connection as a fresh one would be: no open transaction, no session-level
     /// advisory lock. `false` means the connection cannot be reused, and an answer that does
     /// not come within `wait` counts as one.
     fn reset(&self, wait: Duration, stall: Option<Duration>) -> bool {
-        let (send, recv) = mpsc::sync_channel(1);
-        let sent = self.sender.send(Box::new(move |state| {
+        self.ask(Some(wait), move |state| {
             if let Some(stall) = stall {
                 std::thread::sleep(stall);
             }
@@ -165,19 +183,16 @@ impl Worker {
                 }
                 Ok(())
             };
-            let _ = send.send(reset().is_ok() && !state.client.is_closed());
-        }));
-        sent.is_ok() && recv.recv_timeout(wait).unwrap_or(false)
+            reset().is_ok() && !state.client.is_closed()
+        })
+        .unwrap_or(false)
     }
 
     /// Whether an idle connection still serves. The client learns that the server ended
     /// it, or left it inside a failed transaction, only by using it.
     fn serves(&self, wait: Duration) -> bool {
-        let (send, recv) = mpsc::sync_channel(1);
-        let sent = self.sender.send(Box::new(move |state| {
-            let _ = send.send(state.client.batch_execute("SELECT 1").is_ok());
-        }));
-        sent.is_ok() && recv.recv_timeout(wait).unwrap_or(false)
+        self.ask(Some(wait), |state| state.client.batch_execute("SELECT 1").is_ok())
+            .unwrap_or(false)
     }
 }
 
@@ -188,13 +203,18 @@ struct Pool {
     freed: Condvar,
 }
 
+/// A connection that came back this recently is leased again without being asked whether
+/// it still serves, so a busy pool pays no round-trip for the check.
+const TRUSTED_IDLE: Duration = Duration::from_secs(1);
+
 struct PoolState {
-    idle: Vec<Worker>,
+    /// Each with the moment it came back.
+    idle: Vec<(Worker, Instant)>,
     /// Connections that exist: idle, leased, or being opened.
     open: usize,
     checkout_wait: Duration,
     reset_wait: Duration,
-    #[cfg(feature = "fault-injection")]
+    /// Armed only by the `fault-injection` fail point.
     stall_next_reset: Option<Duration>,
 }
 
@@ -210,10 +230,10 @@ impl Pool {
         let wait = state.checkout_wait;
         let deadline = Instant::now() + wait;
         loop {
-            if let Some(worker) = state.idle.pop() {
+            if let Some((worker, returned)) = state.idle.pop() {
                 let wait = state.reset_wait;
                 drop(state);
-                if worker.serves(wait) {
+                if returned.elapsed() < TRUSTED_IDLE || worker.serves(wait) {
                     return Ok(Lease {
                         pool: Arc::clone(self),
                         worker: Some(worker),
@@ -227,7 +247,7 @@ impl Pool {
             if state.open < self.max_connections.get() {
                 state.open += 1;
                 drop(state);
-                return match Worker::connect(self.url.clone()) {
+                return match Worker::connect(self.url.clone(), wait) {
                     Ok(worker) => Ok(Lease {
                         pool: Arc::clone(self),
                         worker: Some(worker),
@@ -258,16 +278,11 @@ impl Pool {
 
     fn release(&self, worker: Worker) {
         let (wait, stall) = {
-            #[cfg_attr(not(feature = "fault-injection"), allow(unused_mut))]
             let mut state = self.state();
-            #[cfg(feature = "fault-injection")]
-            let stall = state.stall_next_reset.take();
-            #[cfg(not(feature = "fault-injection"))]
-            let stall = None;
-            (state.reset_wait, stall)
+            (state.reset_wait, state.stall_next_reset.take())
         };
         if worker.reset(wait, stall) {
-            self.state().idle.push(worker);
+            self.state().idle.push((worker, Instant::now()));
             self.freed.notify_one();
         } else {
             // A worker that did not answer is abandoned with its thread; the server ends
@@ -315,7 +330,6 @@ impl PostgresStore {
                 open: 0,
                 checkout_wait: Duration::from_secs(30),
                 reset_wait: Duration::from_secs(5),
-                #[cfg(feature = "fault-injection")]
                 stall_next_reset: None,
             }),
             freed: Condvar::new(),
@@ -348,12 +362,17 @@ impl PostgresStore {
         }
     }
 
-    /// Host integration SQL (receipts, advisory locks) runs on the same connection as the
-    /// event log when the store is leased. Never expose this capability to clients.
+    /// Host integration SQL (receipts, advisory locks) runs on the leased connection, the
+    /// one the event log uses. It is refused without a lease: whatever it left on a
+    /// per-operation connection, a session-level lock above all, would be gone the moment
+    /// the call returned. Never expose this capability to clients.
     pub fn with_client<T: Send + 'static>(
         &self,
         operation: impl FnOnce(&mut Client) -> Result<T, PostgresError> + Send + 'static,
     ) -> Result<T, PostgresError> {
+        if self.lease.is_none() {
+            return Err(PostgresError("host SQL requires a leased connection".into()));
+        }
         self.run(move |state| {
             state.host_sql = true;
             operation(&mut state.client)
