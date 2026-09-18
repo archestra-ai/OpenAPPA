@@ -1,5 +1,7 @@
-//! The family children a proposed call's arguments name, by Claude Code's own
-//! file spellings.
+//! The family children a proposed call's arguments name. A call whose
+//! arguments name a family child's output file or transcript is refused by
+//! the runtime: the default spellings only, a heuristic rather than a
+//! guarantee.
 
 use appa_runtime_api::{Actor, ProposedCall, TrajectoryId};
 

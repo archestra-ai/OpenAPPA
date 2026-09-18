@@ -1,6 +1,25 @@
-//! Tool identity: the bijection between Claude Code's raw tool spellings and
-//! canonical ids, and the two questions the rest of the crate asks about a raw
-//! spelling — whether it is the spawn, and whether it is an MCP tool.
+//! Tool identity, a bijection over the raw spellings it accepts; the
+//! adapter's inverse reads the table right to left:
+//!
+//! | raw spelling | canonical |
+//! |---|---|
+//! | `mcp__appa__execute_remedy_plan` | `appa/execute_remedy_plan`, the runtime's control tool |
+//! | `mcp__<server>__<tool>`, split at the first `__` after the prefix | `mcp/<server>/<tool>` |
+//! | any other `[A-Za-z0-9_.-]+` | `host/claude-code/<name>` |
+//!
+//! A raw spelling outside that domain is refused and the call blocks:
+//! `mcp__` with no second `__`, an empty server or tool segment, or a
+//! character outside the segment grammar. The server segment never
+//! contains `__`, because it is what precedes the first one. The spawn
+//! tools `Agent` and `Task` are host tools, `host/claude-code/Agent` and
+//! `host/claude-code/Task`; the `agent` family is not Claude Code's.
+//!
+//! Read right to left the table is partial. The control spelling
+//! occupies a cell the `mcp` row would otherwise own, so
+//! `mcp/appa/execute_remedy_plan` — an ordinary tool a policy may
+//! declare on the runtime's own server — has no Claude Code spelling.
+//! Where the runtime would name that tool it says the canonical id, never
+//! a spelling that dispatches the control tool instead.
 
 use appa_runtime_api::{CanonicalTool, Derived, ParseRefusal};
 

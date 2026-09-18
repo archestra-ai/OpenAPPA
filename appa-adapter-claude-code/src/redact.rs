@@ -1,5 +1,42 @@
-//! What the model is shown in place of a result it may not have: one delivered
-//! response restated in place of itself, with its leaves redacted.
+//! Replacing what the model sees. A `PostToolUse` hook replaces a tool
+//! result through `hookSpecificOutput.updatedToolOutput`, and Claude
+//! Code applies the replacement only when it has the tool's own output
+//! shape — otherwise it silently keeps the original. So the codec never
+//! answers with a bare placeholder: it restates the response it was
+//! handed with its leaves redacted. Which restatement one result gets
+//! follows the tool that produced it, as the runtime's own derivation
+//! does, and never the event it arrived as. For the spawn's result the
+//! swap is the `content` text — the one field of the `Agent` response
+//! Claude Code shows the parent model; the rest stays for the transcript
+//! where it is one of the metadata keys that response carries, and is
+//! redacted like any other leaf where it is not, so a response under the
+//! spawn's name that is not the spawn's own shape carries nothing to the
+//! model. For every other builtin tool every leaf is
+//! redacted: the text takes the tool's content field — `Bash` `stdout`,
+//! `Read` `file.content`, `Grep` `content`, `WebFetch` `result`, `Write`
+//! `content` — or, where the shape has no known one, the place of its
+//! longest string; every other string becomes `[appa] redacted`, numbers
+//! `0`, booleans `false`, and an array keeps one element, so a match
+//! count, a line count or a result count carries nothing either and the
+//! answer never grows with the leaf count. A shape with no string to
+//! carry the text — counts and flags only — gets it as the hook's
+//! `additionalContext` beside the redacted output. The one exception to
+//! the redaction is a string under a key Claude Code validates as a
+//! fixed value (`type`, `mode`, `status`) when it is one of the fixed
+//! values its output shapes use; any other string there is content. An
+//! MCP tool's result (`mcp__…`) is restated as one text block instead:
+//! Claude Code accepts any shape there, and an MCP result's keys are
+//! content too. A withheld result additionally carries the reason as
+//! `decision: block`, which Claude Code shows next to the (replaced)
+//! result. Verified live on Claude Code 2.1.233 for `Agent`, `Bash`,
+//! `Read`, `Glob`, `Grep`, `Write`, `Edit`, `WebFetch`, and honored on a
+//! non-2xx answer too — so a runtime refusal at `PostToolUse` also
+//! withholds. A tool whose output shape validates another fixed-value
+//! string field would keep the original; the fixed-value list is the
+//! codec's to extend. A `PostToolUse` this codec cannot read at all is
+//! withheld too, from the tool and response its bytes still carry: the
+//! result has run either way, and a hook that only exits non-zero leaves
+//! that output in front of the model.
 
 use appa_runtime_api::{HookEvent, OutcomeBody, ToolOutcome};
 

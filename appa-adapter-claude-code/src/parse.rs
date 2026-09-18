@@ -1,4 +1,78 @@
-//! Claude Code's hook JSON read into at most one `HookEvent`.
+//! Claude Code's own hook JSON read into at most one `HookEvent`, whose tool
+//! spelling is still Claude Code's raw one and whose trajectory ids are derived
+//! from Claude Code's own ids under the `cc:` prefix.
+//!
+//! Hook mapping:
+//!
+//! | hook | `HookEvent` |
+//! |---|---|
+//! | `SessionStart` | `SessionStart` |
+//! | `UserPromptSubmit` | `Prompt` |
+//! | `PreToolUse` | `ToolCall`; the `Agent` (`Task`) tool is the spawn |
+//! | `PostToolUse` for `Agent` (`Task`) | `SpawnResult`, naming the subagent (`agentId`) and carrying its message (`content`) where the response has them |
+//! | `PostToolUse`, `PostToolUseFailure` | `ToolResult` (the Q14 outcome mapping) |
+//! | `SubagentStart` | `ChildStart`, naming the family's spawn in flight |
+//! | `SubagentStop` | `ChildEnd` carrying `last_assistant_message` as the return; `TurnEnd` for a helper with an empty `agent_type` |
+//! | `Stop`, `StopFailure` | `TurnEnd` for the actor that finished |
+//!
+//! Every call and result carries Claude Code's opaque `tool_use_id` as
+//! its host call identity. The runtime persists that identity beside the
+//! opened dispatch, so ordinary calls can run in parallel and report in
+//! any order, including after a runtime restart. One exception remains:
+//! only one `Agent` (`Task`) spawn may wait for binding at a time. Claude
+//! Code's `SubagentStart` names the child but not the `Agent` call that
+//! launched it, so two unbound spawns would make that start ambiguous.
+//!
+//! Subagents. Claude Code spawns a subagent through its `Agent` tool
+//! (`Task` is its older name), so the codec marks that call as the
+//! deployment's context-controlled spawn; the runtime holds the spawn
+//! until the parent declares the child's return from the block's menu.
+//! `SubagentStart` names the new subagent (`agent_id`) but not the
+//! `Agent` call that started it, so the child start can echo no binding:
+//! it names the family's spawn in flight, and the runtime ties it to the
+//! one prepared fork still open for binding. Its answer carries the
+//! child's return contract as `additionalContext`. The child's
+//! `SubagentStop` is the return channel: its `last_assistant_message` is
+//! the message the parent receives, and the codec reports it as
+//! `ChildEnd` naming the child. A `decision: block` answer there keeps
+//! the subagent running with the reason, and it stops again
+//! (`stop_hook_active: true`), so a return that may not cross holds the
+//! subagent until it returns an admissible message. No hook can
+//! substitute what the parent receives, so a return the runtime would
+//! substitute (`ChildReturn`) is rendered as a block carrying the exact
+//! bytes to return: the subagent echoes them, and the next stop crosses.
+//! The parent's `Agent` `PostToolUse` is the spawn outcome: in a
+//! top-level session the spawn is asynchronous, the hook fires at launch
+//! with `agentId` and no `content`, and its `SpawnResult` binds the fork
+//! to that child before the dispatch closes, whichever of it and
+//! `SubagentStart` lands first. A synchronous spawn (`claude -p`)
+//! delivers the child's message in `content` after the child's stop, and
+//! the same `SpawnResult` replays the crossing the stop decided; a
+//! message the runtime never checked at a stop is withheld from the
+//! parent. Every post-use hook of the spawn's tool is that spawn's
+//! result, whatever its response carries: which lifecycle a result runs
+//! is the runtime's derivation from the tool, so a response that names
+//! no child and carries no message is the same event with both fields
+//! empty, never another lifecycle the runtime would then contradict.
+//! Claude Code's own helper agents stop with an empty
+//! `agent_type`, no `SubagentStart` and no tool calls: their stop is the
+//!
+//! Outcome mapping, which is the adapter's contract. This
+//! harness runs the tools itself, so the codec observes no HTTP status,
+//! no stream, no process exit and no callback — only the two outcome
+//! hooks and the response one of them carries:
+//!
+//! | observation | `ToolOutcome` |
+//! |---|---|
+//! | `PostToolUseFailure` | `Failure` — the run failed; no effects commit |
+//! | `PostToolUse` with a `tool_response` | `Success` carrying that response's JSON rendering |
+//! | `PostToolUse` with no `tool_response` (absent or null — the wire spells them alike) | `Indeterminate` — no effects commit, the reservation stands |
+//! | no outcome hook at all | nothing is reported; the dispatch stays open until the actor's `TurnEnd`, or the next `Prompt` when the turn was interrupted and sent no `Stop`, closes it as not run |
+//!
+//! The mapping is total over those shapes. It reads no error shape out
+//! of a `tool_response` body: no recorded live example of one exists,
+//! and calling a real success a `Failure` would discard effects the
+//! tool had.
 
 use serde::Deserialize;
 

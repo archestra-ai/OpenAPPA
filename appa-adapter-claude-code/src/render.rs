@@ -1,5 +1,11 @@
-//! One `HookDecision` written in the hook wire format Claude Code expects, and the
-//! withholding for hook bytes `parse` refused.
+//! One `HookDecision` written in the hook wire format Claude Code expects, and
+//! the withholding for hook bytes [`crate::parse`] refused. What a replacement
+//! carries is [`crate::redact`]'s; this module decides which channel says it —
+//! a permission decision, a `block` with its reason, a replaced result, or an
+//! added context.
+//!
+//! A `PreToolUse` release carries no slot for the spawn binding, and
+//! needs none: the child start names the spawn in flight instead.
 
 use serde::Deserialize;
 
