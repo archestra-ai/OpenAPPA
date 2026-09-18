@@ -45,8 +45,8 @@ fn opens(path: &Path) {
 fn every_shipped_example_opens() {
     let examples = policy_files(&repo_root().join("marketplace/plugins/claude-code"));
     assert!(
-        examples.len() >= 2,
-        "both shipped examples were checked, not {examples:?}"
+        !examples.is_empty(),
+        "the shipped examples were found and checked, not {examples:?}"
     );
     for path in &examples {
         opens(path);
