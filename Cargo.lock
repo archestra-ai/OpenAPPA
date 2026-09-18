@@ -106,6 +106,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "appa"
 version = "0.23.0"
 dependencies = [
+ "appa-adapter-archestra",
  "appa-adapter-claude-code",
  "appa-adapter-kagent",
  "appa-builtin",
@@ -147,6 +148,15 @@ dependencies = [
  "uuid",
  "windows-sys 0.61.2",
  "zip",
+]
+
+[[package]]
+name = "appa-adapter-archestra"
+version = "0.23.0"
+dependencies = [
+ "appa-runtime-api",
+ "proptest",
+ "serde_json",
 ]
 
 [[package]]

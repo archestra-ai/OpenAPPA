@@ -1,0 +1,17 @@
+[package]
+name = "appa-adapter-archestra"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+appa-runtime-api = { path = "../appa-runtime-api" }
+
+[dev-dependencies]
+proptest = "1"
+# `raw_value` builds a proposed call's arguments in tests as the bytes
+# the host would send — the same passthrough rule appa-runtime-api states.
+serde_json = { workspace = true, features = ["raw_value"] }
+
+[lints]
+workspace = true

@@ -173,6 +173,27 @@ pub fn precise_name(name: &str, adapter: Adapter) -> Option<CanonicalTool> {
     None
 }
 
+/// Whether the wildcard rule covers a spawn under this host. kagent's spawns are other
+/// agents called as tools, which only a contract written for them may release; Claude
+/// Code's `Task` and an embedding host's own delegation keep the wildcard's cover.
+pub(crate) fn wildcard_covers_spawn(adapter: AdapterName) -> bool {
+    match adapter {
+        AdapterName::ClaudeCode | AdapterName::Archestra => true,
+        AdapterName::Kagent => false,
+    }
+}
+
+/// Whether an authored name already spells a server in this host's own grammar, so a
+/// `server` selector beside it would name the server twice.
+fn spells_server(adapter: AdapterName, name: &str) -> bool {
+    name.contains('/')
+        || match adapter {
+            AdapterName::ClaudeCode => name.starts_with("mcp__"),
+            AdapterName::Archestra => name.contains("__"),
+            AdapterName::Kagent => false,
+        }
+}
+
 /// `server_aliases` belongs to deployment configuration, never to a battery. Its values
 /// are configured connection identities, not DNS/provider guesses. A namespace bound to
 /// several identities resolves each rule under it to one canonical id per identity: the
@@ -247,7 +268,7 @@ pub fn resolve(
             };
         }
         if let Some(server) = server {
-            if name.contains('/') || (adapter.name == AdapterName::ClaudeCode && name.starts_with("mcp__")) {
+            if spells_server(adapter.name, name) {
                 return Err(format!(
                     "tool {name:?} conflicts with server selector {server:?}; use a short tool name with server"
                 ));
@@ -273,9 +294,7 @@ pub fn resolve(
                 _ => vec![format!("{id}{selector}")],
             }
         });
-        if qualified.is_none()
-            && (name.contains('/') || (adapter.name == AdapterName::ClaudeCode && name.starts_with("mcp__")))
-        {
+        if qualified.is_none() && spells_server(adapter.name, name) {
             return Err(format!("tool {name:?} has an invalid qualified identity"));
         }
         if qualified.is_none() && adapter.name == AdapterName::Kagent {
@@ -374,7 +393,7 @@ pub fn resolve(
             continue;
         }
         let declared = covered.iter().any(|rule| rule_matches(rule, identity.as_str()));
-        let covered = declared || (report.wildcard && (!spawn || adapter.name == AdapterName::ClaudeCode));
+        let covered = declared || (report.wildcard && (!spawn || wildcard_covers_spawn(adapter.name)));
         report.tools.push(ToolCheck {
             tool: host.clone(),
             status: if covered {

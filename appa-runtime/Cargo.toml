@@ -42,6 +42,7 @@ name = "replay"
 required-features = ["daemon"]
 
 [dependencies]
+appa-adapter-archestra = { path = "../appa-adapter-archestra" }
 appa-adapter-claude-code = { path = "../appa-adapter-claude-code" }
 appa-adapter-kagent = { path = "../appa-adapter-kagent" }
 # The builtin-module ABI: one source of truth for the descriptor,

@@ -26,7 +26,9 @@ pub(crate) fn servers(host: Host, cwd: &Path) -> BTreeSet<Namespace> {
             });
             claude_code_servers(config.as_deref(), &project_root(cwd))
         }
-        Host::Kagent => BTreeSet::new(),
+        // Neither host keeps MCP servers in files on this machine: kagent's live in the
+        // cluster and Archestra's in its own database.
+        Host::Kagent | Host::Archestra => BTreeSet::new(),
     }
 }
 

@@ -10,6 +10,7 @@ members = [
     "appa-policy",
     "appa-adapter-claude-code",
     "appa-adapter-kagent",
+    "appa-adapter-archestra",
     "appa-runtime-api",
     "appa-runtime",
     "appa-runtime/tests/fixtures/module-bad",

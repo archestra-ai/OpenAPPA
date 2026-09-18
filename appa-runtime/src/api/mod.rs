@@ -627,11 +627,10 @@ impl ToolNaming {
     /// does a host that embeds the runtime and delegates under contracts it writes itself.
     pub(crate) fn spawn_coverage(self) -> SpawnCoverage {
         match self {
-            ToolNaming::Canonical { adapter } => match adapter.name {
-                AdapterName::ClaudeCode => SpawnCoverage::Wildcard,
-                AdapterName::Kagent => SpawnCoverage::Declared,
-            },
-            ToolNaming::AsAuthored => SpawnCoverage::Wildcard,
+            ToolNaming::Canonical { adapter } if !crate::tool_validation::wildcard_covers_spawn(adapter.name) => {
+                SpawnCoverage::Declared
+            }
+            ToolNaming::Canonical { .. } | ToolNaming::AsAuthored => SpawnCoverage::Wildcard,
         }
     }
 }
@@ -935,6 +934,19 @@ impl Runtime {
         modules: Option<PathBuf>,
     ) -> Result<Runtime, OpenError> {
         Ok(Prepared::new(config, modules, ToolNaming::AsAuthored)?.with_store(store, None))
+    }
+
+    /// [`Runtime::open_with_store`] for a host that names tools through an adapter: the
+    /// policy is resolved the way a served deployment resolves it, so canonical rules,
+    /// `server_aliases` and the adapter's spelling of a tool to the model all apply. The
+    /// host derives every call through the same adapter before it hands the event over.
+    pub fn open_with_store_as(
+        config: Config,
+        store: Arc<LogStore>,
+        modules: Option<PathBuf>,
+        adapter: Adapter,
+    ) -> Result<Runtime, OpenError> {
+        Ok(Prepared::new(config, modules, ToolNaming::Canonical { adapter })?.with_store(store, None))
     }
 
     /// Run the serving load checks without opening a store, making network requests,
