@@ -988,15 +988,15 @@ impl Session {
         }
     }
 
-    /// A child agent started. `spawn` names the prepared fork the
-    /// child binds to: the [`super::SpawnBinding`] the parent's spawn release
-    /// handed the harness, or — for a harness whose start signal carries no
-    /// reference to the spawn call — the fork already bound to this child, else
-    /// the family's one spawn in flight. The engine's `BindFork` opens the
-    /// child before its first engine event; the child exists exactly when the
-    /// log's `ForkOpened` does. A start for a child already bound is the
-    /// parent addressing it again: the parent's current label flows into the
-    /// child, and a return derivation the child never echoed is dropped.
+    /// A same-family spawned child agent started. `spawn` names the prepared fork the child binds
+    /// to: the [`super::SpawnBinding`] the parent's spawn release handed the harness, or — for a
+    /// harness whose start signal carries no reference to the spawn call — the fork already bound
+    /// to this child, else the family's one spawn in flight. The engine's `BindFork` opens the
+    /// child before its first engine event; the child exists exactly when the log's `ForkOpened`
+    /// does and keeps this session's root. A start for a child already bound is the parent
+    /// addressing it again: the parent's current label flows into the child, and a return
+    /// derivation the child never echoed is dropped. This is not `Runtime::open_root_fork`, which
+    /// opens an independent conversation root without a spawn or return contract.
     #[cfg(test)]
     pub fn on_child_start(&self, id: TrajectoryId, spawn: SpawnRef) -> Result<Session, EventError> {
         self.start_child(id, spawn).map(|(child, _)| child)
@@ -4759,6 +4759,518 @@ context_control = true
             "a dirty child never moves the root fold",
         );
         assert!(runtime.status(&child_id).is_none(), "the status read is root-only");
+    }
+
+    fn trusted_send() -> ProposedCall {
+        ProposedCall {
+            tool: "send".to_string(),
+            arguments: raw(serde_json::json!({})),
+        }
+    }
+
+    /// Admit a narrowing result on `session`'s trajectory in `family`, accepting the narrowing
+    /// its block offers.
+    async fn taint_in(runtime: &Runtime, family: &TrajectoryId, session: &mut Session) {
+        let call = taint(serde_json::json!({"a": 1}));
+        let decision = session
+            .on_tool_call(call.clone(), false)
+            .await
+            .expect("the call is decided");
+        if matches!(decision, ToolCallDecision::Deny { .. }) {
+            let quoted = runtime
+                .minted_offers(family, session.trajectory())
+                .first()
+                .expect("the narrowing block surfaced its acceptance")
+                .clone();
+            let offer = runtime.resolve_in(family, &quoted).expect("the quoted id resolves").0;
+            assert!(matches!(
+                session
+                    .on_remedy(offer, RemedyArguments::default(), None, None)
+                    .await
+                    .expect("the acceptance executes"),
+                RemedyDecision::Authorized { .. },
+            ));
+            assert!(matches!(
+                session
+                    .on_tool_call(call.clone(), false)
+                    .await
+                    .expect("the re-proposal resumes"),
+                ToolCallDecision::Allow { spawn: None, .. }
+            ));
+        }
+        let kept = session
+            .on_tool_result(
+                call,
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("outside content".to_string()),
+                },
+            )
+            .await
+            .expect("the result is admitted");
+        assert_eq!(kept, ToolResultDecision::Keep, "the taint must actually admit");
+    }
+
+    /// Is `call` released? A release is reported back at once as a success, so the family
+    /// carries no open call afterwards.
+    async fn runs(session: &Session, call: ProposedCall) -> bool {
+        match session
+            .on_tool_call(call.clone(), false)
+            .await
+            .expect("the call is decided")
+        {
+            ToolCallDecision::Allow { .. } => {
+                session
+                    .on_tool_result(
+                        call,
+                        ToolOutcome::Success {
+                            body: OutcomeBody::Available("done".to_string()),
+                        },
+                    )
+                    .await
+                    .expect("the result is admitted");
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Is `send`, which requires a trusted trajectory, released?
+    async fn sends(session: &Session) -> bool {
+        runs(session, trusted_send()).await
+    }
+
+    fn root_fork_id(name: &str) -> TrajectoryId {
+        TrajectoryId(format!("cc:{name}"))
+    }
+
+    /// Open `fork` as an independent root fork of `parent`, and a session on it.
+    fn open_root_fork_session(runtime: &Runtime, parent: &TrajectoryId, fork: &TrajectoryId) -> Session {
+        runtime
+            .open_root_fork(parent, parent, fork)
+            .expect("the root fork opens");
+        runtime.session(fork, fork).expect("the root fork reopens")
+    }
+
+    #[tokio::test]
+    async fn a_root_fork_starts_at_its_parents_label() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut parent = runtime.create_session(root()).expect("a fresh id opens");
+        taint_in(&runtime, &root(), &mut parent).await;
+
+        let fork = root_fork_id("fork");
+        runtime
+            .open_root_fork(&root(), &root(), &fork)
+            .expect("the root fork opens");
+
+        assert_eq!(
+            runtime.status(&fork).expect("the fork is a root of its own").trust,
+            "suspicious",
+            "the fork starts where its parent stood"
+        );
+        let forked = runtime.session(&fork, &fork).expect("the fork reopens");
+        assert!(
+            !sends(&forked).await,
+            "the parent's taint blocks the trusted-only sink in the fork"
+        );
+    }
+
+    #[tokio::test]
+    async fn root_forks_and_their_parent_continue_apart() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut parent = runtime.create_session(root()).expect("a fresh id opens");
+        let (a, b) = (root_fork_id("fork-a"), root_fork_id("fork-b"));
+        runtime.open_root_fork(&root(), &root(), &a).expect("root fork a opens");
+        runtime.open_root_fork(&root(), &root(), &b).expect("root fork b opens");
+
+        let mut fork_a = runtime.session(&a, &a).expect("fork a reopens");
+        taint_in(&runtime, &a, &mut fork_a).await;
+        assert_eq!(runtime.status(&a).expect("fork a answers").trust, "suspicious");
+        assert_eq!(
+            runtime.status(&root()).expect("the parent answers").trust,
+            "trusted",
+            "a fork's admission never reaches its parent"
+        );
+        assert_eq!(
+            runtime.status(&b).expect("fork b answers").trust,
+            "trusted",
+            "nor a sibling fork"
+        );
+
+        taint_in(&runtime, &root(), &mut parent).await;
+        assert_eq!(
+            runtime.status(&b).expect("fork b answers").trust,
+            "trusted",
+            "the parent's later admission never reaches a fork"
+        );
+        let fork_b = runtime.session(&b, &b).expect("fork b reopens");
+        assert!(
+            sends(&fork_b).await,
+            "the clean sibling still releases the trusted-only sink"
+        );
+        assert!(!sends(&parent).await, "the parent's own taint blocks it there");
+    }
+
+    #[tokio::test]
+    async fn a_parents_open_call_survives_its_root_forks_turn() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let parent = runtime.create_session(root()).expect("a fresh id opens");
+        let call = fetch(serde_json::json!({"a": 1}));
+        assert!(matches!(
+            parent
+                .on_tool_call(call.clone(), false)
+                .await
+                .expect("the call is decided"),
+            ToolCallDecision::Allow { .. }
+        ));
+
+        let fork = root_fork_id("fork");
+        runtime
+            .open_root_fork(&root(), &root(), &fork)
+            .expect("the root fork opens");
+        let forked = runtime.session(&fork, &fork).expect("the fork reopens");
+        forked.on_turn_end().await.expect("the fork's turn ends");
+
+        let kept = parent
+            .on_tool_result(
+                call,
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("data".to_string()),
+                },
+            )
+            .await
+            .expect("the parent's result is still reportable");
+        assert_eq!(
+            kept,
+            ToolResultDecision::Keep,
+            "a fork's turn end closes nothing of its parent's"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_root_fork_of_a_root_fork_starts_where_its_own_parent_stands() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        runtime.create_session(root()).expect("a fresh id opens");
+        let (first, second) = (root_fork_id("first"), root_fork_id("second"));
+        runtime
+            .open_root_fork(&root(), &root(), &first)
+            .expect("the first root fork opens");
+        let mut forked = runtime.session(&first, &first).expect("the first fork reopens");
+        taint_in(&runtime, &first, &mut forked).await;
+
+        runtime
+            .open_root_fork(&first, &first, &second)
+            .expect("a root fork opens from another root fork");
+
+        assert_eq!(
+            runtime.status(&second).expect("the second fork answers").trust,
+            "suspicious"
+        );
+        assert_eq!(runtime.status(&root()).expect("the root answers").trust, "trusted");
+    }
+
+    #[tokio::test]
+    async fn opening_a_root_fork_again_is_harmless_and_an_unrelated_root_is_refused() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        runtime.create_session(root()).expect("a fresh id opens");
+        let fork = root_fork_id("fork");
+        runtime
+            .open_root_fork(&root(), &root(), &fork)
+            .expect("the root fork opens");
+        runtime
+            .open_root_fork(&root(), &root(), &fork)
+            .expect("opening the same root fork again is not an error");
+
+        let unrelated = root_fork_id("unrelated");
+        runtime
+            .create_session(unrelated.clone())
+            .expect("an unrelated root opens");
+        assert_eq!(
+            runtime.open_root_fork(&unrelated, &root(), &fork),
+            Err(super::super::RootForkRefusal::RootIdConflict),
+            "a standing fork cannot be reopened under another parent family"
+        );
+        assert_eq!(
+            runtime.open_root_fork(&root(), &unrelated, &fork),
+            Err(super::super::RootForkRefusal::RootIdConflict),
+            "a standing fork cannot be reopened from another parent trajectory"
+        );
+        assert_eq!(
+            runtime.open_root_fork(&root(), &root(), &unrelated),
+            Err(super::super::RootForkRefusal::RootIdConflict),
+            "a root that governs its own trajectory never becomes a fork"
+        );
+        assert_eq!(
+            runtime.open_root_fork(
+                &root_fork_id("missing"),
+                &root_fork_id("missing"),
+                &root_fork_id("orphan")
+            ),
+            Err(super::super::RootForkRefusal::ParentUnavailable)
+        );
+        assert_eq!(
+            runtime.open_root_fork(&root(), &root(), &root()),
+            Err(super::super::RootForkRefusal::RootIdConflict)
+        );
+    }
+
+    /// A root fork that stands is recognized before its parent is read, so opening it again holds
+    /// after the parent has ended, while a new root fork of the ended parent is refused.
+    #[tokio::test]
+    async fn opening_a_root_fork_again_holds_after_its_parent_ended() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let child_id = child("c1");
+        let spawned = open_child(&mut session, fetch(serde_json::json!({"a": 1})), child_id.clone()).await;
+        let fork = root_fork_id("fork");
+        runtime
+            .open_root_fork(&root(), &child_id, &fork)
+            .expect("a root fork opens from a spawned child");
+        spawned.on_child_end(None).await.expect("the child ends with no return");
+
+        runtime
+            .open_root_fork(&root(), &child_id, &fork)
+            .expect("the standing root fork is recognized though its parent ended");
+        assert_eq!(
+            runtime.open_root_fork(&root(), &child_id, &root_fork_id("late")),
+            Err(super::super::RootForkRefusal::ParentUnavailable),
+            "an ended trajectory takes no new fork"
+        );
+    }
+
+    const HISTORY: &str = r#"
+version = 2
+
+# `emit` records `k` when it succeeds. `guard` may not run once `k` is recorded, or while a call
+# declaring it has been allowed and has not finished; `need` runs only once `k` is recorded.
+[[policy.tool]]
+name = "emit"
+effects = ["k"]
+delta = {}
+
+[[policy.tool]]
+name = "guard"
+requires = { effects = { excludes = ["k"] } }
+delta = {}
+
+[[policy.tool]]
+name = "need"
+requires = { effects = { contains = ["k"] } }
+delta = {}
+"#;
+
+    fn history_call(tool: &str) -> ProposedCall {
+        ProposedCall {
+            tool: tool.to_string(),
+            arguments: raw(serde_json::json!({})),
+        }
+    }
+
+    async fn allowed(session: &Session, call: ProposedCall) {
+        assert!(matches!(
+            session.on_tool_call(call, false).await.expect("the call is decided"),
+            ToolCallDecision::Allow { .. }
+        ));
+    }
+
+    /// A root fork carries its parent family's effect history. An effect recorded before the root fork
+    /// satisfies `contains` there and blocks `excludes`. A call allowed before the fork that has
+    /// not finished, whether still running or closed at a turn end with no outcome, blocks
+    /// `excludes` in the fork as it does in the parent, and never counts as recorded. The fork
+    /// never learns how that call ends, so it stays blocked after the call fails in the parent.
+    #[tokio::test]
+    async fn a_root_fork_carries_its_parents_effects_and_unfinished_calls() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(config_with(HISTORY, None), dir.path().join("appa.db"), None).expect("the deployment opens");
+
+        let recorded = root_fork_id("recorded");
+        let parent = runtime.create_session(recorded.clone()).expect("a fresh id opens");
+        assert!(runs(&parent, history_call("emit")).await);
+        let fork = open_root_fork_session(&runtime, &recorded, &root_fork_id("recorded-fork"));
+        assert!(
+            !runs(&fork, history_call("guard")).await,
+            "a recorded effect blocks excludes in the fork"
+        );
+        assert!(runs(&fork, history_call("need")).await, "and satisfies contains there");
+
+        let unknown = root_fork_id("unknown");
+        let parent = runtime.create_session(unknown.clone()).expect("a fresh id opens");
+        allowed(&parent, history_call("emit")).await;
+        parent
+            .on_turn_end()
+            .await
+            .expect("the turn end closes the unreported call");
+        assert!(
+            !runs(&parent, history_call("guard")).await,
+            "the parent refuses guard while emit may have run"
+        );
+        let fork = open_root_fork_session(&runtime, &unknown, &root_fork_id("unknown-fork"));
+        assert!(!runs(&fork, history_call("guard")).await, "so does the fork");
+        assert!(
+            !runs(&fork, history_call("need")).await,
+            "an unfinished call is never a recorded effect"
+        );
+
+        let running = root_fork_id("running");
+        let parent = runtime.create_session(running.clone()).expect("a fresh id opens");
+        allowed(&parent, history_call("emit")).await;
+        let fork = open_root_fork_session(&runtime, &running, &root_fork_id("running-fork"));
+        parent
+            .on_tool_result(
+                history_call("emit"),
+                ToolOutcome::Failure {
+                    message: "exit 1".to_string(),
+                },
+            )
+            .await
+            .expect("the failure closes");
+        assert!(
+            runs(&parent, history_call("guard")).await,
+            "the failure frees guard in the parent"
+        );
+        assert!(
+            !runs(&fork, history_call("guard")).await,
+            "the fork never learns how the call ended"
+        );
+    }
+
+    /// How many remedies the block of `call` on `session` offers.
+    async fn offered(session: &Session, call: ProposedCall) -> usize {
+        match session.on_tool_call(call, false).await.expect("the block is delivered") {
+            ToolCallDecision::Deny { offers, .. } => offers.len(),
+            other => panic!("an attended call blocks, got {other:?}"),
+        }
+    }
+
+    /// Block `call` on the root `session` and have the authority its first offer names deny it.
+    async fn denied_on_root(runtime: &Runtime, session: &Session, call: ProposedCall) {
+        let ToolCallDecision::Deny { offers, .. } =
+            session.on_tool_call(call, false).await.expect("the block is delivered")
+        else {
+            panic!("an attended call blocks");
+        };
+        let quoted = OfferId(offers.first().expect("the block offers its authority").id.clone());
+        let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
+        assert!(matches!(
+            session
+                .on_remedy(offer, RemedyArguments::default(), None, None)
+                .await
+                .expect("the denial is delivered"),
+            RemedyDecision::Declined { .. },
+        ));
+    }
+
+    /// A root fork inherits the denials its parent held when the root fork was taken. A call the parent's
+    /// authority denied is offered no plan naming that authority in the fork, while a call the
+    /// parent never denied, or denied only after the fork, still is.
+    #[tokio::test]
+    async fn a_root_fork_inherits_the_denials_its_parent_held_at_the_fork() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let url = stub(serde_json::json!({"ruling": "deny", "reason": "no"})).await;
+        let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let parent = runtime.create_session(root()).expect("a fresh id opens");
+        denied_on_root(&runtime, &parent, wire(500)).await;
+        let fork = open_root_fork_session(&runtime, &root(), &root_fork_id("fork"));
+        denied_on_root(&runtime, &parent, wire(700)).await;
+
+        assert_eq!(
+            offered(&fork, wire(500)).await,
+            0,
+            "the parent's denial holds in the fork"
+        );
+        assert_eq!(
+            offered(&fork, wire(600)).await,
+            1,
+            "a call the parent never denied is still offered its authority"
+        );
+        assert_eq!(
+            offered(&fork, wire(700)).await,
+            1,
+            "a denial recorded after the fork never reaches it"
+        );
+    }
+
+    /// A root fork decides under the policy its parent's family opened with, whatever the deployment
+    /// serves when the root fork is taken: after a reload drops `fetch`, a root fork of an older root still
+    /// has it, and does not have the reloaded policy's `read`.
+    #[tokio::test]
+    async fn a_root_fork_taken_after_a_reload_decides_under_its_parents_opening_policy() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        runtime.create_session(root()).expect("a fresh id opens");
+        runtime
+            .reload(config_with(READ_ONLY, None))
+            .expect("the edited policy installs");
+
+        let fork = open_root_fork_session(&runtime, &root(), &root_fork_id("fork"));
+        assert!(
+            runs(&fork, fetch(serde_json::json!({"a": 1}))).await,
+            "the fork keeps its parent's fetch"
+        );
+        let read = ProposedCall {
+            tool: "read".to_string(),
+            arguments: raw(serde_json::json!({"path": "a.txt"})),
+        };
+        assert!(
+            matches!(
+                fork.on_tool_call(read, false).await,
+                Err(EventError::UndeclaredTool { tool }) if tool == "read"
+            ),
+            "the reloaded policy is not the fork's"
+        );
+    }
+
+    /// A spawned child can open a root fork. The root fork starts at the child's label, not at
+    /// its family's root label, and becomes an independent root.
+    #[tokio::test]
+    async fn a_root_fork_of_a_spawned_child_starts_at_the_childs_label() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut parent = runtime.create_session(root()).expect("a fresh id opens");
+        let child_id = child("c1");
+        let mut spawned = open_child_floored(
+            &mut parent,
+            fetch(serde_json::json!({"a": 1})),
+            child_id.clone(),
+            floor_trust("suspicious"),
+        )
+        .await;
+        taint_in(&runtime, &root(), &mut spawned).await;
+
+        let fork = root_fork_id("fork");
+        runtime
+            .open_root_fork(&root(), &child_id, &fork)
+            .expect("a root fork opens from a spawned child");
+        assert_eq!(
+            runtime.status(&fork).expect("the fork is a root of its own").trust,
+            "suspicious",
+            "the fork starts at the child's label"
+        );
+        assert_eq!(
+            runtime.status(&root()).expect("the root answers").trust,
+            "trusted",
+            "not at its root's"
+        );
+        let forked = runtime.session(&fork, &fork).expect("the fork reopens");
+        assert!(
+            !sends(&forked).await,
+            "the child's taint blocks the trusted-only sink in the fork"
+        );
     }
 
     /// The floor the parent declared bounds the child too: a narrowing below it has no

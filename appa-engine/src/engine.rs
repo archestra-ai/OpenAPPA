@@ -2503,10 +2503,15 @@ impl Engine {
 
     /// The opening batch of a fresh root trajectory family: one `TrajectoryOpened`
     /// record against the empty log. The runtime appends it before any other family event.
+    /// `forked_from` opens the root as an independent conversation-root fork of another family's
+    /// trajectory, from the origin that family's view froze (see
+    /// [`EngineView::root_fork_origin`]). It does not prepare a same-family child, spawn one, or
+    /// establish a return contract.
     pub fn open_trajectory(
         &self,
         trajectory: &TrajectoryId,
         policy_file_key: crate::profile::PolicyFileKey,
+        forked_from: Option<crate::fact::RootForkOrigin>,
     ) -> Result<ValidatedFactBatch, TransitionRefusal> {
         let empty = EngineView::validated(Projection::empty(0), self.identity, trajectory.clone());
         self.seal(
@@ -2518,6 +2523,7 @@ impl Engine {
                 policy_digest: self.identity,
                 policy_file_key,
                 open_vectors: self.open_vectors(),
+                forked_from,
             }],
         )
     }
@@ -3334,7 +3340,7 @@ mod tests {
     }
 
     fn opened_root(e: &Engine, trajectory: &TrajectoryId) -> Fact {
-        e.open_trajectory(trajectory, crate::profile::PolicyFileKey::of(b"policy"))
+        e.open_trajectory(trajectory, crate::profile::PolicyFileKey::of(b"policy"), None)
             .expect("the engine opens its own root")
             .into_unsealed()
             .remove(0)
@@ -9755,7 +9761,7 @@ mod tests {
         let t = traj();
         let key = crate::profile::PolicyFileKey::of(b"the policy file");
         let batch = e
-            .open_trajectory(&t, key.clone())
+            .open_trajectory(&t, key.clone(), None)
             .expect("a fresh root's opening seals");
         assert_eq!(batch.basis(), 0, "the opening stands on the empty log");
         match batch.facts() {
@@ -9767,8 +9773,10 @@ mod tests {
                     policy_digest,
                     policy_file_key,
                     open_vectors,
+                    forked_from,
                 },
             ] => {
+                assert_eq!(forked_from, &None, "a fresh root opens as no fork");
                 assert_eq!(policy_file_key, &key, "the opening names the file it opened under");
                 assert_eq!(trajectory, &t);
                 assert_eq!(*dialect, PolicyDialectVersion::new(1));
@@ -9859,6 +9867,229 @@ mod tests {
         );
     }
 
+    /// The view of `root`'s own family log.
+    fn viewing_root(e: &Engine, root: &TrajectoryId, log: &[Fact]) -> EngineView {
+        e.view(root, log.to_vec(), log.len() as u64)
+            .expect("the root's log replays")
+    }
+
+    /// The whole log of `fork`, an independent root fork of `parent` where `view` stands: its
+    /// one opening record.
+    fn root_fork_log(e: &Engine, view: &EngineView, parent: &TrajectoryId, fork: &TrajectoryId) -> Vec<Fact> {
+        let origin = view
+            .root_fork_origin(parent)
+            .expect("an open trajectory can be root-forked");
+        e.open_trajectory(fork, crate::profile::PolicyFileKey::of(b"policy"), Some(origin))
+            .expect("a fork of another family's trajectory seals")
+            .into_unsealed()
+    }
+
+    /// The requirement gaps `tool` blocks on as `root`'s next proposal, or `None` when it is
+    /// released.
+    fn gaps_of(e: &Engine, root: &TrajectoryId, log: &[Fact], tool: &str) -> Option<Vec<Gap>> {
+        let decision = e
+            .handle(
+                &viewing_root(e, root, log),
+                batch_on(root, tool, Vec::new(), vec![raw(&call(tool, json!({})))], None),
+            )
+            .expect("the call decides");
+        match answered(&decision) {
+            ([_], []) => None,
+            ([], [blocked]) => Some(blocked.block.raw.requirement_gaps.clone()),
+            other => panic!("one call decides one way, got {other:?}"),
+        }
+    }
+
+    /// An independent root fork carries its parent family's history as it stood at the fork. A committed effect
+    /// answers `prior(k)` there and blocks `no_prior(k)`. An unsettled reservation, whether its
+    /// call is still open or closed indeterminate, blocks `no_prior(k)` in the fork as it does in
+    /// the parent and never counts as committed. No call of the fork can settle it: it stands
+    /// there after the parent's call fails, and a fork of the fork carries it on.
+    #[test]
+    fn a_root_fork_carries_its_parent_familys_effects_and_unsettled_reservations() {
+        let e = batch_engine();
+        let k = EffectKind::new("k");
+        let emitted = |log: &[Fact], id: &str| {
+            let decision = e
+                .handle(
+                    &viewing(&e, log),
+                    batch(id, Vec::new(), vec![raw(&call("emit", json!({})))]),
+                )
+                .expect("the emit decides");
+            let dispatch = match answered(&decision) {
+                ([release], []) => release.dispatch.clone(),
+                other => panic!("a neutral emit releases, got {other:?}"),
+            };
+            ([log, &appended_facts(decision)].concat(), dispatch)
+        };
+        let settled = |log: &[Fact], dispatch: &DispatchId, outcome: ToolOutcome| {
+            let closed = e
+                .handle(
+                    &viewing(&e, log),
+                    EngineEvent::Outcome(ToolReport {
+                        dispatch: dispatch.clone(),
+                        outcome,
+                        evidence: Vec::new(),
+                        offer_nonce: nonce(),
+                        audience: crate::audience::AudienceEvidence::default(),
+                    }),
+                )
+                .expect("the outcome closes the emit");
+            [log, &appended_facts(closed)].concat()
+        };
+        let success = || ToolOutcome::Success {
+            body: OutcomeBody::Available(ValueBody::new("emitted")),
+        };
+        let (open, dispatch) = emitted(&opening_log(&e), "emit");
+        let indeterminate = settled(&open, &dispatch, ToolOutcome::Indeterminate);
+        let failed = settled(&open, &dispatch, ToolOutcome::Failure);
+        let committed = settled(&open, &dispatch, success());
+        let (again, repeat) = emitted(&committed, "emit-again");
+        let committed_twice = settled(&again, &repeat, success());
+        let (parent, no_prior, prior) = (
+            traj(),
+            Some(vec![Gap::NoPrior(k.clone())]),
+            Some(vec![Gap::Prior(k.clone())]),
+        );
+
+        assert_eq!(gaps_of(&e, &parent, &indeterminate, "guard"), no_prior);
+        for (log, name) in [(&open, "open"), (&indeterminate, "indeterminate")] {
+            let fork = TrajectoryId::new(name);
+            let forked = root_fork_log(&e, &viewing(&e, log), &parent, &fork);
+            assert_eq!(
+                gaps_of(&e, &fork, &forked, "guard"),
+                no_prior,
+                "the parent's {name} reservation blocks no_prior(k) in the fork"
+            );
+            assert_eq!(
+                gaps_of(&e, &fork, &forked, "wire"),
+                prior,
+                "a reservation is never a committed effect"
+            );
+        }
+        let fork = TrajectoryId::new("committed");
+        let forked = root_fork_log(&e, &viewing(&e, &committed), &parent, &fork);
+        assert_eq!(
+            gaps_of(&e, &fork, &forked, "guard"),
+            no_prior,
+            "a committed k blocks too"
+        );
+        assert_eq!(gaps_of(&e, &fork, &forked, "wire"), None, "and answers prior(k)");
+
+        // The emit fails after the first fork was taken. The parent is free of k again, but that
+        // fork never learns how the call ended: it stays blocked, as checked above, and a fork of
+        // it carries the reservation on. A fork taken after the failure carries nothing.
+        assert_eq!(gaps_of(&e, &parent, &failed, "guard"), None);
+        let fork = TrajectoryId::new("open");
+        let forked = root_fork_log(&e, &viewing(&e, &open), &parent, &fork);
+        let second = TrajectoryId::new("second");
+        let refork = root_fork_log(&e, &viewing_root(&e, &fork, &forked), &fork, &second);
+        assert_eq!(gaps_of(&e, &second, &refork, "guard"), no_prior);
+        let after = TrajectoryId::new("after");
+        let forked = root_fork_log(&e, &viewing(&e, &failed), &parent, &after);
+        assert_eq!(
+            gaps_of(&e, &after, &forked, "guard"),
+            None,
+            "a settled call carries nothing"
+        );
+
+        // The origin holds each kind once, however often the family committed it, and keeps
+        // what is committed apart from what is only reserved.
+        let origin = |log: &[Fact]| viewing(&e, log).root_fork_origin(&parent).expect("the parent is open");
+        let just_k = EffectSet::new([k.clone()]).unwrap();
+        assert_eq!(origin(&committed_twice).effects(), &just_k);
+        assert!(origin(&committed_twice).reservations().is_empty());
+        assert_eq!(origin(&open).reservations(), &just_k);
+        assert!(origin(&open).effects().is_empty());
+    }
+
+    /// An independent root fork can be taken from any open trajectory of a family. A spawned
+    /// child's root fork starts
+    /// at the child's own label: neither its root's, which moved on after the spawn, nor the
+    /// deployment's starting label. A trajectory the family never opened, or a child that has
+    /// ended, has no origin to fork from.
+    #[test]
+    fn a_root_fork_starts_at_the_forked_trajectorys_label_while_it_is_open() {
+        let e = engine(vec![internal_read(), suspicious_read()]);
+        let (root, child) = (traj(), TrajectoryId::new("child"));
+        let mut log = vec![opened(&e)];
+        reads(&e, &mut log, &root, "read_internal");
+        log.extend(forked_child(&e, &log, &child));
+        reads(&e, &mut log, &root, "read_suspicious");
+        let view = viewing(&e, &log);
+        let label = |trajectory: &TrajectoryId| {
+            view.views(trajectory)
+                .expect("the trajectory is opened")
+                .current_label()
+        };
+        let fresh = viewing_root(&e, &root, &[opened(&e)])
+            .views(&root)
+            .expect("the root is opened")
+            .current_label();
+        assert_ne!(label(&child), label(&root), "the root narrowed after the spawn");
+        assert_ne!(label(&child), fresh, "the child inherited the root's earlier narrowing");
+
+        let origin = view.root_fork_origin(&child).expect("a live child can be root-forked");
+        assert_eq!((origin.parent_root(), origin.parent()), (&root, &child));
+        let fork = TrajectoryId::new("fork");
+        let forked = root_fork_log(&e, &view, &child, &fork);
+        assert_eq!(
+            viewing_root(&e, &fork, &forked)
+                .views(&fork)
+                .expect("the fork is opened")
+                .current_label(),
+            label(&child)
+        );
+
+        assert_eq!(view.root_fork_origin(&TrajectoryId::new("stranger")), None);
+        let ended = e
+            .handle(&view, child_report(&log, &child, ChildSubmission::Void))
+            .expect("a void return ends the child");
+        let ended = viewing(&e, &[log, appended_facts(ended)].concat());
+        assert_eq!(
+            ended.root_fork_origin(&child),
+            None,
+            "an ended child cannot be root-forked"
+        );
+        assert!(ended.root_fork_origin(&root).is_some(), "its root still can");
+    }
+
+    /// A root fork's opening names another family. The engine seals no opening whose origin forks the
+    /// root from itself, and a replay refuses one found in a log, whether the origin names the
+    /// root as the parent's family or as the parent trajectory.
+    #[test]
+    fn a_root_fork_opening_that_forks_the_root_from_itself_is_refused() {
+        use crate::transition::OpeningTransitionRefusal;
+        let e = batch_engine();
+        let child = TrajectoryId::new("child");
+        let view = viewing(&e, &spawn_family(&e, &child));
+        let own = view.root_fork_origin(&traj()).expect("the root can be root-forked");
+        let childs = view.root_fork_origin(&child).expect("the child can be root-forked");
+        let key = crate::profile::PolicyFileKey::of(b"policy");
+        let self_fork = Err(TransitionRefusal::Opening(OpeningTransitionRefusal::SelfFork));
+
+        let sealed = |root: &TrajectoryId, origin: &crate::fact::RootForkOrigin| {
+            e.open_trajectory(root, key.clone(), Some(origin.clone())).map(|_| ())
+        };
+        assert_eq!(sealed(&traj(), &own), self_fork);
+        assert_eq!(sealed(&child, &childs), self_fork);
+
+        let replayed = |root: &TrajectoryId, origin: &crate::fact::RootForkOrigin| {
+            let mut opening = opened_root(&e, root);
+            if let Fact::TrajectoryOpened { forked_from, .. } = &mut opening {
+                *forked_from = Some(origin.clone());
+            }
+            e.view(root, vec![opening], 1).map(|_| ())
+        };
+        assert_eq!(replayed(&traj(), &own), self_fork);
+        assert_eq!(replayed(&child, &childs), self_fork);
+        assert_eq!(
+            replayed(&TrajectoryId::new("fork"), &childs),
+            Ok(()),
+            "the same origin opens a root of another name"
+        );
+    }
+
     #[test]
     fn a_fork_records_the_return_policy_its_spawn_approved() {
         let cfg = RegistryConfig {
@@ -9920,7 +10151,7 @@ mod tests {
         let mut advanced = EngineView::validated(Projection::empty(0), e.identity(), t.clone());
         advanced
             .advance(
-                &e.open_trajectory(&t, crate::profile::PolicyFileKey::of(b"policy"))
+                &e.open_trajectory(&t, crate::profile::PolicyFileKey::of(b"policy"), None)
                     .expect("the opening seals"),
             )
             .expect("the sealed opening advances the empty view");

@@ -1188,6 +1188,17 @@ fn reduced(log: &Log) -> HostState {
     HostState::fold(log.host_records(), std::time::SystemTime::now())
 }
 
+/// Why [`Runtime::open_root_fork`] opened no independent conversation-root fork.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum RootForkRefusal {
+    #[error("the parent trajectory is not open in its family")]
+    ParentUnavailable,
+    #[error("the new root ID names its source family, source trajectory, or an unrelated existing root")]
+    RootIdConflict,
+    #[error("the root fork could not be opened: {0}")]
+    Refused(String),
+}
+
 fn read_refused(error: appa_eventlog::ReadError) -> EventError {
     match error {
         appa_eventlog::ReadError::UnknownRoot { .. } => EventError::UnknownTrajectory,
@@ -1641,6 +1652,95 @@ impl Runtime {
         let rules: Rules = toml::from_str(source)
             .map_err(|_| EventError::PolicyUnavailable("stored validation rules do not decode".into()))?;
         Ok(crate::tool_validation::resolve(&rules.policy, adapter, inventory, &rules.server_aliases).report)
+    }
+
+    /// Open `new_root` as an independent conversation-root fork of `parent`, a trajectory in the
+    /// family rooted at `parent_root`. The new root starts from the parent's current label, its
+    /// family's committed effects and unsettled effect reservations, and the parent's denials,
+    /// under the policy the parent's family opened with. After that the two families share
+    /// nothing: what either admits, emits, settles or is denied never reaches the other, and each
+    /// keeps its own dispatches, offers and turns. This creates no same-family spawned child: it
+    /// has no prepared spawn, `ChildStart`/`ChildEnd`, or return contract. The embedding integration
+    /// identifies the source trajectory; an ordinary `SessionStart` does not infer that
+    /// relationship. Opening the same root fork again is not an error, even once the parent has
+    /// ended: a root already open is recognized before the parent is read.
+    pub fn open_root_fork(
+        &self,
+        parent_root: &TrajectoryId,
+        parent: &TrajectoryId,
+        new_root: &TrajectoryId,
+    ) -> Result<(), RootForkRefusal> {
+        if new_root == parent_root || new_root == parent {
+            return Err(RootForkRefusal::RootIdConflict);
+        }
+        let standing = self
+            .inner
+            .store
+            .has_root(&crate::engine::engine_id(new_root))
+            .inspect_err(|error| {
+                self.inner
+                    .note_store_error(Some(new_root), crate::events::StoreOperation::Read, error)
+            })
+            .map_err(|error| RootForkRefusal::Refused(error.to_string()))?;
+        if standing {
+            return self.root_fork_already_open(new_root, parent_root, parent);
+        }
+        let refused = |error: EventError| RootForkRefusal::Refused(error.to_string());
+        let deployment = self.inner.deployment();
+        let log = self.inner.log(parent_root).map_err(|error| match error {
+            EventError::UnknownTrajectory => RootForkRefusal::ParentUnavailable,
+            error => refused(error),
+        })?;
+        let policy = self.inner.resolve_policy(&deployment, &log).map_err(refused)?;
+        let view = policy
+            .engine()
+            .rebuild_view(&log)
+            .map_err(|refusal| refused(EventError::from(refusal)))?;
+        let origin = policy
+            .engine()
+            .root_fork_origin(&view, parent)
+            .ok_or(RootForkRefusal::ParentUnavailable)?;
+        let opening = policy
+            .engine()
+            .root_fork_opening(new_root, log.policy_file(), origin)
+            .map_err(|refusal| RootForkRefusal::Refused(refusal.to_string()))?;
+        match self.inner.store.create_root(opening, log.policy_file()) {
+            Ok(_) => Ok(()),
+            // A concurrent caller created this root ID after the check above.
+            Err(appa_eventlog::CreateError::AlreadyExists { .. }) => {
+                self.root_fork_already_open(new_root, parent_root, parent)
+            }
+            Err(error) => {
+                self.inner
+                    .note_store_error(Some(new_root), crate::events::StoreOperation::Open, &error);
+                Err(RootForkRefusal::Refused(error.to_string()))
+            }
+        }
+    }
+
+    /// A repeat [`Runtime::open_root_fork`]: `fork_root` exists, which is the same root fork
+    /// only when its opening record forked this parent.
+    fn root_fork_already_open(
+        &self,
+        fork_root: &TrajectoryId,
+        parent_root: &TrajectoryId,
+        parent: &TrajectoryId,
+    ) -> Result<(), RootForkRefusal> {
+        let log = self
+            .inner
+            .log(fork_root)
+            .map_err(|error| RootForkRefusal::Refused(error.to_string()))?;
+        match log.facts().first() {
+            Some(appa_engine::fact::Fact::TrajectoryOpened {
+                forked_from: Some(origin),
+                ..
+            }) if origin.parent_root() == &crate::engine::engine_id(parent_root)
+                && origin.parent() == &crate::engine::engine_id(parent) =>
+            {
+                Ok(())
+            }
+            _ => Err(RootForkRefusal::RootIdConflict),
+        }
     }
 
     fn create_session_under(&self, id: TrajectoryId, deployment: Arc<Deployment>) -> Result<Session, EventError> {

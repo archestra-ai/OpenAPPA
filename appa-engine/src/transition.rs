@@ -597,6 +597,13 @@ impl EngineView {
             .then(|| self.projection.view(trajectory))
     }
 
+    /// Freeze what an independent conversation-root fork of `trajectory` carries over from this
+    /// family at this view's position. This opens no same-family child and creates no spawn or
+    /// return contract. `None` for a trajectory this family never opened or one that has ended.
+    pub fn root_fork_origin(&self, trajectory: &TrajectoryId) -> Option<crate::fact::RootForkOrigin> {
+        self.projection.root_fork_origin(&self.family, trajectory)
+    }
+
     /// Which trajectory surfaced this offer, anywhere in the family.
     pub fn offer_trajectory(&self, offer: &crate::value::OfferId) -> Option<&TrajectoryId> {
         self.projection.offer_trajectory(offer)
@@ -667,6 +674,8 @@ pub enum OpeningTransitionRefusal {
     ProfileMismatch,
     #[error("the opening record's open vectors are not the set derived from its declaration")]
     VectorMismatch,
+    #[error("the opening record forks the root from its own family")]
+    SelfFork,
 }
 
 /// Why the transition validator refused a record. One vocabulary for both directions: a
@@ -2134,6 +2143,21 @@ impl<'a> Sequence<'a> {
         Ok(())
     }
 
+    /// An independent root fork carries the origin the runtime recorded when it opened the root.
+    /// Re-deriving that origin would take the parent family's log, which this validator never
+    /// reads, so the replay takes the origin as trusted log content. It refuses only an origin
+    /// that forks the root from itself: one whose parent family or parent trajectory is the root.
+    fn root_fork_origin_admitted(
+        &self,
+        trajectory: &TrajectoryId,
+        origin: &crate::fact::RootForkOrigin,
+    ) -> Result<(), OpeningTransitionRefusal> {
+        if origin.parent_root() == trajectory || origin.parent() == trajectory {
+            return Err(OpeningTransitionRefusal::SelfFork);
+        }
+        Ok(())
+    }
+
     fn member(&self, fact: &Fact) -> Result<(), TransitionRefusal> {
         let trajectory = fact.trajectory();
         if let Fact::TrajectoryOpened {
@@ -2142,10 +2166,15 @@ impl<'a> Sequence<'a> {
             profile,
             policy_digest,
             open_vectors,
+            forked_from,
             ..
         } = fact
         {
-            return Ok(self.root_opened(trajectory, *dialect, profile, policy_digest, open_vectors)?);
+            self.root_opened(trajectory, *dialect, profile, policy_digest, open_vectors)?;
+            if let Some(origin) = forked_from {
+                self.root_fork_origin_admitted(trajectory, origin)?;
+            }
+            return Ok(());
         }
         if !self.projection.is_opened(&self.family) {
             return Err(TransitionRefusal::Unopened);
@@ -3354,7 +3383,7 @@ mod tests {
 
     fn opening(engine: &Engine, family: &TrajectoryId) -> Fact {
         engine
-            .open_trajectory(family, PolicyFileKey::of(b"policy"))
+            .open_trajectory(family, PolicyFileKey::of(b"policy"), None)
             .expect("the opening validates against the empty log")
             .into_unsealed()
             .remove(0)
