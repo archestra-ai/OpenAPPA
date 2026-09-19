@@ -1655,7 +1655,8 @@ impl Runtime {
     /// committed effects and unsettled effect reservations, and the parent's denials, under the
     /// policy the parent's family opened with. After that the two families share nothing: what
     /// either admits, emits, settles or is denied never reaches the other, and each keeps its own
-    /// dispatches, offers and turns. Opening the same fork again is not an error.
+    /// dispatches, offers and turns. Opening the same fork again is not an error, even once the
+    /// parent has ended: a child that already stands is recognized before the parent is read.
     pub fn open_fork(
         &self,
         parent_root: &TrajectoryId,
@@ -1664,6 +1665,18 @@ impl Runtime {
     ) -> Result<(), ForkRefusal> {
         if child == parent_root || child == parent {
             return Err(ForkRefusal::ChildExists);
+        }
+        let standing = self
+            .inner
+            .store
+            .has_root(&crate::engine::engine_id(child))
+            .inspect_err(|error| {
+                self.inner
+                    .note_store_error(Some(child), crate::events::StoreOperation::Read, error)
+            })
+            .map_err(|error| ForkRefusal::Refused(error.to_string()))?;
+        if standing {
+            return self.forked_already(child, parent_root, parent);
         }
         let refused = |error: EventError| ForkRefusal::Refused(error.to_string());
         let deployment = self.inner.deployment();
@@ -1686,6 +1699,8 @@ impl Runtime {
             .map_err(|refusal| ForkRefusal::Refused(refusal.to_string()))?;
         match self.inner.store.create_root(opening, log.policy_file()) {
             Ok(_) => Ok(()),
+            // The child's root was created after the check above, by a concurrent open of this
+            // fork or of another root.
             Err(appa_eventlog::CreateError::AlreadyExists { .. }) => self.forked_already(child, parent_root, parent),
             Err(error) => {
                 self.inner

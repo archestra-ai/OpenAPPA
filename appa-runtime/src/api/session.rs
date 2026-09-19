@@ -4823,6 +4823,32 @@ context_control = true
         );
     }
 
+    /// A fork that stands is recognized before its parent is read, so opening it again holds
+    /// after the parent has ended, while a new fork of the ended parent is refused.
+    #[tokio::test]
+    async fn opening_a_fork_again_holds_after_its_parent_ended() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let child_id = child("c1");
+        let spawned = open_child(&mut session, fetch(serde_json::json!({"a": 1})), child_id.clone()).await;
+        let fork = fork_id("fork");
+        runtime
+            .open_fork(&root(), &child_id, &fork)
+            .expect("a spawned child forks");
+        spawned.on_child_end(None).await.expect("the child ends with no return");
+
+        runtime
+            .open_fork(&root(), &child_id, &fork)
+            .expect("the standing fork is recognized though its parent ended");
+        assert_eq!(
+            runtime.open_fork(&root(), &child_id, &fork_id("late")),
+            Err(super::super::ForkRefusal::ParentUnavailable),
+            "an ended trajectory takes no new fork"
+        );
+    }
+
     const HISTORY: &str = r#"
 version = 2
 
