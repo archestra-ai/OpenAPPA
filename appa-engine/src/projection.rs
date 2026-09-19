@@ -7,7 +7,7 @@ use crate::basis::SubjectKey;
 use crate::candidate::{DerivedCandidate, SanitizerLineage};
 use crate::contract::PinnedAnnotation;
 use crate::fact::{
-    BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ForkSnapshot, ObservedResult, ReturnPolicy,
+    BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ForkOrigin, ForkSnapshot, ObservedResult, ReturnPolicy,
 };
 use crate::label::Label;
 use crate::names::{AuthorityName, SanitizerName};
@@ -282,9 +282,22 @@ impl Projection {
         {
             match fact {
                 Fact::TrajectoryOpened {
-                    trajectory, profile, ..
+                    trajectory,
+                    profile,
+                    forked_from,
+                    ..
                 } => {
-                    let starting = profile.starting_label().clone();
+                    let mut starting = profile.starting_label().clone();
+                    // A root opened as a fork starts where its parent stood: the parent's label
+                    // folds into the base every later admission folds onto, and the parent
+                    // family's effects and the parent's denials hold here from the first record.
+                    if let Some(origin) = forked_from {
+                        starting.fold(origin.label());
+                        effects.extend(origin.effects().iter().cloned());
+                        if !origin.denials().is_empty() {
+                            denials.insert(trajectory.clone(), origin.denials().clone());
+                        }
+                    }
                     assert!(
                         opening.is_none(),
                         "the validator admits one opening per family log, as its first record"
@@ -644,6 +657,23 @@ impl Projection {
 
     fn freeze_basis(&self, trajectory: &TrajectoryId) -> ForkSnapshot {
         ForkSnapshot::freeze(self.opened_base(trajectory), self.basis_sources(trajectory))
+    }
+
+    /// What a root opened as a fork of this trajectory carries over: the trajectory's current
+    /// label, the family's committed effects and the trajectory's denials, at this revision.
+    /// `None` for a trajectory that is not opened or has ended.
+    pub(crate) fn fork_origin(&self, family: &TrajectoryId, trajectory: &TrajectoryId) -> Option<ForkOrigin> {
+        if !self.is_opened(trajectory) || self.ended.contains(trajectory) {
+            return None;
+        }
+        Some(ForkOrigin::new(
+            family.clone(),
+            trajectory.clone(),
+            self.revision,
+            self.fold_for(trajectory),
+            self.effects.clone(),
+            self.denials.get(trajectory).cloned().unwrap_or_default(),
+        ))
     }
 
     /// The exposed provider-run results one batch identity admitted, in order: the

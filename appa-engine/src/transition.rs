@@ -599,6 +599,12 @@ impl EngineView {
             .then(|| self.projection.view(trajectory))
     }
 
+    /// What a root opened as a fork of `trajectory` carries over from this family, frozen at this
+    /// view's position. `None` for a trajectory this family never opened or one that has ended.
+    pub fn fork_origin(&self, trajectory: &TrajectoryId) -> Option<crate::fact::ForkOrigin> {
+        self.projection.fork_origin(&self.family, trajectory)
+    }
+
     /// Which trajectory surfaced this offer, anywhere in the family.
     pub fn offer_trajectory(&self, offer: &crate::value::OfferId) -> Option<&TrajectoryId> {
         self.projection.offer_trajectory(offer)
@@ -669,6 +675,8 @@ pub enum OpeningTransitionRefusal {
     ProfileMismatch,
     #[error("the opening record's open vectors are not the set derived from its declaration")]
     VectorMismatch,
+    #[error("the opening record forks the root from its own family")]
+    SelfFork,
 }
 
 /// Why the transition validator refused a record. One vocabulary for both directions: a
@@ -2097,6 +2105,21 @@ impl<'a> Sequence<'a> {
         Ok(())
     }
 
+    /// A root opened as a fork carries its parent's label, effects and denials. Folding a label
+    /// only narrows, and the effects and denials are the parent's own history at the fork, so the
+    /// origin gives the root nothing its parent did not hold; what is checked is that it names
+    /// another family.
+    fn fork_origin_admitted(
+        &self,
+        trajectory: &TrajectoryId,
+        origin: &crate::fact::ForkOrigin,
+    ) -> Result<(), OpeningTransitionRefusal> {
+        if origin.parent_root() == trajectory || origin.parent() == trajectory {
+            return Err(OpeningTransitionRefusal::SelfFork);
+        }
+        Ok(())
+    }
+
     fn member(&self, fact: &Fact) -> Result<(), TransitionRefusal> {
         let trajectory = fact.trajectory();
         if let Fact::TrajectoryOpened {
@@ -2105,10 +2128,15 @@ impl<'a> Sequence<'a> {
             profile,
             policy_digest,
             open_vectors,
+            forked_from,
             ..
         } = fact
         {
-            return Ok(self.root_opened(trajectory, *dialect, profile, policy_digest, open_vectors)?);
+            self.root_opened(trajectory, *dialect, profile, policy_digest, open_vectors)?;
+            if let Some(origin) = forked_from {
+                self.fork_origin_admitted(trajectory, origin)?;
+            }
+            return Ok(());
         }
         if !self.projection.is_opened(&self.family) {
             return Err(TransitionRefusal::Unopened);
@@ -3321,7 +3349,7 @@ mod tests {
 
     fn opening(engine: &Engine, family: &TrajectoryId) -> Fact {
         engine
-            .open_trajectory(family, PolicyFileKey::of(b"policy"))
+            .open_trajectory(family, PolicyFileKey::of(b"policy"), None)
             .expect("the opening validates against the empty log")
             .into_unsealed()
             .remove(0)

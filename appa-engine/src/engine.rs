@@ -2501,10 +2501,13 @@ impl Engine {
 
     /// The opening batch of a fresh root trajectory family: one `TrajectoryOpened`
     /// record against the empty log. The runtime appends it before any other family event.
+    /// `forked_from` opens the root as a fork of another family's trajectory, from the origin that
+    /// family's view froze (see [`EngineView::fork_origin`]).
     pub fn open_trajectory(
         &self,
         trajectory: &TrajectoryId,
         policy_file_key: crate::profile::PolicyFileKey,
+        forked_from: Option<crate::fact::ForkOrigin>,
     ) -> Result<ValidatedFactBatch, TransitionRefusal> {
         let empty = EngineView::validated(Projection::empty(0), self.identity, trajectory.clone());
         self.seal(
@@ -2516,6 +2519,7 @@ impl Engine {
                 policy_digest: self.identity,
                 policy_file_key,
                 open_vectors: self.open_vectors(),
+                forked_from,
             }],
         )
     }
@@ -3291,7 +3295,7 @@ mod tests {
     }
 
     fn opened_root(e: &Engine, trajectory: &TrajectoryId) -> Fact {
-        e.open_trajectory(trajectory, crate::profile::PolicyFileKey::of(b"policy"))
+        e.open_trajectory(trajectory, crate::profile::PolicyFileKey::of(b"policy"), None)
             .expect("the engine opens its own root")
             .into_unsealed()
             .remove(0)
@@ -9580,7 +9584,7 @@ mod tests {
         let t = traj();
         let key = crate::profile::PolicyFileKey::of(b"the policy file");
         let batch = e
-            .open_trajectory(&t, key.clone())
+            .open_trajectory(&t, key.clone(), None)
             .expect("a fresh root's opening seals");
         assert_eq!(batch.basis(), 0, "the opening stands on the empty log");
         match batch.facts() {
@@ -9592,8 +9596,10 @@ mod tests {
                     policy_digest,
                     policy_file_key,
                     open_vectors,
+                    forked_from,
                 },
             ] => {
+                assert_eq!(forked_from, &None, "a fresh root opens as no fork");
                 assert_eq!(policy_file_key, &key, "the opening names the file it opened under");
                 assert_eq!(trajectory, &t);
                 assert_eq!(*dialect, PolicyDialectVersion::new(1));
@@ -9745,7 +9751,7 @@ mod tests {
         let mut advanced = EngineView::validated(Projection::empty(0), e.identity(), t.clone());
         advanced
             .advance(
-                &e.open_trajectory(&t, crate::profile::PolicyFileKey::of(b"policy"))
+                &e.open_trajectory(&t, crate::profile::PolicyFileKey::of(b"policy"), None)
                     .expect("the opening seals"),
             )
             .expect("the sealed opening advances the empty view");

@@ -175,6 +175,71 @@ impl ForkSnapshot {
     }
 }
 
+/// Where a root that opened as a fork of another family's trajectory was taken from, and what it
+/// carries over from there: that trajectory's label, its family's committed effects, and its
+/// authority denials, all as they stood at the parent family's log position `basis`. The fork is
+/// a family of its own after that point: nothing either side admits, emits or denies later
+/// reaches the other. Built only by [`crate::transition::EngineView::fork_origin`] from the parent
+/// family's validated view.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkOrigin {
+    parent_root: TrajectoryId,
+    parent: TrajectoryId,
+    basis: u64,
+    label: Label,
+    effects: Vec<EffectKind>,
+    denials: std::collections::BTreeMap<CanonicalDigest, std::collections::BTreeSet<AuthorityName>>,
+}
+
+impl ForkOrigin {
+    pub(crate) fn new(
+        parent_root: TrajectoryId,
+        parent: TrajectoryId,
+        basis: u64,
+        label: Label,
+        effects: Vec<EffectKind>,
+        denials: std::collections::BTreeMap<CanonicalDigest, std::collections::BTreeSet<AuthorityName>>,
+    ) -> ForkOrigin {
+        ForkOrigin {
+            parent_root,
+            parent,
+            basis,
+            label,
+            effects,
+            denials,
+        }
+    }
+
+    /// The family root the parent trajectory lives in.
+    pub fn parent_root(&self) -> &TrajectoryId {
+        &self.parent_root
+    }
+
+    /// The trajectory the fork was taken from.
+    pub fn parent(&self) -> &TrajectoryId {
+        &self.parent
+    }
+
+    /// The parent family's log position the fork froze.
+    pub fn basis(&self) -> u64 {
+        self.basis
+    }
+
+    pub(crate) fn label(&self) -> &Label {
+        &self.label
+    }
+
+    pub(crate) fn effects(&self) -> &[EffectKind] {
+        &self.effects
+    }
+
+    pub(crate) fn denials(
+        &self,
+    ) -> &std::collections::BTreeMap<CanonicalDigest, std::collections::BTreeSet<AuthorityName>> {
+        &self.denials
+    }
+}
+
 /// A boundary is punctuation, not a decision: it marks the log, never gates it — an offer stands
 /// on its subject's basis rather than on any boundary, and executing one is re-validated against
 /// the live state. A fork's branch structure lives on its own two records
@@ -226,6 +291,10 @@ pub enum Fact {
         policy_digest: PolicyIdentityV1,
         policy_file_key: PolicyFileKey,
         open_vectors: Vec<OpenVector>,
+        /// Set when the root opened as a fork of another family's trajectory. Its label, effects
+        /// and denials start from the origin's instead of the deployment's starting label alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        forked_from: Option<ForkOrigin>,
     },
     ValueAdmitted {
         trajectory: TrajectoryId,

@@ -4583,6 +4583,235 @@ context_control = true
         assert!(runtime.status(&child_id).is_none(), "the status read is root-only");
     }
 
+    fn trusted_send() -> ProposedCall {
+        ProposedCall {
+            tool: "send".to_string(),
+            arguments: raw(serde_json::json!({})),
+        }
+    }
+
+    /// Admit a narrowing result on `session`'s trajectory in `family`, accepting the narrowing
+    /// its block offers.
+    async fn taint_in(runtime: &Runtime, family: &TrajectoryId, session: &mut Session) {
+        let call = taint(serde_json::json!({"a": 1}));
+        let decision = session
+            .on_tool_call(call.clone(), false)
+            .await
+            .expect("the call is decided");
+        if matches!(decision, ToolCallDecision::Deny { .. }) {
+            let quoted = runtime
+                .minted_offers(family, session.trajectory())
+                .first()
+                .expect("the narrowing block surfaced its acceptance")
+                .clone();
+            let offer = runtime.resolve_in(family, &quoted).expect("the quoted id resolves").0;
+            assert!(matches!(
+                session
+                    .on_remedy(offer, RemedyArguments::default(), None, None)
+                    .await
+                    .expect("the acceptance executes"),
+                RemedyDecision::Authorized { .. },
+            ));
+            assert!(matches!(
+                session
+                    .on_tool_call(call.clone(), false)
+                    .await
+                    .expect("the re-proposal resumes"),
+                ToolCallDecision::Allow { spawn: None, .. }
+            ));
+        }
+        let kept = session
+            .on_tool_result(
+                call,
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("outside content".to_string()),
+                },
+            )
+            .await
+            .expect("the result is admitted");
+        assert_eq!(kept, ToolResultDecision::Keep, "the taint must actually admit");
+    }
+
+    /// Is `send`, which requires a trusted trajectory, released? A release is reported back at
+    /// once, so the family carries no open call afterwards.
+    async fn sends(session: &Session) -> bool {
+        match session
+            .on_tool_call(trusted_send(), false)
+            .await
+            .expect("the call is decided")
+        {
+            ToolCallDecision::Allow { .. } => {
+                session
+                    .on_tool_result(
+                        trusted_send(),
+                        ToolOutcome::Success {
+                            body: OutcomeBody::Available("sent".to_string()),
+                        },
+                    )
+                    .await
+                    .expect("the result is admitted");
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn fork_id(name: &str) -> TrajectoryId {
+        TrajectoryId(format!("cc:{name}"))
+    }
+
+    #[tokio::test]
+    async fn a_fork_starts_at_its_parents_label() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut parent = runtime.create_session(root()).expect("a fresh id opens");
+        taint_in(&runtime, &root(), &mut parent).await;
+
+        let fork = fork_id("fork");
+        runtime.open_fork(&root(), &root(), &fork).expect("the fork opens");
+
+        assert_eq!(
+            runtime.status(&fork).expect("the fork is a root of its own").trust,
+            "suspicious",
+            "the fork starts where its parent stood"
+        );
+        let forked = runtime.session(&fork, &fork).expect("the fork reopens");
+        assert!(
+            !sends(&forked).await,
+            "the parent's taint blocks the trusted-only sink in the fork"
+        );
+    }
+
+    #[tokio::test]
+    async fn forks_and_their_parent_continue_apart() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut parent = runtime.create_session(root()).expect("a fresh id opens");
+        let (a, b) = (fork_id("fork-a"), fork_id("fork-b"));
+        runtime.open_fork(&root(), &root(), &a).expect("fork a opens");
+        runtime.open_fork(&root(), &root(), &b).expect("fork b opens");
+
+        let mut fork_a = runtime.session(&a, &a).expect("fork a reopens");
+        taint_in(&runtime, &a, &mut fork_a).await;
+        assert_eq!(runtime.status(&a).expect("fork a answers").trust, "suspicious");
+        assert_eq!(
+            runtime.status(&root()).expect("the parent answers").trust,
+            "trusted",
+            "a fork's admission never reaches its parent"
+        );
+        assert_eq!(
+            runtime.status(&b).expect("fork b answers").trust,
+            "trusted",
+            "nor a sibling fork"
+        );
+
+        taint_in(&runtime, &root(), &mut parent).await;
+        assert_eq!(
+            runtime.status(&b).expect("fork b answers").trust,
+            "trusted",
+            "the parent's later admission never reaches a fork"
+        );
+        let fork_b = runtime.session(&b, &b).expect("fork b reopens");
+        assert!(
+            sends(&fork_b).await,
+            "the clean sibling still releases the trusted-only sink"
+        );
+        assert!(!sends(&parent).await, "the parent's own taint blocks it there");
+    }
+
+    #[tokio::test]
+    async fn a_parents_open_call_survives_its_forks_turn() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let parent = runtime.create_session(root()).expect("a fresh id opens");
+        let call = fetch(serde_json::json!({"a": 1}));
+        assert!(matches!(
+            parent
+                .on_tool_call(call.clone(), false)
+                .await
+                .expect("the call is decided"),
+            ToolCallDecision::Allow { .. }
+        ));
+
+        let fork = fork_id("fork");
+        runtime.open_fork(&root(), &root(), &fork).expect("the fork opens");
+        let forked = runtime.session(&fork, &fork).expect("the fork reopens");
+        forked.on_turn_end().await.expect("the fork's turn ends");
+
+        let kept = parent
+            .on_tool_result(
+                call,
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("data".to_string()),
+                },
+            )
+            .await
+            .expect("the parent's result is still reportable");
+        assert_eq!(
+            kept,
+            ToolResultDecision::Keep,
+            "a fork's turn end closes nothing of its parent's"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fork_of_a_fork_starts_where_its_own_parent_stands() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        runtime.create_session(root()).expect("a fresh id opens");
+        let (first, second) = (fork_id("first"), fork_id("second"));
+        runtime
+            .open_fork(&root(), &root(), &first)
+            .expect("the first fork opens");
+        let mut forked = runtime.session(&first, &first).expect("the first fork reopens");
+        taint_in(&runtime, &first, &mut forked).await;
+
+        runtime
+            .open_fork(&first, &first, &second)
+            .expect("a fork forks in turn");
+
+        assert_eq!(
+            runtime.status(&second).expect("the second fork answers").trust,
+            "suspicious"
+        );
+        assert_eq!(runtime.status(&root()).expect("the root answers").trust, "trusted");
+    }
+
+    #[tokio::test]
+    async fn opening_a_fork_again_is_harmless_and_an_unrelated_root_is_refused() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        runtime.create_session(root()).expect("a fresh id opens");
+        let fork = fork_id("fork");
+        runtime.open_fork(&root(), &root(), &fork).expect("the fork opens");
+        runtime
+            .open_fork(&root(), &root(), &fork)
+            .expect("opening the same fork again is not an error");
+
+        let unrelated = fork_id("unrelated");
+        runtime
+            .create_session(unrelated.clone())
+            .expect("an unrelated root opens");
+        assert_eq!(
+            runtime.open_fork(&root(), &root(), &unrelated),
+            Err(super::super::ForkRefusal::ChildExists),
+            "a root that governs its own trajectory never becomes a fork"
+        );
+        assert_eq!(
+            runtime.open_fork(&fork_id("missing"), &fork_id("missing"), &fork_id("orphan")),
+            Err(super::super::ForkRefusal::ParentUnavailable)
+        );
+        assert_eq!(
+            runtime.open_fork(&root(), &root(), &root()),
+            Err(super::super::ForkRefusal::ChildExists)
+        );
+    }
+
     /// The floor the parent declared bounds the child too: a narrowing below it has no
     /// acceptance to offer, so nothing the child admits can fall below what may cross.
     #[tokio::test]

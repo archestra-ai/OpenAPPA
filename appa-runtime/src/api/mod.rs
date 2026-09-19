@@ -1184,6 +1184,17 @@ fn reduced(log: &Log) -> HostState {
     HostState::fold(log.host_records(), std::time::SystemTime::now())
 }
 
+/// Why [`Runtime::open_fork`] opened no fork.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ForkRefusal {
+    #[error("the parent trajectory is not open in its family")]
+    ParentUnavailable,
+    #[error("a trajectory with the child's id already exists and is not a fork of this parent")]
+    ChildExists,
+    #[error("the fork could not be opened: {0}")]
+    Refused(String),
+}
+
 fn read_refused(error: appa_eventlog::ReadError) -> EventError {
     match error {
         appa_eventlog::ReadError::UnknownRoot { .. } => EventError::UnknownTrajectory,
@@ -1637,6 +1648,72 @@ impl Runtime {
         let rules: Rules = toml::from_str(source)
             .map_err(|_| EventError::PolicyUnavailable("stored validation rules do not decode".into()))?;
         Ok(crate::tool_validation::resolve(&rules.policy, adapter, inventory, &rules.server_aliases).report)
+    }
+
+    /// Open `child` as the root of a new family that forks `parent`, a trajectory of the family
+    /// rooted at `parent_root`. The child starts from the parent's current label, its family's
+    /// committed effects and the parent's denials, under the policy the parent's family opened
+    /// with. After that the two families share nothing: what either admits, emits or is denied
+    /// never reaches the other, and each keeps its own dispatches, offers and turns. Opening the
+    /// same fork again is not an error.
+    pub fn open_fork(
+        &self,
+        parent_root: &TrajectoryId,
+        parent: &TrajectoryId,
+        child: &TrajectoryId,
+    ) -> Result<(), ForkRefusal> {
+        if child == parent_root || child == parent {
+            return Err(ForkRefusal::ChildExists);
+        }
+        let refused = |error: EventError| ForkRefusal::Refused(error.to_string());
+        let deployment = self.inner.deployment();
+        let log = self.inner.log(parent_root).map_err(|error| match error {
+            EventError::UnknownTrajectory => ForkRefusal::ParentUnavailable,
+            error => refused(error),
+        })?;
+        let policy = self.inner.resolve_policy(&deployment, &log).map_err(refused)?;
+        let view = policy
+            .engine()
+            .rebuild_view(&log)
+            .map_err(|refusal| refused(EventError::from(refusal)))?;
+        let origin = policy
+            .engine()
+            .fork_origin(&view, parent)
+            .ok_or(ForkRefusal::ParentUnavailable)?;
+        let opening = policy
+            .engine()
+            .fork_opening(child, log.policy_file(), origin)
+            .map_err(|refusal| ForkRefusal::Refused(refusal.to_string()))?;
+        match self.inner.store.create_root(opening, log.policy_file()) {
+            Ok(_) => Ok(()),
+            Err(appa_eventlog::CreateError::AlreadyExists { .. }) => self.forked_already(child, parent_root, parent),
+            Err(error) => {
+                self.inner
+                    .note_store_error(Some(child), crate::events::StoreOperation::Open, &error);
+                Err(ForkRefusal::Refused(error.to_string()))
+            }
+        }
+    }
+
+    /// A repeat [`Runtime::open_fork`]: the child's root exists, which is the same fork only when
+    /// its opening record forked this parent.
+    fn forked_already(
+        &self,
+        child: &TrajectoryId,
+        parent_root: &TrajectoryId,
+        parent: &TrajectoryId,
+    ) -> Result<(), ForkRefusal> {
+        let log = self
+            .inner
+            .log(child)
+            .map_err(|error| ForkRefusal::Refused(error.to_string()))?;
+        match log.facts().first() {
+            Some(appa_engine::fact::Fact::TrajectoryOpened {
+                forked_from: Some(origin),
+                ..
+            }) if origin.parent_root().as_str() == parent_root.0 && origin.parent().as_str() == parent.0 => Ok(()),
+            _ => Err(ForkRefusal::ChildExists),
+        }
     }
 
     fn create_session_under(&self, id: TrajectoryId, deployment: Arc<Deployment>) -> Result<Session, EventError> {
