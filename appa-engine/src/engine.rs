@@ -9824,6 +9824,88 @@ mod tests {
         assert!(origin(&open).effects().is_empty());
     }
 
+    /// A fork can be taken from any open trajectory of a family. A spawned child's fork starts
+    /// at the child's own label: neither its root's, which moved on after the spawn, nor the
+    /// deployment's starting label. A trajectory the family never opened, or a child that has
+    /// ended, has no origin to fork from.
+    #[test]
+    fn a_fork_starts_at_the_forked_trajectorys_label_while_it_is_open() {
+        let e = engine(vec![internal_read(), suspicious_read()]);
+        let (root, child) = (traj(), TrajectoryId::new("child"));
+        let mut log = vec![opened(&e)];
+        reads(&e, &mut log, &root, "read_internal");
+        log.extend(forked_child(&e, &log, &child));
+        reads(&e, &mut log, &root, "read_suspicious");
+        let view = viewing(&e, &log);
+        let label = |trajectory: &TrajectoryId| {
+            view.views(trajectory)
+                .expect("the trajectory is opened")
+                .current_label()
+        };
+        let fresh = viewing_root(&e, &root, &[opened(&e)])
+            .views(&root)
+            .expect("the root is opened")
+            .current_label();
+        assert_ne!(label(&child), label(&root), "the root narrowed after the spawn");
+        assert_ne!(label(&child), fresh, "the child inherited the root's earlier narrowing");
+
+        let origin = view.fork_origin(&child).expect("a live child can be forked");
+        assert_eq!((origin.parent_root(), origin.parent()), (&root, &child));
+        let fork = TrajectoryId::new("fork");
+        let forked = forked_root(&e, &view, &child, &fork);
+        assert_eq!(
+            viewing_root(&e, &fork, &forked)
+                .views(&fork)
+                .expect("the fork is opened")
+                .current_label(),
+            label(&child)
+        );
+
+        assert_eq!(view.fork_origin(&TrajectoryId::new("stranger")), None);
+        let ended = e
+            .handle(&view, child_report(&log, &child, ChildSubmission::Void))
+            .expect("a void return ends the child");
+        let ended = viewing(&e, &[log, appended_facts(ended)].concat());
+        assert_eq!(ended.fork_origin(&child), None, "an ended child cannot be forked");
+        assert!(ended.fork_origin(&root).is_some(), "its root still can");
+    }
+
+    /// A fork's opening names another family. The engine seals no opening whose origin forks the
+    /// root from itself, and a replay refuses one found in a log, whether the origin names the
+    /// root as the parent's family or as the parent trajectory.
+    #[test]
+    fn an_opening_that_forks_the_root_from_itself_is_refused() {
+        use crate::transition::OpeningTransitionRefusal;
+        let e = batch_engine();
+        let child = TrajectoryId::new("child");
+        let view = viewing(&e, &spawn_family(&e, &child));
+        let own = view.fork_origin(&traj()).expect("the root can be forked");
+        let childs = view.fork_origin(&child).expect("the child can be forked");
+        let key = crate::profile::PolicyFileKey::of(b"policy");
+        let self_fork = Err(TransitionRefusal::Opening(OpeningTransitionRefusal::SelfFork));
+
+        let sealed = |root: &TrajectoryId, origin: &crate::fact::ForkOrigin| {
+            e.open_trajectory(root, key.clone(), Some(origin.clone())).map(|_| ())
+        };
+        assert_eq!(sealed(&traj(), &own), self_fork);
+        assert_eq!(sealed(&child, &childs), self_fork);
+
+        let replayed = |root: &TrajectoryId, origin: &crate::fact::ForkOrigin| {
+            let mut opening = opened_root(&e, root);
+            if let Fact::TrajectoryOpened { forked_from, .. } = &mut opening {
+                *forked_from = Some(origin.clone());
+            }
+            e.view(root, vec![opening], 1).map(|_| ())
+        };
+        assert_eq!(replayed(&traj(), &own), self_fork);
+        assert_eq!(replayed(&child, &childs), self_fork);
+        assert_eq!(
+            replayed(&TrajectoryId::new("fork"), &childs),
+            Ok(()),
+            "the same origin opens a root of another name"
+        );
+    }
+
     #[test]
     fn a_fork_records_the_return_policy_its_spawn_approved() {
         let cfg = RegistryConfig {

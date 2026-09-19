@@ -4946,6 +4946,133 @@ delta = {}
         );
     }
 
+    /// How many remedies the block of `call` on `session` offers.
+    async fn offered(session: &Session, call: ProposedCall) -> usize {
+        match session.on_tool_call(call, false).await.expect("the block is delivered") {
+            ToolCallDecision::Deny { offers, .. } => offers.len(),
+            other => panic!("an attended call blocks, got {other:?}"),
+        }
+    }
+
+    /// Block `call` on the root `session` and have the authority its first offer names deny it.
+    async fn denied_on_root(runtime: &Runtime, session: &Session, call: ProposedCall) {
+        let ToolCallDecision::Deny { offers, .. } =
+            session.on_tool_call(call, false).await.expect("the block is delivered")
+        else {
+            panic!("an attended call blocks");
+        };
+        let quoted = OfferId(offers.first().expect("the block offers its authority").id.clone());
+        let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
+        assert!(matches!(
+            session
+                .on_remedy(offer, RemedyArguments::default(), None, None)
+                .await
+                .expect("the denial is delivered"),
+            RemedyDecision::Declined { .. },
+        ));
+    }
+
+    /// A fork inherits the denials its parent held when the fork was taken. A call the parent's
+    /// authority denied is offered no plan naming that authority in the fork, while a call the
+    /// parent never denied, or denied only after the fork, still is.
+    #[tokio::test]
+    async fn a_fork_inherits_the_denials_its_parent_held_at_the_fork() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let url = stub(serde_json::json!({"ruling": "deny", "reason": "no"})).await;
+        let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let parent = runtime.create_session(root()).expect("a fresh id opens");
+        denied_on_root(&runtime, &parent, wire(500)).await;
+        let fork = forked(&runtime, &root(), &fork_id("fork"));
+        denied_on_root(&runtime, &parent, wire(700)).await;
+
+        assert_eq!(
+            offered(&fork, wire(500)).await,
+            0,
+            "the parent's denial holds in the fork"
+        );
+        assert_eq!(
+            offered(&fork, wire(600)).await,
+            1,
+            "a call the parent never denied is still offered its authority"
+        );
+        assert_eq!(
+            offered(&fork, wire(700)).await,
+            1,
+            "a denial recorded after the fork never reaches it"
+        );
+    }
+
+    /// A fork decides under the policy its parent's family opened with, whatever the deployment
+    /// serves when the fork is taken: after a reload drops `fetch`, a fork of an older root still
+    /// has it, and does not have the reloaded policy's `read`.
+    #[tokio::test]
+    async fn a_fork_taken_after_a_reload_decides_under_its_parents_opening_policy() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        runtime.create_session(root()).expect("a fresh id opens");
+        runtime
+            .reload(config_with(READ_ONLY, None))
+            .expect("the edited policy installs");
+
+        let fork = forked(&runtime, &root(), &fork_id("fork"));
+        assert!(
+            runs(&fork, fetch(serde_json::json!({"a": 1}))).await,
+            "the fork keeps its parent's fetch"
+        );
+        let read = ProposedCall {
+            tool: "read".to_string(),
+            arguments: raw(serde_json::json!({"path": "a.txt"})),
+        };
+        assert!(
+            matches!(
+                fork.on_tool_call(read, false).await,
+                Err(EventError::UndeclaredTool { tool }) if tool == "read"
+            ),
+            "the reloaded policy is not the fork's"
+        );
+    }
+
+    /// A spawned child can be forked as well as a root. The fork starts at the child's label,
+    /// not at its root's, and is a root of its own.
+    #[tokio::test]
+    async fn a_fork_of_a_spawned_child_starts_at_the_childs_label() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let mut parent = runtime.create_session(root()).expect("a fresh id opens");
+        let child_id = child("c1");
+        let mut spawned = open_child_floored(
+            &mut parent,
+            fetch(serde_json::json!({"a": 1})),
+            child_id.clone(),
+            floor_trust("suspicious"),
+        )
+        .await;
+        taint_in(&runtime, &root(), &mut spawned).await;
+
+        let fork = fork_id("fork");
+        runtime
+            .open_fork(&root(), &child_id, &fork)
+            .expect("a spawned child forks");
+        assert_eq!(
+            runtime.status(&fork).expect("the fork is a root of its own").trust,
+            "suspicious",
+            "the fork starts at the child's label"
+        );
+        assert_eq!(
+            runtime.status(&root()).expect("the root answers").trust,
+            "trusted",
+            "not at its root's"
+        );
+        let forked = runtime.session(&fork, &fork).expect("the fork reopens");
+        assert!(
+            !sends(&forked).await,
+            "the child's taint blocks the trusted-only sink in the fork"
+        );
+    }
+
     /// The floor the parent declared bounds the child too: a narrowing below it has no
     /// acceptance to offer, so nothing the child admits can fall below what may cross.
     #[tokio::test]
