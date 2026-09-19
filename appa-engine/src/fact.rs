@@ -265,23 +265,27 @@ pub enum CloseOutcome {
     Indeterminate,
 }
 
+/// The fields that open a root trajectory family.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrajectoryOpening {
+    pub trajectory: TrajectoryId,
+    pub dialect: PolicyDialectVersion,
+    pub profile: DeploymentProfile,
+    pub policy_digest: PolicyIdentityV1,
+    pub policy_file_key: PolicyFileKey,
+    pub open_vectors: Vec<OpenVector>,
+    /// Set when the root opened as a fork of another family's trajectory. Its label starts
+    /// from the deployment's starting label folded with the origin's, and its effects,
+    /// unsettled reservations and denials start as the origin's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<RootForkOrigin>,
+}
+
 /// One record in the log. New variants are added by the slice that both emits and consumes them
 /// (`dead_code = "deny"` keeps the enum honest — no speculative records).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Fact {
-    TrajectoryOpened {
-        trajectory: TrajectoryId,
-        dialect: PolicyDialectVersion,
-        profile: DeploymentProfile,
-        policy_digest: PolicyIdentityV1,
-        policy_file_key: PolicyFileKey,
-        open_vectors: Vec<OpenVector>,
-        /// Set when the root opened as a fork of another family's trajectory. Its label starts
-        /// from the deployment's starting label folded with the origin's, and its effects,
-        /// unsettled reservations and denials start as the origin's.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        forked_from: Option<RootForkOrigin>,
-    },
+    TrajectoryOpened(TrajectoryOpening),
     ValueAdmitted {
         trajectory: TrajectoryId,
         value: LabeledValue,
@@ -500,7 +504,7 @@ impl Fact {
 
     pub fn trajectory(&self) -> &TrajectoryId {
         match self {
-            Fact::TrajectoryOpened { trajectory, .. }
+            Fact::TrajectoryOpened(TrajectoryOpening { trajectory, .. })
             | Fact::ProposalBatchDecided { trajectory, .. }
             | Fact::ValueAdmitted { trajectory, .. }
             | Fact::DispatchOpened { trajectory, .. }

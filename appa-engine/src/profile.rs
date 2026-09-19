@@ -601,7 +601,7 @@ pub(crate) fn opening_at(trajectory: crate::value::TrajectoryId, starting_label:
         ..ProfileDeclaration::no_coverage(&chain)
     })
     .expect("an established starting label declares");
-    crate::fact::Fact::TrajectoryOpened {
+    crate::fact::Fact::TrajectoryOpened(crate::fact::TrajectoryOpening {
         trajectory,
         dialect: PolicyDialectVersion::new(1),
         policy_digest: identity_of(&config, &profile),
@@ -609,7 +609,7 @@ pub(crate) fn opening_at(trajectory: crate::value::TrajectoryId, starting_label:
         policy_file_key: PolicyFileKey::of(b"fixture"),
         open_vectors: Vec::new(),
         forked_from: None,
-    }
+    })
 }
 
 #[cfg(test)]

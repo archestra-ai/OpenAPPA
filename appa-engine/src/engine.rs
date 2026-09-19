@@ -2530,7 +2530,7 @@ impl Engine {
         let empty = EngineView::validated(Projection::empty(0), self.identity, trajectory.clone());
         self.seal(
             &empty,
-            vec![Fact::TrajectoryOpened {
+            vec![Fact::TrajectoryOpened(crate::fact::TrajectoryOpening {
                 trajectory: trajectory.clone(),
                 dialect: self.dialect,
                 profile: self.profile().clone(),
@@ -2538,7 +2538,7 @@ impl Engine {
                 policy_file_key,
                 open_vectors: self.open_vectors(),
                 forked_from,
-            }],
+            })],
         )
     }
 
@@ -9607,7 +9607,7 @@ mod tests {
         assert_eq!(batch.basis(), 0, "the opening stands on the empty log");
         match batch.facts() {
             [
-                Fact::TrajectoryOpened {
+                Fact::TrajectoryOpened(crate::fact::TrajectoryOpening {
                     trajectory,
                     dialect,
                     profile,
@@ -9615,7 +9615,7 @@ mod tests {
                     policy_file_key,
                     open_vectors,
                     forked_from,
-                },
+                }),
             ] => {
                 assert_eq!(forked_from, &None, "a fresh root opens as no fork");
                 assert_eq!(policy_file_key, &key, "the opening names the file it opened under");
@@ -9672,7 +9672,7 @@ mod tests {
         };
         assert_eq!(
             mutated(&|fact| {
-                if let Fact::TrajectoryOpened { dialect, .. } = fact {
+                if let Fact::TrajectoryOpened(crate::fact::TrajectoryOpening { dialect, .. }) = fact {
                     *dialect = PolicyDialectVersion::new(9);
                 }
             }),
@@ -9682,7 +9682,7 @@ mod tests {
         );
         assert_eq!(
             mutated(&|fact| {
-                if let Fact::TrajectoryOpened { policy_digest, .. } = fact {
+                if let Fact::TrajectoryOpened(crate::fact::TrajectoryOpening { policy_digest, .. }) = fact {
                     let other = engine(vec![plain_tool("send")]);
                     *policy_digest = other.identity();
                 }
@@ -9691,7 +9691,7 @@ mod tests {
         );
         assert_eq!(
             mutated(&|fact| {
-                if let Fact::TrajectoryOpened { profile, .. } = fact {
+                if let Fact::TrajectoryOpened(crate::fact::TrajectoryOpening { profile, .. }) = fact {
                     let other = engine(vec![plain_tool("send")]);
                     *profile = other.profile().clone();
                 }
@@ -9700,7 +9700,7 @@ mod tests {
         );
         assert_eq!(
             mutated(&|fact| {
-                if let Fact::TrajectoryOpened { open_vectors, .. } = fact {
+                if let Fact::TrajectoryOpened(crate::fact::TrajectoryOpening { open_vectors, .. }) = fact {
                     open_vectors.clear();
                 }
             }),
@@ -9917,7 +9917,7 @@ mod tests {
 
         let replayed = |root: &TrajectoryId, origin: &crate::fact::RootForkOrigin| {
             let mut opening = opened_root(&e, root);
-            if let Fact::TrajectoryOpened { forked_from, .. } = &mut opening {
+            if let Fact::TrajectoryOpened(crate::fact::TrajectoryOpening { forked_from, .. }) = &mut opening {
                 *forked_from = Some(origin.clone());
             }
             e.view(root, vec![opening], 1).map(|_| ())

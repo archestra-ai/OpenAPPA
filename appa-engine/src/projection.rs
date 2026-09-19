@@ -287,12 +287,12 @@ impl Projection {
         } = self;
         {
             match fact {
-                Fact::TrajectoryOpened {
+                Fact::TrajectoryOpened(crate::fact::TrajectoryOpening {
                     trajectory,
                     profile,
                     forked_from,
                     ..
-                } => {
+                }) => {
                     let mut starting = profile.starting_label().clone();
                     // A root opened as a fork starts where its parent stood: the parent's label
                     // folds into the base every later admission folds onto, and the parent
@@ -688,7 +688,7 @@ impl Projection {
             label: self.fold_for(trajectory),
             effects: EffectSet::distinct(&self.effects),
             reservations: EffectSet::distinct(reserved),
-            denials: self.denials.get(trajectory).map_or_else(BTreeMap::new, Clone::clone),
+            denials: self.denials.get(trajectory).cloned().unwrap_or_default(),
         })
     }
 

@@ -1573,7 +1573,7 @@ impl Runtime {
                 report.actor_opened = log.facts().iter().any(|fact| {
                     matches!(
                         fact,
-                        appa_engine::fact::Fact::TrajectoryOpened { trajectory, .. }
+                        appa_engine::fact::Fact::TrajectoryOpened(appa_engine::fact::TrajectoryOpening { trajectory, .. })
                         | appa_engine::fact::Fact::ForkOpened { trajectory, .. } if trajectory == &scope
                     )
                 });
@@ -1727,10 +1727,10 @@ impl Runtime {
             .log(fork_root)
             .map_err(|error| RootForkRefusal::Refused(error.to_string()))?;
         match log.facts().first() {
-            Some(appa_engine::fact::Fact::TrajectoryOpened {
+            Some(appa_engine::fact::Fact::TrajectoryOpened(appa_engine::fact::TrajectoryOpening {
                 forked_from: Some(origin),
                 ..
-            }) if origin.is_from(
+            })) if origin.is_from(
                 &crate::engine::engine_id(parent_root),
                 &crate::engine::engine_id(parent),
             ) =>

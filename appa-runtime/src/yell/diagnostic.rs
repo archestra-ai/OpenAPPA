@@ -942,7 +942,7 @@ mod tests {
     /// a variant to the engine and this stops compiling, which is the moment to add its table.
     fn variant(fact: &Fact) -> &'static str {
         match fact {
-            Fact::TrajectoryOpened { .. } => "TrajectoryOpened",
+            Fact::TrajectoryOpened(_) => "TrajectoryOpened",
             Fact::ValueAdmitted { .. } => "ValueAdmitted",
             Fact::DispatchOpened { .. } => "DispatchOpened",
             Fact::DispatchSucceeded { .. } => "DispatchSucceeded",

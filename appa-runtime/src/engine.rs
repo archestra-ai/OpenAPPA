@@ -707,11 +707,11 @@ impl PolicyEngine<'_> {
 /// is known, because it is what names it.
 pub(crate) fn opened_under(log: &Log) -> Option<Opened> {
     match log.facts().first() {
-        Some(Fact::TrajectoryOpened {
+        Some(Fact::TrajectoryOpened(appa_engine::fact::TrajectoryOpening {
             policy_digest,
             policy_file_key,
             ..
-        }) => Some(Opened {
+        })) => Some(Opened {
             policy_file_key: policy_file_key.as_str().to_string(),
             policy_identity: hex(policy_digest.bytes()),
         }),
@@ -1195,7 +1195,7 @@ impl RuntimeEngine {
                     seed: self.render_label(seed)?,
                 },
             },
-            Fact::TrajectoryOpened { .. } | Fact::ProposalBatchDecided { .. } => return Some(None),
+            Fact::TrajectoryOpened(_) | Fact::ProposalBatchDecided { .. } => return Some(None),
             Fact::OfferOpened { .. }
             | Fact::OfferAccepted { .. }
             | Fact::OfferDenied { .. }

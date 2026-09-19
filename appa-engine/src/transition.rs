@@ -10,11 +10,13 @@ use crate::check::{CheckOutcome, Gap, Narrowing};
 use crate::contract::ToolAnnotation;
 use crate::engine::Engine;
 use crate::execute::AuthorityEvidence;
-use crate::fact::{BoundaryKind, CloseOutcome, EffectSet, Fact, ReturnDerivation, ReturnPolicy, ReturnSanitizer};
+use crate::fact::{
+    BoundaryKind, CloseOutcome, EffectSet, Fact, ReturnDerivation, ReturnPolicy, ReturnSanitizer, TrajectoryOpening,
+};
 use crate::label::{Expansions, Label, MembershipContext};
 use crate::names::{AuthorityName, SanitizerName};
 use crate::plan::PlannedBlock;
-use crate::profile::{DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyIdentityV1};
+use crate::profile::PolicyIdentityV1;
 use crate::projection::{Projection, Views};
 use crate::value::{
     ChildReturnId, DispatchId, FileBasis, ForkId, Provenance, RawResultDigest, ResolvedCall, TrajectoryId, ValueBody,
@@ -1058,7 +1060,7 @@ impl<'a> Sequence<'a> {
         let implied = self.implied_advance(fact);
         match fact {
             // Judged in full by `member`, which admits it only as the family's first record.
-            Fact::TrajectoryOpened { .. } => {}
+            Fact::TrajectoryOpened(_) => {}
             Fact::BasisAdvanced { act, advance, .. } => self.declare(act, advance)?,
             Fact::OfferOpened {
                 trajectory,
@@ -2075,32 +2077,27 @@ impl<'a> Sequence<'a> {
     /// the open vectors that declaration derives. `policy_file_key` is deliberately not judged
     /// here: it names a stored file this engine never sees, and the outer layer re-hashes the
     /// file it loaded against the record on every event.
-    fn root_opened(
-        &self,
-        trajectory: &TrajectoryId,
-        dialect: PolicyDialectVersion,
-        profile: &DeploymentProfile,
-        policy_digest: &PolicyIdentityV1,
-        open_vectors: &[OpenVector],
-    ) -> Result<(), OpeningTransitionRefusal> {
+    fn root_opened(&self, opening: &TrajectoryOpening) -> Result<(), OpeningTransitionRefusal> {
         if self.projection.is_opened(&self.family) {
             return Err(OpeningTransitionRefusal::Duplicate);
         }
-        if trajectory != &self.family {
+        if opening.trajectory != self.family {
             return Err(OpeningTransitionRefusal::WrongTrajectory {
-                found: trajectory.as_str().to_string(),
+                found: opening.trajectory.as_str().to_string(),
             });
         }
-        if dialect != self.engine.dialect() {
-            return Err(OpeningTransitionRefusal::UnsupportedDialect { found: dialect.value() });
+        if opening.dialect != self.engine.dialect() {
+            return Err(OpeningTransitionRefusal::UnsupportedDialect {
+                found: opening.dialect.value(),
+            });
         }
-        if policy_digest != &self.engine.identity() {
+        if opening.policy_digest != self.engine.identity() {
             return Err(OpeningTransitionRefusal::DigestMismatch);
         }
-        if profile != self.engine.registry().profile() {
+        if opening.profile != *self.engine.registry().profile() {
             return Err(OpeningTransitionRefusal::ProfileMismatch);
         }
-        if open_vectors != self.engine.open_vectors() {
+        if opening.open_vectors != self.engine.open_vectors() {
             return Err(OpeningTransitionRefusal::VectorMismatch);
         }
         Ok(())
@@ -2108,19 +2105,10 @@ impl<'a> Sequence<'a> {
 
     fn member(&self, fact: &Fact) -> Result<(), TransitionRefusal> {
         let trajectory = fact.trajectory();
-        if let Fact::TrajectoryOpened {
-            trajectory,
-            dialect,
-            profile,
-            policy_digest,
-            open_vectors,
-            forked_from,
-            ..
-        } = fact
-        {
-            self.root_opened(trajectory, *dialect, profile, policy_digest, open_vectors)?;
-            if let Some(origin) = forked_from
-                && (origin.parent_root == *trajectory || origin.parent == *trajectory)
+        if let Fact::TrajectoryOpened(opening) = fact {
+            self.root_opened(opening)?;
+            if let Some(origin) = &opening.forked_from
+                && (origin.parent_root == opening.trajectory || origin.parent == opening.trajectory)
             {
                 return Err(OpeningTransitionRefusal::SelfFork.into());
             }
@@ -3325,7 +3313,7 @@ mod tests {
         Engine::open(crate::profile::DeploymentPolicy {
             registry: config,
             planner_cap: crate::registry::PlannerCap::default(),
-            dialect: PolicyDialectVersion::new(1),
+            dialect: crate::profile::PolicyDialectVersion::new(1),
             profile,
         })
         .expect("the test policy opens")

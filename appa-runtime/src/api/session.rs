@@ -2480,7 +2480,7 @@ name = "appa/execute_remedy_plan"
         assert!(runtime.open_dispatches(&root(), &root()).pop().is_none());
         let log = runtime.log_facts(&root());
         assert!(
-            matches!(log.as_slice(), [appa_engine::fact::Fact::TrajectoryOpened { .. }]),
+            matches!(log.as_slice(), [appa_engine::fact::Fact::TrajectoryOpened(_)]),
             "an invalid call appends no record after the opening",
         );
     }
@@ -2761,7 +2761,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let released: Vec<_> = runtime
             .log_facts(&root())
             .into_iter()
-            .skip_while(|fact| matches!(fact, appa_engine::fact::Fact::TrajectoryOpened { .. }))
+            .skip_while(|fact| matches!(fact, appa_engine::fact::Fact::TrajectoryOpened(_)))
             .collect();
         let tampered = serde_json::to_string(&released)
             .expect("the batch serializes")
@@ -2839,7 +2839,7 @@ starting_label = { audience = ["alice@corp.example"] }
         let released: Vec<_> = runtime
             .log_facts(&root())
             .into_iter()
-            .skip_while(|fact| matches!(fact, appa_engine::fact::Fact::TrajectoryOpened { .. }))
+            .skip_while(|fact| matches!(fact, appa_engine::fact::Fact::TrajectoryOpened(_)))
             .collect();
         let persisted = serde_json::to_string(&released).expect("the batch serializes");
         assert!(
@@ -6148,7 +6148,7 @@ delta = {}
     fn only_the_opening(runtime: &Runtime) -> bool {
         matches!(
             runtime.log_facts(&root()).as_slice(),
-            [appa_engine::fact::Fact::TrajectoryOpened { .. }]
+            [appa_engine::fact::Fact::TrajectoryOpened(_)]
         )
     }
 
