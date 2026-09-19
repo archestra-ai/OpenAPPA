@@ -46,8 +46,8 @@ pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
 use appa_engine::fact::{
-    BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ForkOrigin, ReturnDerivation, ReturnPolicy,
-    ReturnSanitizer,
+    BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ReturnDerivation, ReturnPolicy, ReturnSanitizer,
+    RootForkOrigin,
 };
 use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, Label, ReaderId, SymbolicAtom, Trust};
 use appa_engine::names::MarkName;
@@ -795,14 +795,14 @@ impl RuntimeEngine {
             .into_unsealed()
     }
 
-    /// The opening of a root that forks another family's trajectory: the same opening batch,
-    /// carrying the origin that family's view froze. Refused when the origin names the root
-    /// itself.
-    pub(crate) fn fork_opening(
+    /// The opening of an independent conversation-root fork: the same opening batch, carrying
+    /// the origin another family's view froze. It prepares no same-family child or return
+    /// contract, and refuses an origin that names the root itself.
+    pub(crate) fn root_fork_opening(
         &self,
         trajectory: &TrajectoryId,
         policy_file: &[u8],
-        origin: ForkOrigin,
+        origin: RootForkOrigin,
     ) -> Result<Vec<Fact>, TransitionRefusal> {
         self.engine
             .open_trajectory(
@@ -813,10 +813,10 @@ impl RuntimeEngine {
             .map(ValidatedFactBatch::into_unsealed)
     }
 
-    /// What a root opened as a fork of `trajectory` carries over from this view. `None` when
-    /// the family never opened the trajectory or it has ended.
-    pub(crate) fn fork_origin(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<ForkOrigin> {
-        view.fork_origin(&engine_id(trajectory))
+    /// What an independent conversation-root fork of `trajectory` carries over from this view.
+    /// `None` when the family never opened the trajectory or it has ended.
+    pub(crate) fn root_fork_origin(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<RootForkOrigin> {
+        view.root_fork_origin(&engine_id(trajectory))
     }
 
     /// Refuse one root's log before it is trusted, including the

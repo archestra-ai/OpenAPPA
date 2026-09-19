@@ -35,6 +35,22 @@
 //! Annotator; a call nothing covers is refused before it runs, and an annotation that fails
 //! to arrive is an operational refusal, never a policy denial.
 //!
+//! ## Two fork lifecycles
+//!
+//! A **subagent fork** branches within one family log. A released spawn records
+//! [`fact::Fact::ForkPrepared`]; [`fact::Fact::ForkOpened`] binds its child trajectory.
+//! Its [`fact::ForkSnapshot`] refers to source values in that same log, and a child return
+//! crosses back to its parent only through the checked return path. Family-wide effect
+//! history remains shared.
+//!
+//! A **root fork** opens an independent family from an existing trajectory. Its
+//! [`fact::RootForkOrigin`] is recorded on the new root's [`fact::Fact::TrajectoryOpened`],
+//! not on a `ForkOpened` child binding. It freezes the source label, family effects and
+//! unsettled reservations, and source denials. Replay reads that opening record without
+//! reading the parent log; later activity on either side does not update the other.
+//! No spawn dispatch or child-return contract is created. The runtime must also preserve
+//! the source family's opening policy when it creates the new log.
+//!
 //! ## File content: a pinned basis, and two labels
 //!
 //! A call that touches a file the runtime tracks carries a host-pinned [`value::FileBasis`]

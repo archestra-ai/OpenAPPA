@@ -173,7 +173,14 @@ const TERMS = {
     "Returned on a refusal: exact valid paths forward to unblock execution.",
   confined_results:
     "Tools whose results the integration can keep hidden until OpenAPPA allows delivery. A tool must be listed here for its results to use an output sanitizer. Tools that run inside the model provider's service cannot be listed.",
-  trajectory: "One agent run: its security label plus its append-only event log.",
+  trajectory:
+    "One agent's work and security state. A root and its spawned subagents are separate trajectories recorded in one family log.",
+  "trajectory family":
+    "One root and its spawned subagent trajectories, recorded in the same event log under the family's opening policy. Their effect history is family-wide.",
+  "subagent fork":
+    "A child trajectory bound to an approved spawn in the parent's family. Its content snapshot refers to values in that family log, and its answer crosses a checked return path.",
+  "root fork":
+    "An independent family opened from an identified source trajectory. It freezes the source label and denials, family effects and unsettled reservations, and opening policy. Later activity stays separate; there is no spawn dispatch or child-return contract.",
 } as const satisfies Record<string, string>;
 
 export function termDefinition(chip: string): string | undefined {

@@ -7,7 +7,7 @@ use crate::basis::SubjectKey;
 use crate::candidate::{DerivedCandidate, SanitizerLineage};
 use crate::contract::PinnedAnnotation;
 use crate::fact::{
-    BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ForkOrigin, ForkSnapshot, ObservedResult, ReturnPolicy,
+    BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ForkSnapshot, ObservedResult, ReturnPolicy, RootForkOrigin,
 };
 use crate::label::Label;
 use crate::names::{AuthorityName, SanitizerName};
@@ -668,11 +668,11 @@ impl Projection {
         ForkSnapshot::freeze(self.opened_base(trajectory), self.basis_sources(trajectory))
     }
 
-    /// What a root opened as a fork of this trajectory carries over, at this revision: the
-    /// trajectory's current label, the family's committed effects, the kinds the family's
-    /// unsettled reservations hold (those its own origin carried among them), and the
+    /// What an independent conversation-root fork of this trajectory carries over, at this
+    /// revision: the trajectory's current label, the family's committed effects, the kinds the
+    /// family's unsettled reservations hold (those its own origin carried among them), and the
     /// trajectory's denials. `None` for a trajectory that is not opened or has ended.
-    pub(crate) fn fork_origin(&self, family: &TrajectoryId, trajectory: &TrajectoryId) -> Option<ForkOrigin> {
+    pub(crate) fn root_fork_origin(&self, family: &TrajectoryId, trajectory: &TrajectoryId) -> Option<RootForkOrigin> {
         if !self.is_opened(trajectory) || self.ended.contains(trajectory) {
             return None;
         }
@@ -681,7 +681,7 @@ impl Projection {
             .values()
             .flat_map(EffectSet::iter)
             .chain(self.origin_reservations.iter());
-        Some(ForkOrigin {
+        Some(RootForkOrigin {
             parent_root: family.clone(),
             parent: trajectory.clone(),
             basis: self.revision,

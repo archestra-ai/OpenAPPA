@@ -685,7 +685,9 @@ mod tests {
             ToolCallDecision::Allow { .. }
         ));
         let fork = TrajectoryId("cc:fork-session".to_string());
-        runtime.open_fork(&parent, &parent, &fork).expect("the fork opens");
+        runtime
+            .open_root_fork(&parent, &parent, &fork)
+            .expect("the root fork opens");
 
         let projection = project(&runtime, &fork, Mode::Pseudonymized, Budget::default());
         assert!(

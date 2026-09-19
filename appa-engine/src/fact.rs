@@ -142,8 +142,13 @@ impl<'de> Deserialize<'de> for EffectSet {
     }
 }
 
-/// The content snapshot a fork freezes: the parent's base, the source
-/// values that contributed to its label at that moment, and the label they derive.
+/// The frozen basis of a same-family spawned child fork: the parent's base, the source values
+/// that contributed to its label at that moment, and the label they derive. A
+/// [`Fact::ForkPrepared`] records it and a [`Fact::ForkOpened`] binds it to the child. Its
+/// inherited value IDs name values in that same family log; the child's start keeps the family's
+/// root and may later return under the prepared return policy.
+///
+/// This is distinct from [`RootForkOrigin`], which opens an independent conversation-root fork.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForkSnapshot {
     base: Label,
@@ -186,19 +191,21 @@ impl ForkSnapshot {
     }
 }
 
-/// Where a root that opened as a fork of another family's trajectory was taken from, and what it
-/// carries over from there: that trajectory's label, its family's committed effects, the effect
-/// kinds its family's unsettled reservations held, and that trajectory's authority denials, all
-/// as they stood at the parent family's log position `basis`. The fork is a family of its own
-/// after that point: nothing either side admits, emits, settles or denies later reaches the
-/// other, so a reservation carried over never settles in the fork.
+/// The origin of an independent conversation-root fork. It records where a new root was taken
+/// from and what it carries over: that trajectory's label, its family's committed effects, the
+/// effect kinds its family's unsettled reservations held, and that trajectory's authority
+/// denials, all as they stood at the parent family's log position `basis`. The new root is a
+/// family of its own after that point: nothing either side admits, emits, settles or denies later
+/// reaches the other, so a reservation carried over never settles in the root fork.
 ///
-/// [`crate::transition::EngineView::fork_origin`] freezes one from the parent family's validated
-/// view, and the runtime records it on the fork's opening record. A replay of the fork's log
-/// never reads the parent family's log, so it takes the recorded origin as trusted log content
-/// and refuses only an origin that forks the root from itself.
+/// [`crate::transition::EngineView::root_fork_origin`] freezes one from the parent family's
+/// validated view, and the runtime records it on the new root's opening record. A root fork has
+/// no prepared spawn, child start, or return contract; those belong to the same-family
+/// [`ForkSnapshot`] flow. A replay of the root fork's log never reads the parent family's log, so
+/// it takes the recorded origin as trusted log content and refuses only an origin that forks the
+/// root from itself.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ForkOrigin {
+pub struct RootForkOrigin {
     pub(crate) parent_root: TrajectoryId,
     pub(crate) parent: TrajectoryId,
     pub(crate) basis: u64,
@@ -210,7 +217,7 @@ pub struct ForkOrigin {
     pub(crate) denials: std::collections::BTreeMap<CanonicalDigest, std::collections::BTreeSet<AuthorityName>>,
 }
 
-impl ForkOrigin {
+impl RootForkOrigin {
     /// The family root the parent trajectory lives in.
     pub fn parent_root(&self) -> &TrajectoryId {
         &self.parent_root
@@ -295,7 +302,7 @@ pub enum Fact {
         /// from the deployment's starting label folded with the origin's, and its effects,
         /// unsettled reservations and denials start as the origin's.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        forked_from: Option<ForkOrigin>,
+        forked_from: Option<RootForkOrigin>,
     },
     ValueAdmitted {
         trajectory: TrajectoryId,

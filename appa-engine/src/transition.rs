@@ -599,10 +599,11 @@ impl EngineView {
             .then(|| self.projection.view(trajectory))
     }
 
-    /// What a root opened as a fork of `trajectory` carries over from this family, frozen at this
-    /// view's position. `None` for a trajectory this family never opened or one that has ended.
-    pub fn fork_origin(&self, trajectory: &TrajectoryId) -> Option<crate::fact::ForkOrigin> {
-        self.projection.fork_origin(&self.family, trajectory)
+    /// Freeze what an independent conversation-root fork of `trajectory` carries over from this
+    /// family at this view's position. This opens no same-family child and creates no spawn or
+    /// return contract. `None` for a trajectory this family never opened or one that has ended.
+    pub fn root_fork_origin(&self, trajectory: &TrajectoryId) -> Option<crate::fact::RootForkOrigin> {
+        self.projection.root_fork_origin(&self.family, trajectory)
     }
 
     /// Which trajectory surfaced this offer, anywhere in the family.
@@ -2105,15 +2106,14 @@ impl<'a> Sequence<'a> {
         Ok(())
     }
 
-    /// A root opened as a fork carries the origin the runtime recorded when it opened the fork.
+    /// An independent root fork carries the origin the runtime recorded when it opened the root.
     /// Re-deriving that origin would take the parent family's log, which this validator never
     /// reads, so the replay takes the origin as trusted log content. It refuses only an origin
-    /// that forks the root from itself: one whose parent family or parent trajectory is the
-    /// root.
-    fn fork_origin_admitted(
+    /// that forks the root from itself: one whose parent family or parent trajectory is the root.
+    fn root_fork_origin_admitted(
         &self,
         trajectory: &TrajectoryId,
-        origin: &crate::fact::ForkOrigin,
+        origin: &crate::fact::RootForkOrigin,
     ) -> Result<(), OpeningTransitionRefusal> {
         if origin.parent_root() == trajectory || origin.parent() == trajectory {
             return Err(OpeningTransitionRefusal::SelfFork);
@@ -2135,7 +2135,7 @@ impl<'a> Sequence<'a> {
         {
             self.root_opened(trajectory, *dialect, profile, policy_digest, open_vectors)?;
             if let Some(origin) = forked_from {
-                self.fork_origin_admitted(trajectory, origin)?;
+                self.root_fork_origin_admitted(trajectory, origin)?;
             }
             return Ok(());
         }

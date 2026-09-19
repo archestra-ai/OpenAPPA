@@ -422,9 +422,9 @@ static FORK_SNAPSHOT: Table = Table {
     ],
 };
 
-/// What a root opened as a fork of another family's trajectory records on its opening.
-static FORK_ORIGIN: Table = Table {
-    name: "ForkOrigin",
+/// What an independent conversation-root fork records on its opening.
+static ROOT_FORK_ORIGIN: Table = Table {
+    name: "RootForkOrigin",
     entries: &[
         ("parent_root", TRAJECTORY),
         ("parent", TRAJECTORY),
@@ -517,7 +517,7 @@ static TRAJECTORY_OPENED: Table = Table {
         ("policy_digest", Rule::Fingerprint),
         ("policy_file_key", Rule::Fingerprint),
         ("open_vectors", Rule::Each(&Rule::Table(&OPEN_VECTOR))),
-        ("forked_from", Rule::Table(&FORK_ORIGIN)),
+        ("forked_from", Rule::Table(&ROOT_FORK_ORIGIN)),
     ],
 };
 
