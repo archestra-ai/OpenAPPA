@@ -1730,8 +1730,10 @@ impl Runtime {
             Some(appa_engine::fact::Fact::TrajectoryOpened {
                 forked_from: Some(origin),
                 ..
-            }) if origin.parent_root() == &crate::engine::engine_id(parent_root)
-                && origin.parent() == &crate::engine::engine_id(parent) =>
+            }) if origin.is_from(
+                &crate::engine::engine_id(parent_root),
+                &crate::engine::engine_id(parent),
+            ) =>
             {
                 Ok(())
             }

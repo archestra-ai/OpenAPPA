@@ -2106,21 +2106,6 @@ impl<'a> Sequence<'a> {
         Ok(())
     }
 
-    /// An independent root fork carries the origin the runtime recorded when it opened the root.
-    /// Re-deriving that origin would take the parent family's log, which this validator never
-    /// reads, so the replay takes the origin as trusted log content. It refuses only an origin
-    /// that forks the root from itself: one whose parent family or parent trajectory is the root.
-    fn root_fork_origin_admitted(
-        &self,
-        trajectory: &TrajectoryId,
-        origin: &crate::fact::RootForkOrigin,
-    ) -> Result<(), OpeningTransitionRefusal> {
-        if origin.parent_root() == trajectory || origin.parent() == trajectory {
-            return Err(OpeningTransitionRefusal::SelfFork);
-        }
-        Ok(())
-    }
-
     fn member(&self, fact: &Fact) -> Result<(), TransitionRefusal> {
         let trajectory = fact.trajectory();
         if let Fact::TrajectoryOpened {
@@ -2134,8 +2119,10 @@ impl<'a> Sequence<'a> {
         } = fact
         {
             self.root_opened(trajectory, *dialect, profile, policy_digest, open_vectors)?;
-            if let Some(origin) = forked_from {
-                self.root_fork_origin_admitted(trajectory, origin)?;
+            if let Some(origin) = forked_from
+                && (origin.parent_root == *trajectory || origin.parent == *trajectory)
+            {
+                return Err(OpeningTransitionRefusal::SelfFork.into());
             }
             return Ok(());
         }
@@ -3350,7 +3337,7 @@ mod tests {
 
     fn opening(engine: &Engine, family: &TrajectoryId) -> Fact {
         engine
-            .open_trajectory(family, PolicyFileKey::of(b"policy"), None)
+            .open_trajectory(family, PolicyFileKey::of(b"policy"))
             .expect("the opening validates against the empty log")
             .into_unsealed()
             .remove(0)

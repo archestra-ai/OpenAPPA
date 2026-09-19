@@ -790,7 +790,7 @@ impl RuntimeEngine {
     /// the engine crate.
     pub fn root_opening(&self, trajectory: &TrajectoryId, policy_file: &[u8]) -> Vec<Fact> {
         self.engine
-            .open_trajectory(&engine_id(trajectory), EnginePolicyFileKey::of(policy_file), None)
+            .open_trajectory(&engine_id(trajectory), EnginePolicyFileKey::of(policy_file))
             .expect("the engine's own opening batch validates against the empty log")
             .into_unsealed()
     }
@@ -805,11 +805,7 @@ impl RuntimeEngine {
         origin: RootForkOrigin,
     ) -> Result<Vec<Fact>, TransitionRefusal> {
         self.engine
-            .open_trajectory(
-                &engine_id(trajectory),
-                EnginePolicyFileKey::of(policy_file),
-                Some(origin),
-            )
+            .open_root_fork(&engine_id(trajectory), EnginePolicyFileKey::of(policy_file), origin)
             .map(ValidatedFactBatch::into_unsealed)
     }
 

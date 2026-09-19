@@ -208,6 +208,7 @@ impl ForkSnapshot {
 pub struct RootForkOrigin {
     pub(crate) parent_root: TrajectoryId,
     pub(crate) parent: TrajectoryId,
+    /// Provenance only: replay trusts this opening and does not validate the parent's log position.
     pub(crate) basis: u64,
     pub(crate) label: Label,
     pub(crate) effects: EffectSet,
@@ -218,32 +219,9 @@ pub struct RootForkOrigin {
 }
 
 impl RootForkOrigin {
-    /// The family root the parent trajectory lives in.
-    pub fn parent_root(&self) -> &TrajectoryId {
-        &self.parent_root
-    }
-
-    /// The trajectory the fork was taken from.
-    pub fn parent(&self) -> &TrajectoryId {
-        &self.parent
-    }
-
-    pub(crate) fn label(&self) -> &Label {
-        &self.label
-    }
-
-    pub(crate) fn effects(&self) -> &EffectSet {
-        &self.effects
-    }
-
-    pub(crate) fn reservations(&self) -> &EffectSet {
-        &self.reservations
-    }
-
-    pub(crate) fn denials(
-        &self,
-    ) -> &std::collections::BTreeMap<CanonicalDigest, std::collections::BTreeSet<AuthorityName>> {
-        &self.denials
+    /// Does this origin name exactly this parent family and trajectory?
+    pub fn is_from(&self, parent_root: &TrajectoryId, parent: &TrajectoryId) -> bool {
+        self.parent_root == *parent_root && self.parent == *parent
     }
 }
 

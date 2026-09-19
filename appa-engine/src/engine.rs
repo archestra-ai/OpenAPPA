@@ -2501,11 +2501,27 @@ impl Engine {
 
     /// The opening batch of a fresh root trajectory family: one `TrajectoryOpened`
     /// record against the empty log. The runtime appends it before any other family event.
-    /// `forked_from` opens the root as an independent conversation-root fork of another family's
-    /// trajectory, from the origin that family's view froze (see
-    /// [`EngineView::root_fork_origin`]). It does not prepare a same-family child, spawn one, or
-    /// establish a return contract.
     pub fn open_trajectory(
+        &self,
+        trajectory: &TrajectoryId,
+        policy_file_key: crate::profile::PolicyFileKey,
+    ) -> Result<ValidatedFactBatch, TransitionRefusal> {
+        self.opening(trajectory, policy_file_key, None)
+    }
+
+    /// The opening batch of an independent conversation-root fork. `forked_from` came from the
+    /// parent family's validated view; this creates no same-family child, spawn, or return
+    /// contract.
+    pub fn open_root_fork(
+        &self,
+        trajectory: &TrajectoryId,
+        policy_file_key: crate::profile::PolicyFileKey,
+        forked_from: crate::fact::RootForkOrigin,
+    ) -> Result<ValidatedFactBatch, TransitionRefusal> {
+        self.opening(trajectory, policy_file_key, Some(forked_from))
+    }
+
+    fn opening(
         &self,
         trajectory: &TrajectoryId,
         policy_file_key: crate::profile::PolicyFileKey,
@@ -3297,7 +3313,7 @@ mod tests {
     }
 
     fn opened_root(e: &Engine, trajectory: &TrajectoryId) -> Fact {
-        e.open_trajectory(trajectory, crate::profile::PolicyFileKey::of(b"policy"), None)
+        e.open_trajectory(trajectory, crate::profile::PolicyFileKey::of(b"policy"))
             .expect("the engine opens its own root")
             .into_unsealed()
             .remove(0)
@@ -9586,7 +9602,7 @@ mod tests {
         let t = traj();
         let key = crate::profile::PolicyFileKey::of(b"the policy file");
         let batch = e
-            .open_trajectory(&t, key.clone(), None)
+            .open_trajectory(&t, key.clone())
             .expect("a fresh root's opening seals");
         assert_eq!(batch.basis(), 0, "the opening stands on the empty log");
         match batch.facts() {
@@ -9704,7 +9720,7 @@ mod tests {
         let origin = view
             .root_fork_origin(parent)
             .expect("an open trajectory can be root-forked");
-        e.open_trajectory(fork, crate::profile::PolicyFileKey::of(b"policy"), Some(origin))
+        e.open_root_fork(fork, crate::profile::PolicyFileKey::of(b"policy"), origin)
             .expect("a fork of another family's trajectory seals")
             .into_unsealed()
     }
@@ -9822,10 +9838,10 @@ mod tests {
         // what is committed apart from what is only reserved.
         let origin = |log: &[Fact]| viewing(&e, log).root_fork_origin(&parent).expect("the parent is open");
         let just_k = EffectSet::new([k.clone()]).unwrap();
-        assert_eq!(origin(&committed_twice).effects(), &just_k);
-        assert!(origin(&committed_twice).reservations().is_empty());
-        assert_eq!(origin(&open).reservations(), &just_k);
-        assert!(origin(&open).effects().is_empty());
+        assert_eq!(origin(&committed_twice).effects, just_k);
+        assert!(origin(&committed_twice).reservations.is_empty());
+        assert_eq!(origin(&open).reservations, just_k);
+        assert!(origin(&open).effects.is_empty());
     }
 
     /// An independent root fork can be taken from any open trajectory of a family. A spawned
@@ -9855,7 +9871,7 @@ mod tests {
         assert_ne!(label(&child), fresh, "the child inherited the root's earlier narrowing");
 
         let origin = view.root_fork_origin(&child).expect("a live child can be root-forked");
-        assert_eq!((origin.parent_root(), origin.parent()), (&root, &child));
+        assert!(origin.is_from(&root, &child));
         let fork = TrajectoryId::new("fork");
         let forked = root_fork_log(&e, &view, &child, &fork);
         assert_eq!(
@@ -9894,7 +9910,7 @@ mod tests {
         let self_fork = Err(TransitionRefusal::Opening(OpeningTransitionRefusal::SelfFork));
 
         let sealed = |root: &TrajectoryId, origin: &crate::fact::RootForkOrigin| {
-            e.open_trajectory(root, key.clone(), Some(origin.clone())).map(|_| ())
+            e.open_root_fork(root, key.clone(), origin.clone()).map(|_| ())
         };
         assert_eq!(sealed(&traj(), &own), self_fork);
         assert_eq!(sealed(&child, &childs), self_fork);
@@ -9976,7 +9992,7 @@ mod tests {
         let mut advanced = EngineView::validated(Projection::empty(0), e.identity(), t.clone());
         advanced
             .advance(
-                &e.open_trajectory(&t, crate::profile::PolicyFileKey::of(b"policy"), None)
+                &e.open_trajectory(&t, crate::profile::PolicyFileKey::of(b"policy"))
                     .expect("the opening seals"),
             )
             .expect("the sealed opening advances the empty view");

@@ -1042,7 +1042,7 @@ mod tests {
 
     fn opening(id: &TrajectoryId) -> Vec<Fact> {
         engine()
-            .open_trajectory(id, PolicyFileKey::of(POLICY.as_bytes()), None)
+            .open_trajectory(id, PolicyFileKey::of(POLICY.as_bytes()))
             .expect("the opening seals")
             .into_unsealed()
     }

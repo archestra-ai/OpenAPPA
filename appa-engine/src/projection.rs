@@ -300,11 +300,11 @@ impl Projection {
                     // So do the parent family's unsettled reservations, which nothing here can
                     // settle.
                     if let Some(origin) = forked_from {
-                        starting.fold(origin.label());
-                        effects.extend(origin.effects().iter().cloned());
-                        *origin_reservations = origin.reservations().clone();
-                        if !origin.denials().is_empty() {
-                            denials.insert(trajectory.clone(), origin.denials().clone());
+                        starting.fold(&origin.label);
+                        effects.extend(origin.effects.iter().cloned());
+                        *origin_reservations = origin.reservations.clone();
+                        if !origin.denials.is_empty() {
+                            denials.insert(trajectory.clone(), origin.denials.clone());
                         }
                     }
                     assert!(
@@ -688,7 +688,7 @@ impl Projection {
             label: self.fold_for(trajectory),
             effects: EffectSet::distinct(&self.effects),
             reservations: EffectSet::distinct(reserved),
-            denials: self.denials.get(trajectory).cloned().unwrap_or_default(),
+            denials: self.denials.get(trajectory).map_or_else(BTreeMap::new, Clone::clone),
         })
     }
 
