@@ -407,15 +407,18 @@ def test_receive_skips_slack_on_duplicate(monkeypatch):
     [
         (
             {"harness": "archestra", "hostname": "frontend.example.com"},
-            "Source: Archestra | Host: frontend.example.com",
+            "Harness: Archestra | Filed by: CLI | Host: frontend.example.com",
         ),
-        ({"harness": "claude-code"}, "Source: Claude Code"),
-        ({"harness": "kagent"}, "Source: kagent"),
-        ({"harness": "future-client"}, "Source: Unknown"),
-        ({"harness": ["archestra"]}, "Source: Unknown"),
-        ({"harness": "archestra", "hostname": "<https://evil.example|@channel>"}, "Source: Archestra"),
-        ({"harness": "archestra", "hostname": "user:secret@example.com"}, "Source: Archestra"),
-        ({"harness": "archestra", "hostname": "x" * 254}, "Source: Archestra"),
+        ({"harness": "claude-code"}, "Harness: Claude Code | Filed by: CLI"),
+        ({"harness": "kagent"}, "Harness: kagent | Filed by: CLI"),
+        ({"harness": "future-client"}, "Harness: Unknown | Filed by: CLI"),
+        ({"harness": ["archestra"]}, "Harness: Unknown | Filed by: CLI"),
+        (
+            {"harness": "archestra", "hostname": "<https://evil.example|@channel>"},
+            "Harness: Archestra | Filed by: CLI",
+        ),
+        ({"harness": "archestra", "hostname": "user:secret@example.com"}, "Harness: Archestra | Filed by: CLI"),
+        ({"harness": "archestra", "hostname": "x" * 254}, "Harness: Archestra | Filed by: CLI"),
     ],
 )
 def test_slack_source_metadata_is_bounded_plain_text(serving, expected):
@@ -431,4 +434,22 @@ def test_slack_source_handles_old_or_malformed_runtime_metadata(runtime):
     doc = one_report()
     doc["runtime"] = runtime
     payload = main.format_slack_payload(doc, "digest", "local", "test-bucket")
-    assert payload["blocks"][1]["elements"][1]["text"] == "Source: Unknown"
+    assert payload["blocks"][1]["elements"][1]["text"] == "Harness: Unknown | Filed by: CLI"
+
+
+@pytest.mark.parametrize(
+    ("origin", "expected"),
+    [
+        ({"kind": "agent", "pseudonymized": True}, "Filed by: agent"),
+        ({"kind": "cli", "pseudonymized": True}, "Filed by: CLI"),
+        ({"kind": "future-author"}, "Filed by: Unknown"),
+        ({"kind": ["cli"]}, "Filed by: Unknown"),
+        ({}, "Filed by: Unknown"),
+        (None, "Filed by: Unknown"),
+    ],
+)
+def test_slack_metadata_names_who_filed_the_report(origin, expected):
+    doc = one_report()
+    doc["origin"] = origin
+    payload = main.format_slack_payload(doc, "digest", "commit", "test-bucket")
+    assert payload["blocks"][1]["elements"][1]["text"] == f"Harness: Unknown | {expected}"

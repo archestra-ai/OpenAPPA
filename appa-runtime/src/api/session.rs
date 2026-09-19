@@ -9,8 +9,8 @@ use crate::consult::{
     AnnotationAnswer, AnnotationArtifact, Consult, ConsultBody, LookupAnswer, MembersAnswer, SanitizerAnswer,
 };
 use crate::engine::{
-    AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback, ForkStatus,
-    Liveness, Next, OfferNonce, OpenDispatch, PendingReview, Presentation, RemedyArguments, engine_id,
+    Abstention, AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback,
+    ForkStatus, Liveness, Next, OfferNonce, OpenDispatch, PendingReview, Presentation, RemedyArguments, engine_id,
 };
 use crate::external::ConsultOutcome;
 use appa_engine::label::ReaderId;
@@ -80,6 +80,7 @@ async fn ledger<T: Send + 'static>(
 ) -> Result<T, EventError> {
     let joined = tokio::task::spawn_blocking(move || {
         let files = inner
+            .shared
             .files
             .as_ref()
             .ok_or_else(|| appa_eventlog::files::FileStoreError::Corrupt("file tools are not enabled".into()))?;
@@ -148,12 +149,6 @@ fn classify_report(
         std::iter::empty(),
         &appa_engine::value::TrajectoryId::new("test"),
     )
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum Standing {
-    Runs(OpenDispatch),
-    Abandoned(OpenDispatch),
 }
 
 /// What a late child open did: bound the child now, or found the
@@ -235,14 +230,6 @@ const REPLAY_LIMIT: u32 = 8;
 /// Gathering is designed to close at least one ask per round, so this cap never fires on a
 /// healthy deployment; it bounds the blast radius of a gathering bug or a hostile external.
 pub(super) const RESOLUTION_ROUNDS: u32 = 8;
-
-/// The outcome that closes a substituted release the harness never ran:
-/// the child proposed past it, or ended without running it.
-fn unrun_substitution() -> ToolOutcome {
-    ToolOutcome::Failure {
-        message: "the harness did not run the substituted call".to_string(),
-    }
-}
 
 fn fresh_entropy() -> OfferNonce {
     OfferNonce(rand::random::<[u8; 32]>())
@@ -362,7 +349,7 @@ impl Session {
     /// blocked by bookkeeping rather than by a policy decision, and the reservation it could
     /// not read stays exactly as it was.
     async fn release_file_reservation(&self, dispatch: &appa_engine::value::DispatchId) {
-        if self.inner.files.is_none() {
+        if self.inner.shared.files.is_none() {
             return;
         }
         let key = match super::files::key(dispatch) {
@@ -396,18 +383,12 @@ impl Session {
     /// rather than a refusal — a turn ends for reasons the engine does
     /// not model.
     ///
-    /// A substituted release is never carried. It stands across turns by
-    /// construction: no proposal released it, so no outcome hook is owed
-    /// for it, and it ends only when the harness runs it or proposes
-    /// past it (`claim_or_abandon`). Closing it here would discard the
-    /// remedy that minted it.
     fn carried_calls(&self) -> Result<Vec<OpenDispatch>, EventError> {
         let log = self.inner.log(&self.root)?;
         let policy = self.policy(&log)?;
         let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
         match policy.engine().liveness(&view, &self.trajectory) {
             Liveness::Ended | Liveness::Unopened => Ok(Vec::new()),
-            Liveness::Live if policy.engine().substituted_release(&view, &self.trajectory).is_some() => Ok(Vec::new()),
             Liveness::Live => Ok(policy.engine().open_dispatches(&view, &self.trajectory)),
         }
     }
@@ -423,7 +404,7 @@ impl Session {
         call_id: Option<String>,
         spawn: bool,
     ) -> Result<ToolCallDecision, EventError> {
-        let Some(files) = &self.inner.files else {
+        let Some(files) = &self.inner.shared.files else {
             return self.propose_tool_call(call, call_id, spawn, None).await;
         };
         let (operation, path) = super::files::operation(&call)?;
@@ -529,11 +510,8 @@ impl Session {
         spawn: bool,
         file_basis: Option<appa_engine::value::FileBasis>,
     ) -> Result<ToolCallDecision, EventError> {
-        if let Some(open) = self.substituted_release(&call)? {
-            return self.claim_or_abandon(call, call_id, open).await;
-        }
         if spawn
-            && self.inner.naming.spawn_coverage() == super::SpawnCoverage::Declared
+            && self.inner.shared.naming.spawn_coverage() == super::SpawnCoverage::Declared
             && !self.names_tool(&call.tool)?
         {
             tracing::debug!(trajectory = %self.trajectory.0, tool = %call.tool, "spawn denied: the policy names no such agent");
@@ -597,93 +575,12 @@ impl Session {
         Ok(policy.engine().names_tool(tool))
     }
 
-    fn substituted_release(&self, call: &ProposedCall) -> Result<Option<Standing>, EventError> {
-        let log = self.inner.log(&self.root)?;
-        let policy = self.policy(&log)?;
-        let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
-        match policy.engine().liveness(&view, &self.trajectory) {
-            Liveness::Ended => return Err(EventError::TrajectoryEnded),
-            Liveness::Unopened => return Err(EventError::SpawnNotTaken),
-            Liveness::Live => {}
-        }
-        let Some(open) = policy.engine().substituted_release(&view, &self.trajectory) else {
-            return Ok(None);
-        };
-        let canonical = || policy.engine().canonical_bytes(call);
-        Ok(Some(if is_open_call(call, canonical, &open) {
-            Standing::Runs(open)
-        } else {
-            Standing::Abandoned(open)
-        }))
-    }
-
-    async fn claim_or_abandon(
-        &self,
-        call: ProposedCall,
-        call_id: Option<String>,
-        standing: Standing,
-    ) -> Result<ToolCallDecision, EventError> {
-        let open = match standing {
-            Standing::Runs(open) => {
-                if let Some(call_id) = call_id {
-                    self.bind_existing_call(call_id, open.id.clone())?;
-                }
-                tracing::debug!(
-                    trajectory = %self.trajectory.0,
-                    dispatch = ?open.id,
-                    tool = %open.tool,
-                    "substituted call handed to the harness"
-                );
-                return Ok(ToolCallDecision::Allow {
-                    spawn: None,
-                    dispatch: open.id.clone(),
-                });
-            }
-            Standing::Abandoned(open) => open,
-        };
-        self.abandon_dispatch(open.id.clone(), &unrun_substitution()).await?;
-        tracing::debug!(
-            trajectory = %self.trajectory.0,
-            dispatch = ?open.id,
-            tool = %open.tool,
-            proposed = %call.tool,
-            "substituted call abandoned"
-        );
-        Err(EventError::SubstitutionAbandoned { tool: open.tool })
-    }
-
-    /// Bind a host call identity to a dispatch that a remedy opened before
-    /// the harness received the substituted call. Only the binding is durable, at the log's
-    /// CAS position, and the identity is checked against the position it is written at.
-    fn bind_existing_call(&self, call_id: String, dispatch: appa_engine::value::DispatchId) -> Result<(), EventError> {
-        if call_id.is_empty() {
-            return Err(EventError::CallIdReused);
-        }
-        let trajectory = crate::engine::engine_id(&self.trajectory);
-        self.inner.append_host_with(&self.root, |log| {
-            if log
-                .call_bindings()
-                .any(|binding| *binding.trajectory == trajectory && binding.call_id == call_id)
-            {
-                return Err(EventError::CallIdReused);
-            }
-            Ok((
-                Some(appa_eventlog::HostObservation::CallBound {
-                    trajectory: trajectory.clone(),
-                    call_id: call_id.clone(),
-                    dispatch: dispatch.clone(),
-                }),
-                (),
-            ))
-        })
-    }
-
-    /// Close the call this trajectory has open as one that did not run.
+    /// Close one call this trajectory has open as one that did not run.
     /// The dispatch is re-read from the view on every replay, so a
     /// contended append never closes an occurrence the winning writer
-    /// already closed. Both callers reach here with one dispatch open:
-    /// a substituted release the harness declined to run, and a
-    /// released call whose turn ended without an outcome.
+    /// already closed. Both callers reach here the same way: a released
+    /// call that got no outcome before its turn or its child ended. A
+    /// staged derivation opens nothing and so has nothing to close.
     async fn abandon_dispatch(
         &self,
         dispatch: appa_engine::value::DispatchId,
@@ -716,7 +613,7 @@ impl Session {
     /// executor, so none of that belongs on an async worker.
     #[cfg(feature = "daemon")]
     pub(super) async fn execute_file(&self, call: ProposedCall) -> Result<super::files::FileReply, EventError> {
-        if self.inner.files.is_none() {
+        if self.inner.shared.files.is_none() {
             return Err(super::files::refused("file tools are not enabled"));
         }
         let open = self.carried_calls()?;
@@ -738,7 +635,7 @@ impl Session {
         let result = {
             let inner = self.inner.clone();
             let (call, pin) = (call.clone(), pin.clone());
-            tokio::task::spawn_blocking(move || match inner.files.as_ref() {
+            tokio::task::spawn_blocking(move || match inner.shared.files.as_ref() {
                 Some(files) => super::files::perform(files, &call, &pin),
                 None => Err("file tools are not enabled".to_string()),
             })
@@ -782,7 +679,7 @@ impl Session {
         call_id: Option<String>,
         o: ToolOutcome,
     ) -> Result<ToolResultDecision, EventError> {
-        if self.inner.files.is_some() {
+        if self.inner.shared.files.is_some() {
             super::files::operation(&call)?;
             let log = self.inner.log(&self.root)?;
             let policy = self.policy(&log)?;
@@ -1063,12 +960,6 @@ impl Session {
             Next::Approved { tool, bytes } => Ok(RemedyDecision::Authorized {
                 call: ExactCall { tool, bytes },
             }),
-            Next::InvokeTool(released) => Ok(RemedyDecision::Substituted {
-                call: ExactCall {
-                    tool: released.tool,
-                    bytes: released.bytes,
-                },
-            }),
             Next::PresentToModel(Presentation::Value { value }) => Ok(RemedyDecision::Returned { value }),
             Next::PresentToModel(Presentation::Declined { feedback }) => Ok(RemedyDecision::Declined {
                 presentation: RemedyPresentation {
@@ -1180,12 +1071,9 @@ impl Session {
     /// checked before it may cross; it names the fork that opened the
     /// child, recovered from the log.
     ///
-    /// A call the child still has open got no outcome hook and never
-    /// will, so it closes first, as the child's turn end would close it:
-    /// an ordinary release as unreported, a substituted release the
-    /// harness declined to run as abandoned — the child ended its turn
-    /// without running it, which is the same abandonment as proposing
-    /// past it.
+    /// Any call the child still has open got no outcome hook and never
+    /// will, so each closes first as unreported, exactly as the child's
+    /// turn end would close it.
     ///
     /// A child may stop more than once: each stop is judged under the
     /// fork's return policy as its own crossing, and a stop repeating the
@@ -1227,27 +1115,13 @@ impl Session {
         return_decision(decision)
     }
 
-    /// Close whatever calls this child still has open before it returns.
-    /// A substituted release stands until the harness runs it or the
-    /// model proposes past it; a child that ends has done neither and
-    /// abandons it. Any other open release got no outcome hook and closes
-    /// as unreported, exactly as a turn end closes it.
+    /// Close whatever calls this child still has open before it returns. Each got no outcome
+    /// hook and closes as unreported, exactly as a turn end closes it.
     async fn settle_open_call(
         &self,
         policy: &crate::engine::PolicyEngine<'_>,
         view: &EngineView,
     ) -> Result<(), EventError> {
-        if let Some(open) = policy.engine().substituted_release(view, &self.trajectory) {
-            self.abandon_dispatch(open.id.clone(), &unrun_substitution()).await?;
-            self.release_file_reservation(&open.id).await;
-            tracing::debug!(
-                trajectory = %self.trajectory.0,
-                dispatch = ?open.id,
-                tool = %open.tool,
-                "substituted call abandoned at the child's end"
-            );
-            return Ok(());
-        }
         for open in policy.engine().open_dispatches(view, &self.trajectory) {
             match self
                 .abandon_dispatch(open.id.clone(), &ToolOutcome::Indeterminate)
@@ -1388,7 +1262,6 @@ impl Session {
                 }
             }
             let event = event(&context)?;
-            let remedy_opens_unbound = matches!(&event, EngineEvent::ExecuteOffer { .. });
             if let EngineEvent::ChildReturn { child, .. } = &event
                 && !policy.engine().open_dispatches(&view, child).is_empty()
             {
@@ -1410,9 +1283,16 @@ impl Session {
                 }
                 _ => None,
             });
+            // Only a batch that opens a dispatch can be the second one. An outcome closes a
+            // dispatch and drives the count down, so refusing it would leave a parallel batch
+            // with no way to drain: every report would be refused for the calls it is settling.
+            //
+            // Parallel calls need every one of them to carry an identity, not just the newest.
+            // An unidentified call already open cannot be told apart from this one when its
+            // outcome arrives, so the second dispatch is refused whichever end is unidentified.
             if opens_dispatch.is_some()
                 && policy.engine().opens_a_second_dispatch(&view, &self.trajectory, facts)
-                && ((opening_call_id.is_none() && !remedy_opens_unbound) || context.has_unbound_open_dispatch())
+                && (opening_call_id.is_none() || context.has_unbound_open_dispatch())
             {
                 return Err(EventError::CallOutstanding);
             }
@@ -1521,7 +1401,13 @@ impl Session {
                 };
                 let verdict = match self.timed_consult(&consult, elicitation, ruling).await {
                     ConsultOutcome::Answer(answer) => AuthorityVerdict::from_wire(&answer),
-                    ConsultOutcome::NoAnswer(_) => AuthorityVerdict::Abstain,
+                    ConsultOutcome::NoAnswer(crate::external::NoAnswerReason::Unreachable) => {
+                        AuthorityVerdict::Abstain(Abstention::Unreachable)
+                    }
+                    ConsultOutcome::NoAnswer(crate::external::NoAnswerReason::Unregistered) => {
+                        AuthorityVerdict::Abstain(Abstention::Unregistered)
+                    }
+                    ConsultOutcome::NoAnswer(_) => AuthorityVerdict::Abstain(Abstention::Unanswered),
                 };
                 ExternalEvidence::Authority {
                     authority: authority.clone(),
@@ -1680,6 +1566,9 @@ impl Decided<'_> {
         )
     }
 
+    /// Is a call this trajectory has open one the harness gave no identity for? Its outcome can
+    /// only be matched by tool and bytes, which cannot tell two calls apart, so nothing else may
+    /// open beside it.
     fn has_unbound_open_dispatch(&self) -> bool {
         let trajectory = crate::engine::engine_id(&self.session.trajectory);
         self.open_dispatches().iter().any(|open| {
@@ -1753,7 +1642,7 @@ fn join_review(feedback: &[Feedback], externals: &crate::external::ExternalServi
     )
 }
 
-fn reviews(
+pub(super) fn reviews(
     pending_reviews: &[PendingReview],
     externals: &crate::external::ExternalServices,
 ) -> Vec<appa_runtime_api::Review> {
@@ -2153,6 +2042,93 @@ name = "appa/execute_remedy_plan"
                         Some(call_id.to_string()),
                         ToolOutcome::Success {
                             body: OutcomeBody::Available(body.to_string()),
+                        },
+                    )
+                    .await
+                    .expect("the identified result is correlated"),
+                ToolResultDecision::Keep,
+            );
+        }
+        assert!(runtime.open_dispatches(&root(), &root()).is_empty());
+    }
+
+    /// Parallel calls need every one of them identified, not just the newest. An unidentified
+    /// call already open cannot be told apart from this one when its outcome arrives — the two
+    /// share a tool and can share bytes — so the second dispatch is refused whichever end is
+    /// unidentified.
+    #[tokio::test]
+    async fn a_call_beside_an_unidentified_one_is_refused_even_when_it_carries_an_identity() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let call = fetch(serde_json::json!({"a": 1}));
+
+        assert!(matches!(
+            session
+                .on_tool_call(call.clone(), false)
+                .await
+                .expect("the unidentified call releases"),
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
+        assert!(matches!(
+            session
+                .on_tool_call_identified(fetch(serde_json::json!({"a": 2})), Some("toolu-1".to_string()), false)
+                .await,
+            Err(EventError::CallOutstanding),
+        ));
+        assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 1);
+
+        // Once the unidentified call is settled, an identified one opens beside nothing.
+        session
+            .on_tool_result(
+                call,
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("first".to_string()),
+                },
+            )
+            .await
+            .expect("the unidentified outcome is correlated");
+        assert!(matches!(
+            session
+                .on_tool_call_identified(fetch(serde_json::json!({"a": 2})), Some("toolu-1".to_string()), false)
+                .await
+                .expect("the identified call releases"),
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
+    }
+
+    /// A fan-out wider than two drains. The outcome closing the third of five leaves four
+    /// dispatches open, and the count alone must not refuse it: a batch that opens nothing
+    /// is never the second call.
+    #[tokio::test]
+    async fn a_wide_parallel_fan_out_reports_every_call() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let call = fetch(serde_json::json!({"a": 1}));
+        let ids = ["toolu-1", "toolu-2", "toolu-3", "toolu-4", "toolu-5"];
+
+        for call_id in ids {
+            assert!(matches!(
+                session
+                    .on_tool_call_identified(call.clone(), Some(call_id.to_string()), false)
+                    .await
+                    .expect("the identified call releases"),
+                ToolCallDecision::Allow { spawn: None, .. }
+            ));
+        }
+        assert_eq!(runtime.open_dispatches(&root(), &root()).len(), ids.len());
+
+        for call_id in ids {
+            assert_eq!(
+                session
+                    .on_tool_result_identified(
+                        call.clone(),
+                        Some(call_id.to_string()),
+                        ToolOutcome::Success {
+                            body: OutcomeBody::Available(call_id.to_string()),
                         },
                     )
                     .await
@@ -3402,9 +3378,40 @@ name = "read_hr"
 delta = { audience = ["hr"] }
 
 [[policy.tool]]
+name = "read_legal"
+delta = { audience = ["legal"] }
+
+[[policy.tool]]
 name = "send"
 parameters = { type = "object", properties = { body = { type = "string" } }, required = ["body"] }
 requires = { audience = { contains = ["public"] } }
+delta = {}
+
+[[policy.sanitizer]]
+name = "redactor"
+on = ["tool_input"]
+[policy.sanitizer.permits]
+audience = { from = ["hr"], to = ["public"] }
+"#;
+
+    /// `send` wants a trust floor as well as the audience the redaction widens, and `read_web`
+    /// drops the trajectory below that floor. A redaction cannot lift trust, so this policy tells
+    /// a derivation that still stands apart from a call that may still run.
+    const SUBSTITUTED_SEND_FLOORED: &str = r#"
+version = 2
+
+[[policy.tool]]
+name = "read_hr"
+delta = { audience = ["hr"] }
+
+[[policy.tool]]
+name = "read_web"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "send"
+parameters = { type = "object", properties = { body = { type = "string" } }, required = ["body"] }
+requires = { audience = { contains = ["public"] }, trust = "trusted" }
 delta = {}
 
 [[policy.sanitizer]]
@@ -3533,12 +3540,8 @@ context_control = true
         runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0
     }
 
-    fn standing_release(runtime: &Runtime) -> Option<crate::engine::OpenDispatch> {
-        runtime.substituted_release(&root(), &root())
-    }
-
     #[tokio::test]
-    async fn an_input_substitution_releases_the_replaced_call_and_its_outcome_closes_it() {
+    async fn an_input_substitution_approves_the_replaced_call_and_the_proposal_of_it_runs() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(
             substituting_config(SUBSTITUTED_SEND, None),
@@ -3556,17 +3559,16 @@ context_control = true
         let bytes = format!(r#"{{"body":"{REDACTED_BODY}"}}"#).into_bytes();
         assert_eq!(
             substituted,
-            RemedyDecision::Substituted {
+            RemedyDecision::Authorized {
                 call: ExactCall {
                     tool: "send".to_string(),
                     bytes: bytes.clone(),
                 },
             },
         );
-        let standing = standing_release(&runtime).expect("the replaced call stands open");
-        assert_eq!(
-            (standing.tool.as_str(), standing.bytes.as_slice()),
-            ("send", bytes.as_slice()),
+        assert!(
+            runtime.open_dispatches(&root(), &root()).is_empty(),
+            "the hop decides nothing in advance: it stages a derivation and opens no dispatch"
         );
 
         assert_eq!(
@@ -3576,22 +3578,16 @@ context_control = true
                 .expect("the replay answers"),
             substituted,
         );
-        assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 1);
+        assert!(runtime.open_dispatches(&root(), &root()).is_empty());
 
         assert!(matches!(
             session
                 .on_tool_call(send(REDACTED_BODY), false)
                 .await
-                .expect("the substituted call is allowed"),
+                .expect("the proposal takes the derivation and releases"),
             ToolCallDecision::Allow { spawn: None, .. }
         ));
-        assert!(matches!(
-            session
-                .on_tool_call(send(REDACTED_BODY), false)
-                .await
-                .expect("the repeat is handed the same release"),
-            ToolCallDecision::Allow { spawn: None, .. }
-        ));
+        assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 1);
 
         assert_eq!(
             session
@@ -3606,6 +3602,13 @@ context_control = true
             ToolResultDecision::Keep,
         );
         assert!(runtime.open_dispatches(&root(), &root()).is_empty());
+
+        // The derivation is spent. Proposing the same bytes again is an ordinary proposal
+        // judged against current state, which is what blocked the call in the first place.
+        assert!(matches!(
+            session.on_tool_call(send(REDACTED_BODY), false).await,
+            Ok(ToolCallDecision::Deny { .. }),
+        ));
         assert!(matches!(
             session.on_remedy(hop, RemedyArguments::default(), None, None).await,
             Ok(RemedyDecision::Declined { .. }),
@@ -3680,11 +3683,103 @@ context_control = true
         }
     }
 
-    /// No proposal released the substituted call, so no outcome hook is
-    /// owed for it and a turn that ends before the harness runs it
-    /// leaves it standing. Closing it would discard the remedy.
+    /// Criterion 1: a fan-out whose blocked calls each need a substituting remedy makes
+    /// progress. Both remedies execute while the other stands, and each substituted call is
+    /// released when the model proposes it.
     #[tokio::test]
-    async fn a_turn_end_leaves_a_standing_substituted_call_alone() {
+    async fn two_substituting_remedies_in_one_fan_out_both_run() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(
+            substituting_config(SUBSTITUTED_SEND, None),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the deployment opens");
+        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let read = ProposedCall {
+            tool: "read_hr".to_string(),
+            arguments: raw(serde_json::json!({})),
+        };
+
+        assert!(matches!(
+            session.on_tool_call(read.clone(), false).await,
+            Ok(ToolCallDecision::Deny { .. }),
+        ));
+        let accept = surfaced_offer_for(&runtime, &root(), &root());
+        assert!(matches!(
+            session.on_remedy(accept, RemedyArguments::default(), None, None).await,
+            Ok(RemedyDecision::Authorized { .. }),
+        ));
+        assert!(matches!(
+            session
+                .on_tool_call(read.clone(), false)
+                .await
+                .expect("the read releases"),
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
+        session
+            .on_tool_result(
+                read,
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("Alice Chen".to_string()),
+                },
+            )
+            .await
+            .expect("the read closes");
+
+        const OTHER_RAW: &str = "ping bob@corp.example now";
+        const OTHER_REDACTED: &str = "ping [redacted-email] now";
+        let mut hops = Vec::new();
+        for body in [RAW_BODY, OTHER_RAW] {
+            assert!(
+                matches!(
+                    session.on_tool_call(send(body), false).await,
+                    Ok(ToolCallDecision::Deny { .. })
+                ),
+                "the send carrying {body} blocks"
+            );
+            let quoted = runtime
+                .minted_offers(&root(), &root())
+                .pop()
+                .expect("the block surfaced an offer");
+            hops.push(runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0);
+        }
+
+        for hop in hops {
+            let executed = session.on_remedy(hop, RemedyArguments::default(), None, None).await;
+            assert!(
+                matches!(executed, Ok(RemedyDecision::Authorized { .. })),
+                "both remedies execute, the second while the first still stands: {executed:?}"
+            );
+        }
+
+        for (call_id, body) in [("toolu-1", REDACTED_BODY), ("toolu-2", OTHER_REDACTED)] {
+            let released = session
+                .on_tool_call_identified(send(body), Some(call_id.to_string()), false)
+                .await;
+            assert!(
+                matches!(released, Ok(ToolCallDecision::Allow { spawn: None, .. })),
+                "the substituted call carrying {body} releases when proposed: {released:?}"
+            );
+        }
+        assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 2);
+
+        // Each release took its own derivation and spent it. Were one derivation covering both,
+        // the second proposal above would have found nothing left to take and blocked; were a
+        // derivation to survive its take, this third proposal would release a call nobody paid for.
+        let again = session
+            .on_tool_call_identified(send(REDACTED_BODY), Some("toolu-3".to_string()), false)
+            .await;
+        assert!(
+            matches!(again, Ok(ToolCallDecision::Deny { .. })),
+            "the spent derivation does not release the same bytes again: {again:?}"
+        );
+    }
+
+    /// Criterion 2: a derivation is not a call in flight, so a turn that ends before the model
+    /// proposes it owes no outcome and discards nothing. The next turn still takes it.
+    #[tokio::test]
+    async fn a_turn_end_leaves_a_staged_derivation_alone() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(
             substituting_config(SUBSTITUTED_SEND, None),
@@ -3698,25 +3793,27 @@ context_control = true
             .on_remedy(hop, RemedyArguments::default(), None, None)
             .await
             .expect("the hop executes");
-        assert!(standing_release(&runtime).is_some());
 
         session.on_turn_end().await.expect("the turn end acks");
 
         assert!(
-            standing_release(&runtime).is_some(),
-            "the substituted call still stands after the turn ended"
+            runtime.open_dispatches(&root(), &root()).is_empty(),
+            "a staged derivation is nothing for a turn end to close"
         );
         assert!(matches!(
             session
                 .on_tool_call(send(REDACTED_BODY), false)
                 .await
-                .expect("the next turn is still handed the substituted call"),
+                .expect("the next turn still takes the derivation"),
             ToolCallDecision::Allow { spawn: None, .. }
         ));
     }
 
+    /// The defect this design closes: an unrelated call used to abandon the standing
+    /// substitution, costing the model the remedy it had already paid for. A derivation is not
+    /// in flight, so nothing about another call touches it.
     #[tokio::test]
-    async fn another_call_while_a_substituted_call_stands_abandons_it() {
+    async fn another_call_while_a_derivation_stands_leaves_it_alone() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(
             substituting_config(SUBSTITUTED_SEND, None),
@@ -3730,35 +3827,32 @@ context_control = true
             .on_remedy(hop.clone(), RemedyArguments::default(), None, None)
             .await
             .expect("the hop executes");
-        assert!(standing_release(&runtime).is_some());
 
         let other = ProposedCall {
             tool: "read_hr".to_string(),
             arguments: raw(serde_json::json!({})),
         };
-        assert!(matches!(
-            session.on_tool_call(other.clone(), false).await,
-            Err(EventError::SubstitutionAbandoned { tool }) if tool == "send",
-        ));
-        assert!(runtime.open_dispatches(&root(), &root()).is_empty());
-        let entries = runtime.audit(&root()).expect("the audit reads");
-        assert!(
-            entries.iter().any(|entry| matches!(
-                &entry.event,
-                crate::engine::AuditEvent::Closed {
-                    outcome: crate::engine::DispatchOutcome::Failed
-                }
-            )),
-            "the abandoned dispatch closed as not run: {entries:?}"
-        );
+        let identified = session
+            .on_tool_call_identified(other.clone(), Some("toolu-1".to_string()), false)
+            .await
+            .expect("the unrelated call is decided on its own terms");
+        assert!(matches!(identified, ToolCallDecision::Allow { spawn: None, .. }));
+        session
+            .on_tool_result(
+                other,
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("Alice Chen".to_string()),
+                },
+            )
+            .await
+            .expect("the unrelated call closes");
 
         assert!(matches!(
-            session.on_tool_call(other, false).await.expect("the repeat is decided"),
+            session
+                .on_tool_call(send(REDACTED_BODY), false)
+                .await
+                .expect("the derivation survived the unrelated call"),
             ToolCallDecision::Allow { spawn: None, .. }
-        ));
-        assert!(matches!(
-            session.on_remedy(hop, RemedyArguments::default(), None, None).await,
-            Ok(RemedyDecision::Declined { .. }),
         ));
     }
 
@@ -3779,18 +3873,83 @@ context_control = true
         let runtime =
             Runtime::open(substituting_config(SUBSTITUTED_SEND, None), db, None).expect("the deployment reopens");
         let session = runtime.session(&root(), &root()).expect("the trajectory reopens");
-        assert!(standing_release(&runtime).is_some());
         assert!(matches!(
             session
                 .on_tool_call(send(REDACTED_BODY), false)
                 .await
-                .expect("the substituted call is allowed after the restart"),
+                .expect("the derivation replays from the log and the proposal takes it"),
             ToolCallDecision::Allow { spawn: None, .. }
         ));
     }
 
+    /// Criterion 4: a derivation carries the sanitizer's stage, never a permission. A
+    /// trajectory that narrows after the hop re-gates the substituted call against the label it
+    /// narrowed to. This is what closes the stale-authorization channel a pre-decided release
+    /// left open: park the emission, read a secret, then choose whether to fire it.
     #[tokio::test]
-    async fn a_failed_abandonment_leaves_the_substituted_call_standing() {
+    async fn a_narrowing_after_the_hop_re_gates_the_substituted_call() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(
+            substituting_config(SUBSTITUTED_SEND_FLOORED, None),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let hop = narrowed_and_blocked(&runtime, &mut session).await;
+        assert!(matches!(
+            session.on_remedy(hop, RemedyArguments::default(), None, None).await,
+            Ok(RemedyDecision::Authorized { .. }),
+        ));
+
+        // The session reads an untrusted page, which drops it below the floor `send` wants.
+        let web = ProposedCall {
+            tool: "read_web".to_string(),
+            arguments: raw(serde_json::json!({})),
+        };
+        assert!(matches!(
+            session.on_tool_call(web.clone(), false).await,
+            Ok(ToolCallDecision::Deny { .. }),
+        ));
+        let accept = latest_offer(&runtime);
+        assert!(matches!(
+            session.on_remedy(accept, RemedyArguments::default(), None, None).await,
+            Ok(RemedyDecision::Authorized { .. }),
+        ));
+        assert!(matches!(
+            session
+                .on_tool_call(web.clone(), false)
+                .await
+                .expect("the read releases"),
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
+        session
+            .on_tool_result(
+                web,
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("anything at all".to_string()),
+                },
+            )
+            .await
+            .expect("the read closes");
+
+        assert!(
+            matches!(
+                session.on_tool_call(send(REDACTED_BODY), false).await,
+                Ok(ToolCallDecision::Deny { .. })
+            ),
+            "the derivation still stands, but the call it stages is judged against the label now"
+        );
+        assert!(runtime.open_dispatches(&root(), &root()).is_empty());
+    }
+
+    /// The one term a derivation does freeze: what the released bytes carry. A read the session
+    /// makes later cannot turn redacted bytes back into a secret, so `contains` is answered by the
+    /// sanitizer's derived label rather than by the label the session has narrowed to since.
+    /// Deliberate: intersecting the two would re-taint every sanitized value and leave
+    /// substitution helping nothing.
+    #[tokio::test]
+    async fn a_narrowing_after_the_hop_does_not_re_taint_the_substituted_bytes() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(
             substituting_config(SUBSTITUTED_SEND, None),
@@ -3800,27 +3959,47 @@ context_control = true
         .expect("the deployment opens");
         let mut session = runtime.create_session(root()).expect("a fresh id opens");
         let hop = narrowed_and_blocked(&runtime, &mut session).await;
-        session
-            .on_remedy(hop, RemedyArguments::default(), None, None)
-            .await
-            .expect("the hop executes");
+        assert!(matches!(
+            session.on_remedy(hop, RemedyArguments::default(), None, None).await,
+            Ok(RemedyDecision::Authorized { .. }),
+        ));
 
-        let other = ProposedCall {
-            tool: "read_hr".to_string(),
+        // A second read narrows the session's audience further, well away from public.
+        let legal = ProposedCall {
+            tool: "read_legal".to_string(),
             arguments: raw(serde_json::json!({})),
         };
-        runtime.store().fail_commit_after(0);
         assert!(matches!(
-            session.on_tool_call(other, false).await,
-            Err(EventError::Storage(_)),
+            session.on_tool_call(legal.clone(), false).await,
+            Ok(ToolCallDecision::Deny { .. }),
         ));
-        assert!(standing_release(&runtime).is_some());
+        let accept = latest_offer(&runtime);
+        assert!(matches!(
+            session.on_remedy(accept, RemedyArguments::default(), None, None).await,
+            Ok(RemedyDecision::Authorized { .. }),
+        ));
+        assert!(matches!(
+            session
+                .on_tool_call(legal.clone(), false)
+                .await
+                .expect("the read releases"),
+            ToolCallDecision::Allow { spawn: None, .. }
+        ));
+        session
+            .on_tool_result(
+                legal,
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("counsel's note".to_string()),
+                },
+            )
+            .await
+            .expect("the read closes");
 
         assert!(matches!(
             session
                 .on_tool_call(send(REDACTED_BODY), false)
                 .await
-                .expect("the replaced call still runs"),
+                .expect("the redacted bytes still reach the public audience"),
             ToolCallDecision::Allow { spawn: None, .. }
         ));
     }
@@ -5491,12 +5670,11 @@ context_control = true
         );
     }
 
-    /// A substituted release stands until the harness runs it or the
-    /// child proposes past it. A child that stops has done neither: its
-    /// end abandons the substitute exactly as proposing past it would,
-    /// and the return is judged on what the child admitted.
+    /// A child that stops with a derivation it never proposed owes nothing for it: no
+    /// dispatch stands, so the end closes no call and the return is judged on what the child
+    /// admitted.
     #[tokio::test]
-    async fn a_childs_end_abandons_its_untaken_substituted_release_and_returns() {
+    async fn a_childs_end_leaves_its_untaken_derivation_and_returns() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(
             substituting_config(SUBSTITUTED_SEND_FORKING, None),
@@ -5517,23 +5695,19 @@ context_control = true
             child_session
                 .on_remedy(hop, RemedyArguments::default(), None, None)
                 .await,
-            Ok(RemedyDecision::Substituted { .. }),
+            Ok(RemedyDecision::Authorized { .. }),
         ));
         assert!(
-            runtime.substituted_release(&root(), &child("c1")).is_some(),
-            "the child has a substituted release standing"
+            runtime.open_dispatches(&root(), &child("c1")).is_empty(),
+            "the hop staged a derivation and opened no call"
         );
 
         child_session
             .on_child_end(Some("done".to_string()))
             .await
-            .expect("the end abandons the substitute and returns");
+            .expect("the end returns with nothing to close");
         assert!(
-            runtime.substituted_release(&root(), &child("c1")).is_none(),
-            "the substitute no longer stands"
-        );
-        assert!(
-            runtime.log_facts(&root()).iter().any(|fact| matches!(
+            !runtime.log_facts(&root()).iter().any(|fact| matches!(
                 fact,
                 appa_engine::fact::Fact::DispatchClosed {
                     trajectory,
@@ -5541,7 +5715,7 @@ context_control = true
                     ..
                 } if trajectory.as_str() == child("c1").0
             )),
-            "the substituted call closed as abandoned",
+            "the end closed no call of the child's, because none stood",
         );
         assert!(
             runtime.live(&root(), &child("c1")).is_ok(),

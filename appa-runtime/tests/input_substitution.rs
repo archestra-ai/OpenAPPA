@@ -139,18 +139,35 @@ async fn narrowed_and_blocked(dir: &tempfile::TempDir) -> (Arc<Runtime>, OfferId
     (runtime, hop)
 }
 
+/// No `send` was released and no effect of one committed: the remedy staged a derivation and
+/// decided nothing in advance. Asserted before every re-proposal, so a regression that went back
+/// to releasing the call at remedy time cannot hide behind the later assertions.
+fn nothing_ran(runtime: &Runtime) -> bool {
+    runtime.audit(&root()).expect("the audit reads").iter().all(|entry| {
+        !matches!(
+            &entry.event,
+            AuditEvent::Released { tool, .. } if tool == "send"
+        ) && !matches!(&entry.event, AuditEvent::EffectsCommitted { .. })
+    })
+}
+
 #[tokio::test]
 async fn the_replaced_call_runs_through_the_hooks_and_closes() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (runtime, hop) = narrowed_and_blocked(&dir).await;
 
-    let RemedyOutcome::Substituted { call } = runtime.execute_remedy(&actor(), hop.clone()).await else {
-        panic!("the input sanitizer's hop substitutes the call");
+    let RemedyOutcome::Authorized { call } = runtime.execute_remedy(&actor(), hop.clone()).await else {
+        panic!("the input sanitizer's hop approves the substituted call");
     };
     assert_eq!(call.tool, "send");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(call.arguments.get()).expect("canonical JSON"),
         serde_json::json!({"body": REDACTED_BODY}),
+    );
+    assert!(
+        nothing_ran(&runtime),
+        "the remedy stages a derivation and runs nothing: {:?}",
+        runtime.audit(&root()).expect("the audit reads")
     );
 
     assert_eq!(
@@ -188,19 +205,18 @@ async fn the_replaced_call_runs_through_the_hooks_and_closes() {
     );
 }
 
+/// Another call does not cost the model the remedy it already paid for: a derivation is a
+/// record, not a call in flight, and nothing about an unrelated call touches it.
 #[tokio::test]
-async fn another_call_abandons_the_standing_replaced_call() {
+async fn another_call_leaves_the_staged_derivation_alone() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (runtime, hop) = narrowed_and_blocked(&dir).await;
     assert!(matches!(
         runtime.execute_remedy(&actor(), hop).await,
-        RemedyOutcome::Substituted { .. }
+        RemedyOutcome::Authorized { .. }
     ));
+    assert!(nothing_ran(&runtime), "the remedy runs nothing of its own");
 
-    assert!(matches!(
-        propose(&runtime, read_hr()).await,
-        HookDecision::DenyCall { .. }
-    ));
     assert_eq!(
         propose(&runtime, read_hr()).await,
         HookDecision::AllowCall { spawn: None }
@@ -209,30 +225,30 @@ async fn another_call_abandons_the_standing_replaced_call() {
 
     let entries = runtime.audit(&root()).expect("the audit reads");
     assert!(
-        entries.iter().any(|entry| matches!(
+        !entries.iter().any(|entry| matches!(
             &entry.event,
             AuditEvent::Closed {
                 outcome: DispatchOutcome::Failed
             }
         )),
-        "the abandoned replaced call closed as not run: {entries:?}"
+        "nothing was abandoned: {entries:?}"
     );
-    assert!(
-        !entries
-            .iter()
-            .any(|entry| matches!(&entry.event, AuditEvent::EffectsCommitted { .. })),
-        "no effect of the replaced call committed: {entries:?}"
+    assert_eq!(
+        propose(&runtime, send(REDACTED_BODY)).await,
+        HookDecision::AllowCall { spawn: None },
+        "the derivation still stands and the proposal takes it"
     );
 }
 
 #[tokio::test]
-async fn the_standing_replaced_call_survives_a_reopen() {
+async fn the_staged_derivation_survives_a_reopen() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (runtime, hop) = narrowed_and_blocked(&dir).await;
     assert!(matches!(
         runtime.execute_remedy(&actor(), hop).await,
-        RemedyOutcome::Substituted { .. }
+        RemedyOutcome::Authorized { .. }
     ));
+    assert!(nothing_ran(&runtime), "the remedy runs nothing of its own");
     drop(runtime);
 
     let config = Config::load(&dir.path().join("appa.toml")).expect("the fixture validates");

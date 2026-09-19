@@ -86,6 +86,12 @@ pub(crate) struct RecordedCandidate {
     /// The pinned audience evidence the hop that derived this candidate consumed: what a
     /// later read of the candidate under its own contract inherits, as it inherits an offer's.
     pub(crate) evidence: AudienceEvidence,
+    /// What this candidate's own subject stood at when the derivation landed. A proposal may
+    /// take the candidate only while the subject has not moved since, which spending it does —
+    /// so a spent candidate cannot be taken twice. Only the generation is kept, never the whole
+    /// basis: the flow moves on every admitted value, and a narrowing must leave the derivation
+    /// takeable so the proposal that takes it is judged against the narrowed label.
+    pub(crate) generation: crate::basis::SubjectGeneration,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -332,7 +338,10 @@ impl Projection {
                         open.end = Some(OfferEnd::Invalidated);
                     }
                 }
-                Fact::CallApprovalConsumed { .. } | Fact::CandidateAccepted { .. } => {}
+                // Both only advance their subject, which the prepended `BasisAdvanced` applies:
+                // the record they spend falls out of "current" by that alone.
+                Fact::CallApprovalConsumed { .. } | Fact::CandidateAccepted { .. } | Fact::CandidateConsumed { .. } => {
+                }
                 Fact::CallApproved {
                     trajectory,
                     offer,
@@ -495,6 +504,7 @@ impl Projection {
                     bound_sanitizers.insert(dispatch.clone(), sanitizer.clone());
                 }
                 Fact::CandidateDerived {
+                    trajectory,
                     subject,
                     derived,
                     lineage,
@@ -512,6 +522,9 @@ impl Projection {
                                     AudienceEvidence::default()
                                 }
                             },
+                            // The derivation's own advance is prepended, so this reads the
+                            // generation the subject stands at once the derivation has landed.
+                            generation: versions.basis_for(trajectory, subject).subject,
                         },
                     );
                 }
@@ -893,6 +906,22 @@ impl Views<'_> {
             .map(|(offer, approval)| (*offer, approval))
     }
 
+    /// Every call candidate staged for exactly these substituted bytes in this trajectory,
+    /// whatever their freshness. Two blocked calls can derive the same bytes — a redaction
+    /// collapses distinct inputs by construction — so this yields more than one, and the caller
+    /// decides which is current.
+    ///
+    /// The subject's own key names the trajectory, and a derivation is claimable only within it.
+    pub(crate) fn call_candidates_for(
+        &self,
+        call: &ResolvedCall,
+    ) -> impl Iterator<Item = (&crate::basis::SubjectKey, &RecordedCandidate)> {
+        self.projection.candidates.iter().filter(move |(subject, candidate)| {
+            matches!(subject, crate::basis::SubjectKey::Call { trajectory, .. } if trajectory == self.trajectory)
+                && matches!(&candidate.derived, DerivedCandidate::Call { call: staged, .. } if staged.renders(call))
+        })
+    }
+
     /// The approval this exact call may consume right now. Spending one advances its own
     /// subject, so a spent approval is not current and cannot be found here a second time.
     pub(crate) fn current_approval(&self, call: &ResolvedCall) -> Option<(crate::value::OfferId, &PreparedApproval)> {
@@ -1072,16 +1101,6 @@ impl Views<'_> {
             })
     }
 
-    /// Did a decided proposal batch release this dispatch? False for a call an offer
-    /// execution released on its own: the agent never proposed it, so the
-    /// outer layer still owes the harness the call rather than holding it as one in flight.
-    pub fn released_by_proposal(&self, dispatch: &DispatchId) -> bool {
-        self.projection
-            .decided
-            .values()
-            .any(|batch| batch.released.contains(dispatch))
-    }
-
     pub(crate) fn is_open(&self, dispatch: &DispatchId) -> bool {
         self.projection.open.contains(dispatch)
     }
@@ -1136,7 +1155,11 @@ impl Views<'_> {
     /// The live derived candidate of this subject, if a hop has produced one. The next
     /// stage plans from it, and a successor replaces it.
     pub(crate) fn candidate(&self, subject: &SubjectKey) -> Option<&DerivedCandidate> {
-        self.projection.candidates.get(subject).map(|held| &held.derived)
+        self.recorded_candidate(subject).map(|held| &held.derived)
+    }
+
+    pub(crate) fn recorded_candidate(&self, subject: &SubjectKey) -> Option<&RecordedCandidate> {
+        self.projection.candidates.get(subject)
     }
 
     /// Where this call subject's candidate stands: the label its substituted bytes

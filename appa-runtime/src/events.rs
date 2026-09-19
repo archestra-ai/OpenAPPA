@@ -250,9 +250,7 @@ impl From<&crate::api::RemedyOutcome> for ControlOutcome {
         match outcome {
             // The feedback and the released call are the outcome's own payload and stay out
             // of the entry: a report carries the shape of what happened, never its prose.
-            RemedyOutcome::Authorized { .. } | RemedyOutcome::Substituted { .. } | RemedyOutcome::Returned { .. } => {
-                ControlOutcome::Executed
-            }
+            RemedyOutcome::Authorized { .. } | RemedyOutcome::Returned { .. } => ControlOutcome::Executed,
             RemedyOutcome::Declined { .. } => ControlOutcome::Declined,
             RemedyOutcome::NoAnswer { .. } => ControlOutcome::NoAnswer,
             RemedyOutcome::Refused { .. } => ControlOutcome::Refused,

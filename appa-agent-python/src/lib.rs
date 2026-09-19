@@ -355,14 +355,7 @@ impl SessionInner {
             .block_on(self.runtime.execute_remedy_with(&self.actor(child), offer, arguments))
         {
             RemedyOutcome::Authorized { call } => format!(
-                "Authorized. Call the {} tool again with exactly these arguments; \
-                 it will run without a new check: {}",
-                call.tool,
-                call.arguments.get(),
-            ),
-            RemedyOutcome::Substituted { call } => format!(
-                "Substituted. The sanitizer replaced the arguments and the call is released. \
-                 Call the {} tool with exactly these arguments to run it: {}",
+                "Authorized. Call the {} tool with exactly these arguments to run it: {}",
                 call.tool,
                 call.arguments.get(),
             ),
@@ -633,7 +626,7 @@ impl SessionInner {
             RemedyOutcome::Refused { reason } => {
                 Err(format!("the return declaration was refused: {}", reason.detail()))
             }
-            RemedyOutcome::Substituted { .. } | RemedyOutcome::Returned { .. } => {
+            RemedyOutcome::Returned { .. } => {
                 Err("the return declaration answered with something other than an approval".to_string())
             }
         }

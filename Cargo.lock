@@ -104,7 +104,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "appa"
-version = "0.23.0"
+version = "0.23.1"
 dependencies = [
  "appa-adapter-archestra",
  "appa-adapter-claude-code",
@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "appa-adapter-archestra"
-version = "0.23.0"
+version = "0.23.1"
 dependencies = [
  "appa-runtime-api",
  "proptest",
@@ -161,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "appa-adapter-claude-code"
-version = "0.23.0"
+version = "0.23.1"
 dependencies = [
  "appa-runtime-api",
  "proptest",
@@ -172,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "appa-adapter-kagent"
-version = "0.23.0"
+version = "0.23.1"
 dependencies = [
  "appa-runtime-api",
  "proptest",
@@ -181,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "appa-agent-python"
-version = "0.23.0"
+version = "0.23.1"
 dependencies = [
  "appa",
  "appa-runtime-api",
@@ -196,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "appa-builtin"
-version = "0.23.0"
+version = "0.23.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -205,7 +205,7 @@ dependencies = [
 
 [[package]]
 name = "appa-engine"
-version = "0.23.0"
+version = "0.23.1"
 dependencies = [
  "proptest",
  "serde",
@@ -218,7 +218,7 @@ dependencies = [
 
 [[package]]
 name = "appa-eventlog"
-version = "0.23.0"
+version = "0.23.1"
 dependencies = [
  "appa-engine",
  "appa-policy",
@@ -236,7 +236,7 @@ dependencies = [
 
 [[package]]
 name = "appa-example-agent"
-version = "0.23.0"
+version = "0.23.1"
 dependencies = [
  "appa",
  "appa-runtime-api",
@@ -266,7 +266,7 @@ version = "0.0.0"
 
 [[package]]
 name = "appa-package"
-version = "0.23.0"
+version = "0.23.1"
 dependencies = [
  "appa-runtime-api",
  "serde",
@@ -279,7 +279,7 @@ dependencies = [
 
 [[package]]
 name = "appa-policy"
-version = "0.23.0"
+version = "0.23.1"
 dependencies = [
  "appa-engine",
  "appa-runtime-api",
@@ -291,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "appa-runtime-api"
-version = "0.23.0"
+version = "0.23.1"
 dependencies = [
  "serde",
  "serde_json",

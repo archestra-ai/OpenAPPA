@@ -461,7 +461,7 @@ impl Run<'_> {
                 .await;
                 Ok(Answered::Reply(feedback))
             }
-            HookDecision::PassControl => self.execute_remedy(frame, &id, &proposed).await,
+            HookDecision::PassControl => self.execute_remedy(frame, &proposed).await,
             HookDecision::Refuse { detail } => Ok(self.refuse_call(frame, id, &proposed.tool, detail).await),
             other => Err(unexpected("a proposed call", &other)),
         }
@@ -673,12 +673,7 @@ impl Run<'_> {
         }
     }
 
-    async fn execute_remedy(
-        &mut self,
-        frame: &mut Frame,
-        id: &CallId,
-        call: &ProposedCall,
-    ) -> Result<Answered, StopReason> {
+    async fn execute_remedy(&mut self, frame: &mut Frame, call: &ProposedCall) -> Result<Answered, StopReason> {
         let (offer, arguments) = match appa_runtime::api::parse_control_arguments(call.arguments.get()) {
             Ok(parsed) => parsed,
             Err(_) => {
@@ -698,21 +693,10 @@ impl Run<'_> {
                 )
                 .await;
                 format!(
-                    "Authorized. Call the {} tool again with exactly these arguments; \
-                     it will run without a new check: {}",
+                    "Authorized. Call the {} tool with exactly these arguments to run it: {}",
                     call.tool,
                     call.arguments.get(),
                 )
-            }
-            RemedyOutcome::Substituted { call } => {
-                self.record(
-                    frame,
-                    Record::OfferTaken {
-                        detail: format!("{} runs with the sanitizer's replacement", call.tool),
-                    },
-                )
-                .await;
-                return self.run_substituted(frame, id, call).await;
             }
             RemedyOutcome::Returned { value } => {
                 self.record(
@@ -757,27 +741,6 @@ impl Run<'_> {
             }
         };
         Ok(Answered::Reply(reply))
-    }
-
-    async fn run_substituted(
-        &mut self,
-        frame: &mut Frame,
-        id: &CallId,
-        call: ProposedCall,
-    ) -> Result<Answered, StopReason> {
-        let event = HookEvent::ToolCall {
-            actor: self.actor(frame),
-            call: call.clone(),
-            call_id: Some(id.0.clone()),
-            spawn: self.marks_spawn(&call),
-            ruling: None,
-        };
-        match hooks::handle(&self.agent.runtime, event).await {
-            HookDecision::AllowCall { spawn } => self.run_released(frame, id, call, spawn).await,
-            HookDecision::DenyCall { feedback, .. } => Ok(Answered::Reply(feedback)),
-            HookDecision::Refuse { detail } => Ok(self.refuse_call(frame, id.clone(), &call.tool, detail).await),
-            other => Err(unexpected("a substituted call", &other)),
-        }
     }
 
     async fn infer(&mut self, frame: &Frame) -> Result<WireMessage, StopReason> {

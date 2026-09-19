@@ -526,11 +526,11 @@ fn offers_in(runtime: &Runtime, actor: &Actor, feedback: &str) -> Vec<(OfferKind
         .collect()
 }
 
-/// Take an offer the way the model does — the remedy tool, then the call proposed again
-/// exactly as authorized or substituted — and close the call with an empty output.
+/// Take an offer the way the model does — the remedy tool, then the call proposed exactly as
+/// the remedy authorized it — and close the call with an empty output.
 async fn take_offer(runtime: &Runtime, actor: &Actor, offer: OfferId) -> Result<(), String> {
     let call = match runtime.execute_remedy(actor, offer).await {
-        RemedyOutcome::Authorized { call } | RemedyOutcome::Substituted { call } => call,
+        RemedyOutcome::Authorized { call } => call,
         RemedyOutcome::Returned { .. } => return Ok(()),
         RemedyOutcome::Declined { presentation } => {
             return Err(format!(

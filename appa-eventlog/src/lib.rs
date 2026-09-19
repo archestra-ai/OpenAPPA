@@ -90,6 +90,9 @@ pub enum Backend {
     #[cfg(feature = "postgres")]
     Postgres {
         url: String,
+        /// How many connections the store may hold open at once. One opens with the store;
+        /// the rest open as concurrent work asks for them.
+        max_connections: std::num::NonZeroUsize,
     },
 }
 
@@ -97,15 +100,19 @@ pub struct LogStore {
     connection: Option<Mutex<Connection>>,
     #[cfg(feature = "postgres")]
     postgres: Option<postgres::PostgresStore>,
+    /// Shared with every store leased from this one, so a fail point armed here fires there.
     #[cfg(feature = "fault-injection")]
+    faults: std::sync::Arc<FaultPoints>,
+}
+
+#[cfg(feature = "fault-injection")]
+#[derive(Default)]
+struct FaultPoints {
     commits_until_failure: std::sync::atomic::AtomicU64,
-    #[cfg(feature = "fault-injection")]
     contended_appends: std::sync::atomic::AtomicU64,
-    #[cfg(feature = "fault-injection")]
     failing_reads: std::sync::atomic::AtomicU64,
     /// What the next foreign writer records rather than nothing, so a caller's re-derivation
     /// meets a changed state and not only a moved position.
-    #[cfg(feature = "fault-injection")]
     contending_record: Mutex<Option<(TrajectoryId, TrajectoryId, HostObservation)>>,
 }
 
@@ -422,29 +429,37 @@ pub enum AppendError {
 }
 
 impl LogStore {
-    /// Coordinate host-owned receipts with the connection that writes event batches.
-    /// The embedding host must serialize operations during an outer transaction.
+    /// Coordinate host-owned receipts with the connection that writes event batches: on a
+    /// leased store, this is the lease's connection.
     #[cfg(feature = "postgres")]
     pub fn postgres(&self) -> Option<&postgres::PostgresStore> {
         self.postgres.as_ref()
+    }
+
+    /// This store over one pooled connection of its own. Everything the leased store does —
+    /// event batches, receipts, host SQL, an outer transaction — runs on that connection, and
+    /// the connection goes back to the pool when the leased store and what it began have dropped.
+    #[cfg(feature = "postgres")]
+    pub fn lease(&self) -> Result<LogStore, postgres::LeaseError> {
+        let pg = self.postgres.as_ref().ok_or(postgres::LeaseError::NotPostgres)?;
+        Ok(LogStore {
+            connection: None,
+            postgres: Some(pg.lease()?),
+            #[cfg(feature = "fault-injection")]
+            faults: std::sync::Arc::clone(&self.faults),
+        })
     }
 
     /// Open the log. A fresh database gets the schema and its version stamp; an existing one is
     /// checked for damage and for a version this build understands, and refused otherwise.
     pub fn open(backend: Backend) -> Result<LogStore, OpenError> {
         #[cfg(feature = "postgres")]
-        if let Backend::Postgres { url } = &backend {
+        if let Backend::Postgres { url, max_connections } = &backend {
             return Ok(LogStore {
                 connection: None,
-                postgres: Some(postgres::PostgresStore::open(url.clone())?),
+                postgres: Some(postgres::PostgresStore::open(url.clone(), *max_connections)?),
                 #[cfg(feature = "fault-injection")]
-                commits_until_failure: std::sync::atomic::AtomicU64::new(0),
-                #[cfg(feature = "fault-injection")]
-                contended_appends: std::sync::atomic::AtomicU64::new(0),
-                #[cfg(feature = "fault-injection")]
-                failing_reads: std::sync::atomic::AtomicU64::new(0),
-                #[cfg(feature = "fault-injection")]
-                contending_record: Mutex::new(None),
+                faults: Default::default(),
             });
         }
         let (mut connection, path) = match &backend {
@@ -549,13 +564,7 @@ impl LogStore {
             #[cfg(feature = "postgres")]
             postgres: None,
             #[cfg(feature = "fault-injection")]
-            commits_until_failure: std::sync::atomic::AtomicU64::new(0),
-            #[cfg(feature = "fault-injection")]
-            contended_appends: std::sync::atomic::AtomicU64::new(0),
-            #[cfg(feature = "fault-injection")]
-            failing_reads: std::sync::atomic::AtomicU64::new(0),
-            #[cfg(feature = "fault-injection")]
-            contending_record: Mutex::new(None),
+            faults: Default::default(),
         })
     }
 
@@ -699,6 +708,7 @@ impl LogStore {
             // position: a foreign writer that changed a sibling's log is the race a reader of
             // several families has to survive.
             let armed = self
+                .faults
                 .contending_record
                 .lock()
                 .expect("the injection mutex is never poisoned")
@@ -738,7 +748,8 @@ impl LogStore {
     /// process kill inside the transaction would.
     #[cfg(feature = "fault-injection")]
     pub fn fail_commit_after(&self, skip: u64) {
-        self.commits_until_failure
+        self.faults
+            .commits_until_failure
             .store(skip + 1, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -747,14 +758,18 @@ impl LogStore {
     /// it was, so the read that comes after it still meets the failure.
     #[cfg(feature = "fault-injection")]
     pub fn fail_next_reads(&self, count: u64) {
-        self.failing_reads.store(count, std::sync::atomic::Ordering::SeqCst);
+        self.faults
+            .failing_reads
+            .store(count, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Arm the contention point: the next `count` appends are raced by a foreign writer that
     /// wins, so each loses the compare-and-swap and its caller replays.
     #[cfg(feature = "fault-injection")]
     pub fn contend_next_appends(&self, count: u64) {
-        self.contended_appends.store(count, std::sync::atomic::Ordering::SeqCst);
+        self.faults
+            .contended_appends
+            .store(count, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Arm the contention point once, with what the winner records. The next append to `root`
@@ -768,6 +783,7 @@ impl LogStore {
         observation: &HostObservation,
     ) {
         *self
+            .faults
             .contending_record
             .lock()
             .expect("the injection mutex is never poisoned") =
@@ -812,17 +828,17 @@ impl LogStore {
 
     #[cfg(feature = "fault-injection")]
     fn failure_fires(&self) -> bool {
-        consume(&self.commits_until_failure) == Some(1)
+        consume(&self.faults.commits_until_failure) == Some(1)
     }
 
     #[cfg(feature = "fault-injection")]
     fn contention_fires(&self) -> bool {
-        consume(&self.contended_appends).is_some()
+        consume(&self.faults.contended_appends).is_some()
     }
 
     #[cfg(feature = "fault-injection")]
     fn read_refused(&self) -> Result<(), ReadError> {
-        match consume(&self.failing_reads) {
+        match consume(&self.faults.failing_reads) {
             Some(_) => Err(ReadError::Injected),
             None => Ok(()),
         }
@@ -1687,15 +1703,15 @@ mod tests {
         );
     }
 
-    /// Run against an Archestra-migrated, disposable PostgreSQL database:
-    /// OPENAPPA_TEST_DATABASE_URL=... cargo test -p appa-eventlog --features postgres -- --ignored
+    /// Run against a disposable PostgreSQL database that holds the host schema,
+    /// from a host's migrations or from `tests/fixtures/host_schema.sql`:
+    /// OPENAPPA_TEST_DATABASE_URL=... cargo test -p appa-eventlog --features postgres,fault-injection -- --ignored
     #[cfg(feature = "postgres")]
     #[test]
     #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
     fn postgres_preserves_encoding_cas_and_outer_transaction_atomicity() {
-        let url = std::env::var("OPENAPPA_TEST_DATABASE_URL").expect("test database URL");
-        let first = LogStore::open(Backend::Postgres { url: url.clone() }).unwrap();
-        let second = LogStore::open(Backend::Postgres { url }).unwrap();
+        let first = postgres_store(2).lease().unwrap();
+        let second = postgres_store(1);
         let unique = tempfile::tempdir().unwrap();
         let id = TrajectoryId::new(format!("pg-test:{}", unique.path().display()));
         let facts = vec![Fact::Boundary {
@@ -1874,8 +1890,7 @@ mod tests {
             ProcessedResultKey, ProcessedResultRequest, ReceiptBinding, ReceiptError, ReceiptScope,
         };
 
-        let url = std::env::var("OPENAPPA_TEST_DATABASE_URL").expect("test database URL");
-        let store = LogStore::open(Backend::Postgres { url }).expect("the PostgreSQL store opens");
+        let store = postgres_store(1).lease().expect("the connection leases");
         let pg = store.postgres().expect("the PostgreSQL API is present");
         let unique = tempfile::tempdir().expect("a unique receipt namespace exists");
         let suffix = unique.path().display().to_string();
@@ -1980,7 +1995,7 @@ mod tests {
         );
 
         let mut rollback_owner = owner.clone();
-        rollback_owner.offer_id = "fedcba9876543210".to_owned();
+        rollback_owner.offer_id = "0f1e2d3c4b5a6978".to_owned();
         let rollback_request = OperationRequest {
             key: OperationKey {
                 scope: scope.clone(),
@@ -2034,5 +2049,270 @@ mod tests {
             Ok(())
         })
         .expect("the isolated test receipts clean up");
+    }
+
+    #[cfg(feature = "postgres")]
+    fn postgres_store(max_connections: usize) -> LogStore {
+        let url = std::env::var("OPENAPPA_TEST_DATABASE_URL").expect("test database URL");
+        LogStore::open(Backend::Postgres {
+            url,
+            max_connections: std::num::NonZeroUsize::new(max_connections).expect("a pool holds a connection"),
+        })
+        .expect("the PostgreSQL store opens")
+    }
+
+    #[cfg(feature = "postgres")]
+    fn postgres_root(store: &LogStore, name: &str) -> TrajectoryId {
+        let unique = tempfile::tempdir().expect("a unique root name exists");
+        let id = TrajectoryId::new(format!("pg-test:{name}:{}", unique.path().display()));
+        store
+            .create_root(opening(&id), POLICY.as_bytes())
+            .expect("the root opens");
+        id
+    }
+
+    #[cfg(feature = "postgres")]
+    fn forget_postgres_roots(store: &LogStore, roots: Vec<TrajectoryId>) {
+        store
+            .lease()
+            .expect("a connection leases")
+            .postgres()
+            .expect("the PostgreSQL API is present")
+            .with_client(move |client| {
+                for root in &roots {
+                    client.execute("DELETE FROM openappa_events WHERE root=$1", &[&root.as_str()])?;
+                }
+                Ok(())
+            })
+            .expect("the test roots clean up");
+    }
+
+    #[cfg(feature = "postgres")]
+    fn backend_pid(store: &LogStore) -> i32 {
+        store
+            .postgres()
+            .expect("the PostgreSQL API is present")
+            .with_client(|client| Ok(client.query_one("SELECT pg_backend_pid()", &[])?.get(0)))
+            .expect("the connection names its backend")
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_leases_of_one_store_keep_their_transactions_apart() {
+        let store = postgres_store(3);
+        let (held, written) = (postgres_root(&store, "held"), postgres_root(&store, "written"));
+        let boundary = |id: &TrajectoryId| {
+            vec![Fact::Boundary {
+                trajectory: id.clone(),
+                kind: appa_engine::fact::BoundaryKind::VoidReturn,
+            }]
+        };
+        assert!(
+            store.postgres().unwrap().begin().is_err(),
+            "a store without a connection of its own holds no transaction"
+        );
+        assert!(
+            store.postgres().unwrap().with_client(|_| Ok(())).is_err(),
+            "nor anything else a host's SQL would leave on a connection"
+        );
+
+        let (a, b) = (store.lease().unwrap(), store.lease().unwrap());
+        let before = store.log(&held).unwrap();
+        let rolled_back = a.postgres().unwrap().begin().unwrap();
+        a.append(&before, &boundary(&held)).unwrap();
+        assert_eq!(a.log(&held).unwrap().basis(), before.basis() + 1);
+        assert_eq!(
+            b.log(&held).unwrap(),
+            before,
+            "another lease reads outside the transaction"
+        );
+        assert_eq!(store.log(&held).unwrap(), before, "and so does the unleased store");
+
+        let committed = b
+            .postgres()
+            .unwrap()
+            .begin()
+            .expect("each lease holds its own transaction");
+        b.append(&b.log(&written).unwrap(), &boundary(&written)).unwrap();
+        committed.commit().unwrap();
+        drop(rolled_back);
+        assert_eq!(
+            store.log(&held).unwrap(),
+            before,
+            "one lease's rollback takes only its writes"
+        );
+        assert_eq!(store.log(&written).unwrap().basis(), 2, "and leaves the other's commit");
+
+        let outlived = store.lease().unwrap();
+        let transaction = outlived.postgres().unwrap().begin().unwrap();
+        outlived.append(&before, &boundary(&held)).unwrap();
+        drop(outlived);
+        transaction
+            .commit()
+            .expect("the transaction keeps its connection after the leased store drops");
+        assert_eq!(store.log(&held).unwrap().basis(), before.basis() + 1);
+
+        forget_postgres_roots(&store, vec![held, written]);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host receipt migrations"]
+    fn postgres_session_locks_and_receipt_keys_contend_across_leases() {
+        use crate::postgres::{
+            OperationClaim, OperationKey, OperationRequest, ReceiptBinding, ReceiptError, ReceiptScope,
+        };
+
+        let store = postgres_store(2);
+        let unique = tempfile::tempdir().expect("a unique namespace exists");
+        let suffix = unique.path().display().to_string();
+        let try_lock = |lease: &LogStore| {
+            let key = suffix.clone();
+            lease
+                .postgres()
+                .unwrap()
+                .with_client(move |client| {
+                    Ok(client
+                        .query_one("SELECT pg_try_advisory_lock(hashtextextended($1, 0))", &[&key])?
+                        .get::<_, bool>(0))
+                })
+                .expect("the lock attempt answers")
+        };
+        let (a, b) = (store.lease().unwrap(), store.lease().unwrap());
+        assert!(try_lock(&a));
+        assert!(!try_lock(&b), "a session lock held on one lease excludes another lease");
+        drop(a);
+        assert!(try_lock(&b), "a returned connection gives up the session locks it held");
+        drop(b);
+
+        let request = OperationRequest {
+            key: OperationKey {
+                scope: ReceiptScope {
+                    organization_id: format!("lease-org:{suffix}"),
+                    caller_id: None,
+                    session_id: format!("lease-session:{suffix}"),
+                    binding: ReceiptBinding::Session,
+                },
+                operation_id: "call:contended".to_owned(),
+            },
+            root: format!("lease-root:{suffix}"),
+            input: serde_json::json!({"tool": "wire"}),
+            context: None,
+        };
+        let (a, b) = (store.lease().unwrap(), store.lease().unwrap());
+        let barrier = std::sync::Barrier::new(2);
+        let claims = std::thread::scope(|scope| {
+            let (barrier, request) = (&barrier, &request);
+            [&a, &b]
+                .map(|lease| {
+                    scope.spawn(move || {
+                        barrier.wait();
+                        lease.postgres().unwrap().claim_operation(request.clone())
+                    })
+                })
+                .map(|claim| claim.join().unwrap())
+        });
+        assert_eq!(
+            claims
+                .iter()
+                .filter(|claim| matches!(claim, Ok(OperationClaim::Claimed)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            claims
+                .iter()
+                .filter(|claim| matches!(claim, Err(ReceiptError::Pending)))
+                .count(),
+            1
+        );
+        let decision = serde_json::json!({"decision": "allow_call"});
+        a.postgres()
+            .unwrap()
+            .complete_operation(request.key.clone(), decision.clone())
+            .expect("the claim completes");
+        assert_eq!(
+            b.postgres().unwrap().claim_operation(request.clone()).unwrap(),
+            OperationClaim::Complete { decision },
+            "the other lease replays what the first completed"
+        );
+
+        let session = request.key.scope.session_id;
+        a.postgres()
+            .unwrap()
+            .with_client(move |client| {
+                client.execute("DELETE FROM openappa_operations WHERE session_id=$1", &[&session])?;
+                Ok(())
+            })
+            .expect("the test receipt cleans up");
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_pool_replaces_a_terminated_connection() {
+        let terminate = |pid: i32| {
+            postgres_store(1)
+                .lease()
+                .unwrap()
+                .postgres()
+                .unwrap()
+                .with_client(move |client| {
+                    client.execute("SELECT pg_terminate_backend($1)", &[&pid])?;
+                    Ok(())
+                })
+                .expect("the server ends the connection");
+        };
+        let store = postgres_store(1);
+        let root = postgres_root(&store, "terminated");
+        let lease = store.lease().unwrap();
+        terminate(backend_pid(&lease));
+        assert!(lease.log(&root).is_err(), "work on a dead connection fails closed");
+        drop(lease);
+        assert!(
+            store
+                .has_root(&root)
+                .expect("the pool opens a connection in the dead one's place"),
+            "the store serves again without reopening"
+        );
+
+        // The same end while the connection sits idle costs no operation at all.
+        let idle = backend_pid(&store.lease().unwrap());
+        terminate(idle);
+        // Past the window in which a connection that just came back is leased unasked.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert!(
+            store
+                .has_root(&root)
+                .expect("the pool tells a dead idle connection from a live one"),
+        );
+        assert_ne!(backend_pid(&store.lease().unwrap()), idle);
+        forget_postgres_roots(&store, vec![root]);
+    }
+
+    #[cfg(all(feature = "postgres", feature = "fault-injection"))]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_pool_bounds_its_checkout_and_its_reset() {
+        use std::time::Duration;
+
+        let store = postgres_store(1);
+        let pg = store.postgres().unwrap();
+        pg.set_waits(Duration::from_millis(200), Duration::from_millis(200));
+        let lease = store.lease().unwrap();
+        let pid = backend_pid(&lease);
+        assert!(
+            matches!(store.lease(), Err(crate::postgres::LeaseError::Exhausted(_))),
+            "a full pool refuses within its wait instead of hanging"
+        );
+
+        pg.stall_next_reset(Duration::from_secs(2));
+        drop(lease);
+        assert_ne!(
+            backend_pid(&store.lease().expect("a silent connection frees its place")),
+            pid,
+            "a connection that does not answer its reset is never handed out again"
+        );
     }
 }

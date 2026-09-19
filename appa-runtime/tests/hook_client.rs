@@ -17,6 +17,10 @@ const PRE_TOOL_USE: &str =
 
 const POST_TOOL_USE: &str = r#"{"hook_event_name":"PostToolUse","session_id":"client-test","tool_name":"Bash","tool_input":{"command":"ls"},"tool_response":{"stdout":"readme.txt"}}"#;
 
+/// A subagent's stop: the hook a child's return crosses at, carrying the message the parent
+/// would receive.
+const SUBAGENT_STOP: &str = r#"{"hook_event_name":"SubagentStop","session_id":"client-test","agent_id":"a1","agent_type":"general-purpose","last_assistant_message":"the child's secret"}"#;
+
 fn built_binary() -> &'static std::path::Path {
     std::path::Path::new(env!("CARGO_BIN_EXE_appa"))
 }
@@ -36,8 +40,16 @@ fn client(url: &str) -> Command {
     command
 }
 
-/// Feed `stdin` to a spawned client and collect its exit code and stdout.
-fn finish(mut child: std::process::Child, stdin: &str) -> (i32, String) {
+/// The same client with its stderr captured. Claude Code reads a blocking hook's reason
+/// from that channel, so a test reading only stdout cannot see what the harness is shown.
+fn client_heard(url: &str) -> Command {
+    let mut command = client(url);
+    command.stderr(Stdio::piped());
+    command
+}
+
+/// Feed `stdin` to a spawned client and collect its exit code, stdout and stderr.
+fn finish_output(mut child: std::process::Child, stdin: &str) -> std::process::Output {
     // An ungated client may exit before reading its stdin, closing the pipe
     // mid-write; that is a pass condition, so only a non-EPIPE error fails.
     if let Err(error) = child
@@ -52,7 +64,12 @@ fn finish(mut child: std::process::Child, stdin: &str) -> (i32, String) {
             "the event writes to the hook's stdin",
         );
     }
-    let output = child.wait_with_output().expect("the hook client finishes");
+    child.wait_with_output().expect("the hook client finishes")
+}
+
+/// Feed `stdin` to a spawned client and collect its exit code and stdout.
+fn finish(child: std::process::Child, stdin: &str) -> (i32, String) {
+    let output = finish_output(child, stdin);
     (
         output.status.code().expect("the hook client exits with a code"),
         String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -61,6 +78,17 @@ fn finish(mut child: std::process::Child, stdin: &str) -> (i32, String) {
 
 fn run_client(url: &str, stdin: &str) -> (i32, String) {
     finish(client(url).spawn().expect("the hook client spawns"), stdin)
+}
+
+/// Exit code, stdout and stderr together, for the tests that assert which channel an
+/// answer took.
+fn run_client_heard(url: &str, stdin: &str) -> (i32, String, String) {
+    let output = finish_output(client_heard(url).spawn().expect("the hook client spawns"), stdin);
+    (
+        output.status.code().expect("the hook client exits with a code"),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
 }
 
 fn run_turn_end(url: &str, stdin: &str) -> (i32, String) {
@@ -599,4 +627,123 @@ fn the_session_context_entry_speaks_only_in_a_protected_session() {
         .expect("the binary runs");
     assert!(ungated.status.success());
     assert!(ungated.stdout.is_empty(), "an unprotected session hears nothing");
+}
+
+/// The channel a blocked call's reason takes. Claude Code shows the model what a blocking
+/// hook wrote to stderr, not its response body, so a reason that never reaches that channel
+/// is a reason nobody reads. The runtime's own detail has to survive the trip.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blocked_call_carries_the_runtimes_detail_on_stderr() {
+    let url = serve(Router::new().route(
+        "/hook",
+        post(|| async {
+            (
+                axum::http::StatusCode::CONFLICT,
+                r#"{"protocol":1,"decision":"refuse","detail":"storage failure: disk full"}"#,
+            )
+        }),
+    ))
+    .await;
+    let (code, stdout, stderr) = tokio::task::spawn_blocking(move || run_client_heard(&url, PRE_TOOL_USE))
+        .await
+        .expect("the blocking task joins");
+    assert_eq!(code, 2, "a call that has not run is stopped by the exit code");
+    assert!(
+        stderr.contains("disk full"),
+        "the runtime's own detail reaches the channel the harness shows: {stderr:?}"
+    );
+    // The answer's own rendering is printed beside the blocking exit. Claude Code reads
+    // stdout only from a hook that exits zero, so this is for whoever runs the hook by hand;
+    // stderr is what decides the call.
+    assert!(
+        stdout.contains("disk full"),
+        "the refusal's own rendering still goes out: {stdout:?}"
+    );
+}
+
+/// A withheld result takes the opposite pair of channels: the replacement goes to stdout
+/// under a zero exit, and stderr still reports why, so the two are not confused for each
+/// other. The withheld body reaches neither.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_withheld_result_reports_on_stderr_while_its_replacement_takes_stdout() {
+    let url = refused_url().await;
+    let (code, stdout, stderr) = tokio::task::spawn_blocking(move || run_client_heard(&url, POST_TOOL_USE))
+        .await
+        .expect("the blocking task joins");
+    assert_eq!(
+        code, 0,
+        "the harness applies a replacement only from a zero exit: {stdout}"
+    );
+    let answer: serde_json::Value = serde_json::from_str(&stdout).expect("the withholding renders as JSON");
+    assert!(
+        !answer["hookSpecificOutput"]["updatedToolOutput"].is_null(),
+        "the produced output is replaced: {answer}"
+    );
+    assert!(
+        !stderr.is_empty(),
+        "a withholding says so on the channel the harness shows"
+    );
+    assert!(
+        !stderr.contains("readme.txt") && !stdout.contains("readme.txt"),
+        "the withheld body reaches neither channel: {stdout} {stderr}"
+    );
+}
+
+/// A subagent's stop reports a return the child already produced, so it is answered the way
+/// a result is: through what the client prints, under a zero exit. The child's message is
+/// what must not cross while the runtime has not admitted it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_child_end_withholds_the_return_it_reports() {
+    for answer in [
+        (
+            axum::http::StatusCode::CONFLICT,
+            r#"{"protocol":1,"decision":"refuse","detail":"storage failure: disk full"}"#,
+        ),
+        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom"),
+    ] {
+        let url = serve(Router::new().route("/hook", post(move || async move { answer }))).await;
+        let (code, stdout) = tokio::task::spawn_blocking(move || run_client(&url, SUBAGENT_STOP))
+            .await
+            .expect("the blocking task joins");
+        assert_eq!(
+            code, 0,
+            "a stop is answered by what the client prints, not by its exit: {answer:?} {stdout}"
+        );
+        let rendered: serde_json::Value = serde_json::from_str(&stdout).expect("the answer renders as JSON");
+        assert_eq!(rendered["decision"], "block", "the stop is held: {rendered}");
+        assert!(
+            !stdout.contains("the child's secret"),
+            "the return never crosses on a refusal: {stdout}"
+        );
+    }
+}
+
+/// The same stop where no runtime answers at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unanswered_child_end_withholds_the_return_it_reports() {
+    let url = refused_url().await;
+    let (code, stdout) = tokio::task::spawn_blocking(move || run_client(&url, SUBAGENT_STOP))
+        .await
+        .expect("the blocking task joins");
+    assert_eq!(code, 0, "a stop is answered by what the client prints: {stdout}");
+    let rendered: serde_json::Value = serde_json::from_str(&stdout).expect("the answer renders as JSON");
+    assert_eq!(rendered["decision"], "block", "the stop is held: {rendered}");
+    assert!(
+        !stdout.contains("the child's secret"),
+        "the return never crosses unanswered: {stdout}"
+    );
+}
+
+/// A stop whose bytes this codec cannot read takes the other channel. Nothing has been put
+/// in front of the parent yet — the stop is where a return would cross — so the blocking
+/// exit is what holds the child, and there is no replacement to print.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreadable_stop_is_held_by_the_exit_code_with_nothing_printed() {
+    let url = refused_url().await;
+    let nameless = r#"{"hook_event_name":"SubagentStop","session_id":"client-test","last_assistant_message":"the child's secret"}"#;
+    let (code, stdout) = tokio::task::spawn_blocking(move || run_client(&url, nameless))
+        .await
+        .expect("the blocking task joins");
+    assert_eq!(code, 2, "a stop the codec cannot read is held by the exit code");
+    assert_eq!(stdout, "", "nothing has crossed, so there is nothing to replace");
 }
