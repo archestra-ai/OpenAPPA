@@ -592,6 +592,166 @@ mod tests {
         assert!(policy.digest.is_none(), "a fingerprint is baseline only");
     }
 
+    /// A parent that holds one of everything a fork carries over: a narrowed label naming a
+    /// reader, a committed effect, a denial, and a reservation still open.
+    const FORKED: &str = r#"
+        [policy]
+        version = 2
+
+        [[policy.tool]]
+        name = "post"
+        effects = ["ledger.posted"]
+        delta = {}
+
+        [[policy.tool]]
+        name = "hold"
+        effects = ["ledger.held"]
+        delta = {}
+
+        [[policy.tool]]
+        name = "wire"
+        requires = { attention = ["irreversible"] }
+        delta = {}
+
+        [[policy.authority]]
+        name = "treasurer"
+        [policy.authority.permits]
+        attention = ["irreversible"]
+
+        [policy.deployment]
+        starting_label = { trust = "suspicious", audience = ["alice@corp.example"] }
+
+        [externals]
+        timeout_ms = 1000
+        max_body_bytes = 4096
+
+        [externals.authorities.treasurer]
+        builtin = "hitl"
+    "#;
+
+    /// A root opened as a fork records its origin on its opening record, the one fact a fork
+    /// adds. The recorded session forks no root, so this fork is taken from a parent holding
+    /// something in every field of the origin, and exported end to end the same way.
+    #[tokio::test]
+    async fn a_forked_opening_is_classified_end_to_end() {
+        use crate::api::{OfferId, OutcomeBody, ProposedCall, RemedyDecision, ToolCallDecision, ToolOutcome};
+
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, FORKED).expect("the fixture writes");
+        let config = Config::load(&path).expect("the fixture validates");
+        let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
+        let parent = TrajectoryId("cc:parent-session".to_string());
+        let session = runtime.create_session(parent.clone()).expect("a fresh id opens");
+        let call = |tool: &str| ProposedCall {
+            tool: tool.to_string(),
+            arguments: crate::api::raw(serde_json::json!({})),
+        };
+        let decided =
+            |decision: Result<ToolCallDecision, crate::api::EventError>| decision.expect("the call is decided");
+
+        assert!(matches!(
+            decided(session.on_tool_call(call("post"), false).await),
+            ToolCallDecision::Allow { .. }
+        ));
+        session
+            .on_tool_result(
+                call("post"),
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("posted".to_string()),
+                },
+            )
+            .await
+            .expect("the effect commits");
+        let ToolCallDecision::Deny { offers, .. } = decided(session.on_tool_call(call("wire"), false).await) else {
+            panic!("an attended call blocks");
+        };
+        let quoted = OfferId(offers.first().expect("the block offers its authority").id.clone());
+        let offer = runtime.resolve_in(&parent, &quoted).expect("the quoted id resolves").0;
+        assert!(matches!(
+            session
+                .on_remedy(
+                    offer,
+                    crate::engine::RemedyArguments::default(),
+                    None,
+                    Some(appa_runtime_api::Ruling::Deny)
+                )
+                .await
+                .expect("the ruling is spent"),
+            RemedyDecision::Declined { .. }
+        ));
+        assert!(matches!(
+            decided(session.on_tool_call(call("hold"), false).await),
+            ToolCallDecision::Allow { .. }
+        ));
+        let fork = TrajectoryId("cc:fork-session".to_string());
+        runtime.open_fork(&parent, &parent, &fork).expect("the fork opens");
+
+        let projection = project(&runtime, &fork, Mode::Pseudonymized, Budget::default());
+        assert!(
+            projection.unclassified.is_empty(),
+            "the inventory does not cover {:?}",
+            projection.unclassified
+        );
+        let export = match projection.trajectory {
+            Diagnostic::Present(export) => *export,
+            Diagnostic::Omitted { omitted_reason } => panic!("the fork exports, got {omitted_reason:?}"),
+        };
+        let origin = &export.facts[0].fact["TrajectoryOpened"]["forked_from"];
+        let tokens = |field: &Value| -> Vec<String> {
+            field
+                .as_array()
+                .unwrap_or_else(|| panic!("an array of tokens, got {field}"))
+                .iter()
+                .map(|token| token.as_str().expect("a token").to_string())
+                .collect()
+        };
+        let starts = |token: &str, class: &str| token.starts_with(&format!("{class}-"));
+        assert!(starts(origin["parent_root"].as_str().expect("a token"), "trajectory"));
+        assert_eq!(
+            origin["parent"], origin["parent_root"],
+            "the fork was taken from the root"
+        );
+        assert!(origin["basis"].is_u64());
+        let (effects, reservations) = (tokens(&origin["effects"]), tokens(&origin["reservations"]));
+        assert!(effects.len() == 1 && starts(&effects[0], "effect"), "{origin}");
+        assert!(
+            reservations.len() == 1 && starts(&reservations[0], "effect"),
+            "{origin}"
+        );
+        assert_ne!(
+            effects, reservations,
+            "a committed effect and a reservation are two kinds"
+        );
+        let denials = origin["denials"].as_object().expect("denials by call");
+        let [(digest, authorities)] = denials.iter().collect::<Vec<_>>()[..] else {
+            panic!("one denied call, got {origin}");
+        };
+        assert!(starts(digest, "digest"));
+        let authorities = tokens(authorities);
+        assert!(
+            authorities.len() == 1 && starts(&authorities[0], "authority"),
+            "{origin}"
+        );
+        let readers = tokens(&origin["label"]["audience"][0]["readers"]);
+        assert!(readers.len() == 1 && starts(&readers[0], "reader"), "{origin}");
+
+        let rendered = serde_json::to_string(&export).expect("the export serializes");
+        for spelled in [
+            "parent-session",
+            "fork-session",
+            "alice",
+            "corp.example",
+            "ledger",
+            "treasurer",
+        ] {
+            assert!(
+                !rendered.contains(spelled),
+                "{spelled} survived pseudonymization: {rendered}"
+            );
+        }
+    }
+
     /// The property a person is promised when they answer yes to pseudonymization: nothing a
     /// reader of the report could use to name this machine, this session, or this file.
     #[tokio::test]

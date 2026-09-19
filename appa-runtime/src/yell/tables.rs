@@ -422,6 +422,26 @@ static FORK_SNAPSHOT: Table = Table {
     ],
 };
 
+/// What a root opened as a fork of another family's trajectory records on its opening.
+static FORK_ORIGIN: Table = Table {
+    name: "ForkOrigin",
+    entries: &[
+        ("parent_root", TRAJECTORY),
+        ("parent", TRAJECTORY),
+        // The parent family's log position the fork froze.
+        ("basis", NUMBER),
+        ("label", Rule::Table(&LABEL)),
+        // Both are `EffectSet`s, `#[serde(transparent)]` over their vectors of names.
+        ("effects", Rule::Elements(Class::Effect)),
+        ("reservations", Rule::Elements(Class::Effect)),
+        // The denied authorities, keyed by the digest of the rendered call they denied.
+        (
+            "denials",
+            Rule::MapKeys(Class::Digest, &Rule::Elements(Class::Authority)),
+        ),
+    ],
+};
+
 static BOUNDARY_MERGE: Table = Table {
     name: "BoundaryKind::Merge",
     entries: &[("child_return", Rule::Table(&CHILD_RETURN_ID))],
@@ -497,6 +517,7 @@ static TRAJECTORY_OPENED: Table = Table {
         ("policy_digest", Rule::Fingerprint),
         ("policy_file_key", Rule::Fingerprint),
         ("open_vectors", Rule::Each(&Rule::Table(&OPEN_VECTOR))),
+        ("forked_from", Rule::Table(&FORK_ORIGIN)),
     ],
 };
 
