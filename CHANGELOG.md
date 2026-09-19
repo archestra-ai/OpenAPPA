@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.24.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.23.1...v0.24.0) (2026-09-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* **eventlog:** pool PostgreSQL connections and lease one per dispatch ([#377](https://github.com/archestra-ai/OpenAPPA/issues/377))
+
+### Features
+
+* **eventlog:** pool PostgreSQL connections and lease one per dispatch ([#377](https://github.com/archestra-ai/OpenAPPA/issues/377)) ([a2720de](https://github.com/archestra-ai/OpenAPPA/commit/a2720de2cbdfada272ad9fd2d252b6937a454d16))
+* **runtime:** add independent root forks alongside subagent forks ([#380](https://github.com/archestra-ai/OpenAPPA/issues/380)) ([919d674](https://github.com/archestra-ai/OpenAPPA/commit/919d674c5203b8fb6423de906ae8e007a8f76207))
+
+
+### Bug Fixes
+
+* a parallel fan-out of substituting remedies makes progress ([#378](https://github.com/archestra-ai/OpenAPPA/issues/378)) ([feaeb93](https://github.com/archestra-ai/OpenAPPA/commit/feaeb93477a2f6fec1a1047bac2c97380b2bcd36))
+* **runtime:** ask the hitl reviewer by round trip on MCP 2026-07-28 ([#376](https://github.com/archestra-ai/OpenAPPA/issues/376)) ([f0cb138](https://github.com/archestra-ai/OpenAPPA/commit/f0cb138dab315b982cfc38485023763da85b9a0b))
+
 ## [0.23.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.23.0...v0.23.1) (2026-09-18)
 
 
