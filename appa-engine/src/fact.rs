@@ -158,8 +158,9 @@ impl ForkSnapshot {
         }
     }
 
-    /// The label the child's fold starts from — the deployment's starting label
-    /// carried down every fork.
+    /// The label the child's fold starts from: the opening base of its family's root, carried
+    /// down every fork. That base is the deployment's starting label, folded with the fork
+    /// origin's label when the root itself opened as a fork of another family's trajectory.
     pub(crate) fn base(&self) -> &Label {
         &self.base
     }
@@ -179,8 +180,12 @@ impl ForkSnapshot {
 /// carries over from there: that trajectory's label, its family's committed effects, and its
 /// authority denials, all as they stood at the parent family's log position `basis`. The fork is
 /// a family of its own after that point: nothing either side admits, emits or denies later
-/// reaches the other. Built only by [`crate::transition::EngineView::fork_origin`] from the parent
-/// family's validated view.
+/// reaches the other.
+///
+/// [`crate::transition::EngineView::fork_origin`] freezes one from the parent family's validated
+/// view, and the runtime records it on the fork's opening record. A replay of the fork's log
+/// never reads the parent family's log, so it takes the recorded origin as trusted log content
+/// and refuses only an origin that forks the root from itself.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForkOrigin {
     parent_root: TrajectoryId,

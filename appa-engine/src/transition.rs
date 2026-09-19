@@ -2105,10 +2105,11 @@ impl<'a> Sequence<'a> {
         Ok(())
     }
 
-    /// A root opened as a fork carries its parent's label, effects and denials. Folding a label
-    /// only narrows, and the effects and denials are the parent's own history at the fork, so the
-    /// origin gives the root nothing its parent did not hold; what is checked is that it names
-    /// another family.
+    /// A root opened as a fork carries the origin the runtime recorded when it opened the fork.
+    /// Re-deriving that origin would take the parent family's log, which this validator never
+    /// reads, so the replay takes the origin as trusted log content. It refuses only an origin
+    /// that forks the root from itself: one whose parent family or parent trajectory is the
+    /// root.
     fn fork_origin_admitted(
         &self,
         trajectory: &TrajectoryId,
