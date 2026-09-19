@@ -85,7 +85,7 @@ A policy can use a host-native name or a canonical tool id. Canonical ids have t
 
 `appa/execute_remedy_plan` is the runtime's own control tool, the one member of the `appa` family. A policy cannot declare it: the runtime recognizes it before any contract, and a `[[policy.tool]]` entry that names it refuses the policy at load. The wildcard entry `name = "*"` is not a canonical id; it covers every tool the policy does not name (see [the wildcard](#handling-undeclared-tools)).
 
-The agent keeps using its host's tool names. A plugin implements the host lifecycle; the runtime's adapter translates tool identities and events. The runtime records canonical ids, even when the policy uses native names. Where it tells the model to run a tool, it uses the host's dispatch spelling. Claude Code and kagent have these mappings:
+The agent keeps using its host's tool names. A plugin implements the host lifecycle; the runtime's adapter translates tool identities and events. The runtime records canonical ids, even when the policy uses native names. Where it tells the model to run a tool, it uses the host's dispatch spelling. Claude Code, kagent and Archestra have these mappings:
 
 | Adapter | Raw tool spelling | Canonical tool id |
 |---|---|---|
@@ -97,6 +97,9 @@ The agent keeps using its host's tool names. A plugin implements the host lifecy
 | kagent | A kagent built-in, such as `ask_user`, `load_memory`, `save_memory`, `prefetch_memory`, or a skill tool | `host/kagent/<name>` |
 | kagent | The entrypoint gates | `host/kagent-gate/code_execution`, `host/kagent-gate/memory_persist` |
 | kagent | The remedy tool | `appa/execute_remedy_plan` |
+| Archestra | `<catalog>__<tool>` — split at the last `__`, the slug of the MCP catalog the tool was installed from | `mcp/<catalog>/<tool>` |
+| Archestra | Any other name, including one whose catalog segment would itself contain `__` | `host/archestra/<name>` |
+| Archestra | `archestra__execute_remedy_plan`, the remedy tool as Archestra advertises it | `appa/execute_remedy_plan` |
 
 Claude Code names such as `Bash` and `mcp__github__create_issue` identify precise tools. An unqualified kagent rule such as `read_secret` applies to that native name across MCP servers and kagent's own tools. It does not cover remote-agent delegation. A newly discovered tool can use an existing rule without restarting the trajectory or changing its opening policy.
 

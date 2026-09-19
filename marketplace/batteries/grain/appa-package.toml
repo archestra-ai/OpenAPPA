@@ -4,6 +4,6 @@ description = "Rules for the Grain MCP server: meetings, transcripts, notes, dea
 
 [battery]
 policy = "appa.toml"
-hosts = ["claude-code"]
+hosts = ["claude-code", "archestra"]
 namespaces = ["claude_ai_Grain"]
 helpers = []

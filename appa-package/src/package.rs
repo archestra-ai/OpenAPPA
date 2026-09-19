@@ -381,6 +381,12 @@ impl RawPlugin {
                     images,
                 })
             }
+            // Archestra embeds the runtime and installs batteries from its own store; nothing
+            // is installed into it from a marketplace, so no plugin is written for it.
+            Host::Archestra => Err(ManifestError::PluginHost {
+                path: path.to_path_buf(),
+                host,
+            }),
         }
     }
 }

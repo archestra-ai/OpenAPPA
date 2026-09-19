@@ -184,6 +184,7 @@ impl From<AdapterName> for Harness {
         match adapter {
             AdapterName::ClaudeCode => Harness::ClaudeCode,
             AdapterName::Kagent => Harness::Kagent,
+            AdapterName::Archestra => Harness::Archestra,
         }
     }
 }

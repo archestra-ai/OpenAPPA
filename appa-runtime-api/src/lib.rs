@@ -19,10 +19,14 @@ pub use wire::{
 pub enum AdapterName {
     ClaudeCode,
     Kagent,
+    /// Archestra embeds the runtime in its LLM proxy: there is no served
+    /// process and no wire, the host derives every call through the
+    /// adapter itself and reviews through its own UI.
+    Archestra,
 }
 
 impl AdapterName {
-    pub const ALL: [AdapterName; 2] = [AdapterName::ClaudeCode, AdapterName::Kagent];
+    pub const ALL: [AdapterName; 3] = [AdapterName::ClaudeCode, AdapterName::Kagent, AdapterName::Archestra];
 
     pub fn parse(text: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|host| host.as_str() == text)
@@ -32,6 +36,7 @@ impl AdapterName {
         match self {
             AdapterName::ClaudeCode => "claude-code",
             AdapterName::Kagent => "kagent",
+            AdapterName::Archestra => "archestra",
         }
     }
 
@@ -40,6 +45,7 @@ impl AdapterName {
         match self {
             AdapterName::ClaudeCode => "cc",
             AdapterName::Kagent => "kagent",
+            AdapterName::Archestra => "archestra",
         }
     }
 
@@ -52,7 +58,7 @@ impl AdapterName {
     pub fn review_channel(self) -> ReviewChannel {
         match self {
             AdapterName::ClaudeCode => ReviewChannel::Runtime,
-            AdapterName::Kagent => ReviewChannel::Host,
+            AdapterName::Kagent | AdapterName::Archestra => ReviewChannel::Host,
         }
     }
 }
@@ -84,7 +90,7 @@ impl std::str::FromStr for AdapterName {
         AdapterName::ALL
             .into_iter()
             .find(|name| name.as_str() == text)
-            .ok_or_else(|| format!("{text} is not an adapter; one of: claude-code, kagent"))
+            .ok_or_else(|| format!("{text} is not an adapter; one of: claude-code, kagent, archestra"))
     }
 }
 

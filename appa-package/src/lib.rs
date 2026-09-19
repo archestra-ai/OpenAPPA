@@ -8,6 +8,7 @@
 pub mod generation;
 pub mod tree;
 
+mod bundled;
 mod digest;
 mod manifest;
 mod marketplace;
@@ -15,6 +16,7 @@ mod names;
 mod package;
 mod validate;
 
+pub use bundled::{BundledBattery, BundledFile, bundled_batteries};
 pub use digest::{TreeDigest, TreeDigestParseError};
 pub use manifest::{ManifestError, SCHEMA};
 pub use marketplace::{Marketplace, OwnershipError, PackageEntry, check_ownership};

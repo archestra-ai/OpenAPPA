@@ -80,6 +80,15 @@ pub struct HostDefaults {
     pub max_body_bytes: usize,
 }
 
+/// One battery a host composes under its root document: the name the host lists it
+/// under, which is what errors and [`Config::included_batteries`] say, and its
+/// `appa.toml` text.
+#[derive(Debug, Clone, Copy)]
+pub struct HostedBattery<'a> {
+    pub name: &'a str,
+    pub policy: &'a str,
+}
+
 /// The API providers the `llm` builtin speaks to. Closed: the transport is compiled in
 /// per provider, so a name outside this set is a configuration refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -744,15 +753,7 @@ impl Config {
             .remove("include");
 
         let root_version = policy_version(&root.policy).ok_or(ConfigError::InvalidPolicyVersion)?;
-        let root_annotators = root
-            .policy
-            .get("annotator")
-            .and_then(toml::Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(declaration_name)
-            .map(str::to_owned)
-            .collect::<std::collections::BTreeSet<_>>();
+        let root_annotators = declared_annotators(&root.policy);
         let mut origins = root_command_origins(&root, &source_dir)?;
         let mut seen = std::collections::BTreeSet::new();
         let mut included_batteries = std::collections::BTreeSet::new();
@@ -827,22 +828,72 @@ impl Config {
     }
 
     /// The configuration of a host that holds its document in memory rather than reading
-    /// `appa.toml`: a `[policy]` table and an optional `[externals]` table, the root
-    /// file's own shape, plus the two settings the host fills in where the document states
-    /// neither. The document comes from an author who may run nothing on this machine and
-    /// read none of its files, so every top-level key the host owns and every `command`
-    /// binding is refused. Validation is otherwise the file loader's, tokens included: a
-    /// `token_env` resolves from this process's environment.
+    /// `appa.toml`: a `[policy]` table, an optional `[externals]` table and an optional
+    /// `[server_aliases]` table, plus the two settings the host fills in where the
+    /// document states neither. The document comes from an author who may run nothing on
+    /// this machine and read none of its files, so every other top-level key and every
+    /// `command` binding is refused. `server_aliases` stays admitted because it is the
+    /// host's own declaration of which connections a namespace names, and a document that
+    /// carries it is one snapshot: reopened or replayed under the same bytes, a trajectory
+    /// resolves its rules the way it did when it opened. Validation is otherwise the file
+    /// loader's, tokens included: a `token_env` resolves from this process's environment.
     pub fn hosted(text: &str, defaults: HostDefaults) -> Result<Config, ConfigError> {
+        Config::hosted_composed(text, &[], defaults)
+    }
+
+    /// [`Config::hosted`] with batteries composed under the root document the way a
+    /// root file's `include` composes them: each battery's declarations append to the
+    /// root's, a root annotator replaces one included default, a repeated external is
+    /// refused, and the composed document is what the configuration stores. The host
+    /// holds every text in memory, so nothing here reads a file; a battery's `command`
+    /// bindings are refused as the root's are, and a host that runs a battery's helpers
+    /// rewrites them into `url` bindings it serves before composing.
+    pub fn hosted_composed(
+        root: &str,
+        batteries: &[HostedBattery<'_>],
+        defaults: HostDefaults,
+    ) -> Result<Config, ConfigError> {
         let mut document: toml::Value =
-            toml::from_str(text).map_err(|source| ConfigError::UnparsablePolicy { source })?;
+            toml::from_str(root).map_err(|source| ConfigError::UnparsablePolicy { source })?;
         let document_table = document.as_table_mut().expect("a TOML document parses as a table");
         if let Some(key) = document_table
             .keys()
-            .find(|key| !matches!(key.as_str(), "policy" | "externals"))
+            .find(|key| !matches!(key.as_str(), "policy" | "externals" | "server_aliases"))
         {
             return Err(ConfigError::HostedKey { key: key.clone() });
         }
+        let root_policy = document_table.get("policy").ok_or(ConfigError::InvalidPolicyVersion)?;
+        let root_version = policy_version(root_policy).ok_or(ConfigError::InvalidPolicyVersion)?;
+        let root_annotators = declared_annotators(root_policy);
+        // Composition appends included externals to the root's table, so an absent one
+        // is the empty table it would be in a file loaded with none.
+        document_table
+            .entry("externals")
+            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+        let mut included_batteries = std::collections::BTreeSet::new();
+        let mut replaced_annotators = std::collections::BTreeSet::new();
+        let mut origins = BTreeMap::new();
+        for battery in batteries {
+            if !included_batteries.insert(battery.name.to_string()) {
+                return Err(ConfigError::DuplicateInclude {
+                    path: battery.name.to_string(),
+                });
+            }
+            let included: toml::Value = toml::from_str(battery.policy).map_err(|source| ConfigError::Unparsable {
+                path: battery.name.to_string(),
+                source,
+            })?;
+            compose_include(
+                &mut document,
+                included,
+                Path::new(battery.name),
+                root_version,
+                &root_annotators,
+                &mut replaced_annotators,
+                &mut origins,
+            )?;
+        }
+        let document_table = document.as_table_mut().expect("a TOML document parses as a table");
         let timeout_ms = i64::try_from(defaults.consult_timeout.as_millis()).map_err(|_| {
             ConfigError::UnrepresentableHostDefault {
                 setting: "consult_timeout",
@@ -876,7 +927,7 @@ impl Config {
             raw,
             Reporting::default(),
             BTreeMap::new(),
-            Vec::new(),
+            included_batteries.into_iter().collect(),
             |var| std::env::var(var).ok(),
         )
     }
@@ -1099,6 +1150,19 @@ fn add_composed_metadata(
 
 fn declaration_name(declaration: &toml::Value) -> Option<&str> {
     declaration.as_table()?.get("name")?.as_str()
+}
+
+/// The annotator names a policy declares; a root's set decides which included
+/// defaults its own declarations replace.
+fn declared_annotators(policy: &toml::Value) -> std::collections::BTreeSet<String> {
+    policy
+        .get("annotator")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(declaration_name)
+        .map(str::to_owned)
+        .collect()
 }
 
 fn compose_include(
@@ -2549,14 +2613,145 @@ mod tests {
         ));
     }
 
+    const HOST_DEFAULTS: HostDefaults = HostDefaults {
+        consult_timeout: Duration::from_millis(5000),
+        max_body_bytes: 65_536,
+    };
+
     fn hosted(text: &str) -> Result<Config, ConfigError> {
-        Config::hosted(
-            text,
-            HostDefaults {
-                consult_timeout: Duration::from_millis(5000),
-                max_body_bytes: 65_536,
-            },
+        Config::hosted(text, HOST_DEFAULTS)
+    }
+
+    fn hosted_composed(root: &str, batteries: &[HostedBattery<'_>]) -> Result<Config, ConfigError> {
+        Config::hosted_composed(root, batteries, HOST_DEFAULTS)
+    }
+
+    fn tool_names(config: &Config) -> Vec<String> {
+        config.tool_names()
+    }
+
+    const HOSTED_ROOT: &str = "[policy]\nversion = 2\n[[policy.tool]]\nname = \"root__read\"\ndelta = {}\n";
+
+    const GITHUB_BATTERY: &str = r#"
+        [policy]
+        version = 2
+
+        [[policy.annotator]]
+        name = "github.visibility"
+        ranks = ["suspicious"]
+        audiences = []
+        marks = []
+
+        [[policy.tool]]
+        name = "mcp/github/get_file_contents"
+        annotator = "github.visibility"
+
+        [externals.annotators."github.visibility"]
+        url = "http://127.0.0.1:9000/api/openappa/helpers/install-1/github.visibility"
+        token_env = "APPA_HOSTED_TEST_BRIDGE_TOKEN"
+    "#;
+
+    /// The host's own binding of policy namespaces to connections rides inside the
+    /// document, so the bytes a trajectory opens under resolve the same way on reload.
+    #[test]
+    fn a_hosted_document_may_bind_server_aliases() {
+        let config = hosted("[server_aliases]\ngithub = [\"github_prod\", \"github_dev\"]\n[policy]\nversion = 2\n")
+            .expect("server aliases are the host's to declare");
+        assert_eq!(
+            config.server_aliases,
+            BTreeMap::from([(
+                "github".to_string(),
+                vec!["github_prod".to_string(), "github_dev".to_string()]
+            )])
+        );
+        assert!(String::from_utf8_lossy(config.policy_file().bytes()).contains("server_aliases"));
+    }
+
+    #[test]
+    fn hosted_batteries_compose_under_the_root_and_reload_as_one_document() {
+        // SAFETY: the test process sets its own variable and every reader is this test.
+        unsafe { std::env::set_var("APPA_HOSTED_TEST_BRIDGE_TOKEN", "bridge") };
+        let config = hosted_composed(
+            HOSTED_ROOT,
+            &[HostedBattery {
+                name: "github",
+                policy: GITHUB_BATTERY,
+            }],
         )
+        .expect("the battery composes");
+        assert_eq!(tool_names(&config), ["root__read", "mcp/github/get_file_contents"]);
+        assert_eq!(config.included_batteries(), ["github"]);
+        assert!(config.externals.annotators.contains_key("github.visibility"));
+
+        let stored = String::from_utf8(config.policy_file().bytes().to_vec()).expect("UTF-8");
+        let reloaded = hosted(&stored).expect("the composed document is itself a hosted document");
+        assert_eq!(reloaded.policy_file().bytes(), config.policy_file().bytes());
+        assert_eq!(
+            hosted_composed(
+                HOSTED_ROOT,
+                &[HostedBattery {
+                    name: "github",
+                    policy: GITHUB_BATTERY,
+                }],
+            )
+            .expect("composes again")
+            .policy_file()
+            .bytes(),
+            config.policy_file().bytes(),
+            "composition is deterministic"
+        );
+    }
+
+    #[test]
+    fn a_hosted_root_annotator_replaces_a_battery_default() {
+        // SAFETY: the test process sets its own variable and every reader is this test.
+        unsafe { std::env::set_var("APPA_HOSTED_TEST_BRIDGE_TOKEN", "bridge") };
+        let root = "[policy]\nversion = 2\n[[policy.annotator]]\nname = \"github.visibility\"\nranks = [\"trusted\"]\naudiences = []\nmarks = []\n";
+        let config = hosted_composed(
+            root,
+            &[HostedBattery {
+                name: "github",
+                policy: GITHUB_BATTERY,
+            }],
+        )
+        .expect("the root's annotator wins");
+        let annotators = config.policy_file().value()["annotator"]
+            .as_array()
+            .expect("annotator declarations")
+            .iter()
+            .map(|declaration| declaration["ranks"][0].as_str().expect("rank"))
+            .collect::<Vec<_>>();
+        assert_eq!(annotators, ["trusted"]);
+    }
+
+    #[test]
+    fn hosted_batteries_are_refused_where_a_file_include_would_be() {
+        let battery = |policy: &'static str| HostedBattery { name: "github", policy };
+        assert!(matches!(
+            hosted_composed(HOSTED_ROOT, &[battery(GITHUB_BATTERY), battery(GITHUB_BATTERY)]),
+            Err(ConfigError::DuplicateInclude { path }) if path == "github"
+        ));
+        assert!(matches!(
+            hosted_composed(HOSTED_ROOT, &[battery("[policy]\nversion = 1\n")]),
+            Err(ConfigError::IncludedVersion { path, .. }) if path == "github"
+        ));
+        assert!(matches!(
+            hosted_composed(HOSTED_ROOT, &[battery("[policy]\nversion = 2\n[server_aliases]\nx = [\"y\"]\n")]),
+            Err(ConfigError::IncludedTopLevel { field, .. }) if field == "server_aliases"
+        ));
+        assert!(matches!(
+            hosted_composed(
+                HOSTED_ROOT,
+                &[battery("[policy]\nversion = 2\n[externals.annotators.x]\ncommand = [\"python3\", \"x.py\"]\n")]
+            ),
+            Err(ConfigError::HostedCommand { section: "annotators", name }) if name == "x"
+        ));
+        let root_with_external =
+            "[policy]\nversion = 2\n[externals.annotators.\"github.visibility\"]\nurl = \"https://example.com/v\"\n";
+        assert!(matches!(
+            hosted_composed(root_with_external, &[battery(GITHUB_BATTERY)]),
+            Err(ConfigError::DuplicateExternal { path, section, name }) if path == "github" && section == "annotators" && name == "github.visibility"
+        ));
     }
 
     /// A hosted document declares its externals the way a file does, and they resolve to
@@ -2609,7 +2804,6 @@ mod tests {
             ("appa_composed", "[appa_composed]\ncommand_cwd = {}"),
             ("reporting", "[reporting]\nagent_yell = true"),
             ("bundle", "[bundle]\nfiles = []"),
-            ("server_aliases", "[server_aliases]\ndemo = [\"mcp:demo\"]"),
             ("appa_inventory", "[appa_inventory]\ntools = []"),
         ] {
             let text = format!("{declaration}\n[policy]\nversion = 2\n");

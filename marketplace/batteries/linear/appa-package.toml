@@ -4,6 +4,6 @@ description = "Policy for 65 Linear MCP tools: per-issue, per-team, per-project 
 
 [battery]
 policy = "appa.toml"
-hosts = ["claude-code", "kagent"]
+hosts = ["claude-code", "kagent", "archestra"]
 namespaces = ["linear"]
 helpers = ["audience-source.py"]

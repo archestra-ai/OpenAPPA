@@ -179,6 +179,7 @@ fn served(adapter: AdapterName) -> appa_runtime_api::Adapter {
     match adapter {
         AdapterName::ClaudeCode => appa_adapter_claude_code::adapter(),
         AdapterName::Kagent => appa_adapter_kagent::adapter(),
+        AdapterName::Archestra => appa_adapter_archestra::adapter(),
     }
 }
 

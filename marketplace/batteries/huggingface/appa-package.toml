@@ -4,7 +4,7 @@ description = "Rules for the hosted Hugging Face MCP server: account, search, re
 
 [battery]
 policy = "appa.toml"
-hosts = ["claude-code", "kagent"]
+hosts = ["claude-code", "kagent", "archestra"]
 namespaces = ["huggingface"]
 helpers = ["audience-source.py", "repo-visibility.py", "hf_token.py"]
 setup = "Falls back to your Hugging Face CLI login (hf auth login) when the variable is unset; a read token suffices for reads, a write token for hf_fs_write and create_repo."

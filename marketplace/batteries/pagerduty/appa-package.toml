@@ -4,6 +4,6 @@ description = "Rules for the PagerDuty-hosted MCP server's 18 tools: internal re
 
 [battery]
 policy = "appa.toml"
-hosts = ["claude-code", "kagent"]
+hosts = ["claude-code", "kagent", "archestra"]
 namespaces = ["pagerduty"]
 helpers = []
