@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 
 use appa_runtime::api::{
-    AuditEvent, AuditLabel, DispatchOutcome, OfferId, OpenError, Reloaded, RemedyOutcome, Runtime, TrajectoryStatus,
+    AuditEvent, AuditLabel, DispatchOutcome, OfferId, OpenError, Reloaded, RemedyOutcome, RootForkRefusal, Runtime,
+    TrajectoryStatus,
 };
 use appa_runtime::config::Config;
 use appa_runtime::hooks;
@@ -25,6 +26,15 @@ fn the_reexported_vocabulary(
 fn the_declared_runtime(config: Config, db: PathBuf, modules: Option<PathBuf>) {
     let opened: Result<Runtime, OpenError> = Runtime::open(config, db, modules);
     drop(opened);
+}
+
+fn the_declared_root_fork(
+    runtime: &Runtime,
+    parent_root: &TrajectoryId,
+    parent: &TrajectoryId,
+    new_root: &TrajectoryId,
+) {
+    let _: Result<(), RootForkRefusal> = runtime.open_root_fork(parent_root, parent, new_root);
 }
 
 fn the_declared_reload(runtime: &Runtime, config: Config) {

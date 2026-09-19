@@ -884,11 +884,11 @@ fn is_empty(connection: &Connection) -> Result<bool, rusqlite::Error> {
 
 fn opened_by(opening: &[Fact]) -> Result<(TrajectoryId, PolicyFileKey), CreateError> {
     match opening.first() {
-        Some(Fact::TrajectoryOpened {
+        Some(Fact::TrajectoryOpened(appa_engine::fact::TrajectoryOpening {
             trajectory,
             policy_file_key,
             ..
-        }) => Ok((trajectory.clone(), policy_file_key.clone())),
+        })) => Ok((trajectory.clone(), policy_file_key.clone())),
         Some(_) => Err(CreateError::Malformed {
             detail: "the first record is not a TrajectoryOpened".to_string(),
         }),
@@ -938,9 +938,9 @@ fn stored(connection: &Connection, root: &TrajectoryId) -> Result<(Vec<Vec<u8>>,
         });
     };
     let opening = decode(first)?;
-    let Some(Fact::TrajectoryOpened {
+    let Some(Fact::TrajectoryOpened(appa_engine::fact::TrajectoryOpening {
         policy_file_key: key, ..
-    }) = opening.facts.first()
+    })) = opening.facts.first()
     else {
         return Err(ReadError::Undecodable(
             "the log does not open with a TrajectoryOpened record".to_string(),
@@ -1072,7 +1072,7 @@ mod tests {
         let log = store.log(&root()).expect("the log reads");
         assert_eq!(log.root(), &root());
         assert_eq!(log.basis(), 1, "the opening batch is the log's first position");
-        assert!(matches!(log.facts(), [Fact::TrajectoryOpened { .. }]));
+        assert!(matches!(log.facts(), [Fact::TrajectoryOpened(_)]));
         assert_eq!(log.policy_file(), POLICY.as_bytes());
     }
 
@@ -1121,11 +1121,7 @@ mod tests {
         assert_eq!(log.basis(), 3);
         assert!(matches!(
             log.facts(),
-            [
-                Fact::TrajectoryOpened { .. },
-                Fact::Boundary { .. },
-                Fact::Boundary { .. },
-            ],
+            [Fact::TrajectoryOpened(_), Fact::Boundary { .. }, Fact::Boundary { .. },],
         ));
     }
 
@@ -1217,7 +1213,7 @@ mod tests {
         assert_eq!(seen.basis(), 2, "both streams took one position");
         assert!(matches!(
             seen.facts(),
-            [Fact::TrajectoryOpened { .. }, Fact::Boundary { .. }]
+            [Fact::TrajectoryOpened(_), Fact::Boundary { .. }]
         ));
         let bindings: Vec<_> = seen.call_bindings().collect();
         assert_eq!(bindings.len(), 1);

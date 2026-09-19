@@ -817,7 +817,9 @@ impl PostgresStore {
             });
         };
         let opening = decode(first)?;
-        let Some(Fact::TrajectoryOpened { policy_file_key, .. }) = opening.facts.first() else {
+        let Some(Fact::TrajectoryOpened(appa_engine::fact::TrajectoryOpening { policy_file_key, .. })) =
+            opening.facts.first()
+        else {
             return Err(ReadError::Undecodable("log does not begin with an opening".into()));
         };
         let hash = policy_file_key.as_str().to_owned();

@@ -87,9 +87,10 @@ impl EffectKind {
     }
 }
 
-/// The canonical set of effect kinds a contract declares or a dispatch commits: unique and
-/// sorted, serialized as exactly that sorted sequence — so permutation-equivalent declarations
-/// converge to one value, engine-produced facts are byte-identical, and replayed histories agree.
+/// The canonical set of effect kinds a contract declares, a dispatch commits or a fork origin
+/// carries: unique and sorted, serialized as exactly that sorted sequence — so
+/// permutation-equivalent declarations converge to one value, engine-produced facts are
+/// byte-identical, and replayed histories agree.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct EffectSet(Vec<EffectKind>);
@@ -106,6 +107,15 @@ impl EffectSet {
             return Err(DuplicateEffect(pair[0].clone()));
         }
         Ok(EffectSet(kinds))
+    }
+
+    /// The distinct kinds among `kinds`, however often each occurs: a family's history holds a
+    /// kind once per commit, and a fork origin carries each kind once.
+    pub(crate) fn distinct<'a>(kinds: impl IntoIterator<Item = &'a EffectKind>) -> EffectSet {
+        let mut kinds: Vec<EffectKind> = kinds.into_iter().cloned().collect();
+        kinds.sort();
+        kinds.dedup();
+        EffectSet(kinds)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &EffectKind> {
@@ -132,8 +142,13 @@ impl<'de> Deserialize<'de> for EffectSet {
     }
 }
 
-/// The content snapshot a fork freezes: the parent's base, the source
-/// values that contributed to its label at that moment, and the label they derive.
+/// The frozen basis of a same-family spawned child fork: the parent's base, the source values
+/// that contributed to its label at that moment, and the label they derive. A
+/// [`Fact::ForkPrepared`] records it and a [`Fact::ForkOpened`] binds it to the child. Its
+/// inherited value IDs name values in that same family log; the child's start keeps the family's
+/// root and may later return under the prepared return policy.
+///
+/// This is distinct from [`RootForkOrigin`], which opens an independent conversation-root fork.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForkSnapshot {
     base: Label,
@@ -158,8 +173,9 @@ impl ForkSnapshot {
         }
     }
 
-    /// The label the child's fold starts from — the deployment's starting label
-    /// carried down every fork.
+    /// The label the child's fold starts from: the opening base of its family's root, carried
+    /// down every fork. That base is the deployment's starting label, folded with the fork
+    /// origin's label when the root itself opened as a fork of another family's trajectory.
     pub(crate) fn base(&self) -> &Label {
         &self.base
     }
@@ -172,6 +188,40 @@ impl ForkSnapshot {
 
     pub fn seed(&self) -> &Label {
         &self.seed
+    }
+}
+
+/// The origin of an independent conversation-root fork. It records where a new root was taken
+/// from and what it carries over: that trajectory's label, its family's committed effects, the
+/// effect kinds its family's unsettled reservations held, and that trajectory's authority
+/// denials, all as they stood at the parent family's log position `basis`. The new root is a
+/// family of its own after that point: nothing either side admits, emits, settles or denies later
+/// reaches the other, so a reservation carried over never settles in the root fork.
+///
+/// [`crate::transition::EngineView::root_fork_origin`] freezes one from the parent family's
+/// validated view, and the runtime records it on the new root's opening record. A root fork has
+/// no prepared spawn, child start, or return contract; those belong to the same-family
+/// [`ForkSnapshot`] flow. A replay of the root fork's log never reads the parent family's log, so
+/// it takes the recorded origin as trusted log content and refuses only an origin that forks the
+/// root from itself.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootForkOrigin {
+    pub(crate) parent_root: TrajectoryId,
+    pub(crate) parent: TrajectoryId,
+    /// Provenance only: replay trusts this opening and does not validate the parent's log position.
+    pub(crate) basis: u64,
+    pub(crate) label: Label,
+    pub(crate) effects: EffectSet,
+    /// The kinds reserved by the parent family's released calls that had neither succeeded nor
+    /// failed, an indeterminate close among them. Only `no_prior(k)` reads them.
+    pub(crate) reservations: EffectSet,
+    pub(crate) denials: std::collections::BTreeMap<CanonicalDigest, std::collections::BTreeSet<AuthorityName>>,
+}
+
+impl RootForkOrigin {
+    /// Does this origin name exactly this parent family and trajectory?
+    pub fn is_from(&self, parent_root: &TrajectoryId, parent: &TrajectoryId) -> bool {
+        self.parent_root == *parent_root && self.parent == *parent
     }
 }
 
@@ -215,18 +265,27 @@ pub enum CloseOutcome {
     Indeterminate,
 }
 
+/// The fields that open a root trajectory family.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrajectoryOpening {
+    pub trajectory: TrajectoryId,
+    pub dialect: PolicyDialectVersion,
+    pub profile: DeploymentProfile,
+    pub policy_digest: PolicyIdentityV1,
+    pub policy_file_key: PolicyFileKey,
+    pub open_vectors: Vec<OpenVector>,
+    /// Set when the root opened as a fork of another family's trajectory. Its label starts
+    /// from the deployment's starting label folded with the origin's, and its effects,
+    /// unsettled reservations and denials start as the origin's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<RootForkOrigin>,
+}
+
 /// One record in the log. New variants are added by the slice that both emits and consumes them
 /// (`dead_code = "deny"` keeps the enum honest — no speculative records).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Fact {
-    TrajectoryOpened {
-        trajectory: TrajectoryId,
-        dialect: PolicyDialectVersion,
-        profile: DeploymentProfile,
-        policy_digest: PolicyIdentityV1,
-        policy_file_key: PolicyFileKey,
-        open_vectors: Vec<OpenVector>,
-    },
+    TrajectoryOpened(TrajectoryOpening),
     ValueAdmitted {
         trajectory: TrajectoryId,
         value: LabeledValue,
@@ -455,7 +514,7 @@ impl Fact {
 
     pub fn trajectory(&self) -> &TrajectoryId {
         match self {
-            Fact::TrajectoryOpened { trajectory, .. }
+            Fact::TrajectoryOpened(TrajectoryOpening { trajectory, .. })
             | Fact::ProposalBatchDecided { trajectory, .. }
             | Fact::ValueAdmitted { trajectory, .. }
             | Fact::DispatchOpened { trajectory, .. }
