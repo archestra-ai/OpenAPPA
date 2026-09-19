@@ -4809,6 +4809,16 @@ context_control = true
             .create_session(unrelated.clone())
             .expect("an unrelated root opens");
         assert_eq!(
+            runtime.open_fork(&unrelated, &root(), &fork),
+            Err(super::super::ForkRefusal::ChildExists),
+            "a standing fork cannot be reopened under another parent family"
+        );
+        assert_eq!(
+            runtime.open_fork(&root(), &unrelated, &fork),
+            Err(super::super::ForkRefusal::ChildExists),
+            "a standing fork cannot be reopened from another parent trajectory"
+        );
+        assert_eq!(
             runtime.open_fork(&root(), &root(), &unrelated),
             Err(super::super::ForkRefusal::ChildExists),
             "a root that governs its own trajectory never becomes a fork"

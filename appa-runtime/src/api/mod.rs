@@ -1189,7 +1189,7 @@ fn reduced(log: &Log) -> HostState {
 pub enum ForkRefusal {
     #[error("the parent trajectory is not open in its family")]
     ParentUnavailable,
-    #[error("a trajectory with the child's id already exists and is not a fork of this parent")]
+    #[error("the child's id names its parent root, its parent trajectory, or an existing unrelated trajectory")]
     ChildExists,
     #[error("the fork could not be opened: {0}")]
     Refused(String),
@@ -1726,7 +1726,11 @@ impl Runtime {
             Some(appa_engine::fact::Fact::TrajectoryOpened {
                 forked_from: Some(origin),
                 ..
-            }) if origin.parent_root().as_str() == parent_root.0 && origin.parent().as_str() == parent.0 => Ok(()),
+            }) if origin.parent_root() == &crate::engine::engine_id(parent_root)
+                && origin.parent() == &crate::engine::engine_id(parent) =>
+            {
+                Ok(())
+            }
             _ => Err(ForkRefusal::ChildExists),
         }
     }

@@ -199,38 +199,18 @@ impl ForkSnapshot {
 /// and refuses only an origin that forks the root from itself.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForkOrigin {
-    parent_root: TrajectoryId,
-    parent: TrajectoryId,
-    basis: u64,
-    label: Label,
-    effects: EffectSet,
+    pub(crate) parent_root: TrajectoryId,
+    pub(crate) parent: TrajectoryId,
+    pub(crate) basis: u64,
+    pub(crate) label: Label,
+    pub(crate) effects: EffectSet,
     /// The kinds reserved by the parent family's released calls that had neither succeeded nor
     /// failed, an indeterminate close among them. Only `no_prior(k)` reads them.
-    reservations: EffectSet,
-    denials: std::collections::BTreeMap<CanonicalDigest, std::collections::BTreeSet<AuthorityName>>,
+    pub(crate) reservations: EffectSet,
+    pub(crate) denials: std::collections::BTreeMap<CanonicalDigest, std::collections::BTreeSet<AuthorityName>>,
 }
 
 impl ForkOrigin {
-    pub(crate) fn new(
-        parent_root: TrajectoryId,
-        parent: TrajectoryId,
-        basis: u64,
-        label: Label,
-        effects: EffectSet,
-        reservations: EffectSet,
-        denials: std::collections::BTreeMap<CanonicalDigest, std::collections::BTreeSet<AuthorityName>>,
-    ) -> ForkOrigin {
-        ForkOrigin {
-            parent_root,
-            parent,
-            basis,
-            label,
-            effects,
-            reservations,
-            denials,
-        }
-    }
-
     /// The family root the parent trajectory lives in.
     pub fn parent_root(&self) -> &TrajectoryId {
         &self.parent_root

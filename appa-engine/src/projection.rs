@@ -681,15 +681,15 @@ impl Projection {
             .values()
             .flat_map(EffectSet::iter)
             .chain(self.origin_reservations.iter());
-        Some(ForkOrigin::new(
-            family.clone(),
-            trajectory.clone(),
-            self.revision,
-            self.fold_for(trajectory),
-            EffectSet::distinct(&self.effects),
-            EffectSet::distinct(reserved),
-            self.denials.get(trajectory).cloned().unwrap_or_default(),
-        ))
+        Some(ForkOrigin {
+            parent_root: family.clone(),
+            parent: trajectory.clone(),
+            basis: self.revision,
+            label: self.fold_for(trajectory),
+            effects: EffectSet::distinct(&self.effects),
+            reservations: EffectSet::distinct(reserved),
+            denials: self.denials.get(trajectory).cloned().unwrap_or_default(),
+        })
     }
 
     /// The exposed provider-run results one batch identity admitted, in order: the
