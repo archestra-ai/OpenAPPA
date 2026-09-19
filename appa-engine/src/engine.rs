@@ -9690,6 +9690,140 @@ mod tests {
         );
     }
 
+    /// The view of `root`'s own family log.
+    fn viewing_root(e: &Engine, root: &TrajectoryId, log: &[Fact]) -> EngineView {
+        e.view(root, log.to_vec(), log.len() as u64)
+            .expect("the root's log replays")
+    }
+
+    /// The whole log of `fork`, a root of its own opened as a fork of `parent` where `view`
+    /// stands: its one opening record.
+    fn forked_root(e: &Engine, view: &EngineView, parent: &TrajectoryId, fork: &TrajectoryId) -> Vec<Fact> {
+        let origin = view.fork_origin(parent).expect("an open trajectory can be forked");
+        e.open_trajectory(fork, crate::profile::PolicyFileKey::of(b"policy"), Some(origin))
+            .expect("a fork of another family's trajectory seals")
+            .into_unsealed()
+    }
+
+    /// The requirement gaps `tool` blocks on as `root`'s next proposal, or `None` when it is
+    /// released.
+    fn gaps_of(e: &Engine, root: &TrajectoryId, log: &[Fact], tool: &str) -> Option<Vec<Gap>> {
+        let decision = e
+            .handle(
+                &viewing_root(e, root, log),
+                batch_on(root, tool, Vec::new(), vec![raw(&call(tool, json!({})))], None),
+            )
+            .expect("the call decides");
+        match answered(&decision) {
+            ([_], []) => None,
+            ([], [blocked]) => Some(blocked.block.raw.requirement_gaps.clone()),
+            other => panic!("one call decides one way, got {other:?}"),
+        }
+    }
+
+    /// A fork carries its parent family's history as it stood at the fork. A committed effect
+    /// answers `prior(k)` there and blocks `no_prior(k)`. An unsettled reservation, whether its
+    /// call is still open or closed indeterminate, blocks `no_prior(k)` in the fork as it does in
+    /// the parent and never counts as committed. No call of the fork can settle it: it stands
+    /// there after the parent's call fails, and a fork of the fork carries it on.
+    #[test]
+    fn a_fork_carries_its_parent_familys_effects_and_unsettled_reservations() {
+        let e = batch_engine();
+        let k = EffectKind::new("k");
+        let emitted = |log: &[Fact], id: &str| {
+            let decision = e
+                .handle(
+                    &viewing(&e, log),
+                    batch(id, Vec::new(), vec![raw(&call("emit", json!({})))]),
+                )
+                .expect("the emit decides");
+            let dispatch = match answered(&decision) {
+                ([release], []) => release.dispatch.clone(),
+                other => panic!("a neutral emit releases, got {other:?}"),
+            };
+            ([log, &appended_facts(decision)].concat(), dispatch)
+        };
+        let settled = |log: &[Fact], dispatch: &DispatchId, outcome: ToolOutcome| {
+            let closed = e
+                .handle(
+                    &viewing(&e, log),
+                    EngineEvent::Outcome(ToolReport {
+                        dispatch: dispatch.clone(),
+                        outcome,
+                        evidence: Vec::new(),
+                        offer_nonce: nonce(),
+                        audience: crate::audience::AudienceEvidence::default(),
+                    }),
+                )
+                .expect("the outcome closes the emit");
+            [log, &appended_facts(closed)].concat()
+        };
+        let success = || ToolOutcome::Success {
+            body: OutcomeBody::Available(ValueBody::new("emitted")),
+        };
+        let (open, dispatch) = emitted(&opening_log(&e), "emit");
+        let indeterminate = settled(&open, &dispatch, ToolOutcome::Indeterminate);
+        let failed = settled(&open, &dispatch, ToolOutcome::Failure);
+        let committed = settled(&open, &dispatch, success());
+        let (again, repeat) = emitted(&committed, "emit-again");
+        let committed_twice = settled(&again, &repeat, success());
+        let (parent, no_prior, prior) = (
+            traj(),
+            Some(vec![Gap::NoPrior(k.clone())]),
+            Some(vec![Gap::Prior(k.clone())]),
+        );
+
+        assert_eq!(gaps_of(&e, &parent, &indeterminate, "guard"), no_prior);
+        for (log, name) in [(&open, "open"), (&indeterminate, "indeterminate")] {
+            let fork = TrajectoryId::new(name);
+            let forked = forked_root(&e, &viewing(&e, log), &parent, &fork);
+            assert_eq!(
+                gaps_of(&e, &fork, &forked, "guard"),
+                no_prior,
+                "the parent's {name} reservation blocks no_prior(k) in the fork"
+            );
+            assert_eq!(
+                gaps_of(&e, &fork, &forked, "wire"),
+                prior,
+                "a reservation is never a committed effect"
+            );
+        }
+        let fork = TrajectoryId::new("committed");
+        let forked = forked_root(&e, &viewing(&e, &committed), &parent, &fork);
+        assert_eq!(
+            gaps_of(&e, &fork, &forked, "guard"),
+            no_prior,
+            "a committed k blocks too"
+        );
+        assert_eq!(gaps_of(&e, &fork, &forked, "wire"), None, "and answers prior(k)");
+
+        // The emit fails after the first fork was taken. The parent is free of k again, but that
+        // fork never learns how the call ended: it stays blocked, as checked above, and a fork of
+        // it carries the reservation on. A fork taken after the failure carries nothing.
+        assert_eq!(gaps_of(&e, &parent, &failed, "guard"), None);
+        let fork = TrajectoryId::new("open");
+        let forked = forked_root(&e, &viewing(&e, &open), &parent, &fork);
+        let second = TrajectoryId::new("second");
+        let refork = forked_root(&e, &viewing_root(&e, &fork, &forked), &fork, &second);
+        assert_eq!(gaps_of(&e, &second, &refork, "guard"), no_prior);
+        let after = TrajectoryId::new("after");
+        let forked = forked_root(&e, &viewing(&e, &failed), &parent, &after);
+        assert_eq!(
+            gaps_of(&e, &after, &forked, "guard"),
+            None,
+            "a settled call carries nothing"
+        );
+
+        // The origin holds each kind once, however often the family committed it, and keeps
+        // what is committed apart from what is only reserved.
+        let origin = |log: &[Fact]| viewing(&e, log).fork_origin(&parent).expect("the parent is open");
+        let just_k = EffectSet::new([k.clone()]).unwrap();
+        assert_eq!(origin(&committed_twice).effects(), &just_k);
+        assert!(origin(&committed_twice).reservations().is_empty());
+        assert_eq!(origin(&open).reservations(), &just_k);
+        assert!(origin(&open).effects().is_empty());
+    }
+
     #[test]
     fn a_fork_records_the_return_policy_its_spawn_approved() {
         let cfg = RegistryConfig {

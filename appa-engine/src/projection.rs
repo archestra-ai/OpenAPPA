@@ -127,6 +127,10 @@ pub struct Projection {
     effects: Vec<EffectKind>,
     open: BTreeSet<DispatchId>,
     reservations: BTreeMap<DispatchId, EffectSet>,
+    /// The kinds the parent family's unsettled reservations held when this root opened as a
+    /// fork of one of its trajectories; empty for any other root. No call of this family can
+    /// settle them, so they stand for the family's whole life and answer `no_prior(k)` alone.
+    origin_reservations: EffectSet,
     closed: BTreeMap<DispatchId, CloseKind>,
     occurrences: BTreeMap<(TrajectoryId, CanonicalDigest), u32>,
     dispatch_calls: BTreeMap<DispatchId, ResolvedCall>,
@@ -201,6 +205,7 @@ impl Projection {
             effects: Vec::new(),
             open: BTreeSet::new(),
             reservations: BTreeMap::new(),
+            origin_reservations: EffectSet::default(),
             closed: BTreeMap::new(),
             occurrences: BTreeMap::new(),
             dispatch_calls: BTreeMap::new(),
@@ -253,6 +258,7 @@ impl Projection {
             effects,
             open,
             reservations,
+            origin_reservations,
             closed,
             occurrences,
             dispatch_calls,
@@ -291,9 +297,12 @@ impl Projection {
                     // A root opened as a fork starts where its parent stood: the parent's label
                     // folds into the base every later admission folds onto, and the parent
                     // family's effects and the parent's denials hold here from the first record.
+                    // So do the parent family's unsettled reservations, which nothing here can
+                    // settle.
                     if let Some(origin) = forked_from {
                         starting.fold(origin.label());
                         effects.extend(origin.effects().iter().cloned());
+                        *origin_reservations = origin.reservations().clone();
                         if !origin.denials().is_empty() {
                             denials.insert(trajectory.clone(), origin.denials().clone());
                         }
@@ -659,19 +668,26 @@ impl Projection {
         ForkSnapshot::freeze(self.opened_base(trajectory), self.basis_sources(trajectory))
     }
 
-    /// What a root opened as a fork of this trajectory carries over: the trajectory's current
-    /// label, the family's committed effects and the trajectory's denials, at this revision.
-    /// `None` for a trajectory that is not opened or has ended.
+    /// What a root opened as a fork of this trajectory carries over, at this revision: the
+    /// trajectory's current label, the family's committed effects, the kinds the family's
+    /// unsettled reservations hold (those its own origin carried among them), and the
+    /// trajectory's denials. `None` for a trajectory that is not opened or has ended.
     pub(crate) fn fork_origin(&self, family: &TrajectoryId, trajectory: &TrajectoryId) -> Option<ForkOrigin> {
         if !self.is_opened(trajectory) || self.ended.contains(trajectory) {
             return None;
         }
+        let reserved = self
+            .reservations
+            .values()
+            .flat_map(EffectSet::iter)
+            .chain(self.origin_reservations.iter());
         Some(ForkOrigin::new(
             family.clone(),
             trajectory.clone(),
             self.revision,
             self.fold_for(trajectory),
-            self.effects.clone(),
+            EffectSet::distinct(&self.effects),
+            EffectSet::distinct(reserved),
             self.denials.get(trajectory).cloned().unwrap_or_default(),
         ))
     }
@@ -1076,14 +1092,17 @@ impl Views<'_> {
         self.projection.effects.iter().any(|e| e == kind)
     }
 
-    /// Does an unsettled reservation anywhere in the family contain a matching emit? `no_prior(k)`
-    /// additionally fails on this; `prior(k)` never reads it — both
+    /// Does an unsettled reservation anywhere in the family contain a matching emit? A root
+    /// opened as a fork also holds the ones its origin carried, which nothing in the family can
+    /// settle. `no_prior(k)` additionally fails on this; `prior(k)` never reads it — both
     /// directions fail closed.
     pub(crate) fn has_reservation(&self, kind: &EffectKind) -> bool {
-        self.projection
-            .reservations
-            .values()
-            .any(|reserved| reserved.iter().any(|e| e == kind))
+        self.projection.origin_reservations.contains(kind)
+            || self
+                .projection
+                .reservations
+                .values()
+                .any(|reserved| reserved.iter().any(|e| e == kind))
     }
 
     /// The dispatches this trajectory has open, with the exact call each released: the payload is persisted once, on the opening record, so this is where an outer

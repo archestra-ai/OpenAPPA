@@ -4632,20 +4632,20 @@ context_control = true
         assert_eq!(kept, ToolResultDecision::Keep, "the taint must actually admit");
     }
 
-    /// Is `send`, which requires a trusted trajectory, released? A release is reported back at
-    /// once, so the family carries no open call afterwards.
-    async fn sends(session: &Session) -> bool {
+    /// Is `call` released? A release is reported back at once as a success, so the family
+    /// carries no open call afterwards.
+    async fn runs(session: &Session, call: ProposedCall) -> bool {
         match session
-            .on_tool_call(trusted_send(), false)
+            .on_tool_call(call.clone(), false)
             .await
             .expect("the call is decided")
         {
             ToolCallDecision::Allow { .. } => {
                 session
                     .on_tool_result(
-                        trusted_send(),
+                        call,
                         ToolOutcome::Success {
-                            body: OutcomeBody::Available("sent".to_string()),
+                            body: OutcomeBody::Available("done".to_string()),
                         },
                     )
                     .await
@@ -4656,8 +4656,19 @@ context_control = true
         }
     }
 
+    /// Is `send`, which requires a trusted trajectory, released?
+    async fn sends(session: &Session) -> bool {
+        runs(session, trusted_send()).await
+    }
+
     fn fork_id(name: &str) -> TrajectoryId {
         TrajectoryId(format!("cc:{name}"))
+    }
+
+    /// Open `fork` as a fork of the root `parent`, and a session on it.
+    fn forked(runtime: &Runtime, parent: &TrajectoryId, fork: &TrajectoryId) -> Session {
+        runtime.open_fork(parent, parent, fork).expect("the fork opens");
+        runtime.session(fork, fork).expect("the fork reopens")
     }
 
     #[tokio::test]
@@ -4809,6 +4820,103 @@ context_control = true
         assert_eq!(
             runtime.open_fork(&root(), &root(), &root()),
             Err(super::super::ForkRefusal::ChildExists)
+        );
+    }
+
+    const HISTORY: &str = r#"
+version = 2
+
+# `emit` records `k` when it succeeds. `guard` may not run once `k` is recorded, or while a call
+# declaring it has been allowed and has not finished; `need` runs only once `k` is recorded.
+[[policy.tool]]
+name = "emit"
+effects = ["k"]
+delta = {}
+
+[[policy.tool]]
+name = "guard"
+requires = { effects = { excludes = ["k"] } }
+delta = {}
+
+[[policy.tool]]
+name = "need"
+requires = { effects = { contains = ["k"] } }
+delta = {}
+"#;
+
+    fn history_call(tool: &str) -> ProposedCall {
+        ProposedCall {
+            tool: tool.to_string(),
+            arguments: raw(serde_json::json!({})),
+        }
+    }
+
+    async fn allowed(session: &Session, call: ProposedCall) {
+        assert!(matches!(
+            session.on_tool_call(call, false).await.expect("the call is decided"),
+            ToolCallDecision::Allow { .. }
+        ));
+    }
+
+    /// A fork carries its parent family's effect history. An effect recorded before the fork
+    /// satisfies `contains` there and blocks `excludes`. A call allowed before the fork that has
+    /// not finished, whether still running or closed at a turn end with no outcome, blocks
+    /// `excludes` in the fork as it does in the parent, and never counts as recorded. The fork
+    /// never learns how that call ends, so it stays blocked after the call fails in the parent.
+    #[tokio::test]
+    async fn a_fork_carries_its_parents_effects_and_unfinished_calls() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(config_with(HISTORY, None), dir.path().join("appa.db"), None).expect("the deployment opens");
+
+        let recorded = fork_id("recorded");
+        let parent = runtime.create_session(recorded.clone()).expect("a fresh id opens");
+        assert!(runs(&parent, history_call("emit")).await);
+        let fork = forked(&runtime, &recorded, &fork_id("recorded-fork"));
+        assert!(
+            !runs(&fork, history_call("guard")).await,
+            "a recorded effect blocks excludes in the fork"
+        );
+        assert!(runs(&fork, history_call("need")).await, "and satisfies contains there");
+
+        let unknown = fork_id("unknown");
+        let parent = runtime.create_session(unknown.clone()).expect("a fresh id opens");
+        allowed(&parent, history_call("emit")).await;
+        parent
+            .on_turn_end()
+            .await
+            .expect("the turn end closes the unreported call");
+        assert!(
+            !runs(&parent, history_call("guard")).await,
+            "the parent refuses guard while emit may have run"
+        );
+        let fork = forked(&runtime, &unknown, &fork_id("unknown-fork"));
+        assert!(!runs(&fork, history_call("guard")).await, "so does the fork");
+        assert!(
+            !runs(&fork, history_call("need")).await,
+            "an unfinished call is never a recorded effect"
+        );
+
+        let running = fork_id("running");
+        let parent = runtime.create_session(running.clone()).expect("a fresh id opens");
+        allowed(&parent, history_call("emit")).await;
+        let fork = forked(&runtime, &running, &fork_id("running-fork"));
+        parent
+            .on_tool_result(
+                history_call("emit"),
+                ToolOutcome::Failure {
+                    message: "exit 1".to_string(),
+                },
+            )
+            .await
+            .expect("the failure closes");
+        assert!(
+            runs(&parent, history_call("guard")).await,
+            "the failure frees guard in the parent"
+        );
+        assert!(
+            !runs(&fork, history_call("guard")).await,
+            "the fork never learns how the call ended"
         );
     }
 

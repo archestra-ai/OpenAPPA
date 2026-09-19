@@ -87,9 +87,10 @@ impl EffectKind {
     }
 }
 
-/// The canonical set of effect kinds a contract declares or a dispatch commits: unique and
-/// sorted, serialized as exactly that sorted sequence — so permutation-equivalent declarations
-/// converge to one value, engine-produced facts are byte-identical, and replayed histories agree.
+/// The canonical set of effect kinds a contract declares, a dispatch commits or a fork origin
+/// carries: unique and sorted, serialized as exactly that sorted sequence — so
+/// permutation-equivalent declarations converge to one value, engine-produced facts are
+/// byte-identical, and replayed histories agree.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct EffectSet(Vec<EffectKind>);
@@ -106,6 +107,15 @@ impl EffectSet {
             return Err(DuplicateEffect(pair[0].clone()));
         }
         Ok(EffectSet(kinds))
+    }
+
+    /// The distinct kinds among `kinds`, however often each occurs: a family's history holds a
+    /// kind once per commit, and a fork origin carries each kind once.
+    pub(crate) fn distinct<'a>(kinds: impl IntoIterator<Item = &'a EffectKind>) -> EffectSet {
+        let mut kinds: Vec<EffectKind> = kinds.into_iter().cloned().collect();
+        kinds.sort();
+        kinds.dedup();
+        EffectSet(kinds)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &EffectKind> {
@@ -177,10 +187,11 @@ impl ForkSnapshot {
 }
 
 /// Where a root that opened as a fork of another family's trajectory was taken from, and what it
-/// carries over from there: that trajectory's label, its family's committed effects, and its
-/// authority denials, all as they stood at the parent family's log position `basis`. The fork is
-/// a family of its own after that point: nothing either side admits, emits or denies later
-/// reaches the other.
+/// carries over from there: that trajectory's label, its family's committed effects, the effect
+/// kinds its family's unsettled reservations held, and that trajectory's authority denials, all
+/// as they stood at the parent family's log position `basis`. The fork is a family of its own
+/// after that point: nothing either side admits, emits, settles or denies later reaches the
+/// other, so a reservation carried over never settles in the fork.
 ///
 /// [`crate::transition::EngineView::fork_origin`] freezes one from the parent family's validated
 /// view, and the runtime records it on the fork's opening record. A replay of the fork's log
@@ -192,7 +203,10 @@ pub struct ForkOrigin {
     parent: TrajectoryId,
     basis: u64,
     label: Label,
-    effects: Vec<EffectKind>,
+    effects: EffectSet,
+    /// The kinds reserved by the parent family's released calls that had neither succeeded nor
+    /// failed, an indeterminate close among them. Only `no_prior(k)` reads them.
+    reservations: EffectSet,
     denials: std::collections::BTreeMap<CanonicalDigest, std::collections::BTreeSet<AuthorityName>>,
 }
 
@@ -202,7 +216,8 @@ impl ForkOrigin {
         parent: TrajectoryId,
         basis: u64,
         label: Label,
-        effects: Vec<EffectKind>,
+        effects: EffectSet,
+        reservations: EffectSet,
         denials: std::collections::BTreeMap<CanonicalDigest, std::collections::BTreeSet<AuthorityName>>,
     ) -> ForkOrigin {
         ForkOrigin {
@@ -211,6 +226,7 @@ impl ForkOrigin {
             basis,
             label,
             effects,
+            reservations,
             denials,
         }
     }
@@ -225,17 +241,16 @@ impl ForkOrigin {
         &self.parent
     }
 
-    /// The parent family's log position the fork froze.
-    pub fn basis(&self) -> u64 {
-        self.basis
-    }
-
     pub(crate) fn label(&self) -> &Label {
         &self.label
     }
 
-    pub(crate) fn effects(&self) -> &[EffectKind] {
+    pub(crate) fn effects(&self) -> &EffectSet {
         &self.effects
+    }
+
+    pub(crate) fn reservations(&self) -> &EffectSet {
+        &self.reservations
     }
 
     pub(crate) fn denials(
@@ -296,8 +311,9 @@ pub enum Fact {
         policy_digest: PolicyIdentityV1,
         policy_file_key: PolicyFileKey,
         open_vectors: Vec<OpenVector>,
-        /// Set when the root opened as a fork of another family's trajectory. Its label, effects
-        /// and denials start from the origin's instead of the deployment's starting label alone.
+        /// Set when the root opened as a fork of another family's trajectory. Its label starts
+        /// from the deployment's starting label folded with the origin's, and its effects,
+        /// unsettled reservations and denials start as the origin's.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         forked_from: Option<ForkOrigin>,
     },

@@ -1652,10 +1652,10 @@ impl Runtime {
 
     /// Open `child` as the root of a new family that forks `parent`, a trajectory of the family
     /// rooted at `parent_root`. The child starts from the parent's current label, its family's
-    /// committed effects and the parent's denials, under the policy the parent's family opened
-    /// with. After that the two families share nothing: what either admits, emits or is denied
-    /// never reaches the other, and each keeps its own dispatches, offers and turns. Opening the
-    /// same fork again is not an error.
+    /// committed effects and unsettled effect reservations, and the parent's denials, under the
+    /// policy the parent's family opened with. After that the two families share nothing: what
+    /// either admits, emits, settles or is denied never reaches the other, and each keeps its own
+    /// dispatches, offers and turns. Opening the same fork again is not an error.
     pub fn open_fork(
         &self,
         parent_root: &TrajectoryId,
