@@ -47,6 +47,7 @@ use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
 use appa_engine::fact::{
     BoundaryKind, CloseOutcome, EffectKind, EffectSet, Fact, ReturnDerivation, ReturnPolicy, ReturnSanitizer,
+    RootForkOrigin,
 };
 use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, Label, ReaderId, SymbolicAtom, Trust};
 use appa_engine::names::MarkName;
@@ -479,6 +480,7 @@ impl From<&appa_engine::transition::OpeningTransitionRefusal> for ReplayRefusalC
             appa_engine::transition::OpeningTransitionRefusal::VectorMismatch => {
                 ReplayRefusalClass("opening_vector_mismatch")
             }
+            appa_engine::transition::OpeningTransitionRefusal::SelfFork => ReplayRefusalClass("opening_self_fork"),
         }
     }
 }
@@ -719,11 +721,11 @@ impl PolicyEngine<'_> {
 /// is known, because it is what names it.
 pub(crate) fn opened_under(log: &Log) -> Option<Opened> {
     match log.facts().first() {
-        Some(Fact::TrajectoryOpened {
+        Some(Fact::TrajectoryOpened(appa_engine::fact::TrajectoryOpening {
             policy_digest,
             policy_file_key,
             ..
-        }) => Some(Opened {
+        })) => Some(Opened {
             policy_file_key: policy_file_key.as_str().to_string(),
             policy_identity: hex(policy_digest.bytes()),
         }),
@@ -805,6 +807,26 @@ impl RuntimeEngine {
             .open_trajectory(&engine_id(trajectory), EnginePolicyFileKey::of(policy_file))
             .expect("the engine's own opening batch validates against the empty log")
             .into_unsealed()
+    }
+
+    /// The opening of an independent conversation-root fork: the same opening batch, carrying
+    /// the origin another family's view froze. It prepares no same-family child or return
+    /// contract, and refuses an origin that names the root itself.
+    pub(crate) fn root_fork_opening(
+        &self,
+        trajectory: &TrajectoryId,
+        policy_file: &[u8],
+        origin: RootForkOrigin,
+    ) -> Result<Vec<Fact>, TransitionRefusal> {
+        self.engine
+            .open_root_fork(&engine_id(trajectory), EnginePolicyFileKey::of(policy_file), origin)
+            .map(ValidatedFactBatch::into_unsealed)
+    }
+
+    /// What an independent conversation-root fork of `trajectory` carries over from this view.
+    /// `None` when the family never opened the trajectory or it has ended.
+    pub(crate) fn root_fork_origin(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<RootForkOrigin> {
+        view.root_fork_origin(&engine_id(trajectory))
     }
 
     /// Refuse one root's log before it is trusted, including the
@@ -1169,7 +1191,7 @@ impl RuntimeEngine {
                     seed: self.render_label(seed)?,
                 },
             },
-            Fact::TrajectoryOpened { .. } | Fact::ProposalBatchDecided { .. } => return Some(None),
+            Fact::TrajectoryOpened(_) | Fact::ProposalBatchDecided { .. } => return Some(None),
             Fact::OfferOpened { .. }
             | Fact::OfferAccepted { .. }
             | Fact::OfferDenied { .. }
