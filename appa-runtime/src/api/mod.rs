@@ -1931,7 +1931,7 @@ impl Runtime {
                 report_id.clone(),
                 origin,
                 request.message.clone(),
-                request.harness,
+                request.harness.clone(),
                 projection,
             )
             .with_hostname(request.hostname.clone());

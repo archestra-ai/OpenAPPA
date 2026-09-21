@@ -34,8 +34,8 @@ pub(crate) use diagnostic::{
     Budget, Diagnostic, OmittedReason, Projection, RECENT_WINDOW, Selection, Source, branches, build, resolve,
 };
 #[cfg(feature = "daemon")]
-pub use report::Harness;
-#[cfg(feature = "daemon")]
 pub(crate) use report::{Author, Finished, Origin, Oversize, Report, ReportId, ReportRequest, YellMessage};
+#[cfg(feature = "daemon")]
+pub use report::{Harness, HarnessName};
 #[cfg(feature = "daemon")]
 pub(crate) use tokens::Mode;

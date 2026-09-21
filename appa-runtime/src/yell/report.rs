@@ -168,13 +168,32 @@ pub(crate) enum RuntimeSection {
 }
 
 /// The harness a report is about, in the schema's own vocabulary: a served host by its
-/// adapter name, an embedding host by the name it files its reports under: lowercase
-/// letters, digits and hyphens, as a package name is spelled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// adapter name, an embedding host by the name it files its reports under.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Harness {
     ClaudeCode,
     Kagent,
-    Embedded(&'static str),
+    Embedded(HarnessName),
+}
+
+/// The name an embedding host files its reports under: spelled as a package name is,
+/// lowercase letters, digits and hyphens, and at most 64 bytes long.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessName(String);
+
+impl HarnessName {
+    pub const MAX_LEN: usize = 64;
+
+    pub fn parse(text: &str) -> Result<Self, appa_package::NameError> {
+        if text.len() > Self::MAX_LEN {
+            return Err(appa_package::NameError::Malformed(text.to_owned()));
+        }
+        appa_package::PackageName::parse(text).map(|_| Self(text.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl Harness {
@@ -188,11 +207,11 @@ impl Harness {
         }
     }
 
-    fn as_str(self) -> &'static str {
+    fn as_str(&self) -> &str {
         match self {
             Harness::ClaudeCode => "claude-code",
             Harness::Kagent => "kagent",
-            Harness::Embedded(name) => name,
+            Harness::Embedded(name) => name.as_str(),
         }
     }
 }

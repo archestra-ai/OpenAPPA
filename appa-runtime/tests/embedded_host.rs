@@ -89,6 +89,7 @@ fn embedded_runtime() -> Runtime {
         &[HostedBattery {
             name: "github",
             policy: BATTERY,
+            token_env: &[],
         }],
         HostDefaults {
             consult_timeout: Duration::from_millis(5000),

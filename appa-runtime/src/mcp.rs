@@ -331,7 +331,7 @@ impl RuntimeTools {
                        tool arguments or tool outputs — or leave it false to report on the \
                        policy alone.")]
     pub(crate) async fn yell(&self, Parameters(args): Parameters<YellArgs>) -> CallToolResult {
-        match crate::yell::agent::yell(&self.runtime, self.harness, &args).await {
+        match crate::yell::agent::yell(&self.runtime, self.harness.clone(), &args).await {
             crate::yell::agent::Outcome::Sent(receipt) => {
                 let already = match receipt.duplicate {
                     true => " (already had this one)",
@@ -765,7 +765,7 @@ pub fn service_with_allowed_hosts(
     sessions.session_config.keep_alive = Some(runtime.review_timeout() + SESSION_GRACE);
     let config = server_config(allowed_hosts);
     StreamableHttpService::new(
-        move || Ok(RuntimeTools::new(Arc::clone(&runtime), harness)),
+        move || Ok(RuntimeTools::new(Arc::clone(&runtime), harness.clone())),
         Arc::new(sessions),
         config,
     )

@@ -81,12 +81,15 @@ pub struct HostDefaults {
 }
 
 /// One battery a host composes under its root document: the name the host lists it
-/// under, which is what errors and [`Config::included_batteries`] say, and its
-/// `appa.toml` text.
+/// under, which is what errors and [`Config::included_batteries`] say, its `appa.toml`
+/// text, and the runtime variables its externals may read. A battery is another
+/// author's text: whatever `token_env` it names, the runtime would send to the URL
+/// beside it, so a variable the host did not grant is refused.
 #[derive(Debug, Clone, Copy)]
 pub struct HostedBattery<'a> {
     pub name: &'a str,
     pub policy: &'a str,
+    pub token_env: &'a [&'a str],
 }
 
 /// The API providers the `llm` builtin speaks to. Closed: the transport is compiled in
@@ -491,6 +494,13 @@ pub enum ConfigError {
     UnrepresentableHostDefault { setting: &'static str },
     #[error("root config field {field:?} must be a table")]
     RootField { field: String },
+    #[error("battery {battery} binds externals.{section}.{name:?} to {var:?}, a variable the host did not grant it")]
+    UngrantedBatteryCredential {
+        battery: String,
+        section: String,
+        name: String,
+        var: String,
+    },
 }
 
 /// The four sections a component binds under. Every section takes a URL or a command;
@@ -885,6 +895,7 @@ impl Config {
                 path: battery.name.to_string(),
                 source,
             })?;
+            refuse_ungranted_credentials(battery, &included)?;
             compose_include(
                 &mut document,
                 included,
@@ -1165,6 +1176,35 @@ fn declared_annotators(policy: &toml::Value) -> std::collections::BTreeSet<Strin
         .filter_map(declaration_name)
         .map(str::to_owned)
         .collect()
+}
+
+/// Every `token_env` a battery's externals name is one the host granted it. Shapes
+/// other than a table of tables are left to composition, which refuses them.
+fn refuse_ungranted_credentials(battery: &HostedBattery<'_>, included: &toml::Value) -> Result<(), ConfigError> {
+    let sections = included
+        .get("externals")
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flat_map(|externals| {
+            externals
+                .iter()
+                .filter_map(|(section, entries)| Some((section, entries.as_table()?)))
+        });
+    for (section, entries) in sections {
+        for (name, entry) in entries {
+            if let Some(var) = entry.get("token_env").and_then(toml::Value::as_str)
+                && !battery.token_env.contains(&var)
+            {
+                return Err(ConfigError::UngrantedBatteryCredential {
+                    battery: battery.name.to_string(),
+                    section: section.clone(),
+                    name: name.clone(),
+                    var: var.to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn compose_include(
@@ -2682,6 +2722,7 @@ mod tests {
             &[HostedBattery {
                 name: "github",
                 policy: GITHUB_BATTERY,
+                token_env: &["APPA_HOSTED_TEST_BRIDGE_TOKEN"],
             }],
         )
         .expect("the battery composes");
@@ -2698,6 +2739,7 @@ mod tests {
                 &[HostedBattery {
                     name: "github",
                     policy: GITHUB_BATTERY,
+                    token_env: &["APPA_HOSTED_TEST_BRIDGE_TOKEN"],
                 }],
             )
             .expect("composes again")
@@ -2722,6 +2764,7 @@ mod tests {
                 &[HostedBattery {
                     name: "github",
                     policy: GITHUB_BATTERY,
+                    token_env: &["APPA_HOSTED_TEST_BRIDGE_TOKEN"],
                 }],
             );
             assert!(
@@ -2729,6 +2772,28 @@ mod tests {
                 "{field}: {result:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_battery_reads_only_the_variables_its_host_granted() {
+        // SAFETY: the test process sets its own variable and every reader is this test.
+        unsafe { std::env::set_var("APPA_HOSTED_TEST_BRIDGE_TOKEN", "bridge") };
+        let ungranted = hosted_composed(
+            HOSTED_ROOT,
+            &[HostedBattery {
+                name: "github",
+                policy: GITHUB_BATTERY,
+                token_env: &[],
+            }],
+        );
+        assert!(
+            matches!(
+                &ungranted,
+                Err(ConfigError::UngrantedBatteryCredential { battery, section, name, var })
+                    if battery == "github" && section == "annotators" && name == "github.visibility" && var == "APPA_HOSTED_TEST_BRIDGE_TOKEN"
+            ),
+            "{ungranted:?}"
+        );
     }
 
     #[test]
@@ -2741,6 +2806,7 @@ mod tests {
             &[HostedBattery {
                 name: "github",
                 policy: GITHUB_BATTERY,
+                token_env: &["APPA_HOSTED_TEST_BRIDGE_TOKEN"],
             }],
         )
         .expect("the root's annotator wins");
@@ -2755,7 +2821,11 @@ mod tests {
 
     #[test]
     fn hosted_batteries_are_refused_where_a_file_include_would_be() {
-        let battery = |policy: &'static str| HostedBattery { name: "github", policy };
+        let battery = |policy: &'static str| HostedBattery {
+            name: "github",
+            policy,
+            token_env: &["APPA_HOSTED_TEST_BRIDGE_TOKEN"],
+        };
         assert!(matches!(
             hosted_composed(HOSTED_ROOT, &[battery(GITHUB_BATTERY), battery(GITHUB_BATTERY)]),
             Err(ConfigError::DuplicateInclude { path }) if path == "github"

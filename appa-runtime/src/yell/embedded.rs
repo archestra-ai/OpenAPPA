@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use super::{
     Mode, Selection, YellArgs, client,
-    report::{Author, Harness, ReportRequest, YellMessage},
+    report::{Author, Harness, HarnessName, ReportRequest, YellMessage},
 };
 use crate::api::{Actor, Runtime};
 
@@ -11,9 +11,8 @@ use crate::api::{Actor, Runtime};
 /// from the embedding host, never from model-controlled tool arguments.
 pub struct Request {
     pub actor: Actor,
-    /// The name the receiver files this host's reports under, spelled as a package name
-    /// is: lowercase letters, digits and hyphens.
-    pub harness: &'static str,
+    /// The name the receiver files this host's reports under.
+    pub harness: HarnessName,
     pub endpoint: String,
     /// Public deployment hostname. Do not supply a machine name or a full URL.
     pub hostname: Option<String>,
@@ -27,9 +26,6 @@ pub struct Request {
 pub async fn send(runtime: &Arc<Runtime>, request: Request) -> Result<String, String> {
     if !runtime.agent_yell() {
         return Err("Agent reporting is disabled".into());
-    }
-    if request.harness.len() > 64 || appa_package::PackageName::parse(request.harness).is_err() {
-        return Err("Invalid reporting harness name".into());
     }
     if request.hostname.as_ref().is_some_and(|host| {
         host.is_empty()
@@ -105,7 +101,7 @@ mod tests {
                 root: TrajectoryId("private-session-id".into()),
                 child: None,
             },
-            harness: "test-platform",
+            harness: HarnessName::parse("test-platform").expect("a harness name"),
             endpoint: "http://127.0.0.1:1".into(),
             hostname: Some("platform.example.com".into()),
             message: "The feedback is confusing".into(),
@@ -138,6 +134,14 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn a_harness_name_is_spelled_as_a_package_name_within_a_bound() {
+        assert!(HarnessName::parse("test-platform").is_ok());
+        for invalid in ["", "Test Platform", "-lead", &"a".repeat(HarnessName::MAX_LEN + 1)] {
+            assert!(HarnessName::parse(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
     #[tokio::test]
     async fn refuses_disabled_unvouched_and_cross_session_reports() {
         assert!(send(&runtime(false), request()).await.unwrap_err().contains("disabled"));
@@ -145,9 +149,6 @@ mod tests {
         let mut invalid = request();
         invalid.hostname = Some("https://user:secret@example.com/path".into());
         assert!(send(&runtime, invalid).await.unwrap_err().contains("hostname"));
-        let mut invalid = request();
-        invalid.harness = "Test Platform";
-        assert!(send(&runtime, invalid).await.unwrap_err().contains("harness"));
         assert!(send(&runtime, request()).await.unwrap_err().contains("released"));
         let mut request = request();
         release(&runtime, &request).await;
