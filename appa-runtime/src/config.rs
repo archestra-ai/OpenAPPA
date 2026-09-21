@@ -404,7 +404,7 @@ pub enum ConfigError {
     InvalidPolicyVersion,
     #[error("include path {path:?} must be relative to the root config")]
     AbsoluteInclude { path: String },
-    #[error("include path {path:?} must not leave the root config through \"..\"")]
+    #[error("include path {path:?} must not contain a \"..\" component")]
     TraversingInclude { path: String },
     #[error("the root config includes {path:?} more than once")]
     DuplicateInclude { path: String },
@@ -939,7 +939,7 @@ impl Config {
     /// batteries compose under it. Each entry, as authored, is handed to `resolve`; the
     /// battery it answers composes exactly as a [`Config::hosted_composed`] battery does,
     /// and the composed bytes are the same. The runtime does not read an entry as a path:
-    /// it refuses an absolute one and one that leaves the root through `..`, and hands the
+    /// it refuses an absolute one and one with a `..` component, and hands the
     /// rest to the host, whose answer names the battery. `include` is admitted here alone
     /// and consumed, so the stored document carries none and a stored snapshot reopens
     /// through [`Config::hosted`] unchanged.
