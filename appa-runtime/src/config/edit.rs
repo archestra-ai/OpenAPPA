@@ -105,16 +105,22 @@ pub fn bind_servers(text: &str, namespace: &str, servers: &[String]) -> Result<S
 }
 
 /// The text without the aliases of `namespaces`: a battery's aliases mean
-/// nothing without the battery, and the last one takes the table with it. The
-/// namespaces of a battery are `appa_package`'s, so this takes them parsed, where
-/// [`bind_servers`] takes the one namespace it binds as text.
-pub fn unbind_servers(text: &str, namespaces: &[Namespace]) -> Result<String, ConfigError> {
+/// nothing without the battery, and the last one takes the table with it.
+pub fn unbind_servers(text: &str, namespaces: &[&str]) -> Result<String, ConfigError> {
+    let namespaces = namespaces
+        .iter()
+        .map(|namespace| {
+            Namespace::parse(namespace).map_err(|error| ConfigError::UneditableDocument {
+                reason: error.to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let mut document = document(text)?;
     let Some(aliases) = document.get_mut("server_aliases").and_then(Item::as_table_like_mut) else {
         return Ok(text.to_owned());
     };
     let mut changed = false;
-    for namespace in namespaces {
+    for namespace in &namespaces {
         changed |= aliases.remove(namespace.as_str()).is_some();
     }
     if !changed {
@@ -240,20 +246,16 @@ mod tests {
     #[test]
     fn unbinding_takes_only_the_named_namespaces_and_the_last_one_takes_the_table() {
         let servers = |names: &[&str]| names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>();
-        let github = Namespace::parse("github").unwrap();
-        let slack = Namespace::parse("slack").unwrap();
-        let bound = bind_servers(AUTHORED, github.as_str(), &servers(&["home-github"])).unwrap();
-        let with_slack = bind_servers(&bound, slack.as_str(), &servers(&["team-slack"])).unwrap();
-        let unbound = unbind_servers(&with_slack, std::slice::from_ref(&github)).unwrap();
+        let bound = bind_servers(AUTHORED, "github", &servers(&["home-github"])).unwrap();
+        let with_slack = bind_servers(&bound, "slack", &servers(&["team-slack"])).unwrap();
+        let unbound = unbind_servers(&with_slack, &["github"]).unwrap();
         assert!(!unbound.contains("home-github") && unbound.contains("team-slack"));
-        assert_eq!(
-            unbind_servers(&unbound, std::slice::from_ref(&github)).unwrap(),
-            unbound
-        );
-        assert_eq!(
-            unbind_servers(&unbound, std::slice::from_ref(&slack)).unwrap(),
-            AUTHORED
-        );
+        assert_eq!(unbind_servers(&unbound, &["github"]).unwrap(), unbound);
+        assert_eq!(unbind_servers(&unbound, &["slack"]).unwrap(), AUTHORED);
+        assert!(matches!(
+            unbind_servers(&unbound, &["not a namespace"]),
+            Err(ConfigError::UneditableDocument { .. })
+        ));
     }
 
     /// The table the editor writes is the one the hosted loader admits, and the
