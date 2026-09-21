@@ -20,7 +20,11 @@ FRAME = (
     "supply the parts of its contract that concern audience and trust. Judge the "
     "specific arguments of this call, not the tool's general capability: the same "
     "tool is `public` in one call and `self` in another. A tool name that appears "
-    "inside an argument value is not a destination this call reaches."
+    "inside an argument value is not a destination this call reaches.\n\n"
+    "Some calls address only the agent's own harness: loading a tool schema, invoking "
+    "a skill, waiting on or reading a background task, entering a worktree, or running "
+    "an OpenAPPA remedy plan by its offer id. Such a call delivers nothing to any "
+    "reader outside this machine, and the harness itself produces its result."
 )
 
 DELTA_AUDIENCE_CRITERIA = {
@@ -86,7 +90,13 @@ DELTA_TRUST_INSTRUCTIONS = (
     "content could have been authored or influenced by a party outside the operator's "
     "control, because a later tool that requires `trusted` must not run on it. Answer "
     "about the provenance of what comes back, not about how dangerous the call is to "
-    "run."
+    "run.\n\n"
+    "Judge by who wrote the returned text, not by whether the call used the network. "
+    "What a command or its target service reports about the call itself — a push's "
+    "progress lines, the URL or id of what it created, a list of releases or check "
+    "states, an exit status — is `trusted`. Text a third party wrote — a fetched page, "
+    "a downloaded file, an issue or message body, a package manager's install log — is "
+    "`suspicious`."
 )
 
 REQUIRES_AUDIENCE_CRITERIA = {
@@ -139,8 +149,10 @@ REQUIRES_TRUST_CRITERIA = {
     "true": (
         "The call turns data the trajectory holds into an effect outside the "
         "trajectory: it sends, publishes or delivers bytes off this machine, or it "
-        "executes or installs content that the trajectory supplied. An injected "
-        "instruction that fires this call moves data or code outward."
+        "executes or installs content that the trajectory supplied. Publishing an "
+        "artifact, filing a report, installing a package and running a downloaded "
+        "script all count. An injected instruction that fires this call moves data or "
+        "code outward."
     ),
     "false": (
         "The call's effect stays inside the operator's machine and the trajectory "
@@ -206,6 +218,35 @@ EXAMPLES = [
         "labels": {"delta_audience": "internal", "delta_trust": "suspicious",
                    "requires_audience": "internal", "requires_trusted": "true"},
         "why": "an internal chat log comes back, and the read itself reaches the workspace",
+    },
+    {
+        "tool": "Bash",
+        "arguments": {"command": "gh pr create --title 'Fix the retry loop' --body-file notes.md",
+                      "description": "Open the pull request"},
+        "labels": {"delta_audience": "public", "delta_trust": "trusted",
+                   "requires_audience": "public", "requires_trusted": "true"},
+        "why": "the service answers with the new pull request's URL; the title and body reach a hosted repository",
+    },
+    {
+        "tool": "Bash",
+        "arguments": {"command": "npm install left-pad 2>&1 | tail -3", "description": "Add the dependency"},
+        "labels": {"delta_audience": "public", "delta_trust": "suspicious",
+                   "requires_audience": "public", "requires_trusted": "true"},
+        "why": "a registry receives the request, and the package it serves is installed and its log comes back",
+    },
+    {
+        "tool": "ToolSearch",
+        "arguments": {"query": "select:Read,Edit", "max_results": 5},
+        "labels": {"delta_audience": "public", "delta_trust": "trusted",
+                   "requires_audience": "none", "requires_trusted": "false"},
+        "why": "the harness returns its own tool schemas; nothing leaves the machine",
+    },
+    {
+        "tool": "execute_remedy_plan",
+        "arguments": {"offer_id": "5f1c02a9d3e84b77"},
+        "labels": {"delta_audience": "public", "delta_trust": "trusted",
+                   "requires_audience": "none", "requires_trusted": "false"},
+        "why": "the harness answers with a status; the offer id reaches no outside reader",
     },
     {
         "tool": "Bash",
