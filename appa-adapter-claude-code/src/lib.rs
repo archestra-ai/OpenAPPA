@@ -41,13 +41,17 @@ pub fn codec() -> Codec {
     }
 }
 
-/// The server-side derivation the runtime applies to every Claude Code call.
+/// The server-side derivation the runtime applies to every Claude Code call. Claude
+/// Code's `Task` is its own delegation, which the wildcard covers, and `mcp__` opens the
+/// spelling of an MCP server's tool.
 pub fn adapter() -> Adapter {
     Adapter {
         name: AdapterName::ClaudeCode,
         derive: identity::derive,
         names_children: children::names_children,
         spell: identity::spell,
+        wildcard_covers_spawn: true,
+        spells_server: |name| name.starts_with("mcp__"),
     }
 }
 

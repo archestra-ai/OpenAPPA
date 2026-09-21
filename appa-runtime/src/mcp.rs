@@ -29,7 +29,7 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 
-use appa_runtime_api::AdapterName;
+use crate::yell::Harness;
 
 use crate::api::{ExecuteRemedyPlanArgs, PermitKey, RemedyReply, Runtime};
 use crate::batteries::{BatteriesResponse, BundledBattery};
@@ -48,7 +48,7 @@ pub struct RuntimeToolService {
 #[derive(Clone)]
 pub struct RuntimeTools {
     runtime: Arc<Runtime>,
-    harness: AdapterName,
+    harness: Harness,
     tool_router: ToolRouter<Self>,
     file_actor: Option<appa_runtime_api::Actor>,
 }
@@ -194,10 +194,11 @@ async fn execute_remedy(
 
 #[tool_router]
 impl RuntimeTools {
-    /// The tools this deployment serves right now. `yell` is dropped from the router where
-    /// the deployment has not turned agent reporting on, which is both how it stops being
-    /// advertised and how a call to it stops being routed.
-    pub fn new(runtime: Arc<Runtime>, harness: AdapterName) -> RuntimeTools {
+    /// The tools this deployment serves right now, reporting under `harness`: a served
+    /// adapter's name, or the name an embedding host files its reports under. `yell` is
+    /// dropped from the router where the deployment has not turned agent reporting on,
+    /// which is both how it stops being advertised and how a call to it stops being routed.
+    pub fn new(runtime: Arc<Runtime>, harness: Harness) -> RuntimeTools {
         let mut tool_router = Self::tool_router();
         if !runtime.agent_yell() {
             tool_router.remove_route(YELL);
@@ -330,7 +331,7 @@ impl RuntimeTools {
                        tool arguments or tool outputs — or leave it false to report on the \
                        policy alone.")]
     pub(crate) async fn yell(&self, Parameters(args): Parameters<YellArgs>) -> CallToolResult {
-        match crate::yell::agent::yell(&self.runtime, self.harness, &args).await {
+        match crate::yell::agent::yell(&self.runtime, self.harness.clone(), &args).await {
             crate::yell::agent::Outcome::Sent(receipt) => {
                 let already = match receipt.duplicate {
                     true => " (already had this one)",
@@ -739,7 +740,7 @@ const SESSION_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
 /// Private stdio transport. The actor comes from the host's process arguments, never MCP.
 pub(crate) async fn serve_files(runtime: Arc<Runtime>, actor: appa_runtime_api::Actor) -> Result<(), String> {
     use rmcp::ServiceExt;
-    let mut tools = RuntimeTools::new(runtime, AdapterName::ClaudeCode);
+    let mut tools = RuntimeTools::new(runtime, Harness::ClaudeCode);
     tools.file_actor = Some(actor);
     tools.tool_router.remove_route(YELL);
     let service = tools
@@ -751,23 +752,20 @@ pub(crate) async fn serve_files(runtime: Arc<Runtime>, actor: appa_runtime_api::
 }
 
 /// MCP service served at `/mcp`.
-pub fn service(
-    runtime: Arc<Runtime>,
-    harness: AdapterName,
-) -> StreamableHttpService<RuntimeTools, LocalSessionManager> {
+pub fn service(runtime: Arc<Runtime>, harness: Harness) -> StreamableHttpService<RuntimeTools, LocalSessionManager> {
     service_with_allowed_hosts(runtime, &[], harness)
 }
 
 pub fn service_with_allowed_hosts(
     runtime: Arc<Runtime>,
     allowed_hosts: &[String],
-    harness: AdapterName,
+    harness: Harness,
 ) -> StreamableHttpService<RuntimeTools, LocalSessionManager> {
     let mut sessions = LocalSessionManager::default();
     sessions.session_config.keep_alive = Some(runtime.review_timeout() + SESSION_GRACE);
     let config = server_config(allowed_hosts);
     StreamableHttpService::new(
-        move || Ok(RuntimeTools::new(Arc::clone(&runtime), harness)),
+        move || Ok(RuntimeTools::new(Arc::clone(&runtime), harness.clone())),
         Arc::new(sessions),
         config,
     )
@@ -824,7 +822,7 @@ mod tests {
             )
             .expect("the deployment opens"),
         );
-        let service = RuntimeTools::new(Arc::clone(&runtime), AdapterName::ClaudeCode);
+        let service = RuntimeTools::new(Arc::clone(&runtime), Harness::ClaudeCode);
         assert_eq!(service.get_info().server_info.version, env!("CARGO_PKG_VERSION"));
         // The instance's router, not the static one: `RuntimeTools` decides per session
         // whether `yell` exists, and this fixture leaves agent reporting off.
@@ -872,7 +870,7 @@ mod tests {
                 Runtime::open(config(), directory.path().join("appa.db"), None).expect("the deployment opens"),
             ),
             &["appa-runtime.appa.svc.cluster.local:18787".to_string()],
-            AdapterName::ClaudeCode,
+            Harness::ClaudeCode,
         );
 
         let response = service
@@ -934,7 +932,7 @@ mod tests {
         std::fs::write(&path, text).expect("the fixture writes");
         let config = Config::load(&path).expect("the fixture validates");
         let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
-        RuntimeTools::new(std::sync::Arc::new(runtime), AdapterName::ClaudeCode)
+        RuntimeTools::new(std::sync::Arc::new(runtime), Harness::ClaudeCode)
     }
 
     /// A deployment that has not turned agent reporting on does not advertise the tool, and

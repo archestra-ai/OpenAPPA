@@ -353,6 +353,7 @@ impl RawPlugin {
         };
 
         match host {
+            Host::Embedded => unreachable!("Host::parse names only served hosts"),
             Host::ClaudeCode => {
                 absent(self.images.is_some(), "images")?;
                 Ok(Plugin::ClaudeCode {

@@ -404,6 +404,8 @@ pub enum OpenError {
     UnsupportedPolicy(String),
     #[error("policy declares reserved tool name {0}")]
     ReservedTool(String),
+    #[error("the adapter spells no name for the control tool, which every remedy tells the model to call")]
+    UnspelledControlTool,
     #[error("the policy names tool {name} in {field}, which a served deployment cannot name: {detail}")]
     NonCanonicalTool {
         field: &'static str,
@@ -624,18 +626,15 @@ impl ToolNaming {
         }
     }
 
-    /// Which contracts may release a spawn here. The served adapter settles it, so a
-    /// deployment cannot serve one host under another's rule: kagent's spawns are other
-    /// agents called as tools, and a child trajectory is not something a per-call
-    /// annotation can stand for. Claude Code's `Task` keeps the wildcard's cover, and so
-    /// does a host that embeds the runtime and delegates under contracts it writes itself.
+    /// Which contracts may release a spawn here. The adapter settles it, so a deployment
+    /// cannot run one host under another's rule: a host whose spawns are other agents
+    /// called as tools declares the wildcard does not cover them, since a child trajectory
+    /// is not something a per-call annotation can stand for. A host whose spawn is its own
+    /// delegation keeps the wildcard's cover, as does a runtime naming tools as authored.
     pub(crate) fn spawn_coverage(self) -> SpawnCoverage {
         match self {
-            ToolNaming::Canonical { adapter } => match adapter.name {
-                AdapterName::ClaudeCode => SpawnCoverage::Wildcard,
-                AdapterName::Kagent => SpawnCoverage::Declared,
-            },
-            ToolNaming::AsAuthored => SpawnCoverage::Wildcard,
+            ToolNaming::Canonical { adapter } if !adapter.wildcard_covers_spawn => SpawnCoverage::Declared,
+            ToolNaming::Canonical { .. } | ToolNaming::AsAuthored => SpawnCoverage::Wildcard,
         }
     }
 }
@@ -947,6 +946,23 @@ impl Runtime {
         modules: Option<PathBuf>,
     ) -> Result<Runtime, OpenError> {
         Ok(Prepared::new(config, modules, ToolNaming::AsAuthored)?.with_store(store, None))
+    }
+
+    /// [`Runtime::open_with_store`] for a host that names tools through an adapter of its
+    /// own, under [`AdapterName::Embedded`]: the policy is resolved the way a served
+    /// deployment resolves it, so canonical rules, `server_aliases` and the adapter's
+    /// spelling of a tool to the model all apply. The host derives every call through the
+    /// same adapter before it hands the event over.
+    pub fn open_with_store_as(
+        config: Config,
+        store: Arc<LogStore>,
+        modules: Option<PathBuf>,
+        adapter: Adapter,
+    ) -> Result<Runtime, OpenError> {
+        if (adapter.spell)(&appa_runtime_api::CanonicalTool::control()).is_none() {
+            return Err(OpenError::UnspelledControlTool);
+        }
+        Ok(Prepared::new(config, modules, ToolNaming::Canonical { adapter })?.with_store(store, None))
     }
 
     /// This runtime over another store: the same deployment, consult gates and diagnostics,
@@ -1920,7 +1936,7 @@ impl Runtime {
                 report_id.clone(),
                 origin,
                 request.message.clone(),
-                request.harness,
+                request.harness.clone(),
                 projection,
             )
             .with_hostname(request.hostname.clone());

@@ -26,7 +26,9 @@ pub(crate) fn servers(host: Host, cwd: &Path) -> BTreeSet<Namespace> {
             });
             claude_code_servers(config.as_deref(), &project_root(cwd))
         }
-        Host::Kagent => BTreeSet::new(),
+        // Neither keeps MCP servers in files on this machine: kagent's live in the cluster,
+        // an embedding host's in its own store.
+        Host::Kagent | Host::Embedded => BTreeSet::new(),
     }
 }
 

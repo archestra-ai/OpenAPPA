@@ -1,9 +1,9 @@
-//! Reporting for an authenticated, in-process Archestra host.
+//! Reporting for an authenticated host that embeds the runtime in its own process.
 use std::sync::Arc;
 
 use super::{
     Mode, Selection, YellArgs, client,
-    report::{Author, Harness, ReportRequest, YellMessage},
+    report::{Author, Harness, HarnessName, ReportRequest, YellMessage},
 };
 use crate::api::{Actor, Runtime};
 
@@ -11,6 +11,8 @@ use crate::api::{Actor, Runtime};
 /// from the embedding host, never from model-controlled tool arguments.
 pub struct Request {
     pub actor: Actor,
+    /// The name the receiver files this host's reports under.
+    pub harness: HarnessName,
     pub endpoint: String,
     /// Public deployment hostname. Do not supply a machine name or a full URL.
     pub hostname: Option<String>,
@@ -56,7 +58,7 @@ pub async fn send(runtime: &Arc<Runtime>, request: Request) -> Result<String, St
         } else {
             Selection::RulesOnly
         },
-        harness: Harness::Archestra,
+        harness: Harness::Embedded(request.harness),
         hostname: request.hostname,
     };
     let finished = runtime
@@ -99,6 +101,7 @@ mod tests {
                 root: TrajectoryId("private-session-id".into()),
                 child: None,
             },
+            harness: HarnessName::parse("test-platform").expect("a harness name"),
             endpoint: "http://127.0.0.1:1".into(),
             hostname: Some("platform.example.com".into()),
             message: "The feedback is confusing".into(),
@@ -129,6 +132,22 @@ mod tests {
             .await,
             HookDecision::AllowCall { .. }
         ));
+    }
+
+    #[test]
+    fn a_harness_name_is_spelled_as_a_package_name_within_a_bound() {
+        assert!(HarnessName::parse("test-platform").is_ok());
+        for invalid in [
+            "",
+            "Test Platform",
+            "-lead",
+            &"a".repeat(HarnessName::MAX_LEN + 1),
+            "claude-code",
+            "kagent",
+            "embedded",
+        ] {
+            assert!(HarnessName::parse(invalid).is_err(), "{invalid:?}");
+        }
     }
 
     #[tokio::test]
@@ -173,7 +192,7 @@ mod tests {
         let mut plain = String::new();
         std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(body.as_ref()), &mut plain).unwrap();
         let document: serde_json::Value = serde_json::from_str(&plain).unwrap();
-        assert_eq!(document["runtime"]["serving"]["harness"], "archestra");
+        assert_eq!(document["runtime"]["serving"]["harness"], "test-platform");
         assert_eq!(document["schema"], "openappa.yell.v1");
         assert_eq!(document["runtime"]["serving"]["hostname"], "platform.example.com");
         assert!(!plain.contains("private-session-id"));

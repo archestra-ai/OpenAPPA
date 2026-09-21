@@ -167,24 +167,80 @@ pub(crate) enum RuntimeSection {
     },
 }
 
-/// The harness a report is about, in the schema's own vocabulary.
-///
-/// Separate from [`AdapterName`]: embedded hosts also report without installing a
-/// standalone adapter. Adapter names are converted exhaustively into this vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum Harness {
+/// The harness a report is about, in the schema's own vocabulary: a served host by its
+/// adapter name, an embedding host by the name it files its reports under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Harness {
     ClaudeCode,
     Kagent,
-    Archestra,
+    Embedded(HarnessName),
 }
 
-impl From<AdapterName> for Harness {
-    fn from(adapter: AdapterName) -> Self {
+/// The name an embedding host files its reports under: spelled as a package name is,
+/// lowercase letters, digits and hyphens, at most 64 bytes long, and never an adapter
+/// name, so a receipt or trace tells an embedding host from a served deployment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessName(String);
+
+#[derive(Debug, thiserror::Error)]
+pub enum HarnessNameError {
+    #[error(transparent)]
+    Malformed(#[from] appa_package::NameError),
+    #[error("`{name}` is longer than {max} bytes")]
+    TooLong { name: String, max: usize },
+    #[error("`{0}` is an adapter name, which an embedding host cannot report as")]
+    Reserved(String),
+}
+
+impl HarnessName {
+    pub const MAX_LEN: usize = 64;
+
+    pub fn parse(text: &str) -> Result<Self, HarnessNameError> {
+        if text.len() > Self::MAX_LEN {
+            return Err(HarnessNameError::TooLong {
+                name: text.to_owned(),
+                max: Self::MAX_LEN,
+            });
+        }
+        appa_package::PackageName::parse(text)?;
+        let reserved = AdapterName::ALL
+            .iter()
+            .chain(std::iter::once(&AdapterName::Embedded))
+            .any(|adapter| adapter.as_str() == text);
+        if reserved {
+            return Err(HarnessNameError::Reserved(text.to_owned()));
+        }
+        Ok(Self(text.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Harness {
+    /// The harness a served runtime reports about. An embedding host is no served
+    /// runtime: it reports through [`super::embedded`], naming itself there.
+    pub(crate) fn served(adapter: AdapterName) -> Self {
         match adapter {
             AdapterName::ClaudeCode => Harness::ClaudeCode,
             AdapterName::Kagent => Harness::Kagent,
+            AdapterName::Embedded => unreachable!("a served runtime is started with a served adapter"),
         }
+    }
+
+    fn as_str(&self) -> &str {
+        match self {
+            Harness::ClaudeCode => "claude-code",
+            Harness::Kagent => "kagent",
+            Harness::Embedded(name) => name.as_str(),
+        }
+    }
+}
+
+impl Serialize for Harness {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -485,7 +541,7 @@ mod tests {
             ReportId::generate(),
             Origin::new(Author::Cli, Mode::Pseudonymized),
             YellMessage::new("x").expect("valid"),
-            AdapterName::ClaudeCode.into(),
+            Harness::served(AdapterName::ClaudeCode),
             Projection::rules_only(None, Mode::Pseudonymized, OmittedReason::NoRecentTrajectory),
         );
         let finished = report.finalize().expect("the report fits");

@@ -94,16 +94,26 @@ pub type NamesChildrenFn = fn(&Actor, &ProposedCall) -> Vec<TrajectoryId>;
 /// `None`. A plain `fn` pointer for the same reason [`DeriveFn`] is.
 pub type SpellFn = fn(&CanonicalTool) -> Option<String>;
 
-/// One adapter as the runtime serves it: its name, which fixes the
-/// trajectory prefix, the spawn coverage rule and the review channel,
-/// the two directions of its tool identity map, and the children a
-/// proposed call names.
+/// One adapter as the runtime runs under it: its name, which fixes the
+/// trajectory prefix and the review channel; the two directions of its
+/// tool identity map and the children a proposed call names; and the
+/// two facts about the host that policy resolution reads.
 #[derive(Clone, Copy)]
 pub struct Adapter {
     pub name: AdapterName,
     pub derive: DeriveFn,
     pub names_children: NamesChildrenFn,
     pub spell: SpellFn,
+    /// Whether the wildcard rule covers a spawn under this host. A host
+    /// whose spawns are other agents called as tools answers `false`:
+    /// only a contract written for them may release one. A host whose
+    /// spawn is its own delegation keeps the wildcard's cover.
+    pub wildcard_covers_spawn: bool,
+    /// Whether an authored tool name already spells a server in this
+    /// host's own grammar, so a `server` selector beside it would name
+    /// the server twice. A canonical id (one with `/`) always does; this
+    /// answers for the host's raw spellings.
+    pub spells_server: fn(&str) -> bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1173,6 +1183,8 @@ mod tests {
         derive,
         names_children,
         spell,
+        wildcard_covers_spawn: false,
+        spells_server: |_| false,
     };
 
     /// The same adapter, refusing to answer the question an outcome has no
@@ -1182,6 +1194,8 @@ mod tests {
         derive,
         names_children: unasked_children,
         spell,
+        wildcard_covers_spawn: false,
+        spells_server: |_| false,
     };
 
     #[test]
@@ -1441,6 +1455,8 @@ mod tests {
         derive,
         names_children,
         spell,
+        wildcard_covers_spawn: true,
+        spells_server: |name| name.starts_with("mcp__"),
     };
 
     /// A field the named event does not read reaches no reader, so the
