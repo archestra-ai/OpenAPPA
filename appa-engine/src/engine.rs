@@ -3827,17 +3827,9 @@ mod tests {
         let appended = decision.append.expect("an allowed call opens a dispatch");
         assert!(matches!(
             &appended.facts()[0],
-            Fact::BasisAdvanced { act: crate::basis::DecidedAct::Proposals(batch), advance, .. }
-                if batch.as_str() == "b1"
-                    && !advance.family
-                    && advance.flows == std::collections::BTreeSet::from([traj()])
-                    && advance.subjects.is_empty()
-        ));
-        assert!(matches!(
-            &appended.facts()[1],
             Fact::ProposalBatchDecided { batch, .. } if batch.as_str() == "b1"
         ));
-        match &appended.facts()[2] {
+        match &appended.facts()[1] {
             Fact::DispatchOpened { dispatch, subject, .. } => {
                 assert_eq!(dispatch, &released[0].dispatch);
                 assert_eq!(
@@ -3851,7 +3843,7 @@ mod tests {
             }
             other => panic!("the decision's first release record is its opening, got {other:?}"),
         }
-        assert_eq!(appended.facts().len(), 3);
+        assert_eq!(appended.facts().len(), 2);
     }
 
     #[test]
@@ -4773,13 +4765,7 @@ mod tests {
                     emits: EffectSet::new([EffectKind::new("web.read")]).unwrap(),
                     requires: Requires::default(),
                 },
-                ToolAnnotation {
-                    delta: Delta {
-                        trust: Some(Trust::new(2)),
-                        audience: None,
-                    },
-                    ..open_tool("ping")
-                },
+                restrictable_tool("ping"),
             ]),
             authorities: vec![],
             sanitizers: vec![
@@ -5216,12 +5202,8 @@ mod tests {
         let e = staged_engine();
         let (log, dispatch, _, staged) = staged_candidate(&e);
         let confined = confined_of(&staged.follow_up).clone();
-        let log = [log, appended_facts(staged)].concat();
-        let log = [
-            log.clone(),
-            appended_facts(proposed(&e, &log, "b3", nonce(), call("ping", json!({}))).expect("the open call releases")),
-        ]
-        .concat();
+        let mut log = [log, appended_facts(staged)].concat();
+        reads(&e, &mut log, &traj(), "ping");
         assert_eq!(
             execute_offer(&e, &log, confined.offers[1].0, OfferOutcome::Approved(Vec::new())),
             Err(TransitionError::StaleOffer)
@@ -6009,11 +5991,8 @@ mod tests {
         let hop = opened_offers(&facts)[0].0;
         let log = [log, facts].concat();
 
-        let moved = [
-            log.clone(),
-            appended_facts(proposed(&e, &log, "b2", nonce(), call("ping", json!({}))).expect("the open call releases")),
-        ]
-        .concat();
+        let mut moved = log.clone();
+        reads(&e, &mut moved, &traj(), "ping");
         assert_eq!(
             execute_offer(&e, &moved, hop, substitution(&proposal, REDACTED)).map(|_| ()),
             Err(TransitionError::StaleOffer)
@@ -6461,7 +6440,7 @@ mod tests {
     }
 
     #[test]
-    fn a_release_advances_the_components_its_contract_can_move() {
+    fn a_release_advances_the_family_and_leaves_the_flow_to_its_admission() {
         let effects = engine(vec![emitting_tool()]);
         let log = vec![opened(&effects)];
         let before = basis_of(&effects, &log);
@@ -6477,9 +6456,11 @@ mod tests {
         let internal = vec![opened(&restricting)];
         let before = basis_of(&restricting, &internal);
         let facts = appended_facts(decide(&restricting, &internal, "b1", &call("get_ticket", json!({}))));
-        let after = basis_of(&restricting, &[internal, facts].concat());
-        assert_eq!(after.flow, before.flow.next());
-        assert_eq!(after.family, before.family, "it reserves no effect");
+        assert_eq!(
+            basis_of(&restricting, &[internal, facts].concat()),
+            before,
+            "a result is unseen until it is admitted, and it reserves no effect"
+        );
     }
 
     #[test]
@@ -6712,13 +6693,15 @@ mod tests {
         }
     }
 
-    /// A tool that releases freely at the trajectory's own trust yet declares a delta, so its
-    /// result can restrict the trajectory and its release moves the flow basis.
+    /// A tool whose result narrows the trajectory's audience, so admitting it moves the flow
+    /// basis.
     fn restrictable_tool(name: &str) -> ToolAnnotation {
         ToolAnnotation {
             delta: Delta {
-                trust: Some(TRUSTED),
-                audience: None,
+                trust: None,
+                audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                    "reviewer",
+                )]))),
             },
             ..open_tool(name)
         }
@@ -7264,7 +7247,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_basis_moving_release_stales_an_approval() {
+    fn only_a_moved_label_stales_an_approval() {
         let prepared = |e: &Engine, log: Vec<Fact>| {
             let opened = appended_facts(blocked_batch(e, &log, "b1", nonce()));
             let offer = opened_offers(&opened)[0].0;
@@ -7305,15 +7288,21 @@ mod tests {
         let restricting =
             appended_facts(proposed(&e, &log, "b2", nonce(), call("note", json!({}))).expect("the note releases"));
         assert!(
-            !releases(&e, &[log, restricting].concat(), "b3"),
-            "a release that can restrict the trajectory stales the approval it did not belong to"
+            releases(&e, &[log.clone(), restricting].concat(), "b3"),
+            "a release stales nothing while its result is unseen"
+        );
+        let mut log = log;
+        reads(&e, &mut log, &traj(), "note");
+        assert!(
+            !releases(&e, &log, "b4"),
+            "a result that narrows the trajectory stales the approval taken before it"
         );
     }
 
-    /// A neutral delta under an Annotator is not neutral: the produced annotation owns the
-    /// output, so the release moves the basis an approval was taken on.
+    /// An Annotator-routed release is held to the same law as a static one: the approval stands
+    /// until a result moves the label, whoever declared the delta.
     #[test]
-    fn an_annotated_release_stales_an_approval() {
+    fn an_annotated_release_leaves_an_approval_standing() {
         let classified = ToolAnnotation {
             name: ToolName::new("read_note"),
             ..neutral_tool()
@@ -7363,10 +7352,7 @@ mod tests {
             FollowUp::Proposals { released, .. } => released.clone(),
             other => panic!("a proposal batch answers with proposals, not {other:?}"),
         };
-        assert!(
-            released.is_empty(),
-            "the approval was taken on a basis the pinned release moved"
-        );
+        assert_eq!(released.len(), 1, "the pinned release moved no label");
     }
 
     #[test]
@@ -7556,10 +7542,20 @@ mod tests {
         let decision = blocked_batch(&e, &log, "b1", nonce());
         let opened = appended_facts(decision);
         let offer = opened_offers(&opened)[0].0;
-        let log = [log, opened].concat();
+        let mut log = [log, opened].concat();
 
         let release = proposed(&e, &log, "b2", nonce(), call("note", json!({}))).expect("the note releases");
-        let log = [log, appended_facts(release)].concat();
+        assert!(
+            execute_offer(
+                &e,
+                &[log.clone(), appended_facts(release)].concat(),
+                offer,
+                OfferOutcome::Approved(Vec::new())
+            )
+            .is_ok(),
+            "a release moves no label, so the offer stands beside it"
+        );
+        reads(&e, &mut log, &traj(), "note");
         assert_eq!(
             execute_offer(&e, &log, offer, OfferOutcome::Approved(Vec::new())),
             Err(TransitionError::StaleOffer)
@@ -8050,9 +8046,8 @@ mod tests {
             records.clone(),
             vec![
                 batch[0].clone(),
-                batch[1].clone(),
                 stray_admission(&traj(), known(SUSPICIOUS, Audience::public())),
-                batch[2].clone(),
+                batch[1].clone(),
             ],
         ]
         .concat();
@@ -8063,7 +8058,7 @@ mod tests {
 
         let tampered = |mutate: &dyn Fn(&mut Fact)| {
             let mut facts = batch.clone();
-            mutate(&mut facts[2]);
+            mutate(&mut facts[1]);
             e.validate_replay(&[records.clone(), facts].concat())
         };
         assert_eq!(
@@ -13364,6 +13359,104 @@ mod tests {
                 }),
             ),
             Err(crate::transition::TransitionError::UnbindableFork)
+        );
+    }
+
+    /// A child blocked on `get_ticket`, its parent then lowered below the tool's trust floor by a
+    /// read, and the child resumed.
+    fn resumed_under_a_narrowed_parent(
+        approve_first: bool,
+    ) -> (Engine, Vec<Fact>, TrajectoryId, crate::value::OfferId) {
+        let mut cfg = returning_registry(vec![]);
+        cfg.tools.push(crate::contract::ToolDeclaration::Declared(crm_tool()));
+        let e = open_engine(cfg);
+        let child = TrajectoryId::new("child");
+        let parent = vec![opened(&e)];
+        let mut policy = floor_policy(&e, &parent);
+        policy.floor.audience = Audience::restricted([ReaderId::new("insider")]);
+        let mut log = [parent.clone(), spawn_family_at(&e, &parent, &child, policy)].concat();
+        let blocked = e
+            .handle(
+                &viewing(&e, &log),
+                batch_on(
+                    &child,
+                    "c1",
+                    Vec::new(),
+                    vec![raw(&call("get_ticket", json!({})))],
+                    None,
+                ),
+            )
+            .expect("the child's batch decides");
+        let facts = appended_facts(blocked);
+        let offer = opened_offers(&facts)[0].0;
+        log.extend(facts);
+        if approve_first {
+            let approved =
+                executed_by(&e, &log, &child, offer).expect("the offer executes under the label it was opened on");
+            log.extend(appended_facts(approved));
+        }
+
+        reads(&e, &mut log, &traj(), "read_suspicious");
+        let resumed = e
+            .handle(
+                &viewing(&e, &log),
+                EngineEvent::BindFork(crate::transition::ForkBinding {
+                    fork: fork_in(&log, &child),
+                    child: child.clone(),
+                }),
+            )
+            .expect("the same pair binds again as a resume");
+        log.extend(appended_facts(resumed));
+        assert_eq!(e.validate_replay(&log), Ok(()));
+        (e, log, child, offer)
+    }
+
+    fn executed_by(
+        e: &Engine,
+        log: &[Fact],
+        trajectory: &TrajectoryId,
+        offer: crate::value::OfferId,
+    ) -> Result<EngineDecision, TransitionError> {
+        e.handle(
+            &viewing(e, log),
+            EngineEvent::ExecuteOffer(OfferExecution {
+                trajectory: trajectory.clone(),
+                offer,
+                outcome: OfferOutcome::Approved(Vec::new()),
+                return_policy: None,
+                offer_nonce: crate::value::OfferNonce::new([11u8; 32]),
+                audience: crate::audience::AudienceEvidence::default(),
+            }),
+        )
+    }
+
+    #[test]
+    fn a_resume_that_moves_the_childs_label_ends_the_offers_opened_under_the_old_one() {
+        let (e, log, child, offer) = resumed_under_a_narrowed_parent(false);
+        assert_eq!(
+            executed_by(&e, &log, &child, offer).map(|_| ()),
+            Err(TransitionError::StaleOffer)
+        );
+    }
+
+    #[test]
+    fn a_resume_that_moves_the_childs_label_ends_the_approvals_granted_under_the_old_one() {
+        let (e, log, child, _) = resumed_under_a_narrowed_parent(true);
+        let again = e
+            .handle(
+                &viewing(&e, &log),
+                batch_on(
+                    &child,
+                    "c2",
+                    Vec::new(),
+                    vec![raw(&call("get_ticket", json!({})))],
+                    None,
+                ),
+            )
+            .expect("the child's batch decides");
+        assert!(
+            matches!(answered(&again), ([], [_])),
+            "the approval stood on the label the resume replaced"
         );
     }
 
