@@ -174,11 +174,13 @@ fn stop(target: &crate::runtime_url::RuntimeUrl) -> ExitCode {
 }
 
 /// The derivation the runtime applies to every call of the host it serves. The one
-/// place this crate names the adapter crates.
+/// place this crate names the adapter crates. `--adapter` parses served names only
+/// ([`AdapterName::ALL`]), so an embedding host's adapter never reaches here.
 fn served(adapter: AdapterName) -> appa_runtime_api::Adapter {
     match adapter {
         AdapterName::ClaudeCode => appa_adapter_claude_code::adapter(),
         AdapterName::Kagent => appa_adapter_kagent::adapter(),
+        AdapterName::Embedded => unreachable!("--adapter names a served adapter"),
     }
 }
 
@@ -431,7 +433,7 @@ async fn report(
         // making it a per-caller boundary. The recently active trajectory may well belong to
         // someone else's session on this machine, and loopback is the only thing between them.
         selection: crate::yell::Selection::Recent,
-        harness: state.adapter.name.into(),
+        harness: crate::yell::report::Harness::served(state.adapter.name),
         hostname: None,
     };
     state

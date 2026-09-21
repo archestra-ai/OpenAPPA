@@ -1,4 +1,4 @@
-//! Reporting for an authenticated, in-process Archestra host.
+//! Reporting for an authenticated host that embeds the runtime in its own process.
 use std::sync::Arc;
 
 use super::{
@@ -11,6 +11,9 @@ use crate::api::{Actor, Runtime};
 /// from the embedding host, never from model-controlled tool arguments.
 pub struct Request {
     pub actor: Actor,
+    /// The name the receiver files this host's reports under: lowercase letters, digits
+    /// and hyphens, as an adapter name is spelled.
+    pub harness: &'static str,
     pub endpoint: String,
     /// Public deployment hostname. Do not supply a machine name or a full URL.
     pub hostname: Option<String>,
@@ -56,7 +59,7 @@ pub async fn send(runtime: &Arc<Runtime>, request: Request) -> Result<String, St
         } else {
             Selection::RulesOnly
         },
-        harness: Harness::Archestra,
+        harness: Harness::Embedded(request.harness),
         hostname: request.hostname,
     };
     let finished = runtime
@@ -99,6 +102,7 @@ mod tests {
                 root: TrajectoryId("private-session-id".into()),
                 child: None,
             },
+            harness: "test-platform",
             endpoint: "http://127.0.0.1:1".into(),
             hostname: Some("platform.example.com".into()),
             message: "The feedback is confusing".into(),
@@ -173,7 +177,7 @@ mod tests {
         let mut plain = String::new();
         std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(body.as_ref()), &mut plain).unwrap();
         let document: serde_json::Value = serde_json::from_str(&plain).unwrap();
-        assert_eq!(document["runtime"]["serving"]["harness"], "archestra");
+        assert_eq!(document["runtime"]["serving"]["harness"], "test-platform");
         assert_eq!(document["schema"], "openappa.yell.v1");
         assert_eq!(document["runtime"]["serving"]["hostname"], "platform.example.com");
         assert!(!plain.contains("private-session-id"));

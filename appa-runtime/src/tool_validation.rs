@@ -173,6 +173,12 @@ pub fn precise_name(name: &str, adapter: Adapter) -> Option<CanonicalTool> {
     None
 }
 
+/// Whether an authored name already spells a server: as a canonical id, or in the host's
+/// own grammar, so a `server` selector beside it would name the server twice.
+fn spells_server(adapter: Adapter, name: &str) -> bool {
+    name.contains('/') || (adapter.spells_server)(name)
+}
+
 /// `server_aliases` belongs to deployment configuration, never to a battery. Its values
 /// are configured connection identities, not DNS/provider guesses. A namespace bound to
 /// several identities resolves each rule under it to one canonical id per identity: the
@@ -247,7 +253,7 @@ pub fn resolve(
             };
         }
         if let Some(server) = server {
-            if name.contains('/') || (adapter.name == AdapterName::ClaudeCode && name.starts_with("mcp__")) {
+            if spells_server(adapter, name) {
                 return Err(format!(
                     "tool {name:?} conflicts with server selector {server:?}; use a short tool name with server"
                 ));
@@ -273,9 +279,7 @@ pub fn resolve(
                 _ => vec![format!("{id}{selector}")],
             }
         });
-        if qualified.is_none()
-            && (name.contains('/') || (adapter.name == AdapterName::ClaudeCode && name.starts_with("mcp__")))
-        {
+        if qualified.is_none() && spells_server(adapter, name) {
             return Err(format!("tool {name:?} has an invalid qualified identity"));
         }
         if qualified.is_none() && adapter.name == AdapterName::Kagent {
@@ -374,7 +378,7 @@ pub fn resolve(
             continue;
         }
         let declared = covered.iter().any(|rule| rule_matches(rule, identity.as_str()));
-        let covered = declared || (report.wildcard && (!spawn || adapter.name == AdapterName::ClaudeCode));
+        let covered = declared || (report.wildcard && (!spawn || adapter.wildcard_covers_spawn));
         report.tools.push(ToolCheck {
             tool: host.clone(),
             status: if covered {

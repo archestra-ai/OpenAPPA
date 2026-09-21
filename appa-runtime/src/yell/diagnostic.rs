@@ -909,7 +909,7 @@ mod tests {
                 author: crate::yell::Author::Cli,
                 mode: Mode::Pseudonymized,
                 selection: Selection::Vouched(root),
-                harness: appa_runtime_api::AdapterName::ClaudeCode.into(),
+                harness: crate::yell::report::Harness::served(appa_runtime_api::AdapterName::ClaudeCode),
                 hostname: None,
             })
             .expect("a recorded session fits a report");

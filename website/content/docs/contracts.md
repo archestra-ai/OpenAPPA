@@ -100,6 +100,8 @@ The agent keeps using its host's tool names. A plugin implements the host lifecy
 
 Claude Code names such as `Bash` and `mcp__github__create_issue` identify precise tools. An unqualified kagent rule such as `read_secret` applies to that native name across MCP servers and kagent's own tools. It does not cover remote-agent delegation. A newly discovered tool can use an existing rule without restarting the trajectory or changing its opening policy.
 
+A host that embeds the runtime brings its own mapping: the adapter it opens the runtime with derives every call's canonical id, and the runtime spells a tool back to that host's model through the same adapter. See [Writing an Integration](/writing-an-integration#the-adapter-and-the-hook-protocol).
+
 Use `server` when a rule should apply to one MCP connection:
 
 ```toml

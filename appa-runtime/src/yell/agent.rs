@@ -17,7 +17,7 @@ use appa_runtime_api::AdapterName;
 #[cfg(feature = "daemon")]
 use super::client::{self, Receipt, SendFailure};
 #[cfg(feature = "daemon")]
-use super::report::{Author, ReportRequest, YellMessage};
+use super::report::{Author, Harness, ReportRequest, YellMessage};
 #[cfg(feature = "daemon")]
 use super::{Mode, Selection};
 #[cfg(feature = "daemon")]
@@ -88,7 +88,7 @@ pub(crate) async fn yell(runtime: &std::sync::Arc<Runtime>, harness: AdapterName
         author: Author::Agent,
         mode: Mode::Baseline,
         selection: selection(&acting, args.with_trajectory),
-        harness: harness.into(),
+        harness: Harness::served(harness),
         hostname: None,
     };
     let Ok(finished) = runtime.report_off_thread(request).await else {

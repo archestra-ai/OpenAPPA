@@ -39,13 +39,17 @@
 
 use appa_runtime_api::{Actor, Adapter, AdapterName, CanonicalTool, Derived, ParseRefusal, ProposedCall, TrajectoryId};
 
-/// The server-side derivation the runtime applies to every kagent call.
+/// The server-side derivation the runtime applies to every kagent call. kagent's spawns
+/// are other agents called as tools, which only a contract written for them may release,
+/// and an authored rule spells no server: an unqualified name reaches every server.
 pub fn adapter() -> Adapter {
     Adapter {
         name: AdapterName::Kagent,
         derive,
         names_children,
         spell,
+        wildcard_covers_spawn: false,
+        spells_server: |_| false,
     }
 }
 

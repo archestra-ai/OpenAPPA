@@ -10,18 +10,28 @@ pub use wire::{
     SpellFn, WireDecision, WireEvent, WireOffer, WireOutcome, WireReturn, WireReview,
 };
 
-/// The hosts this runtime can serve. The one place harness names appear
-/// as a closed set: each variant fixes a trajectory prefix, a raw tool
-/// domain, a spawn coverage rule, and the channel a review reaches a
-/// person through ([`AdapterName::review_channel`]).
+/// The hosts this runtime serves over the wire, plus the one that is
+/// no host of the wire at all. The one place harness names appear as a
+/// closed set: each served variant fixes a trajectory prefix and the
+/// channel a review reaches a person through
+/// ([`AdapterName::review_channel`]); what a host derives from a raw
+/// spelling and how its policy resolves names is the [`Adapter`] it
+/// supplies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AdapterName {
     ClaudeCode,
     Kagent,
+    /// A host that embeds the runtime in its own process. There is no
+    /// served process and no wire: the host builds every event itself,
+    /// derives each call through the [`Adapter`] it opened the runtime
+    /// with, and reviews through its own surface. Never the answer to
+    /// [`AdapterName::parse`], since nothing on the wire names it.
+    Embedded,
 }
 
 impl AdapterName {
+    /// The adapters a served runtime can be started with.
     pub const ALL: [AdapterName; 2] = [AdapterName::ClaudeCode, AdapterName::Kagent];
 
     pub fn parse(text: &str) -> Option<Self> {
@@ -32,14 +42,17 @@ impl AdapterName {
         match self {
             AdapterName::ClaudeCode => "claude-code",
             AdapterName::Kagent => "kagent",
+            AdapterName::Embedded => "embedded",
         }
     }
 
-    /// The prefix every trajectory id of this adapter carries.
+    /// The prefix every trajectory id of this adapter carries. An embedding host names
+    /// its trajectories itself and never asks for one.
     pub fn prefix(self) -> &'static str {
         match self {
             AdapterName::ClaudeCode => "cc",
             AdapterName::Kagent => "kagent",
+            AdapterName::Embedded => "embedded",
         }
     }
 
@@ -48,11 +61,12 @@ impl AdapterName {
     }
 
     /// The channel a [`Review`] reaches a person through under this
-    /// host, and with it the right to assert a [`Ruling`].
+    /// host, and with it the right to assert a [`Ruling`]. An embedding
+    /// host has its own surface to show a review on.
     pub fn review_channel(self) -> ReviewChannel {
         match self {
             AdapterName::ClaudeCode => ReviewChannel::Runtime,
-            AdapterName::Kagent => ReviewChannel::Host,
+            AdapterName::Kagent | AdapterName::Embedded => ReviewChannel::Host,
         }
     }
 }

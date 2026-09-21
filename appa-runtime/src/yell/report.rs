@@ -167,24 +167,38 @@ pub(crate) enum RuntimeSection {
     },
 }
 
-/// The harness a report is about, in the schema's own vocabulary.
-///
-/// Separate from [`AdapterName`]: embedded hosts also report without installing a
-/// standalone adapter. Adapter names are converted exhaustively into this vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
+/// The harness a report is about, in the schema's own vocabulary: a served host by its
+/// adapter name, an embedding host by the name it files its reports under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Harness {
     ClaudeCode,
     Kagent,
-    Archestra,
+    Embedded(&'static str),
 }
 
-impl From<AdapterName> for Harness {
-    fn from(adapter: AdapterName) -> Self {
+impl Harness {
+    /// The harness a served runtime reports about. An embedding host is no served
+    /// runtime: it reports through [`super::embedded`], naming itself there.
+    pub(crate) fn served(adapter: AdapterName) -> Self {
         match adapter {
             AdapterName::ClaudeCode => Harness::ClaudeCode,
             AdapterName::Kagent => Harness::Kagent,
+            AdapterName::Embedded => unreachable!("a served runtime is started with a served adapter"),
         }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Harness::ClaudeCode => "claude-code",
+            Harness::Kagent => "kagent",
+            Harness::Embedded(name) => name,
+        }
+    }
+}
+
+impl Serialize for Harness {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -485,7 +499,7 @@ mod tests {
             ReportId::generate(),
             Origin::new(Author::Cli, Mode::Pseudonymized),
             YellMessage::new("x").expect("valid"),
-            AdapterName::ClaudeCode.into(),
+            Harness::served(AdapterName::ClaudeCode),
             Projection::rules_only(None, Mode::Pseudonymized, OmittedReason::NoRecentTrajectory),
         );
         let finished = report.finalize().expect("the report fits");
