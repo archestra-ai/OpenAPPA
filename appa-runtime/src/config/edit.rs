@@ -11,9 +11,9 @@ use std::path::Path;
 use appa_package::Namespace;
 use toml_edit::{DocumentMut, Item};
 
-use super::ConfigError;
+use super::{ConfigError, refuse_foreign_credential, refuse_include_entry};
 
-fn document(text: &str) -> Result<DocumentMut, ConfigError> {
+pub(crate) fn document(text: &str) -> Result<DocumentMut, ConfigError> {
     text.parse()
         .map_err(|error: toml_edit::TomlError| ConfigError::UneditableDocument {
             reason: error.to_string(),
@@ -40,8 +40,10 @@ fn include_list(document: &mut DocumentMut) -> Result<&mut toml_edit::Array, Con
 }
 
 /// The text with `include` in its include list once: unchanged when it is
-/// there, under any spelling that names the same battery.
+/// there, under any spelling that names the same battery. A spelling no loader
+/// would resolve is refused here rather than written.
 pub fn add_include(text: &str, include: &str) -> Result<String, ConfigError> {
+    refuse_include_entry(include)?;
     let mut document = document(text)?;
     let includes = include_list(&mut document)?;
     let battery = crate::batteries::name_from_include(Path::new(include));
@@ -102,6 +104,28 @@ pub fn bind_servers(text: &str, namespace: &str, servers: &[String]) -> Result<S
     Ok(document.to_string())
 }
 
+/// The text without the aliases of `namespaces`: a battery's aliases mean
+/// nothing without the battery, and the last one takes the table with it. The
+/// namespaces of a battery are `appa_package`'s, so this takes them parsed, where
+/// [`bind_servers`] takes the one namespace it binds as text.
+pub fn unbind_servers(text: &str, namespaces: &[Namespace]) -> Result<String, ConfigError> {
+    let mut document = document(text)?;
+    let Some(aliases) = document.get_mut("server_aliases").and_then(Item::as_table_like_mut) else {
+        return Ok(text.to_owned());
+    };
+    let mut changed = false;
+    for namespace in namespaces {
+        changed |= aliases.remove(namespace.as_str()).is_some();
+    }
+    if !changed {
+        return Ok(text.to_owned());
+    }
+    if aliases.is_empty() {
+        document.remove("server_aliases");
+    }
+    Ok(document.to_string())
+}
+
 /// The servers one binding names: an array of strings, else nothing.
 pub(crate) fn bound_servers(item: &Item) -> Option<Vec<String>> {
     item.as_array()?
@@ -112,8 +136,13 @@ pub(crate) fn bound_servers(item: &Item) -> Option<Vec<String>> {
 
 /// The text with `credentials.<var>` naming `key`, or without the variable when
 /// `key` is nothing; the last entry takes the table with it, so a document that
-/// declares no credential carries no empty declaration.
+/// declares no credential carries no empty declaration. A binding the hosted
+/// loader would refuse is refused here; removing one is always allowed, because
+/// that is how a document a loader refuses gets fixed.
 pub fn set_credential(text: &str, var: &str, key: Option<&str>) -> Result<String, ConfigError> {
+    if key.is_some() {
+        refuse_foreign_credential(var, key)?;
+    }
     let mut document = document(text)?;
     let Some(key) = key else {
         let Some(credentials) = document.get_mut("credentials").and_then(Item::as_table_like_mut) else {
@@ -165,6 +194,20 @@ mod tests {
         assert_eq!(remove_include(&added, include).unwrap(), AUTHORED);
     }
 
+    /// A spelling no loader resolves is refused before it reaches the document, with
+    /// the refusal the loader itself would answer.
+    #[test]
+    fn an_include_the_loader_would_refuse_is_never_written() {
+        assert!(matches!(
+            add_include(AUTHORED, "/srv/batteries/github/appa.toml"),
+            Err(ConfigError::AbsoluteInclude { path }) if path == "/srv/batteries/github/appa.toml"
+        ));
+        assert!(matches!(
+            add_include(AUTHORED, "../github/appa.toml"),
+            Err(ConfigError::TraversingInclude { path }) if path == "../github/appa.toml"
+        ));
+    }
+
     #[test]
     fn removal_takes_the_spelled_entry_and_leaves_another_spelling_of_it() {
         let text = "include = ['./batteries/github/appa.toml', 'batteries/github/appa.toml', 'other.toml']\n";
@@ -192,6 +235,25 @@ mod tests {
             bind_servers(AUTHORED, "not a namespace", &servers(&["github"])),
             Err(ConfigError::UneditableDocument { .. })
         ));
+    }
+
+    #[test]
+    fn unbinding_takes_only_the_named_namespaces_and_the_last_one_takes_the_table() {
+        let servers = |names: &[&str]| names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>();
+        let github = Namespace::parse("github").unwrap();
+        let slack = Namespace::parse("slack").unwrap();
+        let bound = bind_servers(AUTHORED, github.as_str(), &servers(&["home-github"])).unwrap();
+        let with_slack = bind_servers(&bound, slack.as_str(), &servers(&["team-slack"])).unwrap();
+        let unbound = unbind_servers(&with_slack, std::slice::from_ref(&github)).unwrap();
+        assert!(!unbound.contains("home-github") && unbound.contains("team-slack"));
+        assert_eq!(
+            unbind_servers(&unbound, std::slice::from_ref(&github)).unwrap(),
+            unbound
+        );
+        assert_eq!(
+            unbind_servers(&unbound, std::slice::from_ref(&slack)).unwrap(),
+            AUTHORED
+        );
     }
 
     /// The table the editor writes is the one the hosted loader admits, and the
@@ -228,6 +290,23 @@ mod tests {
                 .credentials()
                 .is_empty()
         );
+    }
+
+    /// A binding the hosted loader would refuse is refused where it is written, with the
+    /// loader's own answer; removing one stays possible, so a refused document is fixable.
+    #[test]
+    fn a_credential_the_loader_would_refuse_is_never_written() {
+        assert!(matches!(
+            set_credential(AUTHORED, "APPA_BRIDGE_TOKEN", Some("bridge")),
+            Err(ConfigError::CredentialVariable { var }) if var == "APPA_BRIDGE_TOKEN"
+        ));
+        assert!(matches!(
+            set_credential(AUTHORED, "APPA_PROVIDER_GITHUB_TOKEN", Some("")),
+            Err(ConfigError::CredentialValue { var }) if var == "APPA_PROVIDER_GITHUB_TOKEN"
+        ));
+        let foreign = format!("{AUTHORED}[credentials]\nAPPA_BRIDGE_TOKEN = \"bridge\"\n");
+        assert!(Config::hosted(&foreign, HOST_DEFAULTS).is_err());
+        assert_eq!(set_credential(&foreign, "APPA_BRIDGE_TOKEN", None).unwrap(), AUTHORED);
     }
 
     /// A document that declares two credentials keeps the other one when one goes.

@@ -2,45 +2,19 @@
 //! installer reads them. One spelling names a battery,
 //! `batteries/<name>/appa.toml`, and it resolves beside the config, where the
 //! install keeps the store. The edits themselves are [`crate::config::edit`]'s;
-//! what the installer adds here is the battery spelling, the reading back, and
-//! the uninstall, which takes the aliases of a battery that goes.
+//! what the installer adds here is the battery spelling and the reading back.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use appa_package::{Namespace, PackageName};
+use appa_package::PackageName;
 use toml_edit::{DocumentMut, Item};
 
 use super::InstallError;
-use crate::config::edit::bound_servers;
+use crate::config::edit::{bound_servers, document};
 
 pub(crate) fn battery_include(name: &PackageName) -> String {
     format!("batteries/{name}/appa.toml")
-}
-
-fn document(text: &str) -> Result<DocumentMut, InstallError> {
-    text.parse()
-        .map_err(|error: toml_edit::TomlError| InstallError::Invalid(error.to_string()))
-}
-
-/// The text without the aliases of `namespaces`: a battery's aliases mean
-/// nothing without the battery.
-pub(crate) fn unbind_servers(text: &str, namespaces: &[Namespace]) -> Result<String, InstallError> {
-    let mut document = document(text)?;
-    let Some(aliases) = document.get_mut("server_aliases").and_then(Item::as_table_like_mut) else {
-        return Ok(text.to_owned());
-    };
-    let mut changed = false;
-    for namespace in namespaces {
-        changed |= aliases.remove(namespace.as_str()).is_some();
-    }
-    if !changed {
-        return Ok(text.to_owned());
-    }
-    if aliases.is_empty() {
-        document.remove("server_aliases");
-    }
-    Ok(document.to_string())
 }
 
 /// The batteries the include list names: the entries spelled
@@ -98,27 +72,13 @@ mod tests {
         assert_eq!(included(text).unwrap(), BTreeSet::from(["github".to_owned()]));
     }
 
+    /// The installer reads back what the editor wrote, and refuses a binding the
+    /// loader would refuse.
     #[test]
-    fn unbinding_takes_only_the_named_namespaces_and_the_last_one_takes_the_table() {
-        let servers = |names: &[&str]| names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>();
-        let github = Namespace::parse("github").unwrap();
-        let slack = Namespace::parse("slack").unwrap();
-        let bound = bind_servers(AUTHORED, github.as_str(), &servers(&["home-github", "lab-github"])).unwrap();
-        assert_eq!(
-            batteries(&bound).unwrap().1["github"],
-            servers(&["home-github", "lab-github"])
-        );
+    fn the_bindings_read_back_are_the_ones_the_editor_wrote() {
+        let servers = ["home-github".to_owned(), "lab-github".to_owned()];
+        let bound = bind_servers(AUTHORED, "github", &servers).unwrap();
+        assert_eq!(batteries(&bound).unwrap().1["github"], servers);
         assert!(batteries("[server_aliases]\ngithub = 'work-github'\n").is_err());
-        let with_slack = bind_servers(&bound, slack.as_str(), &servers(&["team-slack"])).unwrap();
-        let unbound = unbind_servers(&with_slack, std::slice::from_ref(&github)).unwrap();
-        assert!(!unbound.contains("home-github") && unbound.contains("team-slack"));
-        assert_eq!(
-            unbind_servers(&unbound, std::slice::from_ref(&github)).unwrap(),
-            unbound
-        );
-        assert_eq!(
-            unbind_servers(&unbound, std::slice::from_ref(&slack)).unwrap(),
-            AUTHORED
-        );
     }
 }

@@ -1192,12 +1192,21 @@ fn refuse_foreign_credentials(credentials: &toml::Value) -> Result<(), ConfigErr
         field: "credentials".to_string(),
     })?;
     for (var, key) in credentials {
-        if !var.starts_with(PROVIDER_CREDENTIAL_PREFIX) {
-            return Err(ConfigError::CredentialVariable { var: var.clone() });
-        }
-        if !key.as_str().is_some_and(|key| !key.is_empty()) {
-            return Err(ConfigError::CredentialValue { var: var.clone() });
-        }
+        refuse_foreign_credential(var, key.as_str())?;
+    }
+    Ok(())
+}
+
+/// One `[credentials]` entry: a child-credential variable and the store key the host
+/// holds its value under. `key` is nothing where a document states something that is not
+/// a string. [`edit::set_credential`] refuses an entry here before it writes one, so a
+/// host hears the same refusal whether it edits the document or opens it.
+pub(crate) fn refuse_foreign_credential(var: &str, key: Option<&str>) -> Result<(), ConfigError> {
+    if !var.starts_with(PROVIDER_CREDENTIAL_PREFIX) {
+        return Err(ConfigError::CredentialVariable { var: var.to_string() });
+    }
+    if !key.is_some_and(|key| !key.is_empty()) {
+        return Err(ConfigError::CredentialValue { var: var.to_string() });
     }
     Ok(())
 }
@@ -1213,18 +1222,31 @@ fn take_include(document: &mut toml::Value) -> Result<Vec<String>, ConfigError> 
     let entries = Vec::<String>::deserialize(include).map_err(|source| ConfigError::UnparsablePolicy { source })?;
     let mut seen = std::collections::BTreeSet::new();
     for entry in &entries {
-        let path = Path::new(entry);
-        if path.is_absolute() {
-            return Err(ConfigError::AbsoluteInclude { path: entry.clone() });
-        }
-        if path.components().any(|component| component == Component::ParentDir) {
-            return Err(ConfigError::TraversingInclude { path: entry.clone() });
-        }
+        refuse_include_entry(entry)?;
         if !seen.insert(entry) {
             return Err(ConfigError::DuplicateInclude { path: entry.clone() });
         }
     }
     Ok(entries)
+}
+
+/// One include entry, as authored: a spelling this runtime resolves beside the root
+/// config, or hands to a host that holds the battery under it. Neither reads a spelling
+/// that starts elsewhere or leaves the root. [`edit::add_include`] refuses an entry here
+/// before it writes one, so a document the editor wrote is one a loader reads.
+pub(crate) fn refuse_include_entry(entry: &str) -> Result<(), ConfigError> {
+    let path = Path::new(entry);
+    if path.is_absolute() {
+        return Err(ConfigError::AbsoluteInclude {
+            path: entry.to_string(),
+        });
+    }
+    if path.components().any(|component| component == Component::ParentDir) {
+        return Err(ConfigError::TraversingInclude {
+            path: entry.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// A hosted document's author runs nothing on the machine that holds it: no binding takes

@@ -1300,7 +1300,8 @@ mod tests {
         let without_include =
             crate::config::edit::remove_include(&with_alias, &includes::battery_include(&github)).unwrap();
         let without_alias =
-            includes::unbind_servers(&without_include, &[appa_package::Namespace::parse("github").unwrap()]).unwrap();
+            crate::config::edit::unbind_servers(&without_include, &[appa_package::Namespace::parse("github").unwrap()])
+                .unwrap();
         removed.deselect(PackageKind::Battery, &github);
         install
             .commit_config(Some(with_alias.as_bytes()), without_alias.as_bytes(), &removed)

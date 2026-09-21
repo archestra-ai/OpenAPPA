@@ -377,7 +377,7 @@ pub fn remove_battery(args: BatteryRemove) -> ExitCode {
         }
         let acquired = Acquired::retained(&installation, &selection, Requirements::Packages)?;
         let (_, battery) = super::battery_package(acquired.marketplace(), args.name.as_str())?;
-        let text = includes::unbind_servers(&without, &battery.namespaces)?;
+        let text = edit::unbind_servers(&without, &battery.namespaces)?;
         selection.deselect(PackageKind::Battery, &args.name);
         eprintln!("appa: validating and activating the remaining policy...");
         installation.commit_installation(Some(&before), text.as_bytes(), &selection)?;
