@@ -453,6 +453,19 @@ impl Fact {
         }
     }
 
+    /// The label this record folds into a trajectory's own: an admitted value's, or the
+    /// parent's as a resume hands it to the child. No other record moves a label.
+    pub(crate) fn inflow(&self) -> Option<(&TrajectoryId, &Label)> {
+        match self {
+            Fact::ValueAdmitted { trajectory, value, .. } => Some((trajectory, &value.label)),
+            Fact::Boundary {
+                trajectory,
+                kind: BoundaryKind::Resume { seed },
+            } => Some((trajectory, seed)),
+            _ => None,
+        }
+    }
+
     pub fn trajectory(&self) -> &TrajectoryId {
         match self {
             Fact::TrajectoryOpened { trajectory, .. }
