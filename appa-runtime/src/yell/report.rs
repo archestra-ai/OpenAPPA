@@ -168,9 +168,10 @@ pub(crate) enum RuntimeSection {
 }
 
 /// The harness a report is about, in the schema's own vocabulary: a served host by its
-/// adapter name, an embedding host by the name it files its reports under.
+/// adapter name, an embedding host by the name it files its reports under: lowercase
+/// letters, digits and hyphens, as a package name is spelled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Harness {
+pub enum Harness {
     ClaudeCode,
     Kagent,
     Embedded(&'static str),

@@ -606,7 +606,11 @@ async fn serve(args: Args) -> ExitCode {
         )
         .nest_service(
             "/mcp",
-            mcp::service_with_allowed_hosts(Arc::clone(&runtime), &args.mcp_allowed_hosts, args.adapter),
+            mcp::service_with_allowed_hosts(
+                Arc::clone(&runtime),
+                &args.mcp_allowed_hosts,
+                crate::yell::Harness::served(args.adapter),
+            ),
         )
         .merge(management)
         .with_state(state);

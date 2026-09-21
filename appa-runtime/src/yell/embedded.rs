@@ -11,8 +11,8 @@ use crate::api::{Actor, Runtime};
 /// from the embedding host, never from model-controlled tool arguments.
 pub struct Request {
     pub actor: Actor,
-    /// The name the receiver files this host's reports under: lowercase letters, digits
-    /// and hyphens, as an adapter name is spelled.
+    /// The name the receiver files this host's reports under, spelled as a package name
+    /// is: lowercase letters, digits and hyphens.
     pub harness: &'static str,
     pub endpoint: String,
     /// Public deployment hostname. Do not supply a machine name or a full URL.
@@ -28,13 +28,7 @@ pub async fn send(runtime: &Arc<Runtime>, request: Request) -> Result<String, St
     if !runtime.agent_yell() {
         return Err("Agent reporting is disabled".into());
     }
-    if request.harness.is_empty()
-        || request.harness.len() > 64
-        || !request
-            .harness
-            .bytes()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-    {
+    if request.harness.len() > 64 || appa_package::PackageName::parse(request.harness).is_err() {
         return Err("Invalid reporting harness name".into());
     }
     if request.hostname.as_ref().is_some_and(|host| {

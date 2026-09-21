@@ -171,7 +171,7 @@ async fn deployment_from(policy: String) -> Deployment {
     );
     let app = axum::Router::new().nest_service(
         "/mcp",
-        mcp::service(Arc::clone(&runtime), appa_runtime_api::AdapterName::ClaudeCode),
+        mcp::service(Arc::clone(&runtime), appa_runtime::yell::Harness::ClaudeCode),
     );
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
@@ -293,7 +293,7 @@ builtin = "hitl"
     );
     let app = axum::Router::new().nest_service(
         "/mcp",
-        mcp::service(Arc::clone(&runtime), appa_runtime_api::AdapterName::ClaudeCode),
+        mcp::service(Arc::clone(&runtime), appa_runtime::yell::Harness::ClaudeCode),
     );
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;

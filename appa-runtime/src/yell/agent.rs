@@ -12,8 +12,6 @@
 use crate::api::PermitKey;
 
 #[cfg(feature = "daemon")]
-use appa_runtime_api::AdapterName;
-
 #[cfg(feature = "daemon")]
 use super::client::{self, Receipt, SendFailure};
 #[cfg(feature = "daemon")]
@@ -74,7 +72,7 @@ pub(crate) enum Outcome {
 /// question, and a deployment that turned agent reporting on has already answered it. What
 /// may leave is the same either way — the mode chooses only how the names are spelled.
 #[cfg(feature = "daemon")]
-pub(crate) async fn yell(runtime: &std::sync::Arc<Runtime>, harness: AdapterName, args: &YellArgs) -> Outcome {
+pub(crate) async fn yell(runtime: &std::sync::Arc<Runtime>, harness: Harness, args: &YellArgs) -> Outcome {
     let acting = match runtime.take_vouched(&args.ticket()) {
         Ok((acting, _)) => acting,
         Err(refusal) => return Outcome::Unvouched(refusal),
@@ -88,7 +86,7 @@ pub(crate) async fn yell(runtime: &std::sync::Arc<Runtime>, harness: AdapterName
         author: Author::Agent,
         mode: Mode::Baseline,
         selection: selection(&acting, args.with_trajectory),
-        harness: Harness::served(harness),
+        harness,
         hostname: None,
     };
     let Ok(finished) = runtime.report_off_thread(request).await else {

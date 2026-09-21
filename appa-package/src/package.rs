@@ -353,12 +353,7 @@ impl RawPlugin {
         };
 
         match host {
-            // Never parsed from a manifest, since no served adapter spells it; the type
-            // admits it, so the refusal is stated rather than assumed.
-            Host::Embedded => Err(ManifestError::PluginHost {
-                path: path.to_path_buf(),
-                host,
-            }),
+            Host::Embedded => unreachable!("Host::parse names only served hosts"),
             Host::ClaudeCode => {
                 absent(self.images.is_some(), "images")?;
                 Ok(Plugin::ClaudeCode {
