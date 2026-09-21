@@ -43,7 +43,8 @@ fn project_root(cwd: &Path) -> PathBuf {
 
 /// The keys of every `mcpServers` map Claude Code reads for `project`: the
 /// user scope and the project's local scope in `config`, and the project
-/// scope in the project's own `.mcp.json`.
+/// scope in the project's own `.mcp.json`. The runtime's own server is left
+/// out: its tools are the runtime's, not a battery's to cover.
 fn claude_code_servers(config: Option<&Path>, project: &Path) -> BTreeSet<Namespace> {
     let mut servers = BTreeSet::new();
     if let Some(document) = config.and_then(read_json) {
@@ -57,6 +58,7 @@ fn claude_code_servers(config: Option<&Path>, project: &Path) -> BTreeSet<Namesp
     if let Some(document) = read_json(&project.join(".mcp.json")) {
         servers.extend(server_keys(&document));
     }
+    servers.retain(|server| server.as_str() != crate::init::RUNTIME_SERVER);
     servers
 }
 
@@ -329,7 +331,7 @@ mod tests {
 
     /// The three places Claude Code reads servers from are read together, the
     /// project's local scope under either spelling of its path; keys that are
-    /// not namespaces are left out.
+    /// not namespaces, and the runtime's own server, are left out.
     #[test]
     fn claude_code_servers_come_from_the_user_local_and_project_scopes() {
         let root = tempfile::tempdir().unwrap();
@@ -352,12 +354,7 @@ mod tests {
 
         assert_eq!(
             servers,
-            BTreeSet::from([
-                namespace("appa"),
-                namespace("github"),
-                namespace("linear"),
-                namespace("sentry")
-            ])
+            BTreeSet::from([namespace("github"), namespace("linear"), namespace("sentry")])
         );
     }
 

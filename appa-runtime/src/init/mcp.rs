@@ -12,7 +12,7 @@ use std::process::Command;
 
 use super::{Compensation, InitError, Undo};
 
-pub(super) const SERVER: &str = "appa";
+pub(crate) const SERVER: &str = "appa";
 
 const TEMPLATE_PREFIX: &str = "${APPA_RUNTIME_URL:-";
 const TEMPLATE_SUFFIX: &str = "}/mcp";
