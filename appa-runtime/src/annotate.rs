@@ -6,12 +6,14 @@
 //! every answer is one JSON line on standard output, written as it arrives. No trajectory
 //! is opened, so an Annotator is asked afresh each time and no tool runs.
 //!
-//! The consult gates bound how many Annotators run at once.
+//! An ask waits for its consult gate inside the consult's own deadline, so `--concurrency`
+//! bounds how many calls are in flight at once.
 
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
 use std::time::Instant;
 
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
@@ -88,7 +90,12 @@ async fn ask(runtime: &Runtime, call: &Call, repeat: u32) {
     let _ = writeln!(std::io::stdout().lock(), "{line}");
 }
 
-pub(crate) async fn run(config: Config, modules: Option<std::path::PathBuf>, repeat: u32) -> ExitCode {
+pub(crate) async fn run(
+    config: Config,
+    modules: Option<std::path::PathBuf>,
+    repeat: u32,
+    concurrency: usize,
+) -> ExitCode {
     let runtime = match Runtime::open_in_memory(config, modules) {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -113,6 +120,9 @@ pub(crate) async fn run(config: Config, modules: Option<std::path::PathBuf>, rep
         .iter()
         .flat_map(|call| (0..repeat).map(move |repeat| (call, repeat)))
         .map(|(call, repeat)| ask(&runtime, call, repeat));
-    futures_util::future::join_all(asks).await;
+    futures_util::stream::iter(asks)
+        .buffer_unordered(concurrency)
+        .collect::<()>()
+        .await;
     ExitCode::SUCCESS
 }

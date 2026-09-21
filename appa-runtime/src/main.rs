@@ -137,6 +137,10 @@ enum RuntimeCommand {
         /// How many times each call is asked.
         #[arg(long, default_value_t = 1)]
         repeat: u32,
+
+        /// How many calls are in flight at once.
+        #[arg(long, default_value_t = 4)]
+        concurrency: usize,
     },
 }
 
@@ -458,10 +462,10 @@ where
     T: Into<OsString> + Clone,
 {
     let args = Args::parse_from(args);
-    let annotate_repeat = match args.command {
+    let annotating = match args.command {
         Some(RuntimeCommand::Ensure { target, data_dir }) => return ensure(&target, args.config, data_dir),
         Some(RuntimeCommand::Stop { target }) => return stop(&target),
-        Some(RuntimeCommand::Annotate { repeat }) => Some(repeat),
+        Some(RuntimeCommand::Annotate { repeat, concurrency }) => Some((repeat, concurrency)),
         None => None,
     };
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
@@ -471,8 +475,8 @@ where
             return ExitCode::FAILURE;
         }
     };
-    match annotate_repeat {
-        Some(repeat) => runtime.block_on(annotate(args, repeat)),
+    match annotating {
+        Some((repeat, concurrency)) => runtime.block_on(annotate(args, repeat, concurrency)),
         None => runtime.block_on(serve(args)),
     }
 }
@@ -488,10 +492,10 @@ fn load_config(config_path: &Path, batteries_dir: &[PathBuf]) -> Result<(Config,
 }
 
 /// `appa runtime annotate`: see [`crate::annotate`].
-async fn annotate(args: Args, repeat: u32) -> ExitCode {
+async fn annotate(args: Args, repeat: u32, concurrency: usize) -> ExitCode {
     let config_path = args.config.unwrap_or_else(|| PathBuf::from("appa.toml"));
     match load_config(&config_path, &args.batteries_dir) {
-        Ok((config, _)) => crate::annotate::run(config, args.modules_dir, repeat).await,
+        Ok((config, _)) => crate::annotate::run(config, args.modules_dir, repeat, concurrency).await,
         Err(error) => {
             eprintln!("appa runtime annotate: {error}");
             ExitCode::FAILURE
