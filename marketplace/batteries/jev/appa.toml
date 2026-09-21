@@ -1,0 +1,25 @@
+# Jev battery: one annotator that asks TypeSafe's Jev model.
+#
+# The battery declares no tool. A tool routes to the annotator by name
+# (`annotator = "jev.tool-call"`), and a root `[[policy.annotator]]` that
+# reuses another battery's annotator name with this `command` replaces that
+# annotator. The README shows both.
+#
+# Jev answers the two label dimensions only: `delta.audience`, `delta.trust`,
+# `requires.audience`, and `requires.trust`. It never answers an effect, a
+# `history` entry, or an attention mark, so `marks` and `effects` are empty.
+#
+# The call's name and arguments leave for the TypeSafe API on every consult.
+
+[policy]
+version = 2
+
+[[policy.annotator]]
+name = "jev.tool-call"
+ranks = ["suspicious", "trusted"]
+audiences = ["self", "internal"]
+marks = []
+
+[externals.annotators."jev.tool-call"]
+command = ["python3", "jev-annotator.py"]
+token_env = "APPA_PROVIDER_JEV_API_KEY"
