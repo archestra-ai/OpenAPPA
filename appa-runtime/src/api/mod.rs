@@ -596,6 +596,16 @@ pub(crate) struct Deployment {
     externals: ExternalServices,
 }
 
+/// One Annotator's answer to one call, as `appa runtime annotate` reports it. `admitted`
+/// says whether the answer stays inside the Annotator's declared mandate: an answer that
+/// does not refuses the call in a session.
+#[cfg(feature = "daemon")]
+pub(crate) struct AnnotationConsult {
+    pub(crate) annotator: String,
+    pub(crate) outcome: crate::external::ConsultOutcome,
+    pub(crate) admitted: bool,
+}
+
 /// Which deployment this is, and with it every rule the harness fixes rather than the
 /// policy: how the policy names tools, how a recorded name is spelled back when the runtime
 /// addresses the model, and which contracts may release a spawn.
@@ -1391,6 +1401,45 @@ impl Runtime {
         let mut prepared = Prepared::new(config, modules, ToolNaming::AsAuthored)?;
         prepared.deployment.stand_in_for_remedies();
         prepared.assemble(Backend::Memory)
+    }
+
+    /// `appa runtime annotate`: the serving deployment's Annotator asked afresh about one
+    /// call, or `None` when a static contract covers it. No trajectory is opened and nothing
+    /// is appended.
+    #[cfg(feature = "daemon")]
+    pub(crate) async fn annotate(
+        &self,
+        tool: &str,
+        raw_arguments: &[u8],
+    ) -> Result<Option<AnnotationConsult>, appa_engine::engine::EngineError> {
+        let deployment = self.inner.deployment();
+        let Some(crate::engine::ExternalRequest::Annotation {
+            annotator,
+            declaration,
+            args,
+            ..
+        }) = deployment.resident.annotation_owed(tool, raw_arguments)?
+        else {
+            return Ok(None);
+        };
+        let consult = crate::consult::Consult {
+            name: annotator.clone(),
+            body: crate::consult::ConsultBody::Annotation {
+                declaration: declaration.clone(),
+                artifact: crate::consult::AnnotationArtifact { args },
+            },
+        };
+        let outcome = deployment.externals.consult(&consult, None, None).await;
+        let admitted = matches!(
+            &outcome,
+            crate::external::ConsultOutcome::Answer(answer)
+                if crate::consult::AnnotationAnswer::from_wire(answer, &declaration).is_some()
+        );
+        Ok(Some(AnnotationConsult {
+            annotator,
+            outcome,
+            admitted,
+        }))
     }
 
     /// The policy file key the serving deployment answers under. An install compares it

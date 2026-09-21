@@ -2138,22 +2138,54 @@ impl RuntimeEngine {
             _ => None,
         });
         let Some(answer) = answer else {
-            let binding = self
-                .annotators
-                .get(annotator.as_str())
-                .expect("the deployment registers every annotator the policy declares");
-            return Err(Resolution(vec![ExternalRequest::Annotation {
-                annotator: annotator.as_str().to_string(),
-                call: digest,
-                declaration: self.annotation_declaration(annotator, binding, resolved),
-                args: annotation_args(&binding.inputs, declaration, resolved),
-            }]));
+            return Err(Resolution(vec![self.annotation_request(
+                annotator,
+                declaration,
+                resolved,
+            )]));
         };
         Ok(PinnedAnnotation::new(
             annotator.clone(),
             digest,
             self.produced_annotation(answer),
         ))
+    }
+
+    fn annotation_request(
+        &self,
+        annotator: &appa_engine::names::AnnotatorName,
+        declaration: &ToolDeclaration,
+        resolved: &ResolvedCall,
+    ) -> ExternalRequest {
+        let binding = self
+            .annotators
+            .get(annotator.as_str())
+            .expect("the deployment registers every annotator the policy declares");
+        ExternalRequest::Annotation {
+            annotator: annotator.as_str().to_string(),
+            call: resolved.digest(),
+            declaration: self.annotation_declaration(annotator, binding, resolved),
+            args: annotation_args(&binding.inputs, declaration, resolved),
+        }
+    }
+
+    /// The consult a fresh proposal of this call owes its Annotator, or `None` when a static
+    /// contract covers the call. `appa runtime annotate` only: no trajectory is read or changed.
+    #[cfg(feature = "daemon")]
+    pub(crate) fn annotation_owed(
+        &self,
+        tool: &str,
+        raw_arguments: &[u8],
+    ) -> Result<Option<ExternalRequest>, EngineError> {
+        let resolved = self.engine.resolve_call(ToolName::new(tool), raw_arguments)?;
+        let declaration = self
+            .engine
+            .registry()
+            .declaration(&resolved)
+            .expect("a resolved call names its registered declaration");
+        Ok(declaration
+            .annotator()
+            .map(|annotator| self.annotation_request(annotator, declaration, &resolved)))
     }
 
     /// What one annotation consult declares: the Annotator's trusted hint, the mandate

@@ -131,6 +131,13 @@ enum RuntimeCommand {
         #[command(flatten)]
         target: crate::runtime_url::RuntimeUrl,
     },
+    /// Ask the policy's Annotators about the calls on standard input, without a session.
+    #[command(hide = true)]
+    Annotate {
+        /// How many times each call is asked.
+        #[arg(long, default_value_t = 1)]
+        repeat: u32,
+    },
 }
 
 /// `appa runtime ensure`: the start every protected SessionStart performs, run
@@ -451,11 +458,12 @@ where
     T: Into<OsString> + Clone,
 {
     let args = Args::parse_from(args);
-    match args.command {
+    let annotate_repeat = match args.command {
         Some(RuntimeCommand::Ensure { target, data_dir }) => return ensure(&target, args.config, data_dir),
         Some(RuntimeCommand::Stop { target }) => return stop(&target),
-        None => {}
-    }
+        Some(RuntimeCommand::Annotate { repeat }) => Some(repeat),
+        None => None,
+    };
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -463,7 +471,32 @@ where
             return ExitCode::FAILURE;
         }
     };
-    runtime.block_on(serve(args))
+    match annotate_repeat {
+        Some(repeat) => runtime.block_on(annotate(args, repeat)),
+        None => runtime.block_on(serve(args)),
+    }
+}
+
+fn load_config(config_path: &Path, batteries_dir: &[PathBuf]) -> Result<(Config, Vec<PathBuf>), String> {
+    let battery_dirs = if batteries_dir.is_empty() {
+        crate::batteries::default_search_path(config_path)
+    } else {
+        crate::batteries::prepare(batteries_dir)?
+    };
+    let config = Config::load_from(config_path, &battery_dirs).map_err(|error| error.to_string())?;
+    Ok((config, battery_dirs))
+}
+
+/// `appa runtime annotate`: see [`crate::annotate`].
+async fn annotate(args: Args, repeat: u32) -> ExitCode {
+    let config_path = args.config.unwrap_or_else(|| PathBuf::from("appa.toml"));
+    match load_config(&config_path, &args.batteries_dir) {
+        Ok((config, _)) => crate::annotate::run(config, args.modules_dir, repeat).await,
+        Err(error) => {
+            eprintln!("appa runtime annotate: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 async fn serve(args: Args) -> ExitCode {
@@ -484,20 +517,8 @@ async fn serve(args: Args) -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    let battery_dirs = if args.batteries_dir.is_empty() {
-        Ok(crate::batteries::default_search_path(&config_path))
-    } else {
-        crate::batteries::prepare(&args.batteries_dir)
-    };
-    let battery_dirs = match battery_dirs {
-        Ok(dirs) => dirs,
-        Err(error) => {
-            eprintln!("appa runtime: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let config = match Config::load_from(&config_path, &battery_dirs) {
-        Ok(config) => config,
+    let (config, battery_dirs) = match load_config(&config_path, &args.batteries_dir) {
+        Ok(loaded) => loaded,
         Err(error) => {
             eprintln!("appa runtime: {error}");
             return ExitCode::FAILURE;

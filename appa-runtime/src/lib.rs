@@ -2,6 +2,8 @@
 
 #[cfg(feature = "daemon")]
 mod agent_scan;
+#[cfg(feature = "daemon")]
+mod annotate;
 pub mod api;
 pub mod batteries;
 #[cfg(feature = "daemon")]
