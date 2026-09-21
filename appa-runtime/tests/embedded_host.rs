@@ -63,7 +63,7 @@ fn spell(canonical: &CanonicalTool) -> Option<String> {
     let mut segments = canonical.as_str().splitn(3, '/');
     match (segments.next(), segments.next(), segments.next()) {
         (Some("mcp"), Some(server), Some(tool)) => Some(format!("{server}.{tool}")),
-        (Some("host"), Some("testbed"), Some(name)) => Some(name.to_string()),
+        (Some("host"), Some("testbed"), Some(name)) if name != CONTROL_SPELLING => Some(name.to_string()),
         _ => None,
     }
 }

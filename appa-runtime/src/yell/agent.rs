@@ -12,7 +12,6 @@
 use crate::api::PermitKey;
 
 #[cfg(feature = "daemon")]
-#[cfg(feature = "daemon")]
 use super::client::{self, Receipt, SendFailure};
 #[cfg(feature = "daemon")]
 use super::report::{Author, Harness, ReportRequest, YellMessage};
