@@ -2,8 +2,10 @@
 //! external bindings. The harness adapter is a CLI flag on the
 //! binary, not configuration.
 
+pub mod edit;
+
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use appa_engine::audience::{DeclaredTemplate, SourceRegistration, well_formed_reader};
@@ -13,11 +15,17 @@ use serde::Deserialize;
 /// Each policy namespace bound to the connection identities the host reports for it.
 pub(crate) type ServerBindings = BTreeMap<String, Vec<String>>;
 
+/// Each child-credential variable a battery's helpers read, bound to the key the host's
+/// own store holds its value under. The runtime never looks a key up; see
+/// [`Config::credentials`].
+pub(crate) type CredentialBindings = BTreeMap<String, String>;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     policy: PolicyFile,
     /// Each policy namespace bound to the connection identities the host reports for it.
     pub(crate) server_aliases: ServerBindings,
+    credentials: CredentialBindings,
     pub(crate) inventory: appa_runtime_api::inventory::ToolInventory,
     pub externals: Externals,
     /// Deployment knobs that describe this machine's reporting posture, not its policy.
@@ -90,6 +98,26 @@ pub struct HostedBattery<'a> {
     pub name: &'a str,
     pub policy: &'a str,
     pub token_env: &'a [&'a str],
+}
+
+/// Why a host could not answer an include entry of a root document it composes with
+/// [`Config::hosted_included`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IncludeResolution {
+    /// The host holds no battery under this spelling.
+    Unknown,
+    /// The host holds one but cannot serve it now: a package that fails its own
+    /// validation, a store that cannot be read.
+    Unavailable(String),
+}
+
+/// Whether a hosted root document may list the batteries that compose under it.
+/// [`Config::hosted_included`] is the one entry point that admits `include`, and it
+/// consumes the list, so the document it stores carries none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IncludeAdmission {
+    Refused,
+    Consumed,
 }
 
 /// The API providers the `llm` builtin speaks to. Closed: the transport is compiled in
@@ -376,8 +404,15 @@ pub enum ConfigError {
     InvalidPolicyVersion,
     #[error("include path {path:?} must be relative to the root config")]
     AbsoluteInclude { path: String },
+    #[error("include path {path:?} must not leave the root config through \"..\"")]
+    TraversingInclude { path: String },
     #[error("the root config includes {path:?} more than once")]
     DuplicateInclude { path: String },
+    #[error(
+        "the root config includes {path:?}, which the host does not compose{}",
+        reason.as_deref().map(|reason| format!(": {reason}")).unwrap_or_default()
+    )]
+    UnresolvedInclude { path: String, reason: Option<String> },
     #[error("included config {path} has unsupported top-level field {field:?}")]
     IncludedTopLevel { path: String, field: String },
     #[error("included config {path} cannot set policy field {field:?}")]
@@ -494,6 +529,17 @@ pub enum ConfigError {
     UnrepresentableHostDefault { setting: &'static str },
     #[error("root config field {field:?} must be a table")]
     RootField { field: String },
+    #[error("the root config declares {field:?}, which only a host that embeds the runtime declares")]
+    FileRootField { field: String },
+    #[error(
+        "[credentials] declares {var}, which no battery helper reads as its own credential: the name starts with {}",
+        PROVIDER_CREDENTIAL_PREFIX
+    )]
+    CredentialVariable { var: String },
+    #[error("[credentials] binds {var} to no store key: the value is a string the host can look up")]
+    CredentialValue { var: String },
+    #[error("the document cannot be edited: {reason}")]
+    UneditableDocument { reason: String },
     #[error("battery {battery} binds externals.{section}.{name:?} to {var:?}, a variable the host did not grant it")]
     UngrantedBatteryCredential {
         battery: String,
@@ -592,6 +638,10 @@ struct RawConfig {
     bundle: RawBundle,
     #[serde(default)]
     server_aliases: ServerBindings,
+    /// Hosted documents only: the host's credential declaration, carried and never
+    /// resolved. See [`Config::credentials`].
+    #[serde(default)]
+    credentials: CredentialBindings,
     #[serde(default)]
     appa_inventory: appa_runtime_api::inventory::ToolInventory,
 }
@@ -763,6 +813,18 @@ impl Config {
             .as_table_mut()
             .expect("RawConfig parsed the root as a table")
             .remove("include");
+        // A credential of a battery's helper reaches the child through its own `command`
+        // binding here, from this process's environment; the declaration a host keeps in
+        // its document names a store this loader has nothing to ask.
+        if document
+            .as_table()
+            .expect("RawConfig parsed the root as a table")
+            .contains_key("credentials")
+        {
+            return Err(ConfigError::FileRootField {
+                field: "credentials".to_string(),
+            });
+        }
 
         let root_version = policy_version(&root.policy).ok_or(ConfigError::InvalidPolicyVersion)?;
         let root_annotators = declared_annotators(&root.policy);
@@ -840,15 +902,19 @@ impl Config {
     }
 
     /// The configuration of a host that holds its document in memory rather than reading
-    /// `appa.toml`: a `[policy]` table, an optional `[externals]` table and an optional
-    /// `[server_aliases]` table, plus the two settings the host fills in where the
-    /// document states neither. The document comes from an author who may run nothing on
-    /// this machine and read none of its files, so every other top-level key and every
-    /// `command` binding is refused. `server_aliases` stays admitted because it is the
+    /// `appa.toml`: a `[policy]` table, an optional `[externals]` table and the optional
+    /// `[server_aliases]` and `[credentials]` tables, plus the two settings the host fills
+    /// in where the document states neither. The document comes from an author who may run
+    /// nothing on this machine and read none of its files, so every other top-level key and
+    /// every `command` binding is refused. `server_aliases` stays admitted because it is the
     /// host's own declaration of which connections a namespace names, and a document that
     /// carries it is one snapshot: reopened or replayed under the same bytes, a trajectory
-    /// resolves its rules the way it did when it opened. Validation is otherwise the file
-    /// loader's, tokens included: a `token_env` resolves from this process's environment.
+    /// resolves its rules the way it did when it opened. `[credentials]` is admitted on the
+    /// same terms and carried, never resolved: it names, for each child-credential variable
+    /// a battery's helpers read, the key the host's store holds it under, and the host's own
+    /// authorization over who may write that table is the boundary. Validation is otherwise
+    /// the file loader's, tokens included: a `token_env` this runtime resolves and sends
+    /// itself reads this process's environment, here as in a file.
     pub fn hosted(text: &str, defaults: HostDefaults) -> Result<Config, ConfigError> {
         Config::hosted_composed(text, &[], defaults)
     }
@@ -865,15 +931,46 @@ impl Config {
         batteries: &[HostedBattery<'_>],
         defaults: HostDefaults,
     ) -> Result<Config, ConfigError> {
-        let mut document: toml::Value =
-            toml::from_str(root).map_err(|source| ConfigError::UnparsablePolicy { source })?;
+        let document = hosted_root(root, IncludeAdmission::Refused)?;
+        Config::compose_hosted(document, batteries, defaults)
+    }
+
+    /// [`Config::hosted_composed`] where the root document's own `include` list says which
+    /// batteries compose under it. Each entry, as authored, is handed to `resolve`; the
+    /// battery it answers composes exactly as a [`Config::hosted_composed`] battery does,
+    /// and the composed bytes are the same. The runtime does not read an entry as a path:
+    /// it refuses an absolute one and one that leaves the root through `..`, and hands the
+    /// rest to the host, whose answer names the battery. `include` is admitted here alone
+    /// and consumed, so the stored document carries none and a stored snapshot reopens
+    /// through [`Config::hosted`] unchanged.
+    pub fn hosted_included<'a>(
+        root: &str,
+        defaults: HostDefaults,
+        resolve: impl Fn(&str) -> Result<HostedBattery<'a>, IncludeResolution>,
+    ) -> Result<Config, ConfigError> {
+        let mut document = hosted_root(root, IncludeAdmission::Consumed)?;
+        let entries = take_include(&mut document)?;
+        let batteries = entries
+            .iter()
+            .map(|entry| {
+                resolve(entry).map_err(|resolution| ConfigError::UnresolvedInclude {
+                    path: entry.clone(),
+                    reason: match resolution {
+                        IncludeResolution::Unknown => None,
+                        IncludeResolution::Unavailable(reason) => Some(reason),
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Config::compose_hosted(document, &batteries, defaults)
+    }
+
+    fn compose_hosted(
+        mut document: toml::Value,
+        batteries: &[HostedBattery<'_>],
+        defaults: HostDefaults,
+    ) -> Result<Config, ConfigError> {
         let document_table = document.as_table_mut().expect("a TOML document parses as a table");
-        if let Some(key) = document_table
-            .keys()
-            .find(|key| !matches!(key.as_str(), "policy" | "externals" | "server_aliases"))
-        {
-            return Err(ConfigError::HostedKey { key: key.clone() });
-        }
         let root_policy = document_table.get("policy").ok_or(ConfigError::InvalidPolicyVersion)?;
         let root_version = policy_version(root_policy).ok_or(ConfigError::InvalidPolicyVersion)?;
         let root_annotators = declared_annotators(root_policy);
@@ -974,6 +1071,14 @@ impl Config {
         &self.included_batteries
     }
 
+    /// The host's own credential declaration: each child-credential variable a battery's
+    /// helpers read, bound to the key the host's store holds its value under. The runtime
+    /// carries this table and never reads a key: a hosted document runs no `command`, so
+    /// the host that runs a battery's helper is the one that delivers the credential.
+    pub fn credentials(&self) -> &BTreeMap<String, String> {
+        &self.credentials
+    }
+
     pub fn tool_names(&self) -> Vec<String> {
         self.policy
             .value()
@@ -1039,6 +1144,7 @@ impl Config {
         Ok(Config {
             policy: PolicyFile::new(text.into_bytes(), raw.policy),
             server_aliases: raw.server_aliases,
+            credentials: raw.credentials,
             inventory: raw.appa_inventory,
             reporting,
             included_batteries,
@@ -1058,6 +1164,67 @@ impl Config {
             },
         })
     }
+}
+
+/// The root document of a host, parsed and admitted: every top-level key is one a host
+/// declares, and a `[credentials]` table names child-credential variables and store keys.
+fn hosted_root(text: &str, include: IncludeAdmission) -> Result<toml::Value, ConfigError> {
+    let document: toml::Value = toml::from_str(text).map_err(|source| ConfigError::UnparsablePolicy { source })?;
+    let table = document.as_table().expect("a TOML document parses as a table");
+    if let Some(key) = table.keys().find(|key| match key.as_str() {
+        "policy" | "externals" | "server_aliases" | "credentials" => false,
+        "include" => include == IncludeAdmission::Refused,
+        _ => true,
+    }) {
+        return Err(ConfigError::HostedKey { key: key.clone() });
+    }
+    if let Some(credentials) = table.get("credentials") {
+        refuse_foreign_credentials(credentials)?;
+    }
+    Ok(document)
+}
+
+/// Every `[credentials]` key is a child-credential variable, and every value is a store
+/// key the host can look up. Which helper reads which variable is the host's concern:
+/// the runtime carries the table and resolves nothing in it.
+fn refuse_foreign_credentials(credentials: &toml::Value) -> Result<(), ConfigError> {
+    let credentials = credentials.as_table().ok_or_else(|| ConfigError::RootField {
+        field: "credentials".to_string(),
+    })?;
+    for (var, key) in credentials {
+        if !var.starts_with(PROVIDER_CREDENTIAL_PREFIX) {
+            return Err(ConfigError::CredentialVariable { var: var.clone() });
+        }
+        if !key.as_str().is_some_and(|key| !key.is_empty()) {
+            return Err(ConfigError::CredentialValue { var: var.clone() });
+        }
+    }
+    Ok(())
+}
+
+/// The include list a hosted root authored, taken out of the document it composes, with
+/// every entry refused that no host answer could rescue: one this runtime cannot read as
+/// a relative spelling, and one the root states twice.
+fn take_include(document: &mut toml::Value) -> Result<Vec<String>, ConfigError> {
+    let table = document.as_table_mut().expect("a TOML document parses as a table");
+    let Some(include) = table.remove("include") else {
+        return Ok(Vec::new());
+    };
+    let entries = Vec::<String>::deserialize(include).map_err(|source| ConfigError::UnparsablePolicy { source })?;
+    let mut seen = std::collections::BTreeSet::new();
+    for entry in &entries {
+        let path = Path::new(entry);
+        if path.is_absolute() {
+            return Err(ConfigError::AbsoluteInclude { path: entry.clone() });
+        }
+        if path.components().any(|component| component == Component::ParentDir) {
+            return Err(ConfigError::TraversingInclude { path: entry.clone() });
+        }
+        if !seen.insert(entry) {
+            return Err(ConfigError::DuplicateInclude { path: entry.clone() });
+        }
+    }
+    Ok(entries)
 }
 
 /// A hosted document's author runs nothing on the machine that holds it: no binding takes
@@ -2672,6 +2839,35 @@ mod tests {
         Config::hosted_composed(root, batteries, HOST_DEFAULTS)
     }
 
+    fn hosted_included<'a>(
+        root: &str,
+        resolve: impl Fn(&str) -> Result<HostedBattery<'a>, IncludeResolution>,
+    ) -> Result<Config, ConfigError> {
+        Config::hosted_included(root, HOST_DEFAULTS, resolve)
+    }
+
+    /// Every battery the host of these tests holds, under the spelling its root
+    /// documents include it as.
+    fn hosted_store(entry: &str) -> Result<HostedBattery<'static>, IncludeResolution> {
+        match entry {
+            "batteries/notes@sha256-1111/appa.toml" => Ok(HostedBattery {
+                name: "notes",
+                policy: NOTES_BATTERY,
+                token_env: &[],
+            }),
+            "batteries/desk@sha256-2222/appa.toml" => Ok(HostedBattery {
+                name: "desk",
+                policy: DESK_BATTERY,
+                token_env: &[],
+            }),
+            _ => Err(IncludeResolution::Unknown),
+        }
+    }
+
+    const NOTES_BATTERY: &str = "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/notes/read\"\ndelta = {}\n";
+
+    const DESK_BATTERY: &str = "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/desk/list\"\ndelta = {}\n";
+
     fn tool_names(config: &Config) -> Vec<String> {
         config.tool_names()
     }
@@ -2748,6 +2944,227 @@ mod tests {
             config.policy_file().bytes(),
             "composition is deterministic"
         );
+    }
+
+    const INCLUDED_ROOT: &str = "include = [\"batteries/notes@sha256-1111/appa.toml\", \"batteries/desk@sha256-2222/appa.toml\"]\n[policy]\nversion = 2\n[[policy.tool]]\nname = \"root__read\"\ndelta = {}\n[credentials]\nAPPA_PROVIDER_NOTES_TOKEN = \"notes_prod\"\n";
+
+    /// A root that lists its own batteries composes what the host would have composed by
+    /// handing the same batteries in, and the list it composed from is spent: the stored
+    /// document is one a host reopens with no list of its own.
+    #[test]
+    fn a_hosted_root_composes_the_batteries_its_include_list_names() {
+        let config = hosted_included(INCLUDED_ROOT, hosted_store).expect("the host answers both entries");
+        assert_eq!(
+            tool_names(&config),
+            ["root__read", "mcp/notes/read", "mcp/desk/list"],
+            "each battery appends in the order the list states it"
+        );
+        assert_eq!(config.included_batteries(), ["desk", "notes"]);
+
+        let handed = hosted_composed(
+            "[policy]\nversion = 2\n[[policy.tool]]\nname = \"root__read\"\ndelta = {}\n[credentials]\nAPPA_PROVIDER_NOTES_TOKEN = \"notes_prod\"\n",
+            &[
+                hosted_store("batteries/notes@sha256-1111/appa.toml").unwrap(),
+                hosted_store("batteries/desk@sha256-2222/appa.toml").unwrap(),
+            ],
+        )
+        .expect("the same batteries compose");
+        assert_eq!(config.policy_file().bytes(), handed.policy_file().bytes());
+
+        let stored = String::from_utf8(config.policy_file().bytes().to_vec()).expect("UTF-8");
+        assert!(!stored.contains("include"), "the include list is consumed");
+        let reopened = hosted(&stored).expect("the stored document is a hosted document");
+        assert_eq!(reopened.policy_file().bytes(), config.policy_file().bytes());
+        assert_eq!(reopened.credentials(), config.credentials());
+        assert_eq!(
+            reopened.credentials(),
+            &BTreeMap::from([("APPA_PROVIDER_NOTES_TOKEN".to_string(), "notes_prod".to_string())])
+        );
+    }
+
+    /// The runtime does not read an include entry as anything but text: the host's own
+    /// spelling reaches it whole, and the host's answer names the battery.
+    #[test]
+    fn an_include_entry_reaches_the_host_as_authored() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let config = hosted_included(INCLUDED_ROOT, |entry| {
+            seen.borrow_mut().push(entry.to_string());
+            hosted_store(entry)
+        })
+        .expect("the host answers both entries");
+        assert_eq!(
+            seen.into_inner(),
+            [
+                "batteries/notes@sha256-1111/appa.toml",
+                "batteries/desk@sha256-2222/appa.toml"
+            ]
+        );
+        assert_eq!(config.included_batteries(), ["desk", "notes"]);
+    }
+
+    /// An entry this runtime would have to read as a path of its own is refused without
+    /// asking the host, and so is one the root states twice.
+    #[test]
+    fn an_include_entry_the_runtime_refuses_never_reaches_the_host() {
+        let unasked = |_: &str| -> Result<HostedBattery<'static>, IncludeResolution> {
+            panic!("a refused entry is never resolved")
+        };
+        let root = |include: &str| format!("{include}\n{HOSTED_ROOT}");
+        for list in ["include = \"batteries/notes@sha256-1111/appa.toml\"", "include = [7]"] {
+            assert!(
+                matches!(
+                    hosted_included(&root(list), unasked),
+                    Err(ConfigError::UnparsablePolicy { .. })
+                ),
+                "{list}"
+            );
+        }
+        assert!(matches!(
+            hosted_included(&root("include = [\"/srv/batteries/notes/appa.toml\"]"), unasked),
+            Err(ConfigError::AbsoluteInclude { path }) if path == "/srv/batteries/notes/appa.toml"
+        ));
+        assert!(matches!(
+            hosted_included(&root("include = [\"../notes/appa.toml\"]"), unasked),
+            Err(ConfigError::TraversingInclude { path }) if path == "../notes/appa.toml"
+        ));
+        assert!(matches!(
+            hosted_included(&root("include = [\"batteries/notes@sha256-1111/appa.toml\", \"batteries/notes@sha256-1111/appa.toml\"]"), unasked),
+            Err(ConfigError::DuplicateInclude { path }) if path == "batteries/notes@sha256-1111/appa.toml"
+        ));
+    }
+
+    /// The host answers for the batteries it holds: an entry it does not know, one it
+    /// cannot serve now, and two entries that name one battery are each refused.
+    #[test]
+    fn a_host_that_cannot_answer_an_entry_refuses_the_document() {
+        let root = |include: &str| format!("{include}\n{HOSTED_ROOT}");
+        assert!(matches!(
+            hosted_included(&root("include = [\"batteries/gone@sha256-9999/appa.toml\"]"), hosted_store),
+            Err(ConfigError::UnresolvedInclude { path, reason: None }) if path == "batteries/gone@sha256-9999/appa.toml"
+        ));
+        assert!(matches!(
+            hosted_included(&root("include = [\"batteries/notes@sha256-1111/appa.toml\"]"), |_| Err(
+                IncludeResolution::Unavailable("the upload does not validate".to_string())
+            )),
+            Err(ConfigError::UnresolvedInclude { path, reason: Some(reason) })
+                if path == "batteries/notes@sha256-1111/appa.toml" && reason == "the upload does not validate"
+        ));
+        assert!(matches!(
+            hosted_included(
+                &root("include = [\"batteries/notes@sha256-1111/appa.toml\", \"batteries/notes@sha256-3333/appa.toml\"]"),
+                |_| Ok(HostedBattery {
+                    name: "notes",
+                    policy: NOTES_BATTERY,
+                    token_env: &[],
+                })
+            ),
+            Err(ConfigError::DuplicateInclude { path }) if path == "notes"
+        ));
+    }
+
+    /// The host's credential declaration rides inside the document, as its server
+    /// bindings do: it survives composition, reopening, and naming a variable no
+    /// environment of this process holds, because the runtime resolves none of it.
+    #[test]
+    fn a_hosted_document_carries_the_hosts_credential_declaration() {
+        const TEXT: &str = "[credentials]\nAPPA_PROVIDER_GITHUB_TOKEN = \"github_prod\"\n[policy]\nversion = 2\n";
+        let declared = BTreeMap::from([("APPA_PROVIDER_GITHUB_TOKEN".to_string(), "github_prod".to_string())]);
+        let config = hosted(TEXT).expect("credentials are the host's to declare");
+        assert_eq!(config.credentials(), &declared);
+        let stored = String::from_utf8(config.policy_file().bytes().to_vec()).expect("UTF-8");
+        let reopened = hosted(&stored).expect("the stored document reopens");
+        assert_eq!(reopened.credentials(), &declared);
+        assert_eq!(reopened.policy_file().bytes(), config.policy_file().bytes());
+
+        let composed = hosted_composed(
+            TEXT,
+            &[HostedBattery {
+                name: "notes",
+                policy: NOTES_BATTERY,
+                token_env: &[],
+            }],
+        )
+        .expect("a battery composes under a document that declares credentials");
+        assert_eq!(composed.credentials(), &declared);
+    }
+
+    /// Nothing here says which helper reads which variable — that is the host's — but a
+    /// key outside the child-credential namespace names no helper's credential at all,
+    /// and a value the host cannot look up binds nothing.
+    #[test]
+    fn a_credential_declaration_names_child_credentials_and_store_keys() {
+        for var in ["APPA_BRIDGE_TOKEN", "GITHUB_TOKEN"] {
+            let text = format!("[credentials]\n{var} = \"github_prod\"\n[policy]\nversion = 2\n");
+            assert!(
+                matches!(hosted(&text), Err(ConfigError::CredentialVariable { var: refused }) if refused == var),
+                "{var}"
+            );
+        }
+        for value in ["\"\"", "3", "[\"github_prod\"]"] {
+            let text = format!("[credentials]\nAPPA_PROVIDER_GITHUB_TOKEN = {value}\n[policy]\nversion = 2\n");
+            assert!(
+                matches!(hosted(&text), Err(ConfigError::CredentialValue { var }) if var == "APPA_PROVIDER_GITHUB_TOKEN"),
+                "{value}"
+            );
+        }
+        assert!(matches!(
+            hosted("credentials = \"github_prod\"\n[policy]\nversion = 2\n"),
+            Err(ConfigError::RootField { field }) if field == "credentials"
+        ));
+    }
+
+    /// The declaration belongs to the host that composes the document: a file root has no
+    /// store to name, and a battery is another author's text.
+    #[test]
+    fn only_a_host_declares_credentials() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(
+            &path,
+            "[credentials]\nAPPA_PROVIDER_GITHUB_TOKEN = \"github_prod\"\n[policy]\nversion = 2\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+        )
+        .expect("write file config");
+        assert!(matches!(
+            Config::load(&path),
+            Err(ConfigError::FileRootField { field }) if field == "credentials"
+        ));
+
+        assert!(matches!(
+            hosted_composed(
+                HOSTED_ROOT,
+                &[HostedBattery {
+                    name: "rogue",
+                    policy: "[credentials]\nAPPA_PROVIDER_GITHUB_TOKEN = \"github_prod\"\n[policy]\nversion = 2\n",
+                    token_env: &[],
+                }],
+            ),
+            Err(ConfigError::IncludedTopLevel { path, field }) if path == "rogue" && field == "credentials"
+        ));
+    }
+
+    /// The host's own declarations are admitted before the document says anything else,
+    /// so a root that gets one wrong hears about that one.
+    #[test]
+    fn host_declarations_are_refused_before_the_include_list() {
+        let unasked = |_: &str| -> Result<HostedBattery<'static>, IncludeResolution> {
+            panic!("a refused document is never resolved")
+        };
+        assert!(matches!(
+            Config::hosted_included(
+                "[reporting]\nagent_yell = true\n[credentials]\nGITHUB_TOKEN = \"k\"\ninclude = [\"/srv/notes.toml\"]\n[policy]\nversion = 2\n",
+                HOST_DEFAULTS,
+                unasked,
+            ),
+            Err(ConfigError::HostedKey { key }) if key == "reporting"
+        ));
+        assert!(matches!(
+            Config::hosted_included(
+                "include = [\"/srv/notes.toml\"]\n[credentials]\nGITHUB_TOKEN = \"k\"\n[policy]\nversion = 2\n",
+                HOST_DEFAULTS,
+                unasked,
+            ),
+            Err(ConfigError::CredentialVariable { var }) if var == "GITHUB_TOKEN"
+        ));
     }
 
     #[test]
@@ -2911,6 +3328,20 @@ mod tests {
                 "{key}"
             );
         }
+        // Only the loader that consumes an include list admits one: a host that hands its
+        // batteries in keeps saying which they are, and the document does not.
+        let text = "include = [\"batteries/notes@sha256-1111/appa.toml\"]\n[policy]\nversion = 2\n";
+        assert!(matches!(
+            hosted_composed(
+                text,
+                &[HostedBattery {
+                    name: "notes",
+                    policy: NOTES_BATTERY,
+                    token_env: &[],
+                }],
+            ),
+            Err(ConfigError::HostedKey { key }) if key == "include"
+        ));
     }
 
     #[test]

@@ -1,9 +1,9 @@
 //! The root config's `include` list and `server_aliases` table, as the
-//! installer edits them. One spelling names a battery,
+//! installer reads them. One spelling names a battery,
 //! `batteries/<name>/appa.toml`, and it resolves beside the config, where the
-//! install keeps the store. The installer owns nothing in the config: a line
-//! it wrote and a line the person wrote read the same, and an edit changes
-//! exactly the entry it names.
+//! install keeps the store. The edits themselves are [`crate::config::edit`]'s;
+//! what the installer adds here is the battery spelling, the reading back, and
+//! the uninstall, which takes the aliases of a battery that goes.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -12,6 +12,7 @@ use appa_package::{Namespace, PackageName};
 use toml_edit::{DocumentMut, Item};
 
 use super::InstallError;
+use crate::config::edit::bound_servers;
 
 pub(crate) fn battery_include(name: &PackageName) -> String {
     format!("batteries/{name}/appa.toml")
@@ -20,87 +21,6 @@ pub(crate) fn battery_include(name: &PackageName) -> String {
 fn document(text: &str) -> Result<DocumentMut, InstallError> {
     text.parse()
         .map_err(|error: toml_edit::TomlError| InstallError::Invalid(error.to_string()))
-}
-
-fn include_list(document: &mut DocumentMut) -> Result<&mut toml_edit::Array, InstallError> {
-    if document.get("include").is_none() {
-        // Root keys precede tables; toml_edit places the new key before the
-        // authored tables without reserializing them.
-        document["include"] = toml_edit::value(toml_edit::Array::new());
-    }
-    let includes = document["include"]
-        .as_array_mut()
-        .ok_or_else(|| InstallError::Invalid("include must be an array".into()))?;
-    if includes.iter().any(|value| value.as_str().is_none()) {
-        return Err(InstallError::Invalid("include entries must be strings".into()));
-    }
-    Ok(includes)
-}
-
-/// The text with `include` in its include list once: unchanged when it is
-/// there, under any spelling that names the same battery.
-pub(crate) fn add(text: &str, include: &str) -> Result<String, InstallError> {
-    let mut document = document(text)?;
-    let includes = include_list(&mut document)?;
-    let battery = crate::batteries::name_from_include(Path::new(include));
-    let present = includes.iter().filter_map(toml_edit::Value::as_str).any(|entry| {
-        entry == include || (battery.is_some() && crate::batteries::name_from_include(Path::new(entry)) == battery)
-    });
-    if present {
-        return Ok(text.to_owned());
-    }
-    includes.push(include);
-    Ok(document.to_string())
-}
-
-/// The text without `include`: unchanged when it is not there. Every entry
-/// spelled exactly so goes; another spelling of the same file is the person's
-/// and stays.
-pub(crate) fn remove(text: &str, include: &str) -> Result<String, InstallError> {
-    let mut document = document(text)?;
-    let Some(includes) = document.get_mut("include").and_then(Item::as_array_mut) else {
-        return Ok(text.to_owned());
-    };
-    let before = includes.len();
-    includes.retain(|value| value.as_str() != Some(include));
-    if includes.len() == before {
-        return Ok(text.to_owned());
-    }
-    if includes.is_empty() {
-        document.remove("include");
-    }
-    Ok(document.to_string())
-}
-
-/// The text with `server_aliases.<namespace>` naming exactly `servers`, in
-/// their order; a binding already spelled so is left as written.
-pub(crate) fn bind_servers(text: &str, namespace: &Namespace, servers: &[String]) -> Result<String, InstallError> {
-    let mut document = document(text)?;
-    if document.get("server_aliases").is_none() {
-        document["server_aliases"] = toml_edit::table();
-    }
-    let aliases = document["server_aliases"]
-        .as_table_like_mut()
-        .ok_or_else(|| InstallError::Invalid("server_aliases must be a table".into()))?;
-    if aliases
-        .get(namespace.as_str())
-        .is_some_and(|bound| bound_servers(bound).as_deref() == Some(servers))
-    {
-        return Ok(text.to_owned());
-    }
-    aliases.insert(
-        namespace.as_str(),
-        toml_edit::value(servers.iter().map(String::as_str).collect::<toml_edit::Array>()),
-    );
-    Ok(document.to_string())
-}
-
-/// The servers one binding names: an array of strings, else nothing.
-fn bound_servers(item: &Item) -> Option<Vec<String>> {
-    item.as_array()?
-        .iter()
-        .map(|server| server.as_str().map(str::to_owned))
-        .collect()
 }
 
 /// The text without the aliases of `namespaces`: a battery's aliases mean
@@ -161,32 +81,15 @@ fn included_in(document: &DocumentMut) -> BTreeSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::edit::{add_include, bind_servers};
 
     const AUTHORED: &str = "# my policy\n[policy]\nversion = 2\n# keep this order\n[[policy.tool]]\nname = 'Read'\n";
 
     #[test]
-    fn an_include_is_added_once_and_the_authored_text_stays() {
+    fn an_added_include_is_the_battery_the_config_includes() {
         let github = PackageName::parse("github").unwrap();
-        let include = battery_include(&github);
-        let added = add(AUTHORED, &include).unwrap();
-        assert!(added.contains(AUTHORED));
-        assert_eq!(add(&added, &include).unwrap(), added);
-        let spelled = "include = ['./batteries/github/appa.toml']\n";
-        assert_eq!(add(spelled, &include).unwrap(), spelled);
+        let added = add_include(AUTHORED, &battery_include(&github)).unwrap();
         assert_eq!(included(&added).unwrap(), BTreeSet::from(["github".to_owned()]));
-        assert_eq!(remove(&added, &include).unwrap(), AUTHORED);
-    }
-
-    #[test]
-    fn removal_takes_the_spelled_entry_and_leaves_another_spelling_of_it() {
-        let text = "include = ['./batteries/github/appa.toml', 'batteries/github/appa.toml', 'other.toml']\n";
-        let without = remove(text, "batteries/github/appa.toml").unwrap();
-        assert_eq!(without, "include = ['./batteries/github/appa.toml', 'other.toml']\n");
-        assert_eq!(remove(&without, "batteries/github/appa.toml").unwrap(), without);
-        assert_eq!(
-            remove("[policy]\nversion = 2\n", "batteries/github/appa.toml").unwrap(),
-            "[policy]\nversion = 2\n"
-        );
     }
 
     #[test]
@@ -196,28 +99,17 @@ mod tests {
     }
 
     #[test]
-    fn a_server_binding_replaces_the_namespaces_alias_and_unbinding_takes_only_the_named_ones() {
+    fn unbinding_takes_only_the_named_namespaces_and_the_last_one_takes_the_table() {
         let servers = |names: &[&str]| names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>();
         let github = Namespace::parse("github").unwrap();
-        let bound = bind_servers(AUTHORED, &github, &servers(&["work-github"])).unwrap();
-        assert!(bound.contains(AUTHORED));
+        let slack = Namespace::parse("slack").unwrap();
+        let bound = bind_servers(AUTHORED, github.as_str(), &servers(&["home-github", "lab-github"])).unwrap();
         assert_eq!(
-            bind_servers(&bound, &github, &servers(&["work-github"])).unwrap(),
-            bound
-        );
-        assert_eq!(
-            batteries(&bound).unwrap().1,
-            crate::config::ServerBindings::from([("github".to_owned(), servers(&["work-github"]))])
-        );
-        let rebound = bind_servers(&bound, &github, &servers(&["home-github", "lab-github"])).unwrap();
-        assert!(rebound.contains("home-github") && !rebound.contains("work-github"));
-        assert_eq!(
-            batteries(&rebound).unwrap().1["github"],
+            batteries(&bound).unwrap().1["github"],
             servers(&["home-github", "lab-github"])
         );
         assert!(batteries("[server_aliases]\ngithub = 'work-github'\n").is_err());
-        let slack = Namespace::parse("slack").unwrap();
-        let with_slack = bind_servers(&rebound, &slack, &servers(&["team-slack"])).unwrap();
+        let with_slack = bind_servers(&bound, slack.as_str(), &servers(&["team-slack"])).unwrap();
         let unbound = unbind_servers(&with_slack, std::slice::from_ref(&github)).unwrap();
         assert!(!unbound.contains("home-github") && unbound.contains("team-slack"));
         assert_eq!(
