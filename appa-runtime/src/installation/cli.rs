@@ -10,6 +10,7 @@ use clap::Args;
 use serde::Serialize;
 
 use super::{Acquired, InstallError, Installation, Requirements, Selection, discover, includes};
+use crate::config::edit;
 
 #[derive(Debug, Args)]
 pub struct Target {
@@ -263,7 +264,7 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
         let mut text = text;
         for name in &args.names {
             selection.select(PackageKind::Battery, name);
-            text = includes::add(&text, &includes::battery_include(name))?;
+            text = edit::add_include(&text, &includes::battery_include(name))?;
         }
         if let [server] = args.server.as_slice()
             && batteries[0].namespaces.len() == 1
@@ -278,7 +279,7 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
             if battery.namespaces.len() != 1 {
                 return Err(InstallError::Invalid("this battery has multiple namespaces; configure server_aliases explicitly in the deployment config".into()));
             }
-            text = includes::bind_servers(&text, &battery.namespaces[0], &args.server)?;
+            text = edit::bind_servers(&text, battery.namespaces[0].as_str(), &args.server)?;
         }
         eprintln!("appa: validating and activating the selected policy...");
         installation.commit_installation(Some(&before), text.as_bytes(), &selection)?;
@@ -359,7 +360,7 @@ pub fn remove_battery(args: BatteryRemove) -> ExitCode {
             .selection()?
             .ok_or_else(|| InstallError::Invalid("no installed selection for this config".into()))?;
         let text = String::from_utf8(before.clone()).map_err(|error| InstallError::Invalid(error.to_string()))?;
-        let without = includes::remove(&text, &includes::battery_include(&args.name))?;
+        let without = edit::remove_include(&text, &includes::battery_include(&args.name))?;
         // Another spelling of the include is the person's line; it stays,
         // and so does the battery until they take it out.
         if includes::included(&without)?.contains(args.name.as_str()) {
@@ -376,7 +377,8 @@ pub fn remove_battery(args: BatteryRemove) -> ExitCode {
         }
         let acquired = Acquired::retained(&installation, &selection, Requirements::Packages)?;
         let (_, battery) = super::battery_package(acquired.marketplace(), args.name.as_str())?;
-        let text = includes::unbind_servers(&without, &battery.namespaces)?;
+        let namespaces = battery.namespaces.iter().map(Namespace::as_str).collect::<Vec<_>>();
+        let text = edit::unbind_servers(&without, &namespaces)?;
         selection.deselect(PackageKind::Battery, &args.name);
         eprintln!("appa: validating and activating the remaining policy...");
         installation.commit_installation(Some(&before), text.as_bytes(), &selection)?;
@@ -654,7 +656,7 @@ pub fn install(args: Install) -> ExitCode {
         included.retain(|battery| !selection.batteries.contains(battery.as_str()));
         for battery in &included {
             selection.select(PackageKind::Battery, battery);
-            text = includes::add(&text, &includes::battery_include(battery))?;
+            text = edit::add_include(&text, &includes::battery_include(battery))?;
         }
         eprintln!("appa: verifying artifacts and preparing selected plugins...");
         installation.commit_installation(before.as_deref(), text.as_bytes(), &selection)?;

@@ -46,6 +46,14 @@ pub enum InstallError {
     State { path: PathBuf, reason: String },
 }
 
+/// An edit the installer asks of [`crate::config::edit`] fails on the document it was
+/// handed, which is input like any other the installer reads.
+impl From<crate::config::ConfigError> for InstallError {
+    fn from(error: crate::config::ConfigError) -> InstallError {
+        InstallError::Invalid(error.to_string())
+    }
+}
+
 fn io(operation: &'static str, path: &Path, source: std::io::Error) -> InstallError {
     InstallError::Io {
         operation,
@@ -1274,14 +1282,10 @@ mod tests {
         let github = PackageName::parse("github").unwrap();
         let base = "# authored deployment\n[policy]\nversion=2\n[externals]\ntimeout_ms=100\nmax_body_bytes=1024\n";
         let store = crate::batteries::store_dir(install.config_path());
-        let with_include = includes::add(base, &includes::battery_include(&github)).unwrap();
-        let with_alias = includes::bind_servers(
-            &with_include,
-            &appa_package::Namespace::parse("github").unwrap(),
-            &["work-github".to_owned()],
-        )
-        .unwrap();
-        let stray = includes::add(&with_alias, "batteries/stray/appa.toml").unwrap();
+        let with_include = crate::config::edit::add_include(base, &includes::battery_include(&github)).unwrap();
+        let with_alias =
+            crate::config::edit::bind_servers(&with_include, "github", &["work-github".to_owned()]).unwrap();
+        let stray = crate::config::edit::add_include(&with_alias, "batteries/stray/appa.toml").unwrap();
         assert!(install.commit_config(None, stray.as_bytes(), &selected).is_err());
         assert!(!store.exists(), "a refused commit leaves the store alone");
         install.commit_config(None, with_alias.as_bytes(), &selected).unwrap();
@@ -1293,9 +1297,9 @@ mod tests {
             Some("mcp/github/read")
         );
         let mut removed = selected.clone();
-        let without_include = includes::remove(&with_alias, &includes::battery_include(&github)).unwrap();
-        let without_alias =
-            includes::unbind_servers(&without_include, &[appa_package::Namespace::parse("github").unwrap()]).unwrap();
+        let without_include =
+            crate::config::edit::remove_include(&with_alias, &includes::battery_include(&github)).unwrap();
+        let without_alias = crate::config::edit::unbind_servers(&without_include, &["github"]).unwrap();
         removed.deselect(PackageKind::Battery, &github);
         install
             .commit_config(Some(with_alias.as_bytes()), without_alias.as_bytes(), &removed)
