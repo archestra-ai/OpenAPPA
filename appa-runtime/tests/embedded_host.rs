@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use appa_eventlog::{Backend, LogStore};
-use appa_runtime::api::{RemedyOutcome, Runtime};
+use appa_runtime::api::{OpenError, RemedyOutcome, Runtime};
 use appa_runtime::config::{Config, HostDefaults, HostedBattery};
 use appa_runtime::hooks;
 use appa_runtime_api::{
@@ -84,6 +84,10 @@ fn adapter() -> Adapter {
 }
 
 fn embedded_runtime() -> Runtime {
+    open_under(adapter()).expect("the runtime opens under the host's adapter")
+}
+
+fn open_under(adapter: Adapter) -> Result<Runtime, OpenError> {
     let config = Config::hosted_composed(
         ROOT,
         &[HostedBattery {
@@ -98,7 +102,18 @@ fn embedded_runtime() -> Runtime {
     )
     .expect("the hosted document composes");
     let store = Arc::new(LogStore::open(Backend::Memory).expect("an in-memory log opens"));
-    Runtime::open_with_store_as(config, store, None, adapter()).expect("the runtime opens under the host's adapter")
+    Runtime::open_with_store_as(config, store, None, adapter)
+}
+
+/// Every remedy tells the model to call the control tool by the host's spelling, so an
+/// adapter that has none would dead-end the model on a name it cannot dispatch.
+#[test]
+fn an_adapter_that_spells_no_control_tool_is_refused() {
+    let unspelled = Adapter {
+        spell: |canonical| (!canonical.is_control()).then(|| spell(canonical)).flatten(),
+        ..adapter()
+    };
+    assert!(matches!(open_under(unspelled), Err(OpenError::UnspelledControlTool)));
 }
 
 /// A call as the host hands it over: derived through the adapter first, the way the wire

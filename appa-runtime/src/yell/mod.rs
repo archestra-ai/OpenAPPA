@@ -36,6 +36,6 @@ pub(crate) use diagnostic::{
 #[cfg(feature = "daemon")]
 pub(crate) use report::{Author, Finished, Origin, Oversize, Report, ReportId, ReportRequest, YellMessage};
 #[cfg(feature = "daemon")]
-pub use report::{Harness, HarnessName};
+pub use report::{Harness, HarnessName, HarnessNameError};
 #[cfg(feature = "daemon")]
 pub(crate) use tokens::Mode;

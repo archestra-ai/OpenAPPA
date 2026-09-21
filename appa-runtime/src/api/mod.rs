@@ -404,6 +404,8 @@ pub enum OpenError {
     UnsupportedPolicy(String),
     #[error("policy declares reserved tool name {0}")]
     ReservedTool(String),
+    #[error("the adapter spells no name for the control tool, which every remedy tells the model to call")]
+    UnspelledControlTool,
     #[error("the policy names tool {name} in {field}, which a served deployment cannot name: {detail}")]
     NonCanonicalTool {
         field: &'static str,
@@ -957,6 +959,9 @@ impl Runtime {
         modules: Option<PathBuf>,
         adapter: Adapter,
     ) -> Result<Runtime, OpenError> {
+        if (adapter.spell)(&appa_runtime_api::CanonicalTool::control()).is_none() {
+            return Err(OpenError::UnspelledControlTool);
+        }
         Ok(Prepared::new(config, modules, ToolNaming::Canonical { adapter })?.with_store(store, None))
     }
 

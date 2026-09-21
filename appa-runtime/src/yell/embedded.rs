@@ -137,7 +137,15 @@ mod tests {
     #[test]
     fn a_harness_name_is_spelled_as_a_package_name_within_a_bound() {
         assert!(HarnessName::parse("test-platform").is_ok());
-        for invalid in ["", "Test Platform", "-lead", &"a".repeat(HarnessName::MAX_LEN + 1)] {
+        for invalid in [
+            "",
+            "Test Platform",
+            "-lead",
+            &"a".repeat(HarnessName::MAX_LEN + 1),
+            "claude-code",
+            "kagent",
+            "embedded",
+        ] {
             assert!(HarnessName::parse(invalid).is_err(), "{invalid:?}");
         }
     }

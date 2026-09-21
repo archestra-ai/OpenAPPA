@@ -177,18 +177,40 @@ pub enum Harness {
 }
 
 /// The name an embedding host files its reports under: spelled as a package name is,
-/// lowercase letters, digits and hyphens, and at most 64 bytes long.
+/// lowercase letters, digits and hyphens, at most 64 bytes long, and never an adapter
+/// name, so a receipt or trace tells an embedding host from a served deployment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HarnessName(String);
+
+#[derive(Debug, thiserror::Error)]
+pub enum HarnessNameError {
+    #[error(transparent)]
+    Malformed(#[from] appa_package::NameError),
+    #[error("`{name}` is longer than {max} bytes")]
+    TooLong { name: String, max: usize },
+    #[error("`{0}` is an adapter name, which an embedding host cannot report as")]
+    Reserved(String),
+}
 
 impl HarnessName {
     pub const MAX_LEN: usize = 64;
 
-    pub fn parse(text: &str) -> Result<Self, appa_package::NameError> {
+    pub fn parse(text: &str) -> Result<Self, HarnessNameError> {
         if text.len() > Self::MAX_LEN {
-            return Err(appa_package::NameError::Malformed(text.to_owned()));
+            return Err(HarnessNameError::TooLong {
+                name: text.to_owned(),
+                max: Self::MAX_LEN,
+            });
         }
-        appa_package::PackageName::parse(text).map(|_| Self(text.to_owned()))
+        appa_package::PackageName::parse(text)?;
+        let reserved = AdapterName::ALL
+            .iter()
+            .chain(std::iter::once(&AdapterName::Embedded))
+            .any(|adapter| adapter.as_str() == text);
+        if reserved {
+            return Err(HarnessNameError::Reserved(text.to_owned()));
+        }
+        Ok(Self(text.to_owned()))
     }
 
     pub fn as_str(&self) -> &str {
