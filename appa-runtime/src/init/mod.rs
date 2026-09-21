@@ -23,6 +23,7 @@ mod removal;
 pub(crate) mod settings;
 mod skill;
 
+pub(crate) use self::mcp::SERVER as RUNTIME_SERVER;
 pub use self::paths::installed_config_path;
 pub use self::removal::{Purge, PurgedRuntime, claude_code_purge, claude_code_remove};
 
