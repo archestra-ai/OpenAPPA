@@ -1872,26 +1872,25 @@ impl<'a> Sequence<'a> {
         total
     }
 
+    /// The flow moves exactly when the trajectory's label does. A block and its remedies are
+    /// derived from that label, so a record that leaves it where it was — a release, a metadata
+    /// read, a public file — changes nothing an open offer was derived from, and the offer stands.
     fn implied_advance(&self, fact: &Fact) -> crate::basis::BasisAdvance {
+        let mut advance = self.unlabelled_advance(fact);
+        if let Some((trajectory, label)) = fact.inflow()
+            && self.projection.admission_moves_label(trajectory, label)
+        {
+            advance.absorb(&crate::basis::BasisAdvance::flow(trajectory));
+        }
+        advance
+    }
+
+    fn unlabelled_advance(&self, fact: &Fact) -> crate::basis::BasisAdvance {
         use crate::basis::BasisAdvance;
         match fact {
-            Fact::DispatchOpened {
-                trajectory,
-                dispatch,
-                tool,
-                declaration,
-                proposed_effects,
-                ..
-            } => {
-                let mut advance = BasisAdvance::default();
-                if !proposed_effects.is_empty() {
-                    advance.absorb(&BasisAdvance::family());
-                }
-                if self.result_can_restrict(tool, *declaration, dispatch) {
-                    advance.absorb(&BasisAdvance::flow(trajectory));
-                }
-                advance
-            }
+            // A release moves no label: its result is unseen until it is admitted. The
+            // reservation moves the family.
+            Fact::DispatchOpened { proposed_effects, .. } => self.effect_advance(!proposed_effects.is_empty()),
             // The reservation settles into committed effects.
             Fact::DispatchSucceeded { effects, .. } => self.effect_advance(!effects.is_empty()),
             Fact::DispatchClosed {
@@ -1905,25 +1904,10 @@ impl<'a> Sequence<'a> {
                 }
                 CloseOutcome::Indeterminate => crate::basis::BasisAdvance::default(),
             },
-            // An admission moves the flow only when it moves the trajectory's label. A block and
-            // its remedies are derived from that label, so a value that leaves it where it was — a
-            // metadata read, a public file — changes nothing an open offer was derived from, and
-            // the offer stands. Effects move the family, as for a release.
             Fact::ValueAdmitted {
-                trajectory,
-                value,
-                provenance,
-            } => {
-                let mut advance = if self.projection.admission_moves_label(trajectory, &value.label) {
-                    BasisAdvance::flow(trajectory)
-                } else {
-                    BasisAdvance::default()
-                };
-                if let Provenance::ProviderRun { effects, .. } = provenance {
-                    advance.absorb(&self.effect_advance(!effects.is_empty()));
-                }
-                advance
-            }
+                provenance: Provenance::ProviderRun { effects, .. },
+                ..
+            } => self.effect_advance(!effects.is_empty()),
             // A denial changes what may be offered for that rendered call.
             Fact::Denial { trajectory, .. } => BasisAdvance::flow(trajectory),
             Fact::CallApprovalConsumed { offer, .. } => BasisAdvance {
@@ -1950,41 +1934,6 @@ impl<'a> Sequence<'a> {
             crate::basis::BasisAdvance::family()
         } else {
             crate::basis::BasisAdvance::default()
-        }
-    }
-
-    /// Can this release's result restrict the trajectory or arrive through a bound sanitizer?
-    /// Any tool with a declared delta can, and so can an Annotator-declared contract — the
-    /// wildcard included — whose delta exists only per call; the deliberate static neutral
-    /// `delta = {}` cannot.
-    fn result_can_restrict(
-        &self,
-        tool: &crate::value::ToolName,
-        declaration: crate::value::ToolDeclarationId,
-        dispatch: &DispatchId,
-    ) -> bool {
-        if self
-            .projection
-            .view(dispatch.trajectory())
-            .bound_sanitizer(dispatch)
-            .is_some()
-        {
-            return true;
-        }
-        if self
-            .projection
-            .view(dispatch.trajectory())
-            .dispatch_call(dispatch)
-            .is_some_and(|call| call.file_basis().is_some())
-        {
-            return true;
-        }
-        match self.engine.registry().keyed_tool(tool, declaration) {
-            Some(entry) => match entry.declared() {
-                None => true,
-                Some(annotation) => !annotation.delta.is_none(),
-            },
-            None => true,
         }
     }
 
