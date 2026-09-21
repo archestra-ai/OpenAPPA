@@ -27,6 +27,9 @@ import urllib.error
 import urllib.request
 
 # The sibling module is found beside this file however the file is loaded.
+# The runtime runs this script inside the battery's directory, which a bytecode
+# cache must not change.
+sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from jev_questions import questions  # noqa: E402
 
