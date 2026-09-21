@@ -1359,11 +1359,12 @@ impl Engine {
             &|views, call, taken| {
                 views
                     .call_candidates_for(call)
-                    .find(|(subject, recorded)| {
+                    .filter(|(subject, recorded)| {
                         !taken.contains(*subject)
                             && recorded.generation == views.basis_after(&admissions, subject).subject
                     })
                     .map(|(subject, _)| subject.clone())
+                    .collect()
             },
             act,
         )
@@ -3030,7 +3031,7 @@ pub(crate) fn compose_batch<'a>(
         &Views,
         &ResolvedCall,
         &std::collections::BTreeSet<crate::basis::SubjectKey>,
-    ) -> Option<crate::basis::SubjectKey>,
+    ) -> Vec<crate::basis::SubjectKey>,
     act: &ActEvidence,
 ) -> Result<Vec<Option<SiblingRelease>>, ComposeRefusal> {
     let trajectory = batch.trajectory;
@@ -3111,35 +3112,53 @@ pub(crate) fn compose_batch<'a>(
                 true => CallRole::MarkedSpawn,
                 false => CallRole::Ordinary,
             };
-            // A derivation an earlier block's remedy staged for exactly these bytes. Taking it
-            // puts the call at the sanitizer's stage — its derived label and spent lineage —
+            // The derivations earlier blocks' remedies staged for exactly these bytes. Taking one
+            // puts the call at that sanitizer's stage — its derived label and spent lineage —
             // while every other term is judged against current state, so a trajectory that
-            // narrowed since the derivation landed re-gates the call rather than releasing it
-            // on the terms it was staged under. A marked spawn takes none: its fork's return
-            // policy rides on an approval, which a derivation does not carry.
-            let takes = match role {
-                CallRole::MarkedSpawn => None,
-                CallRole::Ordinary => staged(&views, call, &taken).and_then(|subject| {
-                    let recorded = views.recorded_candidate(&subject)?;
-                    Some((
-                        subject.clone(),
-                        CallStage::of(Some(&recorded.derived), recorded.lineage.clone()),
-                    ))
-                }),
+            // narrowed since the derivation landed re-gates the call rather than releasing it on
+            // the terms it was staged under. A marked spawn takes none: its fork's return policy
+            // rides on an approval, which a derivation does not carry.
+            //
+            // A derivation's label is a claim about the bytes, so where several stand for the same
+            // bytes the call clears if any of them covers it: it is judged under each in subject
+            // order and takes the first that clears, else it blocks under the first.
+            let stages: Vec<(crate::basis::SubjectKey, CallStage)> = match role {
+                CallRole::MarkedSpawn => Vec::new(),
+                CallRole::Ordinary => staged(&views, call, &taken)
+                    .into_iter()
+                    .filter_map(|subject| {
+                        let recorded = views.recorded_candidate(&subject)?;
+                        Some((
+                            subject,
+                            CallStage::of(Some(&recorded.derived), recorded.lineage.clone()),
+                        ))
+                    })
+                    .collect(),
             };
-            let stage = takes
-                .as_ref()
-                .map_or_else(CallStage::default, |(_, stage)| stage.clone());
-            let consumes = match check::evaluate(
-                &contract,
-                &views,
-                call,
-                &stage,
-                role,
-                &membership_context(registry, under),
-            ) {
-                Ok(CheckOutcome::Allow) => None,
-                Ok(CheckOutcome::Block(_)) => match spends {
+            let context = membership_context(registry, under);
+            let mut judged: Option<(crate::basis::SubjectKey, CheckOutcome)> = None;
+            for (subject, stage) in stages {
+                let outcome = check::evaluate(&contract, &views, call, &stage, role, &context)
+                    .map_err(ComposeRefusal::MembershipNeeded)?;
+                let clears = matches!(outcome, CheckOutcome::Allow);
+                if clears || judged.is_none() {
+                    judged = Some((subject, outcome));
+                }
+                if clears {
+                    break;
+                }
+            }
+            let (takes, outcome) = match judged {
+                Some((subject, outcome)) => (Some(subject), outcome),
+                None => (
+                    None,
+                    check::evaluate(&contract, &views, call, &CallStage::default(), role, &context)
+                        .map_err(ComposeRefusal::MembershipNeeded)?,
+                ),
+            };
+            let consumes = match outcome {
+                CheckOutcome::Allow => None,
+                CheckOutcome::Block(_) => match spends {
                     Some(offer) => Some(*offer),
                     None => {
                         refused = true;
@@ -3147,12 +3166,11 @@ pub(crate) fn compose_batch<'a>(
                         continue;
                     }
                 },
-                Err(missing) => return Err(ComposeRefusal::MembershipNeeded(missing)),
             };
             let subject = batch.subject(position);
             let (dispatch, opening) = opened_dispatch(&contract, &views, call, subject, under);
             let mut facts = Vec::new();
-            if let Some((staged, _)) = &takes {
+            if let Some(staged) = &takes {
                 facts.push(Fact::CandidateConsumed {
                     trajectory: trajectory.clone(),
                     subject: staged.clone(),
@@ -3192,13 +3210,13 @@ pub(crate) fn compose_batch<'a>(
             } else {
                 None
             };
-            if let Some((subject, _)) = &takes {
+            if let Some(subject) = &takes {
                 taken.insert(subject.clone());
             }
             SiblingRelease {
                 dispatch,
                 consumes,
-                takes: takes.map(|(subject, _)| subject),
+                takes: takes.clone(),
                 prepares_fork,
                 facts,
                 evidence: under.pinned().clone(),
@@ -5609,6 +5627,112 @@ mod tests {
             1,
             "exactly one hop's derivation was spent: {answers:?}"
         );
+    }
+
+    /// Two derivations can stand for one proposal: the same bytes under sanitizers that widen to
+    /// different audiences. Only `Includes` reads a derivation's frozen label, and a group named
+    /// there resolves through the membership answered for the act that asks — so a group that has
+    /// since lost the recipient leaves one derivation covering the requirement and the other not.
+    /// The proposal is judged under each in turn: the one that no longer clears must not starve
+    /// the one that does, and the record must name the derivation that actually permitted the
+    /// emission.
+    #[test]
+    fn a_derivation_that_no_longer_covers_does_not_starve_the_one_that_does() {
+        let e = open_engine_at(
+            RegistryConfig {
+                annotators: vec![],
+                trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+                tools: declared(vec![ToolAnnotation {
+                    requires: Requires {
+                        label: LabelRequirements {
+                            trust_floor: Some(TRUSTED),
+                            audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                                DeclaredAudience::restricted([corp_reader("partner")]),
+                            ))],
+                        },
+                        ..Requires::default()
+                    },
+                    ..post_tool("post", vec![crate::names::TagName::new("outbound")])
+                }]),
+                authorities: vec![],
+                sanitizers: vec![
+                    // Sorted so the group-labelled hop is the earlier subject's: `by_group` runs
+                    // on b1, `by_name` on b2, and subject order puts b1 first.
+                    input_sanitizer_to("by_group", &["insider"], group_audience("team")),
+                    input_sanitizer_to(
+                        "by_name",
+                        &["insider"],
+                        DeclaredAudience::restricted([corp_reader("partner")]),
+                    ),
+                ],
+                audience: slack_groups(&["team"]),
+            },
+            known(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
+        );
+        let proposal = call("post", json!({ "body": "ssn 123" }));
+        let log = internal_log(&e);
+
+        // While the group holds the partner desk, the group-labelled rewrite clears the block.
+        let holding = source_evidence(vec![user_group(
+            "team",
+            vec![slack_member("slack:UP", Some("partner@corp.com"))],
+        )]);
+        let hop_of = |log: &Vec<Fact>, batch: &str, sanitizer: &str| {
+            let facts = appended_facts(
+                proposed_with(&e, log, batch, nonce(), proposal.clone(), holding.clone()).expect("the batch decides"),
+            );
+            let offer = hop_named(&facts, sanitizer);
+            ([log.clone(), facts].concat(), offer)
+        };
+        let rewrite_by = |sanitizer: &str| {
+            OfferOutcome::Derived(crate::transition::Evidence::Rewrite {
+                sanitizer: crate::names::SanitizerName::new(sanitizer),
+                source: crate::value::RawResultDigest::of(proposal.canonical_arguments().canonical_bytes()),
+                derived: ValueBody::new(REDACTED),
+                annotation: None,
+            })
+        };
+        let (log, by_group) = hop_of(&log, "b1", "by_group");
+        let hopped = execute_offer_with(&e, &log, by_group, rewrite_by("by_group"), holding.clone())
+            .expect("the group-labelled hop runs");
+        let approved = approved_by(&hopped);
+        let log = [log, appended_facts(hopped)].concat();
+
+        let (log, by_name) = hop_of(&log, "b2", "by_name");
+        let hopped = execute_offer(&e, &log, by_name, rewrite_by("by_name")).expect("the named hop runs");
+        assert_eq!(approved_by(&hopped), approved, "both derivations stage the same bytes");
+        let log = [log, appended_facts(hopped)].concat();
+        assert_eq!(e.validate_replay(&log), Ok(()));
+
+        // The group no longer holds the partner desk. The b1 derivation's label covers nobody the
+        // contract asks for; the b2 derivation names the desk outright.
+        let emptied = source_evidence(vec![user_group(
+            "team",
+            vec![slack_member("slack:UQ", Some("someone@corp.com"))],
+        )]);
+        let decided = proposed_with(&e, &log, "b3", nonce(), approved.clone(), emptied).expect("the batch decides");
+        let (released, blocked) = answered(&decided);
+        assert!(blocked.is_empty(), "the derivation that still covers releases the call");
+        assert_eq!(released[0].call, approved);
+
+        let facts = appended_facts(decided);
+        let spent = facts
+            .iter()
+            .find_map(|fact| match fact {
+                Fact::CandidateConsumed { subject, .. } => Some(subject.clone()),
+                _ => None,
+            })
+            .expect("the batch spends the derivation it stood on");
+        assert_eq!(
+            spent,
+            crate::basis::SubjectKey::Call {
+                trajectory: traj(),
+                batch: crate::transition::ProposalBatchId::new("b2"),
+                position: 0,
+            },
+            "the record names the derivation that permitted the emission, not the first in order"
+        );
+        assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
     }
 
     /// One derivation releases one call. A sibling's take does not reach the working projection —
@@ -8867,6 +8991,18 @@ mod tests {
                 tags: vec![crate::names::TagName::new("outbound")],
             },
             hint: None,
+        }
+    }
+
+    fn input_sanitizer_to(name: &str, from: &[&str], to: DeclaredAudience) -> crate::authority::Sanitizer {
+        crate::authority::Sanitizer {
+            transition: crate::authority::DeclaredTransition::Audience {
+                from_includes: DeclaredAudience::literal(Audience::restricted(
+                    from.iter().map(|reader| ReaderId::new(*reader)),
+                )),
+                to,
+            },
+            ..input_sanitizer(name, from, from)
         }
     }
 

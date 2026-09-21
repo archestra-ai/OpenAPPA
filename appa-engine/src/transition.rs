@@ -1825,10 +1825,24 @@ impl<'a> Sequence<'a> {
         if !open.declared.subjects.contains(subject) {
             return Err(TransitionRefusal::UndeclaredAdvance);
         }
-        if open.owed.generation_of(subject, recorded) != self.projection.view(trajectory).basis_for(subject).subject {
+        if !self.stands(trajectory, subject, recorded) {
             return Err(TransitionRefusal::StaleSpend);
         }
         Ok(())
+    }
+
+    /// Is this staged candidate one the open decision could judge the call under? Wider than
+    /// [`Self::may_take`]: the decision judges every standing derivation in turn and declares
+    /// only the one it takes.
+    fn stands(
+        &self,
+        trajectory: &TrajectoryId,
+        subject: &crate::basis::SubjectKey,
+        recorded: crate::basis::SubjectGeneration,
+    ) -> bool {
+        self.declared.as_ref().is_some_and(|open| {
+            open.owed.generation_of(subject, recorded) == self.projection.view(trajectory).basis_for(subject).subject
+        })
     }
 
     fn closing_act(&self, dispatch: &DispatchId) -> Result<(), TransitionRefusal> {
@@ -2197,10 +2211,11 @@ impl<'a> Sequence<'a> {
             &|views, call, taken| {
                 views
                     .call_candidates_for(call)
-                    .find(|(subject, recorded)| {
-                        !taken.contains(*subject) && self.may_take(trajectory, subject, recorded.generation).is_ok()
+                    .filter(|(subject, recorded)| {
+                        !taken.contains(*subject) && self.stands(trajectory, subject, recorded.generation)
                     })
                     .map(|(subject, _)| subject.clone())
+                    .collect()
             },
             &act,
         )
