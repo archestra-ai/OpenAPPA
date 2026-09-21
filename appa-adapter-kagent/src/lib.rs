@@ -40,8 +40,10 @@
 use appa_runtime_api::{Actor, Adapter, AdapterName, CanonicalTool, Derived, ParseRefusal, ProposedCall, TrajectoryId};
 
 /// The server-side derivation the runtime applies to every kagent call. kagent's spawns
-/// are other agents called as tools, which only a contract written for them may release,
-/// and an authored rule spells no server: an unqualified name reaches every server.
+/// are other agents called as tools, which only a contract written for them may release.
+/// An unqualified authored name reaches every server; the one spelling that names its
+/// namespace itself is an agent's, `<namespace>__NS__<agent>`, which no `server`
+/// selector may narrow.
 pub fn adapter() -> Adapter {
     Adapter {
         name: AdapterName::Kagent,
@@ -49,9 +51,12 @@ pub fn adapter() -> Adapter {
         names_children,
         spell,
         wildcard_covers_spawn: false,
-        spells_server: |_| false,
+        spells_server: |name| name.contains(AGENT_SPELLING_SEPARATOR),
     }
 }
+
+/// The separator of an agent's authored spelling, `<namespace>__NS__<agent>`.
+pub const AGENT_SPELLING_SEPARATOR: &str = "__NS__";
 
 /// No kagent call names a family child by its arguments, so nothing here scans them.
 fn names_children(_: &Actor, _: &ProposedCall) -> Vec<TrajectoryId> {

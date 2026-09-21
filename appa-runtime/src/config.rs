@@ -489,6 +489,8 @@ pub enum ConfigError {
     HostedCommand { section: &'static str, name: String },
     #[error("the host default {setting} is too large to write into a policy document")]
     UnrepresentableHostDefault { setting: &'static str },
+    #[error("root config field {field:?} must be a table")]
+    RootField { field: String },
 }
 
 /// The four sections a component binds under. Every section takes a URL or a command;
@@ -1269,7 +1271,9 @@ fn compose_include(
     let root_externals = root_table
         .get_mut("externals")
         .and_then(toml::Value::as_table_mut)
-        .expect("RawConfig requires an externals table");
+        .ok_or_else(|| ConfigError::RootField {
+            field: "externals".to_string(),
+        })?;
     for (section_name, entries) in included_externals {
         let Some(section) = Section::parse(section_name) else {
             return Err(ConfigError::IncludedExternalsField {
@@ -1285,7 +1289,9 @@ fn compose_include(
             .entry(section_name.clone())
             .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
             .as_table_mut()
-            .expect("RawExternals requires named external tables");
+            .ok_or_else(|| ConfigError::RootField {
+                field: format!("externals.{section_name}"),
+            })?;
         for (name, entry) in entries {
             if destination.contains_key(name) {
                 return Err(ConfigError::DuplicateExternal {
@@ -2700,6 +2706,29 @@ mod tests {
             config.policy_file().bytes(),
             "composition is deterministic"
         );
+    }
+
+    #[test]
+    fn a_hosted_root_whose_externals_are_not_tables_is_refused_with_batteries() {
+        for (root, field) in [
+            ("externals = \"bad\"\n[policy]\nversion = 2\n", "externals"),
+            (
+                "[policy]\nversion = 2\n[externals]\nannotators = \"bad\"\n",
+                "externals.annotators",
+            ),
+        ] {
+            let result = hosted_composed(
+                root,
+                &[HostedBattery {
+                    name: "github",
+                    policy: GITHUB_BATTERY,
+                }],
+            );
+            assert!(
+                matches!(&result, Err(ConfigError::RootField { field: refused }) if refused == field),
+                "{field}: {result:?}"
+            );
+        }
     }
 
     #[test]

@@ -166,7 +166,7 @@ pub fn precise_name(name: &str, adapter: Adapter) -> Option<CanonicalTool> {
         return Some(derived.canonical);
     }
     if adapter.name == AdapterName::Kagent
-        && let Some((namespace, agent)) = name.split_once("__NS__")
+        && let Some((namespace, agent)) = name.split_once(appa_adapter_kagent::AGENT_SPELLING_SEPARATOR)
     {
         return CanonicalTool::of("agent", &namespace.replace('_', "-"), &agent.replace('_', "-")).ok();
     }
@@ -479,6 +479,28 @@ mod tests {
         assert_eq!(
             precise_name("my_team__NS__log_analyst", adapter).unwrap().as_str(),
             "agent/my-team/log-analyst"
+        );
+    }
+
+    #[test]
+    fn a_remote_agent_spelling_names_its_namespace_so_a_server_selector_conflicts() {
+        let authored: toml::Value =
+            toml::from_str("version = 2\n[[tool]]\nname = 'my_team__NS__log_analyst'\nserver = 'demo'\ndelta = {}\n")
+                .unwrap();
+        let result = resolve(
+            &authored,
+            appa_adapter_kagent::adapter(),
+            &inventory(&[]),
+            &BTreeMap::new(),
+        );
+        assert!(
+            result
+                .report
+                .errors
+                .iter()
+                .any(|error| error.contains("conflicts with server selector")),
+            "{:?}",
+            result.report
         );
     }
 

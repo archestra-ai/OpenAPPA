@@ -28,6 +28,15 @@ pub async fn send(runtime: &Arc<Runtime>, request: Request) -> Result<String, St
     if !runtime.agent_yell() {
         return Err("Agent reporting is disabled".into());
     }
+    if request.harness.is_empty()
+        || request.harness.len() > 64
+        || !request
+            .harness
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+    {
+        return Err("Invalid reporting harness name".into());
+    }
     if request.hostname.as_ref().is_some_and(|host| {
         host.is_empty()
             || host.len() > 253
@@ -142,6 +151,9 @@ mod tests {
         let mut invalid = request();
         invalid.hostname = Some("https://user:secret@example.com/path".into());
         assert!(send(&runtime, invalid).await.unwrap_err().contains("hostname"));
+        let mut invalid = request();
+        invalid.harness = "Test Platform";
+        assert!(send(&runtime, invalid).await.unwrap_err().contains("harness"));
         assert!(send(&runtime, request()).await.unwrap_err().contains("released"));
         let mut request = request();
         release(&runtime, &request).await;
