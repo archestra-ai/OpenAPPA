@@ -31,6 +31,9 @@ and its [rules and covered tools](https://github.com/archestra-ai/OpenAPPA/blob/
   automations, workflows, agent management, code/actions, Vibe publication and
   general GraphQL operations record `monday.sensitive`. Review includes the
   affected resources and any external destinations.
+- **Notifications:** `create_notification` also checks its `user_id` recipient
+  against the input audience. A monday audience source resolves that user to a
+  confirmed email; absent, inactive, or unconfirmed users are refused.
 - **External submissions:** WorkForm submissions and feedback to monday require
   public input and review. Their suspicious/internal responses mean the exact
   call also needs an authority permitted to approve audience expansion.
@@ -47,6 +50,9 @@ As with the Notion battery, the root must map `internal` to readers authorized
 for all resources reachable through the connection. monday board ACLs are not
 inferred. Map `self` to the credential owner for external-agent connections.
 Root rules can narrow specific resources.
+Notifications need `APPA_PROVIDER_MONDAY_TOKEN` with `users:read` for the
+recipient lookup. The token runs beside the policy, separate from the host's
+MCP credential. The root's reader identities must match confirmed emails.
 
 The Claude Code and kagent defaults provide a human authority for
 `monday-review`, trust exceptions and audience expansion. A custom authority

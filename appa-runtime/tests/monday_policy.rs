@@ -19,6 +19,15 @@ fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
 }
 
 async fn runtime(dir: &tempfile::TempDir, wildcard: bool, expand_audience: bool) -> Arc<Runtime> {
+    runtime_with_monday_source(dir, wildcard, expand_audience, None).await
+}
+
+async fn runtime_with_monday_source(
+    dir: &tempfile::TempDir,
+    wildcard: bool,
+    expand_audience: bool,
+    monday_source: Option<&str>,
+) -> Arc<Runtime> {
     let router = Router::new().route(
         "/audience",
         post(|body: String| async move {
@@ -66,7 +75,16 @@ url = "{url}"
     let battery = "marketplace/batteries/monday/appa.toml";
     let target = dir.path().join(battery);
     std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-    std::fs::copy(repo_root().join(battery), target).unwrap();
+    let policy = std::fs::read_to_string(repo_root().join(battery)).unwrap();
+    let policy = if let Some(url) = monday_source {
+        policy.replace(
+            "command = [\"python3\", \"audience-source.py\"]\ntoken_env = \"APPA_PROVIDER_MONDAY_TOKEN\"",
+            &format!("url = \"{url}\""),
+        )
+    } else {
+        policy
+    };
+    std::fs::write(target, policy).unwrap();
     let expansion = if expand_audience {
         "audience_missing = [\"public\"]"
     } else {
@@ -346,6 +364,45 @@ async fn structural_and_opaque_operations_are_reviewable_under_a_host_wildcard()
         review_write(&runtime, call(name, args)).await;
         assert_eq!(effects(&runtime), vec![vec!["monday.sensitive"]]);
     }
+}
+
+#[tokio::test]
+async fn notification_requires_its_recipient_to_read_the_input() {
+    let router = Router::new().route(
+        "/",
+        post(|body: String| async move {
+            let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let selector = request["artifact"]["selector"].as_str().unwrap();
+            let member = match selector {
+                "user/1" => "alice@corp.example",
+                "user/2" => "outsider@corp.example",
+                other => panic!("unexpected monday selector {other}"),
+            };
+            serde_json::json!({ "version": 1, "answer": { "members": [member] } }).to_string()
+        }),
+    );
+    let source = serve(router).await;
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime_with_monday_source(&dir, false, false, Some(&source)).await;
+    accept_read(&runtime, call("get_board_info", serde_json::json!({ "boardId": 1 }))).await;
+
+    let notification = |user_id| {
+        call(
+            "create_notification",
+            serde_json::json!({
+                "user_id": user_id,
+                "target_id": "1",
+                "target_type": "Project",
+                "text": "Internal plan",
+            }),
+        )
+    };
+    assert!(matches!(
+        propose(&runtime, notification("2")).await,
+        HookDecision::DenyCall { offers, .. } if offers.is_empty()
+    ));
+    review_write(&runtime, notification("1")).await;
+    assert_eq!(effects(&runtime), vec![vec!["monday.sensitive"]]);
 }
 
 #[tokio::test]

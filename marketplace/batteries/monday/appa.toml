@@ -19,6 +19,13 @@
 [policy]
 version = 2
 
+# Notifications name one recipient. Resolve that user through the monday Users
+# API so the call's input must be sharable with the actual recipient.
+[externals.audience.monday]
+command = ["python3", "audience-source.py"]
+token_env = "APPA_PROVIDER_MONDAY_TOKEN"
+selectors = [{ template = "user/<id>" }]
+
 # --- reads: account content and provider schemas, internal readers ---
 # all_api_read rejects mutations at the server; all_monday_api is reviewed below.
 # read_docs reads workspace documents, not public product documentation.
@@ -662,7 +669,7 @@ effects = ["monday.sensitive"]
 [[policy.tool]]
 name = "mcp/monday/create_notification"
 delta = { trust = "suspicious", audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { trust = "trusted", audience = { contains = ["@monday:user/$user_id"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 # --- external submissions: public input, reviewed ---

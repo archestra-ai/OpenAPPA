@@ -1,8 +1,9 @@
 # monday battery
 
 Rules for the hosted Platform MCP at `https://mcp.monday.com/mcp`: 96 tools,
-server version 1.0.0, discovered on 2026-09-22. Plain TOML, no helper or provider
-credential. Include `appa.toml` in the root config, or install from a release
+server version 1.0.0, discovered on 2026-09-22. Static contracts cover the
+inventory; `audience-source.py` resolves notification recipients. Include
+`appa.toml` in the root config, or install from a release
 containing it with `appa battery install monday --server <host-server-name>`.
 
 The [official connection guide](https://developer.monday.com/api-reference/docs/integrate-with-monday-mcp)
@@ -45,7 +46,8 @@ name returned by `create_update`. These tools record `monday.changed`:
 `create_view_table`, `create_widget`, `finalize_asset_upload`, `get_asset_upload_url`,
 `update_doc`, `update_items`, `update_view`, `update_view_table`.
 
-*Sensitive writes* — the same reviewed internal contract, recording
+*Sensitive writes* — the same reviewed internal contract except the
+recipient-bound notification below, recording
 `monday.sensitive`. Review must account for affected resources and destinations,
 including nested operations in code, GraphQL, workflows and agents:
 
@@ -57,6 +59,12 @@ including nested operations in code, GraphQL, workflows and agents:
 `run_workflow_once`, `stop_workflow_run_once`, `update_action`, `update_column`,
 `update_folder`, `update_form`, `update_workspace`, `vibe_create`, `vibe_delete`,
 `vibe_publication`, `vibe_update`.
+
+`create_notification` additionally requires that its `user_id` recipient can
+read the input. The `monday` audience source looks up that user's confirmed
+email through the monday Users API. It refuses absent, inactive, or
+unconfirmed users and lookup errors. The contract requires trusted input and
+`monday-review`; its result remains suspicious/internal.
 
 *External submissions* — `create_form_submission` and
 `submit_bug_or_feature_request` require trusted public input and review, and
@@ -81,6 +89,13 @@ internal = ["directory:members"]
 self = ["directory:viewer"]
 ```
 
+Set `APPA_PROVIDER_MONDAY_TOKEN` where the runtime runs. Its token needs
+`users:read` to resolve `@monday:user/$user_id`; this is separate from the
+host's MCP connection credential. The source uses API version `2026-07` and
+requires a confirmed email so it can compare the recipient with the root's
+reader identities. If the root uses different reader identifiers, the source
+must be adapted to that mapping before notifications can flow.
+
 Claude Code and kagent defaults provide the human authority. A custom root can
 use:
 
@@ -102,16 +117,20 @@ not a connection or provider permissions.
 
 The battery does not resolve board ACLs or nested destinations and publication
 readers. Root rules can narrow known resources and run before battery rules.
+Only the explicit `create_notification` recipient is checked against the
+input audience; other nested destinations still require review.
 Unknown tools follow the root's fallback policy. Provider error text remains
 outside successful-output admission and is not sanitized by this battery.
 
 [Policy tests](../../../appa-runtime/tests/monday_policy.rs) check decisions,
-labels and effects; marketplace tests check host composition. The
+labels and effects; [audience-source tests](test_audience_source.py) check
+recipient identity and refusal paths; marketplace tests check host composition. The
 [offline replay](../../../examples/live-replays/monday) uses fictional readers
 and simulated approval, and does not execute monday tools.
 
 ```sh
 cargo test --locked -p appa --test monday_policy --test marketplace
+python3 -m unittest discover -s marketplace/batteries/monday -p 'test_*.py'
 bash scripts/appa-marketplace.sh --check
 appa replay --config examples/live-replays/monday/appa.toml \
   examples/live-replays/monday/monday-battery.appa

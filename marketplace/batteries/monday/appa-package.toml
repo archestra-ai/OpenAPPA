@@ -6,5 +6,5 @@ description = "Rules for the monday Platform MCP server's 96 tools: internal rea
 policy = "appa.toml"
 hosts = ["claude-code", "kagent"]
 namespaces = ["monday"]
-helpers = []
-setup = "Connect https://mcp.monday.com/mcp with OAuth or a monday API token. Map internal to the authorized reader cohort and self to the credential owner; the host human authority handles monday-review. Installation adds policy, not a connection or board permissions."
+helpers = ["audience-source.py"]
+setup = "Connect https://mcp.monday.com/mcp with OAuth or a monday API token. Give the notification audience source a monday API token with users:read; map internal to the authorized reader cohort and self to the credential owner. The host human authority handles monday-review. Installation adds policy, not a connection or board permissions."
