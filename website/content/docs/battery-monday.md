@@ -2,60 +2,62 @@
 title: monday battery
 category: Batteries
 order: 6.75
-description: Conservative rules for the current monday Platform MCP server, with bounded board/item reads and public-input item creation.
+description: Rules for monday Platform MCP's 96 tools, with internal reads and reviewed writes and sensitive changes.
 sidebar: false
 breadcrumb: monday
 ---
 
-The monday battery supports four reads and item creation through the Platform
-MCP server at `https://mcp.monday.com/mcp`. It blocks the other discovered tools.
+The monday battery covers the 96 tools discovered from the hosted Platform
+MCP server at `https://mcp.monday.com/mcp`, version 1.0.0, on 2026-09-22.
 
 [View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/monday).
 
 ## Tool behavior
 
-- `get_user_context`, `get_board_info`, `get_board_items_page`, and item-only
-  `get_updates` are bounded suspicious reads. They require the root deployment
-  to map `internal` to readers authorized for every board reachable by the
-  connection. The battery does not infer board ACLs or install an audience
-  helper.
-- `create_item` admits only a board ID, a 1–255 character public name, and
-  `columnValues = "{}"`. Groups, subitems, duplication, and label creation are
-  outside the contract.
-- `create_update` is explicitly blocked. Its structured response includes
-  `item_name` read from the existing target item, so a public body and item ID
-  do not make the returned content public.
+- **Internal reads:** boards, items, comments, searches, documents, people,
+  schemas, assets, meetings, automation history, workflow inspection and Vibe
+  inspection enter suspicious/internal. Queries must be sharable with internal.
+  Normal options such as search terms, descriptions, subitems and replies are
+  available. `all_api_read` rejects mutations at the provider.
+- **Public documentation:** `get_monday_knowledge` requires a public question
+  and returns suspicious/public content. `read_docs` instead reads internal
+  workspace documents.
+- **Reviewed writes:** items, comments, docs, folders, groups, dashboards,
+  widgets, views and uploads require trusted internal input and `monday-review`,
+  and record `monday.changed`. Their results stay suspicious/internal because
+  write responses can include existing provider content.
+- **Reviewed sensitive changes:** structural changes, deletes, notifications,
+  automations, workflows, agent management, code/actions, Vibe publication and
+  general GraphQL operations record `monday.sensitive`. Review includes the
+  affected resources and any external destinations.
+- **External submissions:** WorkForm submissions and feedback to monday require
+  public input and review. Their suspicious/internal responses mean the exact
+  call also needs an authority permitted to approve audience expansion.
+- **Returned credentials:** `connect_external_agent` returns a signing secret
+  and API token. Its reviewed contract keeps input and output within `self`.
 
-The bounded `create_item` write requires trusted public input and records
-`monday.changed`; it runs autonomously once that floor is satisfied.
+The read actions of `manage_agent`, `manage_agent_triggers` and
+`manage_agent_knowledge` have separate contracts before their reviewed mutation
+fallbacks. There are no terminal blocks in the discovered inventory.
 
-The `create_item` write preserves trusted/public state only for the documented
-argument subset and retained live response evidence: the observed returned
-name matched the supplied name and the remaining fields were generated or
-generic. This is manual response evidence, not a runtime-enforced output
-whitelist. A restricted monday read cannot
-flow into an unknown destination. If a response adds provider content or the
-schema changes, remove the exact variant or reverify it before use. A root
-deployment may replace an exact rule after independently attesting a complete
-reader cohort, but this battery has no ACL resolver.
+## Deployment
 
-Provider failure text is forwarded by the current host/runtime outside this
-battery's successful-output admission; the battery does not sanitize errors.
-The observed invalid-board failure exposed only the attempted board ID and
-generic request metadata. If a provider failure can return private board or
-user-controlled text, disable this write contract until the host/runtime adds
-error-output admission.
+As with the Notion battery, the root must map `internal` to readers authorized
+for all resources reachable through the connection. monday board ACLs are not
+inferred. Map `self` to the credential owner for external-agent connections.
+Root rules can narrow specific resources.
 
-`create_update`, arbitrary GraphQL (`all_monday_api`, `all_api_read`, and
-`all_api_write`), code and action execution, structural mutations, searches, uploads, workflows,
-agents, Vibe tools, and the remaining discovered tools are refused. The six
-known unsafe or bypass tools are among the 91 refused snapshot tools, all of
-which carry exact `attention = ["blocked"]` rules. Future tool names are not
-covered by this frozen inventory: a root `name = "*"` may cover them, so a new
-discovery and disposition is required before extending the claim.
+The Claude Code and kagent defaults provide a human authority for
+`monday-review`, trust exceptions and audience expansion. A custom authority
+can omit audience expansion: reviewed internal read-to-write workflows still
+work, while external submissions remain refused. See the battery README for
+the authority configuration and complete limits.
 
-The policy replay in
-[`examples/live-replays/monday`](https://github.com/archestra-ai/OpenAPPA/tree/main/examples/live-replays/monday)
-does not call Monday. A separate authenticated clappa smoke must use a
-disposable fixture and verify provider state independently. Installation adds
-the policy but does not create a connection or grant Monday permissions.
+Future tool names follow the deployment's fallback policy. Provider error text
+is outside successful-output admission in the current host/runtime and is not
+sanitized by this battery. Installing it adds policy, not a connection or board
+permissions.
+
+The [offline replay](https://github.com/archestra-ai/OpenAPPA/tree/main/examples/live-replays/monday)
+checks decisions using a fictional audience and simulated approvals. It does
+not call monday or verify provider effects.

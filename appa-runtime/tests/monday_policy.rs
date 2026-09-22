@@ -1,4 +1,4 @@
-//! monday battery: bounded internal reads and autonomous public-input writes.
+//! monday battery: internal reads and reviewed writes, like Linear and PostHog.
 mod common;
 
 use appa_runtime::{
@@ -11,20 +11,6 @@ use axum::{Router, routing::post};
 use common::{actor, offer_of, propose, ran, raw, repo_root, root, serve};
 use std::sync::Arc;
 
-const SUPPORTED_TOOLS: &[&str] = &[
-    "get_user_context",
-    "get_board_info",
-    "get_board_items_page",
-    "get_updates",
-    "create_item",
-];
-
-// Tool names from the authenticated 2026-09-22 tools/list capture, independent
-// of the policy so an omitted contract cannot disappear from coverage.
-fn discovered_tools() -> Vec<String> {
-    serde_json::from_str(include_str!("fixtures/monday-tools.json")).expect("the discovery fixture is valid JSON")
-}
-
 fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
     ProposedCall {
         tool: format!("mcp/monday/{tool}"),
@@ -32,128 +18,99 @@ fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
     }
 }
 
-/// The battery deliberately has no monday ACL helper. This fixture supplies the
-/// deployment's explicit internal cohort so audience narrowing is deterministic.
-async fn members_source() -> String {
+async fn runtime(dir: &tempfile::TempDir, wildcard: bool, expand_audience: bool) -> Arc<Runtime> {
     let router = Router::new().route(
         "/audience",
-        post(|_body: String| async move {
-            serde_json::json!({ "version": 1, "answer": { "members": ["alice@corp.example"] } }).to_string()
+        post(|body: String| async move {
+            let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let members = if request["artifact"]["selector"] == "viewer" {
+                vec!["alice@corp.example"]
+            } else {
+                vec!["alice@corp.example", "bob@corp.example"]
+            };
+            serde_json::json!({ "version": 1, "answer": { "members": members } }).to_string()
         }),
     );
-    format!("{}/audience", serve(router).await)
-}
-
-/// A deployment-level wildcard is intentionally reviewable here so the
-/// composition test can distinguish an exact terminal block from an omitted
-/// future tool that the deployment has chosen to cover.
-async fn wildcard_annotator() -> String {
-    let router = Router::new().route(
-        "/",
-        post(|_body: String| async move {
-            serde_json::json!({
-                "version": 1,
-                "answer": {
-                    "delta": {},
-                    "requires": { "trust": "trusted", "attention": ["signoff"], "history": [] },
-                    "emits": []
-                }
-            })
-            .to_string()
-        }),
-    );
-    serve(router).await
-}
-
-async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
-    let target = dir.path().join("marketplace/batteries/monday");
-    std::fs::create_dir_all(&target).unwrap();
-    std::fs::copy(
-        repo_root().join("marketplace/batteries/monday/appa.toml"),
-        target.join("appa.toml"),
-    )
-    .unwrap();
-    let source = members_source().await;
-    let path = dir.path().join("appa.toml");
-    std::fs::write(
-        &path,
+    let source = serve(router).await;
+    let fallback = if wildcard {
+        let router = Router::new().route(
+            "/",
+            post(|_body: String| async move {
+                serde_json::json!({
+                    "version": 1,
+                    "answer": {
+                        "delta": {},
+                        "requires": { "trust": "trusted", "attention": ["signoff"], "history": [] },
+                        "emits": []
+                    }
+                })
+                .to_string()
+            }),
+        );
+        let url = serve(router).await;
         format!(
-            r#"include = ["marketplace/batteries/monday/appa.toml"]
-
-[policy]
-version = 2
-
-[policy.audience]
-internal = ["people:members"]
-
-[externals]
-timeout_ms = 30000
-review_timeout_ms = 600000
-max_body_bytes = 1048576
-
-[externals.audience.people]
-url = "{source}"
-selectors = [{{ template = "members", feeds = "internal" }}]
-"#
-        ),
-    )
-    .unwrap();
-    let runtime = Arc::new(Runtime::open(Config::load(&path).unwrap(), dir.path().join("runtime.db"), None).unwrap());
-    assert_eq!(
-        hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
-        HookDecision::Ack
-    );
-    runtime
-}
-
-async fn runtime_with_wildcard(dir: &tempfile::TempDir) -> Arc<Runtime> {
-    let target = dir.path().join("marketplace/batteries/monday");
-    std::fs::create_dir_all(&target).unwrap();
-    std::fs::copy(
-        repo_root().join("marketplace/batteries/monday/appa.toml"),
-        target.join("appa.toml"),
-    )
-    .unwrap();
-    let source = members_source().await;
-    let annotator = wildcard_annotator().await;
-    let path = dir.path().join("appa.toml");
-    std::fs::write(
-        &path,
-        format!(
-            r#"include = ["marketplace/batteries/monday/appa.toml"]
-
-[policy]
-version = 2
-
-[policy.audience]
-internal = ["people:members"]
-
+            r#"
 [[policy.annotator]]
 name = "gatekeeper"
-
+marks = ["signoff"]
 [[policy.tool]]
 name = "*"
 annotator = "gatekeeper"
+[externals.annotators.gatekeeper]
+url = "{url}"
+"#
+        )
+    } else {
+        String::new()
+    };
+    let battery = "marketplace/batteries/monday/appa.toml";
+    let target = dir.path().join(battery);
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::copy(repo_root().join(battery), target).unwrap();
+    let expansion = if expand_audience {
+        "audience_missing = [\"public\"]"
+    } else {
+        ""
+    };
+    let path = dir.path().join("appa.toml");
+    std::fs::write(
+        &path,
+        format!(
+            r#"include = [{battery:?}]
+[policy]
+version = 2
+[policy.audience]
+self = ["people:viewer"]
+internal = ["people:members"]
+
+# Read-only probes make both output dimensions independently observable.
+[[policy.tool]]
+name = "mcp/probe/public"
+requires = {{ audience = {{ contains = ["public"] }} }}
+[[policy.tool]]
+name = "mcp/probe/trusted"
+requires = {{ trust = "trusted" }}
+[[policy.tool]]
+name = "mcp/probe/trusted-internal"
+delta = {{ audience = ["internal"] }}
 
 [[policy.authority]]
-name = "operator"
+name = "monday-operator"
 [policy.authority.permits]
-attention = ["signoff"]
+trust_below = "trusted"
+attention = ["*"]
+{expansion}
 
 [externals]
 timeout_ms = 30000
 review_timeout_ms = 600000
 max_body_bytes = 1048576
-
+[externals.authorities.monday-operator]
+builtin = "approve"
 [externals.audience.people]
-url = "{source}"
-selectors = [{{ template = "members", feeds = "internal" }}]
-
-[externals.annotators.gatekeeper]
-url = "{annotator}"
-
-[externals.authorities.operator]
-builtin = "hitl"
+url = "{source}/audience"
+selectors = [{{ template = "viewer", feeds = "self" }}, {{ template = "members", feeds = "internal" }}]
+{fallback}
 "#
         ),
     )
@@ -166,94 +123,149 @@ builtin = "hitl"
     runtime
 }
 
-#[tokio::test]
-async fn bounded_reads_consult_internal_and_reject_escape_variants() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime(&dir).await;
+async fn accept_read(runtime: &Arc<Runtime>, read: ProposedCall) {
+    let decision = propose(runtime, read.clone()).await;
+    if !matches!(decision, HookDecision::AllowCall { .. }) {
+        assert!(matches!(
+            runtime.execute_remedy(&actor(), offer_of(&decision)).await,
+            RemedyOutcome::Authorized { .. }
+        ));
+        assert_eq!(
+            propose(runtime, read.clone()).await,
+            HookDecision::AllowCall { spawn: None }
+        );
+    }
+    ran(runtime, read).await;
+}
 
-    let board = call(
-        "get_board_info",
-        serde_json::json!({ "boardId": 1, "filters": { "columns": { "only": true } } }),
+async fn review_write(runtime: &Arc<Runtime>, write: ProposedCall) {
+    let decision = propose(runtime, write.clone()).await;
+    assert!(
+        matches!(&decision, HookDecision::DenyCall { feedback, .. } if feedback.contains("monday-review")),
+        "{decision:?}"
     );
-    let decision = propose(&runtime, board.clone()).await;
-    assert!(matches!(decision, HookDecision::DenyCall { .. }));
     assert!(matches!(
         runtime.execute_remedy(&actor(), offer_of(&decision)).await,
         RemedyOutcome::Authorized { .. }
     ));
     assert_eq!(
-        propose(&runtime, board.clone()).await,
+        propose(runtime, write.clone()).await,
         HookDecision::AllowCall { spawn: None }
     );
-    ran(&runtime, board).await;
+    ran(runtime, write).await;
+}
 
-    let items = call(
-        "get_board_items_page",
-        serde_json::json!({ "boardId": 1, "itemIds": [1, 2], "includeColumns": true }),
-    );
-    assert_eq!(
-        propose(&runtime, items.clone()).await,
-        HookDecision::AllowCall { spawn: None }
-    );
-    ran(&runtime, items).await;
-
-    let updates = call(
-        "get_updates",
-        serde_json::json!({
-            "objectId": "1",
-            "objectType": "Item",
-            "includeReplies": false,
-            "includeAssets": false
-        }),
-    );
-    assert_eq!(
-        propose(&runtime, updates.clone()).await,
-        HookDecision::AllowCall { spawn: None }
-    );
-    ran(&runtime, updates).await;
-
-    for escaped in [
-        call("get_board_info", serde_json::json!({ "boardId": 1, "unknown": true })),
-        call(
-            "get_board_info",
-            serde_json::json!({ "boardId": 1, "filters": { "columns": { "unknown": true } } }),
-        ),
-        call(
-            "get_board_items_page",
-            serde_json::json!({ "boardId": 1, "searchTerm": "secret" }),
-        ),
-        call(
-            "get_board_items_page",
-            serde_json::json!({ "boardId": 1, "itemIds": vec![1; 100] }),
-        ),
-        call(
-            "get_updates",
-            serde_json::json!({ "objectId": "1", "objectType": "Board" }),
-        ),
-    ] {
-        assert!(
-            !matches!(propose(&runtime, escaped.clone()).await, HookDecision::AllowCall { .. }),
-            "escaped call was admitted: {}",
-            escaped.tool
-        );
-    }
+fn effects(runtime: &Runtime) -> Vec<Vec<String>> {
+    runtime
+        .audit(&root())
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| match entry.event {
+            AuditEvent::Released { tool, effects, .. } if tool.starts_with("mcp/monday/") && !effects.is_empty() => {
+                Some(effects)
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 #[tokio::test]
-async fn public_input_writes_run_without_a_default_review_and_record_effects() {
+async fn ordinary_reads_keep_provider_options_and_classify_results() {
     let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime(&dir).await;
+    let runtime = runtime(&dir, false, false).await;
+    for read in [
+        call("get_user_context", serde_json::json!({})),
+        call(
+            "get_board_info",
+            serde_json::json!({ "boardId": 1, "filters": { "columns": { "only": true } } }),
+        ),
+        call(
+            "get_board_items_page",
+            serde_json::json!({ "boardId": 1, "searchTerm": "plan", "includeItemDescription": true, "includeSubItems": true, "orderBy": [{ "columnId": "name", "direction": "asc" }] }),
+        ),
+        call(
+            "get_updates",
+            serde_json::json!({ "objectId": "1", "objectType": "Board", "includeReplies": true, "includeAssets": true, "includeItemUpdates": true }),
+        ),
+        call(
+            "search",
+            serde_json::json!({ "searchTerm": "plan", "searchType": "ITEMS" }),
+        ),
+        call("workspace_info", serde_json::json!({ "workspace_id": 1 })),
+        call("list_users_and_teams", serde_json::json!({ "getMe": true })),
+        call(
+            "read_docs",
+            serde_json::json!({ "type": "ids", "ids": [1], "include_comments": true }),
+        ),
+        call(
+            "all_api_read",
+            serde_json::json!({ "query": "query { boards { id } }" }),
+        ),
+    ] {
+        accept_read(&runtime, read).await;
+    }
+    assert!(effects(&runtime).is_empty());
+    let labels: Vec<_> = runtime
+        .audit(&root())
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| match entry.event {
+            AuditEvent::Admitted { label } => Some(label),
+            _ => None,
+        })
+        .collect();
+    assert!(!labels.is_empty());
+    for label in labels {
+        assert_eq!(label.trust, "suspicious");
+        assert_eq!(label.audience, "internal");
+    }
+    let public = ProposedCall {
+        tool: "mcp/probe/public".into(),
+        arguments: raw(serde_json::json!({})),
+        cwd: None,
+    };
+    assert!(matches!(propose(&runtime, public).await, HookDecision::DenyCall { offers, .. } if offers.is_empty()));
+    let trusted = ProposedCall {
+        tool: "mcp/probe/trusted".into(),
+        arguments: raw(serde_json::json!({})),
+        cwd: None,
+    };
+    assert!(matches!(
+        propose(&runtime, trusted).await,
+        HookDecision::DenyCall { .. }
+    ));
+}
 
-    let create = call(
-        "create_item",
-        serde_json::json!({ "boardId": 1, "name": "OpenAPPA monday smoke", "columnValues": "{}" }),
-    );
-    assert_eq!(
-        propose(&runtime, create.clone()).await,
-        HookDecision::AllowCall { spawn: None }
-    );
-    ran(&runtime, create).await;
-
+#[tokio::test]
+async fn internal_reads_can_flow_to_reviewed_writes_without_audience_expansion() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime(&dir, false, false).await;
+    accept_read(
+        &runtime,
+        call("get_board_items_page", serde_json::json!({ "boardId": 1 })),
+    )
+    .await;
+    for write in [
+        call(
+            "create_item",
+            serde_json::json!({ "boardId": 1, "name": "Internal plan", "columnValues": "{\"status\":\"Done\"}", "groupId": "topics", "parentItemId": 2 }),
+        ),
+        call(
+            "create_item",
+            serde_json::json!({ "boardId": 1, "name": "Copy", "duplicateFromItemId": 2, "createLabelsIfMissing": true }),
+        ),
+        call(
+            "create_update",
+            serde_json::json!({ "itemId": 1, "body": "Internal summary", "parentId": 2, "mentionsList": "[]" }),
+        ),
+        call(
+            "change_item_column_values",
+            serde_json::json!({ "boardId": 1, "itemId": 1, "columnValues": "{\"status\":\"Done\"}" }),
+        ),
+    ] {
+        review_write(&runtime, write).await;
+    }
+    assert_eq!(effects(&runtime), vec![vec!["monday.changed".to_owned()]; 4]);
     let admitted = runtime
         .audit(&root())
         .unwrap()
@@ -263,216 +275,217 @@ async fn public_input_writes_run_without_a_default_review_and_record_effects() {
             _ => None,
         })
         .next_back()
-        .expect("the write result is admitted");
-    assert_eq!(admitted.audience, "public");
+        .unwrap();
+    assert_eq!(admitted.trust, "suspicious");
+    assert_eq!(admitted.audience, "internal");
+    // Approval of a write does not declassify its result or subsequent calls.
+    assert!(
+        matches!(propose(&runtime, call("get_monday_knowledge", serde_json::json!({ "query": "Internal summary" }))).await, HookDecision::DenyCall { offers, .. } if offers.is_empty())
+    );
+}
 
-    let effects: Vec<_> = runtime
+#[tokio::test]
+async fn trusted_internal_creation_needs_review_but_no_public_audience() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime(&dir, false, false).await;
+    accept_read(
+        &runtime,
+        ProposedCall {
+            tool: "mcp/probe/trusted-internal".into(),
+            arguments: raw(serde_json::json!({})),
+            cwd: None,
+        },
+    )
+    .await;
+    review_write(
+        &runtime,
+        call(
+            "create_item",
+            serde_json::json!({ "boardId": 1, "name": "Internal plan" }),
+        ),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn structural_and_opaque_operations_are_reviewable_under_a_host_wildcard() {
+    for (name, args) in [
+        (
+            "create_board",
+            serde_json::json!({ "boardName": "Plan", "boardKind": "private" }),
+        ),
+        (
+            "move_object",
+            serde_json::json!({ "objectType": "board", "id": 1, "workspaceId": 2 }),
+        ),
+        (
+            "all_monday_api",
+            serde_json::json!({ "query": "mutation { delete_board(board_id: 1) { id } }" }),
+        ),
+        (
+            "all_api_write",
+            serde_json::json!({ "query": "mutation { delete_board(board_id: 1) { id } }" }),
+        ),
+        (
+            "execute_code",
+            serde_json::json!({ "code": "print('reviewed')", "language": "python" }),
+        ),
+        ("run_action", serde_json::json!({ "id": "1" })),
+        ("publish_workflow", serde_json::json!({ "workflowObjectId": "1" })),
+        (
+            "vibe_publication",
+            serde_json::json!({ "app_id": "1", "action": "publish" }),
+        ),
+        ("delete_view", serde_json::json!({ "viewId": 1, "boardId": 1 })),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = runtime(&dir, true, false).await;
+        review_write(&runtime, call(name, args)).await;
+        assert_eq!(effects(&runtime), vec![vec!["monday.sensitive"]]);
+    }
+}
+
+#[tokio::test]
+async fn mixed_tool_read_actions_do_not_use_the_reviewed_write_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime(&dir, true, false).await;
+    for (name, action) in [
+        ("manage_agent", "get"),
+        ("manage_agent_triggers", "list"),
+        ("manage_agent_knowledge", "list"),
+    ] {
+        accept_read(
+            &runtime,
+            call(name, serde_json::json!({ "action": action, "agent_id": "1" })),
+        )
+        .await;
+    }
+    assert!(effects(&runtime).is_empty());
+    for (name, action) in [
+        ("manage_agent", "run"),
+        ("manage_agent_triggers", "add"),
+        ("manage_agent_knowledge", "remove"),
+    ] {
+        review_write(
+            &runtime,
+            call(name, serde_json::json!({ "action": action, "agent_id": "1" })),
+        )
+        .await;
+    }
+    assert_eq!(effects(&runtime), vec![vec!["monday.sensitive".to_owned()]; 3]);
+}
+
+#[tokio::test]
+async fn public_documentation_does_not_narrow_a_fresh_public_trajectory() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime(&dir, false, false).await;
+    accept_read(
+        &runtime,
+        call(
+            "get_monday_knowledge",
+            serde_json::json!({ "query": "How do boards work?", "kind": "general" }),
+        ),
+    )
+    .await;
+    let public = ProposedCall {
+        tool: "mcp/probe/public".into(),
+        arguments: raw(serde_json::json!({})),
+        cwd: None,
+    };
+    assert_eq!(propose(&runtime, public).await, HookDecision::AllowCall { spawn: None });
+}
+
+#[tokio::test]
+async fn external_submissions_require_explicit_audience_approval() {
+    for name in ["create_form_submission", "submit_bug_or_feature_request"] {
+        let dir = tempfile::tempdir().unwrap();
+        let without_expansion = runtime(&dir, false, false).await;
+        accept_read(
+            &without_expansion,
+            call("get_board_info", serde_json::json!({ "boardId": 1 })),
+        )
+        .await;
+        let args = if name == "create_form_submission" {
+            serde_json::json!({ "form_token": "example", "answers": {} })
+        } else {
+            serde_json::json!({ "kind": "bug", "title": "Example", "description": "Example" })
+        };
+        assert!(
+            matches!(propose(&without_expansion, call(name, args.clone())).await, HookDecision::DenyCall { offers, .. } if offers.is_empty())
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let with_expansion = runtime(&dir, false, true).await;
+        review_write(&with_expansion, call(name, args)).await;
+    }
+}
+
+#[tokio::test]
+async fn external_agent_credentials_stay_with_the_viewer() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime(&dir, false, false).await;
+    review_write(
+        &runtime,
+        call(
+            "connect_external_agent",
+            serde_json::json!({ "custom": { "name": "Example" } }),
+        ),
+    )
+    .await;
+    let admitted = runtime
         .audit(&root())
         .unwrap()
         .into_iter()
         .filter_map(|entry| match entry.event {
-            AuditEvent::Released { tool, effects, .. } if tool.starts_with("mcp/monday/") => Some(effects),
+            AuditEvent::Admitted { label } => Some(label),
             _ => None,
         })
-        .collect();
-    assert_eq!(effects, vec![vec!["monday.changed"]]);
-}
-
-#[tokio::test]
-async fn a_restricted_read_cannot_flow_to_an_unknown_monday_destination() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime(&dir).await;
-
-    let read = call("get_board_items_page", serde_json::json!({ "boardId": 1 }));
-    let decision = propose(&runtime, read.clone()).await;
-    assert!(matches!(
-        runtime.execute_remedy(&actor(), offer_of(&decision)).await,
-        RemedyOutcome::Authorized { .. }
-    ));
-    assert_eq!(
-        propose(&runtime, read.clone()).await,
-        HookDecision::AllowCall { spawn: None }
+        .next_back()
+        .unwrap();
+    assert_eq!(admitted.audience, "self");
+    assert!(
+        matches!(propose(&runtime, call("create_item", serde_json::json!({ "boardId": 1, "name": "Secret" }))).await, HookDecision::DenyCall { offers, .. } if offers.is_empty())
     );
-    ran(&runtime, read).await;
-
-    for write in [
-        call(
-            "create_item",
-            serde_json::json!({ "boardId": 1, "name": "must refuse", "columnValues": "{}" }),
-        ),
-        call(
-            "create_update",
-            serde_json::json!({ "itemId": 1, "body": "must refuse" }),
-        ),
-    ] {
-        assert!(
-            !matches!(propose(&runtime, write.clone()).await, HookDecision::AllowCall { .. }),
-            "restricted content reached {}",
-            write.tool
-        );
-    }
 }
 
 #[tokio::test]
-async fn writes_reject_structural_or_opaque_variants() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime(&dir).await;
-
-    for rejected in [
-        call(
-            "create_item",
-            serde_json::json!({ "boardId": 1, "name": "x", "columnValues": "{}", "parentItemId": 2 }),
-        ),
-        call(
-            "create_item",
-            serde_json::json!({ "boardId": 1, "name": "x", "columnValues": "{}", "duplicateFromItemId": 2 }),
-        ),
-        call(
-            "create_item",
-            serde_json::json!({ "boardId": 1, "name": "x", "columnValues": "{}", "createLabelsIfMissing": true }),
-        ),
-        call(
-            "create_item",
-            serde_json::json!({ "boardId": 1, "name": "x", "columnValues": r#"{"status":"Done"}"# }),
-        ),
-        call(
-            "create_update",
-            serde_json::json!({ "itemId": 1, "body": "x", "mentionsList": "[]" }),
-        ),
-        call(
-            "create_update",
-            serde_json::json!({ "itemId": 1, "body": "x", "parentId": 2 }),
-        ),
-        call("create_update", serde_json::json!({ "itemId": 1, "body": "x" })),
-        call(
-            "change_item_column_values",
-            serde_json::json!({ "boardId": 1, "itemId": 1, "columnValues": "{}" }),
-        ),
-        call(
-            "all_monday_api",
-            serde_json::json!({ "query": "mutation { delete_board(board_id: 1) { id } }" }),
-        ),
-        call(
-            "all_api_read",
-            serde_json::json!({ "query": "query { boards { id } }" }),
-        ),
-        call(
-            "all_api_write",
-            serde_json::json!({ "query": "mutation { delete_board(board_id: 1) { id } }" }),
-        ),
-        call("execute_code", serde_json::json!({ "code": "delete everything" })),
-        call("run_action", serde_json::json!({ "actionId": "1" })),
-    ] {
-        assert!(
-            !matches!(
-                propose(&runtime, rejected.clone()).await,
-                HookDecision::AllowCall { .. }
-            ),
-            "unsafe variant was admitted: {}",
-            rejected.tool
-        );
-    }
-}
-
-#[tokio::test]
-async fn future_tools_are_refused_without_a_root_wildcard() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime(&dir).await;
-    let decision = propose(
-        &runtime,
-        call("future_unknown_tool", serde_json::json!({ "marker": "unknown" })),
-    )
-    .await;
-    assert!(!matches!(decision, HookDecision::AllowCall { .. }));
-    // A deployment-level `name = "*"` would cover future names; this battery
-    // intentionally supplies no such catchall. The exact blocked rules above
-    // remain necessary when a deployment chooses to add one.
-}
-
-#[tokio::test]
-async fn exact_refusals_stay_terminal_under_a_reviewable_root_wildcard() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime_with_wildcard(&dir).await;
-    for name in discovered_tools()
-        .iter()
-        .filter(|name| !SUPPORTED_TOOLS.contains(&name.as_str()))
-    {
-        let decision = propose(&runtime, call(name, serde_json::json!({}))).await;
-        match decision {
-            HookDecision::DenyCall {
-                offers,
-                review,
-                feedback,
-            } => {
-                assert!(offers.is_empty(), "blocked tool received a remedy: {name}");
-                assert!(review.is_empty(), "blocked tool received review: {name}");
-                assert!(
-                    feedback.contains("blocked"),
-                    "terminal block lost its marker: {name}: {feedback}"
-                );
+async fn unknown_tools_follow_the_deployments_fallback() {
+    for wildcard in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = runtime(&dir, wildcard, false).await;
+        match propose(&runtime, call("future_unknown_tool", serde_json::json!({}))).await {
+            HookDecision::Refuse { .. } if !wildcard => {}
+            HookDecision::DenyCall { offers, feedback, .. } => {
+                assert_eq!(!offers.is_empty(), wildcard);
+                if wildcard {
+                    assert!(feedback.contains("signoff"));
+                }
             }
-            other => panic!("exact refusal was opened by the wildcard for {name}: {other:?}"),
+            other => panic!("unexpected unknown-tool decision: {other:?}"),
         }
-    }
-}
-
-#[tokio::test]
-async fn an_unknown_future_tool_is_covered_by_a_root_wildcard() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime_with_wildcard(&dir).await;
-    let decision = propose(
-        &runtime,
-        call("future_unknown_tool", serde_json::json!({ "marker": "unknown" })),
-    )
-    .await;
-    match decision {
-        HookDecision::DenyCall {
-            offers,
-            review,
-            feedback,
-        } => {
-            assert!(!offers.is_empty(), "wildcard did not produce a reviewable remedy");
-            assert!(!review.is_empty(), "wildcard did not expose the configured review");
-            assert!(
-                feedback.contains("signoff"),
-                "wildcard response was not consulted: {feedback}"
-            );
-        }
-        other => panic!("future tool did not use the root wildcard: {other:?}"),
     }
 }
 
 #[test]
 fn every_discovered_tool_has_an_explicit_contract() {
-    let discovered = discovered_tools();
-    assert_eq!(discovered.len(), 96);
+    let discovered: Vec<String> = serde_json::from_str(include_str!("fixtures/monday-tools.json")).unwrap();
     let expected: std::collections::BTreeSet<_> = discovered.iter().map(String::as_str).collect();
-    assert_eq!(expected.len(), 96, "discovery contains duplicate names");
-
+    assert_eq!(discovered.len(), 96);
+    assert_eq!(expected.len(), discovered.len());
     let policy: toml::Value = toml::from_str(include_str!("../../marketplace/batteries/monday/appa.toml")).unwrap();
-    let contracts = policy["policy"]["tool"].as_array().unwrap();
-    let actual: std::collections::BTreeSet<_> = contracts
+    let actual: std::collections::BTreeSet<_> = policy["policy"]["tool"]
+        .as_array()
+        .unwrap()
         .iter()
-        .map(|contract| contract["name"].as_str().unwrap().strip_prefix("mcp/monday/").unwrap())
+        .map(|contract| {
+            contract["name"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("mcp/monday/")
+                .unwrap()
+                .split('(')
+                .next()
+                .unwrap()
+        })
         .collect();
-    assert_eq!(contracts.len(), expected.len());
     assert_eq!(actual, expected);
-
-    let supported = contracts
-        .iter()
-        .filter(|contract| contract["requires"].get("attention").is_none())
-        .map(|contract| contract["name"].as_str().unwrap().strip_prefix("mcp/monday/").unwrap())
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(supported, SUPPORTED_TOOLS.iter().copied().collect());
-
-    for contract in contracts {
-        let name = contract["name"].as_str().unwrap().strip_prefix("mcp/monday/").unwrap();
-        if !SUPPORTED_TOOLS.contains(&name) {
-            assert_eq!(
-                contract["requires"]["attention"].as_array().unwrap(),
-                &[toml::Value::String("blocked".into())],
-                "unsupported tool lacks an exact terminal block: {name}"
-            );
-        }
-    }
 }

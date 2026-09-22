@@ -1,10 +1,25 @@
-# Policy-only replay for the monday battery. The replay never dispatches an
-# MCP call; a separate clappa smoke owns authenticated provider execution.
+# Offline policy replay: a fictional audience and replay-simulated review.
 include = ["../../../marketplace/batteries/monday/appa.toml"]
 
 [policy]
 version = 2
 
+[policy.audience]
+internal = ["replay:members"]
+
+[[policy.authority]]
+name = "monday-operator"
+# Deliberately cannot widen an audience: internal read-to-write must work as-is.
+permits = { trust_below = "trusted", attention = ["monday-review"] }
+
 [externals]
 timeout_ms = 30000
 max_body_bytes = 1048576
+
+[externals.authorities.monday-operator]
+builtin = "hitl"
+
+# This fixed roster is only a replay fixture, never a monday ACL resolver.
+[externals.audience.replay]
+command = ["python3", "-c", 'import json, sys; json.load(sys.stdin); print(json.dumps({"version": 1, "answer": {"members": ["alice@corp.example", "bob@corp.example"]}}))']
+selectors = [{ template = "members", feeds = "internal" }]

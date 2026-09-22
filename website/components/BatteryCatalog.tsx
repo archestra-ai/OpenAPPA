@@ -45,7 +45,7 @@ const BATTERIES = [
   },
   {
     name: "monday.com",
-    description: "Four conservative reads and name-only item creation from public input; broader operations are refused.",
+    description: "Rules for 96 tools: internal reads, reviewed writes, and structural, workflow and agent changes.",
     href: "/battery-monday",
     logo: "/images/batteries/monday.svg",
   },

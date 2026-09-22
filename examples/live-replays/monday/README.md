@@ -1,13 +1,10 @@
 # Test the monday battery
 
-The `monday-battery.appa` trace checks the bounded name-only write, structural
-duplication refusal, `create_update` refusal because its response reads the
-existing item name, and arbitrary GraphQL refusal. `appa replay` evaluates
-policy only; it never executes Monday or an MCP call. The focused runtime test
-covers internal audience-source requirements, restricted read-to-write flow,
-and future unknown-tool refusal.
-
-Run the policy-only replay from the repository root:
+The offline trace checks ordinary read options, reviewed creation and comments
+from internal content, a mixed tool's read action, reviewed GraphQL, and
+refusal of public disclosure. The root uses a fictional
+fixed audience. Its review authority cannot expand an audience, so successful
+writes demonstrate that internal data does not need public declassification.
 
 ```sh
 appa replay \
@@ -15,8 +12,11 @@ appa replay \
   examples/live-replays/monday/monday-battery.appa
 ```
 
-The separate clappa smoke uses the authenticated Streamable HTTP endpoint
-`https://mcp.monday.com/mcp`, a disposable fixture, and a unique marker. Keep
-tokens, fixture IDs, and customer data in the private runtime environment.
-The smoke must independently verify provider state before and after each
-positive or negative mutation; this replay does not do that.
+`appa replay` does not execute MCP tools; it supplies simulated approvals and
+empty results. The audience command is only a fixture, not an ACL resolver.
+Runtime tests separately cover sensitive operations, credential confinement,
+external-submission audience approval, unknown tools and deployment wildcard composition.
+
+Live clappa checks need an authenticated monday connection, disposable owned
+fixtures, fresh sessions after policy reload, and independent provider-state
+checks.
