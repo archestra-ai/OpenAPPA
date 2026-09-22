@@ -40,11 +40,13 @@ expect allow
 # Structural and opaque operations have a review path.
 mcp/monday/all_monday_api {
   query: "mutation { delete_board(board_id: 0) { id } }"
+  variables: "{}"
 }
 expect authority monday-operator
 
 # Reviewing a write did not make the trajectory public.
 mcp/monday/get_monday_knowledge {
   query: "Internal summary"
+  kind: "general"
 }
 expect deny
