@@ -126,6 +126,7 @@ fn call(actor: &Actor, raw: &str) -> HookEvent {
         call: ProposedCall {
             tool: derived.canonical.into_string(),
             arguments: serde_json::value::RawValue::from_string("{}".into()).expect("an object"),
+            cwd: None,
         },
         spawn: derived.spawn,
         ruling: None,
@@ -187,6 +188,7 @@ async fn a_battery_rule_reaches_the_server_the_host_aliased_and_speaks_its_spell
                 call: ProposedCall {
                     tool: appa_runtime_api::CONTROL_TOOL.into(),
                     arguments: serde_json::value::RawValue::from_string(plan.to_string()).expect("an object"),
+                    cwd: None,
                 },
                 spawn: false,
                 ruling: None,

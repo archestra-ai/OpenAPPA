@@ -310,6 +310,7 @@ impl super::Runtime {
         let call = ProposedCall {
             tool: format!("{PREFIX}{tool}"),
             arguments: serde_json::value::to_raw_value(&arguments).map_err(refused)?,
+            cwd: None,
         };
         let session = self.session(&actor.root, super::acting_trajectory(actor))?;
         match session.on_tool_call_identified(call.clone(), None, false).await? {
@@ -326,6 +327,7 @@ impl super::Runtime {
         let call = ProposedCall {
             tool: format!("{PREFIX}{tool}"),
             arguments: serde_json::value::to_raw_value(&arguments).map_err(refused)?,
+            cwd: None,
         };
         self.session(&actor.root, super::acting_trajectory(&actor))?
             .execute_file(call)
@@ -468,6 +470,7 @@ max_body_bytes = 65536
         ProposedCall {
             tool: format!("{PREFIX}{name}"),
             arguments: super::super::session::raw(arguments),
+            cwd: None,
         }
     }
 
@@ -630,6 +633,7 @@ max_body_bytes = 65536
         let proposal = ProposedCall {
             tool: format!("{PREFIX}appa_edit_file"),
             arguments: super::super::session::raw(arguments.clone()),
+            cwd: None,
         };
         allow(&runtime, &actor.root, proposal.clone()).await;
         // The approval above releases the call; execute exactly that dispatch as MCP does.
@@ -684,6 +688,7 @@ max_body_bytes = 65536
                 arguments: super::super::session::raw(
                     serde_json::json!({"file_path":"source.txt", "old_string":old, "new_string":"replacement"}),
                 ),
+                cwd: None,
             };
             assert!(matches!(
                 session.on_tool_call(proposal.clone(), false).await.unwrap(),
@@ -767,6 +772,7 @@ else:
                     "input_paths": [input], "output_path": format!("{command}.txt"), "command": command
                 }))
                 .unwrap(),
+                cwd: None,
             };
             let session = runtime.session(&id, &id).unwrap();
             assert!(matches!(
@@ -1055,6 +1061,7 @@ else:
             arguments: super::super::session::raw(
                 serde_json::json!({"file_path": "elsewhere.txt", "content": "pinned content"}),
             ),
+            cwd: None,
         };
         let files = runtime.inner.shared.files.as_ref().unwrap();
         let pin = FilePin {

@@ -115,6 +115,7 @@ fn read_hr() -> ProposedCall {
     ProposedCall {
         tool: "read_hr".to_string(),
         arguments: raw(serde_json::json!({})),
+        cwd: None,
     }
 }
 
@@ -122,6 +123,7 @@ fn read_file(path: &str) -> ProposedCall {
     ProposedCall {
         tool: "read_file".to_string(),
         arguments: raw(serde_json::json!({ "path": path })),
+        cwd: None,
     }
 }
 

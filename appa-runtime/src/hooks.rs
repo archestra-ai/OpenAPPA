@@ -965,6 +965,7 @@ mod tests {
         crate::api::ProposedCall {
             tool: "host/claude-code/Task".to_string(),
             arguments: crate::api::raw(serde_json::json!({"prompt": "look it up"})),
+            cwd: None,
         }
     }
 
@@ -2010,6 +2011,7 @@ mod tests {
         let call = || crate::api::ProposedCall {
             tool: "host/claude-code/Agent".to_string(),
             arguments: crate::api::raw(serde_json::json!({"prompt": "list files"})),
+            cwd: None,
         };
         let result = || HookEvent::SpawnResult {
             actor: Actor {
@@ -2064,6 +2066,7 @@ mod tests {
                 call: crate::api::ProposedCall {
                     tool: "host/claude-code/Bash".to_string(),
                     arguments: crate::api::raw(serde_json::json!({"command": "ls"})),
+                    cwd: None,
                 },
                 call_id: None,
                 spawn: false,
@@ -2103,6 +2106,7 @@ mod tests {
                 call: crate::api::ProposedCall {
                     tool: "host/claude-code/Bash".to_string(),
                     arguments: crate::api::raw(serde_json::json!({"command": "ls"})),
+                    cwd: None,
                 },
                 call_id: None,
                 spawn: false,

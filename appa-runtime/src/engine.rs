@@ -79,8 +79,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::api::{EmbeddedPresentationOptions, OutcomeBody, RemedyDisplay, RemedyDisplayPlan, ToolNaming};
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
 use crate::consult::{
-    AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, HistoryEntry,
-    Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
+    AnnotationAnswer, AnnotationDeclaration, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration, Consult,
+    HistoryEntry, InputArtifact, Ruling, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
 };
 use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn};
 
@@ -147,8 +147,12 @@ pub enum ExternalRequest {
         annotator: String,
         call: appa_engine::value::CanonicalDigest,
         declaration: AnnotationDeclaration,
-        /// The consult artifact: the complete call, or one value per declared input.
+        /// The consult artifact: the complete call, or one value per declared input that
+        /// reads the call. An input a program answers is added by its consult below.
         args: serde_json::Value,
+        /// The consults owed before the annotator is asked, one per `$input.<name>` input;
+        /// each answer joins `args` under its input's name.
+        inputs: Vec<InputRequest>,
     },
     /// One audience source read: the members of one selector's collection at the
     /// registered source of `provider`.
@@ -168,6 +172,13 @@ pub enum ExternalRequest {
         answering: String,
         templates: Vec<String>,
     },
+}
+
+/// One annotator input a program of the deployment answers about the proposed call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InputRequest {
+    pub input: String,
+    pub consult: Consult,
 }
 
 /// A typed external answer. `None`/`Abstain` mean the external gave
@@ -1266,7 +1277,7 @@ impl RuntimeEngine {
                 detail: "deciding a proposal for a trajectory the log has not opened".to_string(),
             });
         };
-        let CallAnswers { annotation } = match self.answers_for(&views, &resolved, evidence) {
+        let CallAnswers { annotation } = match self.answers_for(&views, &resolved, call.cwd.as_deref(), evidence) {
             Ok(answers) => answers,
             Err(Resolution(requests)) => return Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
         };
@@ -1624,13 +1635,15 @@ impl RuntimeEngine {
                 // it: the digest is the annotation's key. Any group its contract reads is
                 // asked through the act's own audience evidence, not gathered here. A
                 // derivation the engine cannot mint a call from is the engine's to refuse.
+                // The offer keeps no working directory, so an input program asked here sees
+                // none.
                 let annotation = match self
                     .engine
                     .resolve_call(call.tool().clone(), derived.as_str().as_bytes())
                 {
                     Ok(rewritten) => match self.engine.registry().declaration(&rewritten) {
                         Some(declaration @ ToolDeclaration::Annotated { .. }) => {
-                            match self.annotation_for(&views, declaration, &rewritten, evidence) {
+                            match self.annotation_for(&views, declaration, &rewritten, None, evidence) {
                                 Ok(annotation) => Some(annotation),
                                 Err(Resolution(requests)) => {
                                     return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
@@ -2094,6 +2107,7 @@ impl RuntimeEngine {
         &self,
         views: &Views,
         resolved: &ResolvedCall,
+        cwd: Option<&str>,
         evidence: &[ExternalEvidence],
     ) -> Result<CallAnswers, Resolution> {
         let declaration = self
@@ -2103,7 +2117,9 @@ impl RuntimeEngine {
             .expect("a resolved call names its registered declaration");
         let annotation = match declaration {
             ToolDeclaration::Declared(_) => None,
-            ToolDeclaration::Annotated { .. } => Some(self.annotation_for(views, declaration, resolved, evidence)?),
+            ToolDeclaration::Annotated { .. } => {
+                Some(self.annotation_for(views, declaration, resolved, cwd, evidence)?)
+            }
         };
         Ok(CallAnswers { annotation })
     }
@@ -2116,6 +2132,7 @@ impl RuntimeEngine {
         views: &Views,
         declaration: &ToolDeclaration,
         resolved: &ResolvedCall,
+        cwd: Option<&str>,
         evidence: &[ExternalEvidence],
     ) -> Result<PinnedAnnotation, Resolution> {
         let annotator = declaration
@@ -2142,6 +2159,7 @@ impl RuntimeEngine {
                 annotator,
                 declaration,
                 resolved,
+                cwd,
             )]));
         };
         Ok(PinnedAnnotation::new(
@@ -2151,21 +2169,43 @@ impl RuntimeEngine {
         ))
     }
 
+    /// `cwd` is the directory the harness proposed the call from, when it reports one; only
+    /// the input programs see it, never the annotator.
     fn annotation_request(
         &self,
         annotator: &appa_engine::names::AnnotatorName,
         declaration: &ToolDeclaration,
         resolved: &ResolvedCall,
+        cwd: Option<&str>,
     ) -> ExternalRequest {
         let binding = self
             .annotators
             .get(annotator.as_str())
             .expect("the deployment registers every annotator the policy declares");
+        let inputs = binding
+            .inputs
+            .iter()
+            .filter_map(|(input, source)| match source {
+                appa_policy::InputSource::External(program) => Some(InputRequest {
+                    input: input.clone(),
+                    consult: Consult::input(
+                        program,
+                        InputArtifact {
+                            tool: resolved.tool().as_str().to_string(),
+                            arguments: resolved.arguments().clone(),
+                            cwd: cwd.map(str::to_string),
+                        },
+                    ),
+                }),
+                appa_policy::InputSource::Call(_) => None,
+            })
+            .collect();
         ExternalRequest::Annotation {
             annotator: annotator.as_str().to_string(),
             call: resolved.digest(),
             declaration: self.annotation_declaration(annotator, binding, resolved),
             args: annotation_args(&binding.inputs, declaration, resolved),
+            inputs,
         }
     }
 
@@ -2185,7 +2225,7 @@ impl RuntimeEngine {
             .expect("a resolved call names its registered declaration");
         Ok(declaration
             .annotator()
-            .map(|annotator| self.annotation_request(annotator, declaration, &resolved)))
+            .map(|annotator| self.annotation_request(annotator, declaration, &resolved, None)))
     }
 
     /// What one annotation consult declares: the Annotator's trusted hint, the mandate
@@ -2207,6 +2247,12 @@ impl RuntimeEngine {
         AnnotationDeclaration {
             hint: binding.hint.as_ref().map(|hint| hint.as_str().to_string()),
             inputs: binding.inputs.keys().cloned().collect(),
+            established: binding
+                .inputs
+                .iter()
+                .filter(|(_, source)| matches!(source, appa_policy::InputSource::External(_)))
+                .map(|(input, _)| input.clone())
+                .collect(),
             trust_ranks: mandate
                 .trust_ranks()
                 .filter_map(|trust| chain.name_of(trust).map(str::to_string))
@@ -2641,9 +2687,10 @@ struct CallAnswers {
 
 /// The consult artifact an annotation request carries: the complete call — its proposed
 /// name, the declaration's description when the policy wrote one, and the canonical
-/// arguments — or one value per declared input.
+/// arguments — or one value per declared input that reads the call. An input a program
+/// answers is left out here and joins once its consult has answered.
 fn annotation_args(
-    inputs: &BTreeMap<String, appa_policy::ToolCallSource>,
+    inputs: &BTreeMap<String, appa_policy::InputSource>,
     declaration: &ToolDeclaration,
     resolved: &ResolvedCall,
 ) -> serde_json::Value {
@@ -2661,6 +2708,9 @@ fn annotation_args(
     }
     let mut args = serde_json::Map::new();
     for (input, source) in inputs {
+        let appa_policy::InputSource::Call(source) = source else {
+            continue;
+        };
         let value = match source {
             appa_policy::ToolCallSource::Call => complete(),
             appa_policy::ToolCallSource::Name => serde_json::json!(resolved.tool().as_str()),
@@ -3919,6 +3969,7 @@ mod tests {
         let call = ProposedCall {
             tool: "lookup".to_string(),
             arguments: serde_json::value::RawValue::from_string(r#"{"id": 7}"#.to_string()).expect("valid JSON"),
+            cwd: None,
         };
         let propose = |view: &EngineView, evidence: Vec<ExternalEvidence>| {
             engine
@@ -3992,7 +4043,7 @@ mod tests {
             .declaration(&resolved)
             .expect("the call names its declaration");
         let pin = engine
-            .annotation_for(&views, declaration, &resolved, &[])
+            .annotation_for(&views, declaration, &resolved, None, &[])
             .expect("the recorded annotation pins without evidence");
         assert_eq!(pin.produced().requires.attention, vec![MarkName::new("privacy-review")]);
 
@@ -4012,7 +4063,7 @@ mod tests {
             },
         };
         let pinned = engine
-            .annotation_for(&views, declaration, &resolved, &[contradicting])
+            .annotation_for(&views, declaration, &resolved, None, &[contradicting])
             .expect("the recorded annotation pins over contradicting evidence");
         assert_eq!(pinned, pin);
     }
@@ -4039,7 +4090,7 @@ mod tests {
         let view = opened_view(&engine, &trajectory);
         let owner = engine_id(&trajectory);
         let views = view.views(&owner).expect("the root is opened");
-        let asked = match engine.annotation_for(&views, declaration, &call, &[]) {
+        let asked = match engine.annotation_for(&views, declaration, &call, None, &[]) {
             Err(Resolution(requests)) => match requests.as_slice() {
                 [
                     ExternalRequest::Annotation {
@@ -4047,6 +4098,7 @@ mod tests {
                         call: digest,
                         declaration,
                         args,
+                        ..
                     },
                 ] => {
                     assert_eq!(annotator, "classifier");
@@ -4094,6 +4146,7 @@ mod tests {
                 &views,
                 declaration,
                 &call,
+                None,
                 &[ExternalEvidence::Annotation {
                     annotator: "classifier".to_string(),
                     call: asked,
@@ -4145,6 +4198,7 @@ mod tests {
                 &views,
                 declaration,
                 &other_call,
+                None,
                 &[ExternalEvidence::Annotation {
                     annotator: "classifier".to_string(),
                     call: asked,

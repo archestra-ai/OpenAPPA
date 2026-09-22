@@ -146,6 +146,7 @@ fn read_hr() -> ProposedCall {
     ProposedCall {
         tool: "read_hr".to_string(),
         arguments: raw(serde_json::json!({})),
+        cwd: None,
     }
 }
 
@@ -153,6 +154,7 @@ fn send(to: &str) -> ProposedCall {
     ProposedCall {
         tool: "send".to_string(),
         arguments: raw(serde_json::json!({ "to": to })),
+        cwd: None,
     }
 }
 
@@ -312,10 +314,12 @@ max_body_bytes = 4096
     let read_secret = || ProposedCall {
         tool: "read_secret".to_string(),
         arguments: raw(serde_json::json!({})),
+        cwd: None,
     };
     let send_internal = || ProposedCall {
         tool: "send_internal".to_string(),
         arguments: raw(serde_json::json!({})),
+        cwd: None,
     };
     let HookDecision::DenyCall { feedback, .. } = propose(&runtime, read_secret()).await else {
         panic!("the narrowing read is offered for acceptance");
@@ -733,6 +737,7 @@ fn send_capped() -> ProposedCall {
     ProposedCall {
         tool: "send_capped".to_string(),
         arguments: raw(serde_json::json!({})),
+        cwd: None,
     }
 }
 
@@ -821,6 +826,7 @@ fn post_to(channel_id: &str) -> ProposedCall {
     ProposedCall {
         tool: "post".to_string(),
         arguments: raw(serde_json::json!({ "channel_id": channel_id, "text": "hi" })),
+        cwd: None,
     }
 }
 

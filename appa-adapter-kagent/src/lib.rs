@@ -137,6 +137,7 @@ mod tests {
                 tool: tool.to_string(),
                 arguments: serde_json::value::to_raw_value(&serde_json::json!({"path": "tasks/c1.output"}))
                     .expect("the fixture serializes"),
+                cwd: None,
             },
         )
     }

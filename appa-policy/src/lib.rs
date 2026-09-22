@@ -78,7 +78,7 @@ pub enum ConfigError {
     )]
     UnknownAnnotatorBuiltin { name: String, builtin: String },
     #[error(
-        "annotator {annotator} input {input} reads {spelling:?}, which is not a tool-call value: an input reads `$tool_call`, `$tool_call.name`, `$tool_call.description`, `$tool_call.arguments`, or `$tool_call.arguments.<name>`"
+        "annotator {annotator} input {input} reads {spelling:?}, which is not an input source: an input reads `$tool_call`, `$tool_call.name`, `$tool_call.description`, `$tool_call.arguments`, `$tool_call.arguments.<name>`, or `$input.<name>`"
     )]
     UnknownCallSource {
         annotator: String,
@@ -256,9 +256,35 @@ impl AnnotatorBuiltin {
     }
 }
 
-/// `$tool_call` is the only input source an `[[annotator]]` reads, and these are its five
-/// forms. The mapping is policy syntax the runtime executes when it builds a consult
-/// artifact; the engine never sees it.
+/// What one `[[annotator]]` input reads: a value of the tool call, or the answer of a program
+/// the deployment binds under `[externals.inputs.<name>]` and runs before the annotator. The
+/// mapping is policy syntax the runtime executes when it builds a consult artifact; the engine
+/// never sees it.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum InputSource {
+    Call(ToolCallSource),
+    /// `$input.<name>`
+    External(String),
+}
+
+impl InputSource {
+    pub fn parse(spelling: &str) -> Option<InputSource> {
+        match spelling.strip_prefix("$input.") {
+            Some(name) if !name.is_empty() => Some(InputSource::External(name.to_string())),
+            Some(_) => None,
+            None => ToolCallSource::parse(spelling).map(InputSource::Call),
+        }
+    }
+
+    pub fn spelling(&self) -> String {
+        match self {
+            InputSource::Call(source) => source.spelling(),
+            InputSource::External(name) => format!("$input.{name}"),
+        }
+    }
+}
+
+/// The five values of the tool call an input can read.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ToolCallSource {
     /// `$tool_call` — the complete call: its name, its description when the tool declares one,
@@ -308,7 +334,7 @@ impl ToolCallSource {
 pub struct AnnotatorBinding {
     pub hint: Option<Hint>,
     pub builtin: Option<AnnotatorBuiltin>,
-    pub inputs: BTreeMap<String, ToolCallSource>,
+    pub inputs: BTreeMap<String, InputSource>,
 }
 
 /// A fully parsed and **fully validated** policy: the opened [`Engine`] — registry, deployment
@@ -400,7 +426,7 @@ impl Config {
             }
             let mut inputs = BTreeMap::new();
             for (input, spelling) in annotator.inputs.unwrap_or_default() {
-                let Some(source) = ToolCallSource::parse(&spelling) else {
+                let Some(source) = InputSource::parse(&spelling) else {
                     return Err(ConfigError::UnknownCallSource {
                         annotator: name.as_str().to_string(),
                         input,
@@ -482,14 +508,14 @@ impl Config {
             {
                 for (input, source) in &binding.inputs {
                     let refused = match source {
-                        ToolCallSource::Argument(argument) => parameters
+                        InputSource::Call(ToolCallSource::Argument(argument)) => parameters
                             .required_property(argument)
                             .err()
                             .map(|fault| format!("which {fault}")),
-                        ToolCallSource::Description if description.is_none() => {
+                        InputSource::Call(ToolCallSource::Description) if description.is_none() => {
                             Some("but the tool declares no description".to_string())
                         }
-                        _ => None,
+                        InputSource::Call(_) | InputSource::External(_) => None,
                     };
                     if let Some(reason) = refused {
                         return Err(ConfigError::AnnotatorInput {
@@ -2068,7 +2094,7 @@ annotator = "acl"
     }
 
     #[test]
-    fn an_input_reads_one_of_the_five_tool_call_values() {
+    fn an_input_reads_a_tool_call_value_or_names_a_program() {
         let policy = |spelling: &str| {
             format!(
                 "version = 2\n[[annotator]]\nname = \"r\"\ninputs = {{ subject = \"{spelling}\" }}\n\
@@ -2083,14 +2109,27 @@ annotator = "acl"
             "$tool_call.description",
             "$tool_call.arguments",
             "$tool_call.arguments.id",
+            "$input.github.repository",
         ] {
-            assert!(load(&policy(supported)).is_ok(), "{supported} is a tool-call value");
+            assert!(load(&policy(supported)).is_ok(), "{supported} is an input source");
         }
+        // A program input is checked against no tool schema: the tool declares nothing
+        // about a value the deployment establishes.
+        let loaded = load(&policy("$input.repo")).expect("a program input loads");
+        assert_eq!(
+            loaded
+                .annotators()
+                .next()
+                .map(|(_, binding)| binding.inputs["subject"].clone()),
+            Some(InputSource::External("repo".to_string()))
+        );
         for unsupported in [
             "$tool",
             "$tool_call.foo",
             "$tool_call.arguments.id.deep",
             "$tool_call.arguments.",
+            "$input.",
+            "$input",
             "id",
         ] {
             assert!(

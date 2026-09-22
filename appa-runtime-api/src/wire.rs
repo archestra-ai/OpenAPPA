@@ -146,10 +146,11 @@ enum Field {
     SpawnedId,
     Value,
     SpawnBinding,
+    Cwd,
 }
 
 impl Field {
-    const ALL: [Field; 11] = [
+    const ALL: [Field; 12] = [
         Field::RootId,
         Field::ChildId,
         Field::Text,
@@ -161,6 +162,7 @@ impl Field {
         Field::SpawnedId,
         Field::Value,
         Field::SpawnBinding,
+        Field::Cwd,
     ];
 
     fn spelling(self) -> &'static str {
@@ -176,6 +178,7 @@ impl Field {
             Field::SpawnedId => "spawned_id",
             Field::Value => "value",
             Field::SpawnBinding => "spawn_binding",
+            Field::Cwd => "cwd",
         }
     }
 }
@@ -203,6 +206,7 @@ fn fields_read(name: EventName) -> &'static [Field] {
             Field::Arguments,
             Field::CallId,
             Field::Ruling,
+            Field::Cwd,
         ],
         EventName::SpawnResume => &[
             Field::RootId,
@@ -417,6 +421,10 @@ pub struct WireEvent {
     pub spawn_binding: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inventory: Option<crate::inventory::ToolInventory>,
+    /// The working directory the host would execute a proposed call in, when it reports
+    /// one. A tool call alone reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 /// A parsed wire event with what the server derived from it.
@@ -451,6 +459,7 @@ impl WireEvent {
             value: None,
             spawn_binding: None,
             inventory: None,
+            cwd: None,
         }
     }
 
@@ -469,6 +478,7 @@ impl WireEvent {
             Field::SpawnedId => self.spawned_id.is_some(),
             Field::Value => self.value.is_some(),
             Field::SpawnBinding => self.spawn_binding.is_some(),
+            Field::Cwd => self.cwd.is_some(),
         }
     }
 
@@ -535,6 +545,7 @@ impl WireEvent {
                     arguments: Some(call.arguments.clone()),
                     call_id: call_id.clone(),
                     ruling: checked_ruling(adapter, *ruling)?,
+                    cwd: call.cwd.clone(),
                     ..Self::bare(adapter, EventName::ToolCall)
                 }
             }
@@ -681,6 +692,7 @@ impl WireEvent {
             value,
             spawn_binding,
             inventory,
+            cwd,
             ..
         } = self;
         let root = || -> Result<TrajectoryId, ParseRefusal> {
@@ -713,7 +725,11 @@ impl WireEvent {
         let derived_call =
             |tool: Option<String>, arguments: Option<Box<RawValue>>| -> Result<(ProposedCall, Derived), ParseRefusal> {
                 let raw = match (tool, arguments) {
-                    (Some(tool), Some(arguments)) => ProposedCall { tool, arguments },
+                    (Some(tool), Some(arguments)) => ProposedCall {
+                        tool,
+                        arguments,
+                        cwd: None,
+                    },
                     _ => return Err(malformed(format!("{name:?} without its tool call"))),
                 };
                 let derived = (served.derive)(&raw.tool)?;
@@ -752,6 +768,7 @@ impl WireEvent {
                     call: ProposedCall {
                         tool: derived.canonical.into_string(),
                         arguments: raw.arguments,
+                        cwd: None,
                     },
                     child,
                 })
@@ -783,6 +800,7 @@ impl WireEvent {
                         call: ProposedCall {
                             tool: derived.canonical.into_string(),
                             arguments: raw.arguments,
+                            cwd: cwd.filter(|cwd| !cwd.is_empty()),
                         },
                         call_id,
                         spawn,
@@ -805,6 +823,7 @@ impl WireEvent {
                 let call = ProposedCall {
                     tool: derived.canonical.into_string(),
                     arguments: raw.arguments,
+                    cwd: None,
                 };
                 let outcome = match outcome {
                     Some(outcome) => outcome.into_outcome()?,
@@ -1408,6 +1427,7 @@ mod tests {
             call: ProposedCall {
                 tool: "Agent".to_string(),
                 arguments: raw(r#"{"prompt":"go"}"#),
+                cwd: None,
             },
             call_id: Some("toolu-1".to_string()),
             outcome: ToolOutcome::Success {
@@ -1448,6 +1468,43 @@ mod tests {
             root: TrajectoryId("kagent:r1".to_string()),
         };
         assert!(WireEvent::from_event(AdapterName::ClaudeCode, &foreign).is_err());
+    }
+
+    /// A tool call's working directory rides the wire with it; no other event reads one.
+    #[test]
+    fn a_tool_call_carries_its_working_directory_and_nothing_else_does() {
+        let event = HookEvent::ToolCall {
+            actor: Actor {
+                root: TrajectoryId("cc:s1".to_string()),
+                child: None,
+            },
+            call: ProposedCall {
+                tool: "Bash".to_string(),
+                arguments: raw(r#"{"command":"git push"}"#),
+                cwd: Some("/work/checkout".to_string()),
+            },
+            call_id: None,
+            spawn: false,
+            ruling: None,
+        };
+        let wire = WireEvent::from_event(AdapterName::ClaudeCode, &event).expect("translates");
+        assert_eq!(wire.cwd.as_deref(), Some("/work/checkout"));
+        let bytes = serde_json::to_vec(&wire).expect("serializes");
+        let back = WireEvent::read(&bytes)
+            .expect("reads")
+            .into_event(&CLAUDE_CODE)
+            .expect("parses")
+            .expect("event");
+        match back.event {
+            HookEvent::ToolCall { call, .. } => assert_eq!(call.cwd.as_deref(), Some("/work/checkout")),
+            other => panic!("{other:?}"),
+        }
+        let refused = WireEvent::read(
+            br#"{"protocol":1,"adapter":"claude-code","event":"turn_end","root_id":"s1","cwd":"/work"}"#,
+        )
+        .expect("reads")
+        .into_event(&CLAUDE_CODE);
+        assert!(matches!(refused, Err(ParseRefusal::Malformed { .. })));
     }
 
     const CLAUDE_CODE: Adapter = Adapter {
@@ -1643,6 +1700,7 @@ mod tests {
             call: ProposedCall {
                 tool: "appa:execute_remedy_plan".to_string(),
                 arguments: raw(r#"{"offer_id":"o1"}"#),
+                cwd: None,
             },
             call_id: None,
             spawn: false,
@@ -1687,6 +1745,7 @@ mod tests {
         let call = |tool: &str| ProposedCall {
             tool: tool.to_string(),
             arguments: raw(r#"{"path":"notes.txt"}"#),
+            cwd: None,
         };
         for outcome in outcomes {
             let events = [

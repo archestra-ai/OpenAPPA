@@ -339,7 +339,7 @@ fn check_externals(
 
 /// The external kinds an included file may bind. A battery is an included
 /// fragment, so this is exactly the set the config loader accepts from one.
-pub const BINDABLE_KINDS: [&str; 4] = ["authorities", "sanitizers", "annotators", "audience"];
+pub const BINDABLE_KINDS: [&str; 5] = ["authorities", "sanitizers", "annotators", "audience", "inputs"];
 
 /// The stock sanitizers a battery may bind by `builtin` name: pure rewrites the
 /// runtime ships, which reach nothing outside the process. The loader's stock

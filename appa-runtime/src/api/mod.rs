@@ -72,6 +72,7 @@ impl ExactCall {
             tool: self.tool,
             arguments: serde_json::value::RawValue::from_string(text)
                 .expect("canonical argument bytes are one JSON value"),
+            cwd: None,
         }
     }
 }
@@ -1416,12 +1417,34 @@ impl Runtime {
         let Some(crate::engine::ExternalRequest::Annotation {
             annotator,
             declaration,
-            args,
+            mut args,
+            inputs,
             ..
         }) = deployment.resident.annotation_owed(tool, raw_arguments)?
         else {
             return Ok(None);
         };
+        let mut asked = Vec::with_capacity(inputs.len());
+        for input in &inputs {
+            asked.push(deployment.externals.consult(&input.consult, None, None));
+        }
+        let outcomes = crate::external::settle_batch(asked).await;
+        for (input, outcome) in inputs.iter().zip(outcomes) {
+            match outcome {
+                crate::external::ConsultOutcome::Answer(answer) => {
+                    args.as_object_mut()
+                        .expect("an annotation with declared inputs carries an object artifact")
+                        .insert(input.input.clone(), answer);
+                }
+                crate::external::ConsultOutcome::NoAnswer(_) => {
+                    return Ok(Some(AnnotationConsult {
+                        annotator,
+                        outcome,
+                        admitted: false,
+                    }));
+                }
+            }
+        }
         let consult = crate::consult::Consult {
             name: annotator.clone(),
             body: crate::consult::ConsultBody::Annotation {
@@ -2907,6 +2930,21 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
         }
     }
     bound_exactly("annotator", bound_by_deployment.into_iter(), &externals.annotators)?;
+    // Every program an annotator input reads is bound. A bound program no annotator reads
+    // stays idle rather than refused, as an audience source does: a battery binds the
+    // program beside the annotator that reads it, and a root that replaces that annotator
+    // may read nothing of the kind.
+    no_unbound(
+        "annotator input",
+        policy
+            .annotators()
+            .flat_map(|(_, binding)| binding.inputs.values())
+            .filter_map(|source| match source {
+                appa_policy::InputSource::External(program) => Some(program.as_str()),
+                appa_policy::InputSource::Call(_) => None,
+            }),
+        &externals.inputs,
+    )?;
     // Every provider the policy references is bound, and so is every entry a provider's
     // `lookup` names. A bound provider the policy never references stays idle rather than
     // refused: a battery binds its own source, and a deployment may include the battery
@@ -3743,6 +3781,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     call: ProposedCall {
                         tool: "host/claude-code/Bash".to_string(),
                         arguments: raw(serde_json::json!({"command": "ls"})),
+                        cwd: None,
                     },
                     call_id: None,
                     spawn: false,
@@ -4878,6 +4917,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let call = ProposedCall {
             tool: "mcp__appa__appa_include_battery".to_string(),
             arguments: serde_json::value::to_raw_value(&args).expect("arguments serialize"),
+            cwd: None,
         };
         let key = call_key(&call).expect("a management call under the MCP prefix");
 
@@ -5047,6 +5087,7 @@ url = "{url}"
                 call: ProposedCall {
                     tool: tool.to_string(),
                     arguments: raw(serde_json::json!({ "request": "summarize the crash logs" })),
+                    cwd: None,
                 },
                 call_id: None,
                 spawn,

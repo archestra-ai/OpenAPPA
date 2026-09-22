@@ -51,6 +51,7 @@ fn call(tool: &str) -> ProposedCall {
     ProposedCall {
         tool: tool.to_string(),
         arguments: raw(serde_json::json!({"file": "alice.md"})),
+        cwd: None,
     }
 }
 
@@ -306,6 +307,7 @@ async fn a_branch_records_its_seed_its_own_flows_and_how_its_return_crossed() {
     let spawn = ProposedCall {
         tool: "delegate".to_string(),
         arguments: raw(serde_json::json!({"task": "look Alice up"})),
+        cwd: None,
     };
     assert!(
         matches!(
@@ -418,6 +420,7 @@ async fn a_child_bound_attest_schema_return_crosses_in_engine() {
     let spawn = ProposedCall {
         tool: "spawn".to_string(),
         arguments: raw(serde_json::json!({"task": "judge the notes"})),
+        cwd: None,
     };
     let attested = RemedyArguments {
         label: Some(LabelSpelling::default()),
@@ -468,6 +471,7 @@ async fn only_a_root_names_the_audit() {
     let spawn = ProposedCall {
         tool: "delegate".to_string(),
         arguments: raw(serde_json::json!({"task": "look Alice up"})),
+        cwd: None,
     };
     assert_eq!(open_child(&runtime, spawn, None, as_spoken()).await, HookDecision::Ack);
 

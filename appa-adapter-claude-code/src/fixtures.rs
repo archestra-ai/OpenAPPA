@@ -49,6 +49,7 @@ pub(crate) fn proposed(tool: &str, arguments: serde_json::Value) -> (Actor, Prop
         ProposedCall {
             tool: tool.to_string(),
             arguments: raw(arguments),
+            cwd: None,
         },
     )
 }
@@ -71,6 +72,7 @@ pub(crate) fn tool_result(response: serde_json::Value) -> HookEvent {
         call: ProposedCall {
             tool: "Bash".to_string(),
             arguments: raw(serde_json::json!({"command": "cat notes.txt"})),
+            cwd: None,
         },
         call_id: None,
         outcome: ToolOutcome::Success {
@@ -88,6 +90,7 @@ pub(crate) fn spawn_result(response: serde_json::Value) -> HookEvent {
         call: ProposedCall {
             tool: "Agent".to_string(),
             arguments: raw(serde_json::json!({"prompt": "List the files."})),
+            cwd: None,
         },
         call_id: None,
         outcome: ToolOutcome::Success {
@@ -107,6 +110,7 @@ pub(crate) fn pre_tool_use() -> HookEvent {
         call: ProposedCall {
             tool: "Bash".to_string(),
             arguments: raw(serde_json::json!({"command": "ls"})),
+            cwd: None,
         },
         call_id: None,
         spawn: false,

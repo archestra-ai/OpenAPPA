@@ -323,6 +323,11 @@ pub struct TrajectoryId(pub String);
 pub struct ProposedCall {
     pub tool: String,
     pub arguments: Box<serde_json::value::RawValue>,
+    /// The working directory the harness would execute the call in, when the harness
+    /// reports one. Not part of the call's identity: the programs bound to an annotator's
+    /// inputs read it, the engine and the annotator never do.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 /// Equality is over the bytes as spelled, because that is the only

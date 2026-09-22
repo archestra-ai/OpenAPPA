@@ -320,6 +320,7 @@ mod tests {
             call: ProposedCall {
                 tool: "Bash".to_string(),
                 arguments: raw(serde_json::json!({"command": "ls"})),
+                cwd: None,
             },
             call_id: None,
             outcome: ToolOutcome::Indeterminate,
@@ -640,6 +641,7 @@ mod tests {
                     call: ProposedCall {
                         tool: "Bash".to_string(),
                         arguments: raw(serde_json::json!({"command": "ls"})),
+                        cwd: None,
                     },
                     call_id: None,
                     outcome: ToolOutcome::Indeterminate,

@@ -437,6 +437,7 @@ async fn run_step(runtime: &Runtime, actor: &Actor, step: &Step) -> StepOutcome 
     let call = ProposedCall {
         tool: step.tool.to_string(),
         arguments: step.arguments.clone(),
+        cwd: None,
     };
     let (got, feedback, offers) = match propose(runtime, actor, call).await {
         Proposed::Allowed(call) => match report_empty_output(runtime, actor, call).await {

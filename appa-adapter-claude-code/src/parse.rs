@@ -107,6 +107,10 @@ pub(crate) struct WireEvent {
     agent_type: Option<String>,
     #[serde(default)]
     last_assistant_message: Option<String>,
+    /// Claude Code's working directory for the session; the programs bound to an
+    /// annotator's inputs read it on a tool call.
+    #[serde(default)]
+    cwd: Option<String>,
 }
 
 pub(crate) fn non_empty(text: Option<&str>) -> Option<&str> {
@@ -142,7 +146,11 @@ impl WireEvent {
                     "AskUserQuestion" => strip_collected_answers(arguments),
                     _ => arguments,
                 };
-                Some(ProposedCall { tool, arguments })
+                Some(ProposedCall {
+                    tool,
+                    arguments,
+                    cwd: non_empty(self.cwd.as_deref()).map(str::to_string),
+                })
             }
             _ => None,
         }
@@ -475,12 +483,33 @@ mod tests {
                 call: ProposedCall {
                     tool: "Bash".to_string(),
                     arguments: raw(serde_json::json!({"command": "ls"})),
+                    cwd: None,
                 },
                 call_id: Some("toolu-1".to_string()),
                 spawn: false,
                 ruling: None,
             })),
         );
+    }
+
+    /// The session's working directory rides on the proposed call; an empty one names none.
+    #[test]
+    fn a_pre_tool_use_carries_the_working_directory() {
+        let event = |cwd: &str| {
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "s1",
+                "tool_name": "Bash",
+                "tool_input": {"command": "git push"},
+                "cwd": cwd,
+            })
+        };
+        let cwd_of = |event: &serde_json::Value| match parse_value(event) {
+            Ok(Some(HookEvent::ToolCall { call, .. })) => call.cwd,
+            other => panic!("a PreToolUse parses to a tool call, got {other:?}"),
+        };
+        assert_eq!(cwd_of(&event("/work/checkout")), Some("/work/checkout".to_string()));
+        assert_eq!(cwd_of(&event("")), None);
     }
 
     #[test]
@@ -592,6 +621,7 @@ mod tests {
                 call: ProposedCall {
                     tool: "Agent".to_string(),
                     arguments: raw(serde_json::json!({"prompt": "List the files.", "subagent_type": "Explore"})),
+                    cwd: None,
                 },
                 call_id: None,
                 outcome: ToolOutcome::Success {
@@ -656,6 +686,7 @@ mod tests {
                     call: ProposedCall {
                         tool: tool.to_string(),
                         arguments: raw(serde_json::json!({"prompt": "List the files.", "subagent_type": "Explore"})),
+                        cwd: None,
                     },
                     call_id: None,
                     outcome: ToolOutcome::Success {
