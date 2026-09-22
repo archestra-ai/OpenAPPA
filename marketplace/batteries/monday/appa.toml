@@ -1,0 +1,423 @@
+# monday battery: the monday-hosted Platform MCP server
+# (`https://mcp.monday.com/mcp`), version 1.0.0.
+#
+# Four reads return account and people metadata, plus board, item, and update
+# content authored by monday users. Results enter suspicious, restricted to
+# internal, and input must be sharable with internal. The discovered tools
+# do not report complete effective readers; map internal to people authorized
+# to see everything the connection can reach. No audience helper is bound here.
+#
+# Item creation requires trusted public input because the destination's
+# readers are unknown. Restricted read content cannot flow into this write.
+
+[policy]
+version = 2
+
+# --- reads: account and board content, restricted to internal readers ---
+
+[[policy.tool]]
+name = "mcp/monday/get_user_context"
+parameters = { type = "object", properties = {}, additionalProperties = false }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/monday/get_board_info"
+parameters = { type = "object", properties = { boardId = { type = "number" }, filters = { type = "object", properties = { views = { type = "object", properties = { ids = { type = "array", items = { type = "string" } }, names = { type = "array", items = { type = "string" } }, only = { type = "boolean" } }, additionalProperties = false }, columns = { type = "object", properties = { ids = { type = "array", items = { type = "string" } }, only = { type = "boolean" } }, additionalProperties = false } }, additionalProperties = false } }, required = ["boardId"], additionalProperties = false }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/monday/get_board_items_page"
+parameters = { type = "object", properties = { boardId = { type = "number" }, itemIds = { type = "array", items = { type = "number" }, maxItems = 99 }, limit = { type = "number", minimum = 1, maximum = 500 }, cursor = { type = "string" }, includeColumns = { type = "boolean" }, includeGroup = { type = "boolean" } }, required = ["boardId"], additionalProperties = false }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/monday/get_updates"
+parameters = { type = "object", properties = { objectId = { type = "string" }, objectType = { type = "string", const = "Item" }, limit = { type = "number", minimum = 1, maximum = 100 }, page = { type = "number", minimum = 1 }, includeReplies = { type = "boolean", const = false }, includeAssets = { type = "boolean", const = false } }, required = ["objectId", "objectType"], additionalProperties = false }
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+# --- writes: item creation from trusted public input ---
+# The observed response contains the supplied name, generated identifiers,
+# the requested board ID, and a generic message. This response assumption is
+# manually verified; the runtime does not enforce an output whitelist.
+# Reverify or remove this contract if the provider response changes.
+
+[[policy.tool]]
+name = "mcp/monday/create_item"
+parameters = { type = "object", properties = { boardId = { type = "number" }, name = { type = "string", minLength = 1, maxLength = 255 }, columnValues = { type = "string", const = "{}" } }, required = ["boardId", "name", "columnValues"], additionalProperties = false }
+delta = { audience = ["public"] }
+requires = { trust = "trusted", audience = { contains = ["public"] } }
+effects = ["monday.changed"]
+
+# --- unsupported tools: blocked, with no authority override ---
+# All 91 other names in the 2026-09-22 discovery have exact blocks, including
+# create_update, whose response reads the existing item's name. These blocks
+# take precedence over a deployment's reviewable `name = "*"` fallback;
+# future names outside this inventory can still match that fallback.
+
+[[policy.tool]]
+name = "mcp/monday/all_monday_api"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/all_api_read"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/all_api_write"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/execute_code"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/run_action"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/create_update"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/create_items"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/get_board_activity"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/list_users_and_teams"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/change_item_column_values"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/update_items"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/create_form"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/update_form"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/get_form"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/form_questions_editor"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/create_form_submission"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/create_column"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/update_column"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/create_group"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/get_graphql_schema"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/get_column_type_info"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/get_type_details"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/create_notification"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/read_docs"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/workspace_info"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/list_workspaces"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/create_doc"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/update_doc"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/update_workspace"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/update_folder"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/create_workspace"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/create_folder"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/move_object"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/create_dashboard"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/all_widgets_schema"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/create_widget"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/board_insights"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/search"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/get_assets"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/get_asset_upload_url"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/finalize_asset_upload"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/list_automations"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/manage_automations"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/create_automation"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/get_automation_runs"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/get_automation_statistics"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/submit_bug_or_feature_request"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/get_monday_dev_sprints_boards"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/get_sprints_metadata"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/get_sprint_summary"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/invoke_process_planner"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/invoke_workflow_expert"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/validate_workflow"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/create_workflow"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/publish_workflow"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/get_run_once_trigger_entities"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/run_workflow_once"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/stop_workflow_run_once"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/get_workflow_run_once_status"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/explore_meetings"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/search_meetings_content"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/get_meetings_content"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/create_view"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/create_view_table"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/update_view"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/update_view_table"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/create_board"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/agent_catalog"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/manage_agent"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/connect_external_agent"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/manage_agent_triggers"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/manage_agent_skills"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/manage_agent_knowledge"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/show-chart"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/show-table"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/show-assign"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/show-battery"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/create_action"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/get_action"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/list_actions"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/update_action"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/delete_action"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/get_monday_knowledge"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/vibe_create"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/vibe_update"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/vibe_get"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/vibe_list"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/vibe_ask"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/vibe_publication"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/vibe_delete"
+requires = { attention = ["blocked"] }
+
+[[policy.tool]]
+name = "mcp/monday/delete_view"
+requires = { attention = ["blocked"] }

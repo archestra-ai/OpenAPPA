@@ -1,0 +1,10 @@
+schema = 1
+name = "monday"
+description = "Conservative policy for the current monday Platform MCP tool set: bounded board/item reads and public-input name-only item creation, with other tools refused."
+
+[battery]
+policy = "appa.toml"
+hosts = ["claude-code", "kagent"]
+namespaces = ["monday"]
+helpers = []
+setup = "Connect the official Streamable HTTP endpoint https://mcp.monday.com/mcp with an OAuth grant or monday API token; installation adds policy but does not create the connection or grant board permissions."

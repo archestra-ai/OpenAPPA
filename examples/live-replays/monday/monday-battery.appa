@@ -1,0 +1,33 @@
+# This trace uses board/item placeholders only. `appa replay` evaluates the
+# policy and does not execute Monday or an MCP call.
+
+# A fresh trusted/public trajectory can create a name-only item.
+mcp/monday/create_item {
+  boardId: 0
+  name: "OpenAPPA monday replay marker"
+  columnValues: "{}"
+}
+expect allow
+
+# Structural duplication is outside the bounded contract.
+mcp/monday/create_item {
+  boardId: 0
+  name: "OpenAPPA monday replay marker"
+  columnValues: "{}"
+  duplicateFromItemId: 1
+}
+expect deny
+
+# The response reads the existing target item's name, so public input does not
+# make this destination safe under the static v1 contract.
+mcp/monday/create_update {
+  itemId: 1
+  body: "OpenAPPA monday replay marker"
+}
+expect deny
+
+# Arbitrary GraphQL remains blocked even for a harmless-looking query.
+mcp/monday/all_monday_api {
+  query: "query { boards { id } }"
+}
+expect deny

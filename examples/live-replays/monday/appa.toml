@@ -1,0 +1,10 @@
+# Policy-only replay for the monday battery. The replay never dispatches an
+# MCP call; a separate clappa smoke owns authenticated provider execution.
+include = ["../../../marketplace/batteries/monday/appa.toml"]
+
+[policy]
+version = 2
+
+[externals]
+timeout_ms = 30000
+max_body_bytes = 1048576

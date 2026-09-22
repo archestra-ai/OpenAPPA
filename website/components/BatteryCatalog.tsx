@@ -44,6 +44,12 @@ const BATTERIES = [
     logo: "/images/batteries/sentry.svg",
   },
   {
+    name: "monday.com",
+    description: "Four conservative reads and name-only item creation from public input; broader operations are refused.",
+    href: "/battery-monday",
+    logo: "/images/batteries/monday.svg",
+  },
+  {
     name: "Notion",
     description: "Rules for 36 tools; reads are internal because Notion exposes no page permissions.",
     href: "/battery-notion",
