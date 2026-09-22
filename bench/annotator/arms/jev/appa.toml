@@ -1,0 +1,13 @@
+# The jev arm: every call, whatever its tool, is judged by the jev battery's Annotator.
+include = ["batteries/jev/appa.toml"]
+
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "*"
+annotator = "jev.tool-call"
+
+[externals]
+timeout_ms = 5000
+max_body_bytes = 65536
