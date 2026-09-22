@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import ast
 from dataclasses import dataclass
+from modulefinder import ModuleFinder
 from pathlib import Path
 import sys
 import tomllib
@@ -65,12 +66,6 @@ class LocalPath:
     path: Path | None
     relative: str | None
     reason: str | None = None
-
-
-@dataclass(frozen=True)
-class Dependency:
-    raw: str
-    line: int
 
 
 def _line_for_key(text: str, key: str, start: int = 0) -> tuple[int, int] | None:
@@ -251,87 +246,99 @@ def _production_scripts(root: Path) -> Iterator[Path]:
             yield path
 
 
-def _module_file(base: Path, parts: Sequence[str]) -> Path | None:
+def _python_modules(root: Path, entry: Path) -> tuple[set[Path], list[Path]]:
+    """Return local Python modules found by stdlib modulefinder.
+
+    The entry directory is first to mirror ``python3 path/to/script.py``;
+    the battery root is also searched for batteries that rely on it being on
+    ``PYTHONPATH``. Other interpreter paths are included so standard-library
+    and installed imports don't get mistaken for battery-local files.
+    """
+
+    search_path = [entry.parent, root]
+    search_path.extend(Path(item or ".").resolve() for item in sys.path)
+    finder = ModuleFinder(path=list(dict.fromkeys(str(path) for path in search_path)))
+    finder.run_script(str(entry))
+
+    local_modules: set[Path] = set()
+    escaping_modules: list[Path] = []
+    for module in finder.modules.values():
+        if not module.__file__:
+            continue
+        candidate = Path(module.__file__)
+        if not candidate.is_absolute():
+            candidate = Path.cwd() / candidate
+        candidate = candidate.absolute()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            escaping_modules.append(candidate)
+            continue
+        if resolved.suffix == ".py" and resolved.is_file():
+            local_modules.add(resolved)
+    return local_modules, escaping_modules
+
+
+def _module_exists(base: Path, parts: list[str]) -> bool:
     if not parts:
-        return None
+        return False
     stem = base.joinpath(*parts)
-    module = stem.with_suffix(".py")
-    if module.is_file():
-        return module
-    package = stem / "__init__.py"
-    if package.is_file():
-        return package
-    return None
+    return stem.with_suffix(".py").is_file() or (stem / "__init__.py").is_file()
 
 
-def _python_imports(
+def _python_import_diagnostics(
     root: Path, source: Path, tree: ast.AST
-) -> tuple[list[Dependency], list[tuple[int, str]], list[tuple[int, str]]]:
-    dependencies: list[Dependency] = []
+) -> tuple[list[tuple[int, str]], list[tuple[int, str]]]:
+    """Find unresolved relative imports and import calls we don't follow.
+
+    ``modulefinder`` handles ordinary import statements transitively. Calls to
+    ``__import__`` and ``import_module`` are deliberately unsupported because
+    bytecode import analysis cannot reliably associate them with a local file.
+    """
+
     missing: list[tuple[int, str]] = []
     unsupported: list[tuple[int, str]] = []
-
-    def bases_for(node: ast.ImportFrom) -> list[Path]:
-        if node.level:
-            base = source.parent
-            for _ in range(max(0, node.level - 1)):
-                base = base.parent
-            return [base]
-        # A helper imported by a script is normally beside that script.  The
-        # battery root fallback also covers a nested entry point run with the
-        # battery root on PYTHONPATH.
-        return [source.parent] if source.parent == root else [source.parent, root]
-
-    def add(path: Path, line: int) -> None:
-        if path not in dependencies_by_path:
-            dependencies_by_path.add(path)
-            dependencies.append(Dependency(path.relative_to(root).as_posix(), line))
-
-    dependencies_by_path: set[Path] = set()
+    dynamic_import_names = {"__import__"}
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                parts = alias.name.split(".")
-                for base in ([source.parent] if source.parent == root else [source.parent, root]):
-                    found = _module_file(base, parts)
-                    if found:
-                        add(found, node.lineno)
-                        break
-        elif isinstance(node, ast.ImportFrom):
-            module_parts = node.module.split(".") if node.module else []
-            found_any = False
-            for base in bases_for(node):
-                module_file = _module_file(base, module_parts) if module_parts else None
-                if module_file:
-                    add(module_file, node.lineno)
-                    found_any = True
-                    # ``from package import helper`` can import another local
-                    # module, while ``from helper import function`` usually
-                    # resolves to helper.py itself.
-                    if module_file.name == "__init__.py":
-                        package_base = module_file.parent
-                        for alias in node.names:
-                            child = _module_file(package_base, alias.name.split("."))
-                            if child:
-                                add(child, node.lineno)
-                    break
-                for alias in node.names:
-                    names = module_parts + alias.name.split(".")
-                    child = _module_file(base, names)
-                    if child:
-                        add(child, node.lineno)
-                        found_any = True
-            if node.level and not found_any:
-                missing.append((node.lineno, node.module or ", ".join(alias.name for alias in node.names)))
-        elif isinstance(node, ast.Call):
-            dynamic = False
-            if isinstance(node.func, ast.Name) and node.func.id == "__import__":
-                dynamic = not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, str)
-            elif isinstance(node.func, ast.Attribute) and node.func.attr == "import_module":
-                dynamic = not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, str)
-            if dynamic:
-                unsupported.append((node.lineno, "dynamic import is not followed because its module name is not static"))
-    return dependencies, missing, unsupported
+        if isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = source.parent
+                for _ in range(node.level - 1):
+                    base = base.parent
+                try:
+                    base.resolve().relative_to(root)
+                except ValueError:
+                    missing.append((node.lineno, "relative import escapes the battery directory"))
+                    continue
+
+                module_parts = node.module.split(".") if node.module else []
+                found = _module_exists(base, module_parts)
+                if not found:
+                    found = any(
+                        _module_exists(base, module_parts + alias.name.split("."))
+                        for alias in node.names
+                    )
+                if not found:
+                    missing.append((node.lineno, node.module or ", ".join(alias.name for alias in node.names)))
+            if node.module == "importlib":
+                dynamic_import_names.update(
+                    alias.asname or alias.name for alias in node.names if alias.name == "import_module"
+                )
+            elif node.module == "builtins":
+                dynamic_import_names.update(
+                    alias.asname or alias.name for alias in node.names if alias.name == "__import__"
+                )
+        elif isinstance(node, ast.Call) and (
+            (isinstance(node.func, ast.Name) and node.func.id in dynamic_import_names)
+            or (isinstance(node.func, ast.Attribute) and node.func.attr in {"import_module", "__import__"})
+        ):
+            unsupported.append((node.lineno, "dynamic import call is not followed; use a static import statement"))
+    return missing, unsupported
 
 
 def _read_manifest(root: Path, battery: str) -> tuple[str, list[tuple[str, Location]], list[Diagnostic]]:
@@ -423,20 +430,52 @@ def lint_battery(root: Path) -> list[Diagnostic]:
             )
 
     reachable: set[Path] = set()
-    pending = list(sorted(direct_targets))
+    uninspectable: set[Path] = set()
     seen_dependency_diagnostics: set[tuple[Path, int, str]] = set()
-    while pending:
-        source = pending.pop()
-        if source in reachable:
-            continue
-        reachable.add(source)
+    for target in sorted(direct_targets):
+        reachable.add(target)
         try:
-            if source.suffix == ".py":
-                tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
-                dependencies, missing, unsupported = _python_imports(root, source, tree)
-            else:
-                dependencies, unsupported = [], []
-                missing = []
+            local_modules, escaping_modules = _python_modules(root, target)
+            reachable.update(local_modules)
+        except (OSError, UnicodeDecodeError, SyntaxError, ImportError) as error:
+            error_path = Path(getattr(error, "filename", None) or target)
+            if not error_path.is_absolute():
+                error_path = Path.cwd() / error_path
+            error_path = error_path.absolute()
+            try:
+                error_path.resolve().relative_to(root)
+            except ValueError:
+                error_path = target
+            uninspectable.add(error_path)
+            if error_path.suffix == ".py":
+                reachable.add(error_path)
+            diagnostics.append(
+                _diagnostic(
+                    battery,
+                    "unsupported/dynamic command",
+                    f"cannot statically inspect {error_path.relative_to(root).as_posix()!r}: {error}",
+                    Location(error_path),
+                    error_path,
+                )
+            )
+            continue
+
+        for escaped in escaping_modules:
+            diagnostics.append(
+                _diagnostic(
+                    battery,
+                    "missing dependency",
+                    f"local import {escaped.relative_to(root).as_posix()!r} resolves outside the battery directory",
+                    file=escaped,
+                )
+            )
+
+    for source in sorted(reachable):
+        if source in uninspectable or _is_test_file(source, root):
+            continue
+        try:
+            tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+            missing, unsupported = _python_import_diagnostics(root, source, tree)
         except (OSError, UnicodeDecodeError, SyntaxError) as error:
             diagnostics.append(
                 _diagnostic(
@@ -448,6 +487,7 @@ def lint_battery(root: Path) -> list[Diagnostic]:
                 )
             )
             continue
+
         for line, message in unsupported:
             key = (source, line, message)
             if key not in seen_dependency_diagnostics:
@@ -474,44 +514,6 @@ def lint_battery(root: Path) -> list[Diagnostic]:
                         source,
                     )
                 )
-        for dependency in dependencies:
-            local = _relative_local_path(root, dependency.raw, canonical=False)
-            if local.reason or local.path is None:
-                diagnostics.append(
-                    _diagnostic(
-                        battery,
-                        "missing dependency",
-                        f"local dependency {dependency.raw!r} is invalid: {local.reason or 'not a local path'}",
-                        Location(source, dependency.line),
-                        source,
-                    )
-                )
-                continue
-            expected = ".py"
-            if not local.relative or not local.relative.endswith(expected):
-                diagnostics.append(
-                    _diagnostic(
-                        battery,
-                        "missing dependency",
-                        f"local dependency {dependency.raw!r} is not a {expected} file",
-                        Location(source, dependency.line),
-                        source,
-                    )
-                )
-                continue
-            if not local.path.is_file():
-                diagnostics.append(
-                    _diagnostic(
-                        battery,
-                        "missing dependency",
-                        f"local dependency {dependency.raw!r} does not name a file inside the battery",
-                        Location(source, dependency.line),
-                        source,
-                    )
-                )
-                continue
-            if local.path not in reachable:
-                pending.append(local.path)
 
     for path, (raw, location) in sorted(helper_paths.items()):
         if path not in reachable:

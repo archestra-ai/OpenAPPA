@@ -42,13 +42,27 @@ class BatteryLinterTests(unittest.TestCase):
     def test_python_helper_imported_by_another_helper_is_used(self):
         directory = self.make_battery(
             [["python3", "entry.py"]],
-            ["entry.py", "helper_module.py"],
+            ["entry.py", "helper_module.py", "leaf_module.py"],
             {
                 "entry.py": "from helper_module import answer\nprint(answer())\n",
-                "helper_module.py": "def answer():\n    return 42\n",
+                "helper_module.py": "from leaf_module import VALUE\ndef answer():\n    return VALUE\n",
+                "leaf_module.py": "VALUE = 42\n",
             },
         )
         self.assertEqual(self.kinds(directory), [])
+
+    def test_dynamic_python_import_is_reported_as_unsupported(self):
+        for source in [
+            "import importlib\nimportlib.import_module(get_module_name())\n",
+            "from importlib import import_module as load\nload('helper_module')\n",
+        ]:
+            with self.subTest(source=source):
+                directory = self.make_battery(
+                    [["python3", "entry.py"]],
+                    ["entry.py"],
+                    {"entry.py": source},
+                )
+                self.assertIn("unsupported/dynamic command", self.kinds(directory))
 
     def test_orphan_python_script_is_reported(self):
         directory = self.make_battery(
