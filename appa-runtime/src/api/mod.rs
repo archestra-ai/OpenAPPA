@@ -905,6 +905,7 @@ impl Prepared {
                     naming: self.naming,
                     files: None,
                     state_path,
+                    working_directories: std::sync::Mutex::new(std::collections::HashMap::new()),
                 }),
                 store,
             }),
@@ -935,6 +936,10 @@ struct Shared {
     /// dispatch, and which contracts release a spawn. Settled at open and unchanged by a
     /// reload — it is the deployment kind, not the policy.
     naming: ToolNaming,
+    /// The directory each root's harness last proposed a call from: a session's property,
+    /// not a call's, so a remedy's rewritten call is annotated in it too. In this process
+    /// only; after a restart the next proposal reports it again.
+    working_directories: std::sync::Mutex<std::collections::HashMap<TrajectoryId, String>>,
 }
 
 /// The trajectory an actor's events belong to: the child when the harness names one.
@@ -1021,6 +1026,25 @@ impl Runtime {
 }
 
 impl Inner {
+    fn note_working_directory(&self, root: &TrajectoryId, cwd: Option<&str>) {
+        if let Some(cwd) = cwd {
+            self.shared
+                .working_directories
+                .lock()
+                .expect("the working-directory mutex is never poisoned: no panic runs while it is held")
+                .insert(root.clone(), cwd.to_string());
+        }
+    }
+
+    fn working_directory(&self, root: &TrajectoryId) -> Option<String> {
+        self.shared
+            .working_directories
+            .lock()
+            .expect("the working-directory mutex is never poisoned: no panic runs while it is held")
+            .get(root)
+            .cloned()
+    }
+
     /// Note a failed store operation as a closed class.
     ///
     /// Takes the *typed* error, deliberately. Every one of these errors carries free text —

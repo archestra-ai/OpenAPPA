@@ -510,6 +510,7 @@ impl Session {
         spawn: bool,
         file_basis: Option<appa_engine::value::FileBasis>,
     ) -> Result<ToolCallDecision, EventError> {
+        self.inner.note_working_directory(&self.root, call.cwd.as_deref());
         if spawn
             && self.inner.shared.naming.spawn_coverage() == super::SpawnCoverage::Declared
             && !self.names_tool(&call.tool)?
@@ -948,6 +949,7 @@ impl Session {
                         arguments: arguments.clone(),
                         evidence,
                         entropy: fresh_entropy(),
+                        cwd: self.inner.working_directory(&self.root),
                     })
                 },
                 elicitation,

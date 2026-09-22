@@ -286,6 +286,9 @@ pub enum EngineEvent {
         arguments: RemedyArguments,
         evidence: Vec<ExternalEvidence>,
         entropy: OfferNonce,
+        /// The directory the harness last proposed a call from: what a rewritten call is
+        /// annotated in.
+        cwd: Option<String>,
     },
     BindFork {
         fork: ForkId,
@@ -1242,7 +1245,17 @@ impl RuntimeEngine {
                 arguments,
                 evidence,
                 entropy,
-            } => self.execute_offer(view, &owner, &offer, &arguments, &evidence, &entropy, presentation),
+                cwd,
+            } => self.execute_offer(
+                view,
+                &owner,
+                &offer,
+                &arguments,
+                &evidence,
+                &entropy,
+                cwd.as_deref(),
+                presentation,
+            ),
             EngineEvent::BindFork { fork, child } => self.bind_fork(view, &fork, &child),
             EngineEvent::ChildReturn { child, value, evidence } => {
                 self.child_return(view, &child, value, &evidence, presentation)
@@ -1589,6 +1602,7 @@ impl RuntimeEngine {
         arguments: &RemedyArguments,
         evidence: &[ExternalEvidence],
         entropy: &OfferNonce,
+        cwd: Option<&str>,
         presentation: &EmbeddedPresentationOptions,
     ) -> Result<EngineDecision, EngineRefusal> {
         let Some(engine_offer) = parse_offer(offer) else {
@@ -1635,15 +1649,13 @@ impl RuntimeEngine {
                 // it: the digest is the annotation's key. Any group its contract reads is
                 // asked through the act's own audience evidence, not gathered here. A
                 // derivation the engine cannot mint a call from is the engine's to refuse.
-                // The offer keeps no working directory, so an input program asked here sees
-                // none.
                 let annotation = match self
                     .engine
                     .resolve_call(call.tool().clone(), derived.as_str().as_bytes())
                 {
                     Ok(rewritten) => match self.engine.registry().declaration(&rewritten) {
                         Some(declaration @ ToolDeclaration::Annotated { .. }) => {
-                            match self.annotation_for(&views, declaration, &rewritten, None, evidence) {
+                            match self.annotation_for(&views, declaration, &rewritten, cwd, evidence) {
                                 Ok(annotation) => Some(annotation),
                                 Err(Resolution(requests)) => {
                                     return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
