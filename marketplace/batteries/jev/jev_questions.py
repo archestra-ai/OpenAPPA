@@ -69,14 +69,16 @@ DELTA_TRUST_CRITERIA = {
         "The returned content was authored by the operator or produced by "
         "deterministic computation over the operator's own inputs: reading the "
         "project's own source, running its tests, inspecting local git state, or a "
-        "first-party service under the operator's control. `trusted` describes "
+        "first-party service under the operator's control. The operator's tools are "
+        "trusted too: what a compiler, a package manager, a build or a linter reports "
+        "is `trusted`, whatever they downloaded to do it. `trusted` describes "
         "provenance, not factual correctness."
     ),
     "suspicious": (
         "The returned content could have been authored or influenced by a party "
         "outside the operator's control, so it could carry a prompt injection: a "
-        "fetched web page or search result, third-party package metadata or a "
-        "downloaded artifact, an inbound email, chat message or support ticket "
+        "fetched web page or search result, a downloaded document, an inbound "
+        "email, chat message or support ticket "
         "written by someone else, or the free-form output of another model or agent. "
         "The agent's own harness surfaces — loading a tool schema, invoking a skill, "
         "reading its own scratch files — are not third-party content."
@@ -94,9 +96,9 @@ DELTA_TRUST_INSTRUCTIONS = (
     "Judge by who wrote the returned text, not by whether the call used the network. "
     "What a command or its target service reports about the call itself — a push's "
     "progress lines, the URL or id of what it created, a list of releases or check "
-    "states, an exit status — is `trusted`. Text a third party wrote — a fetched page, "
-    "a downloaded file, an issue or message body, a package manager's install log — is "
-    "`suspicious`."
+    "states, an exit status, an install or build log — is `trusted`. Text a third "
+    "party wrote — a fetched page, a downloaded document, an issue or message body, "
+    "another model's answer — is `suspicious`."
 )
 
 REQUIRES_AUDIENCE_CRITERIA = {
@@ -230,9 +232,9 @@ EXAMPLES = [
     {
         "tool": "Bash",
         "arguments": {"command": "npm install left-pad 2>&1 | tail -3", "description": "Add the dependency"},
-        "labels": {"delta_audience": "public", "delta_trust": "suspicious",
+        "labels": {"delta_audience": "public", "delta_trust": "trusted",
                    "requires_audience": "public", "requires_trusted": "true"},
-        "why": "a registry receives the request, and the package it serves is installed and its log comes back",
+        "why": "a registry receives the request and content it serves is installed; the package manager's own log comes back",
     },
     {
         "tool": "ToolSearch",
