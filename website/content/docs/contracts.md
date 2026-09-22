@@ -617,7 +617,7 @@ ranks = ["suspicious", "trusted"]
 audiences = ["internal"]
 marks = []
 effects = []
-hint = "Use suspicious for data from unverified sources. Use trusted only for local computation over trusted inputs. Restrict private results to internal."
+hint = "Hosts under corp.example are the organization's own: what they return is internal. Files under /srv/customer-records are internal."
 
 [[policy.tool]]
 name = "Bash"
@@ -705,7 +705,7 @@ An annotator can use a selector placeholder only when its own `audiences` lists 
 
 An empty list and an omitted field have different meanings. For example, `marks = []` prevents the annotator from requiring attention. Omitting `marks` allows it to use any mark the policy declares, `blocked` included; a catch-all `["*"]` permit declares no mark of its own.
 
-The optional `hint` tells the annotator how to classify the call. It can explain what to look for and give examples. It cannot allow values excluded by the permits and cannot exceed 512 characters. An annotator name must be non-empty and can contain dots.
+The optional `hint` tells the annotator what the deployment knows about its calls: which hosts are its own, which paths hold whose data, what an established input means. It can give examples. A model builtin (`builtin = "claude-code"`, `builtin = "llm"`) already applies OpenAPPA's classification: trust by who wrote the returned text, audience by the visible destination; a hint does not restate it. It cannot allow values excluded by the permits and cannot exceed 512 characters. An annotator name must be non-empty and can contain dots.
 
 ### Implementing an annotator
 

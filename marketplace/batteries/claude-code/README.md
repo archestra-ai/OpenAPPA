@@ -89,15 +89,17 @@ confinement out together.
 
 ## Customize Bash classification
 
-The battery's `hint` instructs the model how to classify shell commands. To
-customize it, replace the Annotator in the root config instead of modifying the
-battery:
+How the model Annotator classifies a command — trust by who wrote the text it
+returns, audience by its visible destination — is the runtime's and the same
+for every model Annotator. A `hint` adds what only the deployment knows. To
+give the Bash Annotator one, replace it in the root config instead of
+modifying the battery:
 
 ```toml
 [[policy.annotator]]
 name = "claude-code.bash-requirements"
 builtin = "claude-code"
-hint = "Treat network output as suspicious. Require hitl attention before commands that publish releases or change production infrastructure."
+hint = "Hosts under corp.example are the organization's own: what they return is internal. Require hitl attention before commands that publish releases or change production infrastructure."
 ```
 
 The root declaration replaces the battery's Annotator with the same name.
