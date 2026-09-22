@@ -50,10 +50,12 @@ def labels_of(row: dict) -> dict[str, str] | Refused | None:
             answer = row["answer"]
             delta, requires = answer["delta"], answer["requires"]
             contains = requires.get("audience", {}).get("contains")
+            # Every trajectory's readers include `self`, so requiring it requires nothing.
+            required = narrowest(contains) if contains is not None else "self"
             return {
                 "delta_audience": narrowest(delta.get("audience")),
                 "delta_trust": "suspicious" if "trust" in delta else "trusted",
-                "requires_audience": "none" if contains is None else narrowest(contains),
+                "requires_audience": "none" if required == "self" else required,
                 "requires_trusted": "true" if "trust" in requires else "false",
             }
         case "outside_mandate" | "no_answer":
