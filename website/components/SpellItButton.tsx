@@ -4,9 +4,9 @@ import { useEffect, useRef, useState } from "react";
 
 /* A recording, not speech synthesis: APPA is said as a word, and every
    respelling that made a system voice land on it ("Ahpa", "Ahp-pah",
-   "Op-pa") traded one part of the sound for another. The file settles it,
+   "Op-pa") traded one part of the sound for another. The song settles it,
    and it sounds the same on every machine. */
-const AUDIO_SRC = "/brand/openappa-pronunciation.mp3";
+const AUDIO_SRC = "/brand/openappa-check-the-flow.mp3";
 
 export function SpellItButton() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -42,7 +42,7 @@ export function SpellItButton() {
       type="button"
       className="spell-it"
       onClick={toggle}
-      aria-label={playing ? "Stop saying OpenAPPA" : "Hear how OpenAPPA is pronounced"}
+      aria-label={playing ? "Stop singing OpenAPPA" : "Hear how OpenAPPA is sung"}
       data-speaking={playing || undefined}
     >
       <svg
@@ -62,8 +62,8 @@ export function SpellItButton() {
           <path d="M10 7.5 L17 12 L10 16.5 Z" fill="currentColor" />
         )}
       </svg>
-      <span className="spell-it-say">How to spell &ldquo;OpenAPPA&rdquo;</span>
-      {/* Metadata only: a 34KB clip nobody clicks should not cost every
+      <span className="spell-it-say">How to sing &ldquo;OpenAPPA&rdquo;</span>
+      {/* Metadata only: a ~2.8MB song nobody clicks should not cost every
           visitor a download on the landing page. */}
       <audio
         ref={audioRef}
