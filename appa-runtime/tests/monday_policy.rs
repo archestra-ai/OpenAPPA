@@ -531,6 +531,7 @@ fn every_discovered_tool_has_an_explicit_contract() {
     }
 }
 
+#[cfg(feature = "daemon")]
 #[test]
 fn replay_uses_the_captured_provider_arguments() {
     let path = repo_root().join("examples/live-replays/monday/monday-battery.appa");
