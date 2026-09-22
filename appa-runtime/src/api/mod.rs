@@ -1412,6 +1412,7 @@ impl Runtime {
         &self,
         tool: &str,
         raw_arguments: &[u8],
+        cwd: Option<&str>,
     ) -> Result<Option<AnnotationConsult>, appa_engine::engine::EngineError> {
         let deployment = self.inner.deployment();
         let Some(crate::engine::ExternalRequest::Annotation {
@@ -1420,7 +1421,7 @@ impl Runtime {
             mut args,
             inputs,
             ..
-        }) = deployment.resident.annotation_owed(tool, raw_arguments)?
+        }) = deployment.resident.annotation_owed(tool, raw_arguments, cwd)?
         else {
             return Ok(None);
         };

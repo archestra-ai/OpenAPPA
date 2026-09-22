@@ -2216,6 +2216,7 @@ impl RuntimeEngine {
         &self,
         tool: &str,
         raw_arguments: &[u8],
+        cwd: Option<&str>,
     ) -> Result<Option<ExternalRequest>, EngineError> {
         let resolved = self.engine.resolve_call(ToolName::new(tool), raw_arguments)?;
         let declaration = self
@@ -2225,7 +2226,7 @@ impl RuntimeEngine {
             .expect("a resolved call names its registered declaration");
         Ok(declaration
             .annotator()
-            .map(|annotator| self.annotation_request(annotator, declaration, &resolved, None)))
+            .map(|annotator| self.annotation_request(annotator, declaration, &resolved, cwd)))
     }
 
     /// What one annotation consult declares: the Annotator's trusted hint, the mandate

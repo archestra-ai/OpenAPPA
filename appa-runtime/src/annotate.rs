@@ -1,7 +1,8 @@
 //! `appa runtime annotate`: a policy's Annotators asked about a list of calls.
 //!
 //! Standard input is JSON lines, one call each: `id`, `tool` (the name the policy writes),
-//! and `arguments`. Every call is asked `--repeat` times through the production consult
+//! `arguments`, and optionally `cwd`, the directory the harness would run it in, which the
+//! programs bound to the Annotator's inputs read. Every call is asked `--repeat` times through the production consult
 //! path — the same declaration, prompt, backend, and mandate check a session uses — and
 //! every answer is one JSON line on standard output, written as it arrives. No trajectory
 //! is opened, so an Annotator is asked afresh each time and no tool runs.
@@ -26,6 +27,8 @@ struct Call {
     id: String,
     tool: String,
     arguments: Box<RawValue>,
+    #[serde(default)]
+    cwd: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -59,7 +62,10 @@ struct Answered<'a> {
 
 async fn ask(runtime: &Runtime, call: &Call, repeat: u32) {
     let started = Instant::now();
-    let outcome = match runtime.annotate(&call.tool, call.arguments.get().as_bytes()).await {
+    let outcome = match runtime
+        .annotate(&call.tool, call.arguments.get().as_bytes(), call.cwd.as_deref())
+        .await
+    {
         Ok(None) => Outcome::Static,
         Ok(Some(consult)) => match consult.outcome {
             ConsultOutcome::Answer(answer) if consult.admitted => Outcome::Answer {
