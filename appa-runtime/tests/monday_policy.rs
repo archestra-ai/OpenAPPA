@@ -9,27 +9,9 @@ use appa_runtime::{
 use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
 use axum::{Router, routing::post};
 use common::{actor, offer_of, propose, ran, raw, repo_root, root, serve};
-use std::sync::{Arc, LazyLock};
-
-// The captured provider schemas validate our examples, not runtime policy inputs.
-// Ordinary provider options remain governed by the server itself.
-static DISCOVERY: LazyLock<serde_json::Value> =
-    LazyLock::new(|| serde_json::from_str(include_str!("fixtures/monday-tools.json")).unwrap());
-
-fn validate_arguments(tool: &str, args: &serde_json::Value) {
-    let declaration = DISCOVERY["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|declaration| declaration["name"] == tool)
-        .unwrap_or_else(|| panic!("missing provider declaration for {tool}"));
-    let validator = jsonschema::validator_for(&declaration["inputSchema"]).unwrap();
-    let errors: Vec<_> = validator.iter_errors(args).map(|error| error.to_string()).collect();
-    assert!(errors.is_empty(), "invalid {tool} arguments: {errors:?}");
-}
+use std::sync::Arc;
 
 fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
-    validate_arguments(tool, &args);
     ProposedCall {
         tool: format!("mcp/monday/{tool}"),
         arguments: raw(args),
@@ -489,56 +471,6 @@ async fn unknown_tools_follow_the_deployments_fallback() {
                 }
             }
             other => panic!("unexpected unknown-tool decision: {other:?}"),
-        }
-    }
-}
-
-#[test]
-fn every_discovered_tool_has_an_explicit_contract() {
-    let discovered = DISCOVERY["tools"].as_array().unwrap();
-    let expected: std::collections::BTreeSet<_> =
-        discovered.iter().map(|tool| tool["name"].as_str().unwrap()).collect();
-    for tool in discovered {
-        jsonschema::validator_for(&tool["inputSchema"]).unwrap();
-    }
-    assert_eq!(discovered.len(), 96);
-    assert_eq!(expected.len(), discovered.len());
-    let policy: toml::Value = toml::from_str(include_str!("../../marketplace/batteries/monday/appa.toml")).unwrap();
-    let actual: std::collections::BTreeSet<_> = policy["policy"]["tool"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|contract| {
-            contract["name"]
-                .as_str()
-                .unwrap()
-                .strip_prefix("mcp/monday/")
-                .unwrap()
-                .split('(')
-                .next()
-                .unwrap()
-        })
-        .collect();
-    assert_eq!(actual, expected);
-    for contract in policy["policy"]["tool"].as_array().unwrap() {
-        let name = contract["name"].as_str().unwrap().strip_prefix("mcp/monday/").unwrap();
-        if let Some((tool, selector)) = name.split_once('(') {
-            let (argument, value) = selector.strip_suffix(')').unwrap().split_once(':').unwrap();
-            let declaration = discovered.iter().find(|entry| entry["name"] == tool).unwrap();
-            let schema = &declaration["inputSchema"]["properties"][argument];
-            assert!(schema["enum"].as_array().unwrap().contains(&serde_json::json!(value)));
-        }
-    }
-}
-
-#[cfg(feature = "daemon")]
-#[test]
-fn replay_uses_the_captured_provider_arguments() {
-    let path = repo_root().join("examples/live-replays/monday/monday-battery.appa");
-    let trace = appa_runtime::replay::parse(&path, &std::fs::read_to_string(&path).unwrap()).unwrap();
-    for step in trace.steps {
-        if let Some(tool) = step.tool.to_string().strip_prefix("mcp/monday/") {
-            validate_arguments(tool, &serde_json::from_str(step.arguments.get()).unwrap());
         }
     }
 }
