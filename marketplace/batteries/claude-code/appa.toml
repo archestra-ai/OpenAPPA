@@ -129,6 +129,55 @@ name = "host/claude-code/Bash(command:*databricks*configure*)"
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
+# --- Bash: a push or a GitHub CLI call reaches the repository's readers ---
+
+# Who reads what a `git push` or a `gh` call puts on GitHub is the repository's
+# own visibility, which the command line does not say. Before the Annotator is
+# asked, `repository.py` establishes it: the repository the command names
+# (`--repo`, a URL, a remote), else the checkout's `origin` in the directory
+# the harness would run the command in, asked of the GitHub CLI's login. The
+# Annotator reads the finding under `repository` and requires the readers it
+# implies; a repository it could not establish reads as `null` with a reason,
+# and the Annotator treats an unestablished destination as public.
+[[policy.annotator]]
+name = "claude-code.bash-repository-requirements"
+builtin = "claude-code"
+inputs = { call = "$tool_call", repository = "$input.claude-code.repository" }
+hint = "`repository` is the deployment's own finding: the GitHub repository the command reaches, with its `visibility`, or `null` with a `reason`. A push, pull request, issue, release, or comment into a public repository, or into one not established, requires audience public; into a private or internal one requires audience internal. A read keeps the session's audience; issue, pull-request, and comment bodies are text other people wrote, so their output is suspicious."
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*git push*)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*gh pr *)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*gh issue *)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*gh release *)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*gh api *)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[[policy.tool]]
+name = "host/claude-code/Bash(command:*gh repo *)"
+description = "Runs one shell command and returns its output."
+annotator = "claude-code.bash-repository-requirements"
+
+[externals.inputs."claude-code.repository"]
+command = ["python3", "repository.py"]
+
 # The stock `redact-secrets` sanitizer masks private-key blocks, tokens of
 # well-known shapes, the AWS secret access key, the value of any assignment
 # whose key names a secret, and long high-entropy runs. It carries no tags, so

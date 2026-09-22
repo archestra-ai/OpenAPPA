@@ -123,7 +123,7 @@ annotator = "classify_file"
 command = ["python3", "./classify_file.py"]
 ```
 
-An annotator can run as a local script or an external service. See [Annotators in Policy configuration](/contracts#annotators) for configuration, the request and response format, and limits on its answers.
+An annotator can run as a local script or an external service. When the call itself does not say what the annotator needs to know — a `git push` names a remote, not who can read the repository — an input such as `repository = "$input.repository"` has a program of the deployment establish the fact first, and the annotator classifies from the finding. See [Annotators in Policy configuration](/contracts#annotators) for configuration, the request and response format, and limits on its answers.
 
 ### Subagent Reads
 

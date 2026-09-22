@@ -38,6 +38,19 @@ and `host/claude-code/Edit`:
   the Bash annotator under the root's hint; a deployment that wants a
   fixed contract for one command writes a root rule for it, as the
   `kubectl` example below does.
+- **Bash, `git push` and `gh`** — What a push, a pull request, an issue, a
+  release, or a `gh api` call puts on GitHub is read by the repository's
+  readers, which the command line does not say. Before the Annotator is
+  asked, `repository.py` establishes the repository — the one the command
+  names by `--repo`, URL, or remote, else the checkout's `origin` in the
+  directory Claude Code runs the command in — and its visibility, through
+  the GitHub CLI's own login (`gh repo view`). The Annotator reads the
+  finding as an established input and requires audience `public` for a
+  public repository, `internal` for a private or internal one. A
+  repository it cannot establish (no `gh`, no checkout, no `--repo`) is
+  answered as unknown, and the Annotator treats the destination as public.
+  The finding informs the Annotator; the repository's collaborators are not
+  resolved as readers.
 - **Read** — Reading a hidden path, a credential file, a private key, or a
   system secret location narrows the session to `self`, the requester: nothing
   built from it reaches a sink that requires `internal` or `public`. The rules
