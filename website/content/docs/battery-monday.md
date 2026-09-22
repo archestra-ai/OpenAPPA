@@ -10,10 +10,8 @@ breadcrumb: monday
 The monday battery covers the 96 tools discovered from the hosted Platform
 MCP server at `https://mcp.monday.com/mcp`, version 1.0.0, on 2026-09-22.
 
-[View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/monday),
-including the [complete tool inventory and source links](https://github.com/archestra-ai/OpenAPPA/blob/main/marketplace/batteries/monday/README.md#covered-tools).
-The source README distinguishes the hosted capture from the public server
-repository and lists [questions still requiring evidence](https://github.com/archestra-ai/OpenAPPA/blob/main/marketplace/batteries/monday/README.md#questions-still-requiring-evidence).
+[View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/monday)
+and its [rules and covered tools](https://github.com/archestra-ai/OpenAPPA/blob/main/marketplace/batteries/monday/README.md#rules).
 
 ## Tool behavior
 
