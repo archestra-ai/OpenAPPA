@@ -993,7 +993,7 @@ jobs:
       # These builds read the cache the images job writes. They never
       # write it: two jobs writing one scope in one run overwrite each other.
       - name: Build the shared runtime image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: appa-runtime/Dockerfile
@@ -1003,7 +1003,7 @@ jobs:
           cache-from: type=gha,scope=appa-runtime
 
       - name: Build the Python plugin image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: integrations/kagent/appa-kagent-adk
           tags: appa-kagent-adk:${{ env.APPA_E2E_IMAGE_TAG }}
@@ -1012,7 +1012,7 @@ jobs:
           cache-from: type=gha,scope=appa-kagent-adk
 
       - name: Build the demo tools image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: integrations/kagent/demo
           tags: appa-demo-tools:${{ env.APPA_E2E_IMAGE_TAG }}
@@ -1021,7 +1021,7 @@ jobs:
           cache-from: type=gha,scope=appa-demo-tools
 
       - name: Build the demo mocks image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: integrations/kagent/demo/mocks
           tags: appa-demo-mocks:${{ env.APPA_E2E_IMAGE_TAG }}
@@ -1125,7 +1125,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - name: Build runtime
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: appa-runtime/Dockerfile
@@ -1133,21 +1133,21 @@ jobs:
           load: true
           cache-from: type=gha,scope=appa-runtime
       - name: Build Python plugin
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: integrations/kagent/appa-kagent-adk
           tags: appa-acceptance-python:ci
           load: true
           cache-from: type=gha,scope=appa-kagent-adk
       - name: Build Go plugin
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: integrations/kagent/appa-kagent-adk-go
           tags: appa-acceptance-go:ci
           load: true
           cache-from: type=gha,scope=appa-kagent-adk-go
       - name: Build deterministic model and GitHub fixtures
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: integrations/kagent/e2e/marketplace
           tags: appa-acceptance-fixtures:ci
@@ -1191,7 +1191,7 @@ jobs:
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Build the shared runtime image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: appa-runtime/Dockerfile
@@ -1228,7 +1228,7 @@ jobs:
             'import json, urllib.request; body=json.load(urllib.request.urlopen("http://127.0.0.1:18787/batteries", timeout=2)); assert any(item["name"] == "slack" for item in body["batteries"])'
 
       - name: Build the Python plugin image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: integrations/kagent/appa-kagent-adk
           tags: appa-kagent-adk:ci
@@ -1237,7 +1237,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=appa-kagent-adk
 
       - name: Build the go plugin image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: integrations/kagent/appa-kagent-adk-go
           tags: appa-kagent-adk-go:ci
@@ -1246,7 +1246,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=appa-kagent-adk-go
 
       - name: Build the demo tools image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: integrations/kagent/demo
           tags: appa-demo-tools:ci
@@ -1255,7 +1255,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=appa-demo-tools
 
       - name: Build the demo mocks image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: integrations/kagent/demo/mocks
           tags: appa-demo-mocks:ci
