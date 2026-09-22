@@ -181,6 +181,8 @@ jobs:
               - 'appa-package/**'
               - 'appa-runtime-api/**'
               - 'scripts/appa-marketplace.sh'
+              - 'scripts/lint_batteries.py'
+              - 'scripts/test_lint_batteries.py'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
             integration: &integration
@@ -312,6 +314,25 @@ jobs:
 
       - name: Exercise the real harness with deterministic inference
         run: python3 marketplace/plugins/claude-code/live-gate-check.py
+
+  battery-script-linter:
+    name: Battery Linter
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: changes
+    if: needs.changes.outputs.marketplace == 'true'
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Linter tests
+        run: python3 -m unittest scripts/test_lint_batteries.py
+
+      - name: Lint battery scripts
+        run: python3 scripts/lint_batteries.py
 
   marketplace-checks:
     name: Marketplace Checks

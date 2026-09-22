@@ -31,6 +31,27 @@ CI runs `bash scripts/appa-marketplace.sh --check` and fails when the catalog
 needs regeneration. Regeneration is a developer operation; it does not update
 installed deployments or contact a remote marketplace.
 
+## Battery helper reachability
+
+CI also runs `python3 scripts/lint_batteries.py`. A battery script is **used**
+when it is a direct command target in its `appa.toml`, or when it is reachable
+from such a target through a statically recognized local dependency. Python
+dependencies are local `import` and `from ... import ...` modules resolved with
+`ast`; standard-library and other imports with no local module are ignored.
+Relative imports that cannot be resolved are reported. Shell dependencies are
+only static local targets in `source helper.sh`, `. helper.sh`, `bash
+helper.sh`, or `sh helper.sh` forms. Variable, command-substitution, `eval`,
+and dynamic `exec` paths are reported as unsupported rather than guessed.
+
+Command targets must be exact two-element arrays using `python`/`python3` for a
+local `.py` file, or `bash`/`sh` (including `/bin/bash` and `/bin/sh`) for a
+local `.sh` file. Every direct target must appear in `[battery].helpers`, every
+manifest helper must be reachable, and every production `.py` or `.sh` file
+must be reachable. Files named `test_*.py`, `*_test.py`, test-only shell
+variants, files under `test/` or `tests/`, and `test_cross_battery.py` are not
+production files for this check. README text and test references do not count
+as usage.
+
 ## Install and manage a deployment
 
 Start with an APPA release binary and Claude Code installed:

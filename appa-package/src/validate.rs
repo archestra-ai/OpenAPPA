@@ -452,14 +452,22 @@ fn declares_selectors(value: &Value) -> bool {
     !seen.is_empty()
 }
 
-/// A battery ships the programs it runs, so an argv is exactly `python3` and one
-/// of the helpers this manifest declares.
+/// A battery ships the programs it runs, so an argv is exactly one supported
+/// interpreter and one helper this manifest declares. The linter in
+/// `scripts/lint_batteries.py` deliberately accepts this same command language.
 fn runs_a_declared_helper(command: &Value, helpers: &[RelativePath]) -> bool {
     let Some(argv) = command.as_array() else {
         return false;
     };
     match argv.iter().map(Value::as_str).collect::<Option<Vec<_>>>().as_deref() {
-        Some(["python3", helper]) => helpers.iter().any(|declared| declared.as_str() == *helper),
+        Some([interpreter, helper]) => {
+            let expected_suffix = match *interpreter {
+                "python" | "python3" if helper.ends_with(".py") => ".py",
+                "bash" | "sh" | "/bin/bash" | "/bin/sh" if helper.ends_with(".sh") => ".sh",
+                _ => return false,
+            };
+            helper.ends_with(expected_suffix) && helpers.iter().any(|declared| declared.as_str() == *helper)
+        }
         _ => false,
     }
 }
@@ -756,6 +764,27 @@ mod tests {
                 ),
                 "accepted {command}"
             );
+        }
+    }
+
+    #[test]
+    fn a_battery_binding_accepts_supported_python_and_shell_helpers() {
+        for (command, helper) in [
+            ("[\"python\", \"helper.py\"]", "helper.py"),
+            ("[\"python3\", \"helper.py\"]", "helper.py"),
+            ("[\"bash\", \"helper.sh\"]", "helper.sh"),
+            ("[\"sh\", \"helper.sh\"]", "helper.sh"),
+            ("[\"/bin/bash\", \"helper.sh\"]", "helper.sh"),
+            ("[\"/bin/sh\", \"helper.sh\"]", "helper.sh"),
+        ] {
+            let manifest = BATTERY_MANIFEST.replace("audience-source.py", helper);
+            let policy = BATTERY_POLICY.replace("[\"python3\", \"audience-source.py\"]", command);
+            let directory = tempfile::tempdir().unwrap();
+            fs::write(directory.path().join("appa-package.toml"), manifest).unwrap();
+            fs::write(directory.path().join("appa.toml"), policy).unwrap();
+            fs::write(directory.path().join(helper), "echo ok\n").unwrap();
+
+            assert!(validate_package(directory.path()).is_ok(), "refused {command}");
         }
     }
 
