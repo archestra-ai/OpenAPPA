@@ -3,8 +3,8 @@
 
 The linter deliberately understands a small command language.  This keeps the
 answer useful for package validation: a command is either an exact two-element
-argv for a supported interpreter and a local script, or it is diagnosed as an
-unsupported command.  It does not try to execute TOML, Python, or shell.
+argv for ``python3`` and one local Python script, or it is diagnosed as an
+unsupported command. It does not try to execute TOML or Python.
 """
 
 from __future__ import annotations
@@ -13,17 +13,9 @@ import argparse
 import ast
 from dataclasses import dataclass
 from pathlib import Path
-import shlex
 import sys
 import tomllib
 from typing import Any, Iterator, Sequence
-
-
-PYTHON_INTERPRETERS = {"python", "python3"}
-SHELL_INTERPRETERS = {"bash", "sh", "/bin/bash", "/bin/sh"}
-COMMAND_INTERPRETERS = PYTHON_INTERPRETERS | SHELL_INTERPRETERS
-SHELL_SEPARATORS = {";", "&&", "||", "|", "(", ")"}
-SHELL_KEYWORDS = {"if", "then", "elif", "else", "while", "until", "for", "do", "case"}
 
 
 @dataclass(frozen=True)
@@ -141,9 +133,7 @@ def _relative_local_path(root: Path, raw: str, *, canonical: bool = True) -> Loc
 
     The canonical spelling check intentionally agrees with the Rust manifest
     parser: ``foo.py`` is accepted, while ``./foo.py`` and parent traversal
-    are not silently normalized into a different command. Source statements
-    may use ``./helper.sh`` because they are resolved as local shell paths,
-    not manifest command argv.
+    are not silently normalized into a different command.
     """
 
     if not raw or "\x00" in raw:
@@ -201,16 +191,16 @@ def _parse_command(
             )
         ]
     interpreter, raw_target = value
-    if interpreter not in COMMAND_INTERPRETERS:
+    if interpreter != "python3":
         return None, [
             _diagnostic(
                 battery,
                 "unsupported/dynamic command",
-                f"unsupported interpreter {interpreter!r}; supported interpreters are {sorted(COMMAND_INTERPRETERS)!r}",
+                f"unsupported interpreter {interpreter!r}; battery commands must use 'python3'",
                 command.location,
             )
         ]
-    suffix = ".py" if interpreter in PYTHON_INTERPRETERS else ".sh"
+    suffix = ".py"
     if not raw_target.endswith(suffix):
         return None, [
             _diagnostic(
@@ -252,12 +242,12 @@ def _is_test_file(path: Path, root: Path) -> bool:
     if any(part in {"test", "tests"} for part in relative.parts[:-1]):
         return True
     name = path.name
-    return name.startswith("test_") or name.endswith("_test.py") or name.endswith("_test.sh")
+    return name.startswith("test_") or name.endswith("_test.py")
 
 
 def _production_scripts(root: Path) -> Iterator[Path]:
     for path in sorted(root.rglob("*")):
-        if path.is_file() and path.suffix in {".py", ".sh"} and not _is_test_file(path, root):
+        if path.is_file() and path.suffix == ".py" and not _is_test_file(path, root):
             yield path
 
 
@@ -342,45 +332,6 @@ def _python_imports(
             if dynamic:
                 unsupported.append((node.lineno, "dynamic import is not followed because its module name is not static"))
     return dependencies, missing, unsupported
-
-
-def _shell_tokens(line: str) -> list[str]:
-    lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|()")
-    lexer.whitespace_split = True
-    lexer.commenters = "#"
-    try:
-        return list(lexer)
-    except ValueError:
-        return []
-
-
-def _shell_dependencies(source: Path) -> tuple[list[Dependency], list[tuple[int, str]]]:
-    dependencies: list[Dependency] = []
-    unsupported: list[tuple[int, str]] = []
-    for line_number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
-        tokens = _shell_tokens(line)
-        if not tokens:
-            continue
-        starts = {0}
-        for index, token in enumerate(tokens):
-            if token in SHELL_SEPARATORS or token in SHELL_KEYWORDS:
-                starts.add(index + 1)
-        for index in sorted(starts):
-            if index >= len(tokens):
-                continue
-            command = tokens[index]
-            if command in {"source", ".", "bash", "sh", "/bin/bash", "/bin/sh"}:
-                if index + 1 >= len(tokens):
-                    unsupported.append((line_number, f"{command} has no static local script target"))
-                    continue
-                raw = tokens[index + 1]
-                if not raw.endswith(".sh") or any(marker in raw for marker in ("$", "`", "*", "?")):
-                    unsupported.append((line_number, f"{command} uses a dynamic or unsupported target {raw!r}"))
-                else:
-                    dependencies.append(Dependency(raw, line_number))
-            elif command in {"eval", "exec"}:
-                unsupported.append((line_number, f"{command} is dynamic and its script dependencies are not guessed"))
-    return dependencies, unsupported
 
 
 def _read_manifest(root: Path, battery: str) -> tuple[str, list[tuple[str, Location]], list[Diagnostic]]:
@@ -483,9 +434,6 @@ def lint_battery(root: Path) -> list[Diagnostic]:
             if source.suffix == ".py":
                 tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
                 dependencies, missing, unsupported = _python_imports(root, source, tree)
-            elif source.suffix == ".sh":
-                dependencies, unsupported = _shell_dependencies(source)
-                missing = []
             else:
                 dependencies, unsupported = [], []
                 missing = []
@@ -539,7 +487,7 @@ def lint_battery(root: Path) -> list[Diagnostic]:
                     )
                 )
                 continue
-            expected = ".py" if source.suffix == ".py" else ".sh"
+            expected = ".py"
             if not local.relative or not local.relative.endswith(expected):
                 diagnostics.append(
                     _diagnostic(

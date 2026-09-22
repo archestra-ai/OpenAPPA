@@ -41,7 +41,7 @@ class BatteryLinterTests(unittest.TestCase):
 
     def test_python_helper_imported_by_another_helper_is_used(self):
         directory = self.make_battery(
-            [["python", "entry.py"]],
+            [["python3", "entry.py"]],
             ["entry.py", "helper_module.py"],
             {
                 "entry.py": "from helper_module import answer\nprint(answer())\n",
@@ -73,32 +73,14 @@ class BatteryLinterTests(unittest.TestCase):
         )
         self.assertEqual(self.kinds(directory), [])
 
-    def test_direct_shell_helper_is_used(self):
-        directory = self.make_battery(
-            [["/bin/sh", "entry.sh"]],
-            ["entry.sh"],
-            {"entry.sh": "#!/bin/sh\necho ok\n"},
-        )
-        self.assertEqual(self.kinds(directory), [])
-
-    def test_shell_helper_sourced_by_another_helper_is_used(self):
-        directory = self.make_battery(
-            [["bash", "entry.sh"]],
-            ["entry.sh", "helper.sh"],
-            {
-                "entry.sh": "#!/bin/bash\nsource ./helper.sh\necho \"$VALUE\"\n",
-                "helper.sh": "VALUE=ok\n",
-            },
-        )
-        self.assertEqual(self.kinds(directory), [])
-
-    def test_orphan_shell_script_is_reported(self):
-        directory = self.make_battery(
-            [["sh", "entry.sh"]],
-            ["entry.sh"],
-            {"entry.sh": "echo ok\n", "orphan.sh": "echo no\n"},
-        )
-        self.assertIn("unreferenced production script", self.kinds(directory))
+    def test_only_python3_commands_are_accepted(self):
+        for command, files in [
+            (["python", "entry.py"], {"entry.py": "pass\n"}),
+            (["bash", "entry.sh"], {"entry.sh": "#!/bin/sh\necho ok\n"}),
+        ]:
+            with self.subTest(command=command):
+                directory = self.make_battery([command], [], files)
+                self.assertIn("unsupported/dynamic command", self.kinds(directory))
 
     def test_missing_command_target_is_reported_with_a_toml_line(self):
         directory = self.make_battery(
@@ -136,15 +118,6 @@ class BatteryLinterTests(unittest.TestCase):
             {"entry.py": "pass\n", "unused.py": "pass\n"},
         )
         self.assertIn("unused manifest helper", self.kinds(directory))
-
-    def test_dynamic_shell_source_is_explicitly_reported(self):
-        directory = self.make_battery(
-            [["bash", "entry.sh"]],
-            ["entry.sh"],
-            {"entry.sh": "source \"$HELPER\"\n"},
-        )
-        diagnostics = lint_battery(directory)
-        self.assertTrue(any(d.kind == "unsupported/dynamic command" and "dynamic" in d.message for d in diagnostics))
 
     def test_commands_are_discovered_inside_nested_toml_values(self):
         directory = self.make_battery(
