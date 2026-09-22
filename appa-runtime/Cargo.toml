@@ -60,7 +60,7 @@ axum = { workspace = true, features = ["query"], optional = true }
 # Already in the tree through rmcp and schemars, so this adds nothing to the build.
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 clap = { version = "4", features = ["derive", "env"], optional = true }
-base64 = "0.22"
+base64 = "0.23"
 # `join_all` runs one evidence batch's independent consults concurrently.
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 libloading = "0.9"
