@@ -74,9 +74,10 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
             spawn,
             ..
         } => {
-            let ProposedCall { tool, arguments } = call;
+            let ProposedCall { tool, arguments, cwd } = call;
             let _: String = tool;
             let _: Box<serde_json::value::RawValue> = arguments;
+            let _: Option<String> = cwd;
             let _: bool = spawn;
             let _: Option<String> = call_id;
         }

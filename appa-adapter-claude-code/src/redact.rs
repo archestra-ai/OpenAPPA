@@ -371,6 +371,7 @@ mod tests {
             call: ProposedCall {
                 tool: "mcp__vault__lookup".to_string(),
                 arguments: raw(serde_json::json!({"key": "prod"})),
+                cwd: None,
             },
             call_id: None,
             outcome: ToolOutcome::Success {
@@ -582,6 +583,7 @@ mod tests {
                 call: ProposedCall {
                     tool: "Bash".to_string(),
                     arguments: raw(serde_json::json!({"command": "ls"})),
+                    cwd: None,
                 },
                 call_id: None,
                 outcome,

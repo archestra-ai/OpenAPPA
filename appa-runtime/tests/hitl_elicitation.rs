@@ -150,6 +150,7 @@ async fn deployment_from(policy: String) -> Deployment {
             call: ProposedCall {
                 tool: "publish".to_string(),
                 arguments: raw(serde_json::json!({"body": "the quarterly figures"})),
+                cwd: None,
             },
             call_id: None,
             spawn: false,
@@ -264,6 +265,7 @@ builtin = "hitl"
             call: ProposedCall {
                 tool: "Bash".to_string(),
                 arguments: raw(serde_json::json!({"command": "cat .env"})),
+                cwd: None,
             },
             call_id: None,
             spawn: false,
@@ -342,6 +344,7 @@ async fn execute_over<H: ClientHandler>(
             call: ProposedCall {
                 tool: appa_runtime_api::CONTROL_TOOL.to_string(),
                 arguments: raw(serde_json::json!({ "offer_id": deployment.offer })),
+                cwd: None,
             },
             call_id: None,
             spawn: false,
@@ -598,6 +601,7 @@ async fn the_block_carries_the_review_for_the_hitl_authority() {
             call: ProposedCall {
                 tool: "publish".to_string(),
                 arguments: raw(serde_json::json!({"body": "the quarterly figures"})),
+                cwd: None,
             },
             call_id: None,
             spawn: false,
@@ -657,6 +661,7 @@ async fn an_embedded_host_ruling_survives_without_any_mcp_request_context() {
             call: ProposedCall {
                 tool: appa_runtime_api::CONTROL_TOOL.into(),
                 arguments: raw(args.clone()),
+                cwd: None,
             },
             call_id: None,
             spawn: false,

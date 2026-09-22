@@ -13,6 +13,7 @@ fn bash(command: &str) -> ProposedCall {
     ProposedCall {
         tool: "host/claude-code/Bash".to_string(),
         arguments: raw(serde_json::json!({ "command": command })),
+        cwd: None,
     }
 }
 

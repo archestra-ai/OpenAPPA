@@ -323,6 +323,7 @@ impl SessionInner {
         let call = ProposedCall {
             tool: canonical_tool_name(tool).to_string(),
             arguments,
+            cwd: None,
         };
 
         match self.event(HookEvent::ToolCall {

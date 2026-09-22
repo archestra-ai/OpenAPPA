@@ -32,6 +32,10 @@ postgres = ["appa-eventlog/postgres"]
 # These integration tests drive the server stack: the MCP endpoint, the
 # installer CLI and `appa replay`. Without `daemon` there is nothing to drive.
 [[test]]
+name = "annotate_cli"
+required-features = ["daemon"]
+
+[[test]]
 name = "hitl_elicitation"
 required-features = ["daemon"]
 

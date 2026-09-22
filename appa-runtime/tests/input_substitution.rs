@@ -43,6 +43,7 @@ fn read_hr() -> ProposedCall {
     ProposedCall {
         tool: "read_hr".to_string(),
         arguments: raw(serde_json::json!({})),
+        cwd: None,
     }
 }
 
@@ -50,6 +51,7 @@ fn send(body: &str) -> ProposedCall {
     ProposedCall {
         tool: "send".to_string(),
         arguments: raw(serde_json::json!({"body": body})),
+        cwd: None,
     }
 }
 

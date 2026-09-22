@@ -510,6 +510,7 @@ impl Session {
         spawn: bool,
         file_basis: Option<appa_engine::value::FileBasis>,
     ) -> Result<ToolCallDecision, EventError> {
+        self.inner.note_working_directory(&self.root, call.cwd.as_deref());
         if spawn
             && self.inner.shared.naming.spawn_coverage() == super::SpawnCoverage::Declared
             && !self.names_tool(&call.tool)?
@@ -948,6 +949,7 @@ impl Session {
                         arguments: arguments.clone(),
                         evidence,
                         entropy: fresh_entropy(),
+                        cwd: self.inner.working_directory(&self.root),
                     })
                 },
                 elicitation,
@@ -1443,23 +1445,58 @@ impl Session {
                 call,
                 declaration,
                 args,
+                inputs,
             } => {
-                let consult = Consult {
-                    name: annotator.clone(),
-                    body: ConsultBody::Annotation {
-                        declaration: declaration.clone(),
-                        artifact: AnnotationArtifact { args: args.clone() },
-                    },
-                };
-                let answer = match self.timed_consult(&consult, None, None).await {
-                    ConsultOutcome::Answer(answer) => {
-                        AnnotationAnswer::from_wire(&answer, declaration).ok_or_else(|| {
-                            crate::external::NoAnswerReason::MalformedAnswer(
-                                "detail=invalid_fields_or_value_types".to_string(),
-                            )
-                        })
+                // Every input program answers first, together; one that does not refuses
+                // the annotation exactly as the annotator's own silence would.
+                let mut asked = Vec::with_capacity(inputs.len());
+                for input in inputs {
+                    asked.push(self.timed_consult(&input.consult, None, None));
+                }
+                let outcomes = crate::external::settle_batch(asked).await;
+                let mut args = args.clone();
+                let mut refused = None;
+                for (input, outcome) in inputs.iter().zip(outcomes) {
+                    match outcome {
+                        ConsultOutcome::Answer(answer) => {
+                            args.as_object_mut()
+                                .expect("an annotation with declared inputs carries an object artifact")
+                                .insert(input.input.clone(), answer);
+                        }
+                        ConsultOutcome::NoAnswer(reason) => {
+                            refused.get_or_insert((input, reason));
+                        }
                     }
-                    ConsultOutcome::NoAnswer(reason) => Err(reason),
+                }
+                let answer = match refused {
+                    Some((input, reason)) => {
+                        tracing::warn!(
+                            annotator,
+                            input = input.input,
+                            program = input.consult.name,
+                            ?reason,
+                            "an annotator input produced no answer"
+                        );
+                        Err(reason)
+                    }
+                    None => {
+                        let consult = Consult {
+                            name: annotator.clone(),
+                            body: ConsultBody::Annotation {
+                                declaration: declaration.clone(),
+                                artifact: AnnotationArtifact { args },
+                            },
+                        };
+                        match self.timed_consult(&consult, None, None).await {
+                            ConsultOutcome::Answer(answer) => AnnotationAnswer::from_wire(&answer, declaration)
+                                .ok_or_else(|| {
+                                    crate::external::NoAnswerReason::MalformedAnswer(
+                                        "detail=invalid_fields_or_value_types".to_string(),
+                                    )
+                                }),
+                            ConsultOutcome::NoAnswer(reason) => Err(reason),
+                        }
+                    }
                 };
                 // Annotation failure is an operational refusal, never model feedback: the
                 // call is not judged, nothing is appended, and the harness fails closed.
@@ -1744,6 +1781,7 @@ context_control = true
         ProposedCall {
             tool: "taint".to_string(),
             arguments: raw(spelling),
+            cwd: None,
         }
     }
 
@@ -1751,6 +1789,7 @@ context_control = true
         ProposedCall {
             tool: "fetch".to_string(),
             arguments: raw(spelling),
+            cwd: None,
         }
     }
 
@@ -2268,6 +2307,7 @@ name = "appa/execute_remedy_plan"
             tool: "fetch".to_string(),
             arguments: serde_json::value::RawValue::from_string(r#"{"a":1,"a":2}"#.to_string())
                 .expect("the fixture is well-formed JSON"),
+            cwd: None,
         };
         let decision = session
             .on_tool_call(duplicated, false)
@@ -2471,6 +2511,7 @@ name = "appa/execute_remedy_plan"
                 ProposedCall {
                     tool: "wrench".to_string(),
                     arguments: raw(serde_json::json!({})),
+                    cwd: None,
                 },
                 false,
             )
@@ -2546,6 +2587,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
                 ProposedCall {
                     tool: "read".to_string(),
                     arguments: raw(serde_json::json!({"path": "a.txt"})),
+                    cwd: None,
                 },
                 false,
             )
@@ -2805,6 +2847,7 @@ starting_label = { audience = ["alice@corp.example"] }
         let send = ProposedCall {
             tool: "send".to_string(),
             arguments: raw(serde_json::json!({})),
+            cwd: None,
         };
         // The source reports Alice, whose principal the starting audience holds: released.
         assert!(matches!(
@@ -2845,6 +2888,7 @@ starting_label = { audience = ["alice@corp.example"] }
                 ProposedCall {
                     tool: "send".to_string(),
                     arguments: raw(serde_json::json!({})),
+                    cwd: None,
                 },
                 false,
             )
@@ -2926,6 +2970,7 @@ context_control = false
                 ProposedCall {
                     tool: "spawn".to_string(),
                     arguments: raw(serde_json::json!({})),
+                    cwd: None,
                 },
                 true,
             )
@@ -3036,6 +3081,7 @@ context_control = false
                 ProposedCall {
                     tool: "send".to_string(),
                     arguments: raw(serde_json::json!({})),
+                    cwd: None,
                 },
                 false,
             )
@@ -3069,6 +3115,7 @@ requires = {{ audience = {{ contains = ["reader@example.com"] }} }}
             let read = ProposedCall {
                 tool: "read_internal".into(),
                 arguments: raw(serde_json::json!({})),
+                cwd: None,
             };
             assert!(matches!(
                 session.on_tool_call(read.clone(), false).await.unwrap(),
@@ -3108,6 +3155,7 @@ requires = {{ audience = {{ contains = ["reader@example.com"] }} }}
                         ProposedCall {
                             tool: "send_reader".into(),
                             arguments: raw(serde_json::json!({})),
+                            cwd: None,
                         },
                         false
                     )
@@ -3137,6 +3185,7 @@ attention = ["irreversible"]
         ProposedCall {
             tool: "wire".to_string(),
             arguments: raw(serde_json::json!({"amount": amount})),
+            cwd: None,
         }
     }
 
@@ -3489,6 +3538,7 @@ context_control = true
         ProposedCall {
             tool: "send".to_string(),
             arguments: raw(serde_json::json!({"body": body})),
+            cwd: None,
         }
     }
 
@@ -3503,6 +3553,7 @@ context_control = true
         let read = ProposedCall {
             tool: "read_hr".to_string(),
             arguments: raw(serde_json::json!({})),
+            cwd: None,
         };
         assert!(matches!(
             session.on_tool_call(read.clone(), false).await,
@@ -3644,6 +3695,7 @@ context_control = true
         let read = ProposedCall {
             tool: "read_hr".to_string(),
             arguments: raw(serde_json::json!({})),
+            cwd: None,
         };
         session
             .on_tool_call(read.clone(), false)
@@ -3699,6 +3751,7 @@ context_control = true
         let read = ProposedCall {
             tool: "read_hr".to_string(),
             arguments: raw(serde_json::json!({})),
+            cwd: None,
         };
 
         assert!(matches!(
@@ -3831,6 +3884,7 @@ context_control = true
         let other = ProposedCall {
             tool: "read_hr".to_string(),
             arguments: raw(serde_json::json!({})),
+            cwd: None,
         };
         let identified = session
             .on_tool_call_identified(other.clone(), Some("toolu-1".to_string()), false)
@@ -3906,6 +3960,7 @@ context_control = true
         let web = ProposedCall {
             tool: "read_web".to_string(),
             arguments: raw(serde_json::json!({})),
+            cwd: None,
         };
         assert!(matches!(
             session.on_tool_call(web.clone(), false).await,
@@ -3968,6 +4023,7 @@ context_control = true
         let legal = ProposedCall {
             tool: "read_legal".to_string(),
             arguments: raw(serde_json::json!({})),
+            cwd: None,
         };
         assert!(matches!(
             session.on_tool_call(legal.clone(), false).await,
@@ -4329,6 +4385,7 @@ confined_results = ["leak"]
         ProposedCall {
             tool: "leak".to_string(),
             arguments: raw(serde_json::json!({"q": "all"})),
+            cwd: None,
         }
     }
 
@@ -4480,6 +4537,7 @@ context_control = true
         let browse = ProposedCall {
             tool: "browse".to_string(),
             arguments: raw(serde_json::json!({})),
+            cwd: None,
         };
         assert!(matches!(
             child.on_tool_call(browse.clone(), false).await,
@@ -4600,6 +4658,7 @@ context_control = true
         ProposedCall {
             tool: "mark".to_string(),
             arguments: raw(serde_json::json!({"a": 1})),
+            cwd: None,
         }
     }
 
@@ -4668,6 +4727,7 @@ context_control = true
             ProposedCall {
                 tool: "bare".to_string(),
                 arguments: raw(serde_json::json!({"a": 2})),
+                cwd: None,
             },
         )
         .await;
@@ -4765,6 +4825,7 @@ context_control = true
         ProposedCall {
             tool: "send".to_string(),
             arguments: raw(serde_json::json!({})),
+            cwd: None,
         }
     }
 
@@ -5074,6 +5135,7 @@ delta = {}
         ProposedCall {
             tool: tool.to_string(),
             arguments: raw(serde_json::json!({})),
+            cwd: None,
         }
     }
 
@@ -5224,6 +5286,7 @@ delta = {}
         let read = ProposedCall {
             tool: "read".to_string(),
             arguments: raw(serde_json::json!({"path": "a.txt"})),
+            cwd: None,
         };
         assert!(
             matches!(
@@ -6418,6 +6481,7 @@ delta = {}
         ProposedCall {
             tool: name.to_string(),
             arguments: raw(serde_json::json!({"offer_id": "o1:cc:root:ff"})),
+            cwd: None,
         }
     }
 
@@ -6533,6 +6597,7 @@ delta = {}
         ProposedCall {
             tool: "Bash".to_string(),
             arguments: raw(serde_json::json!({"command": "ls"})),
+            cwd: None,
         }
     }
 

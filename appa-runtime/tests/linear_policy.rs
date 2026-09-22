@@ -15,6 +15,7 @@ fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
     ProposedCall {
         tool: format!("mcp/linear/{tool}"),
         arguments: raw(args),
+        cwd: None,
     }
 }
 
@@ -144,6 +145,7 @@ builtin = "approve"
         tool: "mcp/github/issue_write".into(),
         arguments: raw(serde_json::json!({
         "owner":"example","repo":"private","title":"Reviewed summary","body":"Restricted fixture content"})),
+        cwd: None,
     };
     let offer = offer_of(&propose(&runtime, write.clone()).await);
     assert!(matches!(
@@ -159,6 +161,7 @@ builtin = "approve"
         tool: "mcp/github/issue_write".into(),
         arguments: raw(serde_json::json!({
         "owner":"example","repo":"public","title":"Leak","body":"Restricted fixture content"})),
+        cwd: None,
     };
     assert!(!matches!(
         propose(&runtime, public).await,

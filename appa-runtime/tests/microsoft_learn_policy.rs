@@ -15,6 +15,7 @@ fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
     ProposedCall {
         tool: format!("mcp/microsoft-learn/{tool}"),
         arguments: raw(args),
+        cwd: None,
     }
 }
 
@@ -22,6 +23,7 @@ fn other(tool: &str, args: serde_json::Value) -> ProposedCall {
     ProposedCall {
         tool: tool.to_string(),
         arguments: raw(args),
+        cwd: None,
     }
 }
 

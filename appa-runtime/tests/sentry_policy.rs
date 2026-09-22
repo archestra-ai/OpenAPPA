@@ -15,6 +15,7 @@ fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
     ProposedCall {
         tool: format!("mcp/sentry/{tool}"),
         arguments: raw(args),
+        cwd: None,
     }
 }
 

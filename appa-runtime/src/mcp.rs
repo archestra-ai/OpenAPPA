@@ -1166,6 +1166,7 @@ mod tests {
         let call = ProposedCall {
             tool: "appa_include_battery".to_string(),
             arguments: serde_json::value::to_raw_value(&args).expect("arguments serialize"),
+            cwd: None,
         };
         runtime.vouch(&crate::api::call_key(&call).expect("a management call"), &actor, None);
         assert!(take_management_vouch(&runtime, "appa_include_battery", &args));
@@ -1248,6 +1249,7 @@ mod tests {
                 ProposedCall {
                     tool: "host/claude-code/Read".to_string(),
                     arguments: raw(serde_json::json!({})),
+                    cwd: None,
                 },
                 false,
             )
@@ -1333,6 +1335,7 @@ mod tests {
                 ProposedCall {
                     tool: tool.to_string(),
                     arguments: raw(serde_json::json!({})),
+                    cwd: None,
                 },
                 false,
             )
@@ -1474,6 +1477,7 @@ mod tests {
                 ProposedCall {
                     tool: "wire".to_string(),
                     arguments: raw(serde_json::json!({"amount": 500})),
+                    cwd: None,
                 },
                 false,
             )
@@ -1657,6 +1661,7 @@ max_body_bytes = 4096
                     ProposedCall {
                         tool: "read".to_owned(),
                         arguments: raw(serde_json::json!({})),
+                        cwd: None,
                     },
                     false
                 )
@@ -1705,6 +1710,7 @@ max_body_bytes = 4096
                 call: ProposedCall {
                     tool: "wire".to_string(),
                     arguments: raw(serde_json::json!({"amount": 501})),
+                    cwd: None,
                 },
                 call_id: None,
                 spawn: false,
@@ -1728,6 +1734,7 @@ max_body_bytes = 4096
             call: ProposedCall {
                 tool: "wire".to_string(),
                 arguments: raw(serde_json::json!({"amount": amount})),
+                cwd: None,
             },
             call_id: None,
             spawn: false,
@@ -1832,6 +1839,7 @@ max_body_bytes = 4096
             call: ProposedCall {
                 tool: appa_runtime_api::CONTROL_TOOL.to_string(),
                 arguments: raw(serde_json::json!({ "offer_id": quoted.0 })),
+                cwd: None,
             },
             call_id: None,
             spawn: false,

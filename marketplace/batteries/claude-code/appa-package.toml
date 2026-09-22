@@ -6,4 +6,4 @@ description = "Rules for the Claude Code built-in tools host/claude-code/Bash, h
 policy = "appa.toml"
 hosts = ["claude-code"]
 namespaces = ["claude-code"]
-helpers = []
+helpers = ["repository.py"]

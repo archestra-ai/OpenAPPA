@@ -19,6 +19,7 @@ fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
     ProposedCall {
         tool: format!("mcp/databricks/{tool}"),
         arguments: raw(args),
+        cwd: None,
     }
 }
 

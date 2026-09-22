@@ -117,6 +117,7 @@ mod tests {
                 &serde_json::json!({ "message": request.message, "with_trajectory": request.with_trajectory }),
             )
             .unwrap(),
+            cwd: None,
         };
         assert!(matches!(
             hooks::handle(

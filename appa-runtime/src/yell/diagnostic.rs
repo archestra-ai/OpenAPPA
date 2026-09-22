@@ -646,6 +646,7 @@ mod tests {
         let call = |tool: &str| ProposedCall {
             tool: tool.to_string(),
             arguments: crate::api::raw(serde_json::json!({})),
+            cwd: None,
         };
         let decided =
             |decision: Result<ToolCallDecision, crate::api::EventError>| decision.expect("the call is decided");
@@ -817,6 +818,7 @@ mod tests {
                 call: appa_runtime_api::ProposedCall {
                     tool: invented.to_string(),
                     arguments: serde_json::value::RawValue::from_string("{}".to_string()).expect("valid JSON"),
+                    cwd: None,
                 },
                 call_id: None,
                 spawn: false,

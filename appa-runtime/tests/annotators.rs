@@ -79,6 +79,7 @@ fn fetch(url: &str) -> ProposedCall {
     ProposedCall {
         tool: "fetch".to_string(),
         arguments: raw(serde_json::json!({ "url": url })),
+        cwd: None,
     }
 }
 
@@ -194,6 +195,7 @@ async fn an_http_annotator_annotates_the_complete_call_and_a_fresh_proposal_cons
         serde_json::json!({
             "hint": "Use insider for data restricted to company readers.",
             "inputs": [],
+            "established": [],
             "trust_ranks": ["suspicious", "trusted"],
             "audiences": ["insider"],
             "attention_marks": [],
@@ -395,6 +397,123 @@ audiences = ["insider"]"#,
     assert_eq!(
         requests[0]["artifact"]["args"],
         serde_json::json!({ "subject": "https://a.example" })
+    );
+}
+
+/// The http policy with one input a program answers, bound to the same fake service under
+/// the name `repo`.
+fn input_policy(url: &str) -> String {
+    http_policy(url).replace(
+        r#"name = "classifier"
+audiences = ["insider"]"#,
+        r#"name = "classifier"
+inputs = { call = "$tool_call", repository = "$input.repo" }
+audiences = ["insider"]"#,
+    ) + &format!(
+        r#"
+[externals.inputs.repo]
+url = "{url}"
+"#
+    )
+}
+
+#[tokio::test]
+async fn a_program_answered_input_reaches_the_annotator_as_established() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, service) = serve_annotator().await;
+    service.set("classifier", Answer::Wire(produced("trusted")));
+    service.set(
+        "repo",
+        Answer::Wire(serde_json::json!({ "version": 1, "answer": { "visibility": "private" } })),
+    );
+    let runtime = open_runtime(&dir, &input_policy(&url)).await;
+
+    let mut call = fetch("https://a.example");
+    call.cwd = Some("/work/checkout".to_string());
+    assert_eq!(propose(&runtime, call).await, HookDecision::AllowCall { spawn: None });
+
+    let requests = service.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "the program answers first, then the annotator is asked"
+    );
+    // The program sees the proposed call and where the harness would run it; the policy
+    // gives it no instruction.
+    assert_eq!(requests[0]["kind"], "input");
+    assert_eq!(requests[0]["name"], "repo");
+    assert_eq!(requests[0]["declaration"], serde_json::json!({}));
+    assert_eq!(
+        requests[0]["artifact"],
+        serde_json::json!({
+            "tool": "fetch",
+            "arguments": { "url": "https://a.example" },
+            "cwd": "/work/checkout",
+        })
+    );
+    // The annotator sees the answer under the input's name, marked as established, and
+    // never sees the directory.
+    assert_eq!(requests[1]["kind"], "annotation");
+    assert_eq!(
+        requests[1]["declaration"]["inputs"],
+        serde_json::json!(["call", "repository"])
+    );
+    assert_eq!(
+        requests[1]["declaration"]["established"],
+        serde_json::json!(["repository"])
+    );
+    assert_eq!(
+        requests[1]["artifact"]["args"],
+        serde_json::json!({
+            "call": {
+                "name": "fetch",
+                "description": "Fetches one URL and returns its body.",
+                "arguments": { "url": "https://a.example" },
+            },
+            "repository": { "visibility": "private" },
+        })
+    );
+}
+
+#[tokio::test]
+async fn an_input_program_that_does_not_answer_refuses_the_call_before_the_annotator() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, service) = serve_annotator().await;
+    service.set("classifier", Answer::Wire(produced("trusted")));
+    service.set("repo", Answer::Down);
+    let runtime = open_runtime(&dir, &input_policy(&url)).await;
+    let baseline = audit_len(&runtime);
+
+    let decision = propose(&runtime, fetch("https://a.example")).await;
+    let HookDecision::Refuse { detail } = decision else {
+        panic!("an unanswered input is an operational refusal, got {decision:?}");
+    };
+    assert!(
+        detail.contains("classifier"),
+        "the refusal names the annotator: {detail}"
+    );
+    assert_eq!(audit_len(&runtime), baseline, "nothing is appended");
+    assert!(
+        service.requests().iter().all(|request| request["kind"] == "input"),
+        "the annotator is never asked without its input"
+    );
+}
+
+#[tokio::test]
+async fn an_input_no_program_binds_refuses_the_deployment() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, _service) = serve_annotator().await;
+    let config = input_policy(&url).replace("[externals.inputs.repo]", "[externals.inputs.other]");
+    let path = dir.path().join("appa.toml");
+    std::fs::write(&path, config).expect("the fixture writes");
+    let config = Config::load(&path).expect("the file itself is well formed");
+    let refused = match Runtime::open(config, dir.path().join("appa.db"), None) {
+        Ok(_) => panic!("a deployment whose annotator reads an unbound input opened"),
+        Err(refused) => refused.to_string(),
+    };
+    assert!(
+        refused.contains("repo"),
+        "the refusal names the unbound program: {refused}"
     );
 }
 
@@ -819,6 +938,7 @@ fn call(tool: &str, arguments: serde_json::Value) -> ProposedCall {
     ProposedCall {
         tool: tool.to_string(),
         arguments: raw(arguments),
+        cwd: None,
     }
 }
 
@@ -1147,6 +1267,7 @@ fn read_channel(channel_id: &str) -> ProposedCall {
     ProposedCall {
         tool: "read_channel".to_string(),
         arguments: raw(serde_json::json!({ "channel_id": channel_id })),
+        cwd: None,
     }
 }
 

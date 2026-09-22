@@ -134,6 +134,7 @@ fn kind_of(section: Section) -> ConsultKind {
         Section::Sanitizers => ConsultKind::Sanitizer,
         Section::Annotators => ConsultKind::Annotation,
         Section::Audience => ConsultKind::AudienceSource,
+        Section::Inputs => ConsultKind::Input,
     }
 }
 
@@ -278,17 +279,20 @@ impl ExternalServices {
             }
             backends.insert(kind_of(section), resolved);
         }
-        let mut annotators: BTreeMap<String, Backend> = config
-            .annotators
-            .into_iter()
-            .map(|(name, implementation)| {
-                let backend = match implementation {
-                    AnnotatorImplementation::Resolver(endpoint) => Backend::Url(endpoint),
-                    AnnotatorImplementation::Command(command) => Backend::Command(command),
-                };
-                (name, backend)
-            })
-            .collect();
+        let bound = |table: BTreeMap<String, AnnotatorImplementation>| -> BTreeMap<String, Backend> {
+            table
+                .into_iter()
+                .map(|(name, implementation)| {
+                    let backend = match implementation {
+                        AnnotatorImplementation::Resolver(endpoint) => Backend::Url(endpoint),
+                        AnnotatorImplementation::Command(command) => Backend::Command(command),
+                    };
+                    (name, backend)
+                })
+                .collect()
+        };
+        backends.insert(ConsultKind::Input, bound(config.inputs));
+        let mut annotators = bound(config.annotators);
         for (name, builtin) in annotator_builtins {
             let backend = builtin_backend(
                 Section::Annotators,
@@ -568,7 +572,7 @@ fn builtin_backend(
     let module = match section {
         Section::Authorities => registry.authority(&builtin),
         Section::Sanitizers => registry.sanitizer(&builtin),
-        Section::Annotators | Section::Audience => None,
+        Section::Annotators | Section::Audience | Section::Inputs => None,
     };
     let backend = match (section, builtin.as_str()) {
         (Section::Authorities, HITL) => Some(Backend::Hitl),
@@ -1059,6 +1063,7 @@ mod tests {
             sanitizers: BTreeMap::new(),
             annotators,
             audience,
+            inputs: BTreeMap::new(),
             claude_code: Default::default(),
             llm: None,
         }
@@ -1133,6 +1138,7 @@ mod tests {
                 declaration: AnnotationDeclaration {
                     hint: Some("Classify customer records for the declared audiences.".to_string()),
                     inputs: vec![],
+                    established: vec![],
                     trust_ranks: vec!["suspicious".to_string(), "trusted".to_string()],
                     audiences: appa_engine::registry::AudienceVocabulary::parse_entries(&[
                         "bob@example.com".to_string(),

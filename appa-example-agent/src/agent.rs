@@ -420,6 +420,7 @@ impl Run<'_> {
         let proposed = ProposedCall {
             tool: canonical_tool_name(&call.function.name).to_string(),
             arguments,
+            cwd: None,
         };
         let id = CallId(call.id.clone());
 

@@ -115,6 +115,7 @@ fn read_hr() -> ProposedCall {
     ProposedCall {
         tool: "read_hr".to_string(),
         arguments: raw(serde_json::json!({})),
+        cwd: None,
     }
 }
 
@@ -122,11 +123,20 @@ fn read_file(path: &str) -> ProposedCall {
     ProposedCall {
         tool: "read_file".to_string(),
         arguments: raw(serde_json::json!({ "path": path })),
+        cwd: None,
     }
 }
 
 /// A runtime whose audience is narrowed to `hr`, with the sanitizer answering `rewrite`.
 async fn narrowed(dir: &tempfile::TempDir, rewrite: serde_json::Value) -> (Arc<Runtime>, Stubs) {
+    narrowed_under(dir, rewrite, policy).await
+}
+
+async fn narrowed_under(
+    dir: &tempfile::TempDir,
+    rewrite: serde_json::Value,
+    policy: fn(&str) -> String,
+) -> (Arc<Runtime>, Stubs) {
     let (base, stubs) = serve_stubs(rewrite).await;
     let path = dir.path().join("appa.toml");
     std::fs::write(&path, policy(&base)).expect("the fixture writes");
@@ -218,6 +228,51 @@ async fn a_rewrite_into_the_public_contract_consults_its_annotator_about_the_rew
         released_effects(&runtime),
         vec![Vec::<String>::new()],
         "the release records the public contract's effects, not the classified read"
+    );
+}
+
+/// The policy with one input the `/resolve` stub answers as a program, beside the call.
+fn policy_with_input(base: &str) -> String {
+    policy(base).replace(
+        "name = \"classify\"\n",
+        "name = \"classify\"\ninputs = { call = \"$tool_call\", origin = \"$input.origin\" }\n",
+    ) + &format!("\n[externals.inputs.origin]\nurl = \"{base}/resolve\"\n")
+}
+
+/// The harness reports the directory on the proposal; the remedy's rewritten call is
+/// annotated in the same directory, though the remedy call itself reports none.
+#[tokio::test]
+async fn a_rewrite_is_annotated_in_the_directory_the_proposal_reported() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (runtime, stubs) = narrowed_under(&dir, serde_json::json!({ "path": "public/q3.md" }), policy_with_input).await;
+
+    let mut proposal = read_file("private/q3.md");
+    proposal.cwd = Some("/work/checkout".to_string());
+    let hop = offer_of(&propose(&runtime, proposal).await);
+    assert_eq!(
+        rewritten_path(runtime.execute_remedy(&actor(), hop).await),
+        "public/q3.md"
+    );
+    let consults = stubs.consults.lock().unwrap().clone();
+    assert_eq!(
+        consults.len(),
+        2,
+        "the input program answers, then the annotator is asked"
+    );
+    assert_eq!(consults[0]["kind"], "input");
+    assert_eq!(
+        consults[0]["artifact"],
+        serde_json::json!({
+            "tool": "read_file",
+            "arguments": { "path": "public/q3.md" },
+            "cwd": "/work/checkout",
+        })
+    );
+    assert_eq!(consults[1]["kind"], "annotation");
+    assert_eq!(consults[1]["declaration"]["established"], serde_json::json!(["origin"]));
+    assert_eq!(
+        consults[1]["artifact"]["args"]["origin"]["delta"],
+        serde_json::json!({})
     );
 }
 

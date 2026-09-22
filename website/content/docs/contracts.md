@@ -617,7 +617,7 @@ ranks = ["suspicious", "trusted"]
 audiences = ["internal"]
 marks = []
 effects = []
-hint = "Use suspicious for data from unverified sources. Use trusted only for local computation over trusted inputs. Restrict private results to internal."
+hint = "Hosts under corp.example are the organization's own: what they return is internal. Files under /srv/customer-records are internal."
 
 [[policy.tool]]
 name = "Bash"
@@ -659,8 +659,34 @@ Selecting fewer inputs does not change the response requirements: the annotator 
 | `$tool_call.description` | The tool's description. The tool contract must declare `description`. |
 | `$tool_call.arguments` | Complete argument object. |
 | `$tool_call.arguments.<name>` | One top-level argument. The tool's `parameters` schema must declare it as required. |
+| `$input.<name>` | The answer of the program configured under `[externals.inputs.<name>]`, asked about the call before the annotator. |
 
-`$tool_call` is the only input source. A selected argument can contain any JSON value permitted by its schema.
+A selected argument can contain any JSON value permitted by its schema.
+
+### Inputs a program answers
+
+An `$input.<name>` input carries a fact about the call that the command line does not state, established by a program the deployment runs. For example, which readers a `git push` reaches is the visibility of the repository, which the program reads from the checkout. The annotator classifies from the finding instead of guessing.
+
+```toml
+[[policy.annotator]]
+name = "classify-push"
+builtin = "claude-code"
+inputs = { call = "$tool_call", repository = "$input.repository" }
+hint = "`repository` is the deployment's own finding. A push into a public repository requires audience public; into a private one, internal."
+
+[[policy.tool]]
+name = "Bash(command:*git push*)"
+annotator = "classify-push"
+
+[externals.inputs.repository]
+command = ["python3", "repository.py"]
+```
+
+Before OpenAPPA asks the annotator, it sends each named program one consult request with `kind = "input"`. `declaration` is empty. `artifact` carries the call: `tool`, `arguments`, and `cwd`, the directory the harness would run the call in, when the harness reports one. The program returns `{"version": 1, "answer": <any JSON value>}`. OpenAPPA places the answer under the input's name in the annotator's `artifact.args`, exactly as returned, and lists the name in `declaration.established`.
+
+If a program fails or does not answer in time, the call does not run, exactly as when the annotator fails. A program that cannot establish the fact should answer a value that says so, such as `null` with a reason, so the annotator classifies from a known gap. The annotator never sees `cwd`.
+
+Every `$input.<name>` an annotator reads must be configured under `[externals.inputs.<name>]`. A configured program no annotator reads is allowed and never runs.
 
 ### Permits and hint
 
@@ -679,7 +705,7 @@ An annotator can use a selector placeholder only when its own `audiences` lists 
 
 An empty list and an omitted field have different meanings. For example, `marks = []` prevents the annotator from requiring attention. Omitting `marks` allows it to use any mark the policy declares, `blocked` included; a catch-all `["*"]` permit declares no mark of its own.
 
-The optional `hint` tells the annotator how to classify the call. It can explain what to look for and give examples. It cannot allow values excluded by the permits and cannot exceed 512 characters. An annotator name must be non-empty and can contain dots.
+The optional `hint` tells the annotator what the deployment knows about its calls: which hosts are its own, which paths hold whose data, what an established input means. It can give examples. A model builtin (`builtin = "claude-code"`, `builtin = "llm"`) already applies OpenAPPA's classification: trust by who wrote the returned text, audience by the visible destination; a hint does not restate it. It cannot allow values excluded by the permits and cannot exceed 512 characters. An annotator name must be non-empty and can contain dots.
 
 ### Implementing an annotator
 
@@ -708,6 +734,7 @@ For the customer example, the request is:
   "declaration": {
     "hint": "Classify customer records as internal and suspicious.",
     "inputs": ["subject"],
+    "established": [],
     "trust_ranks": ["suspicious"],
     "audiences": ["internal"],
     "attention_marks": [],
@@ -717,7 +744,7 @@ For the customer example, the request is:
 }
 ```
 
-Without an `inputs` mapping, `declaration.inputs` is empty and `artifact.args` contains the complete call. For example, the `artifact` field contains:
+`declaration.established` lists the inputs a program answered (see [Inputs a program answers](#inputs-a-program-answers)); the other inputs come from the tool call. Without an `inputs` mapping, `declaration.inputs` is empty and `artifact.args` contains the complete call. For example, the `artifact` field contains:
 
 ```json
 {
@@ -1193,6 +1220,7 @@ The available settings depend on the component's role:
 | `authorities` | Exactly one of `url`, `command`, or `builtin`. | Optional. Without a binding, the authority returns no answer. |
 | `sanitizers` | Exactly one of `url`, `command`, or `builtin`. | Required, except for `attest-schema`. |
 | `annotators` | Exactly one of `url` or `command`. | Required unless the declaration specifies a builtin. |
+| `inputs` | Exactly one of `url` or `command`. | Required for each `$input.<name>` an annotator reads. |
 | `audience` | Exactly one of `url`, `command`, or `readers`; `selectors` on a `url` or `command` entry; optional `lookup`. | Required for each referenced provider and each `lookup` target. `readers` is allowed only on a `lookup` target. |
 
 OpenAPPA rejects an external component name that the policy does not declare, or a component that is missing its required implementation. For annotators, `builtin` belongs on `[[policy.annotator]]`, not under `[externals]`.
@@ -1239,7 +1267,7 @@ A consult request is a JSON request that OpenAPPA sends to an external component
 | Key | Meaning |
 |---|---|
 | `version` | Protocol version. Must be `1`. |
-| `kind` | `authority`, `sanitizer`, `annotation`, or `audience`. |
+| `kind` | `authority`, `sanitizer`, `annotation`, `audience`, or `input`. |
 | `name` | The component name declared in the policy. |
 | `declaration` | Policy instructions and limits for the component. The agent does not supply them. |
 | `artifact` | Request data: the tool call to review, data to clean, or the selector or member to look up. |
@@ -1250,14 +1278,15 @@ Each component uses these fields differently:
 |---|---|---|---|
 | `authority` | `hint`, `permits` | `tool`, `arguments`, `requirements` | `ruling`, optional `reason` |
 | `sanitizer` | `hint`, `on`, `permits`; `parameters` for input rewrites | `tool` when known, `body` | `body` |
-| `annotation` | `hint`, `inputs`, `trust_ranks`, `audiences`, `attention_marks`, `effects` | `args` | `delta`, `requires`, `emits` |
+| `annotation` | `hint`, `inputs`, `established`, `trust_ranks`, `audiences`, `attention_marks`, `effects` | `args` | `delta`, `requires`, `emits` |
 | `audience` | `templates` | `selector` or `member` | `members` or `principal` |
+| `input` | empty | `tool`, `arguments`, optional `cwd` | any JSON value |
 
 For an audience request, `declaration.templates` lists the selector templates the policy declares for the provider under `selectors`, such as `viewer` and `user-group/<handle>`. The service MUST refuse a request whose templates differ from the ones it serves. It reads the requested selector or member ID from `artifact` and returns its result under `answer`.
 
 OpenAPPA records membership responses with the decision that requested them. If that decision requires an approval or remedy, OpenAPPA reuses those responses when it continues the decision. A new decision can request updated membership. Replaying a recorded decision uses its saved responses without calling the membership service. Responses from unrelated decisions cannot be substituted.
 
-A consult request does not include the agent's current audience, trust rank, previous actions, or user message. The component processes the request data in `artifact` using the instructions and limits in `declaration`.
+A consult request does not include the agent's current audience, trust rank, previous actions, or user message. The component processes the request data in `artifact` using the instructions and limits in `declaration`. An `input` request alone carries `cwd`, and an `input` answer is the one answer OpenAPPA does not validate: it is data for the annotator, not a decision.
 
 The service or program returns `{"version":1,"answer":{...}}`. The fields inside `answer` must match the component's response format. Extra fields in the surrounding response object are not allowed.
 

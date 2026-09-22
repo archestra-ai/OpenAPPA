@@ -15,6 +15,7 @@ fn call(tool: &str, request: serde_json::Value) -> ProposedCall {
     ProposedCall {
         tool: format!("mcp/launchdarkly/{tool}"),
         arguments: raw(serde_json::json!({ "request": request })),
+        cwd: None,
     }
 }
 

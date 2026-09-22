@@ -198,6 +198,7 @@ fn call(tool: &str, argument: &str, value: &str) -> ProposedCall {
     ProposedCall {
         tool: tool.to_string(),
         arguments: raw(serde_json::json!({ argument: value })),
+        cwd: None,
     }
 }
 
@@ -370,6 +371,7 @@ async fn the_slack_battery_allows_public_writes_and_blocks_leaking_self_secrets(
     let slack_send = ProposedCall {
         tool: "mcp/claude_ai_Slack/slack_send_message".to_string(),
         arguments: raw(serde_json::json!({ "channel_id": "C123", "text": "hello" })),
+        cwd: None,
     };
 
     // 1. Fresh public session: slack write is allowed autonomously

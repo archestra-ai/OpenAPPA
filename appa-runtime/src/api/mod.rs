@@ -72,6 +72,7 @@ impl ExactCall {
             tool: self.tool,
             arguments: serde_json::value::RawValue::from_string(text)
                 .expect("canonical argument bytes are one JSON value"),
+            cwd: None,
         }
     }
 }
@@ -596,6 +597,16 @@ pub(crate) struct Deployment {
     externals: ExternalServices,
 }
 
+/// One Annotator's answer to one call, as `appa runtime annotate` reports it. `admitted`
+/// says whether the answer stays inside the Annotator's declared mandate: an answer that
+/// does not refuses the call in a session.
+#[cfg(feature = "daemon")]
+pub(crate) struct AnnotationConsult {
+    pub(crate) annotator: String,
+    pub(crate) outcome: crate::external::ConsultOutcome,
+    pub(crate) admitted: bool,
+}
+
 /// Which deployment this is, and with it every rule the harness fixes rather than the
 /// policy: how the policy names tools, how a recorded name is spelled back when the runtime
 /// addresses the model, and which contracts may release a spawn.
@@ -894,6 +905,7 @@ impl Prepared {
                     naming: self.naming,
                     files: None,
                     state_path,
+                    working_directories: std::sync::Mutex::new(std::collections::HashMap::new()),
                 }),
                 store,
             }),
@@ -924,6 +936,10 @@ struct Shared {
     /// dispatch, and which contracts release a spawn. Settled at open and unchanged by a
     /// reload — it is the deployment kind, not the policy.
     naming: ToolNaming,
+    /// The directory each root's harness last proposed a call from: a session's property,
+    /// not a call's, so a remedy's rewritten call is annotated in it too. In this process
+    /// only; after a restart the next proposal reports it again.
+    working_directories: std::sync::Mutex<std::collections::HashMap<TrajectoryId, String>>,
 }
 
 /// The trajectory an actor's events belong to: the child when the harness names one.
@@ -1010,6 +1026,25 @@ impl Runtime {
 }
 
 impl Inner {
+    fn note_working_directory(&self, root: &TrajectoryId, cwd: Option<&str>) {
+        if let Some(cwd) = cwd {
+            self.shared
+                .working_directories
+                .lock()
+                .expect("the working-directory mutex is never poisoned: no panic runs while it is held")
+                .insert(root.clone(), cwd.to_string());
+        }
+    }
+
+    fn working_directory(&self, root: &TrajectoryId) -> Option<String> {
+        self.shared
+            .working_directories
+            .lock()
+            .expect("the working-directory mutex is never poisoned: no panic runs while it is held")
+            .get(root)
+            .cloned()
+    }
+
     /// Note a failed store operation as a closed class.
     ///
     /// Takes the *typed* error, deliberately. Every one of these errors carries free text —
@@ -1391,6 +1426,68 @@ impl Runtime {
         let mut prepared = Prepared::new(config, modules, ToolNaming::AsAuthored)?;
         prepared.deployment.stand_in_for_remedies();
         prepared.assemble(Backend::Memory)
+    }
+
+    /// `appa runtime annotate`: the serving deployment's Annotator asked afresh about one
+    /// call, or `None` when a static contract covers it. No trajectory is opened and nothing
+    /// is appended.
+    #[cfg(feature = "daemon")]
+    pub(crate) async fn annotate(
+        &self,
+        tool: &str,
+        raw_arguments: &[u8],
+        cwd: Option<&str>,
+    ) -> Result<Option<AnnotationConsult>, appa_engine::engine::EngineError> {
+        let deployment = self.inner.deployment();
+        let Some(crate::engine::ExternalRequest::Annotation {
+            annotator,
+            declaration,
+            mut args,
+            inputs,
+            ..
+        }) = deployment.resident.annotation_owed(tool, raw_arguments, cwd)?
+        else {
+            return Ok(None);
+        };
+        let mut asked = Vec::with_capacity(inputs.len());
+        for input in &inputs {
+            asked.push(deployment.externals.consult(&input.consult, None, None));
+        }
+        let outcomes = crate::external::settle_batch(asked).await;
+        for (input, outcome) in inputs.iter().zip(outcomes) {
+            match outcome {
+                crate::external::ConsultOutcome::Answer(answer) => {
+                    args.as_object_mut()
+                        .expect("an annotation with declared inputs carries an object artifact")
+                        .insert(input.input.clone(), answer);
+                }
+                crate::external::ConsultOutcome::NoAnswer(_) => {
+                    return Ok(Some(AnnotationConsult {
+                        annotator,
+                        outcome,
+                        admitted: false,
+                    }));
+                }
+            }
+        }
+        let consult = crate::consult::Consult {
+            name: annotator.clone(),
+            body: crate::consult::ConsultBody::Annotation {
+                declaration: declaration.clone(),
+                artifact: crate::consult::AnnotationArtifact { args },
+            },
+        };
+        let outcome = deployment.externals.consult(&consult, None, None).await;
+        let admitted = matches!(
+            &outcome,
+            crate::external::ConsultOutcome::Answer(answer)
+                if crate::consult::AnnotationAnswer::from_wire(answer, &declaration).is_some()
+        );
+        Ok(Some(AnnotationConsult {
+            annotator,
+            outcome,
+            admitted,
+        }))
     }
 
     /// The policy file key the serving deployment answers under. An install compares it
@@ -2858,6 +2955,21 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
         }
     }
     bound_exactly("annotator", bound_by_deployment.into_iter(), &externals.annotators)?;
+    // Every program an annotator input reads is bound. A bound program no annotator reads
+    // stays idle rather than refused, as an audience source does: a battery binds the
+    // program beside the annotator that reads it, and a root that replaces that annotator
+    // may read nothing of the kind.
+    no_unbound(
+        "annotator input",
+        policy
+            .annotators()
+            .flat_map(|(_, binding)| binding.inputs.values())
+            .filter_map(|source| match source {
+                appa_policy::InputSource::External(program) => Some(program.as_str()),
+                appa_policy::InputSource::Call(_) => None,
+            }),
+        &externals.inputs,
+    )?;
     // Every provider the policy references is bound, and so is every entry a provider's
     // `lookup` names. A bound provider the policy never references stays idle rather than
     // refused: a battery binds its own source, and a deployment may include the battery
@@ -3694,6 +3806,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     call: ProposedCall {
                         tool: "host/claude-code/Bash".to_string(),
                         arguments: raw(serde_json::json!({"command": "ls"})),
+                        cwd: None,
                     },
                     call_id: None,
                     spawn: false,
@@ -4829,6 +4942,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let call = ProposedCall {
             tool: "mcp__appa__appa_include_battery".to_string(),
             arguments: serde_json::value::to_raw_value(&args).expect("arguments serialize"),
+            cwd: None,
         };
         let key = call_key(&call).expect("a management call under the MCP prefix");
 
@@ -4998,6 +5112,7 @@ url = "{url}"
                 call: ProposedCall {
                     tool: tool.to_string(),
                     arguments: raw(serde_json::json!({ "request": "summarize the crash logs" })),
+                    cwd: None,
                 },
                 call_id: None,
                 spawn,
