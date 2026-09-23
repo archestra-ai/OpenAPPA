@@ -191,6 +191,11 @@ class FakeTypeSafeHandler(BaseHTTPRequestHandler):
                 self.reply(200, json.dumps({"answers": answers}).encode())
             case ("stall", seconds):
                 time.sleep(seconds)
+            case ("truncated",):
+                self.send_response(200)
+                self.send_header("Content-Length", "1000")
+                self.end_headers()
+                self.wfile.write(b'{"answers": ')
             case ("drip", seconds, code):
                 self.wfile.write(f"HTTP/1.1 {code} Busy\r\n".encode())
                 for _ in range(seconds):
@@ -281,6 +286,11 @@ class ProviderTests(unittest.TestCase):
         self.assert_answered(result, diagnostics)
         self.assertEqual((diagnostics["attempts"], requests), (["timeout", "ok"], 2))
 
+    def test_a_truncated_response_is_retried(self):
+        result, diagnostics, requests = self.consult_through([("truncated",), ("answers", JEV_ANSWERS)])
+        self.assert_answered(result, diagnostics)
+        self.assertEqual((diagnostics["attempts"], requests), (["connection", "ok"], 2))
+
     def test_no_second_attempt_starts_once_the_budget_is_spent(self):
         result, diagnostics, requests = self.consult_through([("drip", 3, 503), ("answers", JEV_ANSWERS)])
         self.assert_refused(result, diagnostics)
@@ -293,6 +303,12 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(result.stdout, b"")
         self.assertEqual(diagnostics["error"], "ValueError")
         self.assertEqual(diagnostics["labels"]["delta_trust"], {"probabilities": {"trusted": 1.0}, "threshold": 0.6})
+
+    def test_a_boolean_probability_is_refused(self):
+        garbled = {**JEV_ANSWERS, "requires_trusted": {"noul": True}}
+        result, diagnostics, _ = self.consult_through([("answers", garbled)])
+        self.assertEqual((result.returncode, result.stdout), (1, b""))
+        self.assertEqual(diagnostics["error"], "ValueError")
 
 
 @unittest.skipUnless(os.environ.get("APPA_PROVIDER_JEV_API_KEY"), "needs a TypeSafe API key")

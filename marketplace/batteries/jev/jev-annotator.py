@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import sys
+import http.client
 import time
 import urllib.error
 import urllib.request
@@ -145,7 +146,7 @@ def labels_of(answers: object, trace: dict | None = None) -> dict[str, str | boo
     requires_trusted = answers.get("requires_trusted")
     probability = requires_trusted.get("noul") if isinstance(requires_trusted, dict) else None
     trace["requires_trusted"] = {"probability": probability, "threshold": REQUIRES_TRUSTED_CUTOFF}
-    if not isinstance(probability, (int, float)):
+    if isinstance(probability, bool) or not isinstance(probability, (int, float)):
         raise ValueError("Jev answered requires_trusted without a probability")
     labels["requires_trusted"] = trace["requires_trusted"]["decision"] = probability >= REQUIRES_TRUSTED_CUTOFF
     return labels
@@ -186,7 +187,7 @@ def annotation(labels: dict[str, str | bool], declaration: dict) -> dict:
     return {"delta": delta, "requires": requires, "emits": []}
 
 
-def network_failure(error: OSError) -> str:
+def network_failure(error: OSError | http.client.HTTPException) -> str:
     reason = error.reason if isinstance(error, urllib.error.URLError) else error
     return "timeout" if isinstance(reason, TimeoutError) else "connection"
 
@@ -214,7 +215,7 @@ def ask_jev(
             attempts.append(f"http_{error.code}")
             if error.code < 500:
                 break
-        except OSError as error:
+        except (OSError, http.client.HTTPException) as error:
             attempts.append(network_failure(error))
         except Exception:
             attempts.append("invalid_response")
