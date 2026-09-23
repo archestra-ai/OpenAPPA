@@ -316,7 +316,7 @@ jobs:
         run: python3 marketplace/plugins/claude-code/live-gate-check.py
 
   battery-checks:
-    name: Battery Linter
+    name: Battery Checks
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: changes
