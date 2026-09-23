@@ -215,56 +215,49 @@ impl SelectorPlaceholder {
     /// mentions the log can carry; anything else is refused rather than read as another
     /// collection.
     pub fn instantiate(&self, arguments: &serde_json::Value) -> Result<BTreeSet<GroupRef>, UnfilledPlaceholder> {
-        let mut fanned = false;
-        let mut selectors = vec![Vec::with_capacity(self.segments.len())];
+        let mut selector = Vec::with_capacity(self.segments.len());
+        let mut fan: Option<(usize, Vec<&str>)> = None;
         for segment in &self.segments {
-            let values = match segment {
-                Segment::Literal(literal) => vec![literal.as_str()],
+            match segment {
+                Segment::Literal(literal) => selector.push(literal.as_str()),
                 Segment::Argument(argument) => {
                     let unfilled = || UnfilledPlaceholder {
                         argument: argument.clone(),
                     };
-                    let values = argument_segments(arguments.get(argument)).ok_or_else(unfilled)?;
-                    if values.len() > 1 && std::mem::replace(&mut fanned, true) {
-                        return Err(unfilled());
+                    match arguments.get(argument).ok_or_else(unfilled)? {
+                        serde_json::Value::Array(values)
+                            if fan.is_none() && (1..=MAX_INSTANTIATED_GROUPS).contains(&values.len()) =>
+                        {
+                            let values = values.iter().map(writable_segment).collect::<Option<_>>();
+                            fan = Some((selector.len(), values.ok_or_else(unfilled)?));
+                            selector.push("");
+                        }
+                        value => selector.push(writable_segment(value).ok_or_else(unfilled)?),
                     }
-                    values
                 }
-            };
-            selectors = selectors
-                .into_iter()
-                .flat_map(|prefix| {
-                    values.iter().map(move |value| {
-                        let mut selector = prefix.clone();
-                        selector.push(*value);
-                        selector
-                    })
-                })
-                .collect();
+            }
         }
-        Ok(selectors
-            .into_iter()
-            .map(|selector| GroupRef::Source {
-                provider: self.provider.clone(),
-                selector: selector.join("/"),
-            })
-            .collect())
+        let group = |selector: &[&str]| GroupRef::Source {
+            provider: self.provider.clone(),
+            selector: selector.join("/"),
+        };
+        Ok(match fan {
+            None => BTreeSet::from([group(&selector)]),
+            Some((index, values)) => values
+                .into_iter()
+                .map(|value| {
+                    selector[index] = value;
+                    group(&selector)
+                })
+                .collect(),
+        })
     }
 }
 
-fn argument_segments(value: Option<&serde_json::Value>) -> Option<Vec<&str>> {
-    fn segment(value: &serde_json::Value) -> Option<&str> {
-        value
-            .as_str()
-            .filter(|value| !value.is_empty() && !value.contains('/') && !value.starts_with('$'))
-    }
-    match value? {
-        serde_json::Value::Array(values) if (1..=MAX_INSTANTIATED_GROUPS).contains(&values.len()) => {
-            values.iter().map(segment).collect()
-        }
-        serde_json::Value::Array(_) => None,
-        value => segment(value).map(|value| vec![value]),
-    }
+fn writable_segment(value: &serde_json::Value) -> Option<&str> {
+    value
+        .as_str()
+        .filter(|value| !value.is_empty() && !value.contains('/') && !value.starts_with('$'))
 }
 
 impl std::fmt::Display for SelectorPlaceholder {
@@ -695,6 +688,12 @@ mod tests {
             placeholder
                 .instantiate(&serde_json::json!({ "channel": too_many }))
                 .is_err()
+        );
+        assert!(
+            nested
+                .instantiate(&serde_json::json!({ "kind": ["channel"], "id": ["X"] }))
+                .is_err(),
+            "a second array is refused whatever its length"
         );
         for value in [
             serde_json::json!(""),
