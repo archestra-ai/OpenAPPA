@@ -1,14 +1,15 @@
 name: Build and deploy appa-demo
 
-# Builds the chat-playground service image, pushes it to Artifact Registry
-# and rolls the appa-demo Cloud Run service to it. Runs only on manual
-# dispatch from main; the crate itself is gated by ci.yml's `--workspace`
-# jobs, which include it.
+# Builds the chat-playground service image, pushes it to Artifact Registry,
+# and rolls the appa-demo Cloud Run service to it on every push to main. A
+# manual dispatch can build any ref, but publishes and deploys only from main.
 #
 # Required repository secrets: APPA_GCP_SERVICE_ACCOUNT,
 # APPA_GCP_WORKLOAD_IDENTITY_PROVIDER.
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions: {}
@@ -39,22 +40,20 @@ jobs:
         run: docker build --tag "$IMAGE:sha-${GITHUB_SHA::12}" --tag "$IMAGE:latest" .
 
       - name: Authenticate to Artifact Registry
-        # Publishing only ever comes from a dispatch on main — a
-        # workflow_dispatch on any other ref builds without publishing.
-        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main'
         uses: ./.github/actions/auth-to-gar
         with:
           service_account: ${{ secrets.APPA_GCP_SERVICE_ACCOUNT }}
           workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
 
       - name: Push image
-        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main'
         run: |
           docker push "$IMAGE:sha-${GITHUB_SHA::12}"
           docker push "$IMAGE:latest"
 
       - name: Deploy to Cloud Run
-        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main'
         run: |
           gcloud run services update appa-demo \
             --region europe-west1 \
