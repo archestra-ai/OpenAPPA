@@ -54,4 +54,5 @@ mod engine;
 mod events;
 mod external;
 mod llm;
+mod recorder;
 pub mod yell;

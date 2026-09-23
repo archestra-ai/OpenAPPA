@@ -136,7 +136,7 @@ pub(crate) enum HookOutcome {
 /// One per [`crate::consult::ConsultKind`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ExternalRole {
+pub enum ExternalRole {
     Authority,
     Sanitizer,
     Annotator,
@@ -146,7 +146,7 @@ pub(crate) enum ExternalRole {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ExternalOutcome {
+pub enum ExternalOutcome {
     Answered,
     NoAnswer(NoAnswerClass),
 }
@@ -159,7 +159,7 @@ pub(crate) enum ExternalOutcome {
 /// rather than filtered later. A status code is a scalar, not prose, and is worth keeping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum NoAnswerClass {
+pub enum NoAnswerClass {
     Unregistered,
     Unreachable,
     #[cfg(feature = "daemon")]

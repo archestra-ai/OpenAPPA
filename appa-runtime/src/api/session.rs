@@ -16,9 +16,9 @@ use crate::external::ConsultOutcome;
 use appa_engine::label::ReaderId;
 
 use super::{
-    ChildReturnDecision, Deployment, EmbeddedPresentationOptions, EventError, ExactCall, Inner, OfferId, OutcomeBody,
-    ProposedCall, RemedyDecision, RemedyPresentation, SpawnRef, SpawnResultDecision, ToolCallDecision, ToolOutcome,
-    ToolResultDecision, TrajectoryId,
+    ChildReturnDecision, ConsultContext, ConsultRecord, Deployment, EmbeddedPresentationOptions, EventError, ExactCall,
+    Inner, OfferId, OutcomeBody, ProposedCall, RemedyDecision, RemedyPresentation, SpawnRef, SpawnResultDecision,
+    ToolCallDecision, ToolOutcome, ToolResultDecision, TrajectoryId,
 };
 
 /// The runtime's own control tool, recognized by its one canonical
@@ -230,6 +230,16 @@ const REPLAY_LIMIT: u32 = 8;
 /// Gathering is designed to close at least one ask per round, so this cap never fires on a
 /// healthy deployment; it bounds the blast radius of a gathering bug or a hostile external.
 pub(super) const RESOLUTION_ROUNDS: u32 = 8;
+
+/// The event a drive runs for, as far as its consults' records join it: the host's call
+/// id, or the offer being executed. A proposal's call id also binds the dispatch it opens.
+#[derive(Debug, Clone, Copy)]
+enum Occasion<'a> {
+    Proposal { call_id: Option<&'a str> },
+    Report { call_id: Option<&'a str> },
+    Remedy { offer: &'a OfferId },
+    Other,
+}
 
 fn fresh_entropy() -> OfferNonce {
     OfferNonce(rand::random::<[u8; 32]>())
@@ -535,7 +545,9 @@ impl Session {
                 },
                 None,
                 None,
-                call_id.as_deref(),
+                Occasion::Proposal {
+                    call_id: call_id.as_deref(),
+                },
             )
             .await?;
 
@@ -601,7 +613,7 @@ impl Session {
             },
             None,
             None,
-            None,
+            Occasion::Other,
         )
         .await
     }
@@ -762,7 +774,7 @@ impl Session {
             },
             None,
             None,
-            None,
+            Occasion::Report { call_id },
         )
         .await
     }
@@ -893,7 +905,9 @@ impl Session {
                     },
                     None,
                     None,
-                    None,
+                    Occasion::Report {
+                        call_id: call_id.as_deref(),
+                    },
                 )
                 .await?;
             // The engine decided on an event this handler built from the view.
@@ -954,7 +968,7 @@ impl Session {
                 },
                 elicitation,
                 ruling,
-                None,
+                Occasion::Remedy { offer: &offer },
             )
             .await?;
 
@@ -1110,7 +1124,7 @@ impl Session {
                 },
                 None,
                 None,
-                None,
+                Occasion::Other,
             )
             .await?;
 
@@ -1180,8 +1194,12 @@ impl Session {
         mut event: impl FnMut(&Decided<'_>, Vec<ExternalEvidence>) -> Result<EngineEvent, EventError>,
         elicitation: Option<&Elicitation>,
         ruling: Option<appa_runtime_api::Ruling>,
-        opening_call_id: Option<&str>,
+        occasion: Occasion<'_>,
     ) -> Result<EngineDecision, EventError> {
+        let opening_call_id = match occasion {
+            Occasion::Proposal { call_id } => call_id,
+            Occasion::Report { .. } | Occasion::Remedy { .. } | Occasion::Other => None,
+        };
         let opened = self.inner.log(&self.root)?;
         let policy = self.policy(&opened)?;
         let mut opened = Some(opened);
@@ -1210,14 +1228,16 @@ impl Session {
                         // then aborts the invocation, discarding the siblings' answers,
                         // before another engine round or any append.
                         // Embedded hosts supply the ruling outside an MCP elicitation context.
-                        let consults = requests.into_iter().map(|request| self.consult(request, None, ruling));
+                        let consults = requests
+                            .into_iter()
+                            .map(|request| self.consult(request, None, ruling, occasion));
                         for answered in crate::external::settle_batch(consults).await {
                             evidence.push(answered?);
                         }
                     }
                     Some(_) => {
                         for request in requests {
-                            let answered = self.consult(request, elicitation, ruling).await?;
+                            let answered = self.consult(request, elicitation, ruling, occasion).await?;
                             evidence.push(answered);
                         }
                     }
@@ -1354,14 +1374,25 @@ impl Session {
     /// directly. An external that is slow, unreachable, or answering nonsense is the single
     /// most common reason an agent appears to be stuck for no reason the trajectory's facts
     /// explain, and the duration is only knowable at the await.
+    ///
+    /// With a recorder attached, the consult is also transcribed and its record handed over
+    /// once the outcome is known. `call` is the canonical call an annotation consult judges.
     async fn timed_consult(
         &self,
         consult: &Consult,
         elicitation: Option<&Elicitation>,
         ruling: Option<appa_runtime_api::Ruling>,
+        occasion: Occasion<'_>,
+        call: Option<&appa_engine::value::CanonicalDigest>,
     ) -> crate::external::ConsultOutcome {
+        let started_at = std::time::SystemTime::now();
         let started = std::time::Instant::now();
-        let outcome = self.deployment.externals.consult(consult, elicitation, ruling).await;
+        let externals = &self.deployment.externals;
+        let (outcome, transcript) = match &self.inner.recorder {
+            Some(_) => externals.consult_transcribed(consult, elicitation, ruling).await,
+            None => (externals.consult(consult, elicitation, ruling).await, None),
+        };
+        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         // Filed under the family, never the acting trajectory: a subagent's slow authority is
         // part of its family's account, and `EventLog` reads one root's bucket.
         self.inner.record(
@@ -1370,11 +1401,34 @@ impl Session {
                 role: consult.kind().into(),
                 name: consult.name.clone(),
                 outcome: (&outcome).into(),
-                duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                duration_ms,
                 offer: None,
                 dispatch: None,
             },
         );
+        if let (Some(recorder), Some(transcript)) = (&self.inner.recorder, transcript) {
+            let context = ConsultContext {
+                root: self.root.0.clone(),
+                trajectory: self.trajectory.0.clone(),
+                call_id: match occasion {
+                    Occasion::Proposal { call_id } | Occasion::Report { call_id } => call_id.map(str::to_string),
+                    Occasion::Remedy { .. } | Occasion::Other => None,
+                },
+                offer_id: match occasion {
+                    Occasion::Remedy { offer } => Some(offer.0.clone()),
+                    Occasion::Proposal { .. } | Occasion::Report { .. } | Occasion::Other => None,
+                },
+                call_digest: call.map(|call| crate::engine::hex(call.bytes())),
+            };
+            recorder.record(ConsultRecord::new(
+                consult,
+                &outcome,
+                transcript,
+                started_at,
+                duration_ms,
+                context,
+            ));
+        }
         outcome
     }
 
@@ -1386,6 +1440,7 @@ impl Session {
         request: ExternalRequest,
         elicitation: Option<&Elicitation>,
         ruling: Option<appa_runtime_api::Ruling>,
+        occasion: Occasion<'_>,
     ) -> Result<ExternalEvidence, EventError> {
         Ok(match &request {
             ExternalRequest::Authority {
@@ -1401,7 +1456,7 @@ impl Session {
                         artifact: artifact.clone(),
                     },
                 };
-                let verdict = match self.timed_consult(&consult, elicitation, ruling).await {
+                let verdict = match self.timed_consult(&consult, elicitation, ruling, occasion, None).await {
                     ConsultOutcome::Answer(answer) => AuthorityVerdict::from_wire(&answer),
                     ConsultOutcome::NoAnswer(crate::external::NoAnswerReason::Unreachable) => {
                         AuthorityVerdict::Abstain(Abstention::Unreachable)
@@ -1430,7 +1485,7 @@ impl Session {
                         artifact: artifact.clone(),
                     },
                 };
-                let derived = match self.timed_consult(&consult, None, None).await {
+                let derived = match self.timed_consult(&consult, None, None, occasion, None).await {
                     ConsultOutcome::Answer(answer) => SanitizerAnswer::from_wire(&answer).map(|answer| answer.body),
                     ConsultOutcome::NoAnswer(_) => None,
                 };
@@ -1451,7 +1506,7 @@ impl Session {
                 // the annotation exactly as the annotator's own silence would.
                 let mut asked = Vec::with_capacity(inputs.len());
                 for input in inputs {
-                    asked.push(self.timed_consult(&input.consult, None, None));
+                    asked.push(self.timed_consult(&input.consult, None, None, occasion, Some(call)));
                 }
                 let outcomes = crate::external::settle_batch(asked).await;
                 let mut args = args.clone();
@@ -1487,7 +1542,7 @@ impl Session {
                                 artifact: AnnotationArtifact { args },
                             },
                         };
-                        match self.timed_consult(&consult, None, None).await {
+                        match self.timed_consult(&consult, None, None, occasion, Some(call)).await {
                             ConsultOutcome::Answer(answer) => AnnotationAnswer::from_wire(&answer, declaration)
                                 .ok_or_else(|| {
                                     crate::external::NoAnswerReason::MalformedAnswer(
@@ -1526,7 +1581,7 @@ impl Session {
                 templates,
             } => {
                 let consult = Consult::audience_selector(provider, selector, templates.clone());
-                let members = match self.timed_consult(&consult, None, None).await {
+                let members = match self.timed_consult(&consult, None, None, occasion, None).await {
                     ConsultOutcome::Answer(answer) => MembersAnswer::from_wire(&answer)
                         .map(|answer| answer.members.into_iter().map(ReaderId::new).collect()),
                     ConsultOutcome::NoAnswer(_) => None,
@@ -1546,7 +1601,7 @@ impl Session {
                 // The evidence stays keyed by the member's own provider, whichever entry
                 // answered.
                 let consult = Consult::member_lookup(answering, member, templates.clone());
-                let principal = match self.timed_consult(&consult, None, None).await {
+                let principal = match self.timed_consult(&consult, None, None, occasion, None).await {
                     ConsultOutcome::Answer(answer) => {
                         LookupAnswer::from_wire(&answer).map(|answer| answer.principal.map(ReaderId::new))
                     }
@@ -6655,5 +6710,198 @@ delta = {}
             Err(UnreportableOutcome::NoOpenDispatch),
             "several open dispatches name no one occurrence",
         );
+    }
+
+    /// A host's recorder: every record, in the order the consults settled.
+    #[derive(Default)]
+    struct Collected(std::sync::Mutex<Vec<crate::api::ConsultRecord>>);
+
+    impl crate::api::ConsultRecorder for Collected {
+        fn record(&self, record: crate::api::ConsultRecord) {
+            self.0.lock().expect("the collector is never poisoned").push(record);
+        }
+    }
+
+    impl Collected {
+        fn taken(&self) -> Vec<crate::api::ConsultRecord> {
+            std::mem::take(&mut *self.0.lock().expect("the collector is never poisoned"))
+        }
+    }
+
+    const PERMISSIVE_ANSWER: &str =
+        r#"{"version":1,"answer":{"delta":{},"requires":{"history":[],"attention":[]},"emits":[]}}"#;
+
+    /// Every call annotated by `gatekeeper`, bound as `binding`, in `dir` so a command's
+    /// script outlives the load.
+    fn annotated(dir: &std::path::Path, binding: &str) -> Config {
+        let text = format!(
+            "[policy]\nversion = 2\n\n[[policy.annotator]]\nname = \"gatekeeper\"\n\n\
+             [[policy.tool]]\nname = \"*\"\nannotator = \"gatekeeper\"\n\n\
+             [externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n\n\
+             [externals.annotators.gatekeeper]\n{binding}\n"
+        );
+        let path = dir.join("appa.toml");
+        std::fs::write(&path, text).expect("the fixture writes");
+        Config::load(&path).expect("the fixture validates")
+    }
+
+    #[tokio::test]
+    async fn a_recorded_annotation_carries_its_wire_exchange_and_join_keys() {
+        use axum::routing::post;
+        let app = axum::Router::new().route(
+            "/",
+            post(|| async { ([("x-appa-diagnostics", "model=m1")], PERMISSIVE_ANSWER) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback stub binds");
+        let url = format!("http://{}/", listener.local_addr().expect("the stub has an address"));
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("the stub serves") });
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = Runtime::open(
+            annotated(dir.path(), &format!("url = \"{url}\"")),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the deployment opens");
+        let recorder = Arc::new(Collected::default());
+        let session = runtime
+            .recording(recorder.clone())
+            .create_session(root())
+            .expect("a fresh id opens");
+
+        let decision = session
+            .on_tool_call_identified(
+                fetch(serde_json::json!({"a": 1})),
+                Some("host-call-7".to_string()),
+                false,
+            )
+            .await
+            .expect("the call is judged");
+        assert!(matches!(decision, ToolCallDecision::Allow { .. }));
+
+        let [record] = recorder.taken().try_into().expect("one consult, one record");
+        assert_eq!(record.id.get_version_num(), 7);
+        assert_eq!(record.role, crate::api::ExternalRole::Annotator);
+        assert_eq!(record.external_name, "gatekeeper");
+        assert_eq!(record.backend, crate::api::ConsultBackend::Url);
+        assert_eq!(record.request["kind"], "annotation");
+        assert_eq!(
+            record.request["artifact"]["args"]["arguments"],
+            serde_json::json!({"a": 1})
+        );
+        assert_eq!(record.outcome, crate::api::ExternalOutcome::Answered);
+        let wire: serde_json::Value = serde_json::from_str(PERMISSIVE_ANSWER).expect("the fixture is JSON");
+        assert_eq!(record.answer.as_ref(), Some(&wire["answer"]));
+        assert_eq!(record.raw_response.as_deref(), Some(PERMISSIVE_ANSWER.as_bytes()));
+        assert_eq!(record.http_status, Some(200));
+        assert_eq!(record.diagnostics.as_deref(), Some(&b"model=m1"[..]));
+        assert!(!record.diagnostics_truncated);
+        assert_eq!(record.context.root, root().0);
+        assert_eq!(record.context.trajectory, root().0);
+        assert_eq!(record.context.call_id.as_deref(), Some("host-call-7"));
+        assert_eq!(record.context.offer_id, None);
+        let digest = record
+            .context
+            .call_digest
+            .as_deref()
+            .expect("an annotation names its call");
+        assert!(digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+
+        let unrecorded = runtime.session(&root(), &root()).expect("the root is open");
+        assert!(matches!(
+            unrecorded
+                .on_tool_call_identified(
+                    fetch(serde_json::json!({"a": 2})),
+                    Some("host-call-8".to_string()),
+                    false
+                )
+                .await
+                .expect("the call is judged"),
+            ToolCallDecision::Allow { .. }
+        ));
+        assert!(
+            recorder.taken().is_empty(),
+            "a view without the recorder records nothing"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_recorded_command_annotation_keeps_its_stderr() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        std::fs::write(
+            dir.path().join("annotate.sh"),
+            format!("cat >/dev/null\necho 'thinking' >&2\nprintf '%s' '{PERMISSIVE_ANSWER}'\n"),
+        )
+        .expect("the script writes");
+        let runtime = Runtime::open(
+            annotated(dir.path(), r#"command = ["/bin/sh", "annotate.sh"]"#),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the deployment opens");
+        let recorder = Arc::new(Collected::default());
+        let session = runtime
+            .recording(recorder.clone())
+            .create_session(root())
+            .expect("a fresh id opens");
+
+        assert!(matches!(
+            session
+                .on_tool_call_identified(
+                    fetch(serde_json::json!({"a": 1})),
+                    Some("host-call-1".to_string()),
+                    false
+                )
+                .await
+                .expect("the call is judged"),
+            ToolCallDecision::Allow { .. }
+        ));
+
+        let [record] = recorder.taken().try_into().expect("one consult, one record");
+        assert_eq!(record.backend, crate::api::ConsultBackend::Command);
+        assert_eq!(record.outcome, crate::api::ExternalOutcome::Answered);
+        assert_eq!(record.raw_response.as_deref(), Some(PERMISSIVE_ANSWER.as_bytes()));
+        assert_eq!(record.http_status, None);
+        assert_eq!(record.diagnostics.as_deref(), Some(&b"thinking\n"[..]));
+        assert_eq!(record.context.call_id.as_deref(), Some("host-call-1"));
+    }
+
+    #[tokio::test]
+    async fn a_recorded_remedy_consult_names_its_offer() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let url = stub(serde_json::json!({"ruling": "approve"})).await;
+        let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
+        let recorder = Arc::new(Collected::default());
+        let session = runtime
+            .recording(recorder.clone())
+            .create_session(root())
+            .expect("a fresh id opens");
+        assert!(matches!(
+            session
+                .on_tool_call(wire(500), false)
+                .await
+                .expect("the block is delivered"),
+            ToolCallDecision::Deny { .. }
+        ));
+        let offer = surfaced_offer(&runtime);
+
+        assert!(matches!(
+            session
+                .on_remedy(offer.clone(), RemedyArguments::default(), None, None)
+                .await
+                .expect("the remedy executes"),
+            RemedyDecision::Authorized { .. }
+        ));
+
+        let [record] = recorder.taken().try_into().expect("one consult, one record");
+        assert_eq!(record.role, crate::api::ExternalRole::Authority);
+        assert_eq!(record.external_name, "approver");
+        assert_eq!(record.answer, Some(serde_json::json!({"ruling": "approve"})));
+        assert_eq!(record.context.offer_id.as_deref(), Some(offer.0.as_str()));
+        assert_eq!(record.context.call_id, None);
+        assert_eq!(record.context.call_digest, None);
     }
 }

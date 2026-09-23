@@ -635,7 +635,7 @@ pub(crate) async fn run_claude_code(
     let status = process.terminate_and_reap().await?;
     if !status.success() {
         let stderr = match tail {
-            Some(tail) => finished_tail(tail).await,
+            Some(tail) => finished_tail(tail).await.and_then(|stderr| stderr.error_line()),
             None => None,
         };
         // The envelope's own message first: the CLI reports a login failure there and
