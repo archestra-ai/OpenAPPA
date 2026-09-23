@@ -1634,7 +1634,6 @@ impl Runtime {
         &self,
         id: TrajectoryId,
         inventory: appa_runtime_api::inventory::ToolInventory,
-        principal: Option<ReaderId>,
     ) -> Result<Session, EventError> {
         let config = self
             .inner
@@ -1649,7 +1648,7 @@ impl Runtime {
             self.inner.shared.naming,
         )
         .map_err(|error| EventError::PolicyUnavailable(error.to_string()))?;
-        self.create_session_under(id, Arc::new(deployment), principal)
+        self.create_session_under(id, Arc::new(deployment), None)
     }
 
     /// Reserve identities in the actor's own scope, independently of the immutable
@@ -3950,9 +3949,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             }],
             ..ToolInventory::default()
         };
-        runtime
-            .create_session_with_inventory(id.clone(), inventory, None)
-            .unwrap();
+        runtime.create_session_with_inventory(id.clone(), inventory).unwrap();
         runtime
             .reload(claude_config(
                 "[policy]\nversion = 2\n[[policy.tool]]\nname = \"other\"\n",
@@ -4160,7 +4157,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             sources: Vec::new(),
         };
         runtime
-            .create_session_with_inventory(root.clone(), inventory("parent"), None)
+            .create_session_with_inventory(root.clone(), inventory("parent"))
             .unwrap();
         let child = Actor {
             root: root.clone(),
@@ -4235,11 +4232,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             }],
             ..ToolInventory::default()
         };
-        assert!(
-            runtime
-                .create_session_with_inventory(id.clone(), inventory, None)
-                .is_err()
-        );
+        assert!(runtime.create_session_with_inventory(id.clone(), inventory).is_err());
         assert!(matches!(runtime.session(&id, &id), Err(EventError::UnknownTrajectory)));
     }
 

@@ -118,27 +118,16 @@ fn observed(
         HookEvent::ToolCall { actor, .. } => actor.clone(),
         _ => unreachable!("wire validation restricts inventory to starts and tool calls"),
     };
-    let principal = match event {
-        HookEvent::SessionStart { principal, .. } => session_principal(principal.as_deref()),
-        _ => Ok(None),
-    };
-    let observed = principal.and_then(|principal| match runtime.session(root, root) {
-        Ok(session) => {
-            continues_for(&session, principal.as_ref())?;
-            runtime.observe_inventory(&actor, *adapter, inventory)
-        }
+    let observed = match runtime.session(root, root) {
+        Ok(_) => runtime.observe_inventory(&actor, *adapter, inventory),
         Err(EventError::UnknownTrajectory) if actor.child.is_none() => {
-            match runtime.create_session_with_inventory(root.clone(), inventory.clone(), principal.clone()) {
-                Ok(_) => runtime.observe_inventory(&actor, *adapter, inventory),
-                Err(EventError::TrajectoryExists) => {
-                    continues_for(&runtime.session(root, root)?, principal.as_ref())?;
-                    runtime.observe_inventory(&actor, *adapter, inventory)
-                }
+            match runtime.create_session_with_inventory(root.clone(), inventory.clone()) {
+                Ok(_) | Err(EventError::TrajectoryExists) => runtime.observe_inventory(&actor, *adapter, inventory),
                 Err(error) => Err(error),
             }
         }
         Err(error) => Err(error),
-    });
+    };
     match observed {
         Ok(()) => Ok(()),
         Err(error) => Err(refused_hook(runtime, root, event, error)),
@@ -1832,27 +1821,6 @@ mod tests {
         )
         .await;
         assert_eq!(call.0, 200, "the opened trajectory decides calls: {:?}", call.1);
-    }
-
-    /// A start naming another principal is refused before its inventory is observed: the
-    /// family it may not continue keeps the bindings it had.
-    #[tokio::test]
-    async fn a_start_for_another_principal_observes_nothing() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime = open_runtime(&dir);
-        let adapter = appa_adapter_claude_code::adapter();
-
-        let opening = br#"{"protocol":1,"adapter":"claude-code","event":"session_start","root_id":"inv","principal":"alice@corp.example","inventory":{"tools":[{"name":"Bash","tool":"Bash"}],"sources":[{"server":"builtin","status":"complete","dynamic":false}]}}"#;
-        let (status, reply) = answer(&runtime, &adapter, opening).await;
-        assert_eq!(status, 200, "{reply}");
-
-        let intruding = br#"{"protocol":1,"adapter":"claude-code","event":"session_start","root_id":"inv","principal":"bob@corp.example","inventory":{"tools":[{"name":"Grep","tool":"Grep"}],"sources":[{"server":"builtin","status":"complete","dynamic":false}]}}"#;
-        let (status, reply) = answer(&runtime, &adapter, intruding).await;
-        assert_eq!(status, 409, "{reply}");
-
-        let rebinding = br#"{"protocol":1,"adapter":"claude-code","event":"session_start","root_id":"inv","principal":"alice@corp.example","inventory":{"tools":[{"name":"Grep","tool":"Read"}],"sources":[{"server":"builtin","status":"complete","dynamic":false}]}}"#;
-        let (status, reply) = answer(&runtime, &adapter, rebinding).await;
-        assert_eq!(status, 200, "the refused start bound nothing: {reply}");
     }
 
     /// What a child's stop can be answered with, and what it can never be answered with. A
