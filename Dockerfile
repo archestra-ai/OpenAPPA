@@ -30,8 +30,10 @@ COPY website-chat-playground website-chat-playground
 RUN cargo build --release --locked --package website-chat-playground
 
 FROM debian:bookworm-slim
-# TLS roots are compiled in (webpki-roots); the runtime needs only the binary,
-# the seed world, and somewhere writable for per-session worlds.
+# Reqwest uses the OS certificate store for outbound HTTPS connections.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --create-home appa
 USER appa
 WORKDIR /home/appa
