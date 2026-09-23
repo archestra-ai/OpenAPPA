@@ -14826,6 +14826,31 @@ mod tests {
         assert_eq!(blocked.len(), 1);
     }
 
+    /// A delta placeholder filled from an array labels the result with the union of every
+    /// collection the call lists — no more, no fewer.
+    #[test]
+    fn a_delta_placeholder_filled_from_an_array_binds_the_union() {
+        let mut read = plain_tool("read");
+        read.delta = Delta {
+            trust: None,
+            audience: Some(DeltaAudience::Selector(channel_placeholder())),
+        };
+        let group = |id: &str| crate::label::GroupRef::Source {
+            provider: "slack".to_string(),
+            selector: format!("channel/{id}"),
+        };
+        let bound = read
+            .bound_to(&json!({ "channel": ["C1", "C2"] }))
+            .expect("the array fills the placeholder")
+            .expect("a placeholder delta binds");
+        assert_eq!(
+            bound.delta.audience,
+            Some(DeltaAudience::Static(DeclaredAudience::Union(
+                crate::label::Clause::new([], [group("C1"), group("C2")], []).expect("a group clause names no reader")
+            )))
+        );
+    }
+
     /// A mandate placeholder admits, per call, exactly the collection the call's arguments
     /// spell. The policy refuses to route a tool without the argument, or the wildcard, through
     /// such a mandate.

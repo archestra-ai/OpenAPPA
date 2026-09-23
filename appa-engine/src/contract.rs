@@ -135,12 +135,17 @@ pub struct SelectorPlaceholder {
     segments: Vec<Segment>,
 }
 
+/// How many collections one call may name through one placeholder: each is a membership consult.
+pub const MAX_INSTANTIATED_GROUPS: usize = 32;
+
 /// Why a call's arguments do not fill a selector placeholder: a value must be one non-empty
 /// selector segment a policy could write — no `/`, which would change the collection's shape,
-/// and no leading `$`, which spells a placeholder — or a non-empty array of such segments.
+/// and no leading `$`, which spells a placeholder — or, for at most one argument of the
+/// placeholder, a non-empty array of at most [`MAX_INSTANTIATED_GROUPS`] such segments.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "argument {argument:?} does not fill a selector segment: a non-empty string without `/` and not starting with `$`, or a non-empty array of them"
+    "argument {argument:?} does not fill a selector segment: a non-empty string without `/` and not starting with `$`, or, for one argument only, a non-empty array of at most {max} of them",
+    max = MAX_INSTANTIATED_GROUPS
 )]
 pub struct UnfilledPlaceholder {
     pub argument: String,
@@ -203,20 +208,27 @@ impl SelectorPlaceholder {
 
     /// The collections one call's arguments name: each argument segment replaced by the
     /// argument's value, one collection per element when the value is an array, so a call
-    /// naming several teams names each. Every argument is a required string or array of
+    /// naming several teams names each. Only one argument may be an array, so the collections
+    /// are exactly the ones the call lists. Every argument is a required string or array of
     /// strings of the tool's schema (the registry makes it one) and every value one writable
     /// segment (checked when the call is minted), so a minted call always instantiates into
     /// mentions the log can carry; anything else is refused rather than read as another
     /// collection.
     pub fn instantiate(&self, arguments: &serde_json::Value) -> Result<BTreeSet<GroupRef>, UnfilledPlaceholder> {
+        let mut fanned = false;
         let mut selectors = vec![Vec::with_capacity(self.segments.len())];
         for segment in &self.segments {
             let values = match segment {
                 Segment::Literal(literal) => vec![literal.as_str()],
                 Segment::Argument(argument) => {
-                    argument_segments(arguments.get(argument)).ok_or_else(|| UnfilledPlaceholder {
+                    let unfilled = || UnfilledPlaceholder {
                         argument: argument.clone(),
-                    })?
+                    };
+                    let values = argument_segments(arguments.get(argument)).ok_or_else(unfilled)?;
+                    if values.len() > 1 && std::mem::replace(&mut fanned, true) {
+                        return Err(unfilled());
+                    }
+                    values
                 }
             };
             selectors = selectors
@@ -247,7 +259,10 @@ fn argument_segments(value: Option<&serde_json::Value>) -> Option<Vec<&str>> {
             .filter(|value| !value.is_empty() && !value.contains('/') && !value.starts_with('$'))
     }
     match value? {
-        serde_json::Value::Array(values) if !values.is_empty() => values.iter().map(segment).collect(),
+        serde_json::Value::Array(values) if (1..=MAX_INSTANTIATED_GROUPS).contains(&values.len()) => {
+            values.iter().map(segment).collect()
+        }
+        serde_json::Value::Array(_) => None,
         value => segment(value).map(|value| vec![value]),
     }
 }
@@ -661,6 +676,25 @@ mod tests {
         assert_eq!(
             nested.instantiate(&serde_json::json!({ "kind": ["channel", "user-group"], "id": "X" })),
             Ok(BTreeSet::from([group("channel/X"), group("user-group/X")]))
+        );
+        assert!(
+            nested
+                .instantiate(&serde_json::json!({ "kind": ["channel", "user-group"], "id": ["X", "Y"] }))
+                .is_err(),
+            "a second array would name pairs the call never listed"
+        );
+        let most: Vec<String> = (0..MAX_INSTANTIATED_GROUPS).map(|i| format!("C{i}")).collect();
+        assert_eq!(
+            placeholder
+                .instantiate(&serde_json::json!({ "channel": most }))
+                .map(|groups| groups.len()),
+            Ok(MAX_INSTANTIATED_GROUPS)
+        );
+        let too_many: Vec<String> = (0..=MAX_INSTANTIATED_GROUPS).map(|i| format!("C{i}")).collect();
+        assert!(
+            placeholder
+                .instantiate(&serde_json::json!({ "channel": too_many }))
+                .is_err()
         );
         for value in [
             serde_json::json!(""),

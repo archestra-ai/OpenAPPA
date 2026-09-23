@@ -2627,6 +2627,24 @@ mod tests {
         assert!(registry.placeholders_filled(post, &no_arguments).is_err());
     }
 
+    /// A mandate placeholder filled from an array admits an answer naming any of the listed
+    /// collections, and none the call did not list.
+    #[test]
+    fn a_mandate_filled_from_an_array_admits_only_the_listed_collections() {
+        let group = |id: &str| GroupRef::Source {
+            provider: "slack".to_string(),
+            selector: format!("channel/{id}"),
+        };
+        let clause =
+            |ids: &[&str]| Clause::new([], ids.iter().map(|id| group(id)), []).expect("a group clause names no reader");
+        let mandate = vocabulary(&["@slack:channel/$channel"])
+            .instantiate(&serde_json::json!({ "channel": ["C1", "C2"] }))
+            .expect("the array fills the placeholder");
+        assert!(mandate.permits_clause(&clause(&["C1", "C2"])));
+        assert!(mandate.permits_clause(&clause(&["C2"])));
+        assert!(!mandate.permits_clause(&clause(&["C1", "C3"])));
+    }
+
     #[test]
     fn an_omitted_mandate_bound_resolves_to_the_whole_policy_vocabulary() {
         let mut catalogued = tool("send");
