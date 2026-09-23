@@ -14,8 +14,8 @@ appa replay \
 
 `appa replay` does not execute MCP tools; it supplies simulated approvals and
 empty results. The audience command is only a fixture, not an ACL resolver.
-Runtime tests separately cover sensitive operations, credential confinement,
-external-submission audience approval, unknown tools and deployment wildcard composition.
+Runtime tests separately cover trust selectors, recipient checks, mixed tool
+actions, credential confinement, and external-submission audience approval.
 
 Live clappa checks need an authenticated monday connection, disposable owned
 fixtures, fresh sessions after policy reload, and independent provider-state

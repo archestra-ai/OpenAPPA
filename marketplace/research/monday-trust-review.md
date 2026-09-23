@@ -69,7 +69,8 @@ All remaining tool or action variants retain `suspicious` result trust, includin
 | Other writes and external submissions | Success or partial-success payloads can include existing provider content, names, diagnostics, or echoed records. For example, `create_item` can duplicate an existing item, `create_items` includes raw API error details, and `create_doc` includes an API error string if markdown insertion fails. The separate `monday-review` attention requirement approves a call; it does not validate returned text. |
 | `connect_external_agent` | Returns signing material and an API token; it remains `suspicious/self`. |
 
-Coverage state: 99 discovered and classified; these thirteen trust-preserving contracts
-are offline tested by `monday_policy.rs` and composed by the marketplace test.
+Coverage state: 99 discovered and classified. `monday_policy.rs` tests
+representative trust-preserving paths and the selector fallbacks; the marketplace
+test composes the full policy into its declared hosts.
 The changed trust classifications have not been live tested against the hosted MCP.
 The policy has no new host connection or credential requirement.

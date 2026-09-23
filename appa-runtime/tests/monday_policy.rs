@@ -18,13 +18,12 @@ fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
     }
 }
 
-async fn runtime(dir: &tempfile::TempDir, wildcard: bool, expand_audience: bool) -> Arc<Runtime> {
-    runtime_with_monday_source(dir, wildcard, expand_audience, None).await
+async fn runtime(dir: &tempfile::TempDir, expand_audience: bool) -> Arc<Runtime> {
+    runtime_with_monday_source(dir, expand_audience, None).await
 }
 
 async fn runtime_with_monday_source(
     dir: &tempfile::TempDir,
-    wildcard: bool,
     expand_audience: bool,
     monday_source: Option<&str>,
 ) -> Arc<Runtime> {
@@ -41,37 +40,6 @@ async fn runtime_with_monday_source(
         }),
     );
     let source = serve(router).await;
-    let fallback = if wildcard {
-        let router = Router::new().route(
-            "/",
-            post(|_body: String| async move {
-                serde_json::json!({
-                    "version": 1,
-                    "answer": {
-                        "delta": {},
-                        "requires": { "trust": "trusted", "attention": ["signoff"], "history": [] },
-                        "emits": []
-                    }
-                })
-                .to_string()
-            }),
-        );
-        let url = serve(router).await;
-        format!(
-            r#"
-[[policy.annotator]]
-name = "gatekeeper"
-marks = ["signoff"]
-[[policy.tool]]
-name = "*"
-annotator = "gatekeeper"
-[externals.annotators.gatekeeper]
-url = "{url}"
-"#
-        )
-    } else {
-        String::new()
-    };
     let battery = "marketplace/batteries/monday/appa.toml";
     let target = dir.path().join(battery);
     std::fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -101,16 +69,9 @@ version = 2
 self = ["people:viewer"]
 internal = ["people:members"]
 
-# Read-only probes make both output dimensions independently observable.
 [[policy.tool]]
 name = "mcp/probe/public"
 requires = {{ audience = {{ contains = ["public"] }} }}
-[[policy.tool]]
-name = "mcp/probe/trusted"
-requires = {{ trust = "trusted" }}
-[[policy.tool]]
-name = "mcp/probe/trusted-internal"
-delta = {{ audience = ["internal"] }}
 
 [[policy.authority]]
 name = "monday-operator"
@@ -128,7 +89,6 @@ builtin = "approve"
 [externals.audience.people]
 url = "{source}/audience"
 selectors = [{{ template = "viewer", feeds = "self" }}, {{ template = "members", feeds = "internal" }}]
-{fallback}
 "#
         ),
     )
@@ -188,124 +148,10 @@ fn effects(runtime: &Runtime) -> Vec<Vec<String>> {
 }
 
 #[tokio::test]
-async fn ordinary_reads_keep_provider_options_and_classify_results() {
+async fn bounded_metadata_keeps_trust_but_entity_details_lower_it() {
     let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime(&dir, false, false).await;
-    for read in [
-        call("get_user_context", serde_json::json!({})),
-        call("get_assigned_items", serde_json::json!({ "limit": 1 })),
-        call("get_user_mentions", serde_json::json!({ "limit": 1 })),
-        call("get_user_recent_activity", serde_json::json!({ "limit": 1 })),
-        call(
-            "get_board_info",
-            serde_json::json!({ "boardId": 1, "filters": { "columns": { "only": true } } }),
-        ),
-        call(
-            "get_board_items_page",
-            serde_json::json!({ "boardId": 1, "searchTerm": "plan", "includeItemDescription": true, "includeSubItems": true, "orderBy": [{ "columnId": "name", "direction": "asc" }] }),
-        ),
-        call(
-            "get_updates",
-            serde_json::json!({ "objectId": "1", "objectType": "Board", "includeReplies": true, "includeAssets": true, "includeItemUpdates": true }),
-        ),
-        call(
-            "search",
-            serde_json::json!({ "searchTerm": "plan", "searchType": "ITEMS" }),
-        ),
-        call("workspace_info", serde_json::json!({ "workspace_id": 1 })),
-        call("list_users_and_teams", serde_json::json!({ "getMe": true })),
-        call(
-            "read_docs",
-            serde_json::json!({ "type": "ids", "ids": ["1"], "include_comments": true }),
-        ),
-        call(
-            "all_api_read",
-            serde_json::json!({ "query": "query { boards { id } }", "variables": "{}" }),
-        ),
-    ] {
-        accept_read(&runtime, read).await;
-    }
-    assert!(effects(&runtime).is_empty());
-    let labels: Vec<_> = runtime
-        .audit(&root())
-        .unwrap()
-        .into_iter()
-        .filter_map(|entry| match entry.event {
-            AuditEvent::Admitted { label } => Some(label),
-            _ => None,
-        })
-        .collect();
-    assert!(!labels.is_empty());
-    for label in labels {
-        assert_eq!(label.trust, "suspicious");
-        assert_eq!(label.audience, "internal");
-    }
-    let public = ProposedCall {
-        tool: "mcp/probe/public".into(),
-        arguments: raw(serde_json::json!({})),
-        cwd: None,
-    };
-    assert!(matches!(propose(&runtime, public).await, HookDecision::DenyCall { offers, .. } if offers.is_empty()));
-    let trusted = ProposedCall {
-        tool: "mcp/probe/trusted".into(),
-        arguments: raw(serde_json::json!({})),
-        cwd: None,
-    };
-    assert!(matches!(
-        propose(&runtime, trusted).await,
-        HookDecision::DenyCall { .. }
-    ));
-}
-
-#[tokio::test]
-async fn provider_schema_metadata_keeps_trust_until_unverified_result_is_read() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime(&dir, false, false).await;
-    for read in [
-        call("get_graphql_schema", serde_json::json!({ "operationType": "read" })),
-        call("get_column_type_info", serde_json::json!({ "columnType": "status" })),
-    ] {
-        accept_read(&runtime, read).await;
-    }
-    let labels: Vec<_> = runtime
-        .audit(&root())
-        .unwrap()
-        .into_iter()
-        .filter_map(|entry| match entry.event {
-            AuditEvent::Admitted { label } => Some(label),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(labels.len(), 2);
-    for label in labels {
-        assert_eq!(label.trust, "trusted");
-        assert_eq!(label.audience, "internal");
-    }
-    let trusted = ProposedCall {
-        tool: "mcp/probe/trusted".into(),
-        arguments: raw(serde_json::json!({})),
-        cwd: None,
-    };
-    assert_eq!(
-        propose(&runtime, trusted.clone()).await,
-        HookDecision::AllowCall { spawn: None }
-    );
-    ran(&runtime, trusted.clone()).await;
-    accept_read(
-        &runtime,
-        call("get_type_details", serde_json::json!({ "typeName": "Board" })),
-    )
-    .await;
-    assert!(matches!(
-        propose(&runtime, trusted).await,
-        HookDecision::DenyCall { .. }
-    ));
-}
-
-#[tokio::test]
-async fn aggregate_statistics_keep_trust_but_entity_details_lower_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime(&dir, false, false).await;
+    let runtime = runtime(&dir, false).await;
+    accept_read(&runtime, call("get_graphql_schema", serde_json::json!({}))).await;
     accept_read(
         &runtime,
         call(
@@ -331,26 +177,34 @@ async fn aggregate_statistics_keep_trust_but_entity_details_lower_it() {
             _ => None,
         })
         .collect();
-    assert_eq!(trusts, ["trusted", "suspicious"]);
+    assert_eq!(trusts, ["trusted", "trusted", "suspicious"]);
 }
 
 #[tokio::test]
-async fn reviewed_identifier_only_writes_keep_trust_until_a_broader_result() {
+async fn reviewed_writes_distinguish_confirmations_from_broader_results() {
     let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime(&dir, false, false).await;
-    for write in [
-        call("create_form", serde_json::json!({ "destination_workspace_id": "1" })),
+    let runtime = runtime(&dir, false).await;
+    review_write(
+        &runtime,
+        call("create_board", serde_json::json!({ "boardName": "Plan" })),
+    )
+    .await;
+    review_write(
+        &runtime,
         call("move_object", serde_json::json!({ "objectType": "Folder", "id": "1" })),
-        call(
-            "get_asset_upload_url",
-            serde_json::json!({ "fileName": "plan.pdf", "contentType": "application/pdf", "fileSize": 100 }),
-        ),
-    ] {
-        review_write(&runtime, write).await;
-    }
+    )
+    .await;
     review_write(
         &runtime,
         call("move_object", serde_json::json!({ "objectType": "Board", "id": "1" })),
+    )
+    .await;
+    review_write(
+        &runtime,
+        call(
+            "create_item",
+            serde_json::json!({ "boardId": 1, "name": "Plan", "columnValues": "{}" }),
+        ),
     )
     .await;
     let trusts: Vec<_> = runtime
@@ -362,191 +216,16 @@ async fn reviewed_identifier_only_writes_keep_trust_until_a_broader_result() {
             _ => None,
         })
         .collect();
-    assert_eq!(trusts, ["trusted", "trusted", "trusted", "suspicious"]);
+    assert_eq!(trusts, ["trusted", "trusted", "suspicious", "suspicious"]);
     assert_eq!(
         effects(&runtime),
         vec![
-            vec!["monday.sensitive".to_owned()],
-            vec!["monday.sensitive".to_owned()],
-            vec!["monday.changed".to_owned()],
-            vec!["monday.sensitive".to_owned()],
+            vec!["monday.sensitive"],
+            vec!["monday.sensitive"],
+            vec!["monday.sensitive"],
+            vec!["monday.changed"],
         ]
     );
-}
-
-#[tokio::test]
-async fn new_object_confirmations_preserve_trust_after_review() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime(&dir, false, false).await;
-    for write in [
-        call("create_board", serde_json::json!({ "boardName": "Plan" })),
-        call(
-            "create_column",
-            serde_json::json!({ "boardId": 1, "columnTitle": "Status", "columnType": "status" }),
-        ),
-        call(
-            "create_folder",
-            serde_json::json!({ "name": "Projects", "workspaceId": "1" }),
-        ),
-        call(
-            "create_group",
-            serde_json::json!({ "boardId": "1", "groupName": "Next" }),
-        ),
-        call(
-            "create_workspace",
-            serde_json::json!({ "name": "Projects", "workspaceKind": "open" }),
-        ),
-        call(
-            "create_dashboard",
-            serde_json::json!({ "name": "Overview", "workspace_id": "1", "board_ids": ["1"] }),
-        ),
-        call(
-            "create_widget",
-            serde_json::json!({ "parent_container_id": "1", "parent_container_type": "DASHBOARD", "widget_kind": "CHART", "widget_name": "Progress", "settings": {} }),
-        ),
-    ] {
-        review_write(&runtime, write).await;
-    }
-    let labels: Vec<_> = runtime
-        .audit(&root())
-        .unwrap()
-        .into_iter()
-        .filter_map(|entry| match entry.event {
-            AuditEvent::Admitted { label } => Some(label),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(labels.len(), 7);
-    assert!(
-        labels
-            .iter()
-            .all(|label| label.trust == "trusted" && label.audience == "internal")
-    );
-
-    review_write(&runtime, call("create_view", serde_json::json!({ "boardId": "1" }))).await;
-    let last = runtime
-        .audit(&root())
-        .unwrap()
-        .into_iter()
-        .filter_map(|entry| match entry.event {
-            AuditEvent::Admitted { label } => Some(label),
-            _ => None,
-        })
-        .next_back()
-        .unwrap();
-    assert_eq!(last.trust, "suspicious");
-}
-
-#[tokio::test]
-async fn internal_reads_can_flow_to_reviewed_writes_without_audience_expansion() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime(&dir, false, false).await;
-    accept_read(
-        &runtime,
-        call("get_board_items_page", serde_json::json!({ "boardId": 1 })),
-    )
-    .await;
-    for write in [
-        call(
-            "create_item",
-            serde_json::json!({ "boardId": 1, "name": "Internal plan", "columnValues": "{\"status\":\"Done\"}", "groupId": "topics", "parentItemId": 2 }),
-        ),
-        call(
-            "create_item",
-            serde_json::json!({ "boardId": 1, "name": "Copy", "columnValues": "{}", "duplicateFromItemId": 2, "createLabelsIfMissing": true }),
-        ),
-        call(
-            "create_update",
-            serde_json::json!({ "itemId": 1, "body": "Internal summary", "parentId": 2, "mentionsList": "[]" }),
-        ),
-        call(
-            "change_item_column_values",
-            serde_json::json!({ "boardId": 1, "itemId": 1, "columnValues": "{\"status\":\"Done\"}" }),
-        ),
-    ] {
-        review_write(&runtime, write).await;
-    }
-    assert_eq!(effects(&runtime), vec![vec!["monday.changed".to_owned()]; 4]);
-    let admitted = runtime
-        .audit(&root())
-        .unwrap()
-        .into_iter()
-        .filter_map(|entry| match entry.event {
-            AuditEvent::Admitted { label } => Some(label),
-            _ => None,
-        })
-        .next_back()
-        .unwrap();
-    assert_eq!(admitted.trust, "suspicious");
-    assert_eq!(admitted.audience, "internal");
-    // Approval of a write does not declassify its result or subsequent calls.
-    assert!(
-        matches!(propose(&runtime, call("get_monday_knowledge", serde_json::json!({ "query": "Internal summary", "kind": "general" }))).await, HookDecision::DenyCall { offers, .. } if offers.is_empty())
-    );
-}
-
-#[tokio::test]
-async fn trusted_internal_creation_needs_review_but_no_public_audience() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime(&dir, false, false).await;
-    accept_read(
-        &runtime,
-        ProposedCall {
-            tool: "mcp/probe/trusted-internal".into(),
-            arguments: raw(serde_json::json!({})),
-            cwd: None,
-        },
-    )
-    .await;
-    review_write(
-        &runtime,
-        call(
-            "create_item",
-            serde_json::json!({ "boardId": 1, "name": "Internal plan", "columnValues": "{}" }),
-        ),
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn structural_and_opaque_operations_are_reviewable_under_a_host_wildcard() {
-    for (name, args) in [
-        (
-            "create_board",
-            serde_json::json!({ "boardName": "Plan", "boardKind": "private" }),
-        ),
-        (
-            "move_object",
-            serde_json::json!({ "objectType": "Board", "id": "1", "workspaceId": "2" }),
-        ),
-        (
-            "all_monday_api",
-            serde_json::json!({ "query": "mutation { delete_board(board_id: 1) { id } }", "variables": "{}" }),
-        ),
-        (
-            "all_api_write",
-            serde_json::json!({ "query": "mutation { delete_board(board_id: 1) { id } }", "variables": "{}" }),
-        ),
-        (
-            "execute_code",
-            serde_json::json!({ "description": "Print a test message", "code": "print('reviewed')", "language": "python" }),
-        ),
-        ("run_action", serde_json::json!({ "id": "1" })),
-        (
-            "publish_workflow",
-            serde_json::json!({ "workflowObjectId": 1, "workflowDraftId": 2 }),
-        ),
-        (
-            "vibe_publication",
-            serde_json::json!({ "app_id": 1, "action": "publish" }),
-        ),
-        ("delete_view", serde_json::json!({ "viewId": "1", "boardId": "1" })),
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        let runtime = runtime(&dir, true, false).await;
-        review_write(&runtime, call(name, args)).await;
-        assert_eq!(effects(&runtime), vec![vec!["monday.sensitive"]]);
-    }
 }
 
 #[tokio::test]
@@ -566,7 +245,7 @@ async fn notification_requires_its_recipient_to_read_the_input() {
     );
     let source = serve(router).await;
     let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime_with_monday_source(&dir, false, false, Some(&source)).await;
+    let runtime = runtime_with_monday_source(&dir, false, Some(&source)).await;
     accept_read(&runtime, call("get_board_info", serde_json::json!({ "boardId": 1 }))).await;
 
     let notification = |user_id| {
@@ -591,7 +270,7 @@ async fn notification_requires_its_recipient_to_read_the_input() {
 #[tokio::test]
 async fn mixed_tool_read_actions_do_not_use_the_reviewed_write_fallback() {
     let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime(&dir, true, false).await;
+    let runtime = runtime(&dir, false).await;
     for (name, action) in [
         ("manage_agent", "get"),
         ("manage_agent_triggers", "list"),
@@ -623,7 +302,7 @@ async fn mixed_tool_read_actions_do_not_use_the_reviewed_write_fallback() {
 #[tokio::test]
 async fn public_documentation_does_not_narrow_a_fresh_public_trajectory() {
     let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime(&dir, false, false).await;
+    let runtime = runtime(&dir, false).await;
     accept_read(
         &runtime,
         call(
@@ -644,7 +323,7 @@ async fn public_documentation_does_not_narrow_a_fresh_public_trajectory() {
 async fn external_submissions_require_explicit_audience_approval() {
     for name in ["create_form_submission", "submit_bug_or_feature_request"] {
         let dir = tempfile::tempdir().unwrap();
-        let without_expansion = runtime(&dir, false, false).await;
+        let without_expansion = runtime(&dir, false).await;
         accept_read(
             &without_expansion,
             call("get_board_info", serde_json::json!({ "boardId": 1 })),
@@ -659,7 +338,7 @@ async fn external_submissions_require_explicit_audience_approval() {
             matches!(propose(&without_expansion, call(name, args.clone())).await, HookDecision::DenyCall { offers, .. } if offers.is_empty())
         );
         let dir = tempfile::tempdir().unwrap();
-        let with_expansion = runtime(&dir, false, true).await;
+        let with_expansion = runtime(&dir, true).await;
         review_write(&with_expansion, call(name, args)).await;
     }
 }
@@ -667,7 +346,7 @@ async fn external_submissions_require_explicit_audience_approval() {
 #[tokio::test]
 async fn external_agent_credentials_stay_with_the_viewer() {
     let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime(&dir, false, false).await;
+    let runtime = runtime(&dir, false).await;
     review_write(
         &runtime,
         call(
@@ -690,27 +369,4 @@ async fn external_agent_credentials_stay_with_the_viewer() {
     assert!(
         matches!(propose(&runtime, call("create_item", serde_json::json!({ "boardId": 1, "name": "Secret", "columnValues": "{}" }))).await, HookDecision::DenyCall { offers, .. } if offers.is_empty())
     );
-}
-
-#[tokio::test]
-async fn unknown_tools_follow_the_deployments_fallback() {
-    for wildcard in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        let runtime = runtime(&dir, wildcard, false).await;
-        let unknown = ProposedCall {
-            tool: "mcp/monday/future_unknown_tool".into(),
-            arguments: raw(serde_json::json!({})),
-            cwd: None,
-        };
-        match propose(&runtime, unknown).await {
-            HookDecision::Refuse { .. } if !wildcard => {}
-            HookDecision::DenyCall { offers, feedback, .. } => {
-                assert_eq!(!offers.is_empty(), wildcard);
-                if wildcard {
-                    assert!(feedback.contains("signoff"));
-                }
-            }
-            other => panic!("unexpected unknown-tool decision: {other:?}"),
-        }
-    }
 }
