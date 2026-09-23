@@ -46,7 +46,7 @@ from appa_agentthreatbench.tasks import (
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = PACKAGE_ROOT.parents[3]
-EXPECTED_BINDING_IDENTITY = "appa-agent-python-v7"
+EXPECTED_BINDING_IDENTITY = "appa-agent-python-v8"
 EXPECTED_FIDES_VERSION = "1.13.0"
 EXPECTED_UPSTREAM_SAMPLES = sum(UPSTREAM_SAMPLE_COUNTS.values())
 EXPECTED_TOTAL_SAMPLES = (EXPECTED_UPSTREAM_SAMPLES + 2) * len(ARMS)
