@@ -68,8 +68,16 @@ safer of Jev's two likeliest options: the narrower result audience, the
 lower trust rank, or the wider required audience. The call still gets an
 annotation, and a remedy plan can still clear it. The script exits nonzero,
 and the runtime refuses the call, when the consult is not a complete call,
-when the mandate does not admit a label, or when the API does not answer
-within 4 s.
+when the mandate does not admit a label, or when the API does not answer.
+A 5xx answer, a timeout, or a connection failure is retried once with a
+1.8 s timeout per attempt; a 4xx answer is not retried, and no attempt
+starts that cannot finish inside the host's 4 s helper budget.
+
+The last stderr line of every run is one JSON object under
+`jev_diagnostics`: each label's probabilities, threshold, and decision,
+the outcome of each attempt, the elapsed milliseconds, and the error class
+on failure. It never carries the API key or the call's arguments. stdout
+carries only the answer.
 
 **`jev_questions.py`** holds the four questions, their criteria, and nine
 worked examples. The Annotator's `hint` is added to each question. The
