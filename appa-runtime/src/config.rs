@@ -1219,7 +1219,7 @@ pub(crate) fn refuse_foreign_credential(var: &str, key: Option<&str>) -> Result<
     if !var.starts_with(PROVIDER_CREDENTIAL_PREFIX) {
         return Err(ConfigError::CredentialVariable { var: var.to_string() });
     }
-    if !key.is_some_and(|key| !key.is_empty()) {
+    if key.is_none_or(|key| key.is_empty()) {
         return Err(ConfigError::CredentialValue { var: var.to_string() });
     }
     Ok(())

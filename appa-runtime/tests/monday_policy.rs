@@ -380,12 +380,30 @@ async fn new_object_confirmations_preserve_trust_after_review() {
     let runtime = runtime(&dir, false, false).await;
     for write in [
         call("create_board", serde_json::json!({ "boardName": "Plan" })),
-        call("create_column", serde_json::json!({ "boardId": 1, "columnTitle": "Status", "columnType": "status" })),
-        call("create_folder", serde_json::json!({ "name": "Projects", "workspaceId": "1" })),
-        call("create_group", serde_json::json!({ "boardId": "1", "groupName": "Next" })),
-        call("create_workspace", serde_json::json!({ "name": "Projects", "workspaceKind": "open" })),
-        call("create_dashboard", serde_json::json!({ "name": "Overview", "workspace_id": "1", "board_ids": ["1"] })),
-        call("create_widget", serde_json::json!({ "parent_container_id": "1", "parent_container_type": "DASHBOARD", "widget_kind": "CHART", "widget_name": "Progress", "settings": {} })),
+        call(
+            "create_column",
+            serde_json::json!({ "boardId": 1, "columnTitle": "Status", "columnType": "status" }),
+        ),
+        call(
+            "create_folder",
+            serde_json::json!({ "name": "Projects", "workspaceId": "1" }),
+        ),
+        call(
+            "create_group",
+            serde_json::json!({ "boardId": "1", "groupName": "Next" }),
+        ),
+        call(
+            "create_workspace",
+            serde_json::json!({ "name": "Projects", "workspaceKind": "open" }),
+        ),
+        call(
+            "create_dashboard",
+            serde_json::json!({ "name": "Overview", "workspace_id": "1", "board_ids": ["1"] }),
+        ),
+        call(
+            "create_widget",
+            serde_json::json!({ "parent_container_id": "1", "parent_container_type": "DASHBOARD", "widget_kind": "CHART", "widget_name": "Progress", "settings": {} }),
+        ),
     ] {
         review_write(&runtime, write).await;
     }
@@ -399,7 +417,11 @@ async fn new_object_confirmations_preserve_trust_after_review() {
         })
         .collect();
     assert_eq!(labels.len(), 7);
-    assert!(labels.iter().all(|label| label.trust == "trusted" && label.audience == "internal"));
+    assert!(
+        labels
+            .iter()
+            .all(|label| label.trust == "trusted" && label.audience == "internal")
+    );
 
     review_write(&runtime, call("create_view", serde_json::json!({ "boardId": "1" }))).await;
     let last = runtime
@@ -410,7 +432,7 @@ async fn new_object_confirmations_preserve_trust_after_review() {
             AuditEvent::Admitted { label } => Some(label),
             _ => None,
         })
-        .last()
+        .next_back()
         .unwrap();
     assert_eq!(last.trust, "suspicious");
 }
