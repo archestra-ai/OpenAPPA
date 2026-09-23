@@ -15,10 +15,11 @@ public source revision.
 ## Rules
 
 *Internal reads* — queries and results stay within `internal`. Most results enter
-`suspicious`; `get_graphql_schema` and `get_column_type_info` return provider
-defined API schema metadata and keep a fresh
-trajectory `trusted`. `all_api_read` rejects mutations at the provider, and
-`read_docs` reads workspace documents. This group covers:
+`suspicious`. `get_graphql_schema`, `get_column_type_info`, and
+`get_automation_statistics(breakdown:totals)` return bounded provider metadata
+and keep a fresh trajectory `trusted`. The statistics tool's `by_entity`
+response remains suspicious. `all_api_read` rejects mutations at the provider,
+and `read_docs` reads workspace documents. This group covers:
 
 `agent_catalog`, `all_api_read`, `all_widgets_schema`, `board_insights`,
 `explore_meetings`, `get_action`, `get_assets`, `get_assigned_items`, `get_automation_runs`,
@@ -41,8 +42,10 @@ use the sensitive-write contract below.
 returns suspicious/public content.
 
 *Reviewed writes* — trusted internal input and `monday-review`; results remain
-suspicious/internal because they can include existing content, such as the item
-name returned by `create_update`. These tools record `monday.changed`:
+suspicious/internal when they can include existing content, such as the item
+name returned by `create_update`. `get_asset_upload_url` instead returns a
+provider issued upload ID, URL and expiration with trusted/internal output.
+These tools record `monday.changed`:
 
 `change_item_column_values`, `create_dashboard`, `create_doc`, `create_folder`,
 `create_group`, `create_item`, `create_items`, `create_update`, `create_view`,
@@ -50,9 +53,12 @@ name returned by `create_update`. These tools record `monday.changed`:
 `update_doc`, `update_items`, `update_view`, `update_view_table`.
 
 *Sensitive writes* — the same reviewed internal contract except the
-recipient-bound notification below, recording
-`monday.sensitive`. Review must account for affected resources and destinations,
-including nested operations in code, GraphQL, workflows and agents:
+recipient-bound notification below, recording `monday.sensitive`. Review must
+account for affected resources and destinations, including nested operations in
+code, GraphQL, workflows and agents. `create_form` returns a fixed confirmation,
+board ID and form token as trusted/internal. `move_object(objectType:Folder)`
+returns a fixed confirmation and object ID as trusted/internal; the other
+object types remain suspicious. These tools are:
 
 `all_api_write`, `all_monday_api`, `create_action`, `create_automation`, `create_board`,
 `create_column`, `create_form`, `create_notification`, `create_workflow`,

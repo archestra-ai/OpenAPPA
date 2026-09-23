@@ -2,13 +2,14 @@
 # version 1.0.0, authenticated 99-tool inventory captured on 2026-09-22.
 #
 # Like Notion, monday has no complete resource-reader API in this tool set.
-# Workspace reads stay suspicious/internal except the two API schema tools.
+# Workspace reads stay suspicious/internal except bounded metadata results.
 # The root maps internal to the people who
 # may see everything the connection can reach. Per-board ACLs are not inferred.
 #
-# Like Linear and PostHog, writes return provider-owned content as well as
+# Like Linear and PostHog, many writes return provider-owned content as well as
 # confirmations: keep those results suspicious/internal and review the exact
-# write. Ordinary changes record monday.changed; structural, automation,
+# write. Bounded provider-issued results can remain trusted. Ordinary changes
+# record monday.changed; structural, automation,
 # execution, sharing and destructive operations record monday.sensitive.
 # The root supplies an authority permitting monday-review.
 #
@@ -143,6 +144,11 @@ requires = { audience = { contains = ["internal"] } }
 [[policy.tool]]
 name = "mcp/monday/get_automation_runs"
 delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/monday/get_automation_statistics(breakdown:totals)"
+delta = { trust = "trusted", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
@@ -371,7 +377,7 @@ effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/get_asset_upload_url"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { trust = "trusted", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
@@ -388,7 +394,7 @@ effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/create_form"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { trust = "trusted", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
@@ -431,6 +437,12 @@ effects = ["monday.sensitive"]
 [[policy.tool]]
 name = "mcp/monday/create_workspace"
 delta = { trust = "suspicious", audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+effects = ["monday.sensitive"]
+
+[[policy.tool]]
+name = "mcp/monday/move_object(objectType:Folder)"
+delta = { trust = "trusted", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 

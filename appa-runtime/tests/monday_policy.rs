@@ -303,6 +303,78 @@ async fn provider_schema_metadata_keeps_trust_until_unverified_result_is_read() 
 }
 
 #[tokio::test]
+async fn aggregate_statistics_keep_trust_but_entity_details_lower_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime(&dir, false, false).await;
+    accept_read(
+        &runtime,
+        call(
+            "get_automation_statistics",
+            serde_json::json!({ "breakdown": "totals", "boardId": "1" }),
+        ),
+    )
+    .await;
+    accept_read(
+        &runtime,
+        call(
+            "get_automation_statistics",
+            serde_json::json!({ "breakdown": "by_entity", "accountWide": true, "runStatus": "success" }),
+        ),
+    )
+    .await;
+    let trusts: Vec<_> = runtime
+        .audit(&root())
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| match entry.event {
+            AuditEvent::Admitted { label } => Some(label.trust),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(trusts, ["trusted", "suspicious"]);
+}
+
+#[tokio::test]
+async fn reviewed_identifier_only_writes_keep_trust_until_a_broader_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime(&dir, false, false).await;
+    for write in [
+        call("create_form", serde_json::json!({ "destination_workspace_id": "1" })),
+        call("move_object", serde_json::json!({ "objectType": "Folder", "id": "1" })),
+        call(
+            "get_asset_upload_url",
+            serde_json::json!({ "fileName": "plan.pdf", "contentType": "application/pdf", "fileSize": 100 }),
+        ),
+    ] {
+        review_write(&runtime, write).await;
+    }
+    review_write(
+        &runtime,
+        call("move_object", serde_json::json!({ "objectType": "Board", "id": "1" })),
+    )
+    .await;
+    let trusts: Vec<_> = runtime
+        .audit(&root())
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| match entry.event {
+            AuditEvent::Admitted { label } => Some(label.trust),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(trusts, ["trusted", "trusted", "trusted", "suspicious"]);
+    assert_eq!(
+        effects(&runtime),
+        vec![
+            vec!["monday.sensitive".to_owned()],
+            vec!["monday.sensitive".to_owned()],
+            vec!["monday.changed".to_owned()],
+            vec!["monday.sensitive".to_owned()],
+        ]
+    );
+}
+
+#[tokio::test]
 async fn internal_reads_can_flow_to_reviewed_writes_without_audience_expansion() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = runtime(&dir, false, false).await;

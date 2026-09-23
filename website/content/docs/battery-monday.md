@@ -17,8 +17,9 @@ and its [rules and covered tools](https://github.com/archestra-ai/OpenAPPA/blob/
 
 - **Internal reads:** boards, items, comments, searches, documents, people,
   schemas, assets, meetings, automation history, workflow inspection and Vibe
-  inspection stay internal. `get_graphql_schema` and `get_column_type_info`
-  return trusted provider schema metadata; other results enter suspicious.
+  inspection stay internal. `get_graphql_schema`, `get_column_type_info` and
+  `get_automation_statistics(breakdown:totals)` return trusted provider
+  metadata; other results enter suspicious.
   Queries must be sharable with internal. Normal options such as search terms,
   descriptions, subitems and replies are available. `all_api_read` rejects
   mutations at the provider.
@@ -27,12 +28,14 @@ and its [rules and covered tools](https://github.com/archestra-ai/OpenAPPA/blob/
   workspace documents.
 - **Reviewed writes:** items, comments, docs, folders, groups, dashboards,
   widgets, views and uploads require trusted internal input and `monday-review`,
-  and record `monday.changed`. Their results stay suspicious/internal because
-  write responses can include existing provider content.
+  and record `monday.changed`. Results that can include existing provider
+  content stay suspicious/internal. `get_asset_upload_url` returns a trusted
+  provider issued upload ID, URL and expiration.
 - **Reviewed sensitive changes:** structural changes, deletes, notifications,
   automations, workflows, agent management, code/actions, Vibe publication and
-  general GraphQL operations record `monday.sensitive`. Review includes the
-  affected resources and any external destinations.
+  general GraphQL operations record `monday.sensitive`. `create_form` and the
+  folder branch of `move_object` return bounded trusted results. Review includes
+  the affected resources and any external destinations.
 - **Notifications:** `create_notification` also checks its `user_id` recipient
   against the input audience. A monday audience source resolves that user to a
   confirmed email; absent, inactive, or unconfirmed users are refused.
