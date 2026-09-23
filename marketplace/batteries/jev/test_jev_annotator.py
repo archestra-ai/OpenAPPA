@@ -304,11 +304,17 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(diagnostics["error"], "ValueError")
         self.assertEqual(diagnostics["labels"]["delta_trust"], {"probabilities": {"trusted": 1.0}, "threshold": 0.6})
 
-    def test_a_boolean_probability_is_refused(self):
-        garbled = {**JEV_ANSWERS, "requires_trusted": {"noul": True}}
-        result, diagnostics, _ = self.consult_through([("answers", garbled)])
-        self.assertEqual((result.returncode, result.stdout), (1, b""))
-        self.assertEqual(diagnostics["error"], "ValueError")
+    def test_a_value_that_is_not_a_probability_is_refused(self):
+        for garbled in (
+            {**JEV_ANSWERS, "requires_trusted": {"noul": True}},
+            {**JEV_ANSWERS, "requires_trusted": {"noul": 1.5}},
+            {**JEV_ANSWERS, "delta_trust": {"probabilities": {"suspicious": False, "trusted": True}}},
+            {**JEV_ANSWERS, "delta_trust": {"probabilities": {"suspicious": -0.2, "trusted": 1.2}}},
+        ):
+            with self.subTest(garbled=garbled):
+                result, diagnostics, _ = self.consult_through([("answers", garbled)])
+                self.assertEqual((result.returncode, result.stdout), (1, b""))
+                self.assertEqual(diagnostics["error"], "ValueError")
 
 
 @unittest.skipUnless(os.environ.get("APPA_PROVIDER_JEV_API_KEY"), "needs a TypeSafe API key")

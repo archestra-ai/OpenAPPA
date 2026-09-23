@@ -20,6 +20,7 @@ APPA_PROVIDER_JEV_API_URL when set.
 
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -120,12 +121,18 @@ def state_of(call: dict) -> dict:
     return state
 
 
+def is_probability(value: object) -> bool:
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value) and 0 <= value <= 1
+
+
 def settled_choice(label: str, answer: object) -> str:
     """The option Jev chose, or the safer of its two likeliest when it is unsure."""
     options = SAFEST_FIRST[label]
     probabilities = answer.get("probabilities") if isinstance(answer, dict) else None
     if not isinstance(probabilities, dict) or set(probabilities) != set(options):
         raise ValueError(f"Jev answered {label} outside its options")
+    if not all(is_probability(value) for value in probabilities.values()):
+        raise ValueError(f"Jev answered {label} with a value that is not a probability")
     ranked = sorted(options, key=lambda option: probabilities[option], reverse=True)
     if probabilities[ranked[0]] >= CONFIDENCE_FLOOR:
         return ranked[0]
@@ -146,7 +153,7 @@ def labels_of(answers: object, trace: dict | None = None) -> dict[str, str | boo
     requires_trusted = answers.get("requires_trusted")
     probability = requires_trusted.get("noul") if isinstance(requires_trusted, dict) else None
     trace["requires_trusted"] = {"probability": probability, "threshold": REQUIRES_TRUSTED_CUTOFF}
-    if isinstance(probability, bool) or not isinstance(probability, (int, float)):
+    if not is_probability(probability):
         raise ValueError("Jev answered requires_trusted without a probability")
     labels["requires_trusted"] = trace["requires_trusted"]["decision"] = probability >= REQUIRES_TRUSTED_CUTOFF
     return labels
