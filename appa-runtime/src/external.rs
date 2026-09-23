@@ -21,6 +21,7 @@ use crate::config::{
 use crate::consult::{AudienceSourceArtifact, Consult, ConsultBody, ConsultKind, ModelPrompt};
 use crate::elicit::Elicitation;
 use crate::llm::{LlmBackend, LlmGate};
+use crate::recorder::ConsultBackend;
 use appa_engine::label::ReaderId;
 use appa_policy::AnnotatorBuiltin;
 
@@ -84,6 +85,61 @@ pub enum ConsultOutcome {
     NoAnswer(NoAnswerReason),
 }
 
+/// The response header a `url` external may describe itself in, for a consult recorder only.
+const DIAGNOSTICS_HEADER: &str = "x-appa-diagnostics";
+
+/// The most bytes of an external's self-description a consult record keeps.
+const MAX_DIAGNOSTIC_BYTES: usize = 8192;
+
+/// What an external wrote about itself beside its answer: a `url` external's
+/// diagnostics header, or the tail of a command's stderr. Kept for a consult recorder;
+/// the runtime never reads it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Diagnostics {
+    pub bytes: Vec<u8>,
+    /// Whether more was written than the 8 KiB kept.
+    pub truncated: bool,
+}
+
+impl Diagnostics {
+    fn head(bytes: &[u8]) -> Diagnostics {
+        Diagnostics {
+            bytes: bytes[..bytes.len().min(MAX_DIAGNOSTIC_BYTES)].to_vec(),
+            truncated: bytes.len() > MAX_DIAGNOSTIC_BYTES,
+        }
+    }
+
+    /// The last line of a command's stderr, as [`error_line`] bounds it; none where the
+    /// command said nothing.
+    #[cfg(unix)]
+    pub(crate) fn error_line(&self) -> Option<String> {
+        Some(error_line(&String::from_utf8_lossy(&self.bytes))).filter(|line| !line.is_empty())
+    }
+}
+
+/// What a recorded transport saw of one consult beside its outcome.
+#[derive(Debug)]
+pub(crate) struct Transcript {
+    pub(crate) backend: ConsultBackend,
+    pub(crate) raw_response: Option<Vec<u8>>,
+    pub(crate) http_status: Option<u16>,
+    pub(crate) diagnostics: Option<Diagnostics>,
+    /// When the outcome was known, where the transport read on for the record alone.
+    pub(crate) settled: Option<std::time::Instant>,
+}
+
+impl Transcript {
+    fn of(backend: ConsultBackend) -> Transcript {
+        Transcript {
+            backend,
+            raw_response: None,
+            http_status: None,
+            diagnostics: None,
+            settled: None,
+        }
+    }
+}
+
 /// The envelope the `url` and `command` transports answer with. No key beside the
 /// two: an extra one is as malformed as a missing one.
 #[derive(Debug, Deserialize)]
@@ -118,6 +174,23 @@ enum Backend {
     /// approves, every sanitizer returns the body unchanged. No configuration can name it;
     /// only `Runtime::open_in_memory` installs it, over whatever the deployment bound.
     StandIn,
+}
+
+impl Backend {
+    /// The transport a consult record names, for a backend that leaves the process or asks
+    /// a person. The in-process answers — stock, an inline roster, the stand-in — are not
+    /// recorded.
+    fn recorded(&self) -> Option<ConsultBackend> {
+        match self {
+            Backend::Url(_) => Some(ConsultBackend::Url),
+            Backend::Command(_) => Some(ConsultBackend::Command),
+            Backend::Module(_) => Some(ConsultBackend::Module),
+            Backend::Hitl => Some(ConsultBackend::Hitl),
+            Backend::ClaudeCode(_) => Some(ConsultBackend::ClaudeCode),
+            Backend::Llm(_) => Some(ConsultBackend::Llm),
+            Backend::Stock(_) | Backend::Readers(_) | Backend::StandIn => None,
+        }
+    }
 }
 
 fn stand_in_answer(consult: &Consult) -> Result<serde_json::Value, NoAnswerReason> {
@@ -351,15 +424,45 @@ impl ExternalServices {
         elicitation: Option<&Elicitation>,
         ruling: Option<appa_runtime_api::Ruling>,
     ) -> ConsultOutcome {
+        self.dispatch(consult, elicitation, ruling, None).await
+    }
+
+    /// [`ExternalServices::consult`] for a consult recorder: the outcome, and what the
+    /// transport saw of it where the backend is one a record names. Only here does a
+    /// `url` consult read a non-success body or a `command` consult wait for its stderr.
+    pub(crate) async fn consult_transcribed(
+        &self,
+        consult: &Consult,
+        elicitation: Option<&Elicitation>,
+        ruling: Option<appa_runtime_api::Ruling>,
+    ) -> (ConsultOutcome, Option<Transcript>) {
+        let mut transcript = self.backend(consult).and_then(Backend::recorded).map(Transcript::of);
+        let outcome = self.dispatch(consult, elicitation, ruling, transcript.as_mut()).await;
+        (outcome, transcript)
+    }
+
+    fn backend(&self, consult: &Consult) -> Option<&Backend> {
+        self.backends
+            .get(&consult.kind())
+            .and_then(|table| table.get(consult.name.as_str()))
+    }
+
+    async fn dispatch(
+        &self,
+        consult: &Consult,
+        elicitation: Option<&Elicitation>,
+        ruling: Option<appa_runtime_api::Ruling>,
+        seen: Option<&mut Transcript>,
+    ) -> ConsultOutcome {
         let kind = consult.kind();
         let name = consult.name.as_str();
-        let Some(backend) = self.backends.get(&kind).and_then(|table| table.get(name)) else {
+        let Some(backend) = self.backend(consult) else {
             tracing::debug!(kind = kind.wire_name(), name, "consult of an unregistered external");
             return ConsultOutcome::NoAnswer(NoAnswerReason::Unregistered);
         };
         let answered = match backend {
-            Backend::Url(endpoint) => self.post_consult(endpoint, consult).await,
-            Backend::Command(command) => self.run_command_consult(command, consult).await,
+            Backend::Url(endpoint) => self.post_consult(endpoint, consult, seen).await,
+            Backend::Command(command) => self.run_command_consult(command, consult, seen).await,
             Backend::Stock(stock) => stock.answer(consult).ok_or(NoAnswerReason::Malformed),
             Backend::Readers(readers) => match &consult.body {
                 ConsultBody::AudienceSource {
@@ -370,7 +473,7 @@ impl ExternalServices {
                 })),
                 _ => Err(NoAnswerReason::Unregistered),
             },
-            Backend::Module(module) => self.call_module(module, consult).await,
+            Backend::Module(module) => self.call_module(module, consult, seen).await,
             Backend::Hitl => match (ruling, elicitation, &consult.body) {
                 (Some(ruling), _, ConsultBody::Authority { .. }) => {
                     tracing::debug!(name, ?ruling, "the harness's own reviewer answered this hitl consult");
@@ -426,15 +529,25 @@ impl ExternalServices {
         }
     }
 
-    async fn post_consult(&self, endpoint: &Endpoint, consult: &Consult) -> Result<serde_json::Value, NoAnswerReason> {
-        let body = self.post(endpoint, consult).await?;
-        read_answer(&body)
+    async fn post_consult(
+        &self,
+        endpoint: &Endpoint,
+        consult: &Consult,
+        mut seen: Option<&mut Transcript>,
+    ) -> Result<serde_json::Value, NoAnswerReason> {
+        let body = self.post(endpoint, consult, seen.as_deref_mut()).await?;
+        let answer = read_answer(&body);
+        if let Some(seen) = seen {
+            seen.raw_response = Some(body);
+        }
+        answer
     }
 
     async fn run_command_consult(
         &self,
         command: &ResolverCommand,
         consult: &Consult,
+        seen: Option<&mut Transcript>,
     ) -> Result<serde_json::Value, NoAnswerReason> {
         let input = serde_json::to_vec(consult).map_err(|_| NoAnswerReason::Malformed)?;
         // As for claude: one deadline covers the permit wait and the process.
@@ -449,8 +562,12 @@ impl ExternalServices {
                 return Err(NoAnswerReason::Timeout);
             }
         };
-        let output = run_command(command, input, deadline, self.max_body_bytes).await;
+        let transcript = seen.as_deref().map(|seen| Transcript::of(seen.backend));
+        let (output, transcript) = run_command(command, input, deadline, self.max_body_bytes, transcript).await;
         drop(permit);
+        if let (Some(seen), Some(transcript)) = (seen, transcript) {
+            *seen = transcript;
+        }
         read_answer(&output?)
     }
 
@@ -485,6 +602,7 @@ impl ExternalServices {
         &self,
         module: &Arc<LoadedModule>,
         consult: &Consult,
+        seen: Option<&mut Transcript>,
     ) -> Result<serde_json::Value, NoAnswerReason> {
         let input = serde_json::to_vec(consult).map_err(|_| NoAnswerReason::ModuleError)?;
         let capacity = self.max_body_bytes.min(MODULE_OUTPUT_CEILING);
@@ -513,13 +631,24 @@ impl ExternalServices {
         })
         .await;
         match outcome {
-            Ok(Ok(bytes)) => serde_json::from_slice(&bytes).map_err(|_| NoAnswerReason::Malformed),
+            Ok(Ok(bytes)) => {
+                let answer = serde_json::from_slice(&bytes).map_err(|_| NoAnswerReason::Malformed);
+                if let Some(seen) = seen {
+                    seen.raw_response = Some(bytes);
+                }
+                answer
+            }
             Ok(Err(reason)) => Err(reason),
             Err(_join) => Err(NoAnswerReason::ModuleError),
         }
     }
 
-    async fn post(&self, endpoint: &Endpoint, consult: &Consult) -> Result<Vec<u8>, NoAnswerReason> {
+    async fn post(
+        &self,
+        endpoint: &Endpoint,
+        consult: &Consult,
+        mut seen: Option<&mut Transcript>,
+    ) -> Result<Vec<u8>, NoAnswerReason> {
         let http = match endpoint.host() {
             EndpointHost::Loopback => &self.http_loopback,
             EndpointHost::Remote => &self.http,
@@ -528,33 +657,51 @@ impl ExternalServices {
         if let Some(token) = &endpoint.token {
             builder = builder.bearer_auth(token.reveal());
         }
-        let response = builder.send().await.map_err(classify_transport)?;
+        let mut response = builder.send().await.map_err(classify_transport)?;
         let status = response.status();
+        let cap = self.max_body_bytes as u64;
+        if let Some(seen) = seen.as_deref_mut() {
+            seen.http_status = Some(status.as_u16());
+            seen.diagnostics = response
+                .headers()
+                .get(DIAGNOSTICS_HEADER)
+                .map(|value| Diagnostics::head(value.as_bytes()));
+        }
         if !status.is_success() {
+            // Read for the record alone: whatever the body holds, the outcome is the status.
+            if let Some(seen) = seen {
+                seen.settled = Some(std::time::Instant::now());
+                let mut body = Vec::new();
+                let _ = tokio::time::timeout(RECORD_READ_GRACE, read_body(&mut response, cap, &mut body)).await;
+                seen.raw_response = Some(body);
+            }
             return Err(NoAnswerReason::NonSuccess {
                 status: status.as_u16(),
                 detail: None,
             });
         }
-        let cap = self.max_body_bytes as u64;
         if response.content_length().is_some_and(|len| len > cap) {
             return Err(NoAnswerReason::Oversized);
         }
-        let mut response = response;
-        let mut body: Vec<u8> = Vec::new();
-        loop {
-            match response.chunk().await {
-                Ok(Some(chunk)) => {
-                    if body.len() as u64 + chunk.len() as u64 > cap {
-                        return Err(NoAnswerReason::Oversized);
-                    }
-                    body.extend_from_slice(&chunk);
-                }
-                Ok(None) => break,
-                Err(error) => return Err(classify_transport(error)),
-            }
-        }
+        let mut body = Vec::new();
+        read_body(&mut response, cap, &mut body).await?;
         Ok(body)
+    }
+}
+
+/// Read a response body into `body` under the cap, stopping at the first chunk past it.
+async fn read_body(response: &mut reqwest::Response, cap: u64, body: &mut Vec<u8>) -> Result<(), NoAnswerReason> {
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if body.len() as u64 + chunk.len() as u64 > cap {
+                    return Err(NoAnswerReason::Oversized);
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Ok(None) => return Ok(()),
+            Err(error) => return Err(classify_transport(error)),
+        }
     }
 }
 
@@ -593,17 +740,24 @@ fn builtin_backend(
     })
 }
 
+/// A command consult's stdout on a successful exit, and the transcript a record asked for.
+type CommandRun = (Result<Vec<u8>, NoAnswerReason>, Option<Transcript>);
+
 #[cfg(unix)]
 async fn run_command(
     command: &ResolverCommand,
     input: Vec<u8>,
     deadline: tokio::time::Instant,
     max_body_bytes: usize,
-) -> Result<Vec<u8>, NoAnswerReason> {
+    mut transcript: Option<Transcript>,
+) -> CommandRun {
     let (cancel, cancelled) = tokio::sync::oneshot::channel();
     let command = command.clone();
-    let task =
-        tokio::spawn(async move { run_command_process(command, input, max_body_bytes, deadline, cancelled).await });
+    let task = tokio::spawn(async move {
+        let output =
+            run_command_process(command, input, max_body_bytes, deadline, cancelled, transcript.as_mut()).await;
+        (output, transcript)
+    });
     CommandTask {
         cancel: Some(cancel),
         task,
@@ -618,22 +772,23 @@ async fn run_command(
     _input: Vec<u8>,
     _deadline: tokio::time::Instant,
     _max_body_bytes: usize,
-) -> Result<Vec<u8>, NoAnswerReason> {
-    Err(NoAnswerReason::Unregistered)
+    transcript: Option<Transcript>,
+) -> CommandRun {
+    (Err(NoAnswerReason::Unregistered), transcript)
 }
 
 #[cfg(unix)]
 struct CommandTask {
     cancel: Option<tokio::sync::oneshot::Sender<()>>,
-    task: tokio::task::JoinHandle<Result<Vec<u8>, NoAnswerReason>>,
+    task: tokio::task::JoinHandle<CommandRun>,
 }
 
 #[cfg(unix)]
 impl CommandTask {
-    async fn wait(mut self) -> Result<Vec<u8>, NoAnswerReason> {
-        let outcome = (&mut self.task).await.map_err(|_| NoAnswerReason::Transport)?;
+    async fn wait(mut self) -> CommandRun {
+        let run = (&mut self.task).await.unwrap_or((Err(NoAnswerReason::Transport), None));
         self.cancel.take();
-        outcome
+        run
     }
 }
 
@@ -801,29 +956,57 @@ pub(crate) async fn exchange_with_child(
     }
 }
 
-/// The last line a child wrote to stderr, read to its end so the pipe never fills: the
-/// command's own error, bounded and stripped of control characters, for the log and the
-/// no-answer diagnostic. Empty where the child said nothing.
+/// The tail of what a child wrote to stderr, read to its end so the pipe never fills: the
+/// command's own error, whose last line goes to the log and the no-answer diagnostic.
 #[cfg(unix)]
-pub(crate) fn stderr_tail(stderr: tokio::process::ChildStderr) -> tokio::task::JoinHandle<String> {
-    const MAX_READ: usize = 4096;
-    tokio::spawn(async move {
-        use tokio::io::AsyncReadExt as _;
-        let mut bytes = Vec::new();
-        let mut stderr = stderr;
-        let mut chunk = [0u8; 1024];
-        while let Ok(read) = stderr.read(&mut chunk).await {
-            if read == 0 {
-                break;
-            }
-            bytes.extend_from_slice(&chunk[..read]);
-            if bytes.len() > MAX_READ {
-                bytes.drain(..bytes.len() - MAX_READ);
+pub(crate) struct StderrTail {
+    read: Arc<std::sync::Mutex<Diagnostics>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(unix)]
+pub(crate) fn stderr_tail(stderr: tokio::process::ChildStderr) -> StderrTail {
+    let read = Arc::new(std::sync::Mutex::new(Diagnostics::default()));
+    let task = tokio::spawn({
+        let read = Arc::clone(&read);
+        async move {
+            use tokio::io::AsyncReadExt as _;
+            let mut stderr = stderr;
+            let mut chunk = [0u8; 1024];
+            while let Ok(count) = stderr.read(&mut chunk).await {
+                if count == 0 {
+                    break;
+                }
+                let Ok(mut tail) = read.lock() else { break };
+                tail.bytes.extend_from_slice(&chunk[..count]);
+                if tail.bytes.len() > MAX_DIAGNOSTIC_BYTES {
+                    let excess = tail.bytes.len() - MAX_DIAGNOSTIC_BYTES;
+                    tail.bytes.drain(..excess);
+                    tail.truncated = true;
+                }
             }
         }
-        error_line(&String::from_utf8_lossy(&bytes))
-    })
+    });
+    StderrTail { read, task }
 }
+
+#[cfg(unix)]
+impl StderrTail {
+    /// What the child wrote once it closed the pipe, or once `wait` passed — a helper that
+    /// kept the pipe open leaves the tail read so far. Nothing where it wrote nothing.
+    /// A reader still waiting is aborted, so a helper holding the pipe keeps no task here.
+    async fn within(&mut self, wait: Duration) -> Option<Diagnostics> {
+        if tokio::time::timeout(wait, &mut self.task).await.is_err() {
+            self.task.abort();
+        }
+        let tail = std::mem::take(&mut *self.read.lock().ok()?);
+        Some(tail).filter(|tail| !tail.bytes.is_empty())
+    }
+}
+
+/// How long a read made for the record alone may extend a consult whose outcome is known:
+/// a failed `url` consult's body, or the stderr a command that answered keeps open.
+const RECORD_READ_GRACE: Duration = Duration::from_millis(100);
 
 /// The last non-empty line of what a child said about its own failure, stripped of
 /// control characters and bounded, fit for a log field and a diagnostic.
@@ -843,14 +1026,10 @@ pub(crate) fn error_line(text: &str) -> String {
     line[..cut].to_string()
 }
 
-/// What a finished tail task reports; a task that failed reports nothing.
+/// The stderr tail of a child that failed, given a second to close the pipe.
 #[cfg(unix)]
-pub(crate) async fn finished_tail(tail: tokio::task::JoinHandle<String>) -> Option<String> {
-    tokio::time::timeout(std::time::Duration::from_secs(1), tail)
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .filter(|line| !line.is_empty())
+pub(crate) async fn finished_tail(mut tail: StderrTail) -> Option<Diagnostics> {
+    tail.within(Duration::from_secs(1)).await
 }
 
 #[cfg(unix)]
@@ -860,6 +1039,7 @@ async fn run_command_process(
     max_body_bytes: usize,
     deadline: tokio::time::Instant,
     mut cancelled: tokio::sync::oneshot::Receiver<()>,
+    seen: Option<&mut Transcript>,
 ) -> Result<Vec<u8>, NoAnswerReason> {
     use std::os::unix::process::CommandExt as _;
     use std::process::Stdio;
@@ -908,25 +1088,35 @@ async fn run_command_process(
             outcome = exchange => outcome,
         }
     };
-    match outcome {
-        Ok(output) => {
-            let status = process.terminate_and_reap().await?;
-            if status.success() {
-                Ok(output)
-            } else {
-                let stderr = match tail {
-                    Some(tail) => finished_tail(tail).await.unwrap_or_default(),
-                    None => String::new(),
-                };
-                tracing::warn!(code = ?status.code(), stderr = %stderr, "the command exited without an answer");
-                Err(NoAnswerReason::Transport)
-            }
-        }
+    let exited = match outcome {
+        Ok(output) => process.terminate_and_reap().await.map(|status| (status, output)),
         Err(reason) => {
             process.terminate_and_reap_later();
             Err(reason)
         }
+    };
+    // A failed exit's tail is read for the log too; an answer's only for the record, and
+    // only briefly, so the outcome's time is taken before that wait.
+    let (stderr, settled) = match (&exited, tail) {
+        (Ok((status, _)), Some(tail)) if !status.success() => (finished_tail(tail).await, std::time::Instant::now()),
+        (Ok(_), Some(mut tail)) if seen.is_some() => {
+            let settled = std::time::Instant::now();
+            (tail.within(RECORD_READ_GRACE).await, settled)
+        }
+        _ => (None, std::time::Instant::now()),
+    };
+    if let Some(seen) = seen {
+        seen.settled = Some(settled);
+        seen.raw_response = exited.as_ref().ok().map(|(_, output)| output.clone());
+        seen.diagnostics = stderr.clone();
     }
+    let (status, output) = exited?;
+    if status.success() {
+        return Ok(output);
+    }
+    let stderr = stderr.and_then(|stderr| stderr.error_line()).unwrap_or_default();
+    tracing::warn!(code = ?status.code(), stderr = %stderr, "the command exited without an answer");
+    Err(NoAnswerReason::Transport)
 }
 
 /// Observe a child's exit without reaping it: the zombie keeps its pid and process-group
@@ -2302,5 +2492,278 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 ConsultOutcome::NoAnswer(reason) => panic!("the gate consult must answer, got {reason:?}"),
             }
         }
+    }
+
+    /// One `url` consult, transcribed and plain, against a stub that answers `status` with
+    /// `body` and — where given — a diagnostics header.
+    async fn transcribed_post(
+        status: u16,
+        body: &'static str,
+        diagnostics: Option<String>,
+    ) -> (ConsultOutcome, ConsultOutcome, Transcript) {
+        let url = stub(Router::new().route(
+            "/",
+            post(move || {
+                let diagnostics = diagnostics.clone();
+                async move {
+                    let mut response = axum::response::Response::new(axum::body::Body::from(body));
+                    *response.status_mut() = axum::http::StatusCode::from_u16(status).expect("a valid status");
+                    if let Some(diagnostics) = diagnostics {
+                        response.headers_mut().insert(
+                            DIAGNOSTICS_HEADER,
+                            axum::http::HeaderValue::from_str(&diagnostics).expect("a valid header value"),
+                        );
+                    }
+                    response
+                }
+            }),
+        ))
+        .await;
+        let mut config = externals(None, 2000, 65536);
+        config.authorities.insert("security".to_string(), endpoint(&url));
+        let services = services_over(config);
+        let consult = authority_consult("security", serde_json::json!({}));
+        let (transcribed, transcript) = services.consult_transcribed(&consult, None, None).await;
+        let plain = services.consult(&consult, None, None).await;
+        (transcribed, plain, transcript.expect("a url consult is transcribed"))
+    }
+
+    #[tokio::test]
+    async fn a_non_success_body_is_kept_for_the_record_and_the_outcome_stands() {
+        let (transcribed, plain, transcript) =
+            transcribed_post(503, "upstream overloaded", Some("trace=7f3a".to_string())).await;
+        assert_eq!(
+            transcribed,
+            ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess {
+                status: 503,
+                detail: None
+            })
+        );
+        assert_eq!(transcribed, plain, "transcribing changes no outcome");
+        assert_eq!(transcript.backend, ConsultBackend::Url);
+        assert_eq!(transcript.http_status, Some(503));
+        assert_eq!(transcript.raw_response.as_deref(), Some(&b"upstream overloaded"[..]));
+        assert_eq!(
+            transcript.diagnostics,
+            Some(Diagnostics {
+                bytes: b"trace=7f3a".to_vec(),
+                truncated: false
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_body_is_kept_for_the_record() {
+        let (transcribed, plain, transcript) = transcribed_post(200, "{\"ruling\":\"approve\"}", None).await;
+        assert_eq!(transcribed, ConsultOutcome::NoAnswer(NoAnswerReason::Malformed));
+        assert_eq!(transcribed, plain, "transcribing changes no outcome");
+        assert_eq!(transcript.http_status, Some(200));
+        assert_eq!(
+            transcript.raw_response.as_deref(),
+            Some(&b"{\"ruling\":\"approve\"}"[..])
+        );
+        assert_eq!(transcript.diagnostics, None);
+    }
+
+    #[tokio::test]
+    async fn a_long_diagnostics_header_is_cut_and_marked() {
+        let (transcribed, _, transcript) = transcribed_post(
+            200,
+            "{\"version\":1,\"answer\":{\"ruling\":\"approve\"}}",
+            Some("d".repeat(MAX_DIAGNOSTIC_BYTES + 100)),
+        )
+        .await;
+        assert_eq!(
+            transcribed,
+            ConsultOutcome::Answer(serde_json::json!({"ruling": "approve"}))
+        );
+        assert_eq!(
+            transcript.diagnostics,
+            Some(Diagnostics {
+                bytes: vec![b'd'; MAX_DIAGNOSTIC_BYTES],
+                truncated: true
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_command_keeps_its_stdout_and_stderr_tail_for_the_record() {
+        let dir = tempfile::tempdir().expect("a fixture directory is created");
+        let script = "cat >/dev/null\nprintf 'partial answer'\nprintf 'model refused\\n' >&2\nexit 3";
+        let services = command_services(dir.path(), script, 5000, 1024);
+        let consult = authority_consult("security", serde_json::json!({}));
+        let (transcribed, transcript) = services.consult_transcribed(&consult, None, None).await;
+        assert_eq!(transcribed, ConsultOutcome::NoAnswer(NoAnswerReason::Transport));
+        assert_eq!(transcribed, services.consult(&consult, None, None).await);
+        let transcript = transcript.expect("a command consult is transcribed");
+        assert_eq!(transcript.backend, ConsultBackend::Command);
+        assert_eq!(transcript.http_status, None);
+        assert_eq!(transcript.raw_response.as_deref(), Some(&b"partial answer"[..]));
+        assert_eq!(
+            transcript.diagnostics,
+            Some(Diagnostics {
+                bytes: b"model refused\n".to_vec(),
+                truncated: false
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_long_stderr_keeps_its_tail() {
+        let dir = tempfile::tempdir().expect("a fixture directory is created");
+        let script = format!(
+            "cat >/dev/null\nhead -c {} /dev/zero | tr '\\0' x >&2\nprintf 'last' >&2\n\
+             printf '%s' '{{\"version\":1,\"answer\":{{\"ruling\":\"approve\"}}}}'",
+            MAX_DIAGNOSTIC_BYTES
+        );
+        let services = command_services(dir.path(), &script, 5000, 1024);
+        let (transcribed, transcript) = services
+            .consult_transcribed(&authority_consult("security", serde_json::json!({})), None, None)
+            .await;
+        assert_eq!(
+            transcribed,
+            ConsultOutcome::Answer(serde_json::json!({"ruling": "approve"}))
+        );
+        let diagnostics = transcript
+            .and_then(|transcript| transcript.diagnostics)
+            .expect("the stderr tail is kept");
+        assert!(diagnostics.truncated);
+        assert_eq!(diagnostics.bytes.len(), MAX_DIAGNOSTIC_BYTES);
+        assert!(diagnostics.bytes.ends_with(b"xlast"));
+    }
+
+    #[tokio::test]
+    async fn in_process_answers_are_not_transcribed() {
+        let mut config = externals(None, 2000, 65536);
+        config
+            .sanitizers
+            .insert("pii".to_string(), Implementation::Builtin("redact-email".to_string()));
+        let mut services = services_over(config);
+        services.stand_in_for_remedies(["auto".to_string()], []);
+        let (stock, transcript) = services
+            .consult_transcribed(&sanitizer_consult("pii", "mail bob@corp.example now"), None, None)
+            .await;
+        assert_eq!(
+            stock,
+            ConsultOutcome::Answer(serde_json::json!({"body": "mail [redacted-email] now"}))
+        );
+        assert!(transcript.is_none(), "a stock answer is not recorded");
+        let (stand_in, transcript) = services
+            .consult_transcribed(&authority_consult("auto", serde_json::json!({})), None, None)
+            .await;
+        assert_eq!(
+            stand_in,
+            ConsultOutcome::Answer(serde_json::json!({"ruling": "approve"}))
+        );
+        assert!(transcript.is_none(), "the stand-in is not recorded");
+    }
+
+    /// A helper outside the command's process group keeps stderr open after the command
+    /// answered: the recorded consult waits out only the grace, and keeps what was written.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_helper_holding_stderr_costs_a_recorded_answer_only_the_grace() {
+        let dir = tempfile::tempdir().expect("a fixture directory is created");
+        let pid_file = dir.path().join("helper.pid");
+        let script = format!(
+            "cat >/dev/null\nprintf 'warming up\\n' >&2\n\
+             perl -MPOSIX -e 'setsid(); sleep 10' &\necho $! > {}\n\
+             printf '%s' '{{\"version\":1,\"answer\":{{\"ruling\":\"approve\"}}}}'",
+            pid_file.display()
+        );
+        let services = command_services(dir.path(), &script, 5000, 1024);
+
+        let started = std::time::Instant::now();
+        let (outcome, transcript) = services
+            .consult_transcribed(&authority_consult("security", serde_json::json!({})), None, None)
+            .await;
+        let elapsed = started.elapsed();
+        let helper: i32 = std::fs::read_to_string(&pid_file)
+            .expect("the command recorded its helper")
+            .trim()
+            .parse()
+            .expect("a pid");
+        unsafe {
+            libc::kill(helper, libc::SIGKILL);
+        }
+
+        assert_eq!(
+            outcome,
+            ConsultOutcome::Answer(serde_json::json!({"ruling": "approve"}))
+        );
+        assert!(
+            elapsed < RECORD_READ_GRACE + Duration::from_millis(600),
+            "the helper stretched the consult to {elapsed:?}"
+        );
+        let transcript = transcript.expect("a command consult is transcribed");
+        assert_eq!(
+            transcript.diagnostics,
+            Some(Diagnostics {
+                bytes: b"warming up\n".to_vec(),
+                truncated: false
+            })
+        );
+        let settled = transcript.settled.expect("the answer's time is taken before the grace");
+        assert!(settled.saturating_duration_since(started) < elapsed);
+    }
+
+    /// A reader still pending when the wait runs out is aborted rather than left holding
+    /// the pipe for as long as the writer lives.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_tail_reader_past_its_wait_is_aborted() {
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("10")
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("sleep starts");
+        let mut tail = stderr_tail(child.stderr.take().expect("stderr is piped"));
+
+        assert_eq!(tail.within(Duration::from_millis(20)).await, None);
+        let joined = tokio::time::timeout(Duration::from_secs(5), &mut tail.task)
+            .await
+            .expect("an aborted reader ends at once");
+        assert!(joined.expect_err("the reader was aborted").is_cancelled());
+        child.kill().await.expect("sleep is killed");
+    }
+
+    /// A failed `url` consult whose body stalls part-way: the record keeps the part read, and
+    /// the consult waits out only the grace, not the client's timeout.
+    #[tokio::test]
+    async fn a_stalled_non_success_body_costs_a_recorded_consult_only_the_grace() {
+        const STALLED: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 100\r\n\r\npartial";
+        let consult = authority_consult("security", serde_json::json!({}));
+        let services_at = |url: String| {
+            let mut config = externals(None, 5000, 65536);
+            config.authorities.insert("security".to_string(), endpoint(&url));
+            services_over(config)
+        };
+
+        let started = std::time::Instant::now();
+        let (recorded, transcript) = services_at(raw_stub(STALLED, true).await)
+            .consult_transcribed(&consult, None, None)
+            .await;
+        let elapsed = started.elapsed();
+        let plain = services_at(raw_stub(STALLED, true).await)
+            .consult(&consult, None, None)
+            .await;
+
+        assert_eq!(
+            recorded,
+            ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess {
+                status: 503,
+                detail: None
+            })
+        );
+        assert_eq!(recorded, plain, "recording changes no outcome");
+        assert!(
+            elapsed < RECORD_READ_GRACE + Duration::from_millis(900),
+            "the stalled body stretched the consult to {elapsed:?}"
+        );
+        let transcript = transcript.expect("a url consult is transcribed");
+        assert_eq!(transcript.raw_response.as_deref(), Some(&b"partial"[..]));
     }
 }

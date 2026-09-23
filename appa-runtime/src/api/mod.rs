@@ -16,6 +16,9 @@ use std::sync::Arc;
 pub use crate::engine::{
     AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, LabelSpelling, RemedyArguments, TrajectoryStatus,
 };
+pub use crate::events::{ExternalOutcome, ExternalRole, NoAnswerClass};
+pub use crate::external::Diagnostics;
+pub use crate::recorder::{ConsultBackend, ConsultContext, ConsultRecord, ConsultRecorder};
 pub use appa_runtime_api::{
     Actor, OfferedRemedy, OutcomeBody, ProposedCall, Review, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,
 };
@@ -908,6 +911,7 @@ impl Prepared {
                     working_directories: std::sync::Mutex::new(std::collections::HashMap::new()),
                 }),
                 store,
+                recorder: None,
             }),
         }
     }
@@ -916,6 +920,8 @@ impl Prepared {
 struct Inner {
     shared: Arc<Shared>,
     store: Arc<LogStore>,
+    /// Where this view's sessions hand a record of every consult they make.
+    recorder: Option<Arc<dyn ConsultRecorder>>,
 }
 
 /// Everything of a runtime but its store: one object, held by the runtime and by every
@@ -990,6 +996,20 @@ impl Runtime {
             inner: Arc::new(Inner {
                 shared: Arc::clone(&self.inner.shared),
                 store,
+                recorder: None,
+            }),
+        }
+    }
+
+    /// This view with every consult its sessions make handed to `recorder`, once the
+    /// consult's outcome is known. Deployment probes and [`Runtime::on`] views of it
+    /// record nothing.
+    pub fn recording(&self, recorder: Arc<dyn ConsultRecorder>) -> Runtime {
+        Runtime {
+            inner: Arc::new(Inner {
+                shared: Arc::clone(&self.inner.shared),
+                store: Arc::clone(&self.inner.store),
+                recorder: Some(recorder),
             }),
         }
     }
