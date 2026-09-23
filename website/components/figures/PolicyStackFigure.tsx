@@ -1,6 +1,6 @@
 import { PixelMark } from "@/components/Logo";
 
-/* Static scheme for the Basic Principles page: a stack of OpenAPPA policy
+/* Static scheme for the landing page: a stack of OpenAPPA policy
    files fanning out to every place the same configuration can be enforced.
    Rendered by the :::fig-policy-stack::: directive. */
 

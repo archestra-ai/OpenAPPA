@@ -1,8 +1,8 @@
 ---
 title: kAgent
 nav_title: kAgent
-category: Integrations
-order: 6
+category: Works with
+order: 7
 description: Protect kagent declarative Python and Go Agents with OpenAPPA policy.
 ---
 

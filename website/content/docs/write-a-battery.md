@@ -1,5 +1,6 @@
 ---
 title: Create your own battery
+nav_title: + Create your own battery
 category: Batteries
 order: 6.7
 description: Create, test, and submit a battery for your MCP server.

@@ -21,6 +21,9 @@ The normative specification is not in this repository. Where the spec
 and this code disagree, the spec is right and the code has drift to
 close; do not cite rule ids here.
 
+## Rules:
+- Never add "Where next" to the bottom of the page with links to other pages. Those links get stale. If you see such a section, remove.
+
 ## Naming
 
 - Use the `appa` prefix for new OpenAPPA-owned crates, binaries, environment

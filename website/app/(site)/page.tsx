@@ -18,7 +18,6 @@ export default function HomePage() {
           {/* Title as text, not the lockup: the header already carries the
               wordmark, and two of them stacked read as a duplicate. */}
           <h1>{doc.title}</h1>
-          <p className="tagline">{doc.description}</p>
           <SpellItButton />
         </div>
         <DocContent content={doc.content} />

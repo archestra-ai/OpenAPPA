@@ -31,6 +31,7 @@ import { RuntimeOverviewFigure } from "@/components/figures/RuntimeOverviewFigur
 import { TwoEndingsFigure } from "@/components/figures/TwoEndingsFigure";
 import { MascotBoard } from "@/components/MascotBoard";
 import { ProposalBlock } from "@/components/ProposalBlock";
+import { SponsorNote } from "@/components/SponsorNote";
 import { Term } from "@/components/Term";
 import { parseProposal, PROPOSAL_SPLIT } from "@/lib/proposals";
 import { termDefinition } from "@/lib/terms";
@@ -107,6 +108,7 @@ const DIRECTIVES: Record<string, () => ReactNode> = {
   "fig-runtime-overview": () => <RuntimeOverviewFigure />,
   "fig-two-endings": () => <TwoEndingsFigure />,
   "mascot-board": () => <MascotBoard />,
+  "sponsor-note": () => <SponsorNote />,
   "details-7pc-leak": () => (
     <details className="leak-details my-6 rounded-lg border border-[var(--border)] bg-[var(--bg-weak)] p-4 text-sm text-[var(--text)]">
       <summary className="cursor-pointer font-semibold text-[var(--text-strong)] hover:text-[var(--accent)]">
