@@ -18,8 +18,8 @@ and its [rules and covered tools](https://github.com/archestra-ai/OpenAPPA/blob/
 - **Internal reads:** boards, items, comments, searches, documents, people,
   schemas, assets, meetings, automation history, workflow inspection and Vibe
   inspection stay internal. `get_graphql_schema`, `get_column_type_info` and
-  `get_automation_statistics(breakdown:totals)` return trusted provider
-  metadata; other results enter suspicious.
+  `get_automation_statistics(breakdown:totals)` return bounded provider
+  metadata and preserve trust; other results enter suspicious.
   Queries must be sharable with internal. Normal options such as search terms,
   descriptions, subitems and replies are available. `all_api_read` rejects
   mutations at the provider.
@@ -29,12 +29,14 @@ and its [rules and covered tools](https://github.com/archestra-ai/OpenAPPA/blob/
 - **Reviewed writes:** items, comments, docs, folders, groups, dashboards,
   widgets, views and uploads require trusted internal input and `monday-review`,
   and record `monday.changed`. Results that can include existing provider
-  content stay suspicious/internal. `get_asset_upload_url` returns a trusted
-  provider issued upload ID, URL and expiration.
+  content stay suspicious/internal. New folder, group, dashboard and widget
+  confirmations preserve trust, as does the provider issued upload ID,
+  URL and expiration from `get_asset_upload_url`.
 - **Reviewed sensitive changes:** structural changes, deletes, notifications,
   automations, workflows, agent management, code/actions, Vibe publication and
-  general GraphQL operations record `monday.sensitive`. `create_form` and the
-  folder branch of `move_object` return bounded trusted results. Review includes
+  general GraphQL operations record `monday.sensitive`. `create_board`,
+  `create_column`, `create_workspace`, `create_form` and the folder branch of
+  `move_object` return bounded confirmations that preserve trust. Review includes
   the affected resources and any external destinations.
 - **Notifications:** `create_notification` also checks its `user_id` recipient
   against the input audience. A monday audience source resolves that user to a

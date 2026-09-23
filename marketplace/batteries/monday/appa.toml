@@ -88,12 +88,12 @@ requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/get_graphql_schema"
-delta = { trust = "trusted", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/get_column_type_info"
-delta = { trust = "trusted", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
@@ -148,7 +148,7 @@ requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/get_automation_statistics(breakdown:totals)"
-delta = { trust = "trusted", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
@@ -329,25 +329,25 @@ effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/create_folder"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/create_group"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/create_dashboard"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/create_widget"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
@@ -377,7 +377,7 @@ effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/get_asset_upload_url"
-delta = { trust = "trusted", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
@@ -394,7 +394,7 @@ effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/create_form"
-delta = { trust = "trusted", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
@@ -412,7 +412,7 @@ effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/create_column"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
@@ -436,13 +436,13 @@ effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/create_workspace"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/move_object(objectType:Folder)"
-delta = { trust = "trusted", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
@@ -454,7 +454,7 @@ effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/create_board"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 

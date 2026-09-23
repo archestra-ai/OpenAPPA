@@ -17,7 +17,7 @@ public source revision.
 *Internal reads* — queries and results stay within `internal`. Most results enter
 `suspicious`. `get_graphql_schema`, `get_column_type_info`, and
 `get_automation_statistics(breakdown:totals)` return bounded provider metadata
-and keep a fresh trajectory `trusted`. The statistics tool's `by_entity`
+and preserve trust (a fresh trajectory stays `trusted`). The statistics tool's `by_entity`
 response remains suspicious. `all_api_read` rejects mutations at the provider,
 and `read_docs` reads workspace documents. This group covers:
 
@@ -43,8 +43,11 @@ returns suspicious/public content.
 
 *Reviewed writes* — trusted internal input and `monday-review`; results remain
 suspicious/internal when they can include existing content, such as the item
-name returned by `create_update`. `get_asset_upload_url` instead returns a
-provider issued upload ID, URL and expiration with trusted/internal output.
+name returned by `create_update`, or API error details from `create_items` and
+`create_doc`. Creation of folders, groups, dashboards and widgets
+returns only new object identifiers, trusted input or provider defaults, so
+those results preserve trust. `get_asset_upload_url` returns a provider issued
+upload ID, URL and expiration and also preserves trust.
 These tools record `monday.changed`:
 
 `change_item_column_values`, `create_dashboard`, `create_doc`, `create_folder`,
@@ -55,10 +58,11 @@ These tools record `monday.changed`:
 *Sensitive writes* — the same reviewed internal contract except the
 recipient-bound notification below, recording `monday.sensitive`. Review must
 account for affected resources and destinations, including nested operations in
-code, GraphQL, workflows and agents. `create_form` returns a fixed confirmation,
-board ID and form token as trusted/internal. `move_object(objectType:Folder)`
-returns a fixed confirmation and object ID as trusted/internal; the other
-object types remain suspicious. These tools are:
+code, GraphQL, workflows and agents. `create_board`, `create_column`,
+`create_workspace` and `create_form` return bounded new object confirmations and
+preserve trust. `move_object(objectType:Folder)` returns a fixed confirmation and
+object ID with the same result rule; the other object types remain suspicious.
+These tools are:
 
 `all_api_write`, `all_monday_api`, `create_action`, `create_automation`, `create_board`,
 `create_column`, `create_form`, `create_notification`, `create_workflow`,
