@@ -14757,6 +14757,75 @@ mod tests {
         );
     }
 
+    /// A placeholder filled from an array asks for every collection the call names, and the
+    /// requirement holds only when the members of all of them already read.
+    #[test]
+    fn a_contains_placeholder_filled_from_an_array_requires_every_collection() {
+        let mut send = plain_tool("send");
+        send.parameters = crate::params::ToolParameters::compile(&json!({
+            "type": "object",
+            "properties": { "channel": { "type": "array", "items": { "type": "string" } } },
+            "required": ["channel"],
+        }))
+        .expect("an array-of-strings schema is dialect-valid");
+        send.requires = Requires {
+            label: LabelRequirements {
+                trust_floor: None,
+                audience: vec![AudienceRequirement::Includes(RecipientSpec::Selector(
+                    channel_placeholder(),
+                ))],
+            },
+            ..Requires::default()
+        };
+        let mut cfg = test_config(vec![send]);
+        cfg.audience = channel_source();
+        let e = open_engine_at(cfg, known(TRUSTED, Audience::restricted([corp_reader("alice")])));
+        let log = vec![opened(&e)];
+        let to_channels = raw(&call("send", json!({ "channel": ["C1", "C2"] })));
+        let atom = |id: &str| {
+            SymbolicAtom::Group(crate::label::GroupRef::Source {
+                provider: "slack".to_string(),
+                selector: format!("channel/{id}"),
+            })
+        };
+        assert_eq!(
+            e.handle(&viewing(&e, &log), batch("b1", Vec::new(), vec![to_channels.clone()])),
+            Err(TransitionError::MembershipNeeded {
+                needed: vec![atom("C1"), atom("C2")]
+            })
+        );
+        let members = |c2: Vec<ReaderId>| {
+            source_evidence(vec![
+                crate::audience::SourceClaims {
+                    provider: "slack".to_string(),
+                    selector: "channel/C1".to_string(),
+                    members: vec![corp_reader("alice")],
+                },
+                crate::audience::SourceClaims {
+                    provider: "slack".to_string(),
+                    selector: "channel/C2".to_string(),
+                    members: c2,
+                },
+            ])
+        };
+        let decision = e
+            .handle(
+                &viewing(&e, &log),
+                evidenced_batch("b2", vec![to_channels.clone()], members(vec![corp_reader("alice")])),
+            )
+            .expect("the batch decides");
+        assert_eq!(answered(&decision).0.len(), 1, "both channels' members already read");
+        let decision = e
+            .handle(
+                &viewing(&e, &log),
+                evidenced_batch("b3", vec![to_channels], members(vec![corp_reader("bob")])),
+            )
+            .expect("the batch decides");
+        let (released, blocked) = answered(&decision);
+        assert!(released.is_empty(), "a reader of the second channel does not read yet");
+        assert_eq!(blocked.len(), 1);
+    }
+
     /// A mandate placeholder admits, per call, exactly the collection the call's arguments
     /// spell. The policy refuses to route a tool without the argument, or the wildcard, through
     /// such a mandate.

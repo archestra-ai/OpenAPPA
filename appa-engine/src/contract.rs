@@ -2,6 +2,8 @@
 //! and the declarations that produce them — statically from policy, or per call through a
 //! registered Annotator.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::fact::{EffectKind, EffectSet};
@@ -135,10 +137,10 @@ pub struct SelectorPlaceholder {
 
 /// Why a call's arguments do not fill a selector placeholder: a value must be one non-empty
 /// selector segment a policy could write — no `/`, which would change the collection's shape,
-/// and no leading `$`, which spells a placeholder.
+/// and no leading `$`, which spells a placeholder — or a non-empty array of such segments.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "argument {argument:?} does not fill a selector segment: a non-empty string without `/` and not starting with `$`"
+    "argument {argument:?} does not fill a selector segment: a non-empty string without `/` and not starting with `$`, or a non-empty array of them"
 )]
 pub struct UnfilledPlaceholder {
     pub argument: String,
@@ -199,32 +201,54 @@ impl SelectorPlaceholder {
             })
     }
 
-    /// The collection one call's arguments name: each argument segment replaced by the
-    /// argument's value. Every argument is a required string of the tool's schema (the
-    /// registry makes it one) and every value one writable segment (checked when the call is
-    /// minted), so a minted call always instantiates into a mention the log can carry;
-    /// anything else is refused rather than read as another collection.
-    pub fn instantiate(&self, arguments: &serde_json::Value) -> Result<GroupRef, UnfilledPlaceholder> {
-        let mut selector = Vec::with_capacity(self.segments.len());
+    /// The collections one call's arguments name: each argument segment replaced by the
+    /// argument's value, one collection per element when the value is an array, so a call
+    /// naming several teams names each. Every argument is a required string or array of
+    /// strings of the tool's schema (the registry makes it one) and every value one writable
+    /// segment (checked when the call is minted), so a minted call always instantiates into
+    /// mentions the log can carry; anything else is refused rather than read as another
+    /// collection.
+    pub fn instantiate(&self, arguments: &serde_json::Value) -> Result<BTreeSet<GroupRef>, UnfilledPlaceholder> {
+        let mut selectors = vec![Vec::with_capacity(self.segments.len())];
         for segment in &self.segments {
-            match segment {
-                Segment::Literal(literal) => selector.push(literal.as_str()),
-                Segment::Argument(argument) => match arguments.get(argument).and_then(serde_json::Value::as_str) {
-                    Some(value) if !value.is_empty() && !value.contains('/') && !value.starts_with('$') => {
-                        selector.push(value)
-                    }
-                    _ => {
-                        return Err(UnfilledPlaceholder {
-                            argument: argument.clone(),
-                        });
-                    }
-                },
-            }
+            let values = match segment {
+                Segment::Literal(literal) => vec![literal.as_str()],
+                Segment::Argument(argument) => {
+                    argument_segments(arguments.get(argument)).ok_or_else(|| UnfilledPlaceholder {
+                        argument: argument.clone(),
+                    })?
+                }
+            };
+            selectors = selectors
+                .into_iter()
+                .flat_map(|prefix| {
+                    values.iter().map(move |value| {
+                        let mut selector = prefix.clone();
+                        selector.push(*value);
+                        selector
+                    })
+                })
+                .collect();
         }
-        Ok(GroupRef::Source {
-            provider: self.provider.clone(),
-            selector: selector.join("/"),
-        })
+        Ok(selectors
+            .into_iter()
+            .map(|selector| GroupRef::Source {
+                provider: self.provider.clone(),
+                selector: selector.join("/"),
+            })
+            .collect())
+    }
+}
+
+fn argument_segments(value: Option<&serde_json::Value>) -> Option<Vec<&str>> {
+    fn segment(value: &serde_json::Value) -> Option<&str> {
+        value
+            .as_str()
+            .filter(|value| !value.is_empty() && !value.contains('/') && !value.starts_with('$'))
+    }
+    match value? {
+        serde_json::Value::Array(values) if !values.is_empty() => values.iter().map(segment).collect(),
+        value => segment(value).map(|value| vec![value]),
     }
 }
 
@@ -358,10 +382,10 @@ impl ToolAnnotation {
         let Some(DeltaAudience::Selector(placeholder)) = &self.delta.audience else {
             return Ok(None);
         };
-        let group = placeholder.instantiate(arguments)?;
+        let groups = placeholder.instantiate(arguments)?;
         let mut bound = self.clone();
         bound.delta.audience = Some(DeltaAudience::Static(DeclaredAudience::Union(
-            Clause::new([], [group], []).expect("a group clause names no reader"),
+            Clause::new([], groups, []).expect("a group clause names no reader"),
         )));
         Ok(Some(bound))
     }
@@ -616,22 +640,37 @@ mod tests {
     }
 
     /// Every instantiation is a mention the policy could have written and the log can carry:
-    /// one non-empty segment per argument, never a `/` or a placeholder mark.
+    /// one non-empty segment per argument value, never a `/` or a placeholder mark. An array
+    /// names one collection per element, and every element must be such a segment.
     #[test]
-    fn a_placeholder_instantiates_only_into_a_writable_mention() {
+    fn a_placeholder_instantiates_only_into_writable_mentions() {
+        let group = |selector: &str| GroupRef::Source {
+            provider: "slack".to_string(),
+            selector: selector.to_string(),
+        };
         let placeholder = SelectorPlaceholder::parse("slack:channel/$channel").expect("a placeholder spelling");
         assert_eq!(
             placeholder.instantiate(&serde_json::json!({ "channel": "C1" })),
-            Ok(GroupRef::Source {
-                provider: "slack".to_string(),
-                selector: "channel/C1".to_string(),
-            })
+            Ok(BTreeSet::from([group("channel/C1")]))
+        );
+        assert_eq!(
+            placeholder.instantiate(&serde_json::json!({ "channel": ["C1", "C2", "C1"] })),
+            Ok(BTreeSet::from([group("channel/C1"), group("channel/C2")]))
+        );
+        let nested = SelectorPlaceholder::parse("slack:$kind/$id").expect("a placeholder spelling");
+        assert_eq!(
+            nested.instantiate(&serde_json::json!({ "kind": ["channel", "user-group"], "id": "X" })),
+            Ok(BTreeSet::from([group("channel/X"), group("user-group/X")]))
         );
         for value in [
             serde_json::json!(""),
             serde_json::json!("a/b"),
             serde_json::json!("$x"),
             serde_json::json!(7),
+            serde_json::json!([]),
+            serde_json::json!(["C1", ""]),
+            serde_json::json!(["C1", "a/b"]),
+            serde_json::json!([["C1"]]),
         ] {
             assert!(
                 placeholder

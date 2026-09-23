@@ -17,6 +17,7 @@ use crate::label::{
     MembershipContext, ReaderId, SymbolicAtom, Trust,
 };
 use crate::names::{AnnotatorName, AuthorityName, MarkName, SanitizerName, TagName};
+use crate::params::ArgumentShape;
 use crate::value::{ToolDeclarationId, ToolName};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -386,7 +387,7 @@ impl AudienceVocabulary {
             .collect()
     }
 
-    /// The vocabulary for one call: each selector placeholder becomes the group the call's
+    /// The vocabulary for one call: each selector placeholder becomes the groups the call's
     /// arguments spell. A vocabulary without placeholders is its own instantiation; a call
     /// that fills no placeholder — never a minted one — has no vocabulary.
     pub fn instantiate(
@@ -398,7 +399,7 @@ impl AudienceVocabulary {
             ..self.clone()
         };
         for placeholder in &self.placeholders {
-            instantiated.groups.insert(placeholder.instantiate(arguments)?);
+            instantiated.groups.extend(placeholder.instantiate(arguments)?);
         }
         Ok(instantiated)
     }
@@ -1106,15 +1107,14 @@ impl Registry {
                     ToolDeclaration::Declared(tool) => &mut tool.parameters,
                     ToolDeclaration::Annotated { parameters, .. } => parameters,
                 };
-                for argument in bound_arguments {
-                    *parameters =
-                        parameters
-                            .require_string(&argument)
-                            .map_err(|fault| LoadError::AudienceBindingSchema {
-                                context: format!("tool {tool_name}"),
-                                argument,
-                                fault,
-                            })?;
+                for (argument, shape) in bound_arguments {
+                    *parameters = parameters.require_argument(&argument, shape).map_err(|fault| {
+                        LoadError::AudienceBindingSchema {
+                            context: format!("tool {tool_name}"),
+                            argument,
+                            fault,
+                        }
+                    })?;
                 }
             }
             let base_name = match contract {
@@ -1696,7 +1696,13 @@ impl Registry {
 fn audience_arguments(
     declaration: &ToolDeclaration,
     annotators: &BTreeMap<AnnotatorName, AnnotatorDeclaration>,
-) -> Vec<String> {
+) -> BTreeSet<(String, ArgumentShape)> {
+    let selector_arguments = |placeholder: &SelectorPlaceholder| {
+        placeholder
+            .arguments()
+            .map(|argument| (argument.to_string(), ArgumentShape::StringOrStrings))
+            .collect::<Vec<_>>()
+    };
     match declaration {
         ToolDeclaration::Declared(tool) => {
             let recipients = tool
@@ -1704,21 +1710,20 @@ fn audience_arguments(
                 .audience_requirements()
                 .iter()
                 .filter_map(|requirement| match requirement {
-                    AudienceRequirement::Includes(RecipientSpec::Placeholder(argument)) => Some(argument.clone()),
+                    AudienceRequirement::Includes(RecipientSpec::Placeholder(argument)) => {
+                        Some((argument.clone(), ArgumentShape::String))
+                    }
                     AudienceRequirement::Includes(_) | AudienceRequirement::Cap(_) => None,
                 });
             recipients
-                .chain(
-                    tool.selector_placeholders()
-                        .flat_map(|placeholder| placeholder.arguments().map(str::to_string)),
-                )
+                .chain(tool.selector_placeholders().flat_map(selector_arguments))
                 .collect()
         }
         ToolDeclaration::Annotated { annotator, .. } => annotators
             .get(annotator)
             .into_iter()
             .flat_map(|declared| declared.audiences.iter().flat_map(AudienceVocabulary::placeholders))
-            .flat_map(|placeholder| placeholder.arguments().map(str::to_string))
+            .flat_map(selector_arguments)
             .collect(),
     }
 }

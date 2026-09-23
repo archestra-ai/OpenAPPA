@@ -217,16 +217,16 @@ impl ToolParameters {
         validate_object(&self.root, arguments, "$")
     }
 
-    /// This schema with `name` a required top-level string: what an audience argument binding
-    /// implies, since a placeholder reads that argument and the schema has to guarantee it is
-    /// present and a string before any check. An undeclared property is added as a free
-    /// string, an optional string becomes required, and a property of another type is refused.
-    /// The result is compiled again, so the implied property is held to the budgets an
-    /// authored one is.
-    pub(crate) fn require_string(&self, name: &str) -> Result<ToolParameters, PropertyFault> {
+    /// This schema with `name` a required top-level argument of `shape`: what an audience
+    /// argument binding implies, since a placeholder reads that argument and the schema has to
+    /// guarantee it is present and of that shape before any check. An undeclared property is
+    /// added as a free string, an optional one becomes required, and a property of another
+    /// type is refused. The result is compiled again, so the implied property is held to the
+    /// budgets an authored one is.
+    pub(crate) fn require_argument(&self, name: &str, shape: ArgumentShape) -> Result<ToolParameters, PropertyFault> {
         let mut root = (*self.root).clone();
-        match root.properties.get(name) {
-            None => {
+        match (root.properties.get(name), shape) {
+            (None, _) => {
                 root.properties.insert(
                     name.to_string(),
                     SchemaNode::String {
@@ -237,8 +237,11 @@ impl ToolParameters {
                     },
                 );
             }
-            Some(SchemaNode::String { .. }) => {}
-            Some(_) => return Err(PropertyFault::NotString),
+            (Some(SchemaNode::String { .. }), _) => {}
+            (Some(SchemaNode::Array { items, .. }), ArgumentShape::StringOrStrings)
+                if matches!(**items, SchemaNode::String { .. }) => {}
+            (Some(_), ArgumentShape::String) => return Err(PropertyFault::NotString),
+            (Some(_), ArgumentShape::StringOrStrings) => return Err(PropertyFault::NotStrings),
         }
         if !root.required.iter().any(|required| required == name) {
             root.required.push(name.to_string());
@@ -261,6 +264,14 @@ impl ToolParameters {
     }
 }
 
+/// What an audience argument binding reads: a recipient argument is one audience spelling; a
+/// selector placeholder's argument is one selector segment or an array of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ArgumentShape {
+    String,
+    StringOrStrings,
+}
+
 /// Why a top-level property is not what a binding needs: the required string an audience
 /// argument implies, or the required property an Annotator input reads. Nesting does not
 /// count: only the root object's own properties are read.
@@ -270,6 +281,8 @@ pub enum PropertyFault {
     Undeclared,
     #[error("is declared but not with `type = \"string\"`")]
     NotString,
+    #[error("is declared but neither a string nor an array of strings")]
+    NotStrings,
     #[error("is declared but not listed in `required`")]
     Optional,
     #[error("cannot be added to the tool's `parameters`: {0}")]
@@ -1630,13 +1643,16 @@ mod tests {
         }))
         .unwrap();
         // A required string keeps its constraints; an optional one becomes required.
-        assert_eq!(schema.require_string("channel").unwrap(), schema);
-        let promoted = schema.require_string("cc").unwrap();
+        assert_eq!(
+            schema.require_argument("channel", ArgumentShape::String).unwrap(),
+            schema
+        );
+        let promoted = schema.require_argument("cc", ArgumentShape::String).unwrap();
         assert_eq!(promoted.root.required, vec!["cc", "channel", "count", "meta"]);
         assert_eq!(promoted.root.properties, schema.root.properties);
         // An undeclared name is added as a free string; nesting does not count, so `owner`
         // inside `meta` is undeclared at the top level.
-        let added = schema.require_string("owner").unwrap();
+        let added = schema.require_argument("owner", ArgumentShape::String).unwrap();
         assert_eq!(
             added.root.properties["owner"],
             SchemaNode::String {
@@ -1647,27 +1663,63 @@ mod tests {
             }
         );
         assert!(added.root.required.iter().any(|name| name == "owner"));
-        assert_eq!(schema.require_string("count"), Err(PropertyFault::NotString));
-        assert_eq!(schema.require_string("meta"), Err(PropertyFault::NotString));
+        assert_eq!(
+            schema.require_argument("count", ArgumentShape::String),
+            Err(PropertyFault::NotString)
+        );
+        assert_eq!(
+            schema.require_argument("meta", ArgumentShape::String),
+            Err(PropertyFault::NotString)
+        );
         // The implied property is held to the compiled budgets.
         let members: serde_json::Map<String, Value> = (0..MAX_OBJECT_PROPERTIES)
             .map(|i| (format!("p{i:03}"), json!({ "type": "string" })))
             .collect();
         let full = compile(json!({ "type": "object", "properties": members })).unwrap();
         assert_eq!(
-            full.require_string("one-more"),
+            full.require_argument("one-more", ArgumentShape::String),
             Err(PropertyFault::Budget(ParamsError::TooManyProperties))
         );
         let long = "a".repeat(MAX_PROPERTY_NAME_BYTES + 1);
         assert_eq!(
-            schema.require_string(&long),
+            schema.require_argument(&long, ArgumentShape::String),
             Err(PropertyFault::Budget(ParamsError::PropertyNameTooLong(long)))
         );
         // The omitted-`parameters` default declares nothing, so every argument is added.
-        let open = ToolParameters::open().require_string("to").unwrap();
+        let open = ToolParameters::open()
+            .require_argument("to", ArgumentShape::String)
+            .unwrap();
         assert!(open.validate(&json!({ "to": "ops", "extra": 1 })).is_ok());
         assert!(open.validate(&json!({ "extra": 1 })).is_err());
         assert!(open.validate(&json!({ "to": 1 })).is_err());
+    }
+
+    /// A selector placeholder's argument may be an array of strings; a recipient's may not.
+    #[test]
+    fn a_selector_argument_may_be_an_array_of_strings() {
+        let schema = compile(json!({
+            "type": "object",
+            "properties": {
+                "teams": { "type": "array", "items": { "type": "string" } },
+                "counts": { "type": "array", "items": { "type": "integer" } },
+                "team": { "type": "string" },
+            },
+        }))
+        .unwrap();
+        let teams = schema
+            .require_argument("teams", ArgumentShape::StringOrStrings)
+            .unwrap();
+        assert!(teams.validate(&json!({ "teams": ["a", "b"] })).is_ok());
+        assert!(teams.validate(&json!({})).is_err());
+        assert!(schema.require_argument("team", ArgumentShape::StringOrStrings).is_ok());
+        assert_eq!(
+            schema.require_argument("teams", ArgumentShape::String),
+            Err(PropertyFault::NotString)
+        );
+        assert_eq!(
+            schema.require_argument("counts", ArgumentShape::StringOrStrings),
+            Err(PropertyFault::NotStrings)
+        );
     }
 
     // --- the strict argument path ----------------------------------------------------------
