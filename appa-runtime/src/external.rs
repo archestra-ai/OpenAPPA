@@ -672,7 +672,7 @@ impl ExternalServices {
             if let Some(seen) = seen {
                 seen.settled = Some(std::time::Instant::now());
                 let mut body = Vec::new();
-                let _ = read_body(&mut response, cap, &mut body).await;
+                let _ = tokio::time::timeout(RECORD_READ_GRACE, read_body(&mut response, cap, &mut body)).await;
                 seen.raw_response = Some(body);
             }
             return Err(NoAnswerReason::NonSuccess {
@@ -994,16 +994,19 @@ pub(crate) fn stderr_tail(stderr: tokio::process::ChildStderr) -> StderrTail {
 impl StderrTail {
     /// What the child wrote once it closed the pipe, or once `wait` passed — a helper that
     /// kept the pipe open leaves the tail read so far. Nothing where it wrote nothing.
-    async fn within(self, wait: Duration) -> Option<Diagnostics> {
-        let _ = tokio::time::timeout(wait, self.task).await;
+    /// A reader still waiting is aborted, so a helper holding the pipe keeps no task here.
+    async fn within(&mut self, wait: Duration) -> Option<Diagnostics> {
+        if tokio::time::timeout(wait, &mut self.task).await.is_err() {
+            self.task.abort();
+        }
         let tail = std::mem::take(&mut *self.read.lock().ok()?);
         Some(tail).filter(|tail| !tail.bytes.is_empty())
     }
 }
 
-/// How long a recorded command that answered may keep its stderr open past its exit.
-#[cfg(unix)]
-const ANSWERED_TAIL_GRACE: Duration = Duration::from_millis(100);
+/// How long a read made for the record alone may extend a consult whose outcome is known:
+/// a failed `url` consult's body, or the stderr a command that answered keeps open.
+const RECORD_READ_GRACE: Duration = Duration::from_millis(100);
 
 /// The last non-empty line of what a child said about its own failure, stripped of
 /// control characters and bounded, fit for a log field and a diagnostic.
@@ -1025,7 +1028,7 @@ pub(crate) fn error_line(text: &str) -> String {
 
 /// The stderr tail of a child that failed, given a second to close the pipe.
 #[cfg(unix)]
-pub(crate) async fn finished_tail(tail: StderrTail) -> Option<Diagnostics> {
+pub(crate) async fn finished_tail(mut tail: StderrTail) -> Option<Diagnostics> {
     tail.within(Duration::from_secs(1)).await
 }
 
@@ -1096,9 +1099,9 @@ async fn run_command_process(
     // only briefly, so the outcome's time is taken before that wait.
     let (stderr, settled) = match (&exited, tail) {
         (Ok((status, _)), Some(tail)) if !status.success() => (finished_tail(tail).await, std::time::Instant::now()),
-        (Ok(_), Some(tail)) if seen.is_some() => {
+        (Ok(_), Some(mut tail)) if seen.is_some() => {
             let settled = std::time::Instant::now();
-            (tail.within(ANSWERED_TAIL_GRACE).await, settled)
+            (tail.within(RECORD_READ_GRACE).await, settled)
         }
         _ => (None, std::time::Instant::now()),
     };
@@ -2691,7 +2694,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             ConsultOutcome::Answer(serde_json::json!({"ruling": "approve"}))
         );
         assert!(
-            elapsed < ANSWERED_TAIL_GRACE + Duration::from_millis(600),
+            elapsed < RECORD_READ_GRACE + Duration::from_millis(600),
             "the helper stretched the consult to {elapsed:?}"
         );
         let transcript = transcript.expect("a command consult is transcribed");
@@ -2704,5 +2707,63 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         );
         let settled = transcript.settled.expect("the answer's time is taken before the grace");
         assert!(settled.saturating_duration_since(started) < elapsed);
+    }
+
+    /// A reader still pending when the wait runs out is aborted rather than left holding
+    /// the pipe for as long as the writer lives.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_tail_reader_past_its_wait_is_aborted() {
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("10")
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("sleep starts");
+        let mut tail = stderr_tail(child.stderr.take().expect("stderr is piped"));
+
+        assert_eq!(tail.within(Duration::from_millis(20)).await, None);
+        let joined = tokio::time::timeout(Duration::from_secs(5), &mut tail.task)
+            .await
+            .expect("an aborted reader ends at once");
+        assert!(joined.expect_err("the reader was aborted").is_cancelled());
+        child.kill().await.expect("sleep is killed");
+    }
+
+    /// A failed `url` consult whose body stalls part-way: the record keeps the part read, and
+    /// the consult waits out only the grace, not the client's timeout.
+    #[tokio::test]
+    async fn a_stalled_non_success_body_costs_a_recorded_consult_only_the_grace() {
+        const STALLED: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 100\r\n\r\npartial";
+        let consult = authority_consult("security", serde_json::json!({}));
+        let services_at = |url: String| {
+            let mut config = externals(None, 5000, 65536);
+            config.authorities.insert("security".to_string(), endpoint(&url));
+            services_over(config)
+        };
+
+        let started = std::time::Instant::now();
+        let (recorded, transcript) = services_at(raw_stub(STALLED, true).await)
+            .consult_transcribed(&consult, None, None)
+            .await;
+        let elapsed = started.elapsed();
+        let plain = services_at(raw_stub(STALLED, true).await)
+            .consult(&consult, None, None)
+            .await;
+
+        assert_eq!(
+            recorded,
+            ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess {
+                status: 503,
+                detail: None
+            })
+        );
+        assert_eq!(recorded, plain, "recording changes no outcome");
+        assert!(
+            elapsed < RECORD_READ_GRACE + Duration::from_millis(900),
+            "the stalled body stretched the consult to {elapsed:?}"
+        );
+        let transcript = transcript.expect("a url consult is transcribed");
+        assert_eq!(transcript.raw_response.as_deref(), Some(&b"partial"[..]));
     }
 }
