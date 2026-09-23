@@ -1389,8 +1389,9 @@ impl Session {
         let started = std::time::Instant::now();
         let externals = &self.deployment.externals;
         let (outcome, transcript) = match &self.inner.recorder {
-            Some(_) => externals.consult_transcribed(consult, elicitation, ruling).await,
-            None => (externals.consult(consult, elicitation, ruling).await, None),
+            // Boxed: the transport future is large, and every drive awaits it deep in the stack.
+            Some(_) => Box::pin(externals.consult_transcribed(consult, elicitation, ruling)).await,
+            None => (Box::pin(externals.consult(consult, elicitation, ruling)).await, None),
         };
         // A transport that read on for the record alone says when the outcome was known.
         let settled = transcript
