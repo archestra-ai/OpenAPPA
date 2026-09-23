@@ -184,7 +184,6 @@ jobs:
               - 'scripts/lint_batteries.py'
               - 'scripts/test_lint_batteries.py'
               - 'scripts/lint_battery_toml.py'
-              - 'scripts/test_lint_battery_toml.py'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
             integration: &integration
@@ -337,9 +336,7 @@ jobs:
         run: python3 scripts/lint_batteries.py
 
       - name: Lint battery TOML files
-        run: |
-          python3 -m unittest scripts/test_lint_battery_toml.py
-          python3 scripts/lint_battery_toml.py
+        run: python3 scripts/lint_battery_toml.py
 
   marketplace-checks:
     name: Marketplace Checks

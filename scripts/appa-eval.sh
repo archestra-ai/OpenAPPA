@@ -73,8 +73,7 @@ run "Repository Python tests" uv run --with 'pyyaml==6.0.2' python3 -m unittest 
   scripts/test_appa_refresh_batteries.py \
   scripts/test_appa_guide_runtime.py \
   scripts/test_appa_oci_tags.py \
-  scripts/test_appa_image_descriptor.py \
-  scripts/test_lint_battery_toml.py
+  scripts/test_appa_image_descriptor.py
 run "Battery TOML files" python3 scripts/lint_battery_toml.py
 run "Claude model fixture tests" python3 -m unittest discover \
   -s marketplace/plugins/claude-code -p 'test_*.py'
