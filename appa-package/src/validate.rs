@@ -742,6 +742,7 @@ mod tests {
     fn a_policy_that_runs_an_undeclared_program_is_refused() {
         for command in [
             "[\"python3\", \"../other/audience-source.py\"]",
+            "[\"python\", \"audience-source.py\"]",
             "[\"bash\", \"audience-source.py\"]",
             "[\"python3\", \"audience-source.py\", \"--now\"]",
             "\"python3 audience-source.py\"",
