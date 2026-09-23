@@ -62,20 +62,21 @@ class FrameworkSession:
         )
         self._logical_tool_names = logical_names
         self._available_tool_names = model_names | logical_names
-        self._pending = False
+        self._pending: set[str | None] = set()
         self._closed = False
 
-    def check(self, tool: str, arguments: dict[str, object]) -> CheckResult:
+    def check(self, tool: str, arguments: dict[str, object], call_id: str | None = None) -> CheckResult:
         try:
             policy_tool, policy_arguments = self.logical_call(tool, arguments)
         except ValueError as error:
             return Blocked(f"Invalid discoverable tool call: {error}")
-        response = self._decode(
-            self._session.check(
-                policy_tool,
-                json.dumps(policy_arguments, separators=(",", ":")),
-            )
+        encoded_arguments = json.dumps(policy_arguments, separators=(",", ":"))
+        response_json = (
+            self._session.check(policy_tool, encoded_arguments)
+            if call_id is None
+            else self._session.check(policy_tool, encoded_arguments, call_id=call_id)
         )
+        response = self._decode(response_json)
         match response.get("kind"):
             case "blocked" if set(response) == {"kind", "feedback"}:
                 feedback = response["feedback"]
@@ -102,7 +103,7 @@ class FrameworkSession:
                     if dispatched_tool != policy_tool or dispatched_arguments != policy_arguments:
                         raise NativeProtocolError("native check altered an allowed Tau tool call")
                     dispatch = self._tau_dispatch(dispatched_tool, dispatched_arguments)
-                    self._pending = True
+                    self._pending.add(call_id)
                     return dispatch
         raise NativeProtocolError("native check response has an invalid result envelope")
 
@@ -131,8 +132,13 @@ class FrameworkSession:
             raise ValueError("arguments must encode a JSON object")
         return logical_tool, logical_arguments
 
-    def report(self, content: str | None, error: bool) -> Reported:
-        response = self._decode(self._session.report(content, error))
+    def report(self, content: str | None, error: bool, call_id: str | None = None) -> Reported:
+        response_json = (
+            self._session.report(content, error)
+            if call_id is None
+            else self._session.report(content, error, call_id=call_id)
+        )
+        response = self._decode(response_json)
         if response.get("kind") == "delivered" and set(response) == {
             "kind",
             "content",
@@ -143,16 +149,22 @@ class FrameworkSession:
             delivered_content = response["content"]
             disposition = response["disposition"]
             if isinstance(delivered_content, str) and disposition in {"admitted", "sealed"}:
-                self._pending = False
+                self._pending.remove(call_id)
                 return Reported(delivered_content, disposition)
         raise NativeProtocolError("native report response has an invalid result envelope")
+
+    def abandon(self, call_id: str | None = None) -> None:
+        if call_id is None:
+            self._session.abandon()
+        else:
+            self._session.abandon(call_id=call_id)
+        self._pending.remove(call_id)
 
     def close(self) -> None:
         if self._closed:
             return
-        if self._pending:
-            self._session.abandon()
-            self._pending = False
+        for call_id in tuple(self._pending):
+            self.abandon(call_id)
         self._session.close()
         self._closed = True
 

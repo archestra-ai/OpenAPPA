@@ -22,6 +22,15 @@ requires = { trust = "internal" }
 delta = {}
 """
 
+PARALLEL_POLICY = """
+version = 2
+trust_chain = ["suspicious", "internal"]
+
+[[tool]]
+name = "read_record"
+delta = {}
+"""
+
 
 def read_record(record_id: str) -> str:
     """Read a record.
@@ -139,6 +148,22 @@ def test_framework_session_checks_then_reports_the_real_tool_result() -> None:
         decision = session.check("write_record", {"record_id": "one"})
         assert isinstance(decision, Blocked)
         assert not decision.recoverable
+    finally:
+        session.close()
+
+
+def test_framework_session_correlates_parallel_results_in_any_order() -> None:
+    session = FrameworkSession(PARALLEL_POLICY, [as_tool(read_record)], "read three records")
+    try:
+        for call_id, record_id in [("call-1", "one"), ("call-2", "two"), ("call-3", "three")]:
+            assert session.check("read_record", {"record_id": record_id}, call_id) == Allowed(
+                "read_record", {"record_id": record_id}
+            )
+
+        for call_id, record_id in [("call-2", "two"), ("call-1", "one"), ("call-3", "three")]:
+            reported = session.report(json.dumps({"record_id": record_id}), error=False, call_id=call_id)
+            assert json.loads(reported.content) == {"record_id": record_id}
+            assert reported.disposition == "admitted"
     finally:
         session.close()
 
