@@ -26,9 +26,10 @@ from appa_taubench.native import BINDING_IDENTITY
 OPENAPPA_REFERENCE = "https://github.com/archestra-ai/OpenAPPA"
 DISCLOSURE = (
     "Custom OpenAPPA scaffold: each proposed call is checked before Tau executes it, and the real result is "
-    "reported to OpenAPPA before the next completion. The agent prompt adds sequential-call and policy-feedback "
-    "instructions and exposes execute_remedy_plan. The scaffold may make hidden replanning completions after a "
-    "multi-call response or when a policy block offers an executable remedy; each is counted and costed separately. "
+    "reported to OpenAPPA before the next completion. Calls from one model response retain their opaque IDs, may "
+    "execute through Tau in parallel, and may report in any order. The agent prompt adds policy-feedback instructions "
+    "and exposes execute_remedy_plan. The scaffold may make hidden replanning completions when a policy block offers "
+    "an executable remedy; each is counted and costed separately. "
     "Irrecoverable and stale-remedy blocks terminate with a fixed refusal. The scaffold also replaces a model "
     "success claim after an errored Tau tool result and a text response that abandons a recoverable policy block "
     "with fixed refusals. Submitted Tau trajectories contain the actual dispatched calls and delivered results; "

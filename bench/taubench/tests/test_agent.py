@@ -2,7 +2,7 @@ import json
 from collections.abc import Iterator
 
 import pytest
-from tau2.data_model.message import AssistantMessage, ToolCall, ToolMessage, UserMessage
+from tau2.data_model.message import AssistantMessage, MultiToolMessage, ToolCall, ToolMessage, UserMessage
 from tau2.environment.tool import as_tool
 
 from appa_taubench import AGENT_PROMPT_PROFILES
@@ -28,11 +28,11 @@ class FakeSession:
         self.user_prompt = user_prompt
         self.logical_tools = logical_tools or []
         self.reported = []
+        self.abandoned = []
         self.closed = False
-        self.abandoned = False
         FakeSession.instance = self
 
-    def check(self, tool, arguments):
+    def check(self, tool, arguments, call_id=None):
         return next(self.decisions)
 
     def logical_call(self, tool, arguments):
@@ -40,9 +40,12 @@ class FakeSession:
             return tool, arguments
         return arguments["agent_tool_name"], json.loads(arguments.get("arguments", "{}"))
 
-    def report(self, content, error):
+    def report(self, content, error, call_id=None):
         self.reported.append((content, error))
         return Reported(content or "[sealed]", "sealed" if error else "admitted")
+
+    def abandon(self, call_id):
+        self.abandoned.append(call_id)
 
     def close(self):
         self.closed = True
@@ -68,6 +71,15 @@ def response(tool: str | None, cost: float = 0.1, arguments=None) -> AssistantMe
                 arguments=arguments or {"value": "one"},
             )
         ],
+        cost=cost,
+    )
+
+
+def batch_response(*tools: str, cost: float = 0.1) -> AssistantMessage:
+    return AssistantMessage(
+        role="assistant",
+        content=None,
+        tool_calls=[ToolCall(id=f"call-{tool}", name=tool, arguments={"value": tool}) for tool in tools],
         cost=cost,
     )
 
@@ -119,6 +131,60 @@ def test_allowed_call_executes_in_taubench_then_reports_before_the_next_completi
     final, state = agent.generate_next_message(ToolMessage(id="call-lookup", role="tool", content="found one"), state)
     assert final.content == "done"
     assert FakeSession.instance.reported == [("found one", False)]
+    agent.stop()
+
+
+def test_parallel_calls_execute_and_report_in_one_tau_batch(monkeypatch) -> None:
+    FakeSession.decisions = iter(
+        [
+            Allowed("lookup", {"value": "one"}),
+            Allowed("lookup", {"value": "two"}),
+        ]
+    )
+    responses = iter([batch_response("one", "two"), response(None)])
+    monkeypatch.setattr("appa_taubench.agent.FrameworkSession", FakeSession)
+    monkeypatch.setattr("appa_taubench.agent.generate", lambda **kwargs: next(responses))
+
+    agent = AppaAgent([as_tool(lookup)], "domain policy", "appa policy", "model")
+    proposed, state = agent.generate_next_message(UserMessage.text("find both"), agent.get_init_state())
+    assert [call.arguments for call in proposed.tool_calls] == [{"value": "one"}, {"value": "two"}]
+
+    final, _ = agent.generate_next_message(
+        MultiToolMessage(
+            role="tool",
+            tool_messages=[
+                ToolMessage(id="call-two", role="tool", content="found two"),
+                ToolMessage(id="call-one", role="tool", content="found one"),
+            ],
+        ),
+        state,
+    )
+    assert final.content == "done"
+    assert FakeSession.instance.reported == [("found two", False), ("found one", False)]
+    assert agent.stats.allowed == 2
+    assert agent.stats.admitted_results == 2
+    agent.stop()
+
+
+def test_blocked_sibling_cancels_released_calls_before_replanning(monkeypatch) -> None:
+    FakeSession.decisions = iter(
+        [
+            Allowed("lookup", {"value": "one"}),
+            Blocked("verify first", recoverable=True),
+            Allowed("lookup", {"value": "safe"}),
+        ]
+    )
+    responses = iter([batch_response("one", "two", cost=0.2), response("lookup", 0.3, {"value": "safe"})])
+    monkeypatch.setattr("appa_taubench.agent.FrameworkSession", FakeSession)
+    monkeypatch.setattr("appa_taubench.agent.generate", lambda **kwargs: next(responses))
+
+    agent = AppaAgent([as_tool(lookup)], "domain policy", "appa policy", "model")
+    proposed, _ = agent.generate_next_message(UserMessage.text("find both"), agent.get_init_state())
+
+    assert proposed.tool_calls[0].arguments == {"value": "safe"}
+    assert proposed.cost == pytest.approx(0.5)
+    assert FakeSession.instance.abandoned == ["call-one"]
+    assert agent.stats.policy_blocks == 1
     agent.stop()
 
 
@@ -217,12 +283,12 @@ def test_mismatched_tau_result_still_closes_the_session_and_audit(monkeypatch, t
     )
     _, state = agent.generate_next_message(UserMessage.text("find one"), agent.get_init_state())
 
-    with pytest.raises(ValueError, match="does not match"):
+    with pytest.raises(ValueError, match="do not match"):
         agent.generate_next_message(ToolMessage(id="wrong", role="tool", content="found"), state)
     agent.stop()
 
     assert FakeSession.instance.closed
-    assert not agent.pending
+    assert not agent._pending_tool_call_ids
     assert len(list(tmp_path.glob("*.json"))) == 1
 
 

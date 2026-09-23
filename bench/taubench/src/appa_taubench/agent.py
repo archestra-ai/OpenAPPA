@@ -26,7 +26,6 @@ from appa_taubench.knowledge import discoverable_tools
 from appa_taubench.native import Allowed, Blocked, FrameworkSession
 
 POLICY_BLOCK_SENTINEL = "OpenAPPA blocked this tool call: "
-SEQUENTIAL_CALL_FEEDBACK = "OpenAPPA requires one sequential tool call per model completion."
 MAX_BLOCKED_COMPLETIONS = 3
 POLICY_REFUSAL = "I cannot complete that request because OpenAPPA refused the proposed action."
 TOOL_ERROR_REFUSAL = "I could not complete that request because the attempted action did not succeed."
@@ -165,8 +164,7 @@ class AppaAgent(LLMAgent[LLMAgentState]):
             llm_args=llm_args,
         )
         self.session: FrameworkSession | None = None
-        self.pending = False
-        self._pending_tool_call_id: str | None = None
+        self._pending_tool_call_ids: set[str] = set()
         self.stats = EpisodeStats()
         self._recorded_stats = False
         self._trial_seeds = trial_seeds
@@ -185,7 +183,7 @@ class AppaAgent(LLMAgent[LLMAgentState]):
     def system_prompt(self) -> str:
         prompt = (
             f"{super().system_prompt}\n\n"
-            "Call at most one tool in each response. OpenAPPA may return policy feedback in a tool result; "
+            "OpenAPPA may return policy feedback in a tool result; "
             "follow that feedback or explain that the request cannot be completed."
         )
         addendum = AGENT_PROMPT_PROFILES[self.agent_prompt_profile]
@@ -207,7 +205,7 @@ class AppaAgent(LLMAgent[LLMAgentState]):
                 message.content,
                 logical_tools=self.logical_tools,
             )
-        elif self.pending:
+        elif self._pending_tool_call_ids:
             self._report(message)
         else:
             self._last_result_error = False
@@ -233,62 +231,64 @@ class AppaAgent(LLMAgent[LLMAgentState]):
                 state.messages.append(response)
                 return response, state
 
-            if len(response.tool_calls) != 1:
-                hidden_cost += self._record_hidden_completion(response, "multiple_tool_calls")
-                self.stats.sequential_blocks += len(response.tool_calls)
-                self.audit.record(
-                    "sequential_block",
-                    tool_call_count=len(response.tool_calls),
-                    feedback=SEQUENTIAL_CALL_FEEDBACK,
-                )
-                self._append_feedback(state, response, SEQUENTIAL_CALL_FEEDBACK)
+            feedback_by_id: dict[str, str] = {}
+            allowed_ids: list[str] = []
+            irrecoverable = False
+            for call in response.tool_calls:
+                self.stats.checks += 1
+                try:
+                    policy_tool, policy_arguments = self.session.logical_call(call.name, call.arguments)
+                except ValueError:
+                    policy_tool, policy_arguments = call.name, call.arguments
+                decision = self.session.check(call.name, call.arguments, call.id)
+                match decision:
+                    case Blocked(feedback):
+                        blocked = True
+                        irrecoverable = irrecoverable or not decision.recoverable
+                        self.stats.policy_blocks += 1
+                        feedback_by_id[call.id] = feedback
+                        self.audit.record(
+                            "policy_block",
+                            tool_call_id=call.id,
+                            proposed_tool=call.name,
+                            proposed_arguments=call.arguments,
+                            policy_tool=policy_tool,
+                            policy_arguments=policy_arguments,
+                            feedback=feedback,
+                            recoverable=decision.recoverable,
+                        )
+                    case Allowed(dispatched_tool, dispatched_arguments):
+                        self.audit.record(
+                            "policy_allow",
+                            tool_call_id=call.id,
+                            proposed_tool=call.name,
+                            proposed_arguments=call.arguments,
+                            policy_tool=policy_tool,
+                            policy_arguments=policy_arguments,
+                            dispatched_tool=dispatched_tool,
+                            dispatched_arguments=dispatched_arguments,
+                        )
+                        call.name = dispatched_tool
+                        call.arguments = dispatched_arguments
+                        allowed_ids.append(call.id)
+                        self.stats.allowed += 1
+
+            if feedback_by_id:
+                hidden_cost += self._record_hidden_completion(response, "policy_block")
+                for call_id in allowed_ids:
+                    self.session.abandon(call_id)
+                    feedback_by_id[call_id] = "A sibling call was blocked, so this released call was not executed."
+                    self.audit.record("policy_abandon", tool_call_id=call_id, reason="blocked_sibling")
+                if irrecoverable:
+                    return self._refuse(state, POLICY_REFUSAL, hidden_cost, "no_next_step")
+                self._append_feedback(state, response, feedback_by_id)
                 continue
 
-            call = response.tool_calls[0]
-            self.stats.checks += 1
-            try:
-                policy_tool, policy_arguments = self.session.logical_call(call.name, call.arguments)
-            except ValueError:
-                policy_tool, policy_arguments = call.name, call.arguments
-            decision = self.session.check(call.name, call.arguments)
-            match decision:
-                case Blocked(feedback):
-                    hidden_cost += self._record_hidden_completion(response, "policy_block")
-                    blocked = True
-                    self.stats.policy_blocks += 1
-                    self.audit.record(
-                        "policy_block",
-                        tool_call_id=call.id,
-                        proposed_tool=call.name,
-                        proposed_arguments=call.arguments,
-                        policy_tool=policy_tool,
-                        policy_arguments=policy_arguments,
-                        feedback=feedback,
-                        recoverable=decision.recoverable,
-                    )
-                    self._append_feedback(state, response, feedback)
-                    if not decision.recoverable:
-                        return self._refuse(state, POLICY_REFUSAL, hidden_cost, "no_next_step")
-                case Allowed(dispatched_tool, dispatched_arguments):
-                    self.audit.record(
-                        "policy_allow",
-                        tool_call_id=call.id,
-                        proposed_tool=call.name,
-                        proposed_arguments=call.arguments,
-                        policy_tool=policy_tool,
-                        policy_arguments=policy_arguments,
-                        dispatched_tool=dispatched_tool,
-                        dispatched_arguments=dispatched_arguments,
-                    )
-                    call.name = dispatched_tool
-                    call.arguments = dispatched_arguments
-                    self.pending = True
-                    self._last_result_error = False
-                    self._pending_tool_call_id = call.id
-                    self.stats.allowed += 1
-                    self._add_hidden_cost(response, hidden_cost)
-                    state.messages.append(response)
-                    return response, state
+            self._pending_tool_call_ids = set(allowed_ids)
+            self._last_result_error = False
+            self._add_hidden_cost(response, hidden_cost)
+            state.messages.append(response)
+            return response, state
 
         return self._refuse(state, POLICY_REFUSAL, hidden_cost, "remedy_retry_limit")
 
@@ -301,14 +301,13 @@ class AppaAgent(LLMAgent[LLMAgentState]):
             session = self.session
             if session is not None:
                 try:
-                    if self.pending and message is not None:
+                    if self._pending_tool_call_ids and message is not None:
                         self._report(message)
                 finally:
                     session.close()
         finally:
             self.session = None
-            self.pending = False
-            self._pending_tool_call_id = None
+            self._pending_tool_call_ids.clear()
             if not self._recorded_stats:
                 with _stats_lock:
                     _completed_stats.append(self.stats)
@@ -343,29 +342,27 @@ class AppaAgent(LLMAgent[LLMAgentState]):
             results = [message]
         else:
             raise ValueError("an allowed OpenAPPA call must be followed by its TauBench tool result")
-        if len(results) != 1:
-            raise ValueError("OpenAPPA permits one outstanding TauBench tool call")
-        result = results[0]
-        if result.id != self._pending_tool_call_id:
-            raise ValueError("TauBench tool result does not match the outstanding OpenAPPA call")
-        original_content = result.content
-        reported = session.report(result.content, result.error)
-        result.content = reported.content
-        self.audit.record(
-            "tool_result",
-            tool_call_id=result.id,
-            original_content=original_content,
-            error=result.error,
-            delivered_content=reported.content,
-            disposition=reported.disposition,
-        )
-        if reported.disposition == "admitted":
-            self.stats.admitted_results += 1
-        else:
-            self.stats.sealed_results += 1
-        self.pending = False
-        self._pending_tool_call_id = None
-        self._last_result_error = result.error
+        result_ids = {result.id for result in results}
+        if len(result_ids) != len(results) or result_ids != self._pending_tool_call_ids:
+            raise ValueError("TauBench tool results do not match the outstanding OpenAPPA calls")
+        for result in results:
+            original_content = result.content
+            reported = session.report(result.content, result.error, result.id)
+            result.content = reported.content
+            self.audit.record(
+                "tool_result",
+                tool_call_id=result.id,
+                original_content=original_content,
+                error=result.error,
+                delivered_content=reported.content,
+                disposition=reported.disposition,
+            )
+            if reported.disposition == "admitted":
+                self.stats.admitted_results += 1
+            else:
+                self.stats.sealed_results += 1
+        self._pending_tool_call_ids.clear()
+        self._last_result_error = any(result.error for result in results)
 
     def _refuse(
         self,
@@ -387,7 +384,11 @@ class AppaAgent(LLMAgent[LLMAgentState]):
         return cost
 
     @staticmethod
-    def _append_feedback(state: LLMAgentState, response: AssistantMessage, feedback: str) -> None:
+    def _append_feedback(
+        state: LLMAgentState,
+        response: AssistantMessage,
+        feedback_by_id: dict[str, str],
+    ) -> None:
         state.messages.append(response)
         for call in response.tool_calls or []:
             state.messages.append(
@@ -395,7 +396,7 @@ class AppaAgent(LLMAgent[LLMAgentState]):
                     id=call.id,
                     role="tool",
                     requestor="assistant",
-                    content=f"{POLICY_BLOCK_SENTINEL}{feedback}",
+                    content=f"{POLICY_BLOCK_SENTINEL}{feedback_by_id[call.id]}",
                     error=True,
                 )
             )

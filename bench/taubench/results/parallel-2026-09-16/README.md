@@ -4,6 +4,8 @@ Parallel tool calling was associated with higher utility and fewer model rounds 
 
 The evaluation covers all 97 `banking_knowledge` base tasks with four trials per arm. Each arm has 388 strictly validated simulations. Both use GPT-5.6 Luna at maximum reasoning effort, `alltools-qwen`, seed 300, and binding `appa-agent-python-v8`.
 
+[`REPRODUCING.md`](REPRODUCING.md) gives the complete setup, identity check, dry-run, execution, resume, validation, and matched-summary procedure for both arms.
+
 | Policy mode | Tool calling | Successful simulations | Mean reward | Mean agent tokens per simulation | Visible agent model calls | Recorded cost |
 |---|---|---:|---:|---:|---:|---:|
 | Guarded | Sequential | 133/388 | 34.28% | 934,475 | 9,854 | $30.33 |
