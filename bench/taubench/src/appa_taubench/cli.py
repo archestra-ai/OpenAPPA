@@ -61,7 +61,12 @@ def add_execution_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--seed", type=int, default=300)
     parser.add_argument("--max-steps", type=integer_at_least(1), default=200)
-    parser.add_argument("--max-concurrency", type=integer_at_least(1), default=3)
+    parser.add_argument(
+        "--max-concurrency",
+        type=integer_at_least(1),
+        default=None,
+        help="Optional ceiling for automatically tuned concurrency (1 is serial).",
+    )
     parser.add_argument("--agent-prompt-profile", choices=AGENT_PROMPT_PROFILES, default="standard")
     parser.add_argument("--dry-run", action="store_true", help="validate and print the plan without invoking Tau")
 

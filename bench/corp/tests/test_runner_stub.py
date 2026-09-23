@@ -249,10 +249,15 @@ def test_grid_runs_episodes_in_parallel(tmp_path: Path) -> None:
 markers="../markers"
 mkdir -p "$markers"
 touch "$markers/$$"
+if [ ! -e "$markers/warmed" ]; then
+    touch "$markers/warmed"
+    rm "$markers/$$"
+    exit 0
+fi
 attempt=0
 while [ "$attempt" -lt 100 ]; do
     count=0
-    for marker in "$markers"/*; do
+    for marker in "$markers"/[0-9]*; do
         [ -e "$marker" ] && count=$((count + 1))
     done
     if [ "$count" -ge 2 ]; then
@@ -272,19 +277,21 @@ exit 9
     results = cli._run_grid(
         [agent],
         [scenario],
-        reps=2,
+        reps=3,
         model="stub",
         run_dir=run_dir,
         timeout_s=30,
-        jobs=2,
+        max_concurrency=2,
     )
 
-    assert [result.rep for result in results] == [1, 2]
+    assert [result.rep for result in results] == [1, 2, 3]
     assert all(result.error is None for result in results)
     assert all(
         (run_dir / agent.name / scenario.name / f"rep{rep}" / "result.json").is_file()
-        for rep in (1, 2)
+        for rep in (1, 2, 3)
     )
+    concurrency = json.loads((run_dir / "concurrency-summary.json").read_text())
+    assert concurrency["peak_active"] == 2
 
 
 def test_diagnostic_patterns_match_the_real_log_wording() -> None:

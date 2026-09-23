@@ -39,10 +39,15 @@ def resolve_samples(command: str, task_type: str = "all", arms: str = "all") -> 
     return ids
 
 
-def add_execution_arguments(parser: argparse.ArgumentParser, default_concurrency: int) -> None:
+def add_execution_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--reasoning-effort", choices=REASONING_EFFORTS, default="high")
-    parser.add_argument("--max-concurrency", type=integer_at_least(1), default=default_concurrency)
+    parser.add_argument(
+        "--max-concurrency",
+        type=integer_at_least(1),
+        default=None,
+        help="Optional ceiling for automatically tuned concurrency (1 is serial).",
+    )
     parser.add_argument("--seed", type=int, default=300)
     parser.add_argument("--logdir", default="runs")
     parser.add_argument("--run-name", default=None)
@@ -60,10 +65,10 @@ def build_parser() -> argparse.ArgumentParser:
     preflight_parser.add_argument("--model", default=DEFAULT_MODEL)
 
     smoke_parser = commands.add_parser("smoke", help="run a manifested 20-sample lifecycle smoke test")
-    add_execution_arguments(smoke_parser, default_concurrency=10)
+    add_execution_arguments(smoke_parser)
 
     run_parser = commands.add_parser("run", help="run upstream and control samples")
-    add_execution_arguments(run_parser, default_concurrency=50)
+    add_execution_arguments(run_parser)
     run_parser.add_argument("--task-type", choices=TASK_TYPE_CHOICES, default="all")
     run_parser.add_argument("--arms", choices=ARM_CHOICES, default="all")
 

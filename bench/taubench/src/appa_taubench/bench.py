@@ -11,10 +11,14 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from functools import partial
 from pathlib import Path
 
+import tau2.runner.batch as tau_batch
+from appa_bench_concurrency import AdaptiveConcurrency, AdaptiveThreadPoolExecutor
 from tau2.data_model.simulation import Results, TerminationReason, TextRunConfig
 from tau2.data_model.tasks import RewardType
 from tau2.registry import registry
@@ -94,7 +98,7 @@ class RunSpec:
     review_model: str
     num_trials: int
     max_steps: int
-    max_concurrency: int
+    max_concurrency: int | None
     seed: int
     trial_seeds: tuple[int, ...]
     task_ids: tuple[str, ...]
@@ -197,7 +201,7 @@ def make_run_spec(
     review_model: str,
     num_trials: int,
     max_steps: int,
-    max_concurrency: int,
+    max_concurrency: int | None,
     seed: int,
     task_ids: tuple[str, ...],
     publication_run: bool,
@@ -246,9 +250,13 @@ def ensure_run_manifest(output_dir: Path, spec: RunSpec) -> None:
         ):
             raise ValueError(f"{path} does not match the requested run; use a different --run-name")
         concurrency_values = existing.get("execution", {}).get("max_concurrency_values")
-        if not isinstance(concurrency_values, list) or not all(isinstance(value, int) for value in concurrency_values):
+        if not isinstance(concurrency_values, list) or not all(
+            value is None or isinstance(value, int) for value in concurrency_values
+        ):
             raise ValueError(f"{path} has invalid execution metadata")
-        payload["execution"]["max_concurrency_values"] = sorted({*concurrency_values, spec.max_concurrency})
+        payload["execution"]["max_concurrency_values"] = sorted(
+            {*concurrency_values, spec.max_concurrency}, key=lambda value: -1 if value is None else value
+        )
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     temporary.replace(path)
@@ -517,6 +525,34 @@ def validate_results_for_submission(results: Results) -> None:
         raise ValueError(f"result contains {len(infrastructure_errors)} infrastructure-error simulations")
 
 
+@contextmanager
+def adaptive_tau_executor(
+    output_dir: Path,
+    *,
+    controller_factory: Callable[[int], AdaptiveConcurrency] | None = None,
+):
+    """Adapt Tau's batch admissions without changing its checkpoint semantics."""
+    original = tau_batch.ThreadPoolExecutor
+    created: list[AdaptiveThreadPoolExecutor] = []
+
+    def factory(max_workers=None, **_kwargs):
+        maximum = max_workers or 1
+        executor = AdaptiveThreadPoolExecutor(
+            max_workers=maximum,
+            history_path=output_dir / "concurrency.jsonl",
+            clean_result=lambda result: result.termination_reason != TerminationReason.INFRASTRUCTURE_ERROR,
+            controller=None if controller_factory is None else controller_factory(maximum),
+        )
+        created.append(executor)
+        return executor
+
+    tau_batch.ThreadPoolExecutor = factory
+    try:
+        yield created
+    finally:
+        tau_batch.ThreadPoolExecutor = original
+
+
 def _execute_bench(
     retrieval_config: str,
     policy_mode: str,
@@ -529,7 +565,7 @@ def _execute_bench(
     run_name: str | None,
     seed: int,
     max_steps: int,
-    max_concurrency: int,
+    max_concurrency: int | None,
     num_trials: int,
     task_ids: tuple[str, ...] | None,
     publication_run: bool,
@@ -554,6 +590,7 @@ def _execute_bench(
     if missing:
         raise ValueError(f"unknown Tau task IDs: {missing}")
     tasks = [available[task_id] for task_id in selected_ids]
+    concurrency_ceiling = min(max_concurrency or len(tasks) * num_trials, len(tasks) * num_trials)
     if publication_run and len(tasks) != len(all_tasks):
         raise ValueError("leaderboard runs require the complete base split")
     spec = make_run_spec(
@@ -617,7 +654,7 @@ def _execute_bench(
         task_ids=None if publication_run else list(selected_ids),
         num_trials=num_trials,
         max_steps=max_steps,
-        max_concurrency=max_concurrency,
+        max_concurrency=concurrency_ceiling,
         seed=seed,
         save_to=suffix,
         auto_resume=True,
@@ -638,12 +675,18 @@ def _execute_bench(
         output_dir / "evaluator-audit",
     ):
         preflight_nl_judge(available["task_102"])
-        results = run_tasks(
-            config,
-            tasks,
-            save_path=output_dir / "results.json",
-            save_dir=output_dir,
-        )
+        with adaptive_tau_executor(output_dir) as executors:
+            results = run_tasks(
+                config,
+                tasks,
+                save_path=output_dir / "results.json",
+                save_dir=output_dir,
+            )
+        if executors:
+            (output_dir / "concurrency-summary.json").write_text(
+                json.dumps(executors[0].controller.summary(), indent=2) + "\n",
+                encoding="utf-8",
+            )
         audit_task_102_atomic(results, judge_model, dict(spec.judge_model_args))
 
     validate_run_integrity(results, len(tasks), num_trials)
@@ -706,7 +749,7 @@ def run_bench(
     run_name: str | None,
     seed: int,
     max_steps: int,
-    max_concurrency: int,
+    max_concurrency: int | None,
     num_trials: int,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     policy_mode: str = "guarded",
@@ -745,7 +788,7 @@ def run_pilot(
     run_name: str,
     seed: int,
     max_steps: int,
-    max_concurrency: int,
+    max_concurrency: int | None,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     dry_run: bool = False,
     agent_prompt_profile: str = "standard",
@@ -793,7 +836,7 @@ def run_chaos_screen(
     run_name: str,
     seed: int,
     max_steps: int,
-    max_concurrency: int,
+    max_concurrency: int | None,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     dry_run: bool = False,
     agent_prompt_profile: str = "standard",

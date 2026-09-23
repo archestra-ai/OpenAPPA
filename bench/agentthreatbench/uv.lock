@@ -237,6 +237,7 @@ dependencies = [
     { name = "agent-framework-core" },
     { name = "anthropic" },
     { name = "appa-agent-python" },
+    { name = "appa-bench-concurrency" },
     { name = "appa-bench-publish" },
     { name = "claude-agent-sdk" },
     { name = "inspect-ai" },
@@ -256,6 +257,7 @@ requires-dist = [
     { name = "agent-framework-core", specifier = "==1.13.0" },
     { name = "anthropic", specifier = "==0.115.0" },
     { name = "appa-agent-python", directory = "../../appa-agent-python" },
+    { name = "appa-bench-concurrency", directory = "../concurrency" },
     { name = "appa-bench-publish", directory = "../publish" },
     { name = "claude-agent-sdk", specifier = "==0.2.152" },
     { name = "inspect-ai", specifier = "==0.3.252" },
@@ -267,6 +269,19 @@ requires-dist = [
 dev = [
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-asyncio", specifier = ">=1" },
+    { name = "ruff", specifier = ">=0.16" },
+]
+
+[[package]]
+name = "appa-bench-concurrency"
+version = "0.1.0"
+source = { directory = "../concurrency" }
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8" },
     { name = "ruff", specifier = ">=0.16" },
 ]
 

@@ -808,3 +808,10 @@ def test_token_overhead_is_unavailable_rather_than_zero_without_an_audit() -> No
     overhead = _token_overhead(summaries)
     assert overhead["per_arm"]["guarded"]["agent_total_per_simulation"] is None
     assert overhead["ratios"]["guarded_over_stock"] is None
+
+
+def test_adaptive_executor_patch_is_scoped(tmp_path) -> None:
+    original = bench.tau_batch.ThreadPoolExecutor
+    with bench.adaptive_tau_executor(tmp_path):
+        assert bench.tau_batch.ThreadPoolExecutor is not original
+    assert bench.tau_batch.ThreadPoolExecutor is original

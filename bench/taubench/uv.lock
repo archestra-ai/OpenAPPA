@@ -138,11 +138,25 @@ source = { editable = "../../appa-agent-python" }
 dev = [{ name = "pytest", specifier = ">=8" }]
 
 [[package]]
+name = "appa-bench-concurrency"
+version = "0.1.0"
+source = { directory = "../concurrency" }
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8" },
+    { name = "ruff", specifier = ">=0.16" },
+]
+
+[[package]]
 name = "appa-taubench"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "appa-agent-python" },
+    { name = "appa-bench-concurrency" },
     { name = "tau2", extra = ["knowledge"] },
 ]
 
@@ -155,6 +169,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "appa-agent-python", editable = "../../appa-agent-python" },
+    { name = "appa-bench-concurrency", directory = "../concurrency" },
     { name = "tau2", extras = ["knowledge"], git = "https://github.com/sierra-research/tau2-bench.git?rev=93ee97b8303ce0e89e0ad17e6207591a1846f84b" },
 ]
 
