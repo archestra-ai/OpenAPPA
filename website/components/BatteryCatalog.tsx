@@ -104,6 +104,12 @@ const BATTERIES = [
     logo: "/images/batteries/databricks.svg",
   },
   {
+    name: "xmemory",
+    description: "Rules for 32 instance and admin tools; internal reads, writes without trusted input, reviewed schema migrations and deletions.",
+    href: "/battery-xmemory",
+    logo: "/images/batteries/xmemory.svg",
+  },
+  {
     name: "Add your own",
     href: "/write-a-battery",
     add: true,
