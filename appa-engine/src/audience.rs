@@ -463,19 +463,25 @@ impl AudienceRegistry {
 
     /// Every selector whose answer the extensional closure of `level` reads: its own `from`,
     /// the groups asserted within it, and — for `internal` — the whole closure of `self`. A
-    /// session principal is `self`'s own member, so `self`'s `from` is not read under one.
-    fn chain_selectors(&self, level: ChainAudience, principal: Option<&ReaderId>) -> BTreeSet<SelectorSpec> {
-        let mut selectors = match (level, principal) {
-            (ChainAudience::Self_, Some(_)) => BTreeSet::new(),
-            _ => self.chain_from(level).clone(),
+    /// session principal is the whole of `self`, so nothing asserted of `self` is read under
+    /// one; its groups still widen `internal`. `None` when the level has neither selectors nor
+    /// a principal to answer it.
+    fn chain_selectors(&self, level: ChainAudience, principal: Option<&ReaderId>) -> Option<BTreeSet<SelectorSpec>> {
+        let groups = |level| self.groups_within(level).flat_map(|group| group.from.iter().cloned());
+        let self_from = self.self_from.iter().filter(|_| principal.is_none()).cloned();
+        let selectors: BTreeSet<SelectorSpec> = match level {
+            ChainAudience::Self_ if principal.is_some() => BTreeSet::new(),
+            ChainAudience::Self_ => self_from.chain(groups(ChainAudience::Self_)).collect(),
+            ChainAudience::Internal => self
+                .internal_from
+                .iter()
+                .cloned()
+                .chain(groups(ChainAudience::Internal))
+                .chain(groups(ChainAudience::Self_))
+                .chain(self_from)
+                .collect(),
         };
-        for group in self.groups_within(level) {
-            selectors.extend(group.from.iter().cloned());
-        }
-        if level == ChainAudience::Internal {
-            selectors.extend(self.chain_selectors(ChainAudience::Self_, principal));
-        }
-        selectors
+        (!selectors.is_empty() || principal.is_some()).then_some(selectors)
     }
 
     /// Translate the atoms an evaluation still needs into the primitive requests that answer
@@ -491,10 +497,9 @@ impl AudienceRegistry {
         for atom in atoms {
             match atom {
                 SymbolicAtom::Chain(level) => {
-                    let selectors = self.chain_selectors(*level, principal);
-                    if selectors.is_empty() && principal.is_none() {
-                        return Err(Unroutable::UnmappedChain(*level));
-                    }
+                    let selectors = self
+                        .chain_selectors(*level, principal)
+                        .ok_or(Unroutable::UnmappedChain(*level))?;
                     needed.selectors.extend(selectors);
                 }
                 SymbolicAtom::Group(GroupRef::Named(name)) => {
@@ -661,8 +666,7 @@ impl AudienceRegistry {
 
         // Chain levels: the symmetric closure over the same selector answers.
         for level in [ChainAudience::Self_, ChainAudience::Internal] {
-            let specs = self.chain_selectors(level, principal);
-            if (!specs.is_empty() || principal.is_some())
+            if let Some(specs) = self.chain_selectors(level, principal)
                 && let Some(mut members) = union_of(&specs)
             {
                 members.extend(principal.cloned());
@@ -1149,6 +1153,48 @@ mod tests {
             registry.only_requested(&viewer, &AudienceEvidence::default(), &[self_], Some(&alice)),
             Err(EvidenceRefusal::UnrequestedEvidence { .. })
         ));
+    }
+
+    /// A group asserted within `self` is not a member of `self` under a principal, but it still
+    /// widens `internal`, which contains `self`'s closure without a principal.
+    #[test]
+    fn under_a_principal_groups_within_self_widen_only_internal() {
+        let mut config = corp_config();
+        config.groups[0].within = Some(ChainAudience::Self_);
+        let registry = registry(config);
+        let alice = reader("alice@corp.com");
+        let finance = spec("google-workspace", "group/finance@corp.com");
+        let self_ = SymbolicAtom::Chain(ChainAudience::Self_);
+        let internal = SymbolicAtom::Chain(ChainAudience::Internal);
+
+        let needed = registry
+            .needed_primitives(std::slice::from_ref(&self_), Some(&alice))
+            .unwrap();
+        assert_eq!(needed, NeededPrimitives::default());
+        let needed = registry
+            .needed_primitives(std::slice::from_ref(&internal), Some(&alice))
+            .unwrap();
+        assert!(needed.selectors.contains(&finance));
+
+        let answered = sources(vec![
+            SourceClaims {
+                provider: "google-workspace".into(),
+                selector: "full-members".into(),
+                members: vec![],
+            },
+            slack("full-members", &[]),
+            SourceClaims {
+                provider: "google-workspace".into(),
+                selector: "group/finance@corp.com".into(),
+                members: vec![reader("cfo@corp.com")],
+            },
+        ]);
+        let expansions = registry.expansions(&answered, Some(&alice)).unwrap();
+        assert_eq!(expansions.members(&self_), Some(&BTreeSet::from([alice.clone()])));
+        assert_eq!(
+            expansions.members(&internal),
+            Some(&BTreeSet::from([alice, reader("cfo@corp.com")]))
+        );
     }
 
     /// Without a principal and without sources, `self` is a policy gap; a principal fills it.
