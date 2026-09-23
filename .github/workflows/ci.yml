@@ -183,6 +183,7 @@ jobs:
               - 'scripts/appa-marketplace.sh'
               - 'scripts/lint_batteries.py'
               - 'scripts/test_lint_batteries.py'
+              - 'scripts/lint_battery_toml.py'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
             integration: &integration
@@ -333,6 +334,9 @@ jobs:
 
       - name: Lint battery scripts
         run: python3 scripts/lint_batteries.py
+
+      - name: Lint battery TOML files
+        run: python3 scripts/lint_battery_toml.py
 
   marketplace-checks:
     name: Marketplace Checks
