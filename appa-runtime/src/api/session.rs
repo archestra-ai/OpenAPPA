@@ -388,6 +388,14 @@ impl Session {
         }
     }
 
+    /// The reader this session's family acts for, as its opening pinned it.
+    pub(crate) fn principal(&self) -> Result<Option<ReaderId>, EventError> {
+        let log = self.inner.log(&self.root)?;
+        let policy = self.policy(&log)?;
+        let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
+        Ok(view.principal().cloned())
+    }
+
     /// The calls a turn end closes. A trajectory that has ended or never
     /// opened carries none, so a turn end that names one is a no-op
     /// rather than a refusal — a turn ends for reasons the engine does
@@ -2056,7 +2064,7 @@ name = "fetch"
 starting_label = { trust = "suspicious" }
 "#;
         let runtime = Runtime::open(config_with(policy, None), db.clone(), None).expect("the deployment opens");
-        runtime.create_session(root()).expect("a fresh id opens");
+        runtime.create_session(root(), None).expect("a fresh id opens");
         let live = runtime.status(&root()).expect("a fresh root answers");
         assert_eq!((live.trust.as_str(), live.audience.as_str()), ("suspicious", "public"));
         drop(runtime);
@@ -2070,7 +2078,7 @@ starting_label = { trust = "suspicious" }
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        runtime.create_session(root()).expect("a fresh id opens");
+        runtime.create_session(root(), None).expect("a fresh id opens");
         assert!(runtime.live(&root(), &root()).is_ok());
         assert!(matches!(
             runtime.live(&root(), &TrajectoryId("cc:never-bound".to_string())),
@@ -2097,7 +2105,7 @@ name = "appa/execute_remedy_plan"
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         let decision = session
             .on_tool_call(fetch(serde_json::json!({"b": 1, "a": 2})), false)
             .await
@@ -2122,7 +2130,7 @@ name = "appa/execute_remedy_plan"
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let db = dir.path().join("appa.db");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), db.clone(), None).expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         let call = fetch(serde_json::json!({"a": 1}));
 
         for call_id in ["toolu-1", "toolu-2"] {
@@ -2167,7 +2175,7 @@ name = "appa/execute_remedy_plan"
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         let call = fetch(serde_json::json!({"a": 1}));
 
         assert!(matches!(
@@ -2212,7 +2220,7 @@ name = "appa/execute_remedy_plan"
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         let call = fetch(serde_json::json!({"a": 1}));
         let ids = ["toolu-1", "toolu-2", "toolu-3", "toolu-4", "toolu-5"];
 
@@ -2250,7 +2258,7 @@ name = "appa/execute_remedy_plan"
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         let call = fetch(serde_json::json!({"a": 1}));
 
         for call_id in ["toolu-1", "toolu-2", "toolu-3"] {
@@ -2287,7 +2295,7 @@ name = "appa/execute_remedy_plan"
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         session
             .on_tool_call_identified(fetch(serde_json::json!({"a": 1})), Some("toolu-1".to_string()), false)
             .await
@@ -2305,7 +2313,7 @@ name = "appa/execute_remedy_plan"
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
 
         let first = authorize_spawn(
             &session,
@@ -2369,7 +2377,7 @@ name = "appa/execute_remedy_plan"
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         let duplicated = ProposedCall {
             tool: "fetch".to_string(),
             arguments: serde_json::value::RawValue::from_string(r#"{"a":1,"a":2}"#.to_string())
@@ -2395,7 +2403,7 @@ name = "appa/execute_remedy_plan"
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         session
             .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
             .await
@@ -2422,7 +2430,7 @@ name = "appa/execute_remedy_plan"
         let url = stub(serde_json::json!({"body": "scrubbed"})).await;
         let runtime =
             Runtime::open(emitting_leak_config(&url), dir.path().join("appa.db"), None).expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         let outcome = || ToolOutcome::Success {
             body: OutcomeBody::Available("raw with pii".to_string()),
         };
@@ -2520,7 +2528,7 @@ name = "appa/execute_remedy_plan"
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         session
             .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
             .await
@@ -2553,7 +2561,7 @@ name = "appa/execute_remedy_plan"
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         let decision = session
             .on_tool_call(fetch(serde_json::json!({"a": "not a number"})), false)
             .await
@@ -2572,7 +2580,7 @@ name = "appa/execute_remedy_plan"
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         let refused = session
             .on_tool_call(
                 ProposedCall {
@@ -2614,7 +2622,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         {
             let runtime =
                 Runtime::open(config_with(FETCH_AND_SEND, None), db.clone(), None).expect("the deployment opens");
-            let session = runtime.create_session(root()).expect("a fresh id opens");
+            let session = runtime.create_session(root(), None).expect("a fresh id opens");
             session
                 .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
                 .await
@@ -2642,7 +2650,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         );
 
         let new = runtime
-            .create_session(TrajectoryId("cc:new".to_string()))
+            .create_session(TrajectoryId("cc:new".to_string()), None)
             .expect("a fresh id opens");
         let refused = new.on_tool_call(fetch(serde_json::json!({"a": 1})), false).await;
         assert!(
@@ -2671,7 +2679,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let db = dir.path().join("appa.db");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), db.clone(), None).expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         runtime.store().forget_policy_files();
         let error = session
             .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
@@ -2685,7 +2693,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let db = dir.path().join("appa.db");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), db.clone(), None).expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         let mut tampered = runtime.config_bytes();
         tampered.extend_from_slice(b"\n# tampered\n");
         runtime.store().corrupt_policy_files(&tampered);
@@ -2701,7 +2709,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let db = dir.path().join("appa.db");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), db.clone(), None).expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         let tampered = serde_json::to_string(&runtime.log_facts(&root()))
             .expect("the opening serializes")
             .replace("cc:root", "cc:evil");
@@ -2726,7 +2734,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
                 None,
             )
             .expect("the deployment opens");
-            let session = runtime.create_session(root()).expect("a fresh id opens");
+            let session = runtime.create_session(root(), None).expect("a fresh id opens");
             session
                 .on_tool_call(wire(500), false)
                 .await
@@ -2793,7 +2801,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         {
             let runtime =
                 Runtime::open(config_with(FETCH_AND_SEND, None), db.clone(), None).expect("the deployment opens");
-            let session = runtime.create_session(root()).expect("a fresh id opens");
+            let session = runtime.create_session(root(), None).expect("a fresh id opens");
             session
                 .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
                 .await
@@ -2822,7 +2830,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         runtime
             .store()
             .corrupt_batch(&crate::engine::engine_id(&root()), 0, b"not engine records");
@@ -2837,7 +2845,7 @@ parameters = { type = "object", properties = { path = { type = "string" } } }
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         session
             .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
             .await
@@ -2910,7 +2918,7 @@ starting_label = { audience = ["alice@corp.example"] }
         std::fs::write(&path, text).expect("the fixture writes");
         let config = Config::load(&path).expect("the fixture validates");
         let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         let send = ProposedCall {
             tool: "send".to_string(),
             arguments: raw(serde_json::json!({})),
@@ -2947,7 +2955,7 @@ starting_label = { audience = ["alice@corp.example"] }
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         admit_success(&runtime, &mut session, taint(serde_json::json!({"a": 1}))).await;
 
         let decision = session
@@ -2973,7 +2981,7 @@ starting_label = { audience = ["alice@corp.example"] }
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let refuse =
             |trajectory: &TrajectoryId, event: crate::engine::EngineEvent| runtime.refuse(&root(), trajectory, event);
 
@@ -3031,7 +3039,7 @@ context_control = false
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(UNCONTROLLED, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         let decision = session
             .on_tool_call(
                 ProposedCall {
@@ -3054,7 +3062,7 @@ context_control = false
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let child = open_child(
             &mut session,
             fetch(serde_json::json!({"a": 1})),
@@ -3102,7 +3110,7 @@ context_control = false
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let mut child = open_child_floored(
             &mut session,
             fetch(serde_json::json!({"a": 9})),
@@ -3178,7 +3186,7 @@ requires = {{ audience = {{ contains = ["reader@example.com"] }} }}
             let dir = tempfile::tempdir().unwrap();
             let db = dir.path().join("appa.db");
             let runtime = Runtime::open(config_with(&policy, None), db.clone(), None).unwrap();
-            let session = runtime.create_session(root()).unwrap();
+            let session = runtime.create_session(root(), None).unwrap();
             let read = ProposedCall {
                 tool: "read_internal".into(),
                 arguments: raw(serde_json::json!({})),
@@ -3275,7 +3283,7 @@ attention = ["irreversible"]
         let url = stub(serde_json::json!({"ruling": "approve"})).await;
         let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
 
         let denied = session
             .on_tool_call(wire(500), false)
@@ -3329,7 +3337,7 @@ attention = ["irreversible"]
         let url = stub(serde_json::json!({"ruling": "deny", "reason": "no"})).await;
         let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
 
         session
             .on_tool_call(wire(500), false)
@@ -3363,9 +3371,11 @@ attention = ["irreversible"]
             .expect("the deployment opens");
         let first_id = root();
         let second_id = TrajectoryId("cc:second-root".to_string());
-        let first = runtime.create_session(first_id.clone()).expect("the first root opens");
+        let first = runtime
+            .create_session(first_id.clone(), None)
+            .expect("the first root opens");
         let second = runtime
-            .create_session(second_id.clone())
+            .create_session(second_id.clone(), None)
             .expect("the second root opens");
 
         first
@@ -3408,7 +3418,7 @@ attention = ["irreversible"]
         let url = stub(serde_json::json!({"note": "still thinking"})).await;
         let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
 
         session
             .on_tool_call(wire(500), false)
@@ -3437,7 +3447,7 @@ attention = ["irreversible"]
         let url = stub(serde_json::json!({"ruling": "approve"})).await;
         let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
 
         session
             .on_tool_call(wire(500), false)
@@ -3468,7 +3478,7 @@ attention = ["irreversible"]
         let offer = {
             let runtime =
                 Runtime::open(config_with(ATTENTION, Some(&url)), db.clone(), None).expect("the deployment opens");
-            let session = runtime.create_session(root()).expect("a fresh id opens");
+            let session = runtime.create_session(root(), None).expect("a fresh id opens");
             session
                 .on_tool_call(wire(500), false)
                 .await
@@ -3667,7 +3677,7 @@ context_control = true
             None,
         )
         .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let hop = narrowed_and_blocked(&runtime, &mut session).await;
 
         let substituted = session
@@ -3758,7 +3768,7 @@ context_control = true
             None,
         )
         .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         let read = ProposedCall {
             tool: "read_hr".to_string(),
             arguments: raw(serde_json::json!({})),
@@ -3814,7 +3824,7 @@ context_control = true
             None,
         )
         .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         let read = ProposedCall {
             tool: "read_hr".to_string(),
             arguments: raw(serde_json::json!({})),
@@ -3907,7 +3917,7 @@ context_control = true
             None,
         )
         .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let hop = narrowed_and_blocked(&runtime, &mut session).await;
         session
             .on_remedy(hop, RemedyArguments::default(), None, None)
@@ -3941,7 +3951,7 @@ context_control = true
             None,
         )
         .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let hop = narrowed_and_blocked(&runtime, &mut session).await;
         session
             .on_remedy(hop.clone(), RemedyArguments::default(), None, None)
@@ -3984,7 +3994,7 @@ context_control = true
         {
             let runtime = Runtime::open(substituting_config(SUBSTITUTED_SEND, None), db.clone(), None)
                 .expect("the deployment opens");
-            let mut session = runtime.create_session(root()).expect("a fresh id opens");
+            let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
             let hop = narrowed_and_blocked(&runtime, &mut session).await;
             session
                 .on_remedy(hop, RemedyArguments::default(), None, None)
@@ -4016,7 +4026,7 @@ context_control = true
             None,
         )
         .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let hop = narrowed_and_blocked(&runtime, &mut session).await;
         assert!(matches!(
             session.on_remedy(hop, RemedyArguments::default(), None, None).await,
@@ -4079,7 +4089,7 @@ context_control = true
             None,
         )
         .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let hop = narrowed_and_blocked(&runtime, &mut session).await;
         assert!(matches!(
             session.on_remedy(hop, RemedyArguments::default(), None, None).await,
@@ -4137,7 +4147,7 @@ context_control = true
             None,
         )
         .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let hop = narrowed_and_blocked(&runtime, &mut session).await;
 
         assert!(matches!(
@@ -4198,7 +4208,7 @@ context_control = true
     }
 
     fn sanitized_child(runtime: &Runtime) -> (Session, TrajectoryId) {
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         (session, TrajectoryId("cc:child".to_string()))
     }
 
@@ -4489,7 +4499,7 @@ confined_results = ["leak"]
         let url = stub(serde_json::json!({"body": "scrubbed"})).await;
         let runtime =
             Runtime::open(narrowing_config(&url), dir.path().join("appa.db"), None).expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         assert!(matches!(
             session
                 .on_tool_call(leak(), false)
@@ -4542,7 +4552,7 @@ confined_results = ["leak"]
         let url = stub(serde_json::json!({"body": "scrubbed"})).await;
         let runtime =
             Runtime::open(partly_cleared_config(&url), dir.path().join("appa.db"), None).expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         assert!(matches!(
             session
                 .on_tool_call(leak(), false)
@@ -4643,7 +4653,7 @@ context_control = true
         let url = stub(serde_json::json!({"body": "scrubbed"})).await;
         let runtime = Runtime::open(partly_cleared_child_config(&url), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let child = narrowed_child(&runtime, &mut session, floor_trust("suspicious")).await;
 
         let staged = child
@@ -4679,7 +4689,7 @@ context_control = true
         let url = stub(serde_json::json!(42)).await;
         let runtime =
             Runtime::open(narrowing_config(&url), dir.path().join("appa.db"), None).expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         assert!(matches!(
             session
                 .on_tool_call(leak(), false)
@@ -4773,7 +4783,7 @@ context_control = true
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime =
             Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
-        runtime.create_session(root()).expect("a fresh id opens");
+        runtime.create_session(root(), None).expect("a fresh id opens");
         let status = runtime.status(&root()).expect("a fresh root answers");
         assert_eq!(status.trajectory, "cc:root");
         assert_eq!(status.trust, "trusted");
@@ -4785,7 +4795,7 @@ context_control = true
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime =
             Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         admit_success(&runtime, &mut session, mark()).await;
         assert_eq!(runtime.status(&root()).expect("the root answers").trust, "suspicious");
         admit_success(
@@ -4808,7 +4818,7 @@ context_control = true
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime =
             Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         admit_success(&runtime, &mut session, mark()).await;
 
         assert!(runtime.status(&TrajectoryId("cc:ghost".to_string())).is_none());
@@ -4827,7 +4837,7 @@ context_control = true
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime =
             Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
-        runtime.create_session(root()).expect("a fresh id opens");
+        runtime.create_session(root(), None).expect("a fresh id opens");
         runtime
             .store()
             .corrupt_batch(&crate::engine::engine_id(&root()), 0, b"not engine records");
@@ -4839,7 +4849,7 @@ context_control = true
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime =
             Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let child = open_child(
             &mut session,
             fetch(serde_json::json!({"a": 1})),
@@ -4861,7 +4871,7 @@ context_control = true
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime =
             Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let child_id = TrajectoryId("cc:child".to_string());
         let mut child = open_child_floored(
             &mut session,
@@ -4984,7 +4994,7 @@ context_control = true
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut parent = runtime.create_session(root()).expect("a fresh id opens");
+        let mut parent = runtime.create_session(root(), None).expect("a fresh id opens");
         taint_in(&runtime, &root(), &mut parent).await;
 
         let fork = root_fork_id("fork");
@@ -5009,7 +5019,7 @@ context_control = true
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut parent = runtime.create_session(root()).expect("a fresh id opens");
+        let mut parent = runtime.create_session(root(), None).expect("a fresh id opens");
         let (a, b) = (root_fork_id("fork-a"), root_fork_id("fork-b"));
         runtime.open_root_fork(&root(), &root(), &a).expect("root fork a opens");
         runtime.open_root_fork(&root(), &root(), &b).expect("root fork b opens");
@@ -5047,7 +5057,7 @@ context_control = true
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let parent = runtime.create_session(root()).expect("a fresh id opens");
+        let parent = runtime.create_session(root(), None).expect("a fresh id opens");
         let call = fetch(serde_json::json!({"a": 1}));
         assert!(matches!(
             parent
@@ -5085,7 +5095,7 @@ context_control = true
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        runtime.create_session(root()).expect("a fresh id opens");
+        runtime.create_session(root(), None).expect("a fresh id opens");
         let (first, second) = (root_fork_id("first"), root_fork_id("second"));
         runtime
             .open_root_fork(&root(), &root(), &first)
@@ -5109,7 +5119,7 @@ context_control = true
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        runtime.create_session(root()).expect("a fresh id opens");
+        runtime.create_session(root(), None).expect("a fresh id opens");
         let fork = root_fork_id("fork");
         runtime
             .open_root_fork(&root(), &root(), &fork)
@@ -5120,7 +5130,7 @@ context_control = true
 
         let unrelated = root_fork_id("unrelated");
         runtime
-            .create_session(unrelated.clone())
+            .create_session(unrelated.clone(), None)
             .expect("an unrelated root opens");
         assert_eq!(
             runtime.open_root_fork(&unrelated, &root(), &fork),
@@ -5158,7 +5168,7 @@ context_control = true
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let child_id = child("c1");
         let spawned = open_child(&mut session, fetch(serde_json::json!({"a": 1})), child_id.clone()).await;
         let fork = root_fork_id("fork");
@@ -5225,7 +5235,9 @@ delta = {}
             Runtime::open(config_with(HISTORY, None), dir.path().join("appa.db"), None).expect("the deployment opens");
 
         let recorded = root_fork_id("recorded");
-        let parent = runtime.create_session(recorded.clone()).expect("a fresh id opens");
+        let parent = runtime
+            .create_session(recorded.clone(), None)
+            .expect("a fresh id opens");
         assert!(runs(&parent, history_call("emit")).await);
         let fork = open_root_fork_session(&runtime, &recorded, &root_fork_id("recorded-fork"));
         assert!(
@@ -5235,7 +5247,7 @@ delta = {}
         assert!(runs(&fork, history_call("need")).await, "and satisfies contains there");
 
         let unknown = root_fork_id("unknown");
-        let parent = runtime.create_session(unknown.clone()).expect("a fresh id opens");
+        let parent = runtime.create_session(unknown.clone(), None).expect("a fresh id opens");
         allowed(&parent, history_call("emit")).await;
         parent
             .on_turn_end()
@@ -5253,7 +5265,7 @@ delta = {}
         );
 
         let running = root_fork_id("running");
-        let parent = runtime.create_session(running.clone()).expect("a fresh id opens");
+        let parent = runtime.create_session(running.clone(), None).expect("a fresh id opens");
         allowed(&parent, history_call("emit")).await;
         let fork = open_root_fork_session(&runtime, &running, &root_fork_id("running-fork"));
         parent
@@ -5310,7 +5322,7 @@ delta = {}
         let url = stub(serde_json::json!({"ruling": "deny", "reason": "no"})).await;
         let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let parent = runtime.create_session(root()).expect("a fresh id opens");
+        let parent = runtime.create_session(root(), None).expect("a fresh id opens");
         denied_on_root(&runtime, &parent, wire(500)).await;
         let fork = open_root_fork_session(&runtime, &root(), &root_fork_id("fork"));
         denied_on_root(&runtime, &parent, wire(700)).await;
@@ -5340,7 +5352,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        runtime.create_session(root()).expect("a fresh id opens");
+        runtime.create_session(root(), None).expect("a fresh id opens");
         runtime
             .reload(config_with(READ_ONLY, None))
             .expect("the edited policy installs");
@@ -5371,7 +5383,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut parent = runtime.create_session(root()).expect("a fresh id opens");
+        let mut parent = runtime.create_session(root(), None).expect("a fresh id opens");
         let child_id = child("c1");
         let mut spawned = open_child_floored(
             &mut parent,
@@ -5410,7 +5422,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime =
             Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let child_id = TrajectoryId("cc:child".to_string());
         let child = open_child(&mut session, fetch(serde_json::json!({"a": 1})), child_id.clone()).await;
 
@@ -5463,7 +5475,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
         session
             .on_child_start(child("c1"), SpawnRef::InFlight)
@@ -5482,7 +5494,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
         let before = runtime.log_basis(&root());
         assert!(
@@ -5526,7 +5538,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let binding = release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
         let mut first = session
             .on_child_start(child("c1"), SpawnRef::Binding(binding.clone()))
@@ -5588,7 +5600,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let binding = release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
 
         let barrier = std::sync::Barrier::new(2);
@@ -5620,7 +5632,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
 
         let error = session
             .on_child_start(child("c0"), SpawnRef::InFlight)
@@ -5651,7 +5663,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
         let mut first = session
             .on_child_start(child("c1"), SpawnRef::InFlight)
@@ -5692,7 +5704,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
         let mut first = session
             .on_child_start(child("c1"), SpawnRef::InFlight)
@@ -5747,7 +5759,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
         session
             .on_child_start(child("c1"), SpawnRef::InFlight)
@@ -5776,7 +5788,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
         let child_session = session
             .on_child_start(child("c1"), SpawnRef::InFlight)
@@ -5820,7 +5832,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
         let first = session
             .on_child_start(child("c1"), SpawnRef::InFlight)
@@ -5892,7 +5904,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
         session
             .on_child_start(child("c1"), SpawnRef::InFlight)
@@ -5941,7 +5953,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let binding = release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
 
         let decision = session
@@ -5973,7 +5985,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         session
             .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
             .await
@@ -6007,7 +6019,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         release_spawn(&mut session, fetch(serde_json::json!({}))).await;
         session
             .on_child_start(child("c1"), SpawnRef::InFlight)
@@ -6049,7 +6061,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let child_session = open_child(&mut session, fetch(serde_json::json!({"a": 1})), child("c1")).await;
         child_session
             .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
@@ -6097,7 +6109,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let child_session = open_child(&mut session, fetch(serde_json::json!({"a": 1})), child("c1")).await;
         child_session
             .on_child_end(Some("done".to_string()))
@@ -6151,7 +6163,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         assert!(matches!(
             session
                 .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
@@ -6194,7 +6206,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         for (call_id, argument) in [("toolu-1", 1), ("toolu-2", 2)] {
             session
                 .on_tool_call_identified(
@@ -6233,7 +6245,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         session
             .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
             .await
@@ -6259,7 +6271,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         session
             .on_tool_call(fetch(serde_json::json!({"a": 1})), false)
             .await
@@ -6287,7 +6299,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let child_session = open_child(&mut session, fetch(serde_json::json!({"a": 1})), child("c1")).await;
         child_session
             .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
@@ -6324,7 +6336,7 @@ delta = {}
             None,
         )
         .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         let mut child_session = open_child_floored(
             &mut session,
             fetch(serde_json::json!({"a": 1})),
@@ -6373,7 +6385,7 @@ delta = {}
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
         let first = session
             .on_child_start(child("c1"), SpawnRef::InFlight)
@@ -6459,9 +6471,9 @@ delta = {}
     fn a_used_root_id_is_refused_and_a_persisted_one_reopens() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
-        runtime.create_session(root()).expect("a fresh id opens");
+        runtime.create_session(root(), None).expect("a fresh id opens");
         assert!(matches!(
-            runtime.create_session(root()),
+            runtime.create_session(root(), None),
             Err(EventError::TrajectoryExists),
         ));
         assert!(runtime.session(&root(), &root()).is_ok());
@@ -6489,7 +6501,7 @@ delta = {}
     async fn a_decision_whose_append_fails_never_acts() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         runtime.store().fail_commit_after(0);
         assert!(matches!(
             session.on_tool_call(fetch(serde_json::json!({"a": 1})), false).await,
@@ -6506,7 +6518,7 @@ delta = {}
     async fn a_lost_race_discards_the_decision_and_replays() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         runtime.store().contend_next_appends(1);
         assert!(matches!(
             session
@@ -6531,7 +6543,7 @@ delta = {}
     async fn a_permanently_contended_log_refuses_the_event() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         runtime.store().contend_next_appends(REPLAY_LIMIT as u64);
         assert!(matches!(
             session.on_tool_call(fetch(serde_json::json!({"a": 1})), false).await,
@@ -6556,7 +6568,7 @@ delta = {}
     async fn a_lookalike_control_tool_is_an_undeclared_tool() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         assert!(matches!(
             session
                 .on_tool_call(control_call("mcp/evil/execute_remedy_plan"), false)
@@ -6569,7 +6581,7 @@ delta = {}
     fn an_over_cap_success_body_is_carried_as_unavailable() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         let success = |len: usize| ToolOutcome::Success {
             body: OutcomeBody::Available("x".repeat(len)),
         };
@@ -6586,7 +6598,7 @@ delta = {}
     async fn an_unknown_offer_is_refused() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         assert!(matches!(
             session
                 .on_remedy(
@@ -6607,7 +6619,7 @@ delta = {}
         let (url, seen) = counting_stub(serde_json::json!({"ruling": "approve"})).await;
         let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"), None)
             .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         assert!(matches!(
             session
                 .on_tool_call(wire(500), false)
@@ -6640,7 +6652,7 @@ delta = {}
             None,
         )
         .expect("the deployment opens");
-        let session = runtime.create_session(root()).expect("a fresh id opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
         for _ in 0..5 {
             assert!(matches!(
                 session

@@ -219,7 +219,10 @@ pub(crate) fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
     })?;
     tracing::debug!(hook = %event.hook_event_name, session = %event.session_id, "hook event");
     match event.hook_event_name.as_str() {
-        "SessionStart" => Ok(Some(HookEvent::SessionStart { root: event.root() })),
+        "SessionStart" => Ok(Some(HookEvent::SessionStart {
+            root: event.root(),
+            principal: None,
+        })),
         "UserPromptSubmit" => match event.prompt.clone() {
             Some(text) => Ok(Some(HookEvent::Prompt {
                 actor: event.actor(),

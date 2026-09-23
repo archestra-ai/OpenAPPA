@@ -97,7 +97,14 @@ async fn deployment(dir: &tempfile::TempDir) -> Arc<Runtime> {
     std::fs::write(&path, POLICY).expect("the fixture writes");
     let config = Config::load(&path).expect("the fixture validates");
     let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"));
-    let started = hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await;
+    let started = hooks::handle(
+        &runtime,
+        HookEvent::SessionStart {
+            root: root(),
+            principal: None,
+        },
+    )
+    .await;
     assert_eq!(started, HookDecision::Ack);
     runtime
 }
@@ -407,7 +414,14 @@ async fn attest_deployment(dir: &tempfile::TempDir) -> Arc<Runtime> {
     std::fs::write(&path, ATTEST_POLICY).expect("the fixture writes");
     let config = Config::load(&path).expect("the fixture validates");
     let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"));
-    let started = hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await;
+    let started = hooks::handle(
+        &runtime,
+        HookEvent::SessionStart {
+            root: root(),
+            principal: None,
+        },
+    )
+    .await;
     assert_eq!(started, HookDecision::Ack);
     runtime
 }

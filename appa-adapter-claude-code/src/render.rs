@@ -429,7 +429,10 @@ mod tests {
     fn session_start_context_reaches_the_root_actor() {
         assert_eq!(
             render(
-                &HookEvent::SessionStart { root: root() },
+                &HookEvent::SessionStart {
+                    root: root(),
+                    principal: None
+                },
                 &HookDecision::Context {
                     text: "available file tools".into()
                 },
@@ -590,7 +593,10 @@ mod tests {
         let table: [(&str, HookEvent, [&str; 10]); 9] = [
             (
                 "session start",
-                HookEvent::SessionStart { root: root() },
+                HookEvent::SessionStart {
+                    root: root(),
+                    principal: None,
+                },
                 [
                     "empty", "allow", "allow", "deny", "block", "block", "block", "block", "context", "error",
                 ],

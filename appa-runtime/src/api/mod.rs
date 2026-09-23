@@ -30,6 +30,7 @@ use crate::engine::{EngineRefusal, Liveness, PolicyEngine, RuntimeEngine};
 use crate::external::{ConsultGates, ExternalServices};
 #[cfg(feature = "daemon")]
 use crate::yell;
+use appa_engine::label::ReaderId;
 use appa_eventlog::{Backend, HostObservation, Log, LogStore};
 use appa_runtime_api::{Adapter, AdapterName};
 use host::{HostState, host_actor, inventory_at};
@@ -473,6 +474,10 @@ pub(crate) enum EventError {
     UnknownTrajectory,
     #[error("a trajectory with this id already exists")]
     TrajectoryExists,
+    #[error("the session principal {0:?} is not an address")]
+    MalformedPrincipal(String),
+    #[error("the session already acts for another principal")]
+    PrincipalMismatch,
     #[error("no open dispatch with this id exists")]
     UnknownDispatch,
     #[error("this outcome does not match the open dispatch; it is not reported")]
@@ -552,6 +557,8 @@ impl EventError {
             | EventError::ResolutionDiverged { .. }
             | EventError::AnnotationRefused { .. }
             | EventError::UndeclaredTool { .. }
+            | EventError::MalformedPrincipal(_)
+            | EventError::PrincipalMismatch
             | EventError::UnexpectedDecision => true,
             EventError::CallOutstanding
             | EventError::SpawnOutstanding
@@ -738,7 +745,6 @@ impl Deployment {
         use crate::consult::{Consult, MembersAnswer};
         use crate::external::ConsultOutcome;
         use appa_engine::audience::{AudienceEvidence, SourceClaims};
-        use appa_engine::label::ReaderId;
 
         let refused = |reason: String| ProbeError::Selector {
             provider: spec.provider.clone(),
@@ -765,7 +771,7 @@ impl Deployment {
             lookups: Vec::new(),
         };
         audience
-            .expansions(&evidence)
+            .expansions(&evidence, None)
             .map_err(|refusal| refused(refusal.to_string()))?;
         Ok(claims)
     }
@@ -780,7 +786,6 @@ impl Deployment {
         use crate::consult::{Consult, LookupAnswer};
         use crate::external::ConsultOutcome;
         use appa_engine::audience::well_formed_reader;
-        use appa_engine::label::ReaderId;
 
         let refused = |reason: String| ProbeError::Lookup {
             provider: spec.provider.clone(),
@@ -811,9 +816,9 @@ impl Deployment {
         crate::engine::selector_templates(audience, provider).expect("the probe reads only registered providers")
     }
 
-    fn root_opening(&self, trajectory: &TrajectoryId) -> Vec<appa_engine::fact::Fact> {
+    fn root_opening(&self, trajectory: &TrajectoryId, principal: Option<ReaderId>) -> Vec<appa_engine::fact::Fact> {
         self.resident
-            .root_opening(trajectory, self.config.policy_file().bytes())
+            .root_opening(trajectory, self.config.policy_file().bytes(), principal)
     }
 }
 
@@ -1620,15 +1625,16 @@ impl Runtime {
     /// One transaction writes the opening
     /// record and stores the policy file it names, so the root is bound
     /// to that file durably or is not opened at all.
-    pub(crate) fn create_session(&self, id: TrajectoryId) -> Result<Session, EventError> {
+    pub(crate) fn create_session(&self, id: TrajectoryId, principal: Option<ReaderId>) -> Result<Session, EventError> {
         let deployment = self.inner.deployment();
-        self.create_session_under(id, deployment)
+        self.create_session_under(id, deployment, principal)
     }
 
     pub(crate) fn create_session_with_inventory(
         &self,
         id: TrajectoryId,
         inventory: appa_runtime_api::inventory::ToolInventory,
+        principal: Option<ReaderId>,
     ) -> Result<Session, EventError> {
         let config = self
             .inner
@@ -1643,7 +1649,7 @@ impl Runtime {
             self.inner.shared.naming,
         )
         .map_err(|error| EventError::PolicyUnavailable(error.to_string()))?;
-        self.create_session_under(id, Arc::new(deployment))
+        self.create_session_under(id, Arc::new(deployment), principal)
     }
 
     /// Reserve identities in the actor's own scope, independently of the immutable
@@ -1878,8 +1884,13 @@ impl Runtime {
         }
     }
 
-    fn create_session_under(&self, id: TrajectoryId, deployment: Arc<Deployment>) -> Result<Session, EventError> {
-        let opening = deployment.root_opening(&id);
+    fn create_session_under(
+        &self,
+        id: TrajectoryId,
+        deployment: Arc<Deployment>,
+        principal: Option<ReaderId>,
+    ) -> Result<Session, EventError> {
+        let opening = deployment.root_opening(&id, principal);
         let root = self
             .inner
             .store
@@ -3618,7 +3629,14 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let view = runtime.on(Arc::clone(&other));
         let root = TrajectoryId("viewed".to_string());
         assert_eq!(
-            crate::hooks::handle(&view, appa_runtime_api::HookEvent::SessionStart { root: root.clone() }).await,
+            crate::hooks::handle(
+                &view,
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None
+                }
+            )
+            .await,
             appa_runtime_api::HookDecision::Ack
         );
         let id = crate::engine::engine_id(&root);
@@ -3632,7 +3650,14 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             .reload(versioned_policy("second"))
             .expect("the second deployment loads");
         let later = TrajectoryId("viewed-after-reload".to_string());
-        crate::hooks::handle(&view, appa_runtime_api::HookEvent::SessionStart { root: later.clone() }).await;
+        crate::hooks::handle(
+            &view,
+            appa_runtime_api::HookEvent::SessionStart {
+                root: later.clone(),
+                principal: None,
+            },
+        )
+        .await;
         let opened_under = other
             .log(&crate::engine::engine_id(&later))
             .expect("the later root reads");
@@ -3691,7 +3716,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert_eq!(
             crate::hooks::handle(
                 &runtime.on(Arc::clone(&lease)),
-                appa_runtime_api::HookEvent::SessionStart { root: root.clone() }
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None
+                }
             )
             .await,
             appa_runtime_api::HookDecision::Ack
@@ -3719,7 +3747,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert_eq!(
             crate::hooks::handle(
                 &runtime,
-                appa_runtime_api::HookEvent::SessionStart { root: root.clone() }
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None
+                }
             )
             .await,
             appa_runtime_api::HookDecision::Ack
@@ -3806,7 +3837,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             assert_eq!(
                 crate::hooks::handle(
                     &recorded,
-                    appa_runtime_api::HookEvent::SessionStart { root: root.clone() }
+                    appa_runtime_api::HookEvent::SessionStart {
+                        root: root.clone(),
+                        principal: None
+                    }
                 )
                 .await,
                 appa_runtime_api::HookDecision::Ack
@@ -3916,7 +3950,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             }],
             ..ToolInventory::default()
         };
-        runtime.create_session_with_inventory(id.clone(), inventory).unwrap();
+        runtime
+            .create_session_with_inventory(id.clone(), inventory, None)
+            .unwrap();
         runtime
             .reload(claude_config(
                 "[policy]\nversion = 2\n[[policy.tool]]\nname = \"other\"\n",
@@ -3950,7 +3986,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             root: TrajectoryId("inventory-root".into()),
             child: None,
         };
-        runtime.create_session(actor.root.clone()).unwrap();
+        runtime.create_session(actor.root.clone(), None).unwrap();
         let before = runtime.inner.log(&actor.root).unwrap();
         let inventory = |server: &str| ToolInventory {
             tools: vec![ObservedTool {
@@ -4009,7 +4045,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             root: TrajectoryId("racing-inventory".into()),
             child: None,
         };
-        runtime.create_session(actor.root.clone()).unwrap();
+        runtime.create_session(actor.root.clone(), None).unwrap();
         let inventory = |server: &str| ToolInventory {
             tools: vec![ObservedTool {
                 name: "read".into(),
@@ -4076,7 +4112,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         );
         let root = adapter.name.root("preflight");
         assert!(matches!(runtime.inner.log(&root), Err(EventError::UnknownTrajectory)));
-        runtime.create_session(root.clone()).unwrap();
+        runtime.create_session(root.clone(), None).unwrap();
         let before = runtime.inner.log(&root).unwrap();
         runtime
             .reload(claude_config(
@@ -4124,7 +4160,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             sources: Vec::new(),
         };
         runtime
-            .create_session_with_inventory(root.clone(), inventory("parent"))
+            .create_session_with_inventory(root.clone(), inventory("parent"), None)
             .unwrap();
         let child = Actor {
             root: root.clone(),
@@ -4199,7 +4235,11 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             }],
             ..ToolInventory::default()
         };
-        assert!(runtime.create_session_with_inventory(id.clone(), inventory).is_err());
+        assert!(
+            runtime
+                .create_session_with_inventory(id.clone(), inventory, None)
+                .is_err()
+        );
         assert!(matches!(runtime.session(&id, &id), Err(EventError::UnknownTrajectory)));
     }
 
@@ -4421,7 +4461,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert_eq!(
             crate::hooks::handle(
                 &runtime,
-                appa_runtime_api::HookEvent::SessionStart { root: root.clone() }
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None
+                }
             )
             .await,
             appa_runtime_api::HookDecision::Ack
@@ -4471,7 +4514,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert_eq!(
             crate::hooks::handle(
                 &runtime,
-                appa_runtime_api::HookEvent::SessionStart { root: root.clone() }
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None
+                }
             )
             .await,
             appa_runtime_api::HookDecision::Ack
@@ -4513,7 +4559,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             let root = TrajectoryId(id.to_string());
             crate::hooks::handle(
                 &runtime,
-                appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None,
+                },
             )
             .await;
             actors.push(Actor { root, child: None });
@@ -4553,7 +4602,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             let root = TrajectoryId(id.to_string());
             crate::hooks::handle(
                 &runtime,
-                appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None,
+                },
             )
             .await;
             let actor = Actor { root, child: None };
@@ -4593,7 +4645,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         .ticket();
         crate::hooks::handle(
             &runtime,
-            appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+            appa_runtime_api::HookEvent::SessionStart {
+                root: root.clone(),
+                principal: None,
+            },
         )
         .await;
         runtime.vouch(&ticket, &actor, None);
@@ -4639,7 +4694,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             let root = TrajectoryId(id.to_string());
             crate::hooks::handle(
                 &runtime,
-                appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None,
+                },
             )
             .await;
             actors.push(Actor { root, child: None });
@@ -4701,7 +4759,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         };
         crate::hooks::handle(
             &runtime,
-            appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+            appa_runtime_api::HookEvent::SessionStart {
+                root: root.clone(),
+                principal: None,
+            },
         )
         .await;
         assert!(!runtime.prompted(&parent), "a family nothing prompted has no mark");
@@ -4749,7 +4810,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         .ticket();
         crate::hooks::handle(
             &runtime,
-            appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+            appa_runtime_api::HookEvent::SessionStart {
+                root: root.clone(),
+                principal: None,
+            },
         )
         .await;
         runtime.vouch(&ticket, &actor, None);
@@ -4781,7 +4845,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             let root = TrajectoryId(id.to_string());
             crate::hooks::handle(
                 &runtime,
-                appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None,
+                },
             )
             .await;
             runtime.vouch(&ticket, &Actor { root, child: None }, None);
@@ -4853,7 +4920,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             );
             crate::hooks::handle(
                 &runtime,
-                appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None,
+                },
             )
             .await;
             runtime.vouch(&ticket, &actor, None);
@@ -4950,7 +5020,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let root = TrajectoryId("management-vouch".to_string());
         crate::hooks::handle(
             &runtime,
-            appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+            appa_runtime_api::HookEvent::SessionStart {
+                root: root.clone(),
+                principal: None,
+            },
         )
         .await;
         let actor = Actor { root, child: None };
@@ -5002,7 +5075,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert_eq!(
             crate::hooks::handle(
                 &runtime,
-                appa_runtime_api::HookEvent::SessionStart { root: root.clone() }
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None
+                }
             )
             .await,
             appa_runtime_api::HookDecision::Ack
@@ -5118,7 +5194,14 @@ url = "{url}"
             None => Runtime::open(config, db, None).expect("the embedded deployment opens"),
         };
         assert_eq!(
-            crate::hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
+            crate::hooks::handle(
+                &runtime,
+                HookEvent::SessionStart {
+                    root: root(),
+                    principal: None
+                }
+            )
+            .await,
             HookDecision::Ack
         );
         runtime

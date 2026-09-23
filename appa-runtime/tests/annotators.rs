@@ -89,7 +89,14 @@ async fn open_runtime(dir: &tempfile::TempDir, config_toml: &str) -> Arc<Runtime
     let config = Config::load(&path).expect("the fixture validates");
     let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"));
     assert_eq!(
-        hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
+        hooks::handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: root(),
+                principal: None
+            }
+        )
+        .await,
         HookDecision::Ack
     );
     runtime
@@ -676,7 +683,14 @@ async fn concurrent_claude_consults_are_gated_by_the_runtime_permit_pool() {
     for index in 0..5 {
         let root = TrajectoryId(format!("annotators-permit-{index}"));
         assert_eq!(
-            hooks::handle(&runtime, HookEvent::SessionStart { root: root.clone() }).await,
+            hooks::handle(
+                &runtime,
+                HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None
+                }
+            )
+            .await,
             HookDecision::Ack
         );
         let runtime = Arc::clone(&runtime);

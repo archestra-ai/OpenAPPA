@@ -153,7 +153,7 @@ fn the_runtime_prefixes_the_trajectory_ids_the_plugin_leaves_bare() {
             .unwrap_or_else(|refusal| panic!("`{name}` is admitted: {refusal:?}"))
             .expect("an event naming a trajectory is never a ping");
         let root_id = match &accepted.event {
-            HookEvent::SessionStart { root }
+            HookEvent::SessionStart { root, .. }
             | HookEvent::ChildStart { root, .. }
             | HookEvent::ChildEnd { root, .. } => root.0.clone(),
             HookEvent::Prompt { actor, .. }

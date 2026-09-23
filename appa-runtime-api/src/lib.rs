@@ -414,6 +414,10 @@ pub struct Review {
 pub enum HookEvent {
     SessionStart {
         root: TrajectoryId,
+        /// The reader this session acts for, as the host authenticated it: an address. It
+        /// answers the `self` audience for the whole family. `None` leaves `self` to the
+        /// policy's configured sources.
+        principal: Option<String>,
     },
     Prompt {
         actor: Actor,

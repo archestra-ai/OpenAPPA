@@ -144,7 +144,8 @@ async fn a_battery_rule_reaches_the_server_the_host_aliased_and_speaks_its_spell
         hooks::handle(
             &runtime,
             HookEvent::SessionStart {
-                root: actor.root.clone()
+                root: actor.root.clone(),
+                principal: None,
             }
         )
         .await,

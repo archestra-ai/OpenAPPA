@@ -77,7 +77,7 @@ pub fn serve(args: ServeArgs) -> ExitCode {
             root: appa_runtime_api::TrajectoryId(format!("cc:{}", args.trajectory)),
             child: None,
         };
-        match runtime.create_session(actor.root.clone()) {
+        match runtime.create_session(actor.root.clone(), None) {
             Ok(_) | Err(crate::api::EventError::TrajectoryExists) => {}
             Err(error) => return Err(error.to_string()),
         }

@@ -1,6 +1,7 @@
 //! The hook dispatcher: one canonical wire event in, one wire decision
 //! out; between them, one typed `HookEvent` and one `HookDecision`.
 
+use appa_engine::label::ReaderId;
 use appa_engine::value::DispatchId as EngineDispatchId;
 use appa_runtime_api::{
     Accepted, Actor, Adapter, HookDecision, HookEvent, ParseRefusal, ProposedCall, Ruling, SpawnRef, ToolOutcome,
@@ -106,7 +107,7 @@ fn observed(
         }
     }
     let actor = match event {
-        HookEvent::SessionStart { root } => Actor {
+        HookEvent::SessionStart { root, .. } => Actor {
             root: root.clone(),
             child: None,
         },
@@ -120,7 +121,13 @@ fn observed(
     let observed = match runtime.session(root, root) {
         Ok(_) => runtime.observe_inventory(&actor, *adapter, inventory),
         Err(EventError::UnknownTrajectory) if actor.child.is_none() => {
-            match runtime.create_session_with_inventory(root.clone(), inventory.clone()) {
+            let principal = match event {
+                HookEvent::SessionStart { principal, .. } => session_principal(principal.as_deref()),
+                _ => Ok(None),
+            };
+            match principal
+                .and_then(|principal| runtime.create_session_with_inventory(root.clone(), inventory.clone(), principal))
+            {
                 Ok(_) | Err(EventError::TrajectoryExists) => runtime.observe_inventory(&actor, *adapter, inventory),
                 Err(error) => Err(error),
             }
@@ -198,7 +205,7 @@ fn bare_hook(
 /// leave `recent_root` naming something no log can be read for.
 fn hook_root(event: &HookEvent) -> &TrajectoryId {
     match event {
-        HookEvent::SessionStart { root } => root,
+        HookEvent::SessionStart { root, .. } => root,
         HookEvent::ChildStart { root, .. } | HookEvent::ChildEnd { root, .. } => root,
         HookEvent::Prompt { actor, .. }
         | HookEvent::TurnEnd { actor }
@@ -340,7 +347,7 @@ async fn dispatch_event(
         options: presentation_options,
     };
     match event {
-        HookEvent::SessionStart { root } => dispatcher.session_start(root),
+        HookEvent::SessionStart { root, principal } => dispatcher.session_start(root, principal),
         HookEvent::Prompt { actor, .. } => dispatcher.prompt(actor),
         HookEvent::TurnEnd { actor } => dispatcher.turn_end(actor).await,
         HookEvent::ToolCall {
@@ -387,9 +394,10 @@ struct Dispatcher<'a> {
 }
 
 impl Dispatcher<'_> {
-    fn session_start(&mut self, root: TrajectoryId) -> HookDecision {
+    fn session_start(&mut self, root: TrajectoryId, principal: Option<String>) -> HookDecision {
         let runtime = self.runtime;
-        match open_or_reopen(runtime, &root) {
+        let opened = session_principal(principal.as_deref()).and_then(|principal| open_as(runtime, &root, principal));
+        match opened {
             Ok(_) => match runtime.live(&root, &root) {
                 Ok(()) if runtime.file_tracking_enabled() => HookDecision::Context {
                     text: "APPA file-only mode: use appa_read_file(file_path), appa_write_file(file_path, content), \
@@ -699,8 +707,34 @@ fn return_decision(said: Option<String>, decision: ChildReturnDecision) -> HookD
     }
 }
 
-fn open_or_reopen(runtime: &Runtime, root: &appa_runtime_api::TrajectoryId) -> Result<Session, EventError> {
-    open_or_reopen_with_presentation(runtime, root, EmbeddedPresentationOptions::default())
+/// The host's named principal, held to the one shape a principal takes.
+fn session_principal(spelling: Option<&str>) -> Result<Option<ReaderId>, EventError> {
+    spelling
+        .map(|spelling| {
+            appa_engine::audience::session_principal(spelling)
+                .ok_or_else(|| EventError::MalformedPrincipal(spelling.to_string()))
+        })
+        .transpose()
+}
+
+/// Open the root for `principal`, or reopen it when the principal it opened for is the one
+/// named. A reopen that names none continues under the principal the opening pinned.
+fn open_as(
+    runtime: &Runtime,
+    root: &appa_runtime_api::TrajectoryId,
+    principal: Option<ReaderId>,
+) -> Result<Session, EventError> {
+    let session = match runtime.session(root, root) {
+        Err(EventError::UnknownTrajectory) => match runtime.create_session(root.clone(), principal.clone()) {
+            Err(EventError::TrajectoryExists) => runtime.session(root, root)?,
+            opened => return opened,
+        },
+        reopened => reopened?,
+    };
+    if principal.is_some() && session.principal()? != principal {
+        return Err(EventError::PrincipalMismatch);
+    }
+    Ok(session)
 }
 
 fn open_or_reopen_with_presentation(
@@ -710,7 +744,7 @@ fn open_or_reopen_with_presentation(
 ) -> Result<Session, EventError> {
     match runtime.session_with_presentation(root, root, presentation.clone()) {
         Ok(session) => Ok(session),
-        Err(EventError::UnknownTrajectory) => match runtime.create_session(root.clone()) {
+        Err(EventError::UnknownTrajectory) => match runtime.create_session(root.clone(), None) {
             Ok(_) => runtime.session_with_presentation(root, root, presentation),
             Err(EventError::TrajectoryExists) => runtime.session_with_presentation(root, root, presentation),
             Err(error) => Err(error),
@@ -1926,7 +1960,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
         let root = TrajectoryId("cc:s1".to_string());
-        handle(&runtime, HookEvent::SessionStart { root: root.clone() }).await;
+        handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: root.clone(),
+                principal: None,
+            },
+        )
+        .await;
         let binding = declared_spawn(&runtime, &root).await;
         let child = TrajectoryId("cc:s1:c1".to_string());
         handle(

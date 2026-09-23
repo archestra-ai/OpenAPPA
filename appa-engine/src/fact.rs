@@ -6,7 +6,7 @@ use crate::basis::SubjectKey;
 use crate::candidate::{DerivedCandidate, SanitizerLineage};
 use crate::check::{Gap, Narrowing};
 use crate::execute::AuthorityReview;
-use crate::label::Label;
+use crate::label::{Label, ReaderId};
 use crate::names::{AuthorityName, SanitizerName};
 use crate::plan::PlanId;
 use crate::profile::{DeploymentProfile, OpenVector, PolicyDialectVersion, PolicyFileKey, PolicyIdentityV1};
@@ -216,6 +216,8 @@ pub struct RootForkOrigin {
     /// failed, an indeterminate close among them. Only `no_prior(k)` reads them.
     pub(crate) reservations: EffectSet,
     pub(crate) denials: std::collections::BTreeMap<CanonicalDigest, std::collections::BTreeSet<AuthorityName>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) principal: Option<ReaderId>,
 }
 
 impl RootForkOrigin {
@@ -279,6 +281,10 @@ pub struct TrajectoryOpening {
     /// unsettled reservations and denials start as the origin's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<RootForkOrigin>,
+    /// The reader the host said this family acts for. It answers `self` for every trajectory
+    /// in the family; a root fork carries its parent's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<ReaderId>,
 }
 
 /// One record in the log. New variants are added by the slice that both emits and consumes them

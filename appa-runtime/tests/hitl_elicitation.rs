@@ -137,7 +137,14 @@ async fn deployment_from(policy: String) -> Deployment {
     let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"));
 
     let root = TrajectoryId("cc:hitl-test".to_string());
-    let acked = hooks::handle(&runtime, HookEvent::SessionStart { root: root.clone() }).await;
+    let acked = hooks::handle(
+        &runtime,
+        HookEvent::SessionStart {
+            root: root.clone(),
+            principal: None,
+        },
+    )
+    .await;
     assert!(matches!(acked, HookDecision::Ack), "the session opens: {acked:?}");
 
     let blocked = hooks::handle(
@@ -252,7 +259,14 @@ builtin = "hitl"
     let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"));
 
     let root = TrajectoryId("cc:dynamic-hitl-test".to_string());
-    let acked = hooks::handle(&runtime, HookEvent::SessionStart { root: root.clone() }).await;
+    let acked = hooks::handle(
+        &runtime,
+        HookEvent::SessionStart {
+            root: root.clone(),
+            principal: None,
+        },
+    )
+    .await;
     assert!(matches!(acked, HookDecision::Ack), "the session opens: {acked:?}");
 
     let blocked = hooks::handle(
@@ -589,7 +603,14 @@ async fn the_block_carries_the_review_for_the_hitl_authority() {
     let config = Config::load(&path).expect("the fixture validates");
     let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"));
     let root = TrajectoryId("cc:hitl-review".to_string());
-    hooks::handle(&runtime, HookEvent::SessionStart { root: root.clone() }).await;
+    hooks::handle(
+        &runtime,
+        HookEvent::SessionStart {
+            root: root.clone(),
+            principal: None,
+        },
+    )
+    .await;
 
     let blocked = hooks::handle(
         &runtime,

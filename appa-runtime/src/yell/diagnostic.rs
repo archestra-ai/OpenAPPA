@@ -642,7 +642,7 @@ mod tests {
         let config = Config::load(&path).expect("the fixture validates");
         let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
         let parent = TrajectoryId("cc:parent-session".to_string());
-        let session = runtime.create_session(parent.clone()).expect("a fresh id opens");
+        let session = runtime.create_session(parent.clone(), None).expect("a fresh id opens");
         let call = |tool: &str| ProposedCall {
             tool: tool.to_string(),
             arguments: crate::api::raw(serde_json::json!({})),

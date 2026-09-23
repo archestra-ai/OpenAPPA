@@ -609,6 +609,7 @@ pub(crate) fn opening_at(trajectory: crate::value::TrajectoryId, starting_label:
         policy_file_key: PolicyFileKey::of(b"fixture"),
         open_vectors: Vec::new(),
         forked_from: None,
+        principal: None,
     })
 }
 

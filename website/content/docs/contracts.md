@@ -335,6 +335,12 @@ Membership answers: who belongs to this audience? OpenAPPA asks an external memb
 
 Under `[policy.audience]`, `self` and `internal` list the selectors that supply their members. `[policy.audience.group.<name>]` declares a named group with `within` and `from`.
 
+### Session principal
+
+A host that serves many people can name the person each session acts for. It passes that person's email address as the session's principal when the session starts. In that session, `self` is exactly that address. OpenAPPA does not ask the `self` selectors, and `internal` includes the principal beside its own sources. Children and root forks of the session act for the same principal. A session without a principal uses `[policy.audience] self` as usual.
+
+OpenAPPA takes the principal on the host's word; it does not authenticate it. Only a host that authenticated the person should name one, and the principal must be the address the membership services report for that person. A multi-user host usually leaves `[policy.audience] self` empty, so a session that names no principal cannot establish `self` and is denied as described below.
+
 A policy can omit `self` or `internal`. A check that needs the members of an omitted level — for example, `contains = ["internal"]` after a `delta` narrowed the audience to `self` — cannot be established. OpenAPPA denies that call and names the missing key; proposing the call again does not change the answer.
 
 Each selector entry has the form `provider:selector`. The provider identifies the service configured under `[externals.audience.<provider>]`. The selector tells that service which reader or group to read. The service's `selectors` declaration lists the selector templates it understands.

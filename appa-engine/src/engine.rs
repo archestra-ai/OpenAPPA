@@ -10,7 +10,7 @@ use crate::check::{self, CallRole, CheckOutcome, Narrowing, RawBlock};
 use crate::contract::ToolAnnotation;
 use crate::execute::{self, PlanError};
 use crate::fact::{BoundaryKind, Fact, ObservedResult, ReturnDerivation, ReturnPolicy, ReturnSanitizer};
-use crate::label::{Expansions, Label, MembershipContext, SymbolicAtom};
+use crate::label::{Expansions, Label, MembershipContext, ReaderId, SymbolicAtom};
 use crate::names::{AuthorityName, SanitizerName};
 use crate::params::{ArgumentError, CanonicalArguments};
 use crate::plan::{self, BlockedCall, PlannedBlock};
@@ -276,7 +276,7 @@ impl Engine {
             EngineEvent::ChildReturn(report) => (report.audience.clone(), AudienceEvidence::default()),
             EngineEvent::BindFork(_) => (AudienceEvidence::default(), AudienceEvidence::default()),
         };
-        self.act_evidence(merged, inherited)
+        self.act_evidence(merged, inherited, projection.principal().cloned())
     }
 
     /// Validate one act's merged evidence and recompute the answers it carries. Junk or
@@ -285,9 +285,10 @@ impl Engine {
         &self,
         evidence: AudienceEvidence,
         inherited: AudienceEvidence,
+        principal: Option<ReaderId>,
     ) -> Result<ActEvidence, TransitionError> {
-        let expansions = self.registry.audience().expansions(&evidence)?;
-        Ok(ActEvidence::new(evidence, expansions, inherited))
+        let expansions = self.registry.audience().expansions(&evidence, principal.as_ref())?;
+        Ok(ActEvidence::new(evidence, expansions, inherited, principal))
     }
 
     fn context<'e>(&'e self, act: &'e ActEvidence) -> MembershipContext<'e> {
@@ -1254,7 +1255,11 @@ impl Engine {
             return Err(TransitionError::BatchIdentityConflict);
         }
         act.inherit(&recorded.evidence)?;
-        let under = self.act_evidence(act.inheriting(&recorded.evidence)?, AudienceEvidence::default())?;
+        let under = self.act_evidence(
+            act.inheriting(&recorded.evidence)?,
+            AudienceEvidence::default(),
+            act.principal.clone(),
+        )?;
         let follow_up = self.decided_follow_up(views, batch, &proposals, &recorded.released, &under)?;
         act.absorb(&under);
         Ok(Some(EngineDecision {
@@ -1634,7 +1639,11 @@ impl Engine {
                 let subject = subject_at(position);
                 let pinned = views.candidate_evidence(&subject);
                 act.inherit(pinned)?;
-                let under = self.act_evidence(act.inheriting(pinned)?, AudienceEvidence::default())?;
+                let under = self.act_evidence(
+                    act.inheriting(pinned)?,
+                    AudienceEvidence::default(),
+                    act.principal.clone(),
+                )?;
                 Ok((views.standing_call(&subject).unwrap_or(call), under))
             })
             .collect::<Result<_, TransitionError>>()?;
@@ -2159,7 +2168,11 @@ impl Engine {
             // atoms that contract reads were pinned by the hop that derived it.
             let pinned = views.candidate_evidence(&recorded.subject);
             act.inherit(pinned)?;
-            let under = self.act_evidence(act.inheriting(pinned)?, AudienceEvidence::default())?;
+            let under = self.act_evidence(
+                act.inheriting(pinned)?,
+                AudienceEvidence::default(),
+                act.principal.clone(),
+            )?;
             let reblocked = self.reblocked(views, recorded, execution, &under)?;
             act.absorb(&under);
             return Ok(match reblocked {
@@ -2508,8 +2521,9 @@ impl Engine {
         &self,
         trajectory: &TrajectoryId,
         policy_file_key: crate::profile::PolicyFileKey,
+        principal: Option<ReaderId>,
     ) -> Result<ValidatedFactBatch, TransitionRefusal> {
-        self.opening(trajectory, policy_file_key, None)
+        self.opening(trajectory, policy_file_key, None, principal)
     }
 
     /// The opening batch of an independent conversation-root fork. `forked_from` came from the
@@ -2521,7 +2535,8 @@ impl Engine {
         policy_file_key: crate::profile::PolicyFileKey,
         forked_from: crate::fact::RootForkOrigin,
     ) -> Result<ValidatedFactBatch, TransitionRefusal> {
-        self.opening(trajectory, policy_file_key, Some(forked_from))
+        let principal = forked_from.principal.clone();
+        self.opening(trajectory, policy_file_key, Some(forked_from), principal)
     }
 
     fn opening(
@@ -2529,6 +2544,7 @@ impl Engine {
         trajectory: &TrajectoryId,
         policy_file_key: crate::profile::PolicyFileKey,
         forked_from: Option<crate::fact::RootForkOrigin>,
+        principal: Option<ReaderId>,
     ) -> Result<ValidatedFactBatch, TransitionRefusal> {
         let empty = EngineView::validated(Projection::empty(0), self.identity, trajectory.clone());
         self.seal(
@@ -2541,6 +2557,7 @@ impl Engine {
                 policy_file_key,
                 open_vectors: self.open_vectors(),
                 forked_from,
+                principal,
             })],
         )
     }
@@ -2933,21 +2950,33 @@ pub(crate) enum ComposeRefusal {
 pub(crate) struct ActEvidence {
     expansions: Expansions,
     ledger: std::cell::RefCell<crate::audience::ActLedger>,
+    /// The family's session principal: it answers `self` beside the pinned evidence.
+    principal: Option<ReaderId>,
 }
 
 impl ActEvidence {
-    fn new(evidence: AudienceEvidence, expansions: Expansions, inherited: AudienceEvidence) -> ActEvidence {
+    fn new(
+        evidence: AudienceEvidence,
+        expansions: Expansions,
+        inherited: AudienceEvidence,
+        principal: Option<ReaderId>,
+    ) -> ActEvidence {
         ActEvidence {
             expansions,
             ledger: std::cell::RefCell::new(crate::audience::ActLedger::of(evidence, inherited)),
+            principal,
         }
     }
 
     /// Assemble from parts a caller validated together: the transition validator recomputes
     /// `expansions` from `evidence` before building this. The validator keeps its own
     /// per-act ledger, so no inherited pins are carried here.
-    pub(crate) fn validated(evidence: AudienceEvidence, expansions: Expansions) -> ActEvidence {
-        ActEvidence::new(evidence, expansions, AudienceEvidence::default())
+    pub(crate) fn validated(
+        evidence: AudienceEvidence,
+        expansions: Expansions,
+        principal: Option<ReaderId>,
+    ) -> ActEvidence {
+        ActEvidence::new(evidence, expansions, AudienceEvidence::default(), principal)
     }
 
     /// The evidence a record of this act pins.
@@ -2980,7 +3009,7 @@ impl ActEvidence {
     fn settle(&self, audience: &crate::audience::AudienceRegistry) -> Result<(), crate::audience::EvidenceRefusal> {
         let mut ledger = self.ledger.borrow_mut();
         ledger.read(self.expansions.reads());
-        ledger.settle(audience)
+        ledger.settle(audience, self.principal.as_ref())
     }
 }
 
@@ -3065,9 +3094,9 @@ pub(crate) fn compose_batch<'a>(
                         .map_err(ComposeRefusal::Evidence)?;
                     let expansions = registry
                         .audience()
-                        .expansions(&merged)
+                        .expansions(&merged, act.principal.as_ref())
                         .map_err(ComposeRefusal::Evidence)?;
-                    std::borrow::Cow::Owned(ActEvidence::validated(merged, expansions))
+                    std::borrow::Cow::Owned(ActEvidence::validated(merged, expansions, act.principal.clone()))
                 }
                 None => std::borrow::Cow::Borrowed(act),
             };
@@ -3374,7 +3403,7 @@ mod tests {
     }
 
     fn opened_root(e: &Engine, trajectory: &TrajectoryId) -> Fact {
-        e.open_trajectory(trajectory, crate::profile::PolicyFileKey::of(b"policy"))
+        e.open_trajectory(trajectory, crate::profile::PolicyFileKey::of(b"policy"), None)
             .expect("the engine opens its own root")
             .into_unsealed()
             .remove(0)
@@ -9908,7 +9937,7 @@ mod tests {
         let t = traj();
         let key = crate::profile::PolicyFileKey::of(b"the policy file");
         let batch = e
-            .open_trajectory(&t, key.clone())
+            .open_trajectory(&t, key.clone(), None)
             .expect("a fresh root's opening seals");
         assert_eq!(batch.basis(), 0, "the opening stands on the empty log");
         match batch.facts() {
@@ -9921,9 +9950,11 @@ mod tests {
                     policy_file_key,
                     open_vectors,
                     forked_from,
+                    principal,
                 }),
             ] => {
                 assert_eq!(forked_from, &None, "a fresh root opens as no fork");
+                assert_eq!(principal, &None, "an opening no host named a principal for has none");
                 assert_eq!(policy_file_key, &key, "the opening names the file it opened under");
                 assert_eq!(trajectory, &t);
                 assert_eq!(*dialect, PolicyDialectVersion::new(1));
@@ -10298,7 +10329,7 @@ mod tests {
         let mut advanced = EngineView::validated(Projection::empty(0), e.identity(), t.clone());
         advanced
             .advance(
-                &e.open_trajectory(&t, crate::profile::PolicyFileKey::of(b"policy"))
+                &e.open_trajectory(&t, crate::profile::PolicyFileKey::of(b"policy"), None)
                     .expect("the opening seals"),
             )
             .expect("the sealed opening advances the empty view");
@@ -11606,7 +11637,7 @@ mod tests {
             unregistered
                 .registry
                 .audience()
-                .needed_primitives(&[group_atom("team")]),
+                .needed_primitives(&[group_atom("team")], None),
             Err(crate::audience::Unroutable::UnknownGroup(_))
         ));
 

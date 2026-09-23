@@ -147,10 +147,11 @@ enum Field {
     Value,
     SpawnBinding,
     Cwd,
+    Principal,
 }
 
 impl Field {
-    const ALL: [Field; 12] = [
+    const ALL: [Field; 13] = [
         Field::RootId,
         Field::ChildId,
         Field::Text,
@@ -163,6 +164,7 @@ impl Field {
         Field::Value,
         Field::SpawnBinding,
         Field::Cwd,
+        Field::Principal,
     ];
 
     fn spelling(self) -> &'static str {
@@ -179,6 +181,7 @@ impl Field {
             Field::Value => "value",
             Field::SpawnBinding => "spawn_binding",
             Field::Cwd => "cwd",
+            Field::Principal => "principal",
         }
     }
 }
@@ -196,7 +199,7 @@ fn fields_read(name: EventName) -> &'static [Field] {
         // no reader and is admitted. What a probe may not carry is a
         // dispatch — no call, no result, no ruling.
         EventName::Ping => &[Field::RootId, Field::ChildId],
-        EventName::SessionStart => &[Field::RootId],
+        EventName::SessionStart => &[Field::RootId, Field::Principal],
         EventName::Prompt => &[Field::RootId, Field::ChildId, Field::Text],
         EventName::TurnEnd => &[Field::RootId, Field::ChildId],
         EventName::ToolCall => &[
@@ -425,6 +428,9 @@ pub struct WireEvent {
     /// one. A tool call alone reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// The reader a session start acts for. A session start alone reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<String>,
 }
 
 /// A parsed wire event with what the server derived from it.
@@ -460,6 +466,7 @@ impl WireEvent {
             spawn_binding: None,
             inventory: None,
             cwd: None,
+            principal: None,
         }
     }
 
@@ -479,6 +486,7 @@ impl WireEvent {
             Field::Value => self.value.is_some(),
             Field::SpawnBinding => self.spawn_binding.is_some(),
             Field::Cwd => self.cwd.is_some(),
+            Field::Principal => self.principal.is_some(),
         }
     }
 
@@ -503,13 +511,14 @@ impl WireEvent {
     pub fn from_event(adapter: AdapterName, event: &HookEvent) -> Result<Self, ParseRefusal> {
         let ids = |actor: &Actor| host_ids(adapter, actor);
         let wire = match event {
-            HookEvent::SessionStart { root } => {
+            HookEvent::SessionStart { root, principal } => {
                 let (root_id, _) = ids(&Actor {
                     root: root.clone(),
                     child: None,
                 })?;
                 Self {
                     root_id: Some(root_id),
+                    principal: principal.clone(),
                     ..Self::bare(adapter, EventName::SessionStart)
                 }
             }
@@ -693,6 +702,7 @@ impl WireEvent {
             spawn_binding,
             inventory,
             cwd,
+            principal,
             ..
         } = self;
         let root = || -> Result<TrajectoryId, ParseRefusal> {
@@ -746,7 +756,10 @@ impl WireEvent {
         };
         match name {
             EventName::Ping => Ok(None),
-            EventName::SessionStart => accepted(HookEvent::SessionStart { root: root()? }),
+            EventName::SessionStart => accepted(HookEvent::SessionStart {
+                root: root()?,
+                principal,
+            }),
             EventName::Prompt => match text {
                 Some(text) => accepted(HookEvent::Prompt { actor: actor()?, text }),
                 None => Err(malformed("prompt without its text")),
@@ -1466,6 +1479,7 @@ mod tests {
         }
         let foreign = HookEvent::SessionStart {
             root: TrajectoryId("kagent:r1".to_string()),
+            principal: None,
         };
         assert!(WireEvent::from_event(AdapterName::ClaudeCode, &foreign).is_err());
     }
