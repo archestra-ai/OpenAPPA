@@ -23,7 +23,9 @@ COPY appa-adapter-claude-code appa-adapter-claude-code
 COPY appa-adapter-kagent appa-adapter-kagent
 COPY appa-builtin appa-builtin
 COPY appa-eventlog appa-eventlog
+COPY appa-package appa-package
 COPY bench bench
+COPY marketplace marketplace
 COPY website-chat-playground website-chat-playground
 RUN cargo build --release --locked --package website-chat-playground
 
