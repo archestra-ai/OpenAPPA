@@ -615,7 +615,7 @@ pub(crate) struct AnnotationConsult {
 /// addresses the model, and which contracts may release a spawn.
 ///
 /// A served deployment answers exactly one host, and carries that host's adapter: the
-/// adapter derives a canonical identity for every call, so the policy names tools that way,
+/// adapter identifies every call's canonical identity, so the policy names tools that way,
 /// and its inverse gives the host spelling the model can dispatch. A host that embeds the
 /// runtime, and `appa replay`, name tools their own way: what the runtime records is already
 /// the name their model calls.
@@ -973,7 +973,7 @@ impl Runtime {
     /// [`Runtime::open_with_store`] for a host that names tools through an adapter of its
     /// own, under [`AdapterName::Embedded`]: the policy is resolved the way a served
     /// deployment resolves it, so canonical rules, `server_aliases` and the adapter's
-    /// spelling of a tool to the model all apply. The host derives every call through the
+    /// spelling of a tool to the model all apply. The host identifies every call through the
     /// same adapter before it hands the event over.
     pub fn open_with_store_as(
         config: Config,
@@ -1163,7 +1163,7 @@ impl Inner {
     /// "no panic runs while it is held" reading must keep holding — so a race can
     /// still compile twice, but only one result is ever cached and handed out.
     ///
-    /// A retired policy decides under the identities this deployment derives now, so it
+    /// A retired policy decides under the identities this deployment identifies now, so it
     /// meets the naming rule this deployment serves under or the trajectory does not
     /// reopen: a stored policy naming a tool the served host's raw way confines and
     /// excepts nothing, while a wildcard contract still permits the call.
@@ -1722,7 +1722,7 @@ impl Runtime {
                     accepted.iter().map(|(name, id, _)| (id, name.as_str())).collect();
                 let mut conflicts = std::collections::BTreeSet::new();
                 for observed in &inventory.tools {
-                    if let Ok(id) = (adapter.derive)(&observed.tool)
+                    if let Ok(id) = (adapter.identify_tool)(&observed.tool)
                         && (names
                             .get(observed.name.as_str())
                             .is_some_and(|previous| **previous != id.canonical)
@@ -3790,7 +3790,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
 
     #[cfg(feature = "daemon")]
     /// A trajectory recorded before the upgrade carries its own policy bytes, and reopening
-    /// it compiles them. A served deployment derives a canonical identity for every call, so
+    /// it compiles them. A served deployment identifies every call's canonical identity, so
     /// a stored policy naming a tool the host's raw way in a `[deployment]` field confines
     /// nothing while its contract still permits the call: the served runtime refuses that
     /// trajectory rather than deciding under it, and reopens a stored canonical policy.
@@ -5073,7 +5073,7 @@ mod spawn_coverage_tests {
         (format!("http://{addr}/annotate"), consults)
     }
 
-    /// One agent this deployment delegates to, by the canonical name both adapters derive,
+    /// One agent this deployment delegates to, by the canonical name both adapters identify,
     /// and a wildcard over everything else. Every name is canonical, so a served deployment
     /// of either host loads it.
     fn config(dir: &tempfile::TempDir, url: &str) -> Config {

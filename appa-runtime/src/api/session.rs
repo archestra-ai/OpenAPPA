@@ -22,9 +22,9 @@ use super::{
 };
 
 /// The runtime's own control tool, recognized by its one canonical
-/// identity, `appa/execute_remedy_plan`: the served adapter derives it
+/// identity, `appa/execute_remedy_plan`: the served adapter identifies it
 /// from the host's registered spelling of the runtime's MCP server, and
-/// nothing else derives it. Selecting an offer is not a checked flow. A
+/// nothing else is identified as it. Selecting an offer is not a checked flow. A
 /// lookalike on another server — say `mcp/evil/execute_remedy_plan` —
 /// is an ordinary checked call.
 pub(crate) fn is_control_tool(tool: &str) -> bool {

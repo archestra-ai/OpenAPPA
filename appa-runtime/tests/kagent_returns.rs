@@ -17,7 +17,7 @@ use appa_runtime::hooks;
 use appa_runtime_api::Actor;
 
 /// The agent this deployment delegates to, as the kagent plugin spells it on the
-/// wire: an agent called as a tool, which the adapter derives as a spawn.
+/// wire: an agent called as a tool, which the adapter identifies as a spawn.
 const AGENT: &str = "agent:NS/log_analyst";
 
 /// The child's final message on the routes that carry it as spoken.
@@ -26,7 +26,7 @@ const RETURN: &str = "the api pod restarted three times";
 /// One agent to delegate to, one read for the child, and the two return
 /// sanitizers a declaration routes through. `scrub` runs inside the runtime, so
 /// the suite needs no external service. Every contract names the canonical tool
-/// the adapter derives from the wire's raw spelling.
+/// the adapter identifies from the wire's raw spelling.
 const POLICY: &str = r#"
 [policy]
 version = 2
@@ -350,12 +350,12 @@ async fn a_marked_spawn_is_held_on_a_menu_that_carries_every_return_route() {
     );
 }
 
-/// Whether a call is a spawn is the served adapter's derivation from the raw
+/// Whether a call is a spawn is part of the served adapter's identification from the raw
 /// spelling: a `spawn` claim on the wire moves nothing. An ordinary MCP call
 /// claimed as a spawn releases as the ordinary call it is; the agent called as a
 /// tool is a spawn with no claim at all.
 #[tokio::test]
-async fn a_spawn_is_derived_from_the_raw_spelling_and_never_read_off_the_wire() {
+async fn a_spawn_is_identified_from_the_raw_spelling_and_never_read_off_the_wire() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let runtime = open(&dir);
     assert_eq!(answered(&runtime, session_start()).await, ack());

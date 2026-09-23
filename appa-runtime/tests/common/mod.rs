@@ -18,7 +18,7 @@ use appa_runtime_api::{
 
 /// The Claude Code hook JSON a suite is written in, as the served runtime
 /// reads it: translated onto the wire by the client-side codec (as `appa
-/// hook --adapter claude-code` does) and derived back by the served
+/// hook --adapter claude-code` does) and identified by the served
 /// adapter, so the event's tool is the canonical one. `None` for a hook the
 /// codec does not gate.
 pub fn claude_event(hook_json: &serde_json::Value) -> Option<HookEvent> {
@@ -27,7 +27,7 @@ pub fn claude_event(hook_json: &serde_json::Value) -> Option<HookEvent> {
     let wire = WireEvent::from_event(AdapterName::ClaudeCode, &event).expect("the event translates");
     let accepted = wire
         .into_event(&appa_adapter_claude_code::adapter())
-        .expect("the wire event derives")
+        .expect("the wire event maps")
         .expect("a translated event is no ping");
     Some(accepted.event)
 }

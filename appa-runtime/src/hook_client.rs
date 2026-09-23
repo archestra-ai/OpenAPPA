@@ -7,7 +7,7 @@
 //! process where a shell and a curl spent two, and spends it on the binary the
 //! install already puts on disk, so the install path grows nothing. The host's
 //! shape translation (the adapter's [`Codec`]) runs here, on the client side;
-//! the wire carries the host's raw tool spelling and the runtime derives the
+//! the wire carries the host's raw tool spelling and the runtime identifies the
 //! rest itself, so nothing this client says about a call is trusted.
 
 use std::io::{Read, Write};

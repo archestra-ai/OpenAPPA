@@ -21,7 +21,7 @@
 //! Where the runtime would name that tool it says the canonical id, never
 //! a spelling that dispatches the control tool instead.
 
-use appa_runtime_api::{CanonicalTool, Derived, ParseRefusal};
+use appa_runtime_api::{CanonicalTool, IdentifiedTool, ParseRefusal};
 
 /// The registered spelling of the runtime's own control tool: `execute_remedy_plan`
 /// on the `appa` MCP server the install registers. Only this spelling is the control
@@ -53,8 +53,8 @@ pub(crate) fn canonical(raw: &str) -> Result<CanonicalTool, ParseRefusal> {
 /// The inverse of [`canonical`] over its range: what Claude Code calls the tool one
 /// canonical identity names, which is the name the runtime says whenever it tells this
 /// model to run something. Every answer is checked against [`canonical`], so a spelling
-/// this returns is one that derives back to the identity it was asked about, and a
-/// canonical id outside the derivation's range answers `None` — the caller says the
+/// this returns is one that maps back to the identity it was asked about, and a
+/// canonical id outside the mapping's range answers `None` — the caller says the
 /// canonical id instead.
 ///
 /// Three families of id have no Claude Code spelling. The `agent` family and another
@@ -75,8 +75,8 @@ pub(crate) fn spell(tool: &CanonicalTool) -> Option<String> {
     (canonical(&raw).as_ref() == Ok(tool)).then_some(raw)
 }
 
-pub(crate) fn derive(raw: &str) -> Result<Derived, ParseRefusal> {
-    Ok(Derived {
+pub(crate) fn identify_tool(raw: &str) -> Result<IdentifiedTool, ParseRefusal> {
+    Ok(IdentifiedTool {
         canonical: canonical(raw)?,
         spawn: is_spawn_tool(raw),
     })
@@ -124,7 +124,7 @@ mod tests {
         }
     }
 
-    /// A canonical id no Claude Code spelling derives to has no Claude Code spelling.
+    /// A canonical id outside the mapping's range has no Claude Code spelling.
     /// `mcp/appa/execute_remedy_plan` is the ordinary tool a policy may declare on the
     /// runtime's own server: its rendering is the reserved control spelling, which names
     /// another tool, so it has none.
@@ -172,14 +172,14 @@ mod tests {
     }
 
     #[test]
-    fn the_derivation_carries_the_canonical_identity_and_spawn() {
+    fn identification_carries_the_canonical_identity_and_spawn() {
         for tool in ["Agent", "Task"] {
-            let derived = derived(tool).expect("derives");
-            assert!(derived.spawn, "{tool} is the spawn");
-            assert_eq!(derived.canonical.as_str(), format!("host/claude-code/{tool}"));
+            let identified = identified(tool).expect("identifies");
+            assert!(identified.spawn, "{tool} is the spawn");
+            assert_eq!(identified.canonical.as_str(), format!("host/claude-code/{tool}"));
         }
-        assert!(!derived("Bash").expect("derives").spawn);
-        assert!(matches!(derived("mcp__github"), Err(ParseRefusal::Malformed { .. })));
+        assert!(!identified("Bash").expect("identifies").spawn);
+        assert!(matches!(identified("mcp__github"), Err(ParseRefusal::Malformed { .. })));
     }
 
     mod laws {
@@ -202,7 +202,7 @@ mod tests {
         }
 
         /// Every canonical identity a policy may declare, including the ones no Claude
-        /// Code spelling derives to: the control tool's own server and name, another
+        /// Code spelling maps to: the control tool's own server and name, another
         /// host's namespace, and a host tool named like an `mcp__` spelling.
         fn canonical_id() -> impl Strategy<Value = CanonicalTool> {
             let family = prop_oneof![Just("mcp"), Just("host"), Just("agent")];
@@ -235,10 +235,10 @@ mod tests {
                 }
             }
 
-            /// The inverse is total over the derivation's range and returns the exact
+            /// The inverse is total over the mapping's range and returns the exact
             /// spelling Claude Code dispatches, so the runtime never has to keep one.
             #[test]
-            fn the_inverse_spells_every_derived_identity_back(raw in raw_spelling()) {
+            fn the_inverse_spells_every_mapped_identity_back(raw in raw_spelling()) {
                 if let Ok(canonical) = canonical(&raw) {
                     let spelled = (adapter().spell)(&canonical);
                     prop_assert_eq!(spelled.as_deref(), Some(raw.as_str()));
@@ -250,7 +250,7 @@ mod tests {
             /// identity it was asked about. An identity whose rendering would name
             /// another tool is spelled `None` instead, never that rendering.
             #[test]
-            fn a_spelled_identity_is_the_one_its_spelling_derives_to(tool in canonical_id()) {
+            fn a_spelled_identity_is_the_one_its_spelling_maps_to(tool in canonical_id()) {
                 if let Some(spelled) = (adapter().spell)(&tool) {
                     prop_assert_eq!(canonical(&spelled), Ok(tool));
                 }

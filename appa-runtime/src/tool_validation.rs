@@ -162,8 +162,8 @@ pub fn precise_name(name: &str, adapter: Adapter) -> Option<CanonicalTool> {
     if name == "*" {
         return None;
     }
-    if let Ok(derived) = (adapter.derive)(name) {
-        return Some(derived.canonical);
+    if let Ok(identified) = (adapter.identify_tool)(name) {
+        return Some(identified.canonical);
     }
     if adapter.name == AdapterName::Kagent
         && let Some((namespace, agent)) = name.split_once(appa_adapter_kagent::AGENT_SPELLING_SEPARATOR)

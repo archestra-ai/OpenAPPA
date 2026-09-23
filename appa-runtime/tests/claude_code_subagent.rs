@@ -109,7 +109,7 @@ fn re_fired(mut stop: serde_json::Value) -> serde_json::Value {
 
 /// The shipped example with `policy_extra` spliced in after the deployment
 /// table, plus deterministic `Bash` and `Read` tools under the canonical
-/// names the served adapter derives. These tests exercise trajectory
+/// names the served adapter maps. These tests exercise trajectory
 /// binding, not the default's model-backed compatibility fallback;
 /// `bash_delta` is what the recorded Bash output carries.
 fn deployment(policy_extra: &str, externals_extra: &str, bash_delta: &str) -> Runtime {

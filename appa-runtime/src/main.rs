@@ -184,7 +184,7 @@ fn stop(target: &crate::runtime_url::RuntimeUrl) -> ExitCode {
     }
 }
 
-/// The derivation the runtime applies to every call of the host it serves. The one
+/// The tool identification the runtime applies to every call of the host it serves. The one
 /// place this crate names the adapter crates. `--adapter` parses served names only
 /// ([`AdapterName::ALL`]), so an embedding host's adapter never reaches here.
 fn served(adapter: AdapterName) -> appa_runtime_api::Adapter {
@@ -528,7 +528,7 @@ async fn serve(args: Args) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // A served deployment answers one host, and the adapter is that host: it derives the
+    // A served deployment answers one host, and the adapter is that host: it identifies the
     // canonical identity the policy must name, its inverse spells a recorded name back for
     // the model, and its rule settles which contracts release a spawn.
     let adapter = served(args.adapter);

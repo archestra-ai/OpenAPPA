@@ -57,7 +57,7 @@ pub struct ToolInventory {
 pub struct ObservedTool {
     /// The name the host actually dispatches, not a policy alias.
     pub name: String,
-    /// The adapter's wire spelling. Only the server-side adapter derives identity.
+    /// The adapter's wire spelling. Only the server-side adapter maps it to an identity.
     pub tool: String,
 }
 
@@ -129,7 +129,7 @@ impl ToolInventory {
             if observed.name.is_empty() || observed.name.chars().any(char::is_control) {
                 return Err(refuse("inventory contains an empty or invalid host tool name".into()));
             }
-            let identity = (adapter.derive)(&observed.tool)?.canonical;
+            let identity = (adapter.identify_tool)(&observed.tool)?.canonical;
             if adapter.name == crate::AdapterName::Kagent
                 && observed.tool.starts_with("mcp:")
                 && identity.as_str().rsplit('/').next() != Some(observed.name.as_str())
@@ -168,8 +168,8 @@ impl ToolInventory {
         self.tools
             .iter()
             .map(|observed| {
-                let derived = (adapter.derive)(&observed.tool)?;
-                Ok((observed.name.clone(), derived.canonical, derived.spawn))
+                let identified = (adapter.identify_tool)(&observed.tool)?;
+                Ok((observed.name.clone(), identified.canonical, identified.spawn))
             })
             .collect()
     }

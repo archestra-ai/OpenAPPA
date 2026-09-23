@@ -32,7 +32,7 @@ fn posted() -> Vec<Posted> {
     lines
 }
 
-/// The family the runtime derives from each of kagent's raw spellings, and
+/// The family the runtime identifies from each of kagent's raw spellings, and
 /// whether the call is a spawn.
 fn expected(raw: &str) -> (String, bool) {
     match raw.split_once(':') {
@@ -41,7 +41,7 @@ fn expected(raw: &str) -> (String, bool) {
         Some(("builtin", name)) => (format!("host/kagent/{name}"), false),
         Some(("gate", name)) => (format!("host/kagent-gate/{name}"), false),
         Some(("appa", _)) => (CanonicalTool::control().as_str().to_string(), false),
-        other => panic!("the fixture spells a tool the adapter cannot derive: {other:?}"),
+        other => panic!("the fixture spells a tool the adapter cannot identify: {other:?}"),
     }
 }
 
@@ -63,7 +63,7 @@ fn every_fixture_event_is_admitted_under_the_served_kagent_adapter() {
 #[test]
 fn each_raw_spelling_arrives_as_the_canonical_tool_the_policy_names() {
     let adapter = appa_adapter_kagent::adapter();
-    let mut derived = 0;
+    let mut identified = 0;
     for Posted { name, body } in posted() {
         let raw = serde_json::from_slice::<serde_json::Value>(&body).expect("the fixture body is JSON")["tool"]
             .as_str()
@@ -79,21 +79,21 @@ fn each_raw_spelling_arrives_as_the_canonical_tool_the_policy_names() {
             other => panic!("`{name}` names a tool on {other:?}"),
         };
         let (canonical, spawns) = expected(&raw);
-        assert_eq!(call.tool, canonical, "`{name}` derives its canonical tool");
+        assert_eq!(call.tool, canonical, "`{name}` identifies its canonical tool");
         assert!(
             CanonicalTool::parse(&call.tool).is_ok(),
-            "`{name}` derives a tool the policy can name"
+            "`{name}` identifies a tool the policy can name"
         );
         if matches!(accepted.event, HookEvent::ToolCall { .. }) {
-            assert_eq!(spawn, spawns, "`{name}` derives whether the call forks a child");
+            assert_eq!(spawn, spawns, "`{name}` identifies whether the call forks a child");
         }
         assert!(
             accepted.names_children.is_empty(),
             "kagent binds a child by its spawn binding, never by an argument"
         );
-        derived += 1;
+        identified += 1;
     }
-    assert!(derived >= 5, "the fixture exercises every raw class");
+    assert!(identified >= 5, "the fixture exercises every raw class");
 }
 
 /// The three successes the fixture spells arrive as three different
