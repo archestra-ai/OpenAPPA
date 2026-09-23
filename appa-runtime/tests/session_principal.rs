@@ -147,6 +147,24 @@ async fn a_reopened_session_cannot_change_its_principal() {
     );
 }
 
+/// A session opened for no one cannot later be claimed for someone.
+#[tokio::test]
+async fn a_session_opened_without_a_principal_cannot_gain_one() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = open(&dir);
+    assert_eq!(start(&runtime, None).await, HookDecision::Ack);
+    assert!(matches!(
+        start(&runtime, Some(ALICE)).await,
+        HookDecision::Refuse { .. }
+    ));
+
+    narrow_to_self(&runtime).await;
+    assert!(matches!(
+        propose(&runtime, send(ALICE)).await,
+        HookDecision::DenyCall { .. }
+    ));
+}
+
 #[tokio::test]
 async fn a_root_fork_acts_for_its_parents_principal() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");

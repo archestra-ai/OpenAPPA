@@ -947,6 +947,7 @@ mod tests {
                 pins in prop::collection::btree_set(0usize..6, 0..5),
                 inherited in prop::collection::btree_set(0usize..6, 0..4),
                 reads in prop::collection::btree_set(0usize..4, 0..4),
+                principal in prop::option::of(Just(reader("alice@corp.com"))),
             ) {
                 let registry = registry(corp_config());
                 let mut live = ActLedger::of(evidence(pins.clone()), evidence(inherited.clone()));
@@ -964,9 +965,12 @@ mod tests {
                 }
                 // The verdict is the invariant; which unrequested entry a refusal names
                 // first follows pin order, which record-by-record replay reverses.
-                let live = live.settle(&registry, None);
-                let replay = replay.settle(&registry, None);
+                let live = live.settle(&registry, principal.as_ref());
+                let replay = replay.settle(&registry, principal.as_ref());
                 prop_assert_eq!(live.is_ok(), replay.is_ok());
+                // The justification oracle below reads what each atom requests without a
+                // principal; under one, `self` requests nothing.
+                prop_assume!(principal.is_none());
 
                 let requested: BTreeSet<usize> = reads.iter().flat_map(|index| atom(*index).1.iter().copied()).collect();
                 let justified = pins.iter().all(|pin| inherited.contains(pin) || requested.contains(pin));
