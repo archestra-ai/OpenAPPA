@@ -1,6 +1,6 @@
 schema = 1
 name = "monday"
-description = "Rules for the monday Platform MCP server's 96 tools: internal reads, reviewed internal writes and sensitive changes, public documentation queries, and viewer-only returned credentials."
+description = "Rules for the monday Platform MCP server's 99 tools: internal reads, reviewed internal writes and sensitive changes, public documentation queries, and viewer-only returned credentials."
 
 [battery]
 policy = "appa.toml"

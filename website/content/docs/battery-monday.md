@@ -2,12 +2,12 @@
 title: monday battery
 category: Batteries
 order: 6.75
-description: Rules for monday Platform MCP's 96 tools, with internal reads and reviewed writes and sensitive changes.
+description: Rules for monday Platform MCP's 99 tools, with internal reads and reviewed writes and sensitive changes.
 sidebar: false
 breadcrumb: monday
 ---
 
-The monday battery covers the 96 tools discovered from the hosted Platform
+The monday battery covers the 99 tools discovered from the hosted Platform
 MCP server at `https://mcp.monday.com/mcp`, version 1.0.0, on 2026-09-22.
 
 [View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/monday)

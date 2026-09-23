@@ -1,6 +1,6 @@
 # monday battery
 
-Rules for the hosted Platform MCP at `https://mcp.monday.com/mcp`: 96 tools,
+Rules for the hosted Platform MCP at `https://mcp.monday.com/mcp`: 99 tools,
 server version 1.0.0, discovered on 2026-09-22. Static contracts cover the
 inventory; `audience-source.py` resolves notification recipients. Include
 `appa.toml` in the root config, or install from a release
@@ -19,12 +19,13 @@ public source revision.
 reads workspace documents. This group covers:
 
 `agent_catalog`, `all_api_read`, `all_widgets_schema`, `board_insights`,
-`explore_meetings`, `get_action`, `get_assets`, `get_automation_runs`,
+`explore_meetings`, `get_action`, `get_assets`, `get_assigned_items`, `get_automation_runs`,
 `get_automation_statistics`, `get_board_activity`, `get_board_info`,
 `get_board_items_page`, `get_column_type_info`, `get_form`, `get_graphql_schema`,
 `get_meetings_content`, `get_monday_dev_sprints_boards`,
 `get_run_once_trigger_entities`, `get_sprint_summary`, `get_sprints_metadata`,
-`get_type_details`, `get_updates`, `get_user_context`, `get_workflow_run_once_status`,
+`get_type_details`, `get_updates`, `get_user_context`, `get_user_mentions`,
+`get_user_recent_activity`, `get_workflow_run_once_status`,
 `invoke_process_planner`, `list_actions`, `list_automations`, `list_users_and_teams`,
 `list_workspaces`, `read_docs`, `search`, `search_meetings_content`, `show-assign`,
 `show-battery`, `show-chart`, `show-table`, `validate_workflow`, `vibe_ask`, `vibe_get`,

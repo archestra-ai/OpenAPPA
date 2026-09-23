@@ -48,7 +48,7 @@ digest = "sha256:3af0b11a68e2e2e5f2c83dd29fda95d872a3407e4f67d8fa70066e996c8564d
 
 [packages.battery.monday]
 path = "batteries/monday"
-digest = "sha256:1f816228976ddbf2cd67e70b6339d830fab35843c6b812ef9942261cbc495473"
+digest = "sha256:c144cd9414d6ae26506a7239ae238750c977462518c862c7dd476bd87ea87f76"
 
 [packages.battery.notion]
 path = "batteries/notion"

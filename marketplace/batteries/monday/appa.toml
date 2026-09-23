@@ -1,5 +1,5 @@
 # monday battery: the hosted Platform MCP server (https://mcp.monday.com/mcp),
-# version 1.0.0, authenticated 96-tool inventory captured on 2026-09-22.
+# version 1.0.0, authenticated 99-tool inventory captured on 2026-09-22.
 # Source links reference public implementations or hosted tools/list declarations.
 # The public source commit is not a verified identifier of the hosted build.
 #
@@ -30,6 +30,24 @@ selectors = [{ template = "user/<id>" }]
 # all_api_read rejects mutations at the server; all_monday_api is reviewed below.
 # read_docs reads workspace documents, not public product documentation.
 # Asset download URLs still identify internal files; they are not public data.
+
+# Source: authenticated hosted tools/list on 2026-09-22; readOnlyHint=true.
+[[policy.tool]]
+name = "mcp/monday/get_assigned_items"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+# Source: authenticated hosted tools/list on 2026-09-22; readOnlyHint=true.
+[[policy.tool]]
+name = "mcp/monday/get_user_mentions"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+# Source: authenticated hosted tools/list on 2026-09-22; readOnlyHint=true.
+[[policy.tool]]
+name = "mcp/monday/get_user_recent_activity"
+delta = { trust = "suspicious", audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
 
 # Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/user-context-tool/user-context-tool.ts#L11
 [[policy.tool]]

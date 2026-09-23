@@ -193,6 +193,9 @@ async fn ordinary_reads_keep_provider_options_and_classify_results() {
     let runtime = runtime(&dir, false, false).await;
     for read in [
         call("get_user_context", serde_json::json!({})),
+        call("get_assigned_items", serde_json::json!({ "limit": 1 })),
+        call("get_user_mentions", serde_json::json!({ "limit": 1 })),
+        call("get_user_recent_activity", serde_json::json!({ "limit": 1 })),
         call(
             "get_board_info",
             serde_json::json!({ "boardId": 1, "filters": { "columns": { "only": true } } }),
