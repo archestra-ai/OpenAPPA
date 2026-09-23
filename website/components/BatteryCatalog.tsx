@@ -38,6 +38,12 @@ const BATTERIES = [
     logo: "/images/batteries/google-workspace.svg",
   },
   {
+    name: "Archestra",
+    description: "Checks shares of projects, apps, knowledge, plugins, and agents against their teams and members.",
+    href: "/battery-archestra",
+    logo: "/images/batteries/archestra.svg",
+  },
+  {
     name: "Sentry",
     description: "Rules for 9 listed and 55 catalog tools, internal reads, and reviewed writes.",
     href: "/battery-sentry",

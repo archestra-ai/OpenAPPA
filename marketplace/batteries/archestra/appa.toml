@@ -1,0 +1,204 @@
+# Archestra battery: the sharing tools of Archestra's built-in MCP server.
+#
+# Each tool below makes something readable by more people: the whole
+# organization, one or more teams, or named members. A share is a write
+# those people read, so it needs trusted data they may already see: the
+# organization is `internal`, a team is `@archestra:team/<team>`, a member
+# is `@archestra:user/<user>`. A share that narrows access, or that keeps a
+# resource with its owner, requires nothing. The `archestra` audience
+# source resolves each collection through Archestra's own API.
+#
+# A tool that takes a list of teams names one collection per team, so
+# sharing with teams A and B requires what A's members and B's members
+# may see. OpenAPPA reads at most 32 teams per call.
+#
+# Known gap: a personal plugin shared with members through `userIds` is
+# not covered, since a selector cannot tell whether that optional list
+# was sent.
+#
+# The root config maps `internal` onto the source — the README shows the
+# wiring.
+
+[policy]
+version = 2
+
+# --- projects ---
+
+[[policy.tool]]
+name = "mcp/archestra/set_project_share(visibility:organization)"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/set_project_share(visibility:team)"
+parameters = { type = "object", properties = { team_ids = { type = "array", items = { type = "string" } } }, required = ["team_ids"], additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@archestra:team/$team_ids"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/set_project_share"
+delta = {}
+
+# --- apps ---
+
+[[policy.tool]]
+name = "mcp/archestra/publish_app(scope:org)"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/publish_app(scope:team)"
+parameters = { type = "object", properties = { teams = { type = "array", items = { type = "string" } } }, required = ["teams"], additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teams"] } }
+
+# --- knowledge bases: a new one is org-wide unless it says otherwise ---
+
+[[policy.tool]]
+name = "mcp/archestra/create_knowledge_base(visibility:private)"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/create_knowledge_base(visibility:team-scoped)"
+parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } } }, required = ["teamIds"], additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teamIds"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/create_knowledge_base"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/update_knowledge_base(visibility:org-wide)"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/update_knowledge_base(visibility:team-scoped)"
+parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } } }, required = ["teamIds"], additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teamIds"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/update_knowledge_base"
+delta = {}
+
+# --- knowledge connectors: a new one is org-wide unless it says otherwise ---
+#
+# Auto-synced permissions mirror the connected system's own ACLs, which no
+# source here can read, so such a connector must be sharable with anyone.
+
+[[policy.tool]]
+name = "mcp/archestra/create_knowledge_connector(visibility:team-scoped)"
+parameters = { type = "object", properties = { team_ids = { type = "array", items = { type = "string" } } }, required = ["team_ids"], additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@archestra:team/$team_ids"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/create_knowledge_connector(visibility:auto-sync-permissions)"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["public"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/create_knowledge_connector"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/update_knowledge_connector(visibility:org-wide)"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/update_knowledge_connector(visibility:team-scoped)"
+parameters = { type = "object", properties = { team_ids = { type = "array", items = { type = "string" } } }, required = ["team_ids"], additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@archestra:team/$team_ids"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/update_knowledge_connector(visibility:auto-sync-permissions)"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["public"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/update_knowledge_connector"
+delta = {}
+
+# --- plugins, agents, MCP gateways: personal unless scoped wider ---
+
+[[policy.tool]]
+name = "mcp/archestra/create_plugin(scope:org)"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/create_plugin(scope:team)"
+parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } } }, required = ["teamIds"], additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teamIds"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/create_plugin"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/update_plugin(scope:org)"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/update_plugin(scope:team)"
+parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } } }, required = ["teamIds"], additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teamIds"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/update_plugin"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/edit_agent(scope:org)"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/edit_agent(scope:team)"
+parameters = { type = "object", properties = { teams = { type = "array", items = { type = "string" } } }, required = ["teams"], additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teams"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/edit_agent"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/edit_mcp_gateway(scope:org)"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/edit_mcp_gateway(scope:team)"
+parameters = { type = "object", properties = { teams = { type = "array", items = { type = "string" } } }, required = ["teams"], additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teams"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/edit_mcp_gateway"
+delta = {}
+
+# --- team membership: the new member reads what the team shares ---
+
+[[policy.tool]]
+name = "mcp/archestra/add_team_member"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@archestra:user/$user"] } }
+
+[externals.audience.archestra]
+command = ["python3", "audience-source.py"]
+token_env = "APPA_PROVIDER_ARCHESTRA_TOKEN"
+selectors = [
+  { template = "members", feeds = "internal" },
+  { template = "team/<team>" },
+  { template = "user/<user>" },
+]

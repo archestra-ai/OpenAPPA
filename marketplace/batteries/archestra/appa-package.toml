@@ -1,0 +1,10 @@
+schema = 1
+name = "archestra"
+description = "Rules for Archestra's built-in sharing tools: projects, apps, knowledge bases and connectors, plugins, agents, MCP gateways, and team membership; each share must be sharable with the organization, teams, or users it names, plus the archestra audience source."
+
+[battery]
+policy = "appa.toml"
+hosts = ["claude-code"]
+namespaces = ["archestra"]
+helpers = ["audience-source.py"]
+setup = "Set ARCHESTRA_BASE_URL to the Archestra API base (e.g. https://archestra.example.com) and APPA_PROVIDER_ARCHESTRA_TOKEN to an API key allowed to read organization membership."
