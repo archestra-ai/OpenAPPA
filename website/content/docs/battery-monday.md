@@ -17,9 +17,11 @@ and its [rules and covered tools](https://github.com/archestra-ai/OpenAPPA/blob/
 
 - **Internal reads:** boards, items, comments, searches, documents, people,
   schemas, assets, meetings, automation history, workflow inspection and Vibe
-  inspection enter suspicious/internal. Queries must be sharable with internal.
-  Normal options such as search terms, descriptions, subitems and replies are
-  available. `all_api_read` rejects mutations at the provider.
+  inspection stay internal. `get_graphql_schema` and `get_column_type_info`
+  return trusted provider schema metadata; other results enter suspicious.
+  Queries must be sharable with internal. Normal options such as search terms,
+  descriptions, subitems and replies are available. `all_api_read` rejects
+  mutations at the provider.
 - **Public documentation:** `get_monday_knowledge` requires a public question
   and returns suspicious/public content. `read_docs` instead reads internal
   workspace documents.

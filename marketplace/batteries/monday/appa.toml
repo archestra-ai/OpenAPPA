@@ -1,10 +1,9 @@
 # monday battery: the hosted Platform MCP server (https://mcp.monday.com/mcp),
 # version 1.0.0, authenticated 99-tool inventory captured on 2026-09-22.
-# Source links reference public implementations or hosted tools/list declarations.
-# The public source commit is not a verified identifier of the hosted build.
 #
 # Like Notion, monday has no complete resource-reader API in this tool set.
-# Reads stay suspicious/internal; the root maps internal to the people who
+# Workspace reads stay suspicious/internal except the two API schema tools.
+# The root maps internal to the people who
 # may see everything the connection can reach. Per-board ACLs are not inferred.
 #
 # Like Linear and PostHog, writes return provider-owned content as well as
@@ -31,265 +30,221 @@ selectors = [{ template = "user/<id>" }]
 # read_docs reads workspace documents, not public product documentation.
 # Asset download URLs still identify internal files; they are not public data.
 
-# Source: authenticated hosted tools/list on 2026-09-22; readOnlyHint=true.
 [[policy.tool]]
 name = "mcp/monday/get_assigned_items"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: authenticated hosted tools/list on 2026-09-22; readOnlyHint=true.
 [[policy.tool]]
 name = "mcp/monday/get_user_mentions"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: authenticated hosted tools/list on 2026-09-22; readOnlyHint=true.
 [[policy.tool]]
 name = "mcp/monday/get_user_recent_activity"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/user-context-tool/user-context-tool.ts#L11
 [[policy.tool]]
 name = "mcp/monday/get_user_context"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/get-board-info/get-board-info-tool.ts#L64
 [[policy.tool]]
 name = "mcp/monday/get_board_info"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/get-board-items-page-tool/get-board-items-page-tool.ts#L151
 [[policy.tool]]
 name = "mcp/monday/get_board_items_page"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/get-updates-tool/get-updates-tool.ts#L61
 [[policy.tool]]
 name = "mcp/monday/get_updates"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/get-board-activity/get-board-activity-tool.ts#L36
 [[policy.tool]]
 name = "mcp/monday/get_board_activity"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/list-users-and-teams-tool/list-users-and-teams-tool.ts#L80
 [[policy.tool]]
 name = "mcp/monday/list_users_and_teams"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/workforms-tools/get-form-tool/index.ts#L9
 [[policy.tool]]
 name = "mcp/monday/get_form"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/all-api-read-tool.ts#L9
 [[policy.tool]]
 name = "mcp/monday/all_api_read"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/get-graphql-schema-tool.ts#L16
 [[policy.tool]]
 name = "mcp/monday/get_graphql_schema"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { trust = "trusted", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/get-column-type-info/get-column-type-info-tool.ts#L28
 [[policy.tool]]
 name = "mcp/monday/get_column_type_info"
-delta = { trust = "suspicious", audience = ["internal"] }
+delta = { trust = "trusted", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/get-type-details-tool.ts#L14
 [[policy.tool]]
 name = "mcp/monday/get_type_details"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/read-docs-tool/read-docs-tool.ts#L163
 [[policy.tool]]
 name = "mcp/monday/read_docs"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/workspace-info-tool/workspace-info-tool.ts#L14
 [[policy.tool]]
 name = "mcp/monday/workspace_info"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/list-workspace-tool/list-workspace-tool.ts#L26
 [[policy.tool]]
 name = "mcp/monday/list_workspaces"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/dashboard-tools/all-widgets-schema-tool.ts#L11
 [[policy.tool]]
 name = "mcp/monday/all_widgets_schema"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/board-insights/board-insights-tool.ts#L56
 [[policy.tool]]
 name = "mcp/monday/board_insights"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/search-tool/search-tool.ts#L223
 [[policy.tool]]
 name = "mcp/monday/search"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/get-assets-tool/get-assets-tool.ts#L12
 [[policy.tool]]
 name = "mcp/monday/get_assets"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/automations-tools/list-automations/list-automations-tool.ts#L60
 [[policy.tool]]
 name = "mcp/monday/list_automations"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/automations-tools/get-automation-runs/get-automation-runs-tool.ts#L73
 [[policy.tool]]
 name = "mcp/monday/get_automation_runs"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/automations-tools/get-automation-statistics/get-automation-statistics-tool.ts#L40
 [[policy.tool]]
 name = "mcp/monday/get_automation_statistics"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/monday-dev-tools/get-sprints-boards-tool/get-sprints-boards-tool.ts#L24
 [[policy.tool]]
 name = "mcp/monday/get_monday_dev_sprints_boards"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/monday-dev-tools/get-sprints-metadata-tool/get-sprints-metadata-tool.ts#L44
 [[policy.tool]]
 name = "mcp/monday/get_sprints_metadata"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/monday-dev-tools/get-sprint-summary-tool/get-sprint-summary-tool.ts#L31
 [[policy.tool]]
 name = "mcp/monday/get_sprint_summary"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://mcp.monday.com/mcp (tools/list: invoke_process_planner, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/invoke_process_planner"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://mcp.monday.com/mcp (tools/list: validate_workflow, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/validate_workflow"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://mcp.monday.com/mcp (tools/list: get_run_once_trigger_entities, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/get_run_once_trigger_entities"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://mcp.monday.com/mcp (tools/list: get_workflow_run_once_status, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/get_workflow_run_once_status"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://mcp.monday.com/mcp (tools/list: explore_meetings, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/explore_meetings"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://mcp.monday.com/mcp (tools/list: search_meetings_content, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/search_meetings_content"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://mcp.monday.com/mcp (tools/list: get_meetings_content, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/get_meetings_content"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/agents-tools/agent-catalog/agent-catalog-tool.ts#L26
 [[policy.tool]]
 name = "mcp/monday/agent_catalog"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://mcp.monday.com/mcp (tools/list: show-chart, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/show-chart"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://mcp.monday.com/mcp (tools/list: show-table, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/show-table"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://mcp.monday.com/mcp (tools/list: show-assign, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/show-assign"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://mcp.monday.com/mcp (tools/list: show-battery, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/show-battery"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://mcp.monday.com/mcp (tools/list: get_action, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/get_action"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://mcp.monday.com/mcp (tools/list: list_actions, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/list_actions"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://mcp.monday.com/mcp (tools/list: vibe_get, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/vibe_get"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://mcp.monday.com/mcp (tools/list: vibe_list, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/vibe_list"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://mcp.monday.com/mcp (tools/list: vibe_ask, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/vibe_ask"
 delta = { trust = "suspicious", audience = ["internal"] }
@@ -297,19 +252,16 @@ requires = { audience = { contains = ["internal"] } }
 
 # Read actions on mixed tools precede their reviewed mutation fallbacks.
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/agents-tools/manage-agent/manage-agent-tool.ts#L80
 [[policy.tool]]
 name = "mcp/monday/manage_agent(action:get)"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/agents-tools/manage-agent-triggers/manage-agent-triggers-tool.ts#L47
 [[policy.tool]]
 name = "mcp/monday/manage_agent_triggers(action:list)"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/agents-tools/manage-agent-knowledge/manage-agent-knowledge-tool.ts#L48
 [[policy.tool]]
 name = "mcp/monday/manage_agent_knowledge(action:list)"
 delta = { trust = "suspicious", audience = ["internal"] }
@@ -318,7 +270,6 @@ requires = { audience = { contains = ["internal"] } }
 # --- public documentation: the question must be sharable with public ---
 # The knowledge endpoint answers from official docs and forbids PII in queries.
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/get-monday-knowledge/get-monday-knowledge.ts#L33
 [[policy.tool]]
 name = "mcp/monday/get_monday_knowledge"
 delta = { trust = "suspicious", audience = ["public"] }
@@ -328,119 +279,102 @@ requires = { audience = { contains = ["public"] } }
 # create_update returns the existing item name. Bulk/duplicate item creation
 # and document updates can also return existing content; none is labelled public.
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/create-item-tool/create-item-tool.ts#L52
 [[policy.tool]]
 name = "mcp/monday/create_item"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/create-items-tool/create-items-tool.ts#L67
 [[policy.tool]]
 name = "mcp/monday/create_items"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/create-update-tool/create-update-tool.ts#L40
 [[policy.tool]]
 name = "mcp/monday/create_update"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/change-item-column-values-tool.ts#L36
 [[policy.tool]]
 name = "mcp/monday/change_item_column_values"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/update-items-tool/update-items-tool.ts#L58
 [[policy.tool]]
 name = "mcp/monday/update_items"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/create-doc-tool/create-doc-tool.ts#L94
 [[policy.tool]]
 name = "mcp/monday/create_doc"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/update-doc-tool/update-doc-tool.ts#L67
 [[policy.tool]]
 name = "mcp/monday/update_doc"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/create-folder-tool/create-folder-tool.ts#L25
 [[policy.tool]]
 name = "mcp/monday/create_folder"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/create-group/create-group-tool.ts#L29
 [[policy.tool]]
 name = "mcp/monday/create_group"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/dashboard-tools/create-dashboard-tool.ts#L30
 [[policy.tool]]
 name = "mcp/monday/create_dashboard"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/dashboard-tools/create-widget-tool.ts#L30
 [[policy.tool]]
 name = "mcp/monday/create_widget"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/create-view-tool/create-view-tool.ts#L59
 [[policy.tool]]
 name = "mcp/monday/create_view"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/create-view-table-tool/create-view-table-tool.ts#L103
 [[policy.tool]]
 name = "mcp/monday/create_view_table"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/update-view-tool/update-view-tool.ts#L63
 [[policy.tool]]
 name = "mcp/monday/update_view"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/update-view-table-tool/update-view-table-tool.ts#L104
 [[policy.tool]]
 name = "mcp/monday/update_view_table"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/get-asset-upload-url-tool/get-asset-upload-url-tool.ts#L27
 [[policy.tool]]
 name = "mcp/monday/get_asset_upload_url"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/finalize-asset-upload-tool/finalize-asset-upload-tool.ts#L32
 [[policy.tool]]
 name = "mcp/monday/finalize_asset_upload"
 delta = { trust = "suspicious", audience = ["internal"] }
@@ -452,238 +386,204 @@ effects = ["monday.changed"]
 # changes beyond the named resource. Review their complete operation and sinks.
 # Vibe publication changes availability on the caller account.
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/workforms-tools/create-form-tool/index.ts#L11
 [[policy.tool]]
 name = "mcp/monday/create_form"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/workforms-tools/update-form-tool/index.ts#L7
 [[policy.tool]]
 name = "mcp/monday/update_form"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/workforms-tools/form-questions-editor-tool/index.ts#L7
 [[policy.tool]]
 name = "mcp/monday/form_questions_editor"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/create-column-tool.ts#L27
 [[policy.tool]]
 name = "mcp/monday/create_column"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/update-column-tool.ts#L40
 [[policy.tool]]
 name = "mcp/monday/update_column"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/update-workspace-tool/update-workspace-tool.ts#L22
 [[policy.tool]]
 name = "mcp/monday/update_workspace"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/update-folder-tool/update-folder-tool.ts#L39
 [[policy.tool]]
 name = "mcp/monday/update_folder"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/create-workspace-tool/create-workspace-tool.ts#L22
 [[policy.tool]]
 name = "mcp/monday/create_workspace"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/move-object-tool/move-object-tool.ts#L44
 [[policy.tool]]
 name = "mcp/monday/move_object"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/create-board-tool.ts#L22
 [[policy.tool]]
 name = "mcp/monday/create_board"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://mcp.monday.com/mcp (tools/list: delete_view, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/delete_view"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/automations-tools/manage-automations/manage-automations-tool.ts#L53
 [[policy.tool]]
 name = "mcp/monday/manage_automations"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/automations-tools/create-automation/create-automation-tool.ts#L22
 [[policy.tool]]
 name = "mcp/monday/create_automation"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://mcp.monday.com/mcp (tools/list: invoke_workflow_expert, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/invoke_workflow_expert"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://mcp.monday.com/mcp (tools/list: create_workflow, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/create_workflow"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://mcp.monday.com/mcp (tools/list: publish_workflow, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/publish_workflow"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://mcp.monday.com/mcp (tools/list: run_workflow_once, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/run_workflow_once"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://mcp.monday.com/mcp (tools/list: stop_workflow_run_once, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/stop_workflow_run_once"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/agents-tools/manage-agent/manage-agent-tool.ts#L80
 [[policy.tool]]
 name = "mcp/monday/manage_agent"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/agents-tools/manage-agent-triggers/manage-agent-triggers-tool.ts#L47
 [[policy.tool]]
 name = "mcp/monday/manage_agent_triggers"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/agents-tools/manage-agent-skills/manage-agent-skills-tool.ts#L48
 [[policy.tool]]
 name = "mcp/monday/manage_agent_skills"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/agents-tools/manage-agent-knowledge/manage-agent-knowledge-tool.ts#L48
 [[policy.tool]]
 name = "mcp/monday/manage_agent_knowledge"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://mcp.monday.com/mcp (tools/list: execute_code, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/execute_code"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://mcp.monday.com/mcp (tools/list: create_action, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/create_action"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://mcp.monday.com/mcp (tools/list: update_action, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/update_action"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://mcp.monday.com/mcp (tools/list: delete_action, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/delete_action"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://mcp.monday.com/mcp (tools/list: run_action, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/run_action"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://mcp.monday.com/mcp (tools/list: vibe_create, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/vibe_create"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://mcp.monday.com/mcp (tools/list: vibe_update, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/vibe_update"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://mcp.monday.com/mcp (tools/list: vibe_publication, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/vibe_publication"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://mcp.monday.com/mcp (tools/list: vibe_delete, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/vibe_delete"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/all-monday-api-tool.ts#L37
 [[policy.tool]]
 name = "mcp/monday/all_monday_api"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/all-api-write-tool.ts#L9
 [[policy.tool]]
 name = "mcp/monday/all_api_write"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/create-notification-tool/create-notification-tool.ts#L22
 [[policy.tool]]
 name = "mcp/monday/create_notification"
 delta = { trust = "suspicious", audience = ["internal"] }
@@ -694,14 +594,12 @@ effects = ["monday.sensitive"]
 # A WorkForm token/URL can identify another workspace; feedback goes to monday.
 # Returned provider content remains internal even when the submitted input is public.
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/workforms-tools/create-submission-tool/index.ts#L13
 [[policy.tool]]
 name = "mcp/monday/create_form_submission"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["public"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
-# Source: https://github.com/mondaycom/mcp/blob/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e/packages/agent-toolkit/src/core/tools/platform-api-tools/submit-bug-or-feature-request-tool/submit-bug-or-feature-request-tool.ts#L25
 [[policy.tool]]
 name = "mcp/monday/submit_bug_or_feature_request"
 delta = { trust = "suspicious", audience = ["internal"] }
@@ -712,7 +610,6 @@ effects = ["monday.sensitive"]
 # The response includes a one-time signing secret and API token. The root must
 # map self to the credential owner and review the callback and new agent access.
 
-# Source: https://mcp.monday.com/mcp (tools/list: connect_external_agent, captured 2026-09-22)
 [[policy.tool]]
 name = "mcp/monday/connect_external_agent"
 delta = { trust = "suspicious", audience = ["self"] }

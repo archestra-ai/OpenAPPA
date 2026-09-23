@@ -7,16 +7,18 @@ inventory; `audience-source.py` resolves notification recipients. Include
 containing it with `appa battery install monday --server <host-server-name>`.
 
 The [official connection guide](https://developer.monday.com/api-reference/docs/integrate-with-monday-mcp)
-covers authentication. [appa.toml](appa.toml) links each rule to the inspected
+covers authentication. The rules use the inspected
 [mondaycom/mcp source](https://github.com/mondaycom/mcp/tree/8fdc0b4af07a4b7e1059ca3f8320d64968737b8e)
-or authenticated hosted `tools/list`. The hosted build is not pinned to that
+and authenticated hosted `tools/list`. The hosted build is not pinned to that
 public source revision.
 
 ## Rules
 
-*Internal reads* — queries and results stay within `internal`; results enter
-`suspicious`. `all_api_read` rejects mutations at the provider, and `read_docs`
-reads workspace documents. This group covers:
+*Internal reads* — queries and results stay within `internal`. Most results enter
+`suspicious`; `get_graphql_schema` and `get_column_type_info` return provider
+defined API schema metadata and keep a fresh
+trajectory `trusted`. `all_api_read` rejects mutations at the provider, and
+`read_docs` reads workspace documents. This group covers:
 
 `agent_catalog`, `all_api_read`, `all_widgets_schema`, `board_insights`,
 `explore_meetings`, `get_action`, `get_assets`, `get_assigned_items`, `get_automation_runs`,

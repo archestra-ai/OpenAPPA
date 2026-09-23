@@ -258,6 +258,51 @@ async fn ordinary_reads_keep_provider_options_and_classify_results() {
 }
 
 #[tokio::test]
+async fn provider_schema_metadata_keeps_trust_until_unverified_result_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime(&dir, false, false).await;
+    for read in [
+        call("get_graphql_schema", serde_json::json!({ "operationType": "read" })),
+        call("get_column_type_info", serde_json::json!({ "columnType": "status" })),
+    ] {
+        accept_read(&runtime, read).await;
+    }
+    let labels: Vec<_> = runtime
+        .audit(&root())
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| match entry.event {
+            AuditEvent::Admitted { label } => Some(label),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(labels.len(), 2);
+    for label in labels {
+        assert_eq!(label.trust, "trusted");
+        assert_eq!(label.audience, "internal");
+    }
+    let trusted = ProposedCall {
+        tool: "mcp/probe/trusted".into(),
+        arguments: raw(serde_json::json!({})),
+        cwd: None,
+    };
+    assert_eq!(
+        propose(&runtime, trusted.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, trusted.clone()).await;
+    accept_read(
+        &runtime,
+        call("get_type_details", serde_json::json!({ "typeName": "Board" })),
+    )
+    .await;
+    assert!(matches!(
+        propose(&runtime, trusted).await,
+        HookDecision::DenyCall { .. }
+    ));
+}
+
+#[tokio::test]
 async fn internal_reads_can_flow_to_reviewed_writes_without_audience_expansion() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = runtime(&dir, false, false).await;
