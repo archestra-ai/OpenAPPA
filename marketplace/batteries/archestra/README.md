@@ -5,30 +5,34 @@ Rules for the sharing tools of Archestra's built-in MCP server, plus the
 
 ## Files
 
-**`appa.toml`** — one rule per sharing value of each tool:
+**`appa.toml`** — one rule per sharing value of each tool, first match
+wins:
 
 | Tool | Widens to | Requires |
 | --- | --- | --- |
 | `set_project_share` | `visibility: organization` / `team` | `internal` / `@archestra:team/$team_ids` |
 | `publish_app` | `scope: org` / `team` | `internal` / `@archestra:team/$teams` |
 | `create_knowledge_base` | default `org-wide` / `team-scoped` | `internal` / `@archestra:team/$teamIds` |
-| `update_knowledge_base` | `org-wide` / `team-scoped` | `internal` / `@archestra:team/$teamIds` |
+| `update_knowledge_base` | `org-wide` / `team-scoped` or a sent `teamIds` | `internal` / `@archestra:team/$teamIds` |
 | `create_knowledge_connector` | default `org-wide` / `team-scoped` / `auto-sync-permissions` | `internal` / `@archestra:team/$team_ids` / `public` |
-| `update_knowledge_connector` | `org-wide` / `team-scoped` / `auto-sync-permissions` | `internal` / `@archestra:team/$team_ids` / `public` |
-| `create_plugin`, `update_plugin` | `scope: org` / `team` | `internal` / `@archestra:team/$teamIds` |
-| `edit_agent`, `edit_mcp_gateway` | `scope: org` / `team` | `internal` / `@archestra:team/$teams` |
+| `update_knowledge_connector` | `org-wide` / `team-scoped` or a sent `team_ids` / `auto-sync-permissions` | `internal` / `@archestra:team/$team_ids` / `public` |
+| `create_plugin`, `update_plugin` | `scope: org` / `team` or a sent `teamIds` / a sent `userIds` / both lists | `internal` / `@archestra:team/$teamIds` / `@archestra:user/$userIds` / `internal` |
+| `edit_agent`, `edit_mcp_gateway` | `scope: org` / `team` or a sent `teams` | `internal` / `@archestra:team/$teams` |
 | `add_team_member` | the added member | `@archestra:user/$user` |
 
 Every widening share also requires `trusted` data. Values that keep a
-resource personal or private, and updates that leave visibility alone,
-require nothing. Auto-synced connector permissions mirror the connected
+resource personal or private, and updates that send no scope and no
+list, require nothing. An update that sends a team or member list
+replaces who the resource is shared with whatever scope it already has,
+so the list is checked on its own: an argument selector such as
+`(teams:*)` matches a call that sent a non-empty list. A call that sends
+both a team and a member list requires `internal`, which holds every
+team and member. Auto-synced connector permissions mirror the connected
 system's own ACLs, which this source cannot read, so such a connector
 must be sharable with anyone.
 
 A team list names one collection per team, and OpenAPPA reads at most 32
-of them per call. A personal plugin shared with members through `userIds`
-is not covered: a selector cannot tell whether that optional list was
-sent.
+of them per call.
 
 **`audience-source.py`** — answers these selectors through Archestra's
 `GET /api/openappa/audience` endpoint:

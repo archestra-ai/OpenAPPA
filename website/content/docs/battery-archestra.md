@@ -19,9 +19,7 @@ A share makes something readable by more people, so it needs trusted data those 
 - sharing with teams requires data sharable with each team, `@archestra:team/<team>`; and
 - adding a member to a team requires data sharable with that member, `@archestra:user/<user>`.
 
-This covers projects, apps, knowledge bases, knowledge connectors, plugins, agents, and MCP gateways. A connector that mirrors its source system's permissions has readers no source here can list, so it requires data sharable with `public`. Keeping a resource personal or private requires nothing. A call may name at most 32 teams.
-
-A personal plugin shared with named members through `userIds` is not covered yet.
+This covers projects, apps, knowledge bases, knowledge connectors, plugins, agents, and MCP gateways, including a personal plugin shared with named members. An update that sends a team or member list is checked against that list even when it names no scope, since it replaces who the resource is shared with. A connector that mirrors its source system's permissions has readers no source here can list, so it requires data sharable with `public`. Keeping a resource personal or private requires nothing. A call may name at most 32 teams.
 
 ## Audiences
 

@@ -12,9 +12,11 @@
 # sharing with teams A and B requires what A's members and B's members
 # may see. OpenAPPA reads at most 32 teams per call.
 #
-# Known gap: a personal plugin shared with members through `userIds` is
-# not covered, since a selector cannot tell whether that optional list
-# was sent.
+# An update that sends a team or member list replaces who the resource is
+# shared with, whatever scope it already has, so a sent list is checked
+# even without a scope: `(teams:*)` selects any call that sent one. A call
+# that sends both a team list and a member list requires `internal`, which
+# holds every team and member.
 #
 # The root config maps `internal` onto the source — the README shows the
 # wiring.
@@ -81,6 +83,12 @@ delta = {}
 requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teamIds"] } }
 
 [[policy.tool]]
+name = "mcp/archestra/update_knowledge_base(teamIds:*)"
+parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teamIds"] } }
+
+[[policy.tool]]
 name = "mcp/archestra/update_knowledge_base"
 delta = {}
 
@@ -122,13 +130,25 @@ delta = {}
 requires = { trust = "trusted", audience = { contains = ["public"] } }
 
 [[policy.tool]]
+name = "mcp/archestra/update_knowledge_connector(team_ids:*)"
+parameters = { type = "object", properties = { team_ids = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@archestra:team/$team_ids"] } }
+
+[[policy.tool]]
 name = "mcp/archestra/update_knowledge_connector"
 delta = {}
 
-# --- plugins, agents, MCP gateways: personal unless scoped wider ---
+# --- plugins: personal unless scoped wider; a personal one is shared with `userIds` ---
 
 [[policy.tool]]
 name = "mcp/archestra/create_plugin(scope:org)"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/create_plugin(teamIds:*,userIds:*)"
+parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } }, userIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
@@ -137,6 +157,18 @@ name = "mcp/archestra/create_plugin(scope:team)"
 parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } } }, required = ["teamIds"], additionalProperties = true }
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teamIds"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/create_plugin(teamIds:*)"
+parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teamIds"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/create_plugin(userIds:*)"
+parameters = { type = "object", properties = { userIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@archestra:user/$userIds"] } }
 
 [[policy.tool]]
 name = "mcp/archestra/create_plugin"
@@ -148,14 +180,34 @@ delta = {}
 requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 [[policy.tool]]
+name = "mcp/archestra/update_plugin(teamIds:*,userIds:*)"
+parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } }, userIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
 name = "mcp/archestra/update_plugin(scope:team)"
 parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } } }, required = ["teamIds"], additionalProperties = true }
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teamIds"] } }
 
 [[policy.tool]]
+name = "mcp/archestra/update_plugin(teamIds:*)"
+parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teamIds"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/update_plugin(userIds:*)"
+parameters = { type = "object", properties = { userIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@archestra:user/$userIds"] } }
+
+[[policy.tool]]
 name = "mcp/archestra/update_plugin"
 delta = {}
+
+# --- agents and MCP gateways: personal unless scoped wider ---
 
 [[policy.tool]]
 name = "mcp/archestra/edit_agent(scope:org)"
@@ -165,6 +217,12 @@ requires = { trust = "trusted", audience = { contains = ["internal"] } }
 [[policy.tool]]
 name = "mcp/archestra/edit_agent(scope:team)"
 parameters = { type = "object", properties = { teams = { type = "array", items = { type = "string" } } }, required = ["teams"], additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teams"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/edit_agent(teams:*)"
+parameters = { type = "object", properties = { teams = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teams"] } }
 
@@ -180,6 +238,12 @@ requires = { trust = "trusted", audience = { contains = ["internal"] } }
 [[policy.tool]]
 name = "mcp/archestra/edit_mcp_gateway(scope:team)"
 parameters = { type = "object", properties = { teams = { type = "array", items = { type = "string" } } }, required = ["teams"], additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teams"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/edit_mcp_gateway(teams:*)"
+parameters = { type = "object", properties = { teams = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teams"] } }
 
