@@ -852,6 +852,7 @@ mod tests {
         assert!(lock_claude_profile(root.path()).is_err());
         drop(first);
         assert!(root.path().join(".appa-install.lock").is_file());
-        assert!(lock_claude_profile(root.path()).is_ok());
+        let reacquired = lock_claude_profile(root.path());
+        assert!(reacquired.is_ok(), "profile lock was not released: {reacquired:?}");
     }
 }
