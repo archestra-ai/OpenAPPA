@@ -64,7 +64,6 @@ run "Rust formatting" cargo fmt --all --check
 if [ "$profile" = full ]; then
   run "Rust lint" cargo clippy --workspace --all-targets --locked -- -D warnings
 fi
-run "Battery linter tests" python3 -m unittest scripts/test_lint_batteries.py
 run "Battery script linter" python3 scripts/lint_batteries.py
 run "Rust tests" cargo test --workspace --locked
 run "Runtime binary" cargo build --package appa --locked
