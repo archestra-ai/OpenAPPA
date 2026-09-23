@@ -632,11 +632,6 @@ samp {
   }
 }
 
-.doc-description {
-  margin-top: 0.4rem;
-  color: var(--text-weak);
-}
-
 .doc-breadcrumb {
   display: flex;
   align-items: center;
@@ -727,7 +722,10 @@ samp {
    Prose (rendered markdown)
    ———————————————————————————————————————————————— */
 .prose {
-  font-size: 15px;
+  /* 16.5px in the 40rem column puts about 70 characters on a line; the
+     body's 14px is for UI chrome, not reading. */
+  font-size: 16.5px;
+  line-height: 1.65;
 }
 
 /* Anchor targets stop below the sticky header instead of underneath it. */
@@ -745,8 +743,7 @@ samp {
 }
 
 .prose h2 {
-  font-family: var(--font-mono);
-  font-size: 22px;
+  font-size: 23px;
   font-weight: 600;
   color: var(--text-strong);
   margin: 2.5rem 0 0.75rem;
@@ -756,8 +753,7 @@ samp {
 }
 
 .prose h3 {
-  font-family: var(--font-mono);
-  font-size: 17px;
+  font-size: 18px;
   font-weight: 600;
   color: var(--text-strong);
   margin: 2rem 0 0.5rem;
@@ -765,8 +761,7 @@ samp {
 
 .prose h4,
 .prose h5 {
-  font-family: var(--font-mono);
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   color: var(--text-strong);
   margin: 1.5rem 0 0.5rem;
@@ -1288,12 +1283,6 @@ samp {
   letter-spacing: -0.01em;
 }
 
-.hero .tagline {
-  margin-top: 0.5rem;
-  color: var(--text-weak);
-  font-size: 15px;
-}
-
 /* ————————————————————————————————————————————————
    "How to spell it" — hero pronunciation button
    ———————————————————————————————————————————————— */
@@ -1324,6 +1313,7 @@ samp {
 }
 
 .spell-it:hover .spell-it-glyph,
+.spell-it[data-confirming] .spell-it-glyph,
 .spell-it[data-speaking] .spell-it-glyph {
   color: var(--accent);
 }
@@ -1334,6 +1324,7 @@ samp {
 }
 
 .spell-it:hover .spell-it-say,
+.spell-it[data-confirming] .spell-it-say,
 .spell-it[data-speaking] .spell-it-say {
   color: var(--text);
 }
@@ -1516,19 +1507,6 @@ samp {
    ———————————————————————————————————————————————— */
 .bench-panel {
   margin: 2rem 0 2.5rem;
-  padding: 22px 24px 20px;
-  border: 1px solid var(--border-weak);
-  border-radius: 10px;
-  background: var(--bg-weak);
-}
-
-.bench-panel-eyebrow {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--accent);
 }
 
 .bench-charts {
@@ -1548,11 +1526,6 @@ samp {
   font-size: 13px;
   font-weight: 500;
   color: var(--text-strong);
-}
-
-.bench-chart-hint {
-  font-weight: 400;
-  color: var(--text-weak);
 }
 
 /* name | bar | value. Both columns are fixed so the two charts share a
@@ -1614,23 +1587,9 @@ samp {
   font-weight: 600;
 }
 
-.bench-panel-foot {
-  margin: 22px 0 0;
-  font-size: 12.5px;
-  line-height: 1.6;
-  color: var(--text-weak);
-}
-
-.bench-panel-foot strong {
-  color: var(--text-strong);
-  font-weight: 600;
-}
-
 .bench-panel-link {
   display: inline-block;
   margin-top: 16px;
-  padding-top: 16px;
-  border-top: 1px solid var(--border-weak);
   width: 100%;
   font-size: 13px;
   font-weight: 500;

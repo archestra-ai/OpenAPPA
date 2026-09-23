@@ -45,7 +45,6 @@ export default async function DocPage({ params }: Props) {
       <div className="prose">
         <h1>{doc.title}</h1>
       </div>
-      {doc.description && <p className="doc-description">{doc.description}</p>}
       {doc.content.trim() === "" ? <UnderConstruction /> : <DocContent content={doc.content} />}
     </DocShell>
   );

@@ -1,6 +1,6 @@
 ---
 title: Add to your agent
-category: Integrations
+category: Works with
 order: 7
 description: Connect an agent harness to OpenAPPA, map its lifecycle to the runtime API, and add optional capabilities such as subagents.
 ---
