@@ -16,6 +16,7 @@ from inspect_ai.scorer import CORRECT
 from inspect_ai.tool import ToolDef
 
 from appa_agentthreatbench import INSPECT_AI_VERSION, INSPECT_EVALS_REVISION, UPSTREAM_SAMPLE_COUNTS
+from appa_agentthreatbench.admission import InspectAdmission
 from appa_agentthreatbench.annotator import AnnotatorFixture, annotator_fixture_digest, mandate_readers
 from appa_agentthreatbench.auto import AUTO_BINDING_IDENTITY, AUTO_SDK_VERSION, auto_policy_digest
 from appa_agentthreatbench.fides import (
@@ -240,7 +241,7 @@ def run_manifest(
     model: str,
     reasoning_effort: str,
     seed: int,
-    max_concurrency: int,
+    max_concurrency: int | None,
     agent_prompt_profile: str = "standard",
     sample_ids: list[str] | None = None,
 ) -> dict[str, object]:
@@ -322,8 +323,7 @@ def run_manifest(
         "run_digest": run_digest,
         "config": config,
         "execution": {
-            "max_samples_values": [max_concurrency],
-            "max_connections_values": [max_concurrency],
+            "max_concurrency_ceiling_values": [max_concurrency],
         },
     }
 
@@ -343,14 +343,14 @@ def ensure_manifest(path: Path, payload: dict[str, object]) -> None:
         if not isinstance(old_execution, dict) or not isinstance(new_execution, dict):
             raise ValueError(f"{path} has invalid execution metadata")
         merged_execution = {}
-        for key in ("max_samples_values", "max_connections_values"):
+        for key in ("max_concurrency_ceiling_values",):
             old_values = old_execution.get(key, [])
             new_values = new_execution.get(key, [])
             if not isinstance(old_values, list) or not isinstance(new_values, list):
                 raise ValueError(f"{path} has invalid {key} metadata")
-            if not all(isinstance(value, int) for value in [*old_values, *new_values]):
-                raise ValueError(f"{path} has non-integer {key} metadata")
-            merged_execution[key] = sorted({*old_values, *new_values})
+            if not all(value is None or isinstance(value, int) for value in [*old_values, *new_values]):
+                raise ValueError(f"{path} has invalid {key} metadata")
+            merged_execution[key] = sorted({*old_values, *new_values}, key=lambda value: -1 if value is None else value)
         payload["execution"] = merged_execution
     temporary = path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -746,7 +746,7 @@ def build_summary(logs: list[EvalLog], audit_dir: Path, manifest: dict[str, obje
 def run_complete(
     model: str,
     reasoning_effort: str,
-    max_concurrency: int,
+    max_concurrency: int | None,
     seed: int,
     logdir: str,
     run_name: str | None,
@@ -775,24 +775,25 @@ def run_complete(
     output_dir = Path(logdir) / slug(run_name)
     ensure_manifest(output_dir / "run-config.json", manifest)
     audit_dir = output_dir / "mediation-audit"
-    success, headers = eval_set(
-        tasks=[complete_task(audit_dir, agent_prompt_profile)],
-        log_dir=str(output_dir / "inspect-logs"),
-        model=model,
-        reasoning_effort=reasoning_effort,
-        seed=seed,
-        sample_id=sample_ids,
-        max_samples=max_concurrency,
-        max_connections=max_concurrency,
-        max_tasks=1,
-        retry_attempts=3,
-        retry_immediate=True,
-        retry_on_error=1,
-        fail_on_error=True,
-        log_samples=True,
-        log_model_api=True,
-        metadata={"appa_run_digest": manifest["run_digest"]},
-    )
+    ceiling = min(max_concurrency or len(selected_ids), len(selected_ids))
+    with InspectAdmission(ceiling, output_dir):
+        success, headers = eval_set(
+            tasks=[complete_task(audit_dir, agent_prompt_profile)],
+            log_dir=str(output_dir / "inspect-logs"),
+            model=model,
+            reasoning_effort=reasoning_effort,
+            seed=seed,
+            sample_id=sample_ids,
+            max_samples=1,
+            max_tasks=1,
+            retry_attempts=3,
+            retry_immediate=True,
+            retry_on_error=1,
+            fail_on_error=True,
+            log_samples=True,
+            log_model_api=True,
+            metadata={"appa_run_digest": manifest["run_digest"]},
+        )
     if not success:
         raise RuntimeError("Inspect exhausted task retries before completing AgentThreatBench")
     logs = []

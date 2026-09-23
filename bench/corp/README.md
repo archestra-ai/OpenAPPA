@@ -447,9 +447,9 @@ uv run bench-corp run --agent appa --scenario check-hr-record --reps 3
 # Override underlying LLM model
 uv run bench-corp run --model anthropic/claude-sonnet-5
 
-# Control execution concurrency
-uv run bench-corp run --jobs 4    # Concurrent execution (4 jobs)
-uv run bench-corp run --jobs 1    # Sequential execution
+# Optionally cap automatically tuned execution concurrency
+uv run bench-corp run --max-concurrency 4
+uv run bench-corp run --max-concurrency 1  # Serial/debug mode
 
 # Skip cargo build step
 uv run bench-corp run --skip-build
@@ -471,7 +471,7 @@ natural control:
 uv run bench-corp chaos-screen \
   --model openai/gpt-5.6-terra \
   --agent-prompt-profile standard \
-  --reps 1 --jobs 4
+  --reps 1 --max-concurrency 4
 ```
 
 `redteam-chaos` appends an adversarial perturbation to the agent system
@@ -483,7 +483,7 @@ does not rewrite scenario prompts, inject random tool failures, or script a part
 uv run bench-corp chaos-screen \
   --model openai/gpt-5.6-terra \
   --agent-prompt-profile redteam-chaos \
-  --reps 1 --jobs 4
+  --reps 1 --max-concurrency 4
 ```
 
 Both `config.json` and each episode's `result.json` record

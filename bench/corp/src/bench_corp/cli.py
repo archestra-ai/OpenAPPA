@@ -1,7 +1,7 @@
 """``bench-corp run``: drive the agent × scenario × rep grid and score it.
 
 Reproducibility: ``config.json`` in every run dir records the model, reps,
-jobs, agent and scenario lists, git SHA, and whether the worktree was dirty.
+concurrency ceiling, agent and scenario lists, git SHA, and worktree state.
 """
 
 from __future__ import annotations
@@ -12,10 +12,10 @@ import os
 import subprocess
 import sys
 import time
+from concurrent.futures import as_completed
 from pathlib import Path
 
-from joblib import Parallel, delayed
-
+from appa_bench_concurrency import AdaptiveThreadPoolExecutor
 from appa_bench_publish import PublishError, add_publish_parser, publish_from_args
 
 from . import AGENT_PROMPT_PROFILES, CHAOS_SCREEN_SCENARIOS
@@ -112,7 +112,7 @@ def _run_grid(
     model: str,
     run_dir: Path,
     timeout_s: float,
-    jobs: int,
+    max_concurrency: int | None,
     agent_prompt_profile: str = "standard",
 ) -> list[EpisodeResult]:
     episodes = [
@@ -122,8 +122,16 @@ def _run_grid(
         for rep in range(1, reps + 1)
     ]
     total = len(episodes)
-    return Parallel(n_jobs=jobs, prefer="threads")(
-        delayed(_execute_episode)(
+    ceiling = min(max_concurrency or total, total)
+    executor = AdaptiveThreadPoolExecutor(
+        max_workers=ceiling,
+        history_path=run_dir / "concurrency.jsonl",
+        clean_result=lambda result: result.error is None,
+        throttled_result=lambda result: result.terminal_status == "provider_failed",
+    )
+    futures = [
+        executor.submit(
+            _execute_episode,
             index,
             total,
             agent,
@@ -135,7 +143,17 @@ def _run_grid(
             agent_prompt_profile=agent_prompt_profile,
         )
         for index, (agent, scenario, rep) in enumerate(episodes, start=1)
+    ]
+    results_by_index = {future: index for index, future in enumerate(futures)}
+    results = [None] * total
+    for future in as_completed(futures):
+        results[results_by_index[future]] = future.result()
+    executor.shutdown()
+    (run_dir / "concurrency-summary.json").write_text(
+        json.dumps(executor.controller.summary(), indent=2) + "\n",
+        encoding="utf-8",
     )
+    return results
 
 
 def _allocate_run_dir(runs_dir: Path) -> Path:
@@ -176,7 +194,7 @@ def _run_canary(args: argparse.Namespace) -> int:
                     "model": model,
                     "reps": 1,
                     "timeout_s": args.timeout,
-                    "jobs": args.jobs,
+                    "max_concurrency": args.max_concurrency,
                     "agents": [agent.name for agent in agents],
                     "scenarios": [scenario.name for scenario in scenarios],
                     "agent_prompt_profile": CANARY_PROMPT_PROFILE,
@@ -193,7 +211,7 @@ def _run_canary(args: argparse.Namespace) -> int:
             model=model,
             run_dir=model_dir,
             timeout_s=args.timeout,
-            jobs=args.jobs,
+            max_concurrency=args.max_concurrency,
             agent_prompt_profile=CANARY_PROMPT_PROFILE,
         )
         summaries = summarize(results)
@@ -251,7 +269,7 @@ def _add_execution_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--timeout", type=float, default=300.0, help="Per-episode timeout in seconds (default 300).")
     parser.add_argument(
-        "-j", "--jobs", type=int, default=-1, help="Concurrent episodes (default -1: all CPUs; 1: sequential)."
+        "--max-concurrency", type=int, default=None, help="Optional ceiling for automatically tuned concurrency."
     )
     parser.add_argument("--runs-dir", type=Path, default=BENCH_DIR / "runs", help="Where run records land.")
     parser.add_argument("--skip-build", action="store_true", help="Skip the up-front cargo builds.")
@@ -298,7 +316,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Per-episode timeout in seconds (default 1200: nightly runs trade latency for fewer provider timeouts).",
     )
     canary_parser.add_argument(
-        "-j", "--jobs", type=int, default=-1, help="Concurrent episodes (default -1: all CPUs; 1: sequential)."
+        "--max-concurrency", type=int, default=None, help="Optional ceiling for automatically tuned concurrency."
     )
     canary_parser.add_argument(
         "--runs-dir", type=Path, default=BENCH_DIR / "runs", help="Where run records land."
@@ -317,8 +335,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "canary":
-        if args.jobs == 0:
-            parser.error("--jobs must not be 0")
+        if args.max_concurrency is not None and args.max_concurrency < 1:
+            parser.error("--max-concurrency must be at least 1")
         return _run_canary(args)
 
     selected_scenarios = (
@@ -334,8 +352,8 @@ def main(argv: list[str] | None = None) -> int:
     agents = [AGENTS[name] for name in selected_agents]
     if args.reps < 1:
         parser.error("--reps must be at least 1")
-    if args.jobs == 0:
-        parser.error("--jobs must not be 0")
+    if args.max_concurrency is not None and args.max_concurrency < 1:
+        parser.error("--max-concurrency must be at least 1")
 
     if not args.skip_build:
         build_binaries(agents)
@@ -348,7 +366,7 @@ def main(argv: list[str] | None = None) -> int:
                 "model": args.model,
                 "reps": args.reps,
                 "timeout_s": args.timeout,
-                "jobs": args.jobs,
+                "max_concurrency": args.max_concurrency,
                 "agents": [s.name for s in agents],
                 "scenarios": [s.name for s in scenarios],
                 "agent_prompt_profile": args.agent_prompt_profile,
@@ -367,7 +385,7 @@ def main(argv: list[str] | None = None) -> int:
         model=args.model,
         run_dir=run_dir,
         timeout_s=args.timeout,
-        jobs=args.jobs,
+        max_concurrency=args.max_concurrency,
         agent_prompt_profile=args.agent_prompt_profile,
     )
 

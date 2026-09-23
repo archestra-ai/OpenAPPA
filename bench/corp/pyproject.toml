@@ -4,9 +4,9 @@ version = "0.1.0"
 description = "Cross-defense bench: the corporate-agent scenario through APPA and FIDES, scored by tool-side end state"
 requires-python = ">=3.11"
 dependencies = [
+    "appa-bench-concurrency==0.1.0",
     "appa-bench-publish==0.1.0",
     "claude-agent-sdk==0.2.152",
-    "joblib>=1.5.3",
     # TOML writing for the per-episode pruned APPA policy (tomllib reads only).
     "tomli-w>=1.0",
 ]
@@ -25,4 +25,5 @@ build-backend = "hatchling.build"
 packages = ["src/bench_corp"]
 
 [tool.uv.sources]
+appa-bench-concurrency = { path = "../concurrency" }
 appa-bench-publish = { path = "../publish" }

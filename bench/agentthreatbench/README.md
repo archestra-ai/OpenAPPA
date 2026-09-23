@@ -102,11 +102,14 @@ uv run appa-agentthreatbench run \
   --run-name full-gpt-5.6-terra
 ```
 
-`--max-concurrency` configures both the global Inspect sample limit and the
-provider connection limit. All configured cases run inside one task. Tool calls
-within a sample remain serialized. Inspect logs,
+Sample concurrency starts at one, rises after clean completions, and backs off
+under live memory pressure. `--max-concurrency` is an optional ceiling; omit it
+to use the number of selected samples, or set it to one for serial debugging.
+Inspect retains its independent adaptive provider connection controller. All
+configured cases run inside one task. Tool calls within a sample remain serialized. Inspect logs,
 OpenAPPA/FIDES mediation sidecars, resolver requests, the run manifest, and
-`summary.json` are written below the ignored `runs/` directory.
+`summary.json` are written below the ignored `runs/` directory. Each run also
+records concurrency transitions and the peak active sample count.
 
 ## Publish a completed run
 

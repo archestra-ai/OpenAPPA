@@ -5,6 +5,7 @@ description = "Tau Knowledge leaderboard harness for OpenAPPA"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "appa-agent-python",
+    "appa-bench-concurrency==0.1.0",
     "tau2[knowledge] @ git+https://github.com/sierra-research/tau2-bench.git@93ee97b8303ce0e89e0ad17e6207591a1846f84b",
 ]
 
@@ -26,6 +27,7 @@ allow-direct-references = true
 
 [tool.uv.sources]
 appa-agent-python = { path = "../../appa-agent-python", editable = true }
+appa-bench-concurrency = { path = "../concurrency" }
 
 [tool.ruff]
 line-length = 120
