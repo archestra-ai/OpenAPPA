@@ -128,8 +128,12 @@ fn observed(
             runtime.observe_inventory(&actor, *adapter, inventory)
         }
         Err(EventError::UnknownTrajectory) if actor.child.is_none() => {
-            match runtime.create_session_with_inventory(root.clone(), inventory.clone(), principal) {
-                Ok(_) | Err(EventError::TrajectoryExists) => runtime.observe_inventory(&actor, *adapter, inventory),
+            match runtime.create_session_with_inventory(root.clone(), inventory.clone(), principal.clone()) {
+                Ok(_) => runtime.observe_inventory(&actor, *adapter, inventory),
+                Err(EventError::TrajectoryExists) => {
+                    continues_for(&runtime.session(root, root)?, principal.as_ref())?;
+                    runtime.observe_inventory(&actor, *adapter, inventory)
+                }
                 Err(error) => Err(error),
             }
         }
@@ -397,7 +401,8 @@ struct Dispatcher<'a> {
 impl Dispatcher<'_> {
     fn session_start(&mut self, root: TrajectoryId, principal: Option<String>) -> HookDecision {
         let runtime = self.runtime;
-        let opened = session_principal(principal.as_deref()).and_then(|principal| open_as(runtime, &root, principal));
+        let opened = session_principal(principal.as_deref())
+            .and_then(|principal| open_or_reopen(runtime, &root, principal, self.options.clone()));
         match opened {
             Ok(_) => match runtime.live(&root, &root) {
                 Ok(()) if runtime.file_tracking_enabled() => HookDecision::Context {
@@ -612,7 +617,7 @@ impl Dispatcher<'_> {
     /// The child is told what its return must look like where the fork's policy shapes it;
     /// a return that crosses as spoken needs no word.
     fn child_start(&mut self, root: TrajectoryId, child: TrajectoryId, spawn: SpawnRef) -> HookDecision {
-        let root = match open_or_reopen_with_presentation(self.runtime, &root, self.options.clone()) {
+        let root = match open_or_reopen(self.runtime, &root, None, self.options.clone()) {
             Ok(session) => session,
             Err(error) => return refuse(error.to_string()),
         };
@@ -720,15 +725,16 @@ fn session_principal(spelling: Option<&str>) -> Result<Option<ReaderId>, EventEr
 
 /// Open the root for `principal`, or reopen it when the principal it opened for is the one
 /// named. A reopen that names none continues under the principal the opening pinned.
-fn open_as(
+fn open_or_reopen(
     runtime: &Runtime,
     root: &appa_runtime_api::TrajectoryId,
     principal: Option<ReaderId>,
+    presentation: EmbeddedPresentationOptions,
 ) -> Result<Session, EventError> {
-    let session = match runtime.session(root, root) {
+    let session = match runtime.session_with_presentation(root, root, presentation.clone()) {
         Err(EventError::UnknownTrajectory) => match runtime.create_session(root.clone(), principal.clone()) {
-            Err(EventError::TrajectoryExists) => runtime.session(root, root)?,
-            opened => return opened,
+            Ok(_) | Err(EventError::TrajectoryExists) => runtime.session_with_presentation(root, root, presentation)?,
+            Err(error) => return Err(error),
         },
         reopened => reopened?,
     };
@@ -741,22 +747,6 @@ fn continues_for(session: &Session, principal: Option<&ReaderId>) -> Result<(), 
     match principal {
         Some(named) if session.principal()?.as_ref() != Some(named) => Err(EventError::PrincipalMismatch),
         _ => Ok(()),
-    }
-}
-
-fn open_or_reopen_with_presentation(
-    runtime: &Runtime,
-    root: &appa_runtime_api::TrajectoryId,
-    presentation: EmbeddedPresentationOptions,
-) -> Result<Session, EventError> {
-    match runtime.session_with_presentation(root, root, presentation.clone()) {
-        Ok(session) => Ok(session),
-        Err(EventError::UnknownTrajectory) => match runtime.create_session(root.clone(), None) {
-            Ok(_) => runtime.session_with_presentation(root, root, presentation),
-            Err(EventError::TrajectoryExists) => runtime.session_with_presentation(root, root, presentation),
-            Err(error) => Err(error),
-        },
-        Err(error) => Err(error),
     }
 }
 
@@ -836,14 +826,7 @@ where
 {
     match &actor.child {
         Some(child) => on_child(runtime, &actor.root, child, missing_start, presentation, event).await,
-        None => {
-            event(open_or_reopen_with_presentation(
-                runtime,
-                &actor.root,
-                presentation.clone(),
-            )?)
-            .await
-        }
+        None => event(open_or_reopen(runtime, &actor.root, None, presentation.clone())?).await,
     }
 }
 
@@ -858,7 +841,7 @@ async fn on_child<T, Run>(
 where
     Run: Future<Output = Result<T, EventError>>,
 {
-    let root_session = open_or_reopen_with_presentation(runtime, root, presentation.clone())?;
+    let root_session = open_or_reopen(runtime, root, None, presentation.clone())?;
     match (
         event(runtime.session_with_presentation(root, child, presentation.clone())?).await,
         missing_start,
