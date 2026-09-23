@@ -11,12 +11,12 @@ The interpreter is Python 3.12 (`.python-version`): Tau at this pin imports `aud
 AgentThreatBench samples attack scenarios, where OpenAPPA intervenes in nearly every episode, so its token overhead answers "what does mediation cost when the policy fires". Tau's normal profile answers the other question: what does it cost across 97 ordinary banking tasks, where the [2026-09-15 evaluation](results/full-2026-09-15/README.md) triggered no policy block in 7,914 checked calls. The matched summary reports these differences per simulation:
 
 - `guarded_minus_permissive` compares policy modes: the same scaffold, the same tools, the same prompts, only the contract differs. The observed token difference includes stochastic trajectory variation, not just permission-checking overhead.
-- `permissive_minus_stock` compares scaffolds: the extra system-prompt addendum, the one-call-per-completion rule, and the tool schemas. The observed difference includes changes in agent behavior and is reported next to the model and effort that produced it.
-- `hidden_agent_total_per_simulation` is the discarded work: completions a policy block or the one-call rule threw away and the model paid for anyway. Tau's trajectory omits them; the `appa-audit/` record includes them, and the totals here use it.
+- `permissive_minus_stock` compares scaffolds: the policy-feedback prompt addendum, OpenAPPA mediation, and the tool schemas. The observed difference includes changes in agent behavior and is reported next to the model and effort that produced it.
+- `hidden_agent_total_per_simulation` is the discarded work: completions a policy block caused the scaffold to replan after, which the model still billed. Tau's trajectory omits them; the `appa-audit/` record includes them, and the totals here use it.
 
 `runs/<name>-matched-summary.json` carries `token_overhead.per_arm`, `.deltas`, and `.ratios`; `run-summary.json` per arm carries the raw cumulative counts and the per-simulation means they come from.
 
-**Known measurement limitation:** the one-tool-per-completion rule adds inference rounds and repeated full-context prompts while also changing retrieval behavior. These totals do not isolate APPA's algebra or marginal mediation overhead. The [result report](results/full-2026-09-15/README.md#known-limitation-these-totals-do-not-isolate-appas-token-overhead) records the fixed-prompt serialization estimate and the controlled comparisons deferred to future PRs; this PR does not change the accounting or scaffold to address it.
+**Historical measurement limitation:** the 2026-09-15 custom arms forced one tool per completion. Current runs preserve the model's batched proposals and Tau's parallel execution. The [result report](results/full-2026-09-15/README.md#known-limitation-these-totals-do-not-isolate-appas-token-overhead) records the fixed-prompt serialization estimate for the historical rows.
 
 ## Setup pins code, data, and retrieval dependencies
 
@@ -61,7 +61,7 @@ uv run appa-taubench pilot \
   --run-name tau-knowledge-gpt-5.2-high-pilot
 ```
 
-The three arms expose different associations. Guarded versus permissive holds the OpenAPPA prompt, remedy tool, and one-call scaffold constant while changing policy enforcement. Stock versus permissive changes that custom scaffold itself, so a custom result is not presented as though it used Tau's standard agent. Matched task IDs and seeds do not make stochastic trajectories a causal experiment.
+The three arms expose different associations. Guarded versus permissive holds the OpenAPPA prompt, remedy tool, and parallel-call scaffold constant while changing policy enforcement. Stock versus permissive changes that custom scaffold itself, so a custom result is not presented as though it used Tau's standard agent. Matched task IDs and seeds do not make stochastic trajectories a causal experiment.
 
 | Arm | Agent and prompt | Tool mediation |
 |---|---|---|
@@ -140,9 +140,11 @@ uv run appa-taubench run --dry-run --policy-mode guarded
 uv run appa-taubench run --policy-mode guarded
 ```
 
+The [parallel-result replication guide](results/parallel-2026-09-16/REPRODUCING.md) gives the exact commands and acceptance checks for both published post-fix arms.
+
 `--policy-mode permissive` runs the full scaffold-matched control, while `--policy-mode stock` runs the full Tau baseline. Publication commands require all 97 tasks and at least four trials. A result with missing trials, missing evaluator evidence, duplicate identities, infrastructure errors, or an unparseable reviewer judgment is refused. Compact evidence from completed publication runs is committed under [`results/`](results/README.md), while complete trajectories and audits remain in the ignored `runs/` directory.
 
-Every output directory name includes a digest of the experiment settings. `run-config.json` records requested models and arguments, the derived trial seeds, task IDs, limits, retry and review settings, policy and implementation hashes, retrieval corpus/index-recipe hash, binding identity, and Tau revision. It records each `max_concurrency` value separately as execution metadata, so concurrency can be tuned when resuming without changing the experiment's identity. Resume is accepted only when the experiment settings match, and Tau checkpoints every completed simulation.
+Every output directory name includes a digest of the experiment settings. `run-config.json` records requested models and arguments, the derived trial seeds, task IDs, limits, retry and review settings, policy and implementation hashes, retrieval corpus/index-recipe hash, binding identity, and Tau revision. It records each `max_concurrency` value separately as execution metadata, so concurrency can be tuned when resuming without changing the experiment's identity. This Tau harness does not configure Inspect's `max_connections` or `max_samples`. Resume is accepted only when the experiment settings match, and Tau checkpoints every completed simulation.
 
 ## Audits retain the evidence Tau trajectories omit
 
@@ -160,7 +162,7 @@ The contract trusts Tau's documented meaning of a successful `log_verification` 
 
 ## Submission metadata discloses the custom scaffold
 
-The submit command invokes Tau's public trajectory verification and interactive preparation, copies the correlated audits and manifest, forces custom-scaffold metadata, and runs Tau's final submission validator. Its disclosure names the modified prompt, remedy tool, sequential-call rule, hidden replanning after multi-call or recoverable policy blocks, fixed terminal refusals, and trajectory rewriting. The result is labeled a custom task and policy-compliance evaluation rather than a standalone proof of authorization security.
+The submit command invokes Tau's public trajectory verification and interactive preparation, copies the correlated audits and manifest, forces custom-scaffold metadata, and runs Tau's final submission validator. Its disclosure names the modified prompt, remedy tool, parallel call mediation, hidden replanning after recoverable policy blocks, fixed terminal refusals, and trajectory rewriting. The result is labeled a custom task and policy-compliance evaluation rather than a standalone proof of authorization security.
 
 ```sh
 uv run appa-taubench submit runs/EXACT_GUARDED_RUN_DIRECTORY --output prepared-submission
