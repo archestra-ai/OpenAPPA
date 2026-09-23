@@ -150,9 +150,9 @@ name = "read_file"
 delta = { audience = ["internal"] }
 ```
 
-A selector checks top-level string arguments. Put it in parentheses after the tool name, with conditions written as `argument:pattern` and separated by commas. List each argument only once, in any order.
+A selector checks top-level string arguments and arrays of strings. Put it in parentheses after the tool name, with conditions written as `argument:pattern` and separated by commas. List each argument only once, in any order.
 
-Every condition must match the full value of its argument. If an argument is missing or is not a string, the selector does not match.
+Every condition must match the full value of its argument. An array argument matches when it is not empty and every element is a string that matches the pattern, so `edit_agent(teams:*)` selects a call that sends a list of teams. If an argument is missing, is an empty array, or is any other value, the selector does not match.
 
 ```toml
 [[policy.tool]]

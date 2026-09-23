@@ -55,17 +55,22 @@ pub(crate) enum PatternPart {
 }
 
 impl ToolMatcher {
-    /// Every declared clause must match: the argument is present, it is a string, and its
-    /// value matches that clause's pattern. A missing or non-string argument does not match.
+    /// Every declared clause must match: the argument is a string whose value matches that
+    /// clause's pattern, or a non-empty array of strings that each match it. A missing
+    /// argument, an empty array, or any other value does not match.
     fn matches(&self, arguments: &serde_json::Value) -> bool {
         match self {
             ToolMatcher::Bare => true,
             ToolMatcher::Arguments(ArgumentPatterns(clauses)) => {
-                let clause_matches = |(argument, pattern): (&String, &Vec<PatternPart>)| {
-                    arguments
-                        .get(argument)
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|value| wildcard_matches(pattern, value))
+                let string_matches = |pattern: &[PatternPart], value: &serde_json::Value| {
+                    value.as_str().is_some_and(|value| wildcard_matches(pattern, value))
+                };
+                let clause_matches = |(argument, pattern): (&String, &Vec<PatternPart>)| match arguments.get(argument) {
+                    Some(serde_json::Value::Array(values)) => {
+                        !values.is_empty() && values.iter().all(|value| string_matches(pattern, value))
+                    }
+                    Some(value) => string_matches(pattern, value),
+                    None => false,
                 };
                 // Clauses that reject on a lookup run before clauses that scan the value. A
                 // conjunction is commutative, so this moves cost and never the answer: an
@@ -2729,6 +2734,28 @@ mod tests {
 
         let dotted = parsed("read(a.b:x)").expect("a dotted argument name is valid");
         assert!(dotted.matches(&serde_json::json!({ "a.b": "x" })));
+    }
+
+    /// An array argument matches when it is non-empty and every element is a string the
+    /// pattern matches, so `teams:*` selects a call that sent a list of teams.
+    #[test]
+    fn an_array_argument_matches_when_every_element_does() {
+        let parsed = |name| parse_tool_selector(name).map(|(_, matcher)| matcher);
+        let teams = |value: serde_json::Value| serde_json::json!({ "teams": value });
+        let any = parsed("edit(teams:*)").expect("the selector is valid");
+        assert!(any.matches(&teams(serde_json::json!(["a"]))));
+        assert!(any.matches(&teams(serde_json::json!(["a", "b"]))));
+        assert!(
+            !any.matches(&teams(serde_json::json!([]))),
+            "an empty list names no team"
+        );
+        assert!(!any.matches(&teams(serde_json::json!(["a", 1]))));
+        assert!(!any.matches(&teams(serde_json::json!([["a"]]))));
+        assert!(!any.matches(&serde_json::json!({})));
+
+        let platform = parsed("edit(teams:platform-*)").expect("the selector is valid");
+        assert!(platform.matches(&teams(serde_json::json!(["platform-a", "platform-b"]))));
+        assert!(!platform.matches(&teams(serde_json::json!(["platform-a", "sales"]))));
     }
 
     /// The conjunction: a selector may name several arguments, and a call is selected only
