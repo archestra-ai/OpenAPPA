@@ -315,7 +315,7 @@ jobs:
       - name: Exercise the real harness with deterministic inference
         run: python3 marketplace/plugins/claude-code/live-gate-check.py
 
-  battery-script-linter:
+  battery-checks:
     name: Battery Linter
     runs-on: ubuntu-latest
     timeout-minutes: 10
