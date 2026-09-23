@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::consult::Consult;
 use crate::events::{ExternalOutcome, ExternalRole};
-use crate::external::{ConsultOutcome, Transcript};
+use crate::external::{ConsultOutcome, Diagnostics, Transcript};
 
 /// Receives one record per recorded consult. Called on the consult's own task, so an
 /// implementation hands the record off rather than doing work of its own here.
@@ -55,14 +55,14 @@ pub struct ConsultRecord {
     pub request: serde_json::Value,
     pub outcome: ExternalOutcome,
     pub answer: Option<serde_json::Value>,
-    /// What a `url` or `command` external returned, whatever its status or shape, and a
-    /// module's output; at most the deployment's `max_body_bytes`.
+    /// What a `url` or `command` external returned, whatever its status or shape, or a
+    /// module's output; at most the deployment's `max_body_bytes`. The model and `hitl`
+    /// backends carry none.
     pub raw_response: Option<Vec<u8>>,
     pub http_status: Option<u16>,
     /// A `url` external's `X-Appa-Diagnostics` header, or the tail of a command's stderr:
     /// at most 8 KiB, never read by the runtime.
-    pub diagnostics: Option<Vec<u8>>,
-    pub diagnostics_truncated: bool,
+    pub diagnostics: Option<Diagnostics>,
     pub context: ConsultContext,
 }
 
@@ -74,19 +74,15 @@ impl ConsultRecord {
         started_at: std::time::SystemTime,
         duration_ms: u64,
         context: ConsultContext,
-    ) -> ConsultRecord {
-        let (diagnostics, diagnostics_truncated) = match transcript.diagnostics {
-            Some(diagnostics) => (Some(diagnostics.bytes), diagnostics.truncated),
-            None => (None, false),
-        };
-        ConsultRecord {
+    ) -> Option<ConsultRecord> {
+        Some(ConsultRecord {
             id: uuid::Uuid::now_v7(),
             started_at: started_at.into(),
             duration_ms,
             role: consult.kind().into(),
             external_name: consult.name.clone(),
             backend: transcript.backend,
-            request: serde_json::to_value(consult).expect("a consult serializes: its wire form is plain JSON"),
+            request: serde_json::to_value(consult).ok()?,
             outcome: outcome.into(),
             answer: match outcome {
                 ConsultOutcome::Answer(answer) => Some(answer.clone()),
@@ -94,9 +90,8 @@ impl ConsultRecord {
             },
             raw_response: transcript.raw_response,
             http_status: transcript.http_status,
-            diagnostics,
-            diagnostics_truncated,
+            diagnostics: transcript.diagnostics,
             context,
-        }
+        })
     }
 }

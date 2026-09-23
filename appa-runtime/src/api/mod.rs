@@ -17,6 +17,7 @@ pub use crate::engine::{
     AuditEntry, AuditEvent, AuditLabel, DispatchOutcome, LabelSpelling, RemedyArguments, TrajectoryStatus,
 };
 pub use crate::events::{ExternalOutcome, ExternalRole, NoAnswerClass};
+pub use crate::external::Diagnostics;
 pub use crate::recorder::{ConsultBackend, ConsultContext, ConsultRecord, ConsultRecorder};
 pub use appa_runtime_api::{
     Actor, OfferedRemedy, OutcomeBody, ProposedCall, Review, SpawnBinding, SpawnRef, ToolOutcome, TrajectoryId,

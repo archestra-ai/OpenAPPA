@@ -1392,7 +1392,12 @@ impl Session {
             Some(_) => externals.consult_transcribed(consult, elicitation, ruling).await,
             None => (externals.consult(consult, elicitation, ruling).await, None),
         };
-        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        // A transport that read on for the record alone says when the outcome was known.
+        let settled = transcript
+            .as_ref()
+            .and_then(|transcript| transcript.settled)
+            .unwrap_or_else(std::time::Instant::now);
+        let duration_ms = u64::try_from(settled.saturating_duration_since(started).as_millis()).unwrap_or(u64::MAX);
         // Filed under the family, never the acting trajectory: a subagent's slow authority is
         // part of its family's account, and `EventLog` reads one root's bucket.
         self.inner.record(
@@ -1407,27 +1412,33 @@ impl Session {
             },
         );
         if let (Some(recorder), Some(transcript)) = (&self.inner.recorder, transcript) {
-            let context = ConsultContext {
-                root: self.root.0.clone(),
-                trajectory: self.trajectory.0.clone(),
-                call_id: match occasion {
-                    Occasion::Proposal { call_id } | Occasion::Report { call_id } => call_id.map(str::to_string),
-                    Occasion::Remedy { .. } | Occasion::Other => None,
-                },
-                offer_id: match occasion {
-                    Occasion::Remedy { offer } => Some(offer.0.clone()),
-                    Occasion::Proposal { .. } | Occasion::Report { .. } | Occasion::Other => None,
-                },
-                call_digest: call.map(|call| crate::engine::hex(call.bytes())),
-            };
-            recorder.record(ConsultRecord::new(
-                consult,
-                &outcome,
-                transcript,
-                started_at,
-                duration_ms,
-                context,
-            ));
+            // The host's code: whatever it does, the outcome below stands.
+            let recorded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let context = ConsultContext {
+                    root: self.root.0.clone(),
+                    trajectory: self.trajectory.0.clone(),
+                    call_id: match occasion {
+                        Occasion::Proposal { call_id } | Occasion::Report { call_id } => call_id.map(str::to_string),
+                        Occasion::Remedy { .. } | Occasion::Other => None,
+                    },
+                    offer_id: match occasion {
+                        Occasion::Remedy { offer } => Some(offer.0.clone()),
+                        Occasion::Proposal { .. } | Occasion::Report { .. } | Occasion::Other => None,
+                    },
+                    call_digest: call.map(|call| crate::engine::hex(call.bytes())),
+                };
+                if let Some(record) =
+                    ConsultRecord::new(consult, &outcome, transcript, started_at, duration_ms, context)
+                {
+                    recorder.record(record);
+                }
+            }));
+            if recorded.is_err() {
+                tracing::warn!(
+                    external = consult.name,
+                    "the consult recorder panicked; the record is dropped"
+                );
+            }
         }
         outcome
     }
@@ -6795,8 +6806,13 @@ delta = {}
         assert_eq!(record.answer.as_ref(), Some(&wire["answer"]));
         assert_eq!(record.raw_response.as_deref(), Some(PERMISSIVE_ANSWER.as_bytes()));
         assert_eq!(record.http_status, Some(200));
-        assert_eq!(record.diagnostics.as_deref(), Some(&b"model=m1"[..]));
-        assert!(!record.diagnostics_truncated);
+        assert_eq!(
+            record.diagnostics,
+            Some(crate::api::Diagnostics {
+                bytes: b"model=m1".to_vec(),
+                truncated: false
+            })
+        );
         assert_eq!(record.context.root, root().0);
         assert_eq!(record.context.trajectory, root().0);
         assert_eq!(record.context.call_id.as_deref(), Some("host-call-7"));
@@ -6864,7 +6880,10 @@ delta = {}
         assert_eq!(record.outcome, crate::api::ExternalOutcome::Answered);
         assert_eq!(record.raw_response.as_deref(), Some(PERMISSIVE_ANSWER.as_bytes()));
         assert_eq!(record.http_status, None);
-        assert_eq!(record.diagnostics.as_deref(), Some(&b"thinking\n"[..]));
+        assert_eq!(
+            record.diagnostics.map(|diagnostics| diagnostics.bytes),
+            Some(b"thinking\n".to_vec())
+        );
         assert_eq!(record.context.call_id.as_deref(), Some("host-call-1"));
     }
 
@@ -6903,5 +6922,47 @@ delta = {}
         assert_eq!(record.context.offer_id.as_deref(), Some(offer.0.as_str()));
         assert_eq!(record.context.call_id, None);
         assert_eq!(record.context.call_digest, None);
+    }
+
+    /// A host recorder that fails on every record.
+    struct Panicking;
+
+    impl crate::api::ConsultRecorder for Panicking {
+        fn record(&self, _record: crate::api::ConsultRecord) {
+            panic!("the host's recorder fails");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_panicking_recorder_leaves_the_consult_outcome_standing() {
+        let url = stub(serde_json::json!({"ruling": "approve"})).await;
+        let mut decisions = Vec::new();
+        for recorder in [None, Some(Arc::new(Panicking) as Arc<dyn crate::api::ConsultRecorder>)] {
+            let dir = tempfile::tempdir().expect("a temp dir is creatable");
+            let runtime = Runtime::open(config_with(ATTENTION, Some(&url)), dir.path().join("appa.db"), None)
+                .expect("the deployment opens");
+            let runtime = match recorder {
+                Some(recorder) => runtime.recording(recorder),
+                None => runtime,
+            };
+            let session = runtime.create_session(root()).expect("a fresh id opens");
+            assert!(matches!(
+                session
+                    .on_tool_call(wire(500), false)
+                    .await
+                    .expect("the block is delivered"),
+                ToolCallDecision::Deny { .. }
+            ));
+            let offer = surfaced_offer(&runtime);
+            decisions.push(
+                session
+                    .on_remedy(offer, RemedyArguments::default(), None, None)
+                    .await
+                    .expect("the remedy executes"),
+            );
+        }
+        let [unrecorded, recorded] = decisions.try_into().expect("two runs");
+        assert!(matches!(unrecorded, RemedyDecision::Authorized { .. }));
+        assert_eq!(recorded, unrecorded, "the recorder's panic changes nothing");
     }
 }

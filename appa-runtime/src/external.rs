@@ -94,10 +94,11 @@ const MAX_DIAGNOSTIC_BYTES: usize = 8192;
 /// What an external wrote about itself beside its answer: a `url` external's
 /// diagnostics header, or the tail of a command's stderr. Kept for a consult recorder;
 /// the runtime never reads it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Diagnostics {
-    pub(crate) bytes: Vec<u8>,
-    pub(crate) truncated: bool,
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Diagnostics {
+    pub bytes: Vec<u8>,
+    /// Whether more was written than the 8 KiB kept.
+    pub truncated: bool,
 }
 
 impl Diagnostics {
@@ -123,6 +124,8 @@ pub(crate) struct Transcript {
     pub(crate) raw_response: Option<Vec<u8>>,
     pub(crate) http_status: Option<u16>,
     pub(crate) diagnostics: Option<Diagnostics>,
+    /// When the outcome was known, where the transport read on for the record alone.
+    pub(crate) settled: Option<std::time::Instant>,
 }
 
 impl Transcript {
@@ -132,6 +135,7 @@ impl Transcript {
             raw_response: None,
             http_status: None,
             diagnostics: None,
+            settled: None,
         }
     }
 }
@@ -666,6 +670,7 @@ impl ExternalServices {
         if !status.is_success() {
             // Read for the record alone: whatever the body holds, the outcome is the status.
             if let Some(seen) = seen {
+                seen.settled = Some(std::time::Instant::now());
                 let mut body = Vec::new();
                 let _ = read_body(&mut response, cap, &mut body).await;
                 seen.raw_response = Some(body);
@@ -954,26 +959,51 @@ pub(crate) async fn exchange_with_child(
 /// The tail of what a child wrote to stderr, read to its end so the pipe never fills: the
 /// command's own error, whose last line goes to the log and the no-answer diagnostic.
 #[cfg(unix)]
-pub(crate) fn stderr_tail(stderr: tokio::process::ChildStderr) -> tokio::task::JoinHandle<Diagnostics> {
-    tokio::spawn(async move {
-        use tokio::io::AsyncReadExt as _;
-        let mut bytes = Vec::new();
-        let mut truncated = false;
-        let mut stderr = stderr;
-        let mut chunk = [0u8; 1024];
-        while let Ok(read) = stderr.read(&mut chunk).await {
-            if read == 0 {
-                break;
-            }
-            bytes.extend_from_slice(&chunk[..read]);
-            if bytes.len() > MAX_DIAGNOSTIC_BYTES {
-                bytes.drain(..bytes.len() - MAX_DIAGNOSTIC_BYTES);
-                truncated = true;
+pub(crate) struct StderrTail {
+    read: Arc<std::sync::Mutex<Diagnostics>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(unix)]
+pub(crate) fn stderr_tail(stderr: tokio::process::ChildStderr) -> StderrTail {
+    let read = Arc::new(std::sync::Mutex::new(Diagnostics::default()));
+    let task = tokio::spawn({
+        let read = Arc::clone(&read);
+        async move {
+            use tokio::io::AsyncReadExt as _;
+            let mut stderr = stderr;
+            let mut chunk = [0u8; 1024];
+            while let Ok(count) = stderr.read(&mut chunk).await {
+                if count == 0 {
+                    break;
+                }
+                let Ok(mut tail) = read.lock() else { break };
+                tail.bytes.extend_from_slice(&chunk[..count]);
+                if tail.bytes.len() > MAX_DIAGNOSTIC_BYTES {
+                    let excess = tail.bytes.len() - MAX_DIAGNOSTIC_BYTES;
+                    tail.bytes.drain(..excess);
+                    tail.truncated = true;
+                }
             }
         }
-        Diagnostics { bytes, truncated }
-    })
+    });
+    StderrTail { read, task }
 }
+
+#[cfg(unix)]
+impl StderrTail {
+    /// What the child wrote once it closed the pipe, or once `wait` passed — a helper that
+    /// kept the pipe open leaves the tail read so far. Nothing where it wrote nothing.
+    async fn within(self, wait: Duration) -> Option<Diagnostics> {
+        let _ = tokio::time::timeout(wait, self.task).await;
+        let tail = std::mem::take(&mut *self.read.lock().ok()?);
+        Some(tail).filter(|tail| !tail.bytes.is_empty())
+    }
+}
+
+/// How long a recorded command that answered may keep its stderr open past its exit.
+#[cfg(unix)]
+const ANSWERED_TAIL_GRACE: Duration = Duration::from_millis(100);
 
 /// The last non-empty line of what a child said about its own failure, stripped of
 /// control characters and bounded, fit for a log field and a diagnostic.
@@ -993,14 +1023,10 @@ pub(crate) fn error_line(text: &str) -> String {
     line[..cut].to_string()
 }
 
-/// What a finished tail task reports; a task that failed, or read nothing, reports nothing.
+/// The stderr tail of a child that failed, given a second to close the pipe.
 #[cfg(unix)]
-pub(crate) async fn finished_tail(tail: tokio::task::JoinHandle<Diagnostics>) -> Option<Diagnostics> {
-    tokio::time::timeout(std::time::Duration::from_secs(1), tail)
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .filter(|tail| !tail.bytes.is_empty())
+pub(crate) async fn finished_tail(tail: StderrTail) -> Option<Diagnostics> {
+    tail.within(Duration::from_secs(1)).await
 }
 
 #[cfg(unix)]
@@ -1066,12 +1092,18 @@ async fn run_command_process(
             Err(reason)
         }
     };
-    let failed = matches!(&exited, Ok((status, _)) if !status.success());
-    let stderr = match tail {
-        Some(tail) if failed || seen.is_some() => finished_tail(tail).await,
-        _ => None,
+    // A failed exit's tail is read for the log too; an answer's only for the record, and
+    // only briefly, so the outcome's time is taken before that wait.
+    let (stderr, settled) = match (&exited, tail) {
+        (Ok((status, _)), Some(tail)) if !status.success() => (finished_tail(tail).await, std::time::Instant::now()),
+        (Ok(_), Some(tail)) if seen.is_some() => {
+            let settled = std::time::Instant::now();
+            (tail.within(ANSWERED_TAIL_GRACE).await, settled)
+        }
+        _ => (None, std::time::Instant::now()),
     };
     if let Some(seen) = seen {
+        seen.settled = Some(settled);
         seen.raw_response = exited.as_ref().ok().map(|(_, output)| output.clone());
         seen.diagnostics = stderr.clone();
     }
@@ -2623,5 +2655,54 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             ConsultOutcome::Answer(serde_json::json!({"ruling": "approve"}))
         );
         assert!(transcript.is_none(), "the stand-in is not recorded");
+    }
+
+    /// A helper outside the command's process group keeps stderr open after the command
+    /// answered: the recorded consult waits out only the grace, and keeps what was written.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_helper_holding_stderr_costs_a_recorded_answer_only_the_grace() {
+        let dir = tempfile::tempdir().expect("a fixture directory is created");
+        let pid_file = dir.path().join("helper.pid");
+        let script = format!(
+            "cat >/dev/null\nprintf 'warming up\\n' >&2\n\
+             perl -MPOSIX -e 'setsid(); sleep 10' &\necho $! > {}\n\
+             printf '%s' '{{\"version\":1,\"answer\":{{\"ruling\":\"approve\"}}}}'",
+            pid_file.display()
+        );
+        let services = command_services(dir.path(), &script, 5000, 1024);
+
+        let started = std::time::Instant::now();
+        let (outcome, transcript) = services
+            .consult_transcribed(&authority_consult("security", serde_json::json!({})), None, None)
+            .await;
+        let elapsed = started.elapsed();
+        let helper: i32 = std::fs::read_to_string(&pid_file)
+            .expect("the command recorded its helper")
+            .trim()
+            .parse()
+            .expect("a pid");
+        unsafe {
+            libc::kill(helper, libc::SIGKILL);
+        }
+
+        assert_eq!(
+            outcome,
+            ConsultOutcome::Answer(serde_json::json!({"ruling": "approve"}))
+        );
+        assert!(
+            elapsed < ANSWERED_TAIL_GRACE + Duration::from_millis(600),
+            "the helper stretched the consult to {elapsed:?}"
+        );
+        let transcript = transcript.expect("a command consult is transcribed");
+        assert_eq!(
+            transcript.diagnostics,
+            Some(Diagnostics {
+                bytes: b"warming up\n".to_vec(),
+                truncated: false
+            })
+        );
+        let settled = transcript.settled.expect("the answer's time is taken before the grace");
+        assert!(settled.saturating_duration_since(started) < elapsed);
     }
 }
