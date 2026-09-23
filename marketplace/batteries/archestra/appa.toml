@@ -68,6 +68,12 @@ requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teams
 # --- knowledge bases: a new one is org-wide unless it says otherwise ---
 
 [[policy.tool]]
+name = "mcp/archestra/create_knowledge_base(visibility:private,teamIds:*)"
+parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teamIds"] } }
+
+[[policy.tool]]
 name = "mcp/archestra/create_knowledge_base(visibility:private)"
 parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}

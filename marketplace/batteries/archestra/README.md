@@ -12,7 +12,7 @@ wins:
 | --- | --- | --- |
 | `set_project_share` | `visibility: organization` / `team` or a sent `team_ids` | `internal` / `@archestra:team/$team_ids` |
 | `publish_app` | `scope: org` / `team` | `internal` / `@archestra:team/$teams` |
-| `create_knowledge_base` | default `org-wide` / `team-scoped` | `internal` / `@archestra:team/$teamIds` |
+| `create_knowledge_base` | default `org-wide` / `team-scoped`, or `private` with a sent `teamIds` | `internal` / `@archestra:team/$teamIds` |
 | `update_knowledge_base` | `org-wide` / `team-scoped` or a sent `teamIds` | `internal` / `@archestra:team/$teamIds` |
 | `create_knowledge_connector` | default `org-wide` / `team-scoped` / `auto-sync-permissions` | `internal` / `@archestra:team/$team_ids` / `public` |
 | `update_knowledge_connector` | `org-wide` / `team-scoped` or a sent `team_ids` / `auto-sync-permissions` | `internal` / `@archestra:team/$team_ids` / `public` |
@@ -66,6 +66,9 @@ The script reads the API base from `ARCHESTRA_BASE_URL` and its token from
 an Archestra API key allowed to read the organization's membership. It
 sends the key as `Authorization: Bearer <key>`. An API error or a
 malformed answer exits nonzero, which the runtime treats as no answer.
+
+`appa-runtime/tests/archestra_policy.rs` pins which rule each representative
+share selects and what it requires.
 
 **`test_audience_source.py`** — runs the script against a local HTTP
 server that answers from recorded payloads:
