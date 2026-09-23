@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -35,10 +36,15 @@ from jev_questions import questions  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+STARTED = time.monotonic()
+
 ENDPOINT = os.environ.get("APPA_PROVIDER_JEV_API_URL", "https://api.typesafe.ai/v1/systemone")
 MODEL = "jev-1.13.0"
-# Under the runtime's default 5 s external deadline.
-TIMEOUT_SECONDS = 4
+# The host allows a helper 4 s in all; two attempts fit inside the budget.
+BUDGET_SECONDS = 3.7
+ATTEMPTS = 2
+ATTEMPT_TIMEOUT_SECONDS = 1.8
+MIN_ATTEMPT_SECONDS = 1.0
 MAX_INPUT_BYTES = 64 * 1024
 MAX_VALUE_CHARS = 4000
 
@@ -125,15 +131,23 @@ def settled_choice(label: str, answer: object) -> str:
     return min(ranked[:2], key=options.index)
 
 
-def labels_of(answers: object) -> dict[str, str | bool]:
+def labels_of(answers: object, trace: dict | None = None) -> dict[str, str | bool]:
+    """The settled labels; `trace` receives each label's probabilities, threshold and decision."""
     if not isinstance(answers, dict):
         raise ValueError("Jev returned no answers")
-    labels: dict[str, str | bool] = {label: settled_choice(label, answers.get(label)) for label in SAFEST_FIRST}
+    trace = {} if trace is None else trace
+    labels: dict[str, str | bool] = {}
+    for label in SAFEST_FIRST:
+        answer = answers.get(label)
+        probabilities = answer.get("probabilities") if isinstance(answer, dict) else None
+        trace[label] = {"probabilities": probabilities, "threshold": CONFIDENCE_FLOOR}
+        labels[label] = trace[label]["decision"] = settled_choice(label, answer)
     requires_trusted = answers.get("requires_trusted")
     probability = requires_trusted.get("noul") if isinstance(requires_trusted, dict) else None
+    trace["requires_trusted"] = {"probability": probability, "threshold": REQUIRES_TRUSTED_CUTOFF}
     if not isinstance(probability, (int, float)):
         raise ValueError("Jev answered requires_trusted without a probability")
-    labels["requires_trusted"] = probability >= REQUIRES_TRUSTED_CUTOFF
+    labels["requires_trusted"] = trace["requires_trusted"]["decision"] = probability >= REQUIRES_TRUSTED_CUTOFF
     return labels
 
 
@@ -172,21 +186,46 @@ def annotation(labels: dict[str, str | bool], declaration: dict) -> dict:
     return {"delta": delta, "requires": requires, "emits": []}
 
 
-def ask_jev(key: str, state: dict, hint: str | None) -> object:
+def network_failure(error: OSError) -> str:
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    return "timeout" if isinstance(reason, TimeoutError) else "connection"
+
+
+def ask_jev(
+    key: str, state: dict, hint: str | None, attempts: list[str] | None = None, deadline: float | None = None
+) -> object:
+    """Jev's answers; a 5xx, timeout or connection failure is retried once when the budget allows."""
+    attempts = [] if attempts is None else attempts
+    deadline = time.monotonic() + BUDGET_SECONDS if deadline is None else deadline
     body = json.dumps({"state": state, "model": MODEL, "questions": questions(hint)}).encode()
     request = urllib.request.Request(
         ENDPOINT,
         data=body,
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
     )
-    try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-            return json.load(response).get("answers")
-    except urllib.error.HTTPError as error:
-        raise RuntimeError(f"the TypeSafe API answered {error.code}") from error
+    for _ in range(ATTEMPTS):
+        remaining = deadline - time.monotonic()
+        if remaining < MIN_ATTEMPT_SECONDS:
+            break
+        try:
+            with urllib.request.urlopen(request, timeout=min(ATTEMPT_TIMEOUT_SECONDS, remaining)) as response:
+                answers = json.load(response).get("answers")
+        except urllib.error.HTTPError as error:
+            attempts.append(f"http_{error.code}")
+            if error.code < 500:
+                break
+        except OSError as error:
+            attempts.append(network_failure(error))
+        except Exception:
+            attempts.append("invalid_response")
+            raise
+        else:
+            attempts.append("ok")
+            return answers
+    raise RuntimeError(f"the TypeSafe API did not answer: {', '.join(attempts) or 'no time left'}")
 
 
-def main() -> None:
+def main(diagnostics: dict) -> None:
     raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
     if len(raw) > MAX_INPUT_BYTES:
         raise ValueError("the consult is too large")
@@ -195,15 +234,24 @@ def main() -> None:
     if not key:
         raise RuntimeError("APPA_PROVIDER_JEV_API_KEY is not set")
     hint = declaration.get("hint")
-    answers = ask_jev(key, state_of(call), hint if isinstance(hint, str) else None)
-    json.dump({"version": 1, "answer": annotation(labels_of(answers), declaration)}, sys.stdout)
+    answers = ask_jev(
+        key, state_of(call), hint if isinstance(hint, str) else None, diagnostics["attempts"], STARTED + BUDGET_SECONDS
+    )
+    json.dump({"version": 1, "answer": annotation(labels_of(answers, diagnostics["labels"]), declaration)}, sys.stdout)
     sys.stdout.write("\n")
 
 
 if __name__ == "__main__":
     logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="jev annotator: %(message)s")
+    # Exactly one diagnostics line, always the last line on stderr.
+    diagnostics: dict = {"version": 1, "model": MODEL, "attempts": [], "labels": {}}
     try:
-        main()
-    except Exception:
+        main(diagnostics)
+    except Exception as error:
+        diagnostics["error"] = type(error).__name__
         logger.exception("no answer")
         raise SystemExit(1)
+    finally:
+        diagnostics["elapsed_ms"] = round((time.monotonic() - STARTED) * 1000)
+        sys.stderr.write(json.dumps({"jev_diagnostics": diagnostics}, separators=(",", ":")) + "\n")
+        sys.stderr.flush()
