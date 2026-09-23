@@ -40,7 +40,7 @@ sent.
 
 The member lookup resolves an `archestra:<user-id>` member to that user's
 email; it answers `null` for a user Archestra does not know. Every member
-is the account's email, lowercased, so Archestra readers compare with the
+is the account's email, as Archestra holds it, so Archestra readers compare with the
 readers of any other email-keyed source, such as `google-workspace`.
 
 The battery binds the source under `[externals.audience.archestra]` and

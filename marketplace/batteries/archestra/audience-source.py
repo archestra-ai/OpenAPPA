@@ -10,9 +10,10 @@ and the member lookup that resolves one `archestra:<user-id>` member to
 that user's email.
 
 Every member is reported as the email address Archestra holds for the
-account, lowercased — the address the identity provider signs the user
-in with — so an Archestra reader compares with the readers any other
-email-keyed source reports.
+account — the address the identity provider signs the user in with — so
+an Archestra reader compares with the readers any other email-keyed
+source reports. A collection larger than MAX_MEMBERS is refused rather
+than transferred whole.
 
 The API base comes from ARCHESTRA_BASE_URL, and credentials from
 APPA_PROVIDER_ARCHESTRA_TOKEN: an Archestra API key allowed to read the
@@ -34,6 +35,7 @@ TOKEN_VAR = "APPA_PROVIDER_ARCHESTRA_TOKEN"
 SOURCE_NAME = "archestra"
 SERVED_TEMPLATES = ["members", "team/<team>", "user/<user>"]
 TIMEOUT_SECONDS = 30
+MAX_MEMBERS = 5000
 
 
 def audience_api(base_url, token):
@@ -69,7 +71,9 @@ def members(call, selector):
     found = call(selector=selector).get("members")
     if not isinstance(found, list) or not all(isinstance(member, str) and member for member in found):
         raise RuntimeError(f"the answer for {selector!r} carries no member list")
-    return [member.lower() for member in found]
+    if len(found) > MAX_MEMBERS:
+        raise RuntimeError(f"{selector!r} has more than {MAX_MEMBERS} members")
+    return found
 
 
 def member_principal(call, member):
@@ -86,7 +90,7 @@ def member_principal(call, member):
             # reader as written.
             return None
         case str() if principal:
-            return principal.lower()
+            return principal
         case _:
             raise RuntimeError(f"the answer for {member!r} carries no principal")
 

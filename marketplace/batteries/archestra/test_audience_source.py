@@ -87,11 +87,11 @@ def answered(completed):
 
 
 class SelectorTests(unittest.TestCase):
-    def test_each_selector_reads_its_collection_as_lowercased_emails(self):
+    def test_each_selector_reads_its_collection_as_emails(self):
         answers = {
-            (("selector", "members"),): (200, {"members": ["Alice@Corp.com", "bob@corp.com"]}),
+            (("selector", "members"),): (200, {"members": ["alice@corp.com", "bob@corp.com"]}),
             (("selector", "team/Platform"),): (200, {"members": ["alice@corp.com"]}),
-            (("selector", "user/u-1"),): (200, {"members": ["Carol@Corp.com"]}),
+            (("selector", "user/u-1"),): (200, {"members": ["carol@corp.com"]}),
         }
         with RecordedArchestra(answers) as archestra:
             self.assertEqual(
@@ -120,9 +120,10 @@ class SelectorTests(unittest.TestCase):
             (("selector", "team/gone"),): (404, {"error": "no such team"}),
             (("selector", "team/odd"),): (200, {"members": "alice@corp.com"}),
             (("selector", "team/blank"),): (200, {"members": [""]}),
+            (("selector", "team/huge"),): (200, {"members": [f"u{i}@corp.com" for i in range(5001)]}),
         }
         with RecordedArchestra(answers) as archestra:
-            for team in ["gone", "odd", "blank"]:
+            for team in ["gone", "odd", "blank", "huge"]:
                 completed = consult({"selector": f"team/{team}"}, archestra.base_url)
                 self.assertEqual(completed.returncode, 1, team)
                 self.assertEqual(completed.stdout, "")
@@ -131,7 +132,7 @@ class SelectorTests(unittest.TestCase):
 class MemberLookupTests(unittest.TestCase):
     def test_a_user_id_resolves_to_its_email_or_to_nothing(self):
         answers = {
-            (("member", "u-1"),): (200, {"principal": "Alice@Corp.com"}),
+            (("member", "u-1"),): (200, {"principal": "alice@corp.com"}),
             (("member", "u-2"),): (200, {"principal": None}),
             (("member", "u-3"),): (200, {}),
         }

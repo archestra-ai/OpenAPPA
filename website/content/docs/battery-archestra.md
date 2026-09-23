@@ -31,7 +31,7 @@ The source builds:
 - a team's members from `team/<team>`, by team id or name; and
 - one member from `user/<user>`, by user id or email.
 
-Every member is reported as their lowercased email, so Archestra readers compare with readers from any other email-based source, such as Google Workspace. Map `internal` in the root config:
+Every member is reported as their email, so Archestra readers compare with readers from any other email-based source, such as Google Workspace. Map `internal` in the root config:
 
 ```toml
 [policy.audience]
