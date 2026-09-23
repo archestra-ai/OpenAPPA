@@ -1,0 +1,14 @@
+# Appended to policy.toml for the `appa-q` arm.
+
+# --- quarantine: a child trajectory reads untrusted mail; only a schema-bounded value returns ---
+
+[[tool]]
+name = "triage_email"
+requires = { trust = "internal" }
+delta = {}
+
+[[sanitizer]]
+name = "attest-schema"
+on = ["tool_output"]
+[sanitizer.permits]
+trust = { from = "suspicious", to = "internal" }

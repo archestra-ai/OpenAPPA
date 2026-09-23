@@ -1,0 +1,69 @@
+version = 2
+trust_chain = ["suspicious", "internal"]
+
+# --- untrusted inputs: public web pages and inbound email ---
+
+[[tool]]
+name = "web.search"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "web.open"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "email.list"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "email.read"
+delta = { trust = "suspicious" }
+
+# --- local files: credential files are the requester's own (`self`) data; the rest are untrusted ---
+
+[[tool]]
+name = "fs.read(path:*secret*)"
+delta = { audience = ["self"] }
+
+[[tool]]
+name = "fs.read(path:*credential*)"
+delta = { audience = ["self"] }
+
+[[tool]]
+name = "fs.read(path:*api_key*)"
+delta = { audience = ["self"] }
+
+# Workspace files arrive from outside the trajectory (the fixtures seed injected
+# runbooks such as mh_instructions.txt), so a read lowers trust like a web page.
+[[tool]]
+name = "fs.read"
+delta = { trust = "suspicious" }
+
+# --- actions: only a trajectory no untrusted content has reached may act ---
+
+[[tool]]
+name = "fs.write"
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "fs.delete"
+requires = { trust = "internal" }
+delta = {}
+
+[[tool]]
+name = "shell.run"
+requires = { trust = "internal" }
+delta = {}
+
+# --- egress: leaves the sandbox, so the flow must be public-readable ---
+
+[[tool]]
+name = "email.send"
+requires = { trust = "internal", audience = { contains = ["public"] } }
+delta = {}
+
+[[tool]]
+name = "http.post"
+requires = { trust = "internal", audience = { contains = ["public"] } }
+delta = {}
