@@ -32,20 +32,22 @@ pub struct DeploymentArgs {
     #[arg(long)]
     workspace: PathBuf,
     #[arg(long)]
-    ledger: PathBuf,
+    initial: String,
     #[arg(long)]
     process_backend: Option<PathBuf>,
 }
 
-impl From<DeploymentArgs> for Deployment {
-    fn from(args: DeploymentArgs) -> Deployment {
-        Deployment {
+impl TryFrom<DeploymentArgs> for Deployment {
+    type Error = String;
+
+    fn try_from(args: DeploymentArgs) -> Result<Deployment, String> {
+        Ok(Deployment {
             config: args.config,
             db: args.db,
             workspace: args.workspace,
-            ledger: args.ledger,
+            initial: serde_json::from_str(&args.initial).map_err(|error| format!("invalid initial Label: {error}"))?,
             process_backend: args.process_backend,
-        }
+        })
     }
 }
 
@@ -60,12 +62,12 @@ pub struct ServeArgs {
 pub fn serve(args: ServeArgs) -> ExitCode {
     crate::tls::install_crypto_provider();
     let result = (|| {
-        let deployment = Deployment::from(args.deployment);
+        let deployment = Deployment::try_from(args.deployment)?;
         let config = crate::config::Config::load(&deployment.config).map_err(|error| error.to_string())?;
         let runtime =
             crate::api::Runtime::open_served(config, deployment.db, None, appa_adapter_claude_code::adapter())
                 .map_err(|error| error.to_string())?
-                .with_file_tracking(deployment.workspace, deployment.ledger, None)
+                .with_file_tracking(deployment.workspace, deployment.initial)
                 .map_err(|error| error.to_string())?;
         let runtime = match deployment.process_backend {
             Some(backend) => runtime
@@ -132,11 +134,12 @@ fn command(binary: &Path, deployment: &Deployment, cwd: &Path, args: &Args) -> R
         ("--config", &deployment.config),
         ("--db", &deployment.db),
         ("--workspace", &deployment.workspace),
-        ("--ledger", &deployment.ledger),
     ] {
         server_args.push(flag.into());
         server_args.push(path.to_str().ok_or("deployment paths must be UTF-8")?.to_string());
     }
+    server_args.push("--initial".into());
+    server_args.push(serde_json::to_string(&deployment.initial).map_err(|error| error.to_string())?);
     if let Some(backend) = &deployment.process_backend {
         server_args.push("--process-backend".into());
         server_args.push(backend.to_str().ok_or("backend path must be UTF-8")?.to_string());
@@ -217,7 +220,7 @@ mod tests {
             config: "/host/policy.toml".into(),
             db: "/host/runtime.db".into(),
             workspace: "/work".into(),
-            ledger: "/host/files.db".into(),
+            initial: appa_engine::label::Label::top(),
             process_backend: None,
         };
         let command = command(

@@ -9,8 +9,8 @@
 //! Inference requests and final responses are not mediated by this launcher. These file
 //! Labels therefore do not establish complete provenance or audience confinement.
 //!
-//! The trusted host owns the workspace exclusively and keeps the ledger, runtime state,
-//! configuration, credentials and execution controls outside it. Relative tool paths
+//! The trusted host owns the workspace exclusively and keeps runtime state, configuration,
+//! credentials and execution controls outside it. Relative tool paths
 //! resolve from that workspace. The host classifies initial files and supplies the prompt;
 //! neither source Labels nor trajectory identifiers are model arguments.
 //!
@@ -30,11 +30,9 @@
 //! Success validates bytes and publishes immutable version metadata before admitting the
 //! result. No file-derived result reaches MCP before admission. An unchanged failure admits
 //! its error text but publishes no version. A changed failure, missing outcome,
-//! or unmatched digest leaves the durable reservation in place, including across restarts.
-//! Further file calls stop. A released call the harness never ran gives its reservation back
-//! at the turn end, and only while the workspace still shows the pinned state; anything else
-//! is an operator's, and `appa file-ledger` reports it, names the drifted paths, and gives a
-//! reservation back under the same condition.
+//! or unmatched digest leaves the session's in-memory reservation in place. Further file
+//! calls in that session stop. A released call the harness never ran gives its reservation
+//! back at the turn end, and only while the workspace still shows the pinned state.
 //! Copy/Move pin both paths under one reservation. Copy stages raw bytes; Move uses same-filesystem
 //! rename. Success verifies both paths and atomically publishes destination metadata and Move's
 //! source absence in the ledger. Failure must leave both files unchanged or remain quarantined.
@@ -48,13 +46,11 @@
 //!
 //! # Enabling the draft
 //!
-//! Start `appa runtime` with `--file-workspace /absolute/workspace` and
-//! `--file-ledger /protected/files.db`. On the first start only, also supply
-//! `--initialize-file-trust suspicious --initialize-file-audience public` (or the operator's
-//! actual classification). This classifies every existing file; it does not inspect content.
-//! Initialization hashes the whole workspace and refuses one that contains any symlink or
-//! hard link, so give the runtime a dedicated directory rather than a working checkout.
-//! Subsequent starts require that same ledger and policy and omit initialization flags.
+//! Start `appa runtime` with `--file-workspace /absolute/workspace` and supply
+//! `--initial-file-trust suspicious --initial-file-audience public` (or the operator's
+//! actual classification). Each root session classifies and hashes the files that exist when
+//! it first uses a file tool. Its subagents share that ledger; other root sessions do not.
+//! A workspace containing a symlink or hard link is refused, so use a dedicated directory.
 //! With the APPA plugin installed, launch Claude with `APPA_GATE=1` and
 //! `APPA_RUNTIME_URL` pointing to this runtime. SessionStart describes the file tools.
 //! The plugin's HTTP MCP calls consume exact one-shot hook approvals; their outcomes
@@ -65,22 +61,19 @@
 //! The policy must declare each enabled tool. File tools alone do not enforce OS isolation.
 //! `--file-process-backend /host/backend` additionally enables `appa_process_files`; its
 //! staged-input contract is in `process.rs`. Use disposable test fixtures only.
-//! `appa file-ledger --ledger /protected/files.db` reads that ledger without a runtime: it
-//! reports the live reservation, every tracked path that no longer holds its recorded bytes,
-//! and `--release` gives back a reservation the harness never ran.
-//!
 //! # Limitations
 //!
 //! The constrained launcher exposes only file tools and the remedy control tool. Bash, other
 //! MCP tools, subagents, general rename/delete, links and known execution-control writes are unsupported.
 //! Copy/Move support regular files only; same-path and cross-filesystem moves are refused.
-//! Sanitizer/rewrite policies are unsupported. The two databases are not one atomic transaction:
-//! crash gaps stop progress conservatively and have no automatic recovery. Historical bytes are not retained.
+//! Sanitizer/rewrite policies are unsupported. File ledger state does not survive a runtime
+//! restart. Historical bytes are not retained.
 //! Only Process calls use the isolated backend. No unmediated filesystem, metadata or
 //! timing-flow guarantee is made. The Claude process and inference remain outside isolation.
 
 use appa_engine::value::{FileBasis, FileSource};
 use appa_eventlog::files::{FileOperation, FilePin, FileStore};
+use std::collections::HashMap;
 #[cfg(feature = "daemon")]
 use std::io::Write;
 #[cfg(feature = "daemon")]
@@ -94,13 +87,32 @@ use super::{EventError, ProposedCall};
 mod process;
 
 pub(super) struct FileTracking {
-    pub store: FileStore,
+    pub(super) stores: std::sync::Mutex<HashMap<String, std::sync::Arc<FileStore>>>,
+    pub(super) initial: appa_engine::label::Label,
     pub policy_key: String,
     pub workspace: PathBuf,
-    /// Kept for the deployment a constrained launcher is started against.
-    #[cfg(feature = "daemon")]
-    pub ledger: PathBuf,
     pub process_backend: Option<PathBuf>,
+}
+
+impl FileTracking {
+    /// One ledger per root trajectory. Child trajectories use their parent's root here, so
+    /// every subagent in a session shares file versions and reservations without exposing
+    /// them to another session served by the same runtime.
+    pub(super) fn store(
+        &self,
+        root: &super::TrajectoryId,
+    ) -> Result<std::sync::Arc<FileStore>, appa_eventlog::files::FileStoreError> {
+        let mut stores = self
+            .stores
+            .lock()
+            .map_err(|_| appa_eventlog::files::FileStoreError::Corrupt("file store map lock poisoned".into()))?;
+        if let Some(store) = stores.get(&root.0) {
+            return Ok(std::sync::Arc::clone(store));
+        }
+        let store = std::sync::Arc::new(FileStore::new(&self.workspace, &self.initial)?);
+        stores.insert(root.0.clone(), std::sync::Arc::clone(&store));
+        Ok(store)
+    }
 }
 
 pub(crate) const TOOLS: [&str; 6] = [
@@ -271,7 +283,7 @@ pub(crate) struct Deployment {
     pub config: PathBuf,
     pub db: PathBuf,
     pub workspace: PathBuf,
-    pub ledger: PathBuf,
+    pub initial: appa_engine::label::Label,
     pub process_backend: Option<PathBuf>,
 }
 
@@ -295,7 +307,7 @@ impl super::Runtime {
             config: std::fs::canonicalize(config).ok()?,
             db: std::fs::canonicalize(self.inner.shared.state_path.as_ref()?).ok()?,
             workspace: files.workspace.clone(),
-            ledger: std::fs::canonicalize(&files.ledger).ok()?,
+            initial: files.initial.clone(),
             process_backend: files.process_backend.clone(),
         })
     }
@@ -401,7 +413,7 @@ mod tests {
     use appa_engine::label::{Audience, Label, Trust};
     use std::path::Path;
 
-    fn open(dir: &Path, initialize: bool) -> Runtime {
+    fn open(dir: &Path) -> Runtime {
         let config = dir.join("policy.toml");
         std::fs::write(
             &config,
@@ -439,11 +451,7 @@ max_body_bytes = 65536
             appa_adapter_claude_code::adapter(),
         )
         .unwrap()
-        .with_file_tracking(
-            dir.join("work"),
-            dir.join("files.db"),
-            initialize.then(|| Label::new(Trust::new(0), Audience::public())),
-        )
+        .with_file_tracking(dir.join("work"), Label::new(Trust::new(0), Audience::public()))
         .unwrap()
     }
 
@@ -452,6 +460,28 @@ max_body_bytes = 65536
         std::fs::create_dir(dir.path().join("work")).unwrap();
         std::fs::write(dir.path().join("work/source.txt"), "outside information").unwrap();
         dir
+    }
+
+    #[test]
+    fn file_ledgers_are_shared_by_subagents_and_isolated_between_root_sessions() {
+        let dir = fixture();
+        let runtime = open(dir.path());
+        let files = runtime.inner.shared.files.as_ref().unwrap();
+        let root = TrajectoryId("cc:session".into());
+        let same_root_for_child = TrajectoryId("cc:session".into());
+        let other_root = TrajectoryId("cc:other-session".into());
+
+        let parent = files.store(&root).unwrap();
+        let child = files.store(&same_root_for_child).unwrap();
+        let other = files.store(&other_root).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&parent, &child));
+        assert!(!std::sync::Arc::ptr_eq(&parent, &other));
+
+        child
+            .prepare("cc:session:child", "call", FileOperation::Read, "source.txt")
+            .unwrap();
+        assert_eq!(parent.reservation().unwrap().unwrap().actor, "cc:session:child");
+        assert!(other.reservation().unwrap().is_none());
     }
 
     fn call(tool: &str, path: &str) -> ProposedCall {
@@ -511,7 +541,7 @@ max_body_bytes = 65536
     async fn managed_files_plugin_hooks_bind_exact_calls_and_absorb_duplicate_results() {
         use appa_runtime_api::HookDecision;
         let dir = fixture();
-        let runtime = open(dir.path(), true);
+        let runtime = open(dir.path());
         let start = hook(
             &runtime,
             serde_json::json!({
@@ -547,7 +577,7 @@ max_body_bytes = 65536
                 .await
                 .is_err()
         );
-        // A second trajectory cannot acquire the reserved workspace, even for another path.
+        // Another root has an independent session-local ledger and reservation.
         let competing = hook(
             &runtime,
             serde_json::json!({
@@ -557,10 +587,7 @@ max_body_bytes = 65536
             }),
         )
         .await;
-        assert!(matches!(
-            competing,
-            HookDecision::DenyCall { .. } | HookDecision::Refuse { .. }
-        ));
+        assert!(matches!(competing, HookDecision::AllowCall { .. }));
         assert_eq!(
             runtime
                 .execute_file("appa_write_file", arguments.clone())
@@ -574,7 +601,8 @@ max_body_bytes = 65536
             .files
             .as_ref()
             .unwrap()
-            .store
+            .store(&TrajectoryId("cc:plugin-test".into()))
+            .unwrap()
             .current("new.txt")
             .unwrap()
             .unwrap();
@@ -600,7 +628,8 @@ max_body_bytes = 65536
                 .files
                 .as_ref()
                 .unwrap()
-                .store
+                .store(&TrajectoryId("cc:plugin-test".into()))
+                .unwrap()
                 .current("new.txt")
                 .unwrap()
                 .unwrap(),
@@ -616,7 +645,7 @@ max_body_bytes = 65536
     #[tokio::test]
     async fn managed_files_bound_caller_retains_failure_taint_after_reopen() {
         let dir = fixture();
-        let runtime = open(dir.path(), true);
+        let runtime = open(dir.path());
         let actor = appa_runtime_api::Actor {
             root: TrajectoryId("host-bound-stdio".into()),
             child: None,
@@ -642,7 +671,7 @@ max_body_bytes = 65536
             FileReply::Failure("old_string must match exactly once".into())
         );
         drop(runtime);
-        let runtime = open(dir.path(), false);
+        let runtime = open(dir.path());
         assert!(matches!(
             runtime.create_session(actor.root.clone()),
             Err(EventError::TrajectoryExists)
@@ -658,7 +687,7 @@ max_body_bytes = 65536
                 .unwrap(),
             FileReply::Value("file written".into())
         );
-        assert_eq!(label(&runtime, "after-reconnect.txt").trust, Trust::new(0));
+        assert_eq!(label(&runtime, &actor.root, "after-reconnect.txt").trust, Trust::new(0));
         assert_eq!(
             std::fs::read_to_string(dir.path().join("work/after-reconnect.txt")).unwrap(),
             "the string was absent"
@@ -679,7 +708,7 @@ max_body_bytes = 65536
     #[tokio::test]
     async fn managed_files_owned_execution_checks_before_matching_and_admits_errors() {
         let dir = fixture();
-        let runtime = open(dir.path(), true);
+        let runtime = open(dir.path());
         for (index, old) in ["absent substring", "outside"].into_iter().enumerate() {
             let id = TrajectoryId(format!("host-probe-{index}"));
             let session = runtime.create_session(id.clone()).unwrap();
@@ -720,7 +749,10 @@ max_body_bytes = 65536
                 execute(&runtime, &id, output.clone()).await,
                 FileReply::Value("file written".into())
             );
-            assert_eq!(label(&runtime, &format!("result-{index}.txt")).trust, Trust::new(0));
+            assert_eq!(
+                label(&runtime, &id, &format!("result-{index}.txt")).trust,
+                Trust::new(0)
+            );
             assert!(
                 runtime
                     .execute_file("appa_write_file", serde_json::from_str(output.arguments.get()).unwrap())
@@ -757,7 +789,7 @@ else:
 "#,
         )
         .unwrap();
-        let runtime = open(dir.path(), true).with_file_process_backend(backend).unwrap();
+        let runtime = open(dir.path()).with_file_process_backend(backend).unwrap();
         for command in ["success", "absolute", "fail"] {
             let id = TrajectoryId(format!("process-{command}"));
             runtime.create_session(id.clone()).unwrap();
@@ -784,7 +816,7 @@ else:
             let reply = execute(&runtime, &id, proposal).await;
             if command != "fail" {
                 assert!(matches!(reply, FileReply::Value(body) if body.contains("outside information")));
-                assert_eq!(label(&runtime, &format!("{command}.txt")).trust, Trust::new(0));
+                assert_eq!(label(&runtime, &id, &format!("{command}.txt")).trust, Trust::new(0));
             } else {
                 assert!(matches!(reply, FileReply::Failure(body) if body.contains("outside information")));
                 assert!(!dir.path().join("work/fail.txt").exists());
@@ -792,7 +824,10 @@ else:
             let report = call("Write", &format!("{command}-report.txt"));
             allow(&runtime, &id, report.clone()).await;
             execute(&runtime, &id, report).await;
-            assert_eq!(label(&runtime, &format!("{command}-report.txt")).trust, Trust::new(0));
+            assert_eq!(
+                label(&runtime, &id, &format!("{command}-report.txt")).trust,
+                Trust::new(0)
+            );
         }
         assert_eq!(
             std::fs::read(dir.path().join("work/source.txt")).unwrap(),
@@ -839,14 +874,15 @@ else:
             .unwrap();
     }
 
-    fn label(runtime: &Runtime, path: &str) -> Label {
+    fn label(runtime: &Runtime, root: &TrajectoryId, path: &str) -> Label {
         runtime
             .inner
             .shared
             .files
             .as_ref()
             .unwrap()
-            .store
+            .store(root)
+            .unwrap()
             .current(path)
             .unwrap()
             .unwrap()
@@ -857,7 +893,7 @@ else:
     async fn managed_files_copy_move_bypass_payload_admission_but_preserve_labels() {
         let dir = fixture();
         std::fs::write(dir.path().join("work/CLAUDE.md"), "host instructions").unwrap();
-        let runtime = open(dir.path(), true);
+        let runtime = open(dir.path());
         let actor = appa_runtime_api::Actor {
             root: TrajectoryId("file-transfer-test".into()),
             child: None,
@@ -880,7 +916,7 @@ else:
                     .unwrap(),
                 FileReply::Value("file transfer completed".into())
             );
-            assert_eq!(label(&runtime, destination).trust, Trust::new(0));
+            assert_eq!(label(&runtime, &actor.root, destination).trust, Trust::new(0));
             assert_eq!(
                 std::fs::read(dir.path().join("work").join(destination)).unwrap(),
                 b"outside information"
@@ -894,7 +930,8 @@ else:
                 .files
                 .as_ref()
                 .unwrap()
-                .store
+                .store(&actor.root)
+                .unwrap()
                 .current("copied.txt")
                 .unwrap()
                 .is_none()
@@ -912,9 +949,9 @@ else:
                 .unwrap(),
             FileReply::Value("file written".into())
         );
-        assert_eq!(label(&runtime, "ack-only.txt").trust, Trust::new(1));
+        assert_eq!(label(&runtime, &actor.root, "ack-only.txt").trust, Trust::new(1));
         drop(runtime);
-        let runtime = open(dir.path(), false);
+        let runtime = open(dir.path());
         assert!(
             matches!(runtime.execute_bound_file(&actor, "appa_read_file", serde_json::json!({
             "file_path":"moved.txt"
@@ -955,23 +992,23 @@ else:
     #[tokio::test]
     async fn managed_files_read_write_edit_and_restart_use_engine_labels() {
         let dir = fixture();
-        let runtime = open(dir.path(), true);
+        let runtime = open(dir.path());
         let id = TrajectoryId("host-owned-session".into());
         runtime.create_session(id.clone()).unwrap();
         allow(&runtime, &id, call("Write", "clean.txt")).await;
         std::fs::write(dir.path().join("work/clean.txt"), "independent text").unwrap();
         success(&runtime, &id, call("Write", "clean.txt")).await;
-        assert_eq!(label(&runtime, "clean.txt").trust, Trust::new(1));
+        assert_eq!(label(&runtime, &id, "clean.txt").trust, Trust::new(1));
 
         allow(&runtime, &id, call("Read", "source.txt")).await;
         success(&runtime, &id, call("Read", "source.txt")).await;
         allow(&runtime, &id, call("Write", "derived.txt")).await;
         std::fs::write(dir.path().join("work/derived.txt"), "derived from outside information").unwrap();
         success(&runtime, &id, call("Write", "derived.txt")).await;
-        assert_eq!(label(&runtime, "derived.txt").trust, Trust::new(0));
+        assert_eq!(label(&runtime, &id, "derived.txt").trust, Trust::new(0));
         drop(runtime);
 
-        let runtime = open(dir.path(), false);
+        let runtime = open(dir.path());
         allow(&runtime, &id, call("Edit", "clean.txt")).await;
         std::fs::write(
             dir.path().join("work/clean.txt"),
@@ -979,14 +1016,15 @@ else:
         )
         .unwrap();
         success(&runtime, &id, call("Edit", "clean.txt")).await;
-        assert_eq!(label(&runtime, "clean.txt").trust, Trust::new(0));
+        assert_eq!(label(&runtime, &id, "clean.txt").trust, Trust::new(0));
         let version = runtime
             .inner
             .shared
             .files
             .as_ref()
             .unwrap()
-            .store
+            .store(&id)
+            .unwrap()
             .current("clean.txt")
             .unwrap()
             .unwrap();
@@ -998,9 +1036,9 @@ else:
     }
 
     #[tokio::test]
-    async fn managed_files_failures_admit_observations_and_partial_writes_quarantine() {
+    async fn managed_files_failures_quarantine_only_the_live_session_ledger() {
         let dir = fixture();
-        let runtime = open(dir.path(), true);
+        let runtime = open(dir.path());
         let id = TrajectoryId("host-owned-session".into());
         runtime.create_session(id.clone()).unwrap();
         allow(&runtime, &id, call("Edit", "source.txt")).await;
@@ -1018,7 +1056,7 @@ else:
         allow(&runtime, &id, call("Write", "after-error.txt")).await;
         std::fs::write(dir.path().join("work/after-error.txt"), "error-derived text").unwrap();
         success(&runtime, &id, call("Write", "after-error.txt")).await;
-        assert_eq!(label(&runtime, "after-error.txt").trust, Trust::new(0));
+        assert_eq!(label(&runtime, &id, "after-error.txt").trust, Trust::new(0));
         allow(&runtime, &id, call("Edit", "source.txt")).await;
         std::fs::write(dir.path().join("work/source.txt"), "partial write").unwrap();
         assert!(
@@ -1037,23 +1075,22 @@ else:
                 .contains("quarantined")
         );
         drop(runtime);
-        let runtime = open(dir.path(), false);
+        let runtime = open(dir.path());
         assert!(
             runtime
                 .session(&id, &id)
                 .unwrap()
                 .on_tool_call(call("Read", "after-error.txt"), false)
                 .await
-                .unwrap_err()
-                .to_string()
-                .contains("pending")
+                .is_ok(),
+            "a process restart creates a fresh session-local ledger"
         );
     }
 
     #[tokio::test]
     async fn managed_files_execute_the_pinned_path_not_the_argument_path() {
         let dir = fixture();
-        let runtime = open(dir.path(), true);
+        let runtime = open(dir.path());
         // The pin names source.txt; the call's bytes name elsewhere.txt. The ledger validated,
         // hashed and reserved the pinned path, so that is the one that runs.
         let call = ProposedCall {
@@ -1084,7 +1121,7 @@ else:
     #[tokio::test]
     async fn managed_files_release_a_released_call_the_harness_never_ran() {
         let dir = fixture();
-        let runtime = open(dir.path(), true);
+        let runtime = open(dir.path());
         let id = TrajectoryId("host-owned-session".into());
         let session = runtime.create_session(id.clone()).unwrap();
         // The policy released this call and the harness never ran it — a declined prompt, an
@@ -1109,7 +1146,8 @@ else:
                 .files
                 .as_ref()
                 .unwrap()
-                .store
+                .store(&id)
+                .unwrap()
                 .current("later.txt")
                 .unwrap()
                 .is_some()
@@ -1119,7 +1157,7 @@ else:
     #[tokio::test]
     async fn managed_files_bypasses_and_missing_outcomes_fail_closed() {
         let dir = fixture();
-        let runtime = open(dir.path(), true);
+        let runtime = open(dir.path());
         let id = TrajectoryId("host-owned-session".into());
         let session = runtime.create_session(id.clone()).unwrap();
         for proposal in [

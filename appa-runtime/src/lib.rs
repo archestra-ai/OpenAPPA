@@ -13,8 +13,6 @@ pub mod config;
 mod default_config;
 pub mod describe;
 #[cfg(feature = "daemon")]
-pub mod file_ledger;
-#[cfg(feature = "daemon")]
 pub mod hook_client;
 pub mod hooks;
 #[cfg(feature = "daemon")]

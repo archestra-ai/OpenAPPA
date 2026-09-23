@@ -1302,16 +1302,14 @@ impl Runtime {
     /// Enable experimental Read/Write/Edit tracking, not a supported security boundary.
     /// Runtime-owned tools require native alternatives and implicit reads disabled.
     /// Inference and final responses remain unmediated. Use disposable fixtures only.
-    /// Configure this before sharing the runtime. `Some(initial)`
-    /// explicitly initializes all existing files with the operator's source Label; `None`
-    /// requires an existing ledger. Never initialize again to recover a lost ledger.
+    /// Configure this before sharing the runtime. Each root session snapshots all existing
+    /// files with the operator's source Label. Child trajectories share their root's snapshot.
     /// Only exclusively owned Unix workspaces are supported. The host must also keep its
     /// configuration, plugins, credentials and other execution-control files outside the root.
     pub fn with_file_tracking(
         mut self,
         workspace: PathBuf,
-        ledger: PathBuf,
-        initial: Option<appa_engine::label::Label>,
+        initial: appa_engine::label::Label,
     ) -> Result<Self, OpenError> {
         let inner = Arc::get_mut(&mut self.inner)
             .and_then(|inner| Arc::get_mut(&mut inner.shared))
@@ -1343,34 +1341,22 @@ impl Runtime {
             ));
         }
         let policy_key = crate::engine::policy_file_key(deployment.config.policy_file().bytes());
-        if let Some(label) = &initial
-            && deployment
-                .resident
-                .registry()
-                .trust_chain()
-                .name_of(label.trust)
-                .is_none()
+        if deployment
+            .resident
+            .registry()
+            .trust_chain()
+            .name_of(initial.trust)
+            .is_none()
         {
             return Err(OpenError::Storage(
                 "initial file trust must be a configured policy rank".into(),
             ));
         }
-        let store = match initial {
-            Some(label) => appa_eventlog::files::FileStore::initialize(&ledger, &workspace, &policy_key, &label),
-            None => appa_eventlog::files::FileStore::open(
-                &ledger,
-                &workspace,
-                &policy_key,
-                &appa_engine::label::Label::top(),
-            ),
-        }
-        .map_err(|error| OpenError::Storage(error.to_string()))?;
         inner.files = Some(files::FileTracking {
-            store,
+            stores: std::sync::Mutex::new(std::collections::HashMap::new()),
+            initial,
             policy_key,
             workspace,
-            #[cfg(feature = "daemon")]
-            ledger,
             process_backend: None,
         });
         tracing::warn!(

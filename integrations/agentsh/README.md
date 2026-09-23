@@ -28,17 +28,18 @@ backend and the mounted system toolchain (`/usr`, `/bin`, `/lib`, `/lib64`) as
 trusted, public host inputs. Do not put credentials or private data in that
 toolchain. The agent must not be able to change host execution controls.
 
-Start the file runtime with its normal workspace/ledger options and additionally:
+Start the file runtime with its workspace and initial Label options, plus the backend:
 
 ```sh
 appa runtime --config /host/policy.toml --db /host/runtime.db \
-  --file-workspace /host/work --file-ledger /host/files.db \
+  --file-workspace /host/work \
+  --initial-file-trust suspicious --initial-file-audience public \
   --file-process-backend /absolute/new/backend
 ```
 
-The workspace must already be initialized using the file runtime's explicit host
-classification flags. Declare `mcp/appa/appa_process_files`
-in the policy. The tool is absent from MCP unless the backend is enabled.
+The explicit host classification flags seed each root session's workspace snapshot.
+Declare `mcp/appa/appa_process_files` in the policy. The tool is absent from MCP unless
+the backend is enabled.
 
 ## Execution and publication contract
 
@@ -55,7 +56,7 @@ The runtime side of this contract — the reservation, the Label algebra and the
 order — is in [the file-mediation architecture note](../../appa-runtime/FILE-MEDIATION.md).
 
 1. The runtime binds the tool call to the host-owned trajectory. The ledger pins
-   all inputs and the destination under one durable workspace reservation.
+   all inputs and the destination under one session-local reservation.
 2. The engine combines the receiving trajectory Label, tool delta and every input
    Label. This applies to output content, stdout, stderr and failures. Requirements
    and narrowing are checked before the command runs. Ignoring an input does not
@@ -75,8 +76,7 @@ order — is in [the file-mediation architecture note](../../appa-runtime/FILE-M
 6. The runtime stages and atomically replaces the destination, verifies the ledger
    pins, records all input dependencies, and admits the result before returning it
    through MCP. A failed command publishes nothing. A workspace that moved away from
-   its pins retains the reservation; `appa file-ledger` reports it and names the
-   drifted paths.
+   its pins retains the reservation in that root session's in-memory ledger.
 
 The command timeout is 120 seconds. A launcher timeout or malformed response never
 publishes output. Command failures retain their captured diagnostic text with the

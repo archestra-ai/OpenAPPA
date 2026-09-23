@@ -148,7 +148,7 @@ statusline reads.
 ## File mediation (draft)
 
 A second, opt-in mode makes the runtime own the file tools themselves. Start it with
-`--file-workspace` and `--file-ledger` and the runtime serves `appa_read_file`,
+`--file-workspace`, `--initial-file-trust`, and `--initial-file-audience`. The runtime serves `appa_read_file`,
 `appa_write_file`, `appa_edit_file`, `appa_copy_file`, `appa_move_file` and, with
 `--file-process-backend`, `appa_process_files`. The runtime pins each file version, checks
 the call with the pinned Label, performs the operation and records the version it published,
@@ -157,7 +157,7 @@ bytes to the model. The mode is experimental, it assumes the runtime owns the wo
 it refuses every call that is not one of those tools.
 
 [`FILE-MEDIATION.md`](FILE-MEDIATION.md) is the architecture note: component map, call
-sequence, the ledger and its reservation lifecycle, the Label algebra, the isolated Process
+sequence, the session-local ledger and its reservation lifecycle, the Label algebra, the isolated Process
 contract, and the list of what is and is not covered.
 
 ## Things to know

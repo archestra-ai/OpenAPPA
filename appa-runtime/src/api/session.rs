@@ -71,12 +71,13 @@ fn is_open_call(call: &ProposedCall, canonical: impl FnOnce() -> Option<Vec<u8>>
 
 /// Run one ledger operation on the blocking pool.
 ///
-/// Every one of them hashes whole files or writes rows under a synchronous connection, and
+/// Every one of them can hash whole files while holding the session ledger lock, and
 /// this executor also serves the harness's hooks and MCP requests. `bind`, `cancel` and
-/// `abandon` stay inline: each is one indexed row, with no file read behind it.
+/// `abandon` stay inline when they do not read files.
 async fn ledger<T: Send + 'static>(
     inner: std::sync::Arc<super::Inner>,
-    work: impl FnOnce(&super::files::FileTracking) -> Result<T, appa_eventlog::files::FileStoreError> + Send + 'static,
+    root: super::TrajectoryId,
+    work: impl FnOnce(&appa_eventlog::files::FileStore) -> Result<T, appa_eventlog::files::FileStoreError> + Send + 'static,
 ) -> Result<T, EventError> {
     let joined = tokio::task::spawn_blocking(move || {
         let files = inner
@@ -84,7 +85,8 @@ async fn ledger<T: Send + 'static>(
             .files
             .as_ref()
             .ok_or_else(|| appa_eventlog::files::FileStoreError::Corrupt("file tools are not enabled".into()))?;
-        work(files)
+        let store = files.store(&root)?;
+        work(&store)
     })
     .await
     .map_err(|error| super::files::refused(format!("the file ledger task failed: {error}")))?;
@@ -369,9 +371,9 @@ impl Session {
                 return;
             }
         };
-        let released = ledger(self.inner.clone(), {
+        let released = ledger(self.inner.clone(), self.root.clone(), {
             let (actor, key) = (self.trajectory.0.clone(), key);
-            move |files| files.store.abandon(&actor, &key)
+            move |store| store.abandon(&actor, &key)
         })
         .await;
         match released {
@@ -437,27 +439,27 @@ impl Session {
                 }
                 let args: super::files::ProcessArgs =
                     serde_json::from_str(call.arguments.get()).map_err(super::files::refused)?;
-                ledger(self.inner.clone(), {
+                ledger(self.inner.clone(), self.root.clone(), {
                     let (actor, key, path, inputs) =
                         (self.trajectory.0.clone(), key.clone(), path.clone(), args.input_paths);
-                    move |files| files.store.prepare_process(&actor, &key, &inputs, &path)
+                    move |store| store.prepare_process(&actor, &key, &inputs, &path)
                 })
                 .await?
             }
             appa_eventlog::files::FileOperation::Copy | appa_eventlog::files::FileOperation::Move => {
                 let args: super::files::FileTransferArgs =
                     serde_json::from_str(call.arguments.get()).map_err(super::files::refused)?;
-                ledger(self.inner.clone(), {
+                ledger(self.inner.clone(), self.root.clone(), {
                     let (actor, key, path, source) =
                         (self.trajectory.0.clone(), key.clone(), path.clone(), args.source_path);
-                    move |files| files.store.prepare_transfer(&actor, &key, operation, &source, &path)
+                    move |store| store.prepare_transfer(&actor, &key, operation, &source, &path)
                 })
                 .await?
             }
             _ => {
-                ledger(self.inner.clone(), {
+                ledger(self.inner.clone(), self.root.clone(), {
                     let (actor, key, path) = (self.trajectory.0.clone(), key.clone(), path.clone());
-                    move |files| files.store.prepare(&actor, &key, operation, &path)
+                    move |store| store.prepare(&actor, &key, operation, &path)
                 })
                 .await?
             }
@@ -481,7 +483,8 @@ impl Session {
                 })
         {
             files
-                .store
+                .store(&self.root)
+                .map_err(super::files::refused)?
                 .cancel(&self.trajectory.0, &key)
                 .map_err(super::files::refused)?;
             return Err(super::files::refused(
@@ -499,13 +502,15 @@ impl Session {
                 let view = policy.engine().rebuild_view(&log)?;
                 let label = policy.engine().file_output_label(&view, dispatch)?;
                 files
-                    .store
+                    .store(&self.root)
+                    .map_err(super::files::refused)?
                     .bind(&self.trajectory.0, &key, &key, &label)
                     .map_err(super::files::refused)?;
             }
             _ => {
                 files
-                    .store
+                    .store(&self.root)
+                    .map_err(super::files::refused)?
                     .cancel(&self.trajectory.0, &key)
                     .map_err(super::files::refused)?;
             }
@@ -639,9 +644,9 @@ impl Session {
             return Err(EventError::OutcomeMismatch);
         }
         let key = super::files::key(&open.id)?;
-        let pin = ledger(self.inner.clone(), {
+        let pin = ledger(self.inner.clone(), self.root.clone(), {
             let (actor, key) = (self.trajectory.0.clone(), key.clone());
-            move |files| files.store.pin_for(&actor, &key)
+            move |store| store.pin_for(&actor, &key)
         })
         .await?
         .ok_or_else(|| super::files::refused("the released call holds no file reservation"))?;
@@ -719,11 +724,11 @@ impl Session {
             };
             if matches!(o, ToolOutcome::Success { .. }) {
                 // Verify the physical version before admitting a successful result. The
-                // dispatch was durably released; an append failure afterward cannot erase
-                // this already-published file's Label.
-                ledger(self.inner.clone(), {
+                // dispatch was released; an append failure afterward cannot erase this
+                // already-published file's Label from the live session ledger.
+                ledger(self.inner.clone(), self.root.clone(), {
                     let (actor, key) = (self.trajectory.0.clone(), key.clone());
-                    move |files| files.store.finish(&actor, &key, true)
+                    move |store| store.finish(&actor, &key, true)
                 })
                 .await?;
             }
@@ -735,9 +740,9 @@ impl Session {
                     ));
                 }
                 ToolOutcome::Failure { .. } => {
-                    ledger(self.inner.clone(), {
+                    ledger(self.inner.clone(), self.root.clone(), {
                         let (actor, key) = (self.trajectory.0.clone(), key.clone());
-                        move |files| files.store.finish(&actor, &key, false)
+                        move |store| store.finish(&actor, &key, false)
                     })
                     .await?;
                 }

@@ -6,10 +6,9 @@
 //! and never consults a policy.
 //!
 //! The mediated file tools that ship are elsewhere and share nothing with this file:
-//! `appa-eventlog::files` owns the durable version ledger, and `appa-runtime::api::files`
-//! owns the tools, the reservations and the engine admission. Its `FileKey` validation is
-//! the lab's own too — `appa-eventlog::files::validated_relative` is the one that guards a
-//! real workspace.
+//! `appa-eventlog::files` owns the session-local in-memory version ledger, and
+//! `appa-runtime::api::files` owns the tools, reservations, and engine admission. This lab
+//! also has separate `FileKey` validation. The runtime ledger guards the real workspace.
 //!
 //! Draft, opt-in file-content tracking for an exclusively owned workspace.
 //!

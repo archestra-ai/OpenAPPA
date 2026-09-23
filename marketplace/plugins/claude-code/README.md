@@ -80,13 +80,13 @@ plugin installation disables native tools or implicit reads.
 
 1. **Sharpen the plugin without isolation or an inference proxy.** Integrate
    and test runtime-owned Read/Write/Edit through the installed bundle. Verify
-   identity binding, failures, concurrent calls, interruption, and durable
+   identity binding, failures, concurrent calls, interruption, and session-local
    state. Record native paths that remain unmediated. Tests must inspect actual
    file versions and observations, not just hook responses, and include live
    agentic exercises. An interrupted turn gives back the reservation of a call
    the harness never ran, while the workspace still matches the pin; a workspace
-   that moved keeps it, and `appa file-ledger` reports it. Automatic
-   reconciliation of a moved workspace is not implemented.
+   that moved keeps it for the life of the runtime. Automatic reconciliation
+   of a moved workspace is not implemented.
 2. **Add mediated file-to-file Copy/Move.** File bytes need not enter model
    context for their Labels to propagate. Pin source and destination versions,
    retain the source's Label contribution, check the destination flow, and
@@ -159,15 +159,15 @@ The file runtime is off unless the operator starts it that way:
 
 ```sh
 appa runtime --config /host/policy.toml --db /host/runtime.db \
-  --file-workspace /host/work --file-ledger /host/files.db \
+  --file-workspace /host/work \
+  --initial-file-trust suspicious --initial-file-audience public \
   --file-process-backend /host/backend
 ```
 
-The first start also classifies the workspace with
-`--initialize-file-trust <rank> --initialize-file-audience <level>`. Initialization
-hashes every file and refuses a workspace that holds a symlink or a hard link anywhere
-in it. Give the runtime a dedicated directory rather than a working checkout, and keep
-the policy, the ledger, the runtime database and the backend outside that directory.
+The initial file flags classify the workspace snapshot for each root session. The runtime
+hashes every file and refuses a workspace that holds a symlink or hard link anywhere in it.
+Give it a dedicated directory rather than a working checkout. Keep the policy, runtime
+database, and backend outside that directory.
 
 The policy this runtime runs needs two things the shipped starting policy does not
 have, so give the file runtime a policy of its own:
@@ -186,22 +186,11 @@ refused — including APPA's own management tools (`appa_get_runtime_state`,
 `appa_refresh_batteries`, `appa_update_policy`). Run those from the `appa` command
 line. The model keeps its native tools, but their calls are refused at the hook.
 
-One file operation runs at a time per workspace. A released call the harness never ran
-gives its reservation back at the turn end, and only while the workspace still shows
-the pinned state. A workspace that moved keeps its reservation, and every later file
-call is refused until an operator resolves it:
-
-```sh
-appa file-ledger --ledger /host/files.db            # the reservation, and every drifted path
-appa file-ledger --ledger /host/files.db --release  # only while the workspace matches
-```
-
-The command reads the ledger directly: no runtime, no policy file, and no workspace
-argument, because the ledger records the workspace it is bound to. It never releases a
-workspace that moved. Restore the recorded bytes, or start a new workspace with a fresh
-ledger. Stop the runtime before `--release`: a live reservation may belong to an
-operation that is running right now, and a runtime that is up releases its own abandoned
-calls at the turn end anyway.
+One file operation runs at a time per root session. The root agent and its subagents share
+the same in-memory ledger and reservation. Other root sessions have independent ledgers.
+A released call the harness never ran gives its reservation back at the turn end, and only
+while the workspace still shows the pinned state. A moved workspace keeps the reservation
+for that session until the runtime restarts.
 
 ### Capabilities deferred to an inference proxy
 
