@@ -44,6 +44,12 @@ const BATTERIES = [
     logo: "/images/batteries/sentry.svg",
   },
   {
+    name: "monday.com",
+    description: "Rules for 96 tools: internal reads, reviewed writes, and structural, workflow and agent changes.",
+    href: "/battery-monday",
+    logo: "/images/batteries/monday.svg",
+  },
+  {
     name: "Notion",
     description: "Rules for 36 tools; reads are internal because Notion exposes no page permissions.",
     href: "/battery-notion",

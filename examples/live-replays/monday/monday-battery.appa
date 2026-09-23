@@ -1,0 +1,52 @@
+# Offline policy decisions only: these calls never execute at monday.
+
+mcp/monday/get_board_items_page {
+  boardId: 0
+  searchTerm: "Plan"
+  includeItemDescription: true
+  includeSubItems: true
+}
+expect allow
+
+mcp/monday/get_updates {
+  objectId: "0"
+  objectType: "Board"
+  includeReplies: true
+  includeAssets: true
+}
+expect allow
+
+# Internal results can flow back to monday with exact-call review.
+mcp/monday/create_item {
+  boardId: 0
+  name: "Internal plan"
+  columnValues: "{\"status\":\"Done\"}"
+  duplicateFromItemId: 1
+}
+expect authority monday-operator
+
+mcp/monday/create_update {
+  itemId: 1
+  body: "Internal summary"
+}
+expect authority monday-operator
+
+mcp/monday/manage_agent {
+  action: "get"
+  agent_id: "1"
+}
+expect allow
+
+# Structural and opaque operations have a review path.
+mcp/monday/all_monday_api {
+  query: "mutation { delete_board(board_id: 0) { id } }"
+  variables: "{}"
+}
+expect authority monday-operator
+
+# Reviewing a write did not make the trajectory public.
+mcp/monday/get_monday_knowledge {
+  query: "Internal summary"
+  kind: "general"
+}
+expect deny

@@ -1,0 +1,10 @@
+schema = 1
+name = "monday"
+description = "Rules for the monday Platform MCP server's 99 tools: internal reads, reviewed internal writes and sensitive changes, public documentation queries, and viewer-only returned credentials."
+
+[battery]
+policy = "appa.toml"
+hosts = ["claude-code", "kagent"]
+namespaces = ["monday"]
+helpers = ["audience-source.py"]
+setup = "Connect https://mcp.monday.com/mcp with OAuth or a monday API token. Give the notification audience source a monday API token with users:read; map internal to the authorized reader cohort and self to the credential owner. The host human authority handles monday-review. Installation adds policy, not a connection or board permissions."

@@ -15,6 +15,7 @@ so a deployment can customize its hint without editing the battery.
 | `linear/` | 65 Linear MCP tools; per-issue, per-team, per-project audiences and reviewed writes | the `linear` audience source: viewer, full members, team members and readers, an issue's, project's, or document's readers |
 | `grain/` | the Grain MCP server: meetings, transcripts, notes, deals, clips, stories, collections, workspace admin (49 tools) | none |
 | `sentry/` | the Sentry MCP server: 9 listed tools and the 55 catalog tools behind `execute_sentry_tool`; internal reads, reviewed writes | none |
+| `monday/` | the hosted monday Platform MCP server, all 99 tools; internal reads, reviewed writes and sensitive changes, public documentation questions, viewer-only returned credentials | the `monday` audience source resolves a notification's user ID to its confirmed reader |
 | `notion/` | the hosted Notion MCP server, all 36 tools; internal reads (Notion exposes no page permissions), reviewed structural changes | none |
 | `microsoft-learn/` | the Microsoft Learn MCP Server, all 3 read-only tools; suspicious public results, and every query must be sharable with `public` | none |
 | `cloudflare/` | Cloudflare's documentation (2 tools) and Workers Observability (8 tools) MCP servers, one namespace bound to both; internal logs, telemetry and Worker reads, public documentation reads whose query must be sharable with `public`, no writes | none |
