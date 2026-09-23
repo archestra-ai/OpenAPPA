@@ -10,7 +10,7 @@ wins:
 
 | Tool | Widens to | Requires |
 | --- | --- | --- |
-| `set_project_share` | `visibility: organization` / `team` | `internal` / `@archestra:team/$team_ids` |
+| `set_project_share` | `visibility: organization` / `team` or a sent `team_ids` | `internal` / `@archestra:team/$team_ids` |
 | `publish_app` | `scope: org` / `team` | `internal` / `@archestra:team/$teams` |
 | `create_knowledge_base` | default `org-wide` / `team-scoped` | `internal` / `@archestra:team/$teamIds` |
 | `update_knowledge_base` | `org-wide` / `team-scoped` or a sent `teamIds` | `internal` / `@archestra:team/$teamIds` |
@@ -29,7 +29,9 @@ so the list is checked on its own: an argument selector such as
 both a team and a member list requires `internal`, which holds every
 team and member. Auto-synced connector permissions mirror the connected
 system's own ACLs, which this source cannot read, so such a connector
-must be sharable with anyone.
+must be sharable with anyone. Every rule of a tool declares its lists as
+arrays of strings, so a malformed list is refused rather than read as no
+list.
 
 A team list names one collection per team, and OpenAPPA reads at most 32
 of them per call.
