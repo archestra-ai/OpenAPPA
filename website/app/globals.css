@@ -1479,7 +1479,8 @@ samp {
   color: var(--accent);
 }
 
-.prose img[alt*="Claude Code session"] {
+.prose img[alt*="Claude Code session"],
+.prose img[alt*="Archestra sidebar"] {
   display: block;
   width: 100%;
   margin: 1.25rem 0 2rem;
@@ -2259,6 +2260,42 @@ samp {
 /* ————————————————————————————————————————————————
    Under construction — filler for empty doc pages
    ———————————————————————————————————————————————— */
+.sponsor-note {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  margin: 1.5rem 0 2rem;
+  padding: 18px 22px;
+  border: 1px solid var(--warn);
+  border-radius: 10px;
+  background: var(--warn-bg);
+}
+
+.sponsor-note-mark {
+  flex: none;
+}
+
+.sponsor-note-text {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.sponsor-note-text a {
+  color: var(--warn);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+@media (max-width: 480px) {
+  .sponsor-note {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+}
+
 .under-construction {
   display: flex;
   flex-direction: column;

@@ -1,7 +1,8 @@
 ---
 title: Add to your agent
+nav_title: + Add to your agent
 category: Works with
-order: 7
+order: 8
 description: Connect an agent harness to OpenAPPA, map its lifecycle to the runtime API, and add optional capabilities such as subagents.
 ---
 

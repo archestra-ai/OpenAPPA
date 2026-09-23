@@ -10,6 +10,8 @@ const DOCS_DIR = path.join(process.cwd(), "content", "docs");
 
 export interface DocFrontMatter {
   title: string;
+  /** Sidebar label when it should differ from the page title. */
+  nav_title?: string;
   category: string;
   order?: number;
   description?: string;
@@ -20,6 +22,7 @@ export interface DocFrontMatter {
 export interface DocPage {
   slug: string;
   title: string;
+  navTitle: string;
   category: string;
   order: number;
   description: string;
@@ -154,6 +157,7 @@ export function getAllDocs(): DocPage[] {
     return {
       slug: file.replace(/\.md$/, ""),
       title: fm.title,
+      navTitle: fm.nav_title ?? fm.title,
       category: fm.category,
       order: fm.order ?? 999,
       description: fm.description ?? "",
