@@ -46,22 +46,16 @@ async fn archestra_source() -> String {
 /// source: the helper has its own tests, and a root cannot rebind a battery's provider.
 async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
     let shipped = std::fs::read_to_string(repo_root().join("marketplace/batteries/archestra/appa.toml")).unwrap();
-    let (rules, binding) = shipped
-        .split_once("[externals.audience.archestra]")
+    let mut battery: toml_edit::DocumentMut = shipped.parse().unwrap();
+    let binding = battery["externals"]["audience"]["archestra"]
+        .as_table_mut()
         .expect("the battery binds its source");
-    let selectors = binding
-        .lines()
-        .skip_while(|line| !line.starts_with("selectors"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let source = archestra_source().await;
+    binding.remove("command");
+    binding.remove("token_env");
+    binding.insert("url", toml_edit::value(archestra_source().await));
     let target = dir.path().join("batteries/archestra");
     std::fs::create_dir_all(&target).unwrap();
-    std::fs::write(
-        target.join("appa.toml"),
-        format!("{rules}[externals.audience.archestra]\nurl = \"{source}\"\n{selectors}\n"),
-    )
-    .unwrap();
+    std::fs::write(target.join("appa.toml"), battery.to_string()).unwrap();
     let path = dir.path().join("appa.toml");
     std::fs::write(
         &path,
