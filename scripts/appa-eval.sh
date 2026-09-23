@@ -69,6 +69,7 @@ run "Rust tests" cargo test --workspace --locked
 run "Runtime binary" cargo build --package appa --locked
 
 run "Repository Python tests" uv run --with 'pyyaml==6.0.2' python3 -m unittest \
+  scripts/test_lint_batteries.py \
   scripts/test_appa_refresh_batteries.py \
   scripts/test_appa_guide_runtime.py \
   scripts/test_appa_oci_tags.py \
