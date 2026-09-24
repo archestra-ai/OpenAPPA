@@ -399,10 +399,17 @@ fn annotated_examples(
         .filter_map(|example| Some((example, annotation(&example.labels(), declaration).ok()?)))
 }
 
-/// The guide as a model annotator reads it: each criterion under the leaf it settles, then
-/// each worked example with the annotation this declaration gives it. A criterion or
-/// example whose labels the mandate does not admit is left out; `None` when nothing is left.
-pub(crate) fn for_model(declaration: &AnnotationDeclaration) -> Option<String> {
+/// One leaf's criteria under a declaration: each surviving criterion with the value the leaf
+/// takes, `None` where the leaf is omitted.
+struct LeafCriteria {
+    part: &'static str,
+    leaf: &'static str,
+    criteria: Vec<(Option<serde_json::Value>, &'static str)>,
+}
+
+/// Each leaf's criteria spelled in `declaration`'s names. A criterion whose labels the
+/// mandate does not admit is left out, and so is a leaf left with nothing but omitting it.
+fn leaf_criteria(declaration: &AnnotationDeclaration) -> Vec<LeafCriteria> {
     let delta_audience = &DELTA_AUDIENCE_CRITERIA;
     let delta_trust = &DELTA_TRUST_CRITERIA;
     let requires_audience = &REQUIRES_AUDIENCE_CRITERIA;
@@ -465,34 +472,64 @@ pub(crate) fn for_model(declaration: &AnnotationDeclaration) -> Option<String> {
             ],
         ),
     ];
-    let criteria = leaves.into_iter().filter_map(|(part, leaf, criteria)| {
-        let bullets = criteria
-            .into_iter()
-            .filter_map(|(labels, criterion)| {
-                let answer = annotation(&labels, declaration).ok()?;
-                Some(match answer[part].get(leaf) {
-                    None => format!("- omit it: {criterion}"),
-                    Some(value) => format!("- `{value}`: {criterion}"),
+    leaves
+        .into_iter()
+        .map(|(part, leaf, criteria)| LeafCriteria {
+            part,
+            leaf,
+            criteria: criteria
+                .into_iter()
+                .filter_map(|(labels, criterion)| {
+                    let answer = annotation(&labels, declaration).ok()?;
+                    Some((answer[part].get(leaf).cloned(), criterion))
                 })
-            })
-            .collect::<Vec<_>>();
-        (!bullets.is_empty()).then(|| format!("`{part}.{leaf}`:\n{}", bullets.join("\n")))
-    });
+                .collect(),
+        })
+        .filter(|leaf| leaf.criteria.iter().any(|(value, _)| value.is_some()))
+        .collect()
+}
+
+/// The guide as a model annotator reads it: each criterion under the leaf it settles, then
+/// each worked example with the annotation this declaration gives it. `None` when the
+/// mandate admits nothing the guide spells.
+pub(crate) fn for_model(declaration: &AnnotationDeclaration) -> Option<String> {
+    let criteria = leaf_criteria(declaration)
+        .into_iter()
+        .map(|LeafCriteria { part, leaf, criteria }| {
+            let bullets = criteria.into_iter().map(|(value, criterion)| match value {
+                None => format!("- omit it: {criterion}"),
+                Some(value) => format!("- `{value}`: {criterion}"),
+            });
+            format!("`{part}.{leaf}`:\n{}", bullets.collect::<Vec<_>>().join("\n"))
+        })
+        .collect::<Vec<_>>();
     let examples = annotated_examples(declaration)
-        .map(|(example, answer)| format!("- {}\n  -> {answer}  ({})", example.call, example.why));
-    let criteria = criteria.collect::<Vec<_>>();
-    let examples = examples.collect::<Vec<_>>();
+        .map(|(example, answer)| format!("- {}\n  -> {answer}  ({})", example.call, example.why))
+        .collect::<Vec<_>>();
     if criteria.is_empty() && examples.is_empty() {
         return None;
     }
     let mut parts = vec![
         concat!(
-            "Label guide. It says what earns each trust and audience leaf of your answer. It does not ",
-            "decide `emits`, `requires.history` or `requires.attention`: an example's empty lists there ",
-            "are not a ruling. The deployer's `hint`, when present, overrides this guide."
+            "Label guide. It gives criteria and worked examples for the trust and audience leaves of ",
+            "your answer. It does not decide `emits`, `requires.history` or `requires.attention`: an ",
+            "example's empty lists there are not a ruling. Where this guide and the rules above ",
+            "disagree, the guide wins; the deployer's `hint`, when present, overrides both. One ",
+            "exception to its `delta.trust` criteria: a command that names an unknown host returns ",
+            "the lowest rank in `trust_ranks`, whatever reports it."
         )
         .to_string(),
     ];
+    let unspelled = declaration
+        .audiences
+        .entries()
+        .any(|entry| entry != ResultAudience::Self_.name() && entry != ResultAudience::Internal.name());
+    if unspelled {
+        parts.push(
+            "The guide spells only `self`, `internal` and `public`; every other audience in `audiences` follows the rules above."
+                .to_string(),
+        );
+    }
     parts.extend(criteria);
     if !examples.is_empty() {
         parts.push(format!(
@@ -579,5 +616,28 @@ mod tests {
             assert!(kept.len() < EXAMPLES.len(), "{audiences:?} leaves an example out");
         }
         assert!(for_model(&declaration(&[], &["self", "internal"])).is_none());
+    }
+
+    #[test]
+    fn a_leaf_whose_only_criterion_left_is_omitting_it_is_not_rendered() {
+        let leaves = |audiences: &[&str]| {
+            leaf_criteria(&declaration(&["suspicious", "trusted"], audiences))
+                .into_iter()
+                .map(|leaf| (leaf.part, leaf.leaf))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            leaves(&["finance"]),
+            [("delta", "trust"), ("requires", "audience"), ("requires", "trust")]
+        );
+        assert_eq!(
+            leaves(&["internal"]),
+            [
+                ("delta", "audience"),
+                ("delta", "trust"),
+                ("requires", "audience"),
+                ("requires", "trust")
+            ]
+        );
     }
 }
