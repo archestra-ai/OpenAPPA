@@ -221,6 +221,16 @@ samp {
   animation-delay: var(--appa-blink-delay, 0s);
 }
 
+/* Dancing (the header mark while the song plays): the pose is set inline
+   every frame from the audio clock, and a running CSS animation would win
+   over that inline transform, so the float goes off for the duration. The
+   feet stay planted: the landing squash scales from the bottom edge. */
+.logo-mark.is-dancing .appa-mark-float {
+  animation: none;
+  transform-origin: 50% 100%;
+  will-change: transform;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .appa-mark-float,
   .appa-mark-eyes {

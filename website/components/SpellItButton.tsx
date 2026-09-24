@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { publishSong } from "@/lib/song";
+
 /* A recording, not speech synthesis: APPA is said as a word, and every
    respelling that made a system voice land on it ("Ahpa", "Ahp-pah",
    "Op-pa") traded one part of the sound for another. The song settles it,
@@ -25,6 +27,7 @@ export function SpellItButton() {
     const audio = audioRef.current;
     return () => {
       audio?.pause();
+      publishSong(null);
       if (confirmTimer.current) clearTimeout(confirmTimer.current);
     };
   }, []);
@@ -63,7 +66,11 @@ export function SpellItButton() {
     setPlaying(true);
     // Nothing to recover from — a rejected play() (no codec, blocked media)
     // just means the button goes back to idle.
-    audio.play().catch(() => setPlaying(false));
+    audio
+      .play()
+      // The header mascot dances to whatever is published here.
+      .then(() => publishSong(audio))
+      .catch(() => setPlaying(false));
   }
 
   const label = playing
@@ -108,8 +115,14 @@ export function SpellItButton() {
         ref={audioRef}
         src={AUDIO_SRC}
         preload="metadata"
-        onEnded={() => setPlaying(false)}
-        onPause={() => setPlaying(false)}
+        onEnded={() => {
+          publishSong(null);
+          setPlaying(false);
+        }}
+        onPause={() => {
+          publishSong(null);
+          setPlaying(false);
+        }}
       />
     </button>
   );
