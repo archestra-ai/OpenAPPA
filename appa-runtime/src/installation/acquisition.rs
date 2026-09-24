@@ -812,7 +812,7 @@ mod tests {
                 installed.retain(&acquired).unwrap();
                 let selection = Selection::empty(acquired.generation().clone(), Platform::MacArm64);
                 let config = b"[policy]\nversion = 2\n[externals]\ntimeout_ms = 100\nmax_body_bytes = 1024\n";
-                installed.commit_config(None, config, &selection).unwrap();
+                installed.commit_installation(None, config, &selection).unwrap();
                 let bundle = deployment.path().join("bundle.tar.gz");
                 let checksum = installed.export_bundle(&bundle).unwrap();
                 // The HTTP fixture has shut down: import is entirely local.

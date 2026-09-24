@@ -140,6 +140,13 @@ expect_installed pinned-version APPA_VERSION="$tag"
 
 expect_refused invalid-version APPA_REPOSITORY_URL="$origin/good" APPA_VERSION='../main'
 expect_refused foreign-redirect APPA_REPOSITORY_URL="$origin/foreign"
+# The same local release under a name other than the loopback address, which
+# curl is told resolves to it: plain HTTP is refused.
+port=${origin##*:}
+mkdir "$work/curlrc"
+printf 'resolve = "release.test:%s:127.0.0.1"\n' "$port" > "$work/curlrc/.curlrc"
+expect_refused plain-http APPA_REPOSITORY_URL="http://release.test:$port/good" \
+  APPA_VERSION="$tag" CURL_HOME="$work/curlrc"
 expect_refused relative-install-dir APPA_REPOSITORY_URL="$origin/good" APPA_INSTALL_DIR=relative/bin
 
 # The rest tamper with the release itself, so restore it after each case.

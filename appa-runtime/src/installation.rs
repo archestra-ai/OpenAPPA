@@ -550,31 +550,12 @@ impl Installation {
             .map_err(|error| io("fill the battery store", &store, error))
     }
 
+    /// Activate host support before publishing the selected generation. The
+    /// durable journal remains until both native activation and config agree.
     /// A journal covers only the non-atomic config/selection switch and the
     /// store that switch fills. Immutable tree publication needs no journal.
     /// Host activation extends this same record before it performs any
     /// external mutation.
-    pub fn commit_config(
-        &self,
-        before: Option<&[u8]>,
-        after: &[u8],
-        selection: &Selection,
-    ) -> Result<(), InstallError> {
-        self.recover_config()?;
-        if selection.plugins.contains("claude-code")
-            || self
-                .selection()?
-                .is_some_and(|selected| selected.plugins.contains("claude-code"))
-        {
-            return Err(InstallError::Invalid(
-                "Claude selection requires native activation through commit_installation".into(),
-            ));
-        }
-        self.commit_with_activation(before, after, selection, Activation::None)
-    }
-
-    /// Activate host support before publishing the selected generation. The
-    /// durable journal remains until both native activation and config agree.
     pub fn commit_installation(
         &self,
         before: Option<&[u8]>,
@@ -583,23 +564,31 @@ impl Installation {
     ) -> Result<(), InstallError> {
         self.recover_config()?;
         let mut selection = selection.clone();
-        if let Some(previous) = self.selection()? {
+        let previous = self.selection()?;
+        let removed_claude = previous
+            .as_ref()
+            .filter(|previous| previous.plugins.contains("claude-code") && !selection.plugins.contains("claude-code"));
+        // Recovery replays a removal only with the version it was selected
+        // under, so a removal that also changes version would never finish.
+        if removed_claude.is_some_and(|previous| previous.generation() != selection.generation()) {
+            return Err(InstallError::Invalid(
+                "this change removes claude-code and changes version at once; run `appa plugin remove claude-code` first, then retry".into(),
+            ));
+        }
+        if let Some(previous) = &previous {
             let already_removed = selection.kagent_runtime.is_none()
                 && previous.kagent_assets.as_ref().is_some_and(|digest| {
                     fs::symlink_metadata(self.state.join("kagent").join(digest.hex()))
                         .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
                 });
             if !already_removed {
-                kagent::verify(self, &previous)?;
+                kagent::verify(self, previous)?;
             }
         }
         selection.kagent_assets = kagent::prepare(self, &selection, after)?;
         let activation = if selection.plugins.contains("claude-code") {
             Activation::Claude
-        } else if self
-            .selection()?
-            .is_some_and(|selected| selected.plugins.contains("claude-code"))
-        {
+        } else if removed_claude.is_some() {
             Activation::RemoveClaude
         } else {
             Activation::None
@@ -1129,7 +1118,7 @@ mod tests {
         let mut selection = Selection::empty(generation, Platform::MacArm64);
         selection.select(PackageKind::Plugin, &PackageName::parse("kagent").unwrap());
         let config = b"[policy]\nversion=2\n[externals]\ntimeout_ms=100\nmax_body_bytes=1024\n";
-        installation.commit_config(None, config, &selection).unwrap();
+        installation.commit_installation(None, config, &selection).unwrap();
         let before = fs::read(installation.state.join("active.json")).unwrap();
         let output = root.path().join("bundle.tar.gz");
         assert!(matches!(
@@ -1270,7 +1259,7 @@ mod tests {
         assert!(forged.validate_packages(&published.join("marketplace")).is_err());
         assert!(
             install
-                .commit_config(
+                .commit_installation(
                     None,
                     b"[policy]\nversion=2\n[externals]\ntimeout_ms=100\nmax_body_bytes=1024\n",
                     &forged
@@ -1286,9 +1275,11 @@ mod tests {
         let with_alias =
             crate::config::edit::bind_servers(&with_include, "github", &["work-github".to_owned()]).unwrap();
         let stray = crate::config::edit::add_include(&with_alias, "batteries/stray/appa.toml").unwrap();
-        assert!(install.commit_config(None, stray.as_bytes(), &selected).is_err());
+        assert!(install.commit_installation(None, stray.as_bytes(), &selected).is_err());
         assert!(!store.exists(), "a refused commit leaves the store alone");
-        install.commit_config(None, with_alias.as_bytes(), &selected).unwrap();
+        install
+            .commit_installation(None, with_alias.as_bytes(), &selected)
+            .unwrap();
         assert!(store.join("github/appa.toml").is_file(), "the commit fills the store");
         let effective = crate::config::Config::load(install.config_path()).unwrap();
         assert_eq!(effective.server_aliases["github"], vec!["work-github"]);
@@ -1302,7 +1293,7 @@ mod tests {
         let without_alias = crate::config::edit::unbind_servers(&without_include, &["github"]).unwrap();
         removed.deselect(PackageKind::Battery, &github);
         install
-            .commit_config(Some(with_alias.as_bytes()), without_alias.as_bytes(), &removed)
+            .commit_installation(Some(with_alias.as_bytes()), without_alias.as_bytes(), &removed)
             .unwrap();
         assert!(without_alias.contains(base));
         assert!(
@@ -1328,11 +1319,36 @@ mod tests {
         let path = root.path().join("appa.toml");
         let install = Installation::open(&path).unwrap();
         let after = b"[policy]\nversion = 2\n[externals]\ntimeout_ms = 100\nmax_body_bytes = 1024\n";
-        install.commit_config(None, after, &selection()).unwrap();
+        install.commit_installation(None, after, &selection()).unwrap();
         assert_eq!(fs::read(&path).unwrap(), after);
         assert_eq!(install.selection().unwrap(), Some(selection()));
-        install.commit_config(Some(after), after, &selection()).unwrap();
+        install.commit_installation(Some(after), after, &selection()).unwrap();
         assert_eq!(fs::read_dir(install.state.join("history")).unwrap().count(), 1);
+    }
+
+    /// Recovery replays a Claude removal only under the version it was selected
+    /// with, so a removal that also switches version is refused before the
+    /// journal is written, not left for a recovery that can never finish.
+    #[test]
+    fn removing_claude_while_changing_version_is_refused_before_any_change() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("appa.toml");
+        let install = Installation::open(&path).unwrap();
+        let mut with_claude = selection();
+        with_claude.select(PackageKind::Plugin, &PackageName::parse("claude-code").unwrap());
+        fs::write(
+            install.state.join("active.json"),
+            serde_json::to_vec(&with_claude).unwrap(),
+        )
+        .unwrap();
+        let other_version = Selection::empty(generation(b"schema = 1\nname = 'other'\n"), Platform::MacArm64);
+        assert_ne!(other_version.generation(), with_claude.generation());
+        let after = b"[policy]\nversion = 2\n[externals]\ntimeout_ms = 100\nmax_body_bytes = 1024\n";
+        let result = install.commit_installation(None, after, &other_version);
+        assert!(matches!(result, Err(InstallError::Invalid(_))), "{result:?}");
+        assert!(!path.exists());
+        assert!(!install.state.join("transaction.json").exists());
+        assert_eq!(install.selection().unwrap(), Some(with_claude));
     }
 
     #[test]
@@ -1356,13 +1372,13 @@ mod tests {
         let install = Installation::open(&path).unwrap();
         assert!(
             install
-                .commit_config(Some(before), b"invalid = [", &selection())
+                .commit_installation(Some(before), b"invalid = [", &selection())
                 .is_err()
         );
         assert_eq!(fs::read(&path).unwrap(), before);
         assert!(install.selection().unwrap().is_none());
         assert!(matches!(
-            install.commit_config(Some(b"stale"), before, &selection()),
+            install.commit_installation(Some(b"stale"), before, &selection()),
             Err(InstallError::Changed(_))
         ));
     }

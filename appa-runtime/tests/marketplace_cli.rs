@@ -247,6 +247,28 @@ fn invalid_install_input_is_refused_before_creating_state_or_contacting_a_host()
             "bad",
             "--json",
         ],
+        vec![
+            "plugin",
+            "install",
+            "claude-code",
+            "--from",
+            "bundle.tar.gz",
+            "--sha256",
+            &"a".repeat(64),
+            "--agent-yell",
+            "--json",
+        ],
+        vec![
+            "plugin",
+            "install",
+            "claude-code",
+            "--from",
+            "bundle.tar.gz",
+            "--sha256",
+            &"a".repeat(64),
+            "--no-agent-yell",
+            "--json",
+        ],
     ] {
         let output = run(root.path(), &args);
         assert_eq!(output.status.code(), Some(2));
@@ -353,7 +375,7 @@ fn stage(root: &Path, kagent: Option<&[&str]>, batteries: &[&str]) -> std::path:
     std::fs::write(installation.state_path().join("artifacts").join(digest.hex()), archive).unwrap();
     let selection = Selection::empty(generation, Platform::current().unwrap());
     let text = b"# authored policy\n[policy]\nversion=2\n[[policy.tool]]\nname='Custom'\n[externals]\ntimeout_ms=100\nmax_body_bytes=1024\n";
-    installation.commit_config(None, text, &selection).unwrap();
+    installation.commit_installation(None, text, &selection).unwrap();
     config
 }
 
@@ -496,6 +518,24 @@ fn kagent_requires_explicit_config_and_rejects_inapplicable_runtime_before_write
         vec!["plugin", "install", "kagent", "--json"],
         vec!["plugin", "remove", "kagent", "--json"],
         vec!["plugin", "install", "claude-code", "--runtime", "go", "--json"],
+        vec![
+            "plugin",
+            "install",
+            "kagent",
+            "--config",
+            "deploy/appa.toml",
+            "--agent-yell",
+            "--json",
+        ],
+        vec![
+            "plugin",
+            "install",
+            "kagent",
+            "--config",
+            "deploy/appa.toml",
+            "--no-agent-yell",
+            "--json",
+        ],
     ] {
         let output = run(root.path(), &args);
         assert_eq!(output.status.code(), Some(1));
@@ -557,7 +597,7 @@ fn explicit_custom_files_roundtrip_through_the_existing_bundle_commands() {
             acquired.generation().clone(),
             appa_package::generation::Platform::current().unwrap(),
         );
-        target.commit_config(None, original.as_bytes(), &empty).unwrap();
+        target.commit_installation(None, original.as_bytes(), &empty).unwrap();
     }
     std::fs::write(replica.path().join("config/helper.txt"), "do not overwrite").unwrap();
     let imported = run(

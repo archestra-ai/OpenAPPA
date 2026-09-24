@@ -301,7 +301,9 @@ cargo install --locked --path appa-runtime --force
 appa plugin install claude-code
 ```
 
-The install reports each slow phase on stderr and never prompts. A runtime an
+The install reports each slow phase on stderr. A first install at a terminal
+asks one question, whether the agent may report its own blocked calls;
+`--agent-yell` or `--no-agent-yell` answers it for a script. A runtime an
 earlier APPA deployment of yours left at the runtime endpoint is stopped; an
 unidentified listener or another user's process is named and never stopped.
 

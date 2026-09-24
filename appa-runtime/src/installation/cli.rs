@@ -1,4 +1,5 @@
-//! Marketplace command presentation. These commands never read stdin.
+//! Marketplace command presentation. These commands read stdin only for the
+//! agent-reporting question a first claude-code install asks at a terminal.
 
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -51,7 +52,7 @@ pub struct Bundle {
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  appa plugin install claude-code\n  appa plugin install kagent --config ./deployment/appa.toml --runtime both\n  appa plugin install claude-code --from ./appa-bundle.tar.gz --sha256 <trusted-sha256>\n\nClaude registration activates and verifies its runtime. Kagent prepares local\nHelm values, Agent snippets and image checks; it does not deploy to a cluster.\nNever prompts. An explicit revision moves the whole deployment to that version;\na bundle restores its selection."
+    after_help = "Examples:\n  appa plugin install claude-code\n  appa plugin install kagent --config ./deployment/appa.toml --runtime both\n  appa plugin install claude-code --from ./appa-bundle.tar.gz --sha256 <trusted-sha256>\n\nClaude registration activates and verifies its runtime. Kagent prepares local\nHelm values, Agent snippets and image checks; it does not deploy to a cluster.\nA first claude-code install at a terminal asks one question, about agent\nreporting; --json and --from never ask. An explicit revision moves the whole deployment to that version;\na bundle restores its selection."
 )]
 pub struct Install {
     /// Host plugin to install. Omitted, the catalog is listed instead.
@@ -63,10 +64,11 @@ pub struct Install {
     /// Let the agent report its own blocked calls to the OpenAPPA team through the
     /// `yell` tool. Written into the policy a first install creates; a later install
     /// keeps the config as it is. Without either flag, a terminal is asked.
-    #[arg(long, conflicts_with = "no_agent_yell")]
+    /// A bundle brings its own config, so neither applies with --from.
+    #[arg(long, conflicts_with_all = ["no_agent_yell", "from"])]
     agent_yell: bool,
     /// Keep agent reporting off in the policy a first install creates, without asking.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "from")]
     no_agent_yell: bool,
     #[command(flatten)]
     target: Target,
@@ -545,8 +547,13 @@ fn ask_agent_yell(input: &mut impl BufRead, output: &mut impl Write) -> io::Resu
 const AGENT_YELL_OFF: &str = "\nagent_yell = false";
 const AGENT_YELL_ON: &str = "\nagent_yell = true";
 
-fn with_agent_yell_on(policy: &str) -> String {
-    policy.replacen(AGENT_YELL_OFF, AGENT_YELL_ON, 1)
+/// None when the policy does not carry the off line exactly once, so a yes
+/// would otherwise change nothing without saying so.
+fn with_agent_yell_on(policy: &str) -> Option<String> {
+    match policy.matches(AGENT_YELL_OFF).count() {
+        1 => Some(policy.replacen(AGENT_YELL_OFF, AGENT_YELL_ON, 1)),
+        _ => None,
+    }
 }
 
 fn revision(value: &str) -> Result<String, String> {
@@ -566,6 +573,11 @@ pub fn install(args: Install) -> ExitCode {
         if args.runtime.is_some() && name != "kagent" {
             return Err(InstallError::Invalid("--runtime applies only to kagent".into()));
         }
+        if (args.agent_yell || args.no_agent_yell) && name != "claude-code" {
+            return Err(InstallError::Invalid(
+                "--agent-yell and --no-agent-yell apply only to claude-code".into(),
+            ));
+        }
         let path = plugin_path(&args.target, &name)?;
         if path.exists() {
             crate::config::Config::load(&path).map_err(|error| InstallError::Invalid(error.to_string()))?;
@@ -575,7 +587,7 @@ pub fn install(args: Install) -> ExitCode {
         let before = super::optional_bytes(installation.config_path())?;
         // Asked before the slow acquisition, so the person is not kept waiting to
         // answer, and before any state changes, so a closed terminal changes nothing.
-        let agent_yell = if before.is_none() && name == "claude-code" {
+        let agent_yell = if before.is_none() && name == "claude-code" && args.source.from.is_none() {
             args.agent_yell(&path)?
         } else {
             None
@@ -639,9 +651,20 @@ pub fn install(args: Install) -> ExitCode {
                 None => {
                     let text = String::from_utf8(super::required_bytes(&root.join(plugin.default_policy().as_str()))?)
                         .map_err(|error| InstallError::Invalid(error.to_string()))?;
-                    match agent_yell {
-                        Some(AgentYell::On) => with_agent_yell_on(&text),
-                        Some(AgentYell::Off) | None => text,
+                    match (agent_yell, with_agent_yell_on(&text)) {
+                        (Some(AgentYell::On), Some(on)) => on,
+                        (Some(AgentYell::On), None) if args.agent_yell => {
+                            return Err(InstallError::Invalid(
+                                "--agent-yell: this version's policy has no single `agent_yell = false` line to turn on; set [reporting] agent_yell in the config after installing".into(),
+                            ));
+                        }
+                        (Some(AgentYell::On), None) => {
+                            eprintln!(
+                                "appa: warning: agent reporting stays off: this version's policy has no single `agent_yell = false` line; set [reporting] agent_yell in the config"
+                            );
+                            text
+                        }
+                        (Some(AgentYell::Off) | None, _) => text,
                     }
                 }
             };
@@ -1394,7 +1417,7 @@ mod tests {
     }
 
     /// The answer works by replacing the one line the shipped policy carries, so the
-    /// policy has to carry exactly one of it. Two, or none, and a yes silently does nothing.
+    /// policy has to carry exactly one of it. Two, or none, and a yes cannot be honored.
     #[test]
     fn the_shipped_policy_states_the_reporting_posture_exactly_once() {
         let text = crate::default_config::text();
@@ -1405,13 +1428,20 @@ mod tests {
     #[test]
     fn a_yes_turns_reporting_on_and_changes_only_that_line() {
         let before = crate::default_config::text();
-        let after = with_agent_yell_on(&before);
+        let after = with_agent_yell_on(&before).expect("the shipped policy carries the line once");
         assert_ne!(after, before.as_ref());
         assert_eq!(after.replacen(AGENT_YELL_ON, AGENT_YELL_OFF, 1), before.as_ref());
         let directory = tempfile::tempdir().expect("temporary directory");
         let config = directory.path().join("appa.toml");
         std::fs::write(&config, &after).expect("the answered policy is written");
         crate::config::Config::load(&config).expect("the answered policy still loads");
+    }
+
+    #[test]
+    fn a_yes_is_not_applied_to_a_policy_without_exactly_one_off_line() {
+        let off = AGENT_YELL_OFF.trim_start();
+        assert_eq!(with_agent_yell_on("[policy]\nversion = 2\n"), None);
+        assert_eq!(with_agent_yell_on(&format!("[a]\n{off}\n[b]\n{off}\n")), None);
     }
 
     #[test]

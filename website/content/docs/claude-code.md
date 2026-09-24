@@ -26,7 +26,9 @@ install --path appa-runtime --force` builds the binary instead of downloading
 one.
 
 The install prints progress while it selects the version, updates Claude Code,
-and starts the runtime, and it never prompts. A release binary installs the
+and starts the runtime. A first install at a terminal asks one question: whether
+the agent may report its own blocked calls (`--agent-yell` or
+`--no-agent-yell` answers it for a script). A release binary installs the
 version published for its tag; a checkout build installs its own version,
 exported from the commit it was built from. If an earlier APPA runtime is
 already running at the endpoint, the installer stops it. If an unrelated process
