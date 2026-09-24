@@ -2,21 +2,53 @@
 title: Validation
 category: Operations
 order: 8
-description: Test policy decisions across multi-step agent trajectories without running tools.
+description: Test policy decisions before merging changes, without running your agent's tools.
 ---
 
-OpenAPPA includes `appa replay` to test your policies offline. It checks policy rules against scripted tool traces without calling an LLM or running tools.
+The APPA CLI provides two commands for validation:
 
-Each trace defines a sequence of proposed tool calls and the expected decision for each call. Replay verifies that security rules—such as audience limits, taint tracking, required approvals, and sanitization—hold across multi-step agent trajectories.
+- `appa describe --check` checks that your configuration loads.
+- `appa replay` checks scripted tool calls against the decisions you expect, without running your agent's tools.
 
-## Minimal example
+Run them locally or in continuous integration (CI) to catch configuration errors and unexpected policy decisions before deployment.
 
-Consider an agent that reads internal records and sends emails. The policy blocks sending HR files outside the company while allowing internal emails.
+## Make policy tests a required CI check
 
-The policy tags files read from `/hr/*` with an audience limit, and requires emails to stay within that audience:
+Keep the workflow, policy, and tests in the same repository:
+
+```text
+.
+|-- .github/
+|   `-- workflows/
+|       `-- policy-check.yml
+|-- appa.toml
+`-- policy-tests/
+    `-- hr-email.appa
+```
+
+In `policy-check.yml`, add this step to a pull-request job after checkout and installation of your agent's APPA version:
+
+```yaml
+- name: Check policy decisions
+  shell: bash
+  run: |
+    appa describe --config appa.toml --check
+    appa replay --config appa.toml policy-tests/
+```
+
+Make the job a required check in GitHub to block merges when validation fails. The example below supplies the policy and test.
+
+## Example: HR files can only be emailed to HR
+
+Consider an agent that reads files and sends email. After it reads an HR file, the policy must block email to an outside recipient while still allowing email to HR.
+
+Save this configuration as `appa.toml`. The read's `delta` restricts the audience to `hr@archestra.ai`. The send's `requires` checks that its recipient belongs to that audience.
 
 ```toml
-# appa.toml
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+
 [policy]
 version = 2
 
@@ -30,10 +62,9 @@ requires = { audience = { contains = ["$to"] } }
 delta = {}
 ```
 
-A trace names each tool by the canonical tool id the policy declares. A trace file tests this interaction over three steps:
+Create a `policy-tests/` directory and save this sequence as `policy-tests/hr-email.appa`:
 
 ```text
-# secret-stays-inside.appa
 mcp/files/read {
   path: "/hr/salaries.csv"
 }
@@ -50,101 +81,42 @@ mcp/mail/send {
 expect allow
 ```
 
-Here is what happens during replay:
+The calls share one trajectory. After the read, only HR remains in the audience, so the outside recipient is denied and HR is allowed. Replay supplies an empty result for the read. No CSV file or email account is needed.
 
-1. **Read file (`expect allow`):**  
-   The agent calls `mcp/files/read` on `/hr/salaries.csv`. The engine matches `mcp/files/read(path:/hr/*)` and allows the call. Replay records an empty output, and the contract's `delta` restricts the trajectory's audience to `hr@archestra.ai`.
-
-2. **Block external recipient (`expect deny`):**  
-   The agent tries to email `x@other.com`. The `mcp/mail/send` rule requires the recipient to be inside the current audience (`hr@archestra.ai`). Because `x@other.com` is outside the audience, the engine blocks the call without offering a remedy.
-
-3. **Allow internal recipient (`expect allow`):**  
-   The agent emails `hr@archestra.ai`. The recipient matches the allowed audience, so the engine lets the call through.
-
-This test confirms that the policy prevents data leaks across tools without needing real CSV files or live email accounts.
-
-## Running replay
-
-Pass your policy configuration with `--config`, followed by trace files or directories:
+Run it with APPA installed:
 
 ```sh
-appa replay --config appa.toml first.appa second.appa
+appa replay --config appa.toml policy-tests/
 ```
-
-Passing a directory runs all `.appa` files directly inside it:
-
-```sh
-appa replay --config appa.toml traces/
-```
-
-Each trace file runs as an isolated trajectory starting with a clean state. Steps in a file run in order, so label restrictions and recorded effects carry forward from one step to the next.
-
-Add `-v` to print each call as it runs:
-
-```sh
-appa replay -v --config appa.toml traces/
-```
-
-## Syntax
-
-Trace files (`.appa`) are plain text and line-oriented. Each step pairs a proposed tool call with its expected decision:
 
 ```text
-mcp/mail/send {
-  to: "person@example.com"
-  subject: "Status report"
-}
-expect allow
+ok    policy-tests/hr-email.appa
+1 file: 1 ok, 0 failed, 0 could not run
 ```
 
-### Tool calls
+If a change permits the outside recipient or blocks HR, this test fails. It checks both confidentiality and permitted work.
 
-- **Tool name:** Start with the canonical tool id and `{`. If a tool takes no arguments, write `{}`. A name that is not a canonical tool id is refused, and so is the runtime's own control tool `appa/execute_remedy_plan`: a trace holds the calls the model proposes, and `expect` takes the offers.
-- **Arguments:** Put one `key: <JSON value>` per line. Values must be valid JSON (quotes around strings, raw numbers or booleans, JSON objects or arrays).
-- **Comments:** Empty lines and lines starting with `#` are ignored.
-- **Errors:** Replay reports the file and line number if the tool name is not a canonical tool id, an argument repeats, a JSON value is invalid, or a call lacks an `expect` line.
+## What to test
 
-### Expectations
+Start by checking your configuration and listing the tools named in your policy:
 
-The line right after `}` declares the expected outcome:
+```sh
+appa describe --check
+```
 
-| Expectation | When to use | What replay does |
-|---|---|---|
-| **`expect allow`** | The policy must allow the call. | Accepts label narrowing automatically. Returns an empty output so the contract's `delta` and `effects` apply to later steps. |
-| **`expect deny`** | The policy must block the call with no remedy offered. | Checks that the call is refused outright. No label changes or effects are recorded. |
-| **`expect authority [name]`** | The call must be blocked with an offer requiring approval from an [authority](/contracts#authorities). | Approves the request via a stand-in backend and continues the test. If a name is given, verifies that the offer named that exact authority. |
-| **`expect sanitizer [name]`** | The call must be blocked with an offer requiring transformation through a [sanitizer](/contracts#sanitizers). | Returns the value unchanged via a stand-in backend and applies the declassification delta. If a name is given, verifies that the offer named that exact sanitizer. |
-
-## Calls during replay
-
-Replay checks policy rules without running your tools. When a call is allowed, replay returns an empty output and applies the contract's `delta` and `effects` to the trajectory.
-
-External services behave differently depending on their type:
-
-- **Authorities and sanitizers:** Handled by built-in test stand-ins. Replay grants approval and accepts sanitization without sending HTTP requests or asking users.
-- **Annotators:** Called live. [Annotators](/contracts#annotators) generate dynamic contracts for proposed tool calls, so replay needs their responses to make policy decisions.
-- **Audience sources:** Called live. Replay queries configured providers to check dynamic group membership ([audience sources](/contracts#configure-audience-membership)). Replay does not probe the sources before it starts.
-
-If a live external service fails or times out, replay reports that the step could not run instead of a policy failure.
-
-## Results and exit codes
-
-When all steps match, replay prints `ok` for each file. If a step fails, replay prints the location and the mismatch:
+The output shows your batteries, policy tools, and validation results. For example, with the tool list and other details shortened:
 
 ```text
-secret-stays-inside.appa:6: mcp/mail/send: got allow, want deny
-FAIL  secret-stays-inside.appa
-1 file: 0 ok, 1 failed, 0 could not run
+OpenAPPA world
+Adapter: claude-code
+Config: /path/to/appa.toml (loadable)
+Batteries: claude-code, slack, github, ...
+Policy tools: *, Agent, ..., host/claude-code/Read, ...
+...
+Session integrations/tools/accounts: unavailable to this command
+Validation: tools: 0 valid, 0 invalid, 522 unknown; inventory: partial or unavailable; new tools: possible; wildcard: present (ordinary tools only)
 ```
 
-A failed step stops that file immediately. Other trace files continue running.
+Use the policy tool list to choose what to test. Check that your rules allow intended work and block forbidden actions, including after the agent reads sensitive data. Test remedies where your rules offer them.
 
-| Exit code | Meaning |
-|---|---|
-| `0` | All decisions matched the trace files. |
-| `1` | One or more steps did not match their expected decisions. |
-| `2` | Replay could not run (trace syntax error, bad config, or external service failure). |
-
-## More examples
-
-The [shipped test cases](https://github.com/archestra-ai/OpenAPPA/tree/main/examples/tests) contain complete examples testing audience restrictions, trust levels, approvals, sanitizers, and action ordering.
+Replay checks policy decisions. Integration tests check that your agent follows those decisions and that the connected tools and services work.

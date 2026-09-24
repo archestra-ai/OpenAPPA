@@ -20,7 +20,7 @@ OpenAPPA is an agentic security framework with a language for defining security 
 | | OPA | OpenAPPA |
 |---|---|---|
 | Deployment | [HTTP service, embedded Go library, or compiled WebAssembly policies](https://www.openpolicyagent.org/docs/integration) | Run alongside your agent process or deploy as a shared Kubernetes service |
-| Agent connection | Your application or an integration requests and enforces decisions | Use supplied [Claude Code](/claude-code) and [kagent](/kagent) integrations, or [connect your existing agent](/writing-an-integration) |
+| Agent connection | Your application or an integration requests and enforces decisions | Use supplied [Claude Code](/claude-code) and [kagent](/kagent) integrations, or [connect your existing agent](/add-to-agent) |
 
 OPA can [use external data to make policy decisions](https://www.openpolicyagent.org/docs/external-data), but your application must supply the agent's history and keep it up to date. Your integration then enforces the decision.
 

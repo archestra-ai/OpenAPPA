@@ -30,6 +30,7 @@ import { RemedyPlanFigure } from "@/components/figures/RemedyPlanFigure";
 import { RuntimeOverviewFigure } from "@/components/figures/RuntimeOverviewFigure";
 import { TwoEndingsFigure } from "@/components/figures/TwoEndingsFigure";
 import { MascotBoard } from "@/components/MascotBoard";
+import { IntegrationPaths } from "@/components/IntegrationPaths";
 import { ProposalBlock } from "@/components/ProposalBlock";
 import { SponsorNote } from "@/components/SponsorNote";
 import { Term } from "@/components/Term";
@@ -105,9 +106,10 @@ const DIRECTIVES: Record<string, () => ReactNode> = {
   "fig-negotiation": () => <NegotiationFigure />,
   "fig-policy-stack": () => <PolicyStackFigure />,
   "fig-remedy-plan": () => <RemedyPlanFigure />,
-  "fig-runtime-overview": () => <RuntimeOverviewFigure />,
+  "fig-runtime-overview": () => <RuntimeOverviewFigure overview />,
   "fig-two-endings": () => <TwoEndingsFigure />,
   "mascot-board": () => <MascotBoard />,
+  "integration-paths": () => <IntegrationPaths />,
   "sponsor-note": () => <SponsorNote />,
   "details-7pc-leak": () => (
     <details className="leak-details my-6 rounded-lg border border-[var(--border)] bg-[var(--bg-weak)] p-4 text-sm text-[var(--text)]">

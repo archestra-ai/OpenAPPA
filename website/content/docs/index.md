@@ -29,7 +29,7 @@ Rule sets end up either so tight they break the agent or so intricate nobody can
 
 ## OpenAPPA tracks flows instead of matching patterns
 
-OpenAPPA is a cross-platform, pluggable engine driven by a [single configuration](/contracts). It runs outside the agent's prompt and execution loop, so the model cannot see, negotiate with, or manipulate it, and it [plugs into an existing agent loop](/writing-an-integration) in one place.
+OpenAPPA is a cross-platform, pluggable engine driven by a [single configuration](/contracts). It runs outside the agent's prompt and execution loop, so the model cannot see, negotiate with, or manipulate it, and it [plugs into an existing agent loop](/add-to-agent) in one place.
 
 :::fig-policy-stack:::
 

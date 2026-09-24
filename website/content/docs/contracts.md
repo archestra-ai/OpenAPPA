@@ -100,7 +100,7 @@ The agent keeps using its host's tool names. A plugin implements the host lifecy
 
 Claude Code names such as `Bash` and `mcp__github__create_issue` identify precise tools. An unqualified kagent rule such as `read_secret` applies to that native name across MCP servers and kagent's own tools. It does not cover remote-agent delegation. A newly discovered tool can use an existing rule without restarting the trajectory or changing its opening policy.
 
-A host that embeds the runtime brings its own tool identification. The adapter identifies every call's canonical id. The runtime spells a tool back through the same adapter. See [Writing an Integration](/writing-an-integration#the-adapter-and-the-hook-protocol).
+A host that embeds the runtime brings its own tool identification. The adapter identifies every call's canonical id. The runtime spells a tool back through the same adapter. See [Add to your agent](/add-to-agent#how-the-hooks-reach-appa).
 
 Use `server` when a rule should apply to one MCP connection:
 
@@ -1201,7 +1201,7 @@ delta = { audience = ["internal"] }
 - Every tool in `confined_results` must have a policy contract. A wildcard contract also satisfies this requirement.
 - Some tools run inside the model provider's service. The integration cannot intercept their results before the model reads them. These tools can declare only static `delta` fields. They cannot declare requirements, annotators, or argument selectors, and cannot appear in `confined_results`.
 
-OpenAPPA rejects configurations that require controls the integration does not support. See [integration configuration](/writing-an-integration) for the integration's responsibilities.
+OpenAPPA rejects configurations that require controls the integration does not support. See [integration configuration](/add-to-agent) for the integration's responsibilities.
 
 ## Externals
 

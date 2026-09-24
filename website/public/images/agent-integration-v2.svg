@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 300" role="img" aria-labelledby="title description">
+  <title id="title">Your agent calls APPA before execution and delivery</title>
+  <desc id="description">The agent sends events to APPA and receives decisions. The agent executes allowed tool calls and holds results until APPA admits them. APPA owns policy checks and the trajectory log.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 Z" fill="#52695b"/>
+    </marker>
+  </defs>
+  <rect width="640" height="300" fill="#f5f4ef"/>
+  <g fill="#ffffff" stroke="#a4afa7" stroke-width="1.5">
+    <rect x="24" y="28" width="214" height="122"/>
+    <rect x="402" y="28" width="214" height="122"/>
+    <rect x="24" y="232" width="214" height="44"/>
+  </g>
+  <g font-family="Arial, sans-serif" fill="#202b24">
+    <g font-size="19" font-weight="700">
+      <text x="42" y="59">Your agent</text>
+      <text x="420" y="59">APPA runtime</text>
+      <text x="42" y="260">Your tools</text>
+    </g>
+    <g font-size="16">
+      <text x="42" y="94">Tool dispatcher</text>
+      <text x="42" y="123">Transcript</text>
+      <text x="420" y="94">Policy checks</text>
+      <text x="420" y="123">Trajectory log</text>
+    </g>
+    <g font-size="14" fill="#52695b">
+      <text x="320" y="66" text-anchor="middle">Events</text>
+      <text x="320" y="119" text-anchor="middle">Decisions</text>
+      <text x="27" y="181">Allowed</text>
+      <text x="27" y="199">call</text>
+      <text x="190" y="181">Result held until</text>
+      <text x="190" y="199">APPA admits it</text>
+    </g>
+  </g>
+  <g fill="none" stroke="#52695b" stroke-width="2" marker-end="url(#arrow)">
+    <path d="M 238 80 H 400"/>
+    <path d="M 402 133 H 240"/>
+    <path d="M 99 150 V 230"/>
+    <path d="M 171 232 V 152"/>
+  </g>
+</svg>
