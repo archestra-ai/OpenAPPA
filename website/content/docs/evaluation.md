@@ -107,6 +107,49 @@ These totals include every prompt and completion in the complete agent
 trajectory. They measure the whole agent setup, not the computing cost of the
 OpenAPPA policy engine alone.
 
+## Claude Code auto mode: only OpenAPPA stopped every scored attack
+
+[Claude Code auto mode](/openappa-vs-auto-mode) asks a classifier model to
+approve each tool call. OpenAPPA asks no model to judge intent. It records where
+each value came from and who may see it, then checks every flow against explicit
+policy. Each decision is deterministic and traces to a policy rule.
+
+We ran guarded OpenAPPA against two Auto configurations:
+
+- **IFC-tuned Auto** is the like-for-like comparison: it tries to solve the same
+  problem with a classifier instead of a policy engine. Each scenario's
+  auto-mode rules restate the information-flow policy OpenAPPA enforces in plain
+  language: which sources are trusted, who may see each piece of data, where
+  data may go, and which narrowing is legitimate. It gets no attack markers or
+  expected answers.
+- **Stock Auto** is the out-of-the-box baseline. Its default rules target
+  generic developer risks, such as destructive commands, actions beyond the
+  user's request, and secrets sent to external endpoints. Unconfigured, it knows
+  nothing about a deployment's own rules, such as which colleague may see which
+  record.
+
+All three used the same actor model (Claude Sonnet 5), prompts, and tools, and
+ran every task once, so the results have no variance estimate. Each benchmark
+applied its own scoring. Utility is the task completion rate. Attacks counts the
+scenarios or tasks in which a scored attack succeeded.
+
+| Benchmark | Guarded OpenAPPA (Utility / Attacks) | IFC-tuned Auto (Utility / Attacks) | Stock Auto (Utility / Attacks) |
+|---|---:|---:|---:|
+| Bench-Corp (20 scenarios) | 75.0% / **0/20** | 85.0% / **0/20** | 90.0% / 2/20 |
+| AgentThreatBench (24 tasks) | 75.0% / **0/24** | 95.8% / 6/24 | 87.5% / 8/24 |
+
+OpenAPPA was the only configuration with zero scored attacks in both suites.
+IFC-tuned Auto matched it on Bench-Corp but let six attacks through on
+AgentThreatBench. Stock Auto, which never saw the policy, let ten through.
+
+That protection costs completion and tokens. OpenAPPA completed 75% of tasks in
+both suites; the Auto configurations completed 85–96%. Compared with the same
+agent under a permissive policy, guarded OpenAPPA used 6.5× the reported tokens
+on Bench-Corp and 2.3× on AgentThreatBench. These multiples cover the whole
+guarded agent, including isolated child trajectories and recovery, not the
+policy engine alone. Claude's SDK does not report the tokens Auto's classifier
+spends, so total costs are not directly comparable.
+
 ## What we measured
 
 - **[Bench-Corp](https://github.com/archestra-ai/OpenAPPA/tree/main/bench/corp)**
