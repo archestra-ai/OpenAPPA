@@ -229,23 +229,30 @@ pub fn declared_sources(document: &toml::Value) -> Result<Vec<SourceRegistration
     Ok(sources)
 }
 
-/// The stock model transports an `[[annotator]]` may name on its declaration with `builtin`.
-/// Closed: the runtime compiles both in. An Annotator that names one takes no deployment
-/// binding; every other Annotator is bound by the deployment.
+/// The stock annotators an `[[annotator]]` may name on its declaration with `builtin`: the
+/// two model transports and TypeSafe's Jev classifier. Closed: the runtime compiles all three
+/// in. An Annotator that names one takes no deployment binding; every other Annotator is
+/// bound by the deployment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AnnotatorBuiltin {
     ClaudeCode,
     Llm,
+    Jev,
 }
 
 impl AnnotatorBuiltin {
-    pub const ALL: [AnnotatorBuiltin; 2] = [AnnotatorBuiltin::ClaudeCode, AnnotatorBuiltin::Llm];
+    pub const ALL: [AnnotatorBuiltin; 3] = [
+        AnnotatorBuiltin::ClaudeCode,
+        AnnotatorBuiltin::Llm,
+        AnnotatorBuiltin::Jev,
+    ];
 
-    /// The name a policy writes: `claude-code` or `llm`.
+    /// The name a policy writes: `claude-code`, `llm`, or `jev`.
     pub fn wire_name(self) -> &'static str {
         match self {
             AnnotatorBuiltin::ClaudeCode => "claude-code",
             AnnotatorBuiltin::Llm => "llm",
+            AnnotatorBuiltin::Jev => "jev",
         }
     }
 

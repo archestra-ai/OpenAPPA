@@ -445,6 +445,27 @@ fn a_battery_that_validates_loads() {
             body(tool, "[externals.audience.probe]\nbuiltin = \"llm\"\n"),
         ),
         (
+            "a jev profile naming a credential this package owns",
+            yes,
+            yes,
+            body(tool, "[externals.jev]\ntoken_env = \"APPA_PROVIDER_PROBE_JEV\"\n"),
+        ),
+        (
+            "a jev profile naming a credential another package owns",
+            no,
+            yes,
+            body(tool, "[externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n"),
+        ),
+        (
+            "a jev profile naming its endpoint",
+            no,
+            no,
+            body(
+                tool,
+                "[externals.jev]\ntoken_env = \"APPA_PROVIDER_PROBE_JEV\"\nurl = \"https://elsewhere.example\"\n",
+            ),
+        ),
+        (
             "a root-only external setting",
             no,
             no,

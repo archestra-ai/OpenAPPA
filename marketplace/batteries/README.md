@@ -26,7 +26,7 @@ so a deployment can customize its hint without editing the battery.
 | `databricks/` | Databricks' managed MCP servers Genie One (5 tools) and Databricks SQL (`execute_sql`), one namespace bound to both host servers; internal Genie reads, each SQL statement classified before it runs | the Claude Code model classifies each statement; the `databricks` audience source: viewer, active users, a group with nested groups expanded, a Genie space's readers |
 | `archestra/` | Archestra's built-in sharing tools (11 tools, 43 rules): projects, apps, knowledge bases and connectors, plugins, agents, MCP gateways, team membership | the `archestra` audience source: organization members, a team, one member |
 | `xmemory/` | the hosted xmemory instance (15 tools) and admin (17 tools) MCP servers, one namespace bound to both; internal reads, writes without trusted input, trusted admin and schema changes, reviewed schema migrations and instance deletion | none |
-| `jev/` | no tools; one Annotator a deployment routes its own tools to | TypeSafe's Jev model annotates each routed call's audience and trust; the call's name and arguments are sent to the TypeSafe API |
+| `jev/` | no tools; one Annotator a deployment routes its own tools to | TypeSafe's Jev model annotates each routed call's audience and trust; the call's name, description, and arguments are sent to the TypeSafe API |
 
 Include a battery with a path relative to the including file. An install
 replaces the deployment's battery store beside the root config, so the line it

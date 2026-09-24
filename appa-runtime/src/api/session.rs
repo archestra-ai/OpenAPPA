@@ -6953,6 +6953,73 @@ delta = {}
         assert_eq!(record.context.call_id.as_deref(), Some("host-call-1"));
     }
 
+    /// The `jev` builtin's record names its own backend, and its diagnostics are the
+    /// `jev_diagnostics` object: what each attempt did and how each label settled.
+    #[tokio::test]
+    async fn a_recorded_jev_annotation_carries_its_diagnostics() {
+        use axum::routing::post;
+        const REPLY: &str = r#"{"answers":{"delta_audience":{"probabilities":{"self":0.0,"internal":0.1,"public":0.9}},"delta_trust":{"probabilities":{"suspicious":0.1,"trusted":0.9}},"requires_audience":{"probabilities":{"public":0.0,"internal":0.1,"none":0.9}},"requires_trusted":{"noul":0.1}}}"#;
+        let app = axum::Router::new().route("/v1/systemone", post(|| async { REPLY }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback stub binds");
+        let url = format!(
+            "http://{}/v1/systemone",
+            listener.local_addr().expect("the stub has an address")
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("the stub serves") });
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(
+            &path,
+            "[policy]\nversion = 2\n\n[[policy.annotator]]\nname = \"gatekeeper\"\nbuiltin = \"jev\"\n\n\
+             [[policy.tool]]\nname = \"*\"\nannotator = \"gatekeeper\"\n\n\
+             [externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n\n\
+             [externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n",
+        )
+        .expect("the fixture writes");
+        let mut config = Config::load(&path).expect("the fixture validates");
+        config.externals.jev = Some(crate::config::JevProfile {
+            url,
+            key: crate::config::JevKey::Set(crate::config::Token::new("jev-test-key".to_string())),
+        });
+        let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
+        let recorder = Arc::new(Collected::default());
+        let session = runtime
+            .recording(recorder.clone())
+            .create_session(root(), None)
+            .expect("a fresh id opens");
+
+        assert!(matches!(
+            session
+                .on_tool_call_identified(
+                    fetch(serde_json::json!({"url": "https://example.org"})),
+                    Some("host-call-1".to_string()),
+                    false
+                )
+                .await
+                .expect("the call is judged"),
+            ToolCallDecision::Allow { .. }
+        ));
+
+        let [record] = recorder.taken().try_into().expect("one consult, one record");
+        assert_eq!(record.backend, crate::api::ConsultBackend::Jev);
+        assert_eq!(record.outcome, crate::api::ExternalOutcome::Answered);
+        assert_eq!(record.http_status, Some(200));
+        assert_eq!(record.raw_response.as_deref(), Some(REPLY.as_bytes()));
+        let diagnostics = record.diagnostics.expect("a jev consult describes itself");
+        assert!(!diagnostics.truncated);
+        let diagnostics: serde_json::Value =
+            serde_json::from_slice(&diagnostics.bytes).expect("the diagnostics are one JSON object");
+        let diagnostics = &diagnostics["jev_diagnostics"];
+        assert_eq!(diagnostics["version"], 1);
+        assert_eq!(diagnostics["model"], "jev-1.13.0");
+        assert_eq!(diagnostics["attempts"], serde_json::json!(["ok"]));
+        assert_eq!(diagnostics["labels"]["delta_trust"]["decision"], "trusted");
+        assert_eq!(diagnostics.get("error"), None);
+        assert!(diagnostics["elapsed_ms"].is_u64());
+    }
+
     #[tokio::test]
     async fn a_recorded_remedy_consult_names_its_offer() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");

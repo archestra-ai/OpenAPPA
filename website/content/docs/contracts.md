@@ -723,10 +723,11 @@ Alternatively, use a built-in annotator. The available options are:
 
 - `builtin = "claude-code"`: uses Claude Code to classify tool calls.
 - `builtin = "llm"`: uses the model configured under `[externals.llm]` to classify tool calls.
+- `builtin = "jev"`: asks TypeSafe's Jev classifier, with the key named under [`[externals.jev]`](#jev), to label each call's audience and trust.
 
 Set `builtin` on `[[policy.annotator]]`, as in the Claude Code example above. An annotator with `builtin` cannot also have an `[externals.annotators.<name>]` section. Unlike sanitizers and authorities, annotators do not accept `builtin` under `[externals]`.
 
-`claude-code` runs the local `claude` command and requires Claude Code on the Unix machine running OpenAPPA. `llm` requires model settings under `[externals.llm]`. OpenAPPA rejects a configuration with a missing implementation, an unknown implementation name, or an implementation unavailable on that system.
+`claude-code` runs the local `claude` command and requires Claude Code on the Unix machine running OpenAPPA. `llm` requires model settings under `[externals.llm]`. `jev` requires `[externals.jev]`, judges the complete call, so its annotator cannot declare `inputs`, and needs a mandate that admits at least two trust ranks. OpenAPPA rejects a configuration with a missing implementation, an unknown implementation name, or an implementation unavailable on that system.
 
 ### Annotator protocol
 
@@ -1233,7 +1234,7 @@ The available settings depend on the component's role:
 
 OpenAPPA rejects an external component name that the policy does not declare, or a component that is missing its required implementation. For annotators, `builtin` belongs on `[[policy.annotator]]`, not under `[externals]`.
 
-Included files can add bindings and annotator builtins. They cannot replace root settings: `timeout_ms`, `max_body_bytes`, `review_timeout_ms`, `[externals.claude_code]`, or `[externals.llm]`.
+Included files can add bindings and annotator builtins. One included file may add `[externals.jev]` when no other file declares it. They cannot replace root settings: `timeout_ms`, `max_body_bytes`, `review_timeout_ms`, `[externals.claude_code]`, or `[externals.llm]`.
 
 ### HTTP services
 
@@ -1334,3 +1335,16 @@ max_concurrent = 4
 Supported providers are `anthropic`, `openai`, `gemini`, and `ollama`. `token_env` is required except for `ollama`. An optional `url` selects a custom endpoint and follows the same URL rules as [HTTP services](#http-services).
 
 `openai` uses the Chat Completions API, including when `url` points to a compatible service. `ollama` uses `http://localhost:11434` unless `url` specifies another endpoint, and requires no token.
+
+### Jev
+
+`[externals.jev]` names the key used by all `builtin = "jev"` annotators:
+
+```toml
+[externals.jev]
+token_env = "APPA_PROVIDER_JEV_API_KEY"
+```
+
+`token_env` is the only field and must start with `APPA_`. OpenAPPA sends the key only to TypeSafe's API at `https://api.typesafe.ai/v1/systemone`. A configuration cannot name another endpoint. The operator can set `APPA_PROVIDER_JEV_API_URL` in the OpenAPPA process environment, following the URL rules of [HTTP services](#http-services). While the key's variable is unset, every `jev` consult returns no answer.
+
+Each consult sends the tool's name, description, and arguments to that endpoint. OpenAPPA first redacts, on a best-effort basis, what it recognizes as a secret: well-known token and key shapes, private-key blocks, `Authorization` header values, and the value of any field named for a secret, such as `password`, `token`, or `auth`. It then cuts each string at 4,000 characters. Redaction is not a proof that no secret remains. A slow request is repeated on a new connection, and a server error or a connection failure is retried, within `timeout_ms`. The consult record carries the attempts and the label probabilities under `jev_diagnostics`.

@@ -26,6 +26,7 @@ pub enum ConsultBackend {
     Command,
     Module,
     Llm,
+    Jev,
     ClaudeCode,
     Hitl,
 }

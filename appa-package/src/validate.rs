@@ -74,6 +74,8 @@ pub enum PackageError {
     PolicyRootSetting { policy: PathBuf, key: String },
     #[error("{policy}: `{external}.command` is not `python3` and one of this package's helpers")]
     PolicyExternalCommand { policy: PathBuf, external: String },
+    #[error("{policy}: `externals.jev` carries one `token_env` and nothing else")]
+    PolicyJevProfile { policy: PathBuf },
     #[error("{policy}: `{external}.token_env` reads `{variable}`, which is outside `{prefix}`")]
     PolicyForeignCredential {
         policy: PathBuf,
@@ -320,6 +322,10 @@ fn check_externals(
     };
     let mut credentials = std::collections::BTreeSet::new();
     for (kind, value) in table {
+        if kind == JEV_PROFILE {
+            credentials.insert(check_jev_profile(policy, value, name)?);
+            continue;
+        }
         // A deployment's own settings (`timeout_ms`, `max_body_bytes`, …) sit
         // directly under `[externals]`, and so do the sections only a root
         // config may bind (`llm`, `claude_code`). A battery binds externals of
@@ -335,6 +341,36 @@ fn check_externals(
         }
     }
     Ok(credentials.into_iter().collect())
+}
+
+/// The one profile an included file may carry. The runtime sends its key only to
+/// TypeSafe's API, so a battery that routes tools to the `jev` annotator ships the
+/// profile beside them, naming a credential of its own.
+const JEV_PROFILE: &str = "jev";
+
+/// Returns the credential variable the profile names.
+fn check_jev_profile(policy: &Path, profile: &Value, name: &PackageName) -> Result<String, PackageError> {
+    let refuse = || PackageError::PolicyJevProfile {
+        policy: policy.to_path_buf(),
+    };
+    let variable = match profile
+        .as_table()
+        .map(|table| table.iter().collect::<Vec<_>>())
+        .as_deref()
+    {
+        Some([(key, variable)]) if key.as_str() == "token_env" => variable.as_str().ok_or_else(refuse)?,
+        _ => return Err(refuse()),
+    };
+    let prefix = name.credential_prefix();
+    match prefix.owns(variable) {
+        true => Ok(variable.to_owned()),
+        false => Err(PackageError::PolicyForeignCredential {
+            policy: policy.to_path_buf(),
+            external: JEV_PROFILE.to_owned(),
+            variable: variable.to_owned(),
+            prefix,
+        }),
+    }
 }
 
 /// The external kinds an included file may bind. A battery is an included
@@ -649,6 +685,33 @@ mod tests {
         // The providers the policy binds are read from it, for the marketplace's ownership check.
         assert_eq!(package.battery().unwrap().audiences, vec!["github"]);
         assert!(package.battery().unwrap().credentials.is_empty());
+    }
+
+    /// A battery ships the `jev` profile with a credential of its own and nothing else.
+    #[test]
+    fn a_battery_ships_the_jev_profile_with_its_own_credential() {
+        let with = |profile: &str| format!("{BATTERY_POLICY}\n[externals.jev]\n{profile}\n");
+
+        let package = validate_package(battery(&with("token_env = \"APPA_PROVIDER_GITHUB_JEV\"")).path()).unwrap();
+        assert_eq!(package.battery().unwrap().credentials, vec!["APPA_PROVIDER_GITHUB_JEV"]);
+
+        assert!(matches!(
+            validate_package(battery(&with("token_env = \"APPA_PROVIDER_JEV_API_KEY\"")).path()),
+            Err(PackageError::PolicyForeignCredential { external, .. }) if external == "jev"
+        ));
+        for profile in [
+            "token_env = \"APPA_PROVIDER_GITHUB_JEV\"\nurl = \"https://elsewhere.example\"",
+            "url = \"https://elsewhere.example\"",
+            "token_env = 1",
+        ] {
+            assert!(
+                matches!(
+                    validate_package(battery(&with(profile)).path()),
+                    Err(PackageError::PolicyJevProfile { .. })
+                ),
+                "{profile}"
+            );
+        }
     }
 
     /// The variables a battery's helpers read come from its bindings, one entry
