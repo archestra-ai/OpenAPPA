@@ -55,6 +55,7 @@ class Arm(StrEnum):
     OPTIMAL = "optimal"
     APPA = "appa"
     APPA_Q = "appa-q"
+    NONE_Q = "none-q"
     STICKY = "sticky"
     STICKY_INTENT = "sticky-intent"
     SDK_RULES = "rules"
@@ -217,7 +218,7 @@ def replay(candidate: Candidate, arm: Arm, model: str) -> dict:
     hooks = None
     specs = to_agent_tool_specs(tuple(ToolSuite(FIXTURES, isolate_fs=True).specs.values()))
     match arm:
-        case Arm.NONE:
+        case Arm.NONE | Arm.NONE_Q:
             guardrail = GuardrailBase()
         case Arm.OPTIMAL:
             guardrail = OptimalGuardrail()
@@ -243,8 +244,7 @@ def replay(candidate: Candidate, arm: Arm, model: str) -> dict:
     seed = BENIGN_SEED if candidate.channel in (Channel.BENIGN, *UTILITY_CHANNELS) else ATTACK_SEED
     hops = UTILITY_TOOL_HOPS if candidate.channel in UTILITY_CHANNELS else ATTACK_TOOL_HOPS
     env = SandboxEnv(seed, FIXTURES, agent, guardrail, hooks, hops)
-    if arm is Arm.APPA_Q:
-        assert mediator is not None
+    if arm in (Arm.APPA_Q, Arm.NONE_Q):
         quarantine.install(env, mediator, model)
     error: str | None = None
     try:

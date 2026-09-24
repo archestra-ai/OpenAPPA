@@ -6,6 +6,8 @@ set -eu
 cd "$(dirname "$0")"
 
 ARMS=none,rules,optimal,sticky,sticky-intent,appa-q
+# none-q (the triage sub-agent without APPA) is a utility control, so it runs on triage only.
+TRIAGE_ARMS=$ARMS,none-q
 MAX_CONCURRENCY=${MAX_CONCURRENCY:-16}
 OUT=${OUT:-runs}
 REPLAYS=${REPLAYS:-3}
@@ -20,7 +22,7 @@ replay() {
     tag=${entry#*=}
     uv run appa-aicomp run --model "$model" --sets corpus,washout --arms "$ARMS" --max-concurrency "$MAX_CONCURRENCY" --out "$dir/corpus-$tag" > "$dir/corpus-$tag.log" 2>&1 &
     pids="$pids $!"
-    uv run appa-aicomp run --model "$model" --sets triage-all --arms "$ARMS" --max-concurrency "$MAX_CONCURRENCY" --out "$dir/triage-$tag" > "$dir/triage-$tag.log" 2>&1 &
+    uv run appa-aicomp run --model "$model" --sets triage-all --arms "$TRIAGE_ARMS" --max-concurrency "$MAX_CONCURRENCY" --out "$dir/triage-$tag" > "$dir/triage-$tag.log" 2>&1 &
     pids="$pids $!"
   done
 

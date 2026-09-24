@@ -8,7 +8,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-ARMS = ("none", "rules", "optimal", "sticky", "sticky-intent", "appa-q")
+ARMS = ("none", "none-q", "rules", "optimal", "sticky", "sticky-intent", "appa-q")
 ATTACK_CHANNELS = ("indirect", "mixed", "washout", "direct")
 UTILITY_CHANNELS = ("utility", "utility-malicious", "utility-ambiguous")
 

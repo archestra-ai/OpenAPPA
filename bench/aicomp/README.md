@@ -15,7 +15,7 @@ echo "OPENROUTER_API_KEY=..." > .env
 
 `uv` builds the `appa-agent-python` binding from `../../appa-agent-python`, so a
 Rust toolchain is needed. The script replays both workloads on four models and
-six defenses three times (`REPLAYS`), writes one `rows.jsonl` per run under
+seven arms three times (`REPLAYS`), writes one `rows.jsonl` per run under
 `runs/r<n>/`, and prints the tables pooled over the replays. Runs that end in a
 harness or API error are left out of every rate, and the tables then exit
 non-zero. Every row keeps the full trajectory and each APPA decision. Each run
@@ -44,6 +44,7 @@ user turns are not yet sent to OpenAPPA.
 | arm | defense |
 |---|---|
 | `none` | the agent alone |
+| `none-q` | the agent with the same `triage_email` sub-agent as `appa-q`, unchecked: its answer reaches the agent as written. A utility control, run on triage only |
 | `rules` | the organizers' baseline guardrail, `aicomp_sdk.attacks.baselines.guardrail_rules` |
 | `optimal` | the organizers' public-leaderboard guardrail, `aicomp_sdk.guardrails.optimal` |
 | `sticky` | the private-leaderboard guardrail as the winning write-ups reconstruct it: persistent provenance plus a full-payload secret scan (`sticky.py`) |

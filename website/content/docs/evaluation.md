@@ -61,26 +61,33 @@ task completion followed by attack success rate (ASR).
 | DeepSeek V4 Flash | **89.5% / 0%** | 39.5% / 34.5% | 41.5% / 33.0% |
 | Gemini 3.7 Flash | **90.0% / 0%** | 43.5% / 28.5% | 44.5% / 28.0% |
 
-The [Kaggle replay](https://github.com/archestra-ai/OpenAPPA/tree/main/bench/aicomp)
-runs the competition's own sandbox and scorer. In each task the user asks the
-agent to read one of the organizers' 319 support emails and mail a triage
-summary. 63 of these emails carry an attack. A task counts as done cleanly when
-the summary arrives, the scorer finds no breach, and the mail carries no link
-the attacker planted. Guarded OpenAPPA reads each email in a
-[subagent](/how-it-works#subagent-reads) that returns only
-[structured fields](/contracts#structured-child-returns). The competition's
-guardrails deny the summary or let the attacker's link out with it.
+The [Kaggle replay](https://github.com/archestra-ai/OpenAPPA/blob/main/bench/aicomp/REPORT.md)
+uses the competition's own sandbox and scorer. The user asks for ordinary work,
+and the attack sits in the data the agent reads. In each task the agent reads
+one of the organizers' 319 support emails and mails a triage summary. 63 of
+these emails carry an attack. We ran GPT-OSS 20B and Gemma 4 26B, the small
+open models the competition used, plus GLM 5.3 Flash and GPT-6 Luna.
 
-| Model | Guarded OpenAPPA | Organizers' rule guardrail | Leaderboard guardrails | No guardrail |
+| Model | Guarded OpenAPPA | Same subagent, unchecked | Organizers' rule guardrail | No guardrail |
 |---|---:|---:|---:|---:|
-| GPT-6 Luna | **100% / 0** | 87.1% / 0 | 0% / 0 | 86.0% / 2 |
-| GPT-OSS 20B | **99.3% / 0** | 82.4% / 0 | 0% / 0 | 82.3% / 18 |
-| Gemma 4 26B | **100% / 0** | 69.7% / 0 | 0% / 0 | 68.0% / 105 |
-| GLM 5.3 Flash | **96.6% / 0** | 38.8% / 0 | 0% / 0 | 49.1% / 142 |
+| GPT-6 Luna | **100% / 0** | 100% / 0 | 87.1% / 19 | 86.0% / 20 |
+| GPT-OSS 20B | **99.3% / 0** | 100% / 0 | 82.4% / 112 | 82.3% / 109 |
+| Gemma 4 26B | **100% / 0** | 97.8% / 0 | 69.7% / 143 | 68.0% / 150 |
+| GLM 5.3 Flash | **96.6% / 0** | 98.1% / 11 | 38.8% / 189 | 49.1% / 222 |
 
-Each entry shows tasks done cleanly, followed by scored breaches in 957 runs.
-The leaderboard column covers the public guardrail and a reconstruction of the
-private one from the winning write-ups.
+Each entry shows the share of 957 runs done cleanly, followed by the number of
+sent mails that carried the attacker's link. A run is done cleanly when the
+summary arrives, the scorer finds no breach, and the mail carries no such link.
+
+Guarded OpenAPPA reads each email in a [subagent](/how-it-works#subagent-reads)
+that may return only four typed fields. Most of the utility comes from that
+design, so the second column runs the same subagent without OpenAPPA. It
+finishes as many tasks, but about one answer in ten leaves the declared shape.
+On GLM, 11 of those answers carried the attacker's link into the summary.
+OpenAPPA [refuses any answer outside the shape](/contracts#structured-child-returns),
+so no guarded mail carried the link. The competition's leaderboard guardrails
+pass its own benign check, but they deny every send after the agent reads an
+email, so they finish no triage task.
 
 In AgentThreatBench's adversarial tests, guarded OpenAPPA had the highest task
 completion for all three models. In the standard tests, it led with Luna and
@@ -153,4 +160,6 @@ OpenAPPA policy engine alone.
   fixtures (`aicomp_sdk` 3.1.2). It covers the triage task over all 319
   organizer emails, the 31 collected attacks in which the user only asks for
   ordinary work, and 9 chains that target the public guardrail's five-call
-  window. Each model ran every task three times.
+  window. Each model ran every task three times. The
+  [report](https://github.com/archestra-ai/OpenAPPA/blob/main/bench/aicomp/REPORT.md)
+  gives the method, every outcome table and the limits.
