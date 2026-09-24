@@ -4,11 +4,11 @@
 //! annotation: `delta.audience`, `delta.trust`, `requires.audience` and `requires.trust`. It
 //! never answers an effect, a `history` entry or an attention mark.
 //!
-//! The call's name, description and arguments leave for the TypeSafe API. Known secret
-//! shapes and the values of fields named for a secret are redacted and long text is cut
-//! first. An unsure label moves to its safer neighbour
-//! instead of refusing the call: the narrower result audience, the lower trust rank, the
-//! wider required audience. A label the mandate does not admit, a consult that is not a
+//! The call's name, description and arguments leave for the TypeSafe API. Redaction first
+//! is best effort: well-known token and key shapes, private-key blocks, `Authorization`
+//! header values, and the values of fields named for a secret; long text is then cut. An
+//! unsure label moves to its safer neighbour instead of refusing the call: the narrower
+//! result audience, the lower trust rank, the wider required audience. A label the mandate does not admit, a consult that is not a
 //! complete call, and every provider failure are no answer.
 //!
 //! A new connection to the API lands on a slow backend often enough to matter, and stays
@@ -121,7 +121,12 @@ impl JevBackend {
             jev_diagnostics: JevDiagnostics {
                 version: DIAGNOSTICS_VERSION,
                 model: MODEL,
-                attempts: &exchange.attempts,
+                // `ask` settles every attempt it launches before it returns.
+                attempts: exchange
+                    .attempts
+                    .iter()
+                    .map(|outcome| outcome.unwrap_or(AttemptOutcome::Timeout))
+                    .collect(),
                 labels: &exchange.trace,
                 error: answered.as_ref().err().map(|(failure, _)| *failure),
                 elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -130,8 +135,8 @@ impl JevBackend {
         let diagnostics = serde_json::to_vec(&diagnostics).expect("the diagnostics serialize: strings and numbers");
         tracing::debug!(diagnostics = %String::from_utf8_lossy(&diagnostics), "jev consult");
         let record = JevRecord {
-            raw_response: exchange.last.as_ref().map(|(_, body)| body.clone()),
-            http_status: exchange.last.and_then(|(status, _)| status),
+            http_status: exchange.last.as_ref().map(|(status, _)| *status),
+            raw_response: exchange.last.map(|(_, body)| body),
             diagnostics,
         };
         (answered.map_err(|(_, reason)| reason), record)
@@ -231,17 +236,17 @@ impl JevBackend {
                     let failed = match reply {
                         Reply::Labels { labels, trace, status, body } => {
                             exchange.trace = trace;
-                            exchange.last = Some((Some(status), body));
+                            exchange.last = Some((status, body));
                             prompt = (!slow).then(|| Arc::clone(slot));
                             break Ok(labels);
                         }
                         Reply::Invalid { trace, status, body, reason } => {
                             exchange.trace = trace;
-                            exchange.last = Some((Some(status), body));
+                            exchange.last = Some((status, body));
                             break Err((JevFailure::InvalidResponse, reason));
                         }
                         Reply::Status { status, body } => {
-                            exchange.last = Some((Some(status), body));
+                            exchange.last = Some((status, body));
                             let reason = NoAnswerReason::NonSuccess { status, detail: None };
                             if status < 500 {
                                 break Err((JevFailure::NoAnswer, reason));
@@ -344,7 +349,7 @@ struct Exchange {
     attempts: Vec<Option<AttemptOutcome>>,
     trace: LabelTrace,
     /// The status and body of the last attempt that got a response.
-    last: Option<(Option<u16>, Vec<u8>)>,
+    last: Option<(u16, Vec<u8>)>,
 }
 
 struct Attempted {
@@ -434,7 +439,7 @@ struct DiagnosticsLine<'a> {
 struct JevDiagnostics<'a> {
     version: u32,
     model: &'static str,
-    attempts: &'a [Option<AttemptOutcome>],
+    attempts: Vec<AttemptOutcome>,
     labels: &'a LabelTrace,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<JevFailure>,
@@ -477,15 +482,19 @@ impl<'a> State<'a> {
 }
 
 /// The known secret shapes, in the order they are redacted, with their replacements.
-static SECRET_PATTERNS: std::sync::LazyLock<[(regex::Regex, &str); 8]> = std::sync::LazyLock::new(|| {
+static SECRET_PATTERNS: std::sync::LazyLock<[(regex::Regex, &str); 9]> = std::sync::LazyLock::new(|| {
     let pattern = |source: &str| regex::Regex::new(source).expect("the secret patterns compile");
     [
+        (
+            pattern(r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----"),
+            "<REDACTED_PRIVATE_KEY>",
+        ),
         (pattern(r"sk-[A-Za-z0-9_\-]{16,}"), "<REDACTED_KEY>"),
         (pattern(r"gh[pousr]_[A-Za-z0-9]{16,}"), "<REDACTED_KEY>"),
         (pattern(r"xox[baprs]-[A-Za-z0-9\-]{10,}"), "<REDACTED_KEY>"),
         (pattern(r"AKIA[0-9A-Z]{16}"), "<REDACTED_KEY>"),
         (
-            pattern(r"(?i)(authorization:\s*bearer\s+)[A-Za-z0-9._\-]{12,}"),
+            pattern(r#"(?i)(authorization:\s*(?:bearer|basic)\s+)[^\s"'`]+"#),
             "${1}<REDACTED_KEY>",
         ),
         (
@@ -500,9 +509,12 @@ static SECRET_PATTERNS: std::sync::LazyLock<[(regex::Regex, &str); 8]> = std::sy
     ]
 });
 
-/// A field whose name contains one of these words holds a secret, whatever its value.
+/// A field whose name contains one of these words, or is `auth`, holds a secret, whatever
+/// its value.
 static SECRET_FIELD: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r"(?i)api[_-]?key|secret|token|password|authorization|cookie|credential|private[_-]?key")
+    regex::Regex::new(
+        r"(?i)api[_-]?key|secret|token|password|passwd|passphrase|authorization|cookie|credential|private[_-]?key|access[_-]?key|^auth$",
+    )
         .expect("the secret field pattern compiles")
 });
 
@@ -1308,6 +1320,18 @@ mod tests {
             ("mytoken=abcdefghijklmnop", "mytoken=abcdefghijklmnop"),
             ("secret: short", "secret: short"),
             ("Bearer abc", "Bearer <REDACTED_KEY>"),
+            (
+                "curl -H 'Authorization: Basic dXNlcjpwYXNz' https://example.org",
+                "curl -H 'Authorization: Basic <REDACTED_KEY>' https://example.org",
+            ),
+            (
+                "key: -----BEGIN RSA PRIVATE KEY-----\nMIIEow\nIBAAK==\n-----END RSA PRIVATE KEY----- done",
+                "key: <REDACTED_PRIVATE_KEY> done",
+            ),
+            (
+                "-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----",
+                "<REDACTED_PRIVATE_KEY>",
+            ),
             ("basic dXNlcjpwYXNz", "basic <REDACTED_KEY>"),
             ("use Bearer tokens", "use Bearer tokens"),
             (
@@ -1332,6 +1356,12 @@ mod tests {
                 "headers": {"Authorization": "Bearer abc", "X-Forward": "Basic dXNlcjpwYXNz", "Accept": "*/*"},
                 "hosts": [{"name": "db", "Client-Secret": {"v": "s"}}, {"sessionCookie": "c", "port": 5432}],
                 "user": "me",
+                "db_passwd": "p",
+                "passphrase": "p",
+                "AWS_ACCESS_KEY": "k",
+                "Auth": "a",
+                "author": "Ada",
+                "oauth_scope": "read",
             })),
             json!({
                 "password": "<REDACTED>",
@@ -1339,6 +1369,12 @@ mod tests {
                 "headers": {"Authorization": "<REDACTED>", "X-Forward": "Basic <REDACTED_KEY>", "Accept": "*/*"},
                 "hosts": [{"name": "db", "Client-Secret": "<REDACTED>"}, {"sessionCookie": "<REDACTED>", "port": 5432}],
                 "user": "me",
+                "db_passwd": "<REDACTED>",
+                "passphrase": "<REDACTED>",
+                "AWS_ACCESS_KEY": "<REDACTED>",
+                "Auth": "<REDACTED>",
+                "author": "Ada",
+                "oauth_scope": "read",
             })
         );
     }
