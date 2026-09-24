@@ -264,6 +264,22 @@ else
   report FAIL upgrade-replaces-previous
 fi
 
+# A directory where the binary belongs would swallow the rename: mv would move
+# the new binary inside it and report success.
+directory_dir=$(case_dir target-is-directory)
+mkdir -p "$directory_dir/appa"
+if env APPA_REPOSITORY_URL="$origin/good" APPA_INSTALL_DIR="$directory_dir" \
+  sh "$installer" >"$work/directory.out" 2>"$work/directory.err"; then
+  report FAIL "target-is-directory (installer succeeded)"
+elif ! grep -q '^appa-install: ' "$work/directory.err"; then
+  cat "$work/directory.err" >&2
+  report FAIL "target-is-directory (no installer error message)"
+elif [ ! -d "$directory_dir/appa" ] || [ -n "$(ls -A "$directory_dir/appa")" ]; then
+  report FAIL "target-is-directory (the directory was changed)"
+else
+  report PASS target-is-directory
+fi
+
 # On PATH, the installer points at the bare command rather than the full path.
 path_dir=$(case_dir on-path-hint)
 if env APPA_REPOSITORY_URL="$origin/good" APPA_INSTALL_DIR="$path_dir" \

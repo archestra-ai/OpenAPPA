@@ -62,6 +62,9 @@ case $install_dir in
   /*) ;;
   *) fail "APPA_INSTALL_DIR must be an absolute path" ;;
 esac
+# mv would move the new binary inside a directory at the target and succeed.
+[ ! -d "$install_dir/appa" ] ||
+  fail "$install_dir/appa is a directory; move it aside and rerun"
 
 if [ -n "${APPA_VERSION:-}" ]; then
   tag=$APPA_VERSION
