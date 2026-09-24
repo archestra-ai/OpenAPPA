@@ -551,6 +551,12 @@ pub enum HookDecision {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OfferedRemedy {
     pub id: String,
+    /// The plan accepts a narrowing: the trajectory's label narrows to
+    /// what the call's inputs carry, and the call runs under it.
+    pub narrowing: bool,
+    /// The authorities the plan consults, in plan order; empty for a plan
+    /// that needs no one's approval.
+    pub authorities: Vec<String>,
     pub returns: Option<OfferedReturn>,
     /// Input sanitizer that rewrites call arguments before re-proposing the tool.
     pub input_sanitizer: Option<OfferedInputSanitizer>,

@@ -102,7 +102,7 @@ def test_an_unshaped_child_stands_on_the_parents_floor(session: Session):
 
     refused = decision(child.check("read_ticket", {"id": "T-42"}))
     assert refused["kind"] == "blocked"
-    assert 'offer_id: "' not in refused["feedback"], refused["feedback"]
+    assert not any(offer["narrowing"] for offer in refused["offers"]), refused
 
     assert decision(child.finish("The ticket is unread."))["kind"] == "returned"
 

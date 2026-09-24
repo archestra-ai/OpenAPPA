@@ -52,7 +52,7 @@ use appa_engine::fact::{
 use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, Label, ReaderId, SymbolicAtom, Trust};
 use appa_engine::names::MarkName;
 use appa_engine::plan::{
-    ExecutableRemedyPlan, FloorStanding, ForkAdvice, PlanId, PlannedBlock, RemedyPlan, RequiredRuling,
+    ExecutableRemedyPlan, FloorStanding, ForkAdvice, PlanId, PlannedBlock, RemedyPlan, RemedyStep, RequiredRuling,
 };
 use appa_engine::profile::PolicyFileKey as EnginePolicyFileKey;
 use appa_engine::projection::Views;
@@ -1481,6 +1481,19 @@ impl RuntimeEngine {
                 });
                 OfferedRemedy {
                     id: offer.0,
+                    narrowing: plan.is_some_and(|plan| plan.narrowing().is_some()),
+                    authorities: plan.map_or_else(Vec::new, |plan| {
+                        plan.steps
+                            .iter()
+                            .filter_map(|step| match step {
+                                RemedyStep::Authorize(name) => Some(name.as_str().to_string()),
+                                RemedyStep::Accept(_)
+                                | RemedyStep::Sanitize(_)
+                                | RemedyStep::Derive(_)
+                                | RemedyStep::Return(_) => None,
+                            })
+                            .collect()
+                    }),
                     returns,
                     input_sanitizer,
                 }
@@ -2011,6 +2024,8 @@ impl RuntimeEngine {
                 .into_iter()
                 .map(|offer| OfferedRemedy {
                     id: offer.0,
+                    narrowing: false,
+                    authorities: Vec::new(),
                     returns: None,
                     input_sanitizer: None,
                 })

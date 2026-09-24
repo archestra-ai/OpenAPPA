@@ -33,6 +33,7 @@ create_exception!(appa_agent_python, AppaError, PyRuntimeError);
 enum DispatchResponse {
     Blocked {
         feedback: String,
+        offers: Vec<OfferView>,
     },
     Delivered {
         content: String,
@@ -50,6 +51,7 @@ enum DispatchResponse {
 enum CheckResponse {
     Blocked {
         feedback: String,
+        offers: Vec<OfferView>,
     },
     Allowed {
         dispatched_tool: String,
@@ -62,6 +64,51 @@ enum CheckResponse {
     Control {
         reply: String,
     },
+}
+
+/// One remedy a block offers, as a harness that routes offers itself reads
+/// it: `narrowing` for a plan that accepts the narrowing the call causes,
+/// `authorities` for the ones the plan consults, in plan order.
+#[derive(Serialize)]
+struct OfferView {
+    offer_id: String,
+    narrowing: bool,
+    authorities: Vec<String>,
+    input_sanitizer: Option<String>,
+    returns: Option<ReturnView>,
+}
+
+impl OfferView {
+    fn of(offers: Vec<OfferedRemedy>) -> Vec<Self> {
+        offers
+            .into_iter()
+            .map(|offer| OfferView {
+                offer_id: offer.id,
+                narrowing: offer.narrowing,
+                authorities: offer.authorities,
+                input_sanitizer: offer.input_sanitizer.map(|sanitizer| sanitizer.name),
+                returns: offer.returns.map(|returns| match returns {
+                    OfferedReturn::AsSpoken => ReturnView::AsSpoken(AsSpoken::AsSpoken),
+                    OfferedReturn::Sanitized { sanitizer } => ReturnView::Sanitized { sanitizer },
+                }),
+            })
+            .collect()
+    }
+}
+
+/// How a declared child return crosses: `"as_spoken"`, or
+/// `{"sanitizer": name}`.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ReturnView {
+    AsSpoken(AsSpoken),
+    Sanitized { sanitizer: String },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AsSpoken {
+    AsSpoken,
 }
 
 /// The answer to a spawn proposal that also opened the child.
@@ -378,6 +425,19 @@ impl SessionInner {
         }
     }
 
+    /// Report a later user turn on the root trajectory, as the session's
+    /// opening prompt is reported.
+    fn prompt(&self, text: &str) -> Result<(), String> {
+        if self.closed {
+            return Err("the session is closed".to_string());
+        }
+        self.event(HookEvent::Prompt {
+            actor: self.actor(None),
+            text: text.to_string(),
+        })?;
+        Ok(())
+    }
+
     fn execute_remedy(&self, child: Option<&TrajectoryId>, call: &ProposedCall) -> String {
         let Ok((offer, arguments)) = appa_runtime::api::parse_control_arguments(call.arguments.get()) else {
             return format!(
@@ -409,7 +469,10 @@ impl SessionInner {
         call_id: Option<&str>,
     ) -> Result<String, String> {
         encode(match self.decide(child, tool, arguments_json, spawn, call_id)? {
-            Decision::Blocked { feedback, .. } => CheckResponse::Blocked { feedback },
+            Decision::Blocked { feedback, offers } => CheckResponse::Blocked {
+                feedback,
+                offers: OfferView::of(offers),
+            },
             Decision::Control { reply } => CheckResponse::Control { reply },
             Decision::Allowed { call, binding } => CheckResponse::Allowed {
                 dispatched_tool: call.tool.clone(),
@@ -424,7 +487,10 @@ impl SessionInner {
             return Err("dispatch requires a bridge URL; use check and report for framework-owned tools".to_string());
         };
         match self.decide(None, tool, arguments_json, false, None)? {
-            Decision::Blocked { feedback, .. } => encode(DispatchResponse::Blocked { feedback }),
+            Decision::Blocked { feedback, offers } => encode(DispatchResponse::Blocked {
+                feedback,
+                offers: OfferView::of(offers),
+            }),
             Decision::Control { reply } => encode(DispatchResponse::Control { reply }),
             Decision::Allowed { call, .. } => {
                 let outcome = self
@@ -1066,6 +1132,12 @@ impl Session {
         py.detach(|| with(&self.inner, |inner| inner.report(None, content, error, call_id)))
     }
 
+    /// Report a user turn after the opening one, so the trajectory records
+    /// every prompt the agent received.
+    fn prompt(&self, py: Python<'_>, text: &str) -> PyResult<()> {
+        py.detach(|| with(&self.inner, |inner| inner.prompt(text)))
+    }
+
     #[pyo3(signature = (call_id=None))]
     fn abandon(&self, py: Python<'_>, call_id: Option<&str>) -> PyResult<()> {
         py.detach(|| with(&self.inner, |inner| inner.abandon(None, call_id)))
@@ -1266,18 +1338,19 @@ delta    = {}
             .to_string()
     }
 
+    /// The block's one narrowing offer that consults no authority.
     fn offer_id(blocked: &str) -> String {
-        let feedback = serde_json::from_str::<serde_json::Value>(blocked).expect("a JSON response")["feedback"]
+        let response = serde_json::from_str::<serde_json::Value>(blocked).expect("a JSON response");
+        let offers = response["offers"].as_array().expect("a block lists its offers");
+        let narrowing: Vec<_> = offers
+            .iter()
+            .filter(|offer| offer["narrowing"] == true && offer["authorities"] == serde_json::json!([]))
+            .collect();
+        assert_eq!(narrowing.len(), 1, "one unattended narrowing offer: {blocked}");
+        narrowing[0]["offer_id"]
             .as_str()
-            .expect("a block carries feedback")
-            .to_string();
-        let after = feedback
-            .split("offer_id:")
-            .nth(1)
-            .expect("blocking feedback surfaces an offer");
-        let rest = after.trim_start().strip_prefix('"').expect("the offer id is quoted");
-        let end = rest.find('"').expect("the offer id closes its quote");
-        rest[..end].to_string()
+            .expect("an offer names its id")
+            .to_string()
     }
 
     #[test]
@@ -1304,6 +1377,14 @@ delta    = {}
             kind(&session.root_check("publish", r#"{"text":"x"}"#).unwrap()),
             "blocked"
         );
+    }
+
+    #[test]
+    fn a_later_user_turn_is_reported_until_the_session_closes() {
+        let mut session = session(None);
+        session.prompt("and one more thing").unwrap();
+        session.close().unwrap();
+        assert!(session.prompt("too late").is_err(), "a closed session takes no prompt");
     }
 
     #[test]

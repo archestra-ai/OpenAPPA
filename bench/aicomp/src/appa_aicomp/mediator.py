@@ -8,7 +8,6 @@ delivered content; a tool error reaches the model as the SDK reported it. Every 
 
 import json
 import logging
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -24,8 +23,6 @@ from aicomp_sdk.hooks import HookContext, HookRegistry, HookResult, HookStage
 
 logger = logging.getLogger(__name__)
 
-# The engine's wording for a remedy that only narrows this trajectory's label.
-NARROWING_OFFER = re.compile(r'Accept this change for the rest of this session:\s*\n\s*execute_remedy_plan\(offer_id: "([0-9a-f]+)"\)')
 REMEDY_TOOL = "execute_remedy_plan"
 
 
@@ -50,6 +47,15 @@ class Decision:
     feedback: str | None = None
 
 
+def narrowing_offer(offers: list[dict[str, Any]]) -> str | None:
+    """The first offer that only narrows this trajectory's label: no authority, no sanitizer."""
+    for offer in offers:
+        match offer:
+            case {"offer_id": str(offer_id), "narrowing": True, "authorities": [], "input_sanitizer": None, "returns": None}:
+                return offer_id
+    return None
+
+
 class Checker(Protocol):
     """`Session` and `ChildSession` share this surface."""
 
@@ -63,11 +69,11 @@ def resolve(checker: Checker, tool: str, arguments: dict[str, object], accept_na
     match json.loads(checker.check(tool, json.dumps(arguments))):
         case {"kind": "allowed"}:
             return Verdict.ALLOWED, None
-        case {"kind": "blocked", "feedback": str(feedback)}:
-            offer = NARROWING_OFFER.search(feedback)
+        case {"kind": "blocked", "feedback": str(feedback), "offers": list(offers)}:
+            offer = narrowing_offer(offers)
             if not (accept_narrowing and offer):
                 return Verdict.BLOCKED, feedback
-            match json.loads(checker.check(REMEDY_TOOL, json.dumps({"offer_id": offer.group(1)}))):
+            match json.loads(checker.check(REMEDY_TOOL, json.dumps({"offer_id": offer}))):
                 case {"kind": "control"}:
                     pass
                 case other:
@@ -121,9 +127,12 @@ class AppaMediator:
         self.session = None
 
     def _on_user_message(self, ctx: HookContext) -> HookResult:
-        # The binding takes only the opening prompt; later user turns are not
-        # reported to APPA and are missing from its audit trail.
+        text = ctx.context["user_message"]
         if self.session is not None:
+            try:
+                self.session.prompt(text)
+            except Exception:
+                logger.exception("reporting a user turn to APPA failed")
             return HookResult()
         try:
             schemas = [
@@ -131,7 +140,7 @@ class AppaMediator:
                 for spec in self.tools
             ]
             self.session = appa_agent_python.Session(
-                self.policy, json.dumps(schemas), ctx.context["user_message"], spawn_tool=self.spawn_tool
+                self.policy, json.dumps(schemas), text, spawn_tool=self.spawn_tool
             )
         except Exception:
             # SDK hooks swallow exceptions; with no session every call is denied as a fault.
