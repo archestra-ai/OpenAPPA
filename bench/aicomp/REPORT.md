@@ -151,7 +151,7 @@ not checked.
 | `appa-q` | 3,810 / 3,812 |
 | `none-q` | 3,770 / 3,799 |
 | `rules` | 3,124 / 3,124 |
-| `sticky-intent` | 3,080 / 3,081 |
+| `sticky-intent` | 3,079 / 3,081 |
 | `none` | 3,406 / 3,409 |
 
 Most of `none-q`'s misses are Gemma (915 of 941), where the unchecked subagent
