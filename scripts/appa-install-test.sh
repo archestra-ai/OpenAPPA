@@ -237,8 +237,13 @@ upgrade_dir=$(case_dir upgrade-preserves-previous)
 mkdir -p "$upgrade_dir"
 printf '#!/bin/sh\necho "appa 0.0.0-previous"\n' > "$upgrade_dir/appa"
 chmod 755 "$upgrade_dir/appa"
-replace_host_archive "$work/corrupt.tar.gz"
+# The release is good; only the final rename fails, after the new binary is
+# already staged beside the old one.
+mkdir "$work/failing-mv"
+printf '#!/bin/sh\nexit 1\n' > "$work/failing-mv/mv"
+chmod 755 "$work/failing-mv/mv"
 if env APPA_REPOSITORY_URL="$origin/good" APPA_INSTALL_DIR="$upgrade_dir" \
+  PATH="$work/failing-mv:$PATH" \
   sh "$installer" >"$work/upgrade.out" 2>"$work/upgrade.err"; then
   report FAIL "upgrade-preserves-previous (installer succeeded)"
 elif [ "$("$upgrade_dir/appa" --version)" != "appa 0.0.0-previous" ]; then
@@ -248,7 +253,6 @@ elif [ -n "$(find "$upgrade_dir" -name 'appa.*.new' 2>/dev/null)" ]; then
 else
   report PASS upgrade-preserves-previous
 fi
-restore_host_archive
 
 # ...and a later good release replaces it.
 if env APPA_REPOSITORY_URL="$origin/good" APPA_INSTALL_DIR="$upgrade_dir" \
