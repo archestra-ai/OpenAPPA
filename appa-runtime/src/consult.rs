@@ -778,9 +778,15 @@ impl ModelPrompt {
     /// reach here.
     pub fn new(consult: &Consult) -> Option<ModelPrompt> {
         let (preamble, schema) = match &consult.body {
-            ConsultBody::Authority { .. } => (AUTHORITY_PREAMBLE, authority_schema()),
-            ConsultBody::Sanitizer { .. } => (SANITIZER_PREAMBLE, sanitizer_schema()),
-            ConsultBody::Annotation { declaration, .. } => (ANNOTATION_PREAMBLE, annotation_schema(declaration)),
+            ConsultBody::Authority { .. } => (AUTHORITY_PREAMBLE.to_string(), authority_schema()),
+            ConsultBody::Sanitizer { .. } => (SANITIZER_PREAMBLE.to_string(), sanitizer_schema()),
+            ConsultBody::Annotation { declaration, .. } => (
+                match crate::label_guide::for_model(declaration) {
+                    Some(guide) => format!("{ANNOTATION_PREAMBLE}\n\n{guide}"),
+                    None => ANNOTATION_PREAMBLE.to_string(),
+                },
+                annotation_schema(declaration),
+            ),
             ConsultBody::AudienceSource { .. } | ConsultBody::Input { .. } => return None,
         };
         let declaration = consult.declaration_json();

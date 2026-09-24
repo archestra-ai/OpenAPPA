@@ -202,8 +202,9 @@ builtin = "redact-secrets"
 
 # The default model Annotator generates every other command's complete contract
 # before dispatch: its output label, required trust, review marks, and effects.
-# How it classifies — trust by who wrote the returned text, audience by the
-# visible destination — is the runtime's, the same for every model Annotator.
+# How it classifies — the runtime's label guide: trust by who wrote the
+# returned text, audience by the visible destination, with worked examples —
+# is the same for every model Annotator.
 # A `hint` carries what only this deployment knows: which hosts are its own,
 # which paths hold whose data. To add one without modifying this battery,
 # declare an Annotator with the same name in the root config. `audiences` is
