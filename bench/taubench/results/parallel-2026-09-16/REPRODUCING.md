@@ -13,10 +13,14 @@ The original guarded run exceeded 10 GiB of memory at peak. A smaller machine ca
 
 ## 1. Install the pinned environment
 
-From the repository root:
+Create a clean worktree at the recorded producer commit. Do not run the experiment from the current default branch because later implementation changes produce a different identity.
+
+From an OpenAPPA repository root:
 
 ```sh
-cd bench/taubench
+git worktree add ../OpenAPPA-taubench-parallel \
+  e6ed6ba5a66cff0c6ebc9883425df06f98ee6ce2
+cd ../OpenAPPA-taubench-parallel/bench/taubench
 
 npm install -g @anthropic-ai/sandbox-runtime@0.0.23
 
@@ -153,4 +157,6 @@ The generated summary requires identical task, trial, and seed identities across
 
 ## Evidence boundary
 
-The committed summaries and configurations identify and rerun the experiment. The original complete evidence bundle contains trajectories, audits, retry logs, and snapshots. [`archive-index.json`](archive-index.json) identifies it, but the bundle remains local and unpublished. It is not required for replication. A new run produces its own `results.json`, `appa-audit/`, `evaluator-audit/`, `run-config.json`, and `run-summary.json`.
+The original evidence bundle is not required for replication. The committed summaries and configurations identify the experiment and reproduce its setup. A new run produces its own `results.json`, `appa-audit/`, `evaluator-audit/`, `run-config.json`, and `run-summary.json`.
+
+The original bundle retains the trajectories, audits, retry logs, and snapshots for independent review. [`archive-index.json`](archive-index.json) records its private GCP location and checksum. Authenticated project contributors can retrieve it with the commands in [`README.md`](README.md).
