@@ -3,16 +3,16 @@ title: Archestra
 nav_title: Archestra
 category: Works with
 order: 5
-description: Deliver OpenAPPA to every developer machine through the Archestra platform.
+description: Run OpenAPPA at the LLM proxy level with the Archestra platform.
 ---
 
-[Archestra](https://archestra.ai) is an open source enterprise platform for AI agents: an LLM proxy, an MCP gateway, and skills catalog.
+[Archestra](https://archestra.ai) is an open-source enterprise platform for AI agents: an LLM proxy, an MCP gateway, and a skills catalog.
 
 :::sponsor-note:::
 
 ## How it works
 
-Archestra implements OpenAPPA at the LLM proxy level. Every agent that talks to a model through the proxy is covered by the same policy, whether it runs in a coding CLI, a SaaS app, or a service in production, and no per-agent integration work is needed. 
+Archestra implements OpenAPPA at the LLM proxy level. Every agent that talks to a model through the proxy is covered by the same policy, whether it runs in a coding CLI, a SaaS app, or a service in production, and no per-agent integration work is needed.
 
 That makes Archestra a starting point for securing agents with OpenAPPA across an enterprise at scale and at low cost.
 

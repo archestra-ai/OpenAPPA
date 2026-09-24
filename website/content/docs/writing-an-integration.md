@@ -8,9 +8,9 @@ description: Connect an agent harness to OpenAPPA, map its lifecycle to the runt
 
 An **integration** connects an agent harness (such as Claude Code, kagent, or a custom agent loop) to OpenAPPA. It intercepts the agent at key lifecycle points, submits proposed actions to OpenAPPA, and enforces the engine's policy decision before execution proceeds.
 
-Follow [Add an Integration](#add-an-integration) to wire your harness hooks, or see [Runtime Overview](#runtime-overview) for architecture details.
+Follow [Add an integration](#add-an-integration) to wire your harness hooks, or see [Runtime overview](#runtime-overview) for architecture details.
 
-## Runtime Overview
+## Runtime overview
 
 A host reaches the runtime through an adapter, which speaks one hook protocol: a versioned wire envelope posted to `/hook`. Claude Code and kagent are the initial adapters.
 
@@ -29,15 +29,15 @@ By default, `appa-runtime` listens on `http://127.0.0.1:8787` (`--listen`) and e
 - **`GET /binary-fingerprint`**: Deployment check. Returns the process ID, binary build digest, and config file path so CLI tools (such as `appa plugin install`) can verify process ownership.
 - **`GET /policy-key`**: Policy synchronization check. Returns the hash of the active in-memory policy to detect disk-policy changes.
 
-### Event Log
+### Event log
 
 To keep track of agent actions and enforce policies, OpenAPPA reconstructs each trajectory from an append-only event log. The log preserves state across turns: tool dispatches, child branches, authority decisions, and the initial policy.
 
 `appa-runtime` persists this log to a local SQLite database (`--db ./appa.db`). Use durable storage when trajectories must resume across runtime restarts.
 
-### Deployment Models
+### Deployment models
 
-`appa-runtime` works with any agent able to send lifecycle events over HTTP and wait for a decision before continuing—including background running agents or interactive chat agents. The integration contract remains identical across deployment models:
+`appa-runtime` works with any agent able to send lifecycle events over HTTP and wait for a decision before continuing, including agents that run in the background and interactive chat agents. The integration contract remains identical across deployment models:
 
 | Placement | Typical use |
 |---|---|
@@ -45,32 +45,32 @@ To keep track of agent actions and enforce policies, OpenAPPA reconstructs each 
 | **Shared internal service** | Gates multiple internal agents through a centralized runtime and shared policy configuration. |
 | **SaaS-managed service** | Protects user-facing agents directly inside your application infrastructure and private network. |
 
-See [Add an Integration](#add-an-integration) for the required events and decision handling.
+See [Add an integration](#add-an-integration) for the required events and decision handling.
 
-### Use Your Existing Security Controls
+### Use your existing security controls
 
 OpenAPPA can work with the approval processes, data-cleaning services, and company directories you already use. Connect them to OpenAPPA and define when the agent must use them:
 
 | What you already use | OpenAPPA component | How it works |
 |---|---|---|
 | **Human review & automated approval services** | [Authority](/contracts#authorities) | Ask a person, webhook, or LLM evaluator to approve or deny a specific action before the agent proceeds. |
-| **Data and Action Classification** | [Annotator](/contracts#annotators) | Use a scanner or classifier to determine who may see data, how much it can be trusted, or whether an action needs review. |
+| **Data and action classification** | [Annotator](/contracts#annotators) | Use a scanner or classifier to determine who may see data, how much it can be trusted, or whether an action needs review. |
 | **PII redactors & sanitizers** | [Sanitizer](/contracts#sanitizers) | Remove sensitive information before the agent receives data or shares it with another tool. |
-| **IAM Groups based access control** | [Audience sources](/contracts#configure-audience-membership) | Use membership from Google Workspace, Slack, or GitHub to check who is allowed to access data. |
+| **IAM group-based access control** | [Audience sources](/contracts#configure-audience-membership) | Use membership from Google Workspace, Slack, or GitHub to check who is allowed to access data. |
 
-See the [Policy configuration](/contracts) for configuration examples.
+See [Policy configuration](/contracts) for examples.
 
-## Why Add OpenAPPA?
+## Why add OpenAPPA?
 
-### Benefits for a SaaS Product
+### Benefits for a SaaS product
 
 OpenAPPA enforces policy independently of the LLM. If your product lets users connect custom MCP servers, you can let them control where their data may flow. If your product performs agentic work behind the scenes, OpenAPPA prevents the agent from sending that data to destinations the policy does not allow.
 
-### Benefits for an Enterprise Agent
+### Benefits for an enterprise agent
 
 OpenAPPA lets an enterprise apply centralized security policies across its fleet of agents. A policy defines where data may go, how it must be cleaned before it is sent, and who must approve sensitive actions.
 
-## Add an Integration
+## Add an integration
 
 OpenAPPA's integration surface centers on the [`POST /hook`](#endpoints) endpoint. The runtime handles five core lifecycle events for single-agent workflows, plus three optional events for child agents (subagents).
 
@@ -99,7 +99,7 @@ Connecting an agent harness requires two steps:
 > what you verified, and any required hook the harness cannot expose.
 > ```
 
-### Lifecycle Events
+### Lifecycle events
 
 Every integration maps harness lifecycle hooks to OpenAPPA's hook events. The harness posts each event as the hook protocol's wire envelope: one JSON object with `protocol: 1`, the `adapter` name, the `event`, and the fields that event needs. The runtime answers with a decision envelope of the same protocol.
 
@@ -137,7 +137,7 @@ If your agent framework supports child agents (subagents), handle these three ad
 
 Which calls start a child trajectory is part of the adapter's tool identification (Claude Code's `Agent`, a kagent agent called as a tool), never a claim on the wire. A delegating call the adapter does not recognize as a spawn releases no fork: the runtime then answers `refuse` to that `child_start`, and blocks the `child_end` that follows. If your agent framework does not support child agents, skip these three events.
 
-### Connect the Agent Hooks
+### Connect the agent hooks
 
 Integration hooks can live directly inside your agent or run as an external extension:
 
@@ -167,16 +167,16 @@ A host that embeds the runtime in its own process skips the wire altogether. It 
 
 Such a host can also let the root document say which batteries apply to it. `Config::hosted_included` takes the root text and a resolver: every entry of the document's `include` list reaches the resolver spelled as the host writes it, and the battery the host answers composes the way a `Config::hosted_composed` battery composes. The list is consumed, so the composed document the runtime stores carries no `include` and reopens through `Config::hosted`. A host that runs a battery's helpers declares in a `[credentials]` table which key of its own store holds each `APPA_PROVIDER_*` variable those helpers read. The runtime checks that the names are child credentials and that each value is a store key, then carries the table in the stored document and reads none of it: a hosted document runs no local command, so the host delivers the credential to the helper it runs, and `Config::credentials()` gives it the table back. The host's authorization over who may write that table is the boundary, as it is for `server_aliases`. Both the include list and the table are edited with `appa::config::edit`, which leaves the rest of the document as its author wrote it.
 
-A new host chooses one of these shapes: build the envelope in-process, as kagent does, translate a host's hook format in a client, as `appa hook` does, or embed the runtime. A served host needs an adapter crate the runtime is built with, because the runtime identifies every call through it; an embedding host defines its adapter beside the code that embeds. For a complete reference, see [`appa-adapter-claude-code`](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-claude-code) and [`appa-adapter-kagent`](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-kagent); the envelope and decision types are in [`appa-runtime-api`](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-runtime-api).
+A new host chooses one of these shapes: build the envelope in-process, as kagent does; translate a host's hook format in a client, as `appa hook` does; or embed the runtime. A served host needs an adapter crate the runtime is built with, because the runtime identifies every call through it; an embedding host defines its adapter beside the code that embeds. For a complete reference, see [`appa-adapter-claude-code`](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-claude-code) and [`appa-adapter-kagent`](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-kagent); the envelope and decision types are in [`appa-runtime-api`](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-runtime-api).
 
-### Reference Implementations
+### Reference implementations
 
 Use the shipped source on GitHub as a reference:
 
-- **Claude Code**: [Appa adapter](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-claude-code) and [hook client](https://github.com/archestra-ai/OpenAPPA/blob/main/appa-runtime/src/hook_client.rs).
-- **kagent**: [Appa adapter](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-kagent), [Python plugin](https://github.com/archestra-ai/OpenAPPA/tree/main/integrations/kagent/appa-kagent-adk), and [Go plugin](https://github.com/archestra-ai/OpenAPPA/tree/main/integrations/kagent/appa-kagent-adk-go).
+- **Claude Code**: [adapter crate](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-claude-code) and [hook client](https://github.com/archestra-ai/OpenAPPA/blob/main/appa-runtime/src/hook_client.rs).
+- **kagent**: [adapter crate](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-adapter-kagent), [Python plugin](https://github.com/archestra-ai/OpenAPPA/tree/main/integrations/kagent/appa-kagent-adk), and [Go plugin](https://github.com/archestra-ai/OpenAPPA/tree/main/integrations/kagent/appa-kagent-adk-go).
 
-### Smoke-Test Checklist
+### Smoke-test checklist
 
 Verify your integration against these core behaviors:
 

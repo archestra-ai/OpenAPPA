@@ -43,7 +43,7 @@ user skills directory, and installs `clappa`, a protected way to start Claude
 Code. Rerunning the install updates only OpenAPPA-managed files. Custom hooks,
 MCP servers, and skills are preserved. If the installer detects unmanaged `appa`
 entries, it halts to avoid overwriting your setup.
-It preserves an existing policy and custom statusline. It does not replace
+It preserves an existing policy and custom status line. It does not replace
 `claude` or change how ordinary sessions start.
 
 The install keeps a copy of every battery of its version beside the
@@ -74,7 +74,7 @@ The skill inspects the MCP servers and tools available to Claude Code. It uses t
 
 Before this sync, a fresh installation routes unnamed tools through a bounded Claude annotator. The fallback fails closed and keeps newly installed tools from becoming an immediate configuration outage; exact contracts and maintained batteries produced by the skill take precedence over it.
 
-It begins with `appa describe`, which reports the current config,
+The skill begins with `appa describe`, which reports the current config,
 included batteries, policy tools, referenced groups, and membership wiring.
 The command does not guess at session-only tools or connector accounts; the
 skill merges those from the active Claude session and asks when an identity or
