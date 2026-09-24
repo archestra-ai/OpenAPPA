@@ -136,7 +136,7 @@ pub struct SelectorPlaceholder {
 }
 
 /// How many collections one call may name through one placeholder: each is a membership consult.
-pub const MAX_INSTANTIATED_GROUPS: usize = 32;
+pub const MAX_INSTANTIATED_GROUPS: usize = 100;
 
 /// Why a call's arguments do not fill a selector placeholder: a value must be one non-empty
 /// selector segment a policy could write — no `/`, which would change the collection's shape,
