@@ -975,6 +975,17 @@ pub enum AsSpoken {
     AsSpoken,
 }
 
+impl From<&OfferedReturn> for WireReturn {
+    fn from(returns: &OfferedReturn) -> Self {
+        match returns {
+            OfferedReturn::AsSpoken => WireReturn::AsSpoken(AsSpoken::AsSpoken),
+            OfferedReturn::Sanitized { sanitizer } => WireReturn::Sanitized {
+                sanitizer: sanitizer.clone(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireReview {
     pub offer_id: String,
@@ -1044,12 +1055,7 @@ impl WireDecision {
                             offer_id: offer.id.clone(),
                             narrowing: offer.narrowing,
                             authorities: offer.authorities.clone(),
-                            returns: offer.returns.as_ref().map(|returns| match returns {
-                                OfferedReturn::AsSpoken => WireReturn::AsSpoken(AsSpoken::AsSpoken),
-                                OfferedReturn::Sanitized { sanitizer } => WireReturn::Sanitized {
-                                    sanitizer: sanitizer.clone(),
-                                },
-                            }),
+                            returns: offer.returns.as_ref().map(WireReturn::from),
                             input_sanitizer: offer.input_sanitizer.as_ref().map(|sanitizer| WireInputSanitizer {
                                 name: sanitizer.name.clone(),
                                 target: sanitizer.target.clone(),

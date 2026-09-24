@@ -9,7 +9,7 @@ use appa_runtime::config::{Config, HostDefaults};
 use appa_runtime::hooks;
 use appa_runtime_api::{
     ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OfferedReturn, OutcomeBody, ProposedCall, SpawnBinding,
-    SpawnRef, ToolOutcome, TrajectoryId, canonical_tool_name, is_reserved_tool_name,
+    SpawnRef, ToolOutcome, TrajectoryId, WireReturn, canonical_tool_name, is_reserved_tool_name,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
@@ -75,7 +75,8 @@ struct OfferView {
     narrowing: bool,
     authorities: Vec<String>,
     input_sanitizer: Option<String>,
-    returns: Option<ReturnView>,
+    /// `"as_spoken"` or `{"sanitizer": name}` for a plan that declares a child's return.
+    returns: Option<WireReturn>,
 }
 
 impl OfferView {
@@ -87,28 +88,10 @@ impl OfferView {
                 narrowing: offer.narrowing,
                 authorities: offer.authorities,
                 input_sanitizer: offer.input_sanitizer.map(|sanitizer| sanitizer.name),
-                returns: offer.returns.map(|returns| match returns {
-                    OfferedReturn::AsSpoken => ReturnView::AsSpoken(AsSpoken::AsSpoken),
-                    OfferedReturn::Sanitized { sanitizer } => ReturnView::Sanitized { sanitizer },
-                }),
+                returns: offer.returns.as_ref().map(WireReturn::from),
             })
             .collect()
     }
-}
-
-/// How a declared child return crosses: `"as_spoken"`, or
-/// `{"sanitizer": name}`.
-#[derive(Serialize)]
-#[serde(untagged)]
-enum ReturnView {
-    AsSpoken(AsSpoken),
-    Sanitized { sanitizer: String },
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "snake_case")]
-enum AsSpoken {
-    AsSpoken,
 }
 
 /// The answer to a spawn proposal that also opened the child.
@@ -117,6 +100,7 @@ enum AsSpoken {
 enum SpawnResponse {
     Blocked {
         feedback: String,
+        offers: Vec<OfferView>,
     },
     Opened {
         child_id: String,
@@ -668,15 +652,15 @@ impl SessionInner {
         let decision = match self.decide(None, &tool, arguments_json, true, None)? {
             Decision::Blocked { feedback, offers } => match self.declare_return(&offers, return_schema)? {
                 Some(declared) => self.decide(None, &tool, declared.arguments.get(), true, None)?,
-                None => Decision::Blocked {
-                    feedback,
-                    offers: Vec::new(),
-                },
+                None => Decision::Blocked { feedback, offers },
             },
             decision => decision,
         };
         match decision {
-            Decision::Blocked { feedback, .. } => encode(SpawnResponse::Blocked { feedback }),
+            Decision::Blocked { feedback, offers } => encode(SpawnResponse::Blocked {
+                feedback,
+                offers: OfferView::of(offers),
+            }),
             Decision::Control { reply } => encode(SpawnResponse::Control { reply }),
             Decision::Allowed { call, binding: None } => {
                 // The release prepared no fork, so no child exists to open. The
@@ -1775,6 +1759,11 @@ trust = { from = "suspicious", to = "trusted" }
 
         let answered = session.spawn_child(child(), "{}", schema()).unwrap();
         assert_eq!(kind(&answered), "blocked");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&answered).expect("a JSON response")["offers"],
+            serde_json::json!([]),
+            "a blocked spawn lists its offers, and nothing clears a trust floor here"
+        );
         assert!(session.children.is_empty(), "a refused spawn opens no branch");
         assert!(session.pending.is_none(), "a refused spawn owes no outcome");
     }

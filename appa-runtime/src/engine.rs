@@ -1480,22 +1480,9 @@ impl RuntimeEngine {
                     })
                 });
                 OfferedRemedy {
-                    id: offer.0,
-                    narrowing: plan.is_some_and(|plan| plan.narrowing().is_some()),
-                    authorities: plan.map_or_else(Vec::new, |plan| {
-                        plan.steps
-                            .iter()
-                            .filter_map(|step| match step {
-                                RemedyStep::Authorize(name) => Some(name.as_str().to_string()),
-                                RemedyStep::Accept(_)
-                                | RemedyStep::Sanitize(_)
-                                | RemedyStep::Derive(_)
-                                | RemedyStep::Return(_) => None,
-                            })
-                            .collect()
-                    }),
                     returns,
                     input_sanitizer,
+                    ..offered_remedy(offer, plan)
                 }
             })
             .collect()
@@ -2006,10 +1993,14 @@ impl RuntimeEngine {
         &self,
         headline: &str,
         residual: &appa_engine::check::Narrowing,
-        staged: &[(EngineOfferId, PlanId)],
+        staged: &[(EngineOfferId, ExecutableRemedyPlan)],
         presentation: &EmbeddedPresentationOptions,
     ) -> Presentation {
         let offers: Vec<OfferId> = staged.iter().map(|(offer, _)| offer_id(offer)).collect();
+        let offered = staged
+            .iter()
+            .map(|(offer, plan)| offered_remedy(offer_id(offer), Some(plan)))
+            .collect();
         let feedback = stage_feedback(
             headline,
             residual,
@@ -2020,16 +2011,7 @@ impl RuntimeEngine {
         );
         Presentation::Blocked {
             feedback,
-            offers: offers
-                .into_iter()
-                .map(|offer| OfferedRemedy {
-                    id: offer.0,
-                    narrowing: false,
-                    authorities: Vec::new(),
-                    returns: None,
-                    input_sanitizer: None,
-                })
-                .collect(),
+            offers: offered,
             review: Vec::new(),
             display: None,
         }
@@ -2976,6 +2958,28 @@ fn offer_id(offer: &EngineOfferId) -> OfferId {
     let mut hex = offer.to_hex();
     hex.truncate(RENDERED_OFFER_CHARS);
     OfferId(hex)
+}
+
+/// One offer as a harness reads what its plan does: whether it accepts a narrowing and which
+/// authorities it consults, in plan order. Nothing about a return or an input rewrite.
+fn offered_remedy(offer: OfferId, plan: Option<&ExecutableRemedyPlan>) -> OfferedRemedy {
+    OfferedRemedy {
+        id: offer.0,
+        narrowing: plan.is_some_and(|plan| plan.narrowing().is_some()),
+        authorities: plan.map_or_else(Vec::new, |plan| {
+            plan.steps
+                .iter()
+                .filter_map(|step| match step {
+                    RemedyStep::Authorize(name) => Some(name.as_str().to_string()),
+                    RemedyStep::Accept(_) | RemedyStep::Sanitize(_) | RemedyStep::Derive(_) | RemedyStep::Return(_) => {
+                        None
+                    }
+                })
+                .collect()
+        }),
+        returns: None,
+        input_sanitizer: None,
+    }
 }
 
 fn parse_offer(offer: &OfferId) -> Option<EngineOfferId> {

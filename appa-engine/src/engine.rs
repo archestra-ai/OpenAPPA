@@ -1113,7 +1113,7 @@ impl Engine {
                 dispatch: dispatch.clone(),
                 candidate: value,
                 residual,
-                offers,
+                offers: staged_plans(offers, stage),
             },
         ))
     }
@@ -1142,7 +1142,7 @@ impl Engine {
                     dispatch: dispatch.clone(),
                     candidate: value,
                     residual,
-                    offers,
+                    offers: pending_plans(views, offers),
                 }))),
             });
         }
@@ -1182,7 +1182,7 @@ impl Engine {
                 dispatch: dispatch.clone(),
                 candidate: value,
                 residual,
-                offers,
+                offers: staged_plans(offers, stage),
             }))),
         })
     }
@@ -2295,7 +2295,7 @@ impl Engine {
                 dispatch: dispatch.clone(),
                 candidate: value.clone(),
                 residual: residual.clone(),
-                offers,
+                offers: pending_plans(views, offers),
             })),
             _ => OfferFollowUp::Invalidated,
         }
@@ -2643,6 +2643,33 @@ impl Engine {
             .map_err(EngineError::InvalidCall)?;
         Ok(contract)
     }
+}
+
+/// Each freshly opened staged offer beside the plan it binds: `open_offers` opens one offer per
+/// plan, in the stage's order.
+fn staged_plans(
+    offers: Vec<(crate::value::OfferId, plan::PlanId)>,
+    stage: Vec<plan::ExecutableRemedyPlan>,
+) -> Vec<(crate::value::OfferId, plan::ExecutableRemedyPlan)> {
+    offers.into_iter().map(|(offer, _)| offer).zip(stage).collect()
+}
+
+/// Each standing staged offer beside the plan its record carries.
+fn pending_plans(
+    views: &Views,
+    offers: Vec<(crate::value::OfferId, plan::PlanId)>,
+) -> Vec<(crate::value::OfferId, plan::ExecutableRemedyPlan)> {
+    offers
+        .into_iter()
+        .map(|(offer, _)| {
+            let plan = views
+                .offer(&offer)
+                .expect("a pending block names only recorded offers")
+                .plan
+                .clone();
+            (offer, plan)
+        })
+        .collect()
 }
 
 fn crossed(facts: &[Fact]) -> ValueBody {
@@ -5082,7 +5109,7 @@ mod tests {
                 .offers
                 .iter()
                 .find(|(id, _)| id == offer)
-                .map(|(_, plan)| *plan)
+                .map(|(_, plan)| plan.id)
                 .expect("the stage's own offer")
         };
         let scrubbed = ValueBody::new("page bytes, redacted, scrubbed");

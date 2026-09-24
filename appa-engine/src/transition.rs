@@ -201,7 +201,7 @@ pub struct Confined {
     /// The offer opened for each next-stage plan, paired with the plan it binds: acceptance of
     /// exactly `residual`, and every sanitizer hop that strictly improves the candidate. Runtime
     /// renders these and routes `execute_remedy_plan` by them; it mints none of its own.
-    pub offers: Vec<(crate::value::OfferId, crate::plan::PlanId)>,
+    pub offers: Vec<(crate::value::OfferId, crate::plan::ExecutableRemedyPlan)>,
 }
 
 /// The host's child identity for one prepared fork. Idempotent: repeating the same pair

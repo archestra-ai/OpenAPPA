@@ -4581,6 +4581,38 @@ confined_results = ["leak"]
         assert_eq!(presentation.feedback, placeholder);
     }
 
+    #[tokio::test]
+    async fn a_staged_derivation_offers_its_residual_acceptance_as_a_narrowing() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let url = stub(serde_json::json!({"body": "scrubbed"})).await;
+        let runtime =
+            Runtime::open(partly_cleared_config(&url), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        assert!(matches!(
+            session
+                .on_tool_call(leak(), false)
+                .await
+                .expect("the block is delivered"),
+            ToolCallDecision::Deny { .. },
+        ));
+        let ToolResultDecision::Replace { presentation, .. } = run_sanitize_offer(&runtime, &mut session).await else {
+            panic!("a staged derivation is delivered as a replacement, not kept");
+        };
+        let offers = presentation
+            .expect("a result-time block preserves its remedy state")
+            .offers;
+        let accepting: Vec<_> = offers.iter().filter(|offer| offer.narrowing).collect();
+        assert_eq!(
+            accepting.len(),
+            1,
+            "the stage offers exactly one acceptance of the residual: {offers:?}"
+        );
+        assert!(
+            accepting[0].authorities.is_empty(),
+            "accepting a narrowing consults no one"
+        );
+    }
+
     const PARTLY_CLEARED_CHILD: &str = r#"
 version = 2
 
