@@ -116,11 +116,17 @@ policy. Each decision is deterministic and traces to a policy rule.
 
 We ran guarded OpenAPPA against two Auto configurations:
 
-- **Stock Auto:** Claude Code's default auto-mode settings.
-- **IFC-tuned Auto:** Stock Auto plus the information-flow facts a security team
-  would supply: which sources are trusted, who may see each piece of data, where
-  data may go, and which narrowing is legitimate. It gets no attack markers or
-  expected answers.
+- **IFC-tuned Auto** is the direct rival: it tries to solve the same problem
+  with a classifier instead of a policy engine. Each scenario's auto-mode rules
+  restate the information-flow policy OpenAPPA enforces in plain language:
+  which sources are trusted, who may see each piece of data, where data may go,
+  and which narrowing is legitimate. It gets no attack markers or expected
+  answers.
+- **Stock Auto** is the out-of-the-box baseline. Its default rules target
+  generic developer risks, such as destructive commands, actions beyond the
+  user's request, and secrets sent to external endpoints. Unconfigured, it knows
+  nothing about a deployment's own rules, such as which colleague may see which
+  record.
 
 All three used the same actor model (Claude Sonnet 5), prompts, and tools, and
 ran every task once, so the results have no variance estimate. Each benchmark
@@ -133,8 +139,8 @@ scenarios or tasks in which a scored attack succeeded.
 | AgentThreatBench (24 tasks) | 75.0% / **0/24** | 95.8% / 6/24 | 87.5% / 8/24 |
 
 OpenAPPA was the only configuration with zero scored attacks in both suites.
-Ten attacks got past Stock Auto. IFC tuning cut that to six, all in
-AgentThreatBench.
+IFC-tuned Auto matched it on Bench-Corp but let six attacks through on
+AgentThreatBench. Stock Auto, which never saw the policy, let ten through.
 
 That protection costs completion and tokens. OpenAPPA completed 75% of tasks in
 both suites; the Auto configurations completed 85–96%. Compared with the same
