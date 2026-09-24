@@ -32,3 +32,7 @@ __pycache__/
 
 # Local Amp portal metadata.
 .amp/portals/*
+
+# Generated Amp-to-GCP external-account configuration. It contains no secret,
+# but embeds this orb checkout's absolute path to its credential helper.
+.amp/gcp-external-account.json
