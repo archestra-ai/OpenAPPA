@@ -12,7 +12,7 @@ The [APPA CLI](https://openappa.com/install.sh) provides two commands for valida
 
 Run them locally or in continuous integration (CI) to catch configuration errors and unexpected policy decisions before deployment.
 
-Install the CLI on Linux or macOS:
+How to install the APPA CLI on Linux or macOS:
 
 ```sh
 curl -fsSL https://openappa.com/install.sh | sh
