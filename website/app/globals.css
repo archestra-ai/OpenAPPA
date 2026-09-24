@@ -618,6 +618,14 @@ samp {
   font-weight: 600;
 }
 
+/* The mascot standing in for "OpenAPPA" in a rail link: sized to the text,
+   sat on the baseline like a glyph. */
+.sidebar-mark {
+  display: inline-flex;
+  vertical-align: -0.2em;
+  margin-right: 0.15em;
+}
+
 .sidebar-proposal {
   margin-left: 0.45em;
   font-size: 10px;
@@ -2268,7 +2276,34 @@ samp {
 }
 
 /* ————————————————————————————————————————————————
-   Under construction — filler for empty doc pages
+   Over-simplified — the one-sentence panel under a comparison title
+   ———————————————————————————————————————————————— */
+.oversimplified {
+  min-width: 0;
+  margin: 1.5rem 0 2rem;
+  padding: 12px 22px 16px;
+  border: 1px solid var(--warn);
+  border-radius: 10px;
+  background: var(--warn-bg);
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+/* The legend sits across the top border and notches it. */
+.oversimplified-label {
+  margin-left: 6px;
+  padding: 0 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--warn);
+}
+
+/* ————————————————————————————————————————————————
+   Sponsor note — who pays for OpenAPPA
    ———————————————————————————————————————————————— */
 .sponsor-note {
   display: flex;

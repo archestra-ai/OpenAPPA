@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
+import { PixelMark } from "@/components/Logo";
 import { useDrawerDismissal, useMobileNav } from "@/components/MobileNav";
 import { SearchIcon, useSearch } from "@/components/SearchProvider";
 import { ThemeToggle } from "@/components/ThemeToggle";
@@ -27,6 +28,24 @@ export const NEW_CHAT_EVENT = "appa:new-chat";
 
 function docHref(slug: string): string {
   return slug === "index" ? "/" : `/${slug}`;
+}
+
+/* The comparison pages are all titled "OpenAPPA vs …", and the word costs a
+   wrapped line in the rail. The mascot stands in for it there; the link's
+   accessible name keeps the full title. */
+const MASCOT_PREFIX = "OpenAPPA vs ";
+
+function NavTitle({ title }: { title: string }) {
+  if (!title.startsWith(MASCOT_PREFIX)) return <>{title}</>;
+  return (
+    <>
+      <span className="sidebar-mark" aria-hidden="true">
+        <PixelMark size={20} />
+      </span>
+      {" vs "}
+      {title.slice(MASCOT_PREFIX.length)}
+    </>
+  );
 }
 
 export function DocsSidebar({
@@ -104,8 +123,12 @@ export function DocsSidebar({
                 return (
                   <Fragment key={doc.slug}>
                     <li>
-                      <Link href={href} aria-current={pathname === href ? "page" : undefined}>
-                        {doc.title}
+                      <Link
+                        href={href}
+                        aria-current={pathname === href ? "page" : undefined}
+                        aria-label={doc.title.startsWith(MASCOT_PREFIX) ? doc.title : undefined}
+                      >
+                        <NavTitle title={doc.title} />
                         {doc.proposal && (
                           <span className="sidebar-proposal" aria-label="Proposal">
                             🚧

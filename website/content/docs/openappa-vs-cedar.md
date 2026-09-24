@@ -2,6 +2,7 @@
 title: OpenAPPA vs Cedar
 category: Comparison
 order: 10.5
+oversimplified: "Cedar is a policy language for spelling out what is allowed and what is blocked; OpenAPPA could in theory be expressed in Cedar, but its concept is different: you describe your data, and an algebraic engine derives the decisions."
 ---
 
 [Cedar](https://docs.cedarpolicy.com/) is a general-purpose authorization policy language and engine, while OpenAPPA is an agentic security framework. Cedar checks requests using the context you provide and returns an allow or deny decision. A policy can allow a refund only up to an employee's approval limit. With OpenAPPA, that business check lives in code outside the policy language.
