@@ -365,14 +365,17 @@ fn invoke(binary: &Path, arguments: &[&std::ffi::OsStr], timeout: Duration) -> R
         ));
     }
     if !status.success() {
-        let mut message = String::new();
+        let mut message = Vec::new();
         stderr
             .take(65536)
-            .read_to_string(&mut message)
+            .read_to_end(&mut message)
             .map_err(|error| io("read native diagnostics", binary, error))?;
         return Err(InstallError::Recovery {
             path: binary.to_owned(),
-            reason: format!("activation failed: {}", failure_cause(&message, status)),
+            reason: format!(
+                "activation failed: {}",
+                failure_cause(&String::from_utf8_lossy(&message), status)
+            ),
         });
     }
     #[cfg(windows)]
@@ -433,5 +436,16 @@ mod tests {
         let noisy = invoke(Path::new("/usr/bin/yes"), &[], Duration::from_secs(5));
         assert!(matches!(noisy, Err(InstallError::Recovery { .. })));
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_command_with_non_utf8_diagnostics_still_reports_its_failure() {
+        let failed = invoke(
+            Path::new("/bin/sh"),
+            &["-c".as_ref(), "printf 'bad \\377 byte\\n' >&2; exit 3".as_ref()],
+            Duration::from_secs(5),
+        );
+        assert!(matches!(failed, Err(InstallError::Recovery { .. })), "{failed:?}");
     }
 }
