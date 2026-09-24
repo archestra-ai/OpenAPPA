@@ -27,6 +27,7 @@ export function BenchmarkHighlight() {
           <figcaption className="bench-chart-title">
             Task completion
           </figcaption>
+          <BenchRow name="Claude Auto mode" pct={90} />
           <BenchRow name="OpenAPPA" pct={89} isSubject />
           <BenchRow name="FIDES (Microsoft)" pct={41} />
         </figure>
@@ -35,6 +36,7 @@ export function BenchmarkHighlight() {
           <figcaption className="bench-chart-title">
             Attacks that succeeded
           </figcaption>
+          <BenchRow name="Claude Auto mode" pct={10} />
           <BenchRow name="OpenAPPA" pct={0} isSubject />
           <BenchRow name="FIDES (Microsoft)" pct={31} />
         </figure>
