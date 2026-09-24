@@ -742,18 +742,12 @@ mod tests {
     }
 
     #[test]
-    fn invalid_revision_is_rejected_without_network_access() {
-        for revision in ["main", "latest", "abc123", "v1/../../other"] {
-            assert!(
-                Acquired::fetch_from(
-                    revision,
-                    None,
-                    Requirements::Packages,
-                    "http://127.0.0.1:1",
-                    "http://127.0.0.1:1"
-                )
-                .is_err()
-            );
+    fn only_full_commits_and_version_tags_are_revisions() {
+        for revision in ["main", "latest", "abc123", "v1/../../other", "v", "vNext"] {
+            assert!(validate_revision(revision).is_err(), "{revision}");
+        }
+        for revision in ["v0.14.1", "v1.2.3-rc.1", "0123456789abcdef0123456789abcdef01234567"] {
+            assert!(validate_revision(revision).is_ok(), "{revision}");
         }
     }
 
