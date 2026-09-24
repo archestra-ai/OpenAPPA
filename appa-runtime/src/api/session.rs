@@ -6963,7 +6963,7 @@ delta = {}
         let recorder = Arc::new(Collected::default());
         let session = runtime
             .recording(recorder.clone())
-            .create_session(root())
+            .create_session(root(), None)
             .expect("a fresh id opens");
 
         assert!(matches!(
