@@ -28,16 +28,15 @@ backend and the mounted system toolchain (`/usr`, `/bin`, `/lib`, `/lib64`) as
 trusted, public host inputs. Do not put credentials or private data in that
 toolchain. The agent must not be able to change host execution controls.
 
-Start the file runtime with its initial Label options, plus the backend:
+Enable file tracking in the APPA configuration and start the runtime with the backend:
 
 ```sh
-appa runtime --config /host/policy.toml --db /host/runtime.db \
-  --initial-file-trust suspicious --initial-file-audience public \
+appa runtime --config /host/file-policy.toml --db /host/runtime.db \
   --file-process-backend /absolute/new/backend
 ```
 
 Each root session binds to the working directory in its first file call. The explicit host
-classification flags seed that root session's workspace snapshot.
+classification in `[file_tracking]` seeds that root session's workspace snapshot.
 Declare `mcp/appa/appa_process_files` in the policy. The tool is absent from MCP unless
 the backend is enabled.
 

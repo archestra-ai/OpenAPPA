@@ -3,8 +3,8 @@
 Runtime-owned file tools for a workspace the runtime owns: a session-local version ledger, Label
 propagation through file operations, and opt-in isolated processing of declared inputs.
 
-**Status: draft.** The file runtime is off unless an operator starts it with an initial file
-Label. Read [What is verified](#what-is-verified) and
+**Status: draft.** The file runtime is off unless the APPA configuration contains a
+`[file_tracking]` table. Read [What is verified](#what-is-verified) and
 [What is not covered](#what-is-not-covered) before relying on it.
 
 Related documents:
@@ -162,8 +162,9 @@ runtime never guesses.
 
 ## The file tools
 
-All six are MCP tools on the runtime's `appa` server, advertised only while file tracking is
-enabled. Paths are workspace-relative or absolute inside the workspace.
+The five direct file tools are advertised while file tracking is enabled.
+`appa_process_files` is advertised only when `--file-process-backend` is also configured.
+Paths are workspace-relative or absolute inside the workspace.
 
 | Tool | Arguments | Returns to the trajectory | Publishes |
 | --- | --- | --- | --- |
@@ -282,14 +283,15 @@ launcher-failure contract and the acceptance probes are in the
 ## Operating it
 
 ```sh
-appa runtime --config /host/policy.toml --db /host/runtime.db \
-  --initial-file-trust suspicious --initial-file-audience public \
+appa runtime --config /host/file-policy.toml --db /host/runtime.db \
   --file-process-backend /host/backend
 ```
 
+- The `[file_tracking]` table in `file-policy.toml` is the feature flag. Omitting it disables
+  file tracking. A complete table supplies `initial_trust` and `initial_audience`.
 - Each root session binds to the `cwd` in its first file call. Its subagents share that
   workspace and ledger. Another root session can bind to a different workspace.
-- The initial file flags classify each root session's initial snapshot. They do not inspect
+- The initial settings classify each root session's initial snapshot. They do not inspect
   content. The policy separately defines which file-tool flows are permitted.
 - A snapshot refuses a workspace that holds any symlink or hard link. Use a dedicated directory.
 - Keep the policy, runtime database, and backend outside the workspace.
@@ -315,6 +317,10 @@ delta or requirement:
 ```toml
 [policy]
 version = 2
+
+[file_tracking]
+initial_trust = "suspicious"
+initial_audience = "public"
 
 [[policy.tool]]
 name = "mcp/appa/appa_read_file"
@@ -349,8 +355,8 @@ context_control = true
 ```
 
 Add `requires` or a non-empty `delta` when the deployment needs tighter file flows. The
-`--initial-file-trust` and `--initial-file-audience` flags only Label bytes that exist when a
-root takes its snapshot; they do not replace these contracts.
+`initial_trust` and `initial_audience` settings only Label bytes that exist when a root takes
+its snapshot; they do not replace these contracts.
 
 ## What is verified
 

@@ -158,14 +158,15 @@ access, inference traffic or final response.
 The file runtime is off unless the operator starts it that way:
 
 ```sh
-appa runtime --config /host/policy.toml --db /host/runtime.db \
-  --initial-file-trust suspicious --initial-file-audience public \
+appa runtime --config /host/file-policy.toml --db /host/runtime.db \
   --file-process-backend /host/backend
 ```
 
+The `[file_tracking]` table in `file-policy.toml` enables file tracking and supplies the
+initial trust and audience. Without that table, the runtime does not expose the file tools.
 Each root session binds to the working directory in its first file call. Its subagents share
 that workspace and in-memory ledger. Another root session can use another workspace on the
-same runtime. The initial file flags classify each root session's workspace snapshot. The runtime
+same runtime. The initial settings classify each root session's workspace snapshot. The runtime
 hashes every file and refuses a workspace that holds a symlink or hard link anywhere in it.
 Give it a dedicated directory rather than a working checkout. Keep the policy, runtime
 database, and backend outside that directory.

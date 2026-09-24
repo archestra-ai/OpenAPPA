@@ -46,9 +46,9 @@
 //!
 //! # Enabling the draft
 //!
-//! Start `appa runtime` with
-//! `--initial-file-trust suspicious --initial-file-audience public` (or the operator's
-//! actual classification). Each root session binds to its first file call's working directory,
+//! Add `[file_tracking]` with `initial_trust` and `initial_audience` to the APPA
+//! configuration. The table's presence enables file tracking. Each root session binds to
+//! its first file call's working directory,
 //! then classifies and hashes the files that exist there. Its subagents share that workspace
 //! and ledger; another root session can bind to a different workspace.
 //! A workspace containing a symlink or hard link is refused, so use a dedicated directory.
