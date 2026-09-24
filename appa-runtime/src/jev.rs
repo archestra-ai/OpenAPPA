@@ -30,8 +30,9 @@ use serde::Serialize;
 use tokio::time::Instant;
 
 use crate::config::{Endpoint, EndpointHost, JevKey, JevProfile};
-use crate::consult::{AnnotationDeclaration, Consult, ConsultBody};
+use crate::consult::{Consult, ConsultBody};
 use crate::external::NoAnswerReason;
+use crate::label_guide::{Labels, RequiredAudience, ResultAudience, ResultTrust, annotation};
 use questions::Questions;
 
 const MODEL: &str = "jev-1.13.0";
@@ -550,33 +551,6 @@ fn redacted(text: &str) -> String {
 
 // ---------------------------------------------------------------- labels
 
-/// What the call's result may be read by, safest first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum ResultAudience {
-    #[serde(rename = "self")]
-    Self_,
-    Internal,
-    Public,
-}
-
-/// Who wrote the call's result, safest first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum ResultTrust {
-    Suspicious,
-    Trusted,
-}
-
-/// Who the call delivers data to, safest first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum RequiredAudience {
-    Public,
-    Internal,
-    None,
-}
-
 const RESULT_AUDIENCES: [(ResultAudience, &str); 3] = [
     (ResultAudience::Self_, "self"),
     (ResultAudience::Internal, "internal"),
@@ -591,15 +565,6 @@ const REQUIRED_AUDIENCES: [(RequiredAudience, &str); 3] = [
     (RequiredAudience::Internal, "internal"),
     (RequiredAudience::None, "none"),
 ];
-
-/// Jev's four answers, settled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Labels {
-    result_audience: ResultAudience,
-    result_trust: ResultTrust,
-    required_audience: RequiredAudience,
-    requires_trusted: bool,
-}
 
 /// Each label's probabilities as Jev answered them, its threshold, and the decision, in the
 /// order the labels settle; a label past the first one Jev answered badly is absent.
@@ -709,54 +674,6 @@ fn labels_of(body: &[u8], trace: &mut LabelTrace) -> Option<Labels> {
         required_audience,
         requires_trusted: requires_trusted?,
     })
-}
-
-/// The labels in the policy's own spelling, refused where the mandate does not admit them.
-fn annotation(labels: &Labels, declaration: &AnnotationDeclaration) -> Result<serde_json::Value, String> {
-    let (Some(lowest), Some(highest)) = (declaration.trust_ranks.first(), declaration.trust_ranks.last()) else {
-        return Err("jev needs a lowest and a highest trust rank".to_string());
-    };
-    let admitted = |audience: &str| match declaration.audiences.entries().any(|entry| entry == audience) {
-        true => Ok(serde_json::json!([audience])),
-        false => Err(format!(
-            "jev answered the audience {audience:?}, which the mandate does not admit"
-        )),
-    };
-    let mut delta = serde_json::Map::new();
-    match labels.result_audience {
-        ResultAudience::Public => {}
-        ResultAudience::Internal => {
-            delta.insert("audience".to_string(), admitted("internal")?);
-        }
-        ResultAudience::Self_ => {
-            delta.insert("audience".to_string(), admitted("self")?);
-        }
-    }
-    match labels.result_trust {
-        ResultTrust::Suspicious => {
-            delta.insert("trust".to_string(), serde_json::json!(lowest));
-        }
-        ResultTrust::Trusted => {}
-    }
-    let mut requires = serde_json::Map::new();
-    requires.insert("history".to_string(), serde_json::json!([]));
-    requires.insert("attention".to_string(), serde_json::json!([]));
-    match labels.required_audience {
-        RequiredAudience::None => {}
-        RequiredAudience::Public => {
-            requires.insert("audience".to_string(), serde_json::json!({"contains": "public"}));
-        }
-        RequiredAudience::Internal => {
-            requires.insert(
-                "audience".to_string(),
-                serde_json::json!({"contains": admitted("internal")?}),
-            );
-        }
-    }
-    if labels.requires_trusted {
-        requires.insert("trust".to_string(), serde_json::json!(highest));
-    }
-    Ok(serde_json::json!({"delta": delta, "requires": requires, "emits": []}))
 }
 
 // ---------------------------------------------------------------- clients
@@ -883,7 +800,7 @@ mod tests {
 
     use super::*;
     use crate::config::{JEV_DEFAULT_URL, Token};
-    use crate::consult::AnnotationArtifact;
+    use crate::consult::{AnnotationArtifact, AnnotationDeclaration};
     use appa_engine::registry::AudienceVocabulary;
 
     const KEY: &str = "jev-test-key";
@@ -1823,7 +1740,7 @@ mod tests {
                 _ => spacing,
             })
             .await;
-            let example = &questions::EXAMPLES[round % questions::EXAMPLES.len()];
+            let example = &crate::label_guide::EXAMPLES[round % crate::label_guide::EXAMPLES.len()];
             let shown: serde_json::Value = serde_json::from_str(example.call).expect("an example call is JSON");
             let consult = consult_of(json!({"name": shown["tool"], "arguments": shown["arguments"]}));
             let started = std::time::Instant::now();
@@ -1835,14 +1752,10 @@ mod tests {
             hedged += usize::from(outcomes.len() > 1);
             let labels = &diagnostics["labels"];
             let decided = [
-                labels["delta_audience"]["decision"].as_str() == Some(example.delta_audience),
-                labels["delta_trust"]["decision"].as_str() == Some(example.delta_trust),
-                labels["requires_audience"]["decision"].as_str() == Some(example.requires_audience),
-                labels["requires_trusted"]["decision"]
-                    .as_bool()
-                    .map(|decision| decision.to_string())
-                    .as_deref()
-                    == Some(example.requires_trusted),
+                labels["delta_audience"]["decision"].as_str() == Some(example.delta_audience.name()),
+                labels["delta_trust"]["decision"].as_str() == Some(example.delta_trust.name()),
+                labels["requires_audience"]["decision"].as_str() == Some(example.requires_audience.name()),
+                labels["requires_trusted"]["decision"].as_bool() == Some(example.requires_trusted),
             ];
             agreed += usize::from(decided.iter().all(|same| *same));
             eprintln!(

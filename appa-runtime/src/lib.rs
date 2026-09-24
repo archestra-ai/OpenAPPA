@@ -52,6 +52,7 @@ mod engine;
 mod events;
 mod external;
 mod jev;
+mod label_guide;
 mod llm;
 mod recorder;
 mod telemetry;
