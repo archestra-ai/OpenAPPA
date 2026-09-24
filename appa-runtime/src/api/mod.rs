@@ -839,13 +839,15 @@ pub struct Reloaded {
     pub changed: bool,
 }
 
-/// A deployment loaded for a reload and not yet serving: the previous one keeps serving
-/// until [`Runtime::install`], and a failed probe here leaves it untouched.
-pub struct PreparedReload {
+/// A deployment loaded and not serving: [`Runtime::install`] makes it the runtime's serving
+/// one, and [`Runtime::pinned`] serves it to one view alone. A failed probe here leaves the
+/// serving deployment untouched. Cloning shares the loaded deployment.
+#[derive(Clone)]
+pub struct PreparedDeployment {
     deployment: Arc<Deployment>,
 }
 
-impl PreparedReload {
+impl PreparedDeployment {
     /// [`Runtime::probe_sources`] over the prepared deployment.
     pub async fn probe_sources(&self) -> Result<(), ProbeError> {
         self.deployment.probe_sources().await
@@ -923,6 +925,7 @@ impl Prepared {
                 }),
                 store,
                 recorder: None,
+                pinned: None,
             }),
         }
     }
@@ -933,10 +936,13 @@ struct Inner {
     store: Arc<LogStore>,
     /// Where this view's sessions hand a record of every consult they make.
     recorder: Option<Arc<dyn ConsultRecorder>>,
+    /// The deployment this view serves in place of the shared one; see [`Runtime::pinned`].
+    pinned: Option<Arc<Deployment>>,
 }
 
 /// Everything of a runtime but its store: one object, held by the runtime and by every
-/// view [`Runtime::on`] makes of it, so a reload through any of them serves them all.
+/// view [`Runtime::on`] makes of it, so a reload through any of them serves every view
+/// that pins no deployment.
 struct Shared {
     files: Option<files::FileTracking>,
     state_path: Option<PathBuf>,
@@ -1008,6 +1014,7 @@ impl Runtime {
                 shared: Arc::clone(&self.inner.shared),
                 store,
                 recorder: None,
+                pinned: self.inner.pinned.clone(),
             }),
         }
     }
@@ -1021,6 +1028,25 @@ impl Runtime {
                 shared: Arc::clone(&self.inner.shared),
                 store: Arc::clone(&self.inner.store),
                 recorder: Some(recorder),
+                pinned: self.inner.pinned.clone(),
+            }),
+        }
+    }
+
+    /// This view serving `deployment` instead of the runtime's serving one: every root it
+    /// opens, event it decides and consult it makes reads this deployment, whatever a
+    /// concurrent [`Runtime::install`] swaps in. A host that serves many policies from one
+    /// runtime dispatches each through a view pinned to that policy's deployment. A
+    /// trajectory opened under another policy decides under its stored policy, as it does
+    /// after a reload. The deployment is one this runtime prepared; [`Runtime::on`] and
+    /// [`Runtime::recording`] views of this one keep the pin.
+    pub fn pinned(&self, deployment: &PreparedDeployment) -> Runtime {
+        Runtime {
+            inner: Arc::new(Inner {
+                shared: Arc::clone(&self.inner.shared),
+                store: Arc::clone(&self.inner.store),
+                recorder: self.inner.recorder.clone(),
+                pinned: Some(Arc::clone(&deployment.deployment)),
             }),
         }
     }
@@ -1129,13 +1155,16 @@ impl Inner {
     }
 
     fn deployment(&self) -> Arc<Deployment> {
-        Arc::clone(
-            &self
-                .shared
-                .deployment
-                .read()
-                .expect("the deployment lock is never poisoned: no panic runs while it is held"),
-        )
+        match &self.pinned {
+            Some(pinned) => Arc::clone(pinned),
+            None => Arc::clone(
+                &self
+                    .shared
+                    .deployment
+                    .read()
+                    .expect("the deployment lock is never poisoned: no panic runs while it is held"),
+            ),
+        }
     }
 
     pub(super) fn resolve_policy<'a>(
@@ -1546,25 +1575,27 @@ impl Runtime {
     /// names every tool canonically survives the reload, and a refused candidate changes
     /// nothing — the deployment that was serving keeps serving.
     pub fn reload(&self, config: Config) -> Result<Reloaded, OpenError> {
-        Ok(self.install(self.prepare_reload(config)?))
+        Ok(self.install(self.prepare_deployment(config)?))
     }
 
     /// Load the deployment a configuration declares without installing it: every open-time
-    /// gate runs, and the result is held for a probe before [`Runtime::install`] swaps it in.
-    pub fn prepare_reload(&self, config: Config) -> Result<PreparedReload, OpenError> {
+    /// gate runs, and the result is held for a probe before [`Runtime::install`] swaps it in
+    /// or [`Runtime::pinned`] serves it to one view. It shares this runtime's modules,
+    /// consult gates and tool naming.
+    pub fn prepare_deployment(&self, config: Config) -> Result<PreparedDeployment, OpenError> {
         let deployment = Deployment::load(
             config,
             &self.inner.shared.modules,
             self.inner.shared.gates.clone(),
             self.inner.shared.naming,
         )?;
-        Ok(PreparedReload {
+        Ok(PreparedDeployment {
             deployment: Arc::new(deployment),
         })
     }
 
     /// Swap a prepared deployment in as the serving one.
-    pub fn install(&self, prepared: PreparedReload) -> Reloaded {
+    pub fn install(&self, prepared: PreparedDeployment) -> Reloaded {
         let deployment = prepared.deployment;
         let identity = deployment.resident().identity_hex();
         // The gate's bound and the serving snapshot change as one transition under the
@@ -3277,6 +3308,7 @@ mod deployment_tests {
                 consult_timeout: Duration::from_secs(30),
                 max_body_bytes: 65_536,
             },
+            |_| None,
         )
         .expect("the hosted document validates")
     }

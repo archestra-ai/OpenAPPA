@@ -349,7 +349,7 @@ async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (
     };
     let prepared = state
         .runtime
-        .prepare_reload(config)
+        .prepare_deployment(config)
         .map_err(|refusal| refused(refusal.to_string()))?;
     // The new sources are probed before anything swaps, and before the battery lock below
     // is taken: nothing holds a std lock across the await.

@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
-use appa_runtime::{config::Config, hooks};
+use appa_runtime::config::{Config, HostDefaults};
+use appa_runtime::hooks;
 use appa_runtime_api::{Actor, HookDecision, HookEvent, ProposedCall, TrajectoryId};
 use axum::Router;
 use axum::extract::State;
@@ -27,6 +28,7 @@ enum Answer {
 struct Annotator {
     answers: Arc<Mutex<std::collections::BTreeMap<String, Answer>>>,
     requests: Arc<Mutex<Vec<serde_json::Value>>>,
+    authorizations: Arc<Mutex<Vec<Option<String>>>>,
 }
 
 impl Annotator {
@@ -37,27 +39,42 @@ impl Annotator {
     fn requests(&self) -> Vec<serde_json::Value> {
         self.requests.lock().unwrap().clone()
     }
+
+    fn authorizations(&self) -> Vec<Option<String>> {
+        self.authorizations.lock().unwrap().clone()
+    }
 }
 
 async fn serve_annotator() -> (String, Annotator) {
     let annotator = Annotator {
         answers: Arc::new(Mutex::new(Default::default())),
         requests: Arc::new(Mutex::new(Vec::new())),
+        authorizations: Arc::new(Mutex::new(Vec::new())),
     };
     let router = Router::new()
         .route(
             "/annotate",
-            post(|State(annotator): State<Annotator>, body: String| async move {
-                let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
-                let name = request["name"].as_str().unwrap_or_default().to_string();
-                annotator.requests.lock().unwrap().push(request);
-                let answer = annotator.answers.lock().unwrap().get(&name).cloned();
-                match answer {
-                    Some(Answer::Wire(value)) => (axum::http::StatusCode::OK, value.to_string()),
-                    Some(Answer::Malformed) => (axum::http::StatusCode::OK, "not json".to_string()),
-                    Some(Answer::Down) | None => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom".to_string()),
-                }
-            }),
+            post(
+                |State(annotator): State<Annotator>, headers: axum::http::HeaderMap, body: String| async move {
+                    let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
+                    let name = request["name"].as_str().unwrap_or_default().to_string();
+                    annotator.requests.lock().unwrap().push(request);
+                    annotator.authorizations.lock().unwrap().push(
+                        headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string),
+                    );
+                    let answer = annotator.answers.lock().unwrap().get(&name).cloned();
+                    match answer {
+                        Some(Answer::Wire(value)) => (axum::http::StatusCode::OK, value.to_string()),
+                        Some(Answer::Malformed) => (axum::http::StatusCode::OK, "not json".to_string()),
+                        Some(Answer::Down) | None => {
+                            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom".to_string())
+                        }
+                    }
+                },
+            ),
         )
         .with_state(annotator.clone());
     (format!("{}/annotate", serve(router).await), annotator)
@@ -1334,4 +1351,107 @@ async fn a_mandate_placeholder_declares_the_collection_each_call_spells() {
         baseline,
         "an answer outside the mandate appends nothing"
     );
+}
+
+fn hosted_policy(url: &str, token_env: Option<&str>) -> Config {
+    let token = token_env
+        .map(|var| format!("token_env = \"{var}\"\n"))
+        .unwrap_or_default();
+    let document = format!(
+        r#"
+[policy]
+version = 2
+
+[[policy.annotator]]
+name = "classifier"
+
+[[policy.tool]]
+name = "fetch"
+parameters = {{ type = "object", properties = {{ url = {{ type = "string" }} }}, required = ["url"] }}
+annotator = "classifier"
+
+[externals.annotators.classifier]
+url = "{url}"
+{token}"#
+    );
+    let host = |var: &str| (var == "APPA_TEST_TENANT_TOKEN").then(|| "tenant-secret".to_string());
+    Config::hosted(
+        &document,
+        HostDefaults {
+            consult_timeout: Duration::from_secs(2),
+            max_body_bytes: 65_536,
+        },
+        host,
+    )
+    .expect("the hosted document validates")
+}
+
+async fn open_hosted(config: Config) -> Arc<Runtime> {
+    let store =
+        Arc::new(appa_eventlog::LogStore::open(appa_eventlog::Backend::Memory).expect("an in-memory log opens"));
+    let runtime = Arc::new(Runtime::open_with_store(config, store, None).expect("the deployment opens"));
+    assert_eq!(
+        hooks::handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: root(),
+                principal: None
+            }
+        )
+        .await,
+        HookDecision::Ack
+    );
+    runtime
+}
+
+/// One runtime serving two policies that bind the same annotator to different endpoints:
+/// a view pinned to the policy a trajectory runs under consults that policy's endpoint,
+/// whatever the runtime installed since.
+#[tokio::test]
+async fn a_pinned_view_consults_its_own_deployment_after_the_runtime_serves_another() {
+    let (url_a, annotator_a) = serve_annotator().await;
+    let (url_b, annotator_b) = serve_annotator().await;
+    annotator_a.set("classifier", Answer::Wire(produced("trusted")));
+    annotator_b.set("classifier", Answer::Wire(produced("trusted")));
+    let runtime = open_hosted(hosted_policy(&url_a, None)).await;
+
+    let deployment_a = runtime
+        .prepare_deployment(hosted_policy(&url_a, None))
+        .expect("policy A loads");
+    let deployment_b = runtime
+        .prepare_deployment(hosted_policy(&url_b, None))
+        .expect("policy B loads");
+    runtime.install(deployment_b);
+
+    let pinned = Arc::new(runtime.pinned(&deployment_a));
+    assert_eq!(
+        propose(&pinned, fetch("https://a.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert_eq!(annotator_a.requests().len(), 1);
+    assert!(annotator_b.requests().is_empty(), "the pinned view never reaches B");
+    ran(&pinned, fetch("https://a.example")).await;
+
+    // Unpinned, the same trajectory reaches whatever the runtime serves now.
+    assert_eq!(
+        propose(&runtime, fetch("https://b.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert_eq!(annotator_a.requests().len(), 1);
+    assert_eq!(annotator_b.requests().len(), 1);
+}
+
+/// A hosted document's `token_env` resolves through the host's lookup, and the consult
+/// carries that value as its bearer token.
+#[tokio::test]
+async fn a_hosted_token_resolves_through_the_host_and_rides_the_consult() {
+    let (url, annotator) = serve_annotator().await;
+    annotator.set("classifier", Answer::Wire(produced("trusted")));
+    let runtime = open_hosted(hosted_policy(&url, Some("APPA_TEST_TENANT_TOKEN"))).await;
+
+    assert_eq!(
+        propose(&runtime, fetch("https://a.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert_eq!(annotator.authorizations(), [Some("Bearer tenant-secret".to_string())]);
 }

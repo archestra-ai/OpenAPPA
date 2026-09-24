@@ -268,7 +268,7 @@ mod tests {
             set_credential(&bound, "APPA_PROVIDER_GITHUB_TOKEN", Some("github_prod")).unwrap(),
             bound
         );
-        let config = Config::hosted(&bound, HOST_DEFAULTS).expect("the editor writes a hosted document");
+        let config = Config::hosted(&bound, HOST_DEFAULTS, |_| None).expect("the editor writes a hosted document");
         assert_eq!(
             config.credentials()["APPA_PROVIDER_GITHUB_TOKEN"],
             "github_prod".to_string()
@@ -276,7 +276,7 @@ mod tests {
 
         let rebound = set_credential(&bound, "APPA_PROVIDER_GITHUB_TOKEN", Some("github_dev")).unwrap();
         assert_eq!(
-            Config::hosted(&rebound, HOST_DEFAULTS).unwrap().credentials()["APPA_PROVIDER_GITHUB_TOKEN"],
+            Config::hosted(&rebound, HOST_DEFAULTS, |_| None).unwrap().credentials()["APPA_PROVIDER_GITHUB_TOKEN"],
             "github_dev".to_string()
         );
 
@@ -287,7 +287,7 @@ mod tests {
             dropped
         );
         assert!(
-            Config::hosted(&dropped, HOST_DEFAULTS)
+            Config::hosted(&dropped, HOST_DEFAULTS, |_| None)
                 .unwrap()
                 .credentials()
                 .is_empty()
@@ -307,7 +307,7 @@ mod tests {
             Err(ConfigError::CredentialValue { var }) if var == "APPA_PROVIDER_GITHUB_TOKEN"
         ));
         let foreign = format!("{AUTHORED}[credentials]\nAPPA_BRIDGE_TOKEN = \"bridge\"\n");
-        assert!(Config::hosted(&foreign, HOST_DEFAULTS).is_err());
+        assert!(Config::hosted(&foreign, HOST_DEFAULTS, |_| None).is_err());
         assert_eq!(set_credential(&foreign, "APPA_BRIDGE_TOKEN", None).unwrap(), AUTHORED);
     }
 
@@ -321,7 +321,7 @@ mod tests {
         )
         .unwrap();
         let one = set_credential(&both, "APPA_PROVIDER_GITHUB_TOKEN", None).unwrap();
-        let config = Config::hosted(&one, HOST_DEFAULTS).unwrap();
+        let config = Config::hosted(&one, HOST_DEFAULTS, |_| None).unwrap();
         assert_eq!(
             config.credentials(),
             &std::collections::BTreeMap::from([("APPA_PROVIDER_SLACK_TOKEN".to_string(), "slack_prod".to_string())])

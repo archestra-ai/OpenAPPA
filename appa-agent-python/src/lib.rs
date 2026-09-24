@@ -203,6 +203,7 @@ impl SessionInner {
                 consult_timeout: CONSULT_TIMEOUT,
                 max_body_bytes: MAX_BODY_BYTES,
             },
+            |var| std::env::var(var).ok(),
         )
         .map_err(|error| error.to_string())?;
         let runtime = Runtime::open(config, store.path().join("appa.db"), None).map_err(|error| error.to_string())?;

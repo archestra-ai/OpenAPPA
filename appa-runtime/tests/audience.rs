@@ -493,7 +493,7 @@ async fn a_refused_reload_probe_leaves_the_previous_deployment_serving() {
         Config::load(&path).expect("the revision validates")
     };
     source.members(Some(vec!["finance"]));
-    let prepared = runtime.prepare_reload(revised()).expect("the revision loads");
+    let prepared = runtime.prepare_deployment(revised()).expect("the revision loads");
     assert!(
         prepared.probe_sources().await.is_err(),
         "the revision's source answers garbage"
@@ -501,7 +501,7 @@ async fn a_refused_reload_probe_leaves_the_previous_deployment_serving() {
     drop(prepared);
 
     source.members(Some(vec!["bob@corp.example"]));
-    let prepared = runtime.prepare_reload(revised()).expect("the revision loads again");
+    let prepared = runtime.prepare_deployment(revised()).expect("the revision loads again");
     prepared.probe_sources().await.expect("the source recovered");
     let reloaded = runtime.install(prepared);
     assert!(
