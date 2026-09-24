@@ -64,6 +64,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aicomp-sdk" },
     { name = "appa-agent-python" },
+    { name = "appa-bench-concurrency" },
     { name = "openai" },
     { name = "pyyaml" },
 ]
@@ -72,8 +73,22 @@ dependencies = [
 requires-dist = [
     { name = "aicomp-sdk", specifier = "==3.1.2" },
     { name = "appa-agent-python", editable = "../../appa-agent-python" },
+    { name = "appa-bench-concurrency", directory = "../concurrency" },
     { name = "openai", specifier = ">=1.60" },
     { name = "pyyaml", specifier = ">=6" },
+]
+
+[[package]]
+name = "appa-bench-concurrency"
+version = "0.1.0"
+source = { directory = "../concurrency" }
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8" },
+    { name = "ruff", specifier = ">=0.16" },
 ]
 
 [[package]]

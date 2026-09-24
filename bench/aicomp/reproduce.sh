@@ -6,7 +6,7 @@ set -eu
 cd "$(dirname "$0")"
 
 ARMS=none,rules,optimal,sticky,sticky-intent,appa-q
-WORKERS=${WORKERS:-12}
+MAX_CONCURRENCY=${MAX_CONCURRENCY:-16}
 OUT=${OUT:-runs}
 MODELS="openai/gpt-oss-20b=gptoss20b google/gemma-4-26b-a4b-it=gemma4-26b z-ai/glm-5.3-flash=glm53flash openai/gpt-6-luna=gpt6luna"
 
@@ -15,9 +15,9 @@ pids=""
 for entry in $MODELS; do
   model=${entry%%=*}
   tag=${entry#*=}
-  uv run appa-aicomp run --model "$model" --sets corpus,washout --arms "$ARMS" --workers "$WORKERS" --out "$OUT/corpus-$tag" > "$OUT/corpus-$tag.log" 2>&1 &
+  uv run appa-aicomp run --model "$model" --sets corpus,washout --arms "$ARMS" --max-concurrency "$MAX_CONCURRENCY" --out "$OUT/corpus-$tag" > "$OUT/corpus-$tag.log" 2>&1 &
   pids="$pids $!"
-  uv run appa-aicomp run --model "$model" --sets triage-all --arms "$ARMS" --workers "$WORKERS" --out "$OUT/triage-$tag" > "$OUT/triage-$tag.log" 2>&1 &
+  uv run appa-aicomp run --model "$model" --sets triage-all --arms "$ARMS" --max-concurrency "$MAX_CONCURRENCY" --out "$OUT/triage-$tag" > "$OUT/triage-$tag.log" 2>&1 &
   pids="$pids $!"
 done
 

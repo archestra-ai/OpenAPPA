@@ -9,7 +9,7 @@ import logging
 import os
 import sys
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from importlib.resources import files
@@ -23,6 +23,7 @@ from aicomp_sdk.guardrails.base import GuardrailBase
 from aicomp_sdk.attacks.baselines.guardrail_rules import Guardrail as RulesGuardrail
 from aicomp_sdk.guardrails.optimal import Guardrail as OptimalGuardrail
 from aicomp_sdk.hooks import HookContext, HookRegistry, HookResult, HookStage
+from appa_bench_concurrency import AdaptiveThreadPoolExecutor
 
 from appa_aicomp.agent import OpenRouterAgent
 from appa_aicomp import quarantine
@@ -313,9 +314,13 @@ def main() -> None:
     run.add_argument("--sets", default="benign,indirect,direct")
     run.add_argument("--gk-repo", type=Path)
     run.add_argument("--limit", type=int, default=None, help="max candidates per set")
-    run.add_argument("--workers", type=int, default=8)
+    run.add_argument(
+        "--max-concurrency", type=int, default=None, help="Optional ceiling for automatically tuned concurrency."
+    )
     run.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
+    if args.max_concurrency is not None and args.max_concurrency < 1:
+        parser.error("--max-concurrency must be at least 1")
     dotenv = Path(__file__).resolve().parents[2] / ".env"
     if "OPENROUTER_API_KEY" not in os.environ and dotenv.exists():
         for line in dotenv.read_text().splitlines():
@@ -354,7 +359,12 @@ def main() -> None:
 
     args.out.mkdir(parents=True, exist_ok=True)
     rows: list[dict] = []
-    with ThreadPoolExecutor(args.workers) as pool, (args.out / "rows.jsonl").open("w") as sink:
+    executor = AdaptiveThreadPoolExecutor(
+        max_workers=min(args.max_concurrency or len(jobs), len(jobs)),
+        history_path=args.out / "concurrency.jsonl",
+        clean_result=lambda row: row["error"] is None,
+    )
+    with executor as pool, (args.out / "rows.jsonl").open("w") as sink:
         futures = [pool.submit(replay, candidate, arm, args.model) for candidate, arm in jobs]
         for future in as_completed(futures):
             row = future.result()
@@ -365,6 +375,7 @@ def main() -> None:
                 "%s %s breach=%s preds=%s blocked=%d tools=%s",
                 row["arm"], row["candidate"], row["breach"], row["predicates"], row["blocked"], row["ok_tools"],
             )
+    (args.out / "concurrency-summary.json").write_text(json.dumps(executor.controller.summary(), indent=2) + "\n")
     summary = summarize(rows)
     (args.out / "summary.json").write_text(json.dumps(summary, indent=2))
     print(json.dumps(summary, indent=2))

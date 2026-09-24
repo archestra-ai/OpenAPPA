@@ -16,7 +16,9 @@ echo "OPENROUTER_API_KEY=..." > .env
 `uv` builds the `appa-agent-python` binding from `../../appa-agent-python`, so a
 Rust toolchain is needed. The script replays both workloads on four models and
 six defenses, writes one `rows.jsonl` per run under `runs/`, and prints the
-tables. Every row keeps the full trajectory and each APPA decision.
+tables. Every row keeps the full trajectory and each APPA decision. Each run
+tunes its own concurrency with `appa-bench-concurrency` (`../concurrency`);
+`MAX_CONCURRENCY` caps it per run, and `OUT` picks the output directory.
 
 ## Workloads
 
