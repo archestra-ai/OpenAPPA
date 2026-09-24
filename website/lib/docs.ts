@@ -17,6 +17,8 @@ export interface DocFrontMatter {
   description?: string;
   sidebar?: boolean;
   breadcrumb?: string;
+  /** One-sentence gist shown in a panel under the title; the comparison pages use it. */
+  oversimplified?: string;
 }
 
 export interface DocPage {
@@ -30,6 +32,7 @@ export interface DocPage {
   proposal: boolean;
   sidebar: boolean;
   breadcrumb?: string;
+  oversimplified?: string;
 }
 
 export interface TocItem {
@@ -165,6 +168,7 @@ export function getAllDocs(): DocPage[] {
       proposal: PROPOSAL_OPEN.test(cleanContent.trimStart().split("\n", 1)[0]),
       sidebar: fm.sidebar ?? true,
       breadcrumb: fm.breadcrumb,
+      oversimplified: fm.oversimplified,
     };
   });
   return docs.sort((a, b) => a.order - b.order || a.title.localeCompare(b.title));

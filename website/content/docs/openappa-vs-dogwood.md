@@ -2,6 +2,7 @@
 title: OpenAPPA vs Dogwood
 category: Comparison
 order: 10.6
+oversimplified: "Dogwood lets you describe what an agent may do, taking its previous actions into account; OpenAPPA is agent-agnostic: you describe the data, and the same config scales to millions of agents."
 ---
 
 [Dogwood](https://dogwood-policy.github.io/dogwood/guide/00-introduction.html) is a policy language for AI agents. It builds on Cedar and adds rules about earlier actions, such as requiring approval within the last hour or limiting how often a tool runs.
