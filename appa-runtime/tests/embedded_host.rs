@@ -99,6 +99,7 @@ fn open_under(adapter: Adapter) -> Result<Runtime, OpenError> {
             consult_timeout: Duration::from_millis(5000),
             max_body_bytes: 65_536,
         },
+        |_| None,
     )
     .expect("the hosted document composes");
     let store = Arc::new(LogStore::open(Backend::Memory).expect("an in-memory log opens"));

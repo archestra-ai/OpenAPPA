@@ -91,6 +91,7 @@ mod tests {
                 consult_timeout: Duration::from_secs(1),
                 max_body_bytes: 4096,
             },
+            |_| None,
         )
         .unwrap();
         config.reporting.agent_yell = enabled;

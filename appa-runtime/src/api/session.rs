@@ -4407,6 +4407,7 @@ context_control = true
                 consult_timeout: std::time::Duration::from_millis(2000),
                 max_body_bytes: 65536,
             },
+            |_| None,
         )
         .expect("the hosted document validates")
     }

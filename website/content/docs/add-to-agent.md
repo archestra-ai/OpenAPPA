@@ -102,6 +102,14 @@ With a separate runtime, a hook sends the tool name and arguments as JSON to `PO
 
 An adapter handles naming differences between your agent and APPA. For example, it identifies which policy tool a Claude Code `Read` call refers to. Your coding agent connects an existing adapter or writes one for your agent.
 
+### One embedded runtime can serve many policies
+
+A host that serves several policies from one embedded runtime, such as one per organization, prepares each policy's deployment with `Runtime::prepare_deployment` and dispatches each event through `runtime.pinned(&deployment)`. Every root that view opens, every decision it makes, and every consult it sends to an annotator, authority, or membership service uses the pinned deployment, whatever the shared runtime serves. A trajectory opened under an earlier policy still decides under its stored policy file.
+
+A pin selects a policy, not whose trajectories a view can reach. When the policies belong to separate tenants, give each dispatch its tenant's store through `runtime.on(store)`, a store that reads and writes only that tenant's trajectory logs. Also keep root trajectory ids unique across the whole runtime, for example by including the tenant id, because the runtime keys some in-process state by root id alone.
+
+A hosted document (`Config::hosted`, `Config::hosted_composed`, `Config::hosted_included`) resolves each `token_env` through a `lookup` function the host passes in, not through the process environment. Each policy's endpoints receive only the credentials the host supplies for that policy.
+
 ### How the agent uses a remedy
 
 Suppose APPA blocks a call but offers a way to request approval. The integration returns that offer to the model. The model can then call `appa/execute_remedy_plan` to ask APPA to carry out the offered plan.

@@ -212,6 +212,7 @@ impl Sessions {
                 consult_timeout: CONSULT_TIMEOUT,
                 max_body_bytes: MAX_CONSULT_BYTES,
             },
+            |var| std::env::var(var).ok(),
         )
         .map_err(Box::new)?;
         let runtime = Runtime::open(config, session_dir.join("appa.db"), None).map_err(Box::new)?;

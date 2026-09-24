@@ -36,92 +36,15 @@ fn answer_budget(input: &str, max_body_bytes: usize) -> u64 {
 }
 
 /// One provider client built from the `[externals.llm]` profile at open, shared by every
-/// `builtin = "llm"` entry of the deployment, drawing on the runtime's one llm gate.
+/// `builtin = "llm"` entry of the deployment. Its permit pool is the deployment's own,
+/// bounded by the profile's `max_concurrent`, so two deployments never share or resize one.
 #[derive(Clone)]
 pub struct LlmBackend {
     client: LlmClient,
     model: String,
     timeout: Duration,
     max_body_bytes: usize,
-    gate: Arc<LlmGate>,
-}
-
-/// The permit pool every `llm` consult of a runtime draws on, bounded by `max_concurrent`
-/// of the profile the runtime serves. A reload that raises the bound widens the pool at
-/// once; one that lowers it reclaims permits as in-flight consults release them, so the
-/// old and the new deployment snapshot never exceed the new bound together.
-pub(crate) struct LlmGate {
-    permits: Arc<tokio::sync::Semaphore>,
-    shape: std::sync::Mutex<GateShape>,
-}
-
-/// The pool's bound and the permits a shrink still owes: the semaphore holds
-/// `bound + owed` permits in total, available or in flight.
-struct GateShape {
-    bound: usize,
-    owed: usize,
-}
-
-impl LlmGate {
-    pub(crate) fn new(bound: usize) -> LlmGate {
-        LlmGate {
-            permits: Arc::new(tokio::sync::Semaphore::new(bound)),
-            shape: std::sync::Mutex::new(GateShape { bound, owed: 0 }),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn available(&self) -> usize {
-        self.permits.available_permits()
-    }
-
-    pub(crate) fn resize(&self, bound: usize) {
-        let mut shape = self.shape.lock().expect("the llm gate mutex is never poisoned");
-        let total = shape.bound + shape.owed;
-        if bound >= total {
-            self.permits.add_permits(bound - total);
-            shape.owed = 0;
-        } else {
-            shape.owed = total - bound;
-            shape.owed -= self.permits.forget_permits(shape.owed);
-        }
-        shape.bound = bound;
-    }
-}
-
-/// One consult's permit. Dropping it — on an answer, a timeout, or a consult cancelled
-/// mid-flight alike — settles a narrowed gate's debt before the permit can return.
-struct LlmPermit {
-    gate: Arc<LlmGate>,
-    permit: Option<tokio::sync::OwnedSemaphorePermit>,
-}
-
-impl LlmPermit {
-    async fn acquire(gate: &Arc<LlmGate>) -> LlmPermit {
-        let permit = gate
-            .permits
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("the llm consult gate is never closed");
-        LlmPermit {
-            gate: Arc::clone(gate),
-            permit: Some(permit),
-        }
-    }
-}
-
-impl Drop for LlmPermit {
-    fn drop(&mut self) {
-        let Some(permit) = self.permit.take() else {
-            return;
-        };
-        let mut shape = self.gate.shape.lock().expect("the llm gate mutex is never poisoned");
-        if shape.owed > 0 {
-            shape.owed -= 1;
-            permit.forget();
-        }
-    }
+    gate: Arc<tokio::sync::Semaphore>,
 }
 
 impl std::fmt::Debug for LlmBackend {
@@ -172,7 +95,6 @@ impl LlmBackend {
         profile: &LlmProfile,
         shared_timeout: Duration,
         max_body_bytes: usize,
-        gate: Arc<LlmGate>,
     ) -> Result<LlmBackend, LlmClientError> {
         // Every provider client below builds a reqwest client of rig's own, so the
         // provider must be in place before the first of them is constructed.
@@ -217,16 +139,21 @@ impl LlmBackend {
             model: profile.model.clone(),
             timeout: profile.timeout.unwrap_or(shared_timeout),
             max_body_bytes,
-            gate,
+            gate: Arc::new(tokio::sync::Semaphore::new(profile.max_concurrent)),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn available_permits(&self) -> usize {
+        self.gate.available_permits()
     }
 
     /// One consult. The deadline covers the permit wait and the request: queueing behind
     /// the pool spends the same budget the consult itself would.
     pub async fn consult(&self, prompt: &ModelPrompt) -> Result<serde_json::Value, NoAnswerReason> {
         let deadline = tokio::time::Instant::now() + self.timeout;
-        let permit = match tokio::time::timeout_at(deadline, LlmPermit::acquire(&self.gate)).await {
-            Ok(permit) => permit,
+        let permit = match tokio::time::timeout_at(deadline, self.gate.acquire()).await {
+            Ok(permit) => permit.expect("the llm consult gate is never closed"),
             Err(_) => {
                 tracing::warn!("the llm consult gate stayed saturated for the whole budget");
                 return Err(NoAnswerReason::Timeout);
@@ -416,22 +343,10 @@ mod tests {
     }
 
     fn built_under(provider: LlmProvider, url: String, max_concurrent: usize, max_body_bytes: usize) -> LlmBackend {
-        built_over(provider, url, max_concurrent, max_body_bytes, Arc::new(LlmGate::new(0)))
-    }
-
-    fn built_over(
-        provider: LlmProvider,
-        url: String,
-        max_concurrent: usize,
-        max_body_bytes: usize,
-        gate: Arc<LlmGate>,
-    ) -> LlmBackend {
-        gate.resize(max_concurrent);
         LlmBackend::new(
             &profile(provider, Some(url), Some("sekret"), max_concurrent),
             Duration::from_secs(5),
             max_body_bytes,
-            gate,
         )
         .expect("the backend builds")
     }
@@ -531,12 +446,11 @@ mod tests {
     #[test]
     fn gemini_and_ollama_profiles_build_without_a_network() {
         let gemini = profile(LlmProvider::Gemini, None, Some("sekret"), 2);
-        let gate = || Arc::new(LlmGate::new(0));
-        assert!(LlmBackend::new(&gemini, Duration::from_secs(1), 65_536, gate()).is_ok());
+        assert!(LlmBackend::new(&gemini, Duration::from_secs(1), 65_536).is_ok());
         let ollama = profile(LlmProvider::Ollama, None, None, 2);
-        assert!(LlmBackend::new(&ollama, Duration::from_secs(1), 65_536, gate()).is_ok());
+        assert!(LlmBackend::new(&ollama, Duration::from_secs(1), 65_536).is_ok());
         let pinned = profile(LlmProvider::Ollama, Some("http://127.0.0.1:11434".to_string()), None, 2);
-        assert!(LlmBackend::new(&pinned, Duration::from_secs(1), 65_536, gate()).is_ok());
+        assert!(LlmBackend::new(&pinned, Duration::from_secs(1), 65_536).is_ok());
     }
 
     #[tokio::test]
@@ -588,68 +502,30 @@ mod tests {
         assert_eq!(backend.consult(&prompt()).await, Err(NoAnswerReason::Oversized));
     }
 
+    /// Each deployment's backend bounds its own consults by its own profile: a deployment
+    /// allowing one consult at a time is not widened by another allowing two, nor narrows it.
     #[tokio::test]
-    async fn the_runtime_gate_bounds_concurrent_consults_across_deployment_snapshots() {
-        let (addr, stub) = serve("/v1/messages", anthropic_reply, Duration::from_millis(100)).await;
-        stub.answering(StubAnswer::Text("{\"ruling\":\"approve\"}".to_string()));
-        let gate = Arc::new(LlmGate::new(0));
-        // The snapshot before a reload and the one after it: the same runtime gate, the
-        // profile's bound applied by whichever loaded last.
-        let before = built_over(
-            LlmProvider::Anthropic,
-            format!("http://{addr}"),
-            4,
-            65_536,
-            gate.clone(),
-        );
-        let after = built_over(LlmProvider::Anthropic, format!("http://{addr}"), 1, 65_536, gate);
+    async fn each_backend_bounds_its_consults_by_its_own_profile() {
+        let (narrow_addr, narrow_stub) = serve("/v1/messages", anthropic_reply, Duration::from_millis(100)).await;
+        let (wide_addr, wide_stub) = serve("/v1/messages", anthropic_reply, Duration::from_millis(100)).await;
+        for stub in [&narrow_stub, &wide_stub] {
+            stub.answering(StubAnswer::Text("{\"ruling\":\"approve\"}".to_string()));
+        }
+        let narrow = built(LlmProvider::Anthropic, format!("http://{narrow_addr}"), 1);
+        let wide = built(LlmProvider::Anthropic, format!("http://{wide_addr}"), 2);
 
         let ask = prompt();
         let answers = futures_util::future::join_all([
-            before.consult(&ask),
-            after.consult(&ask),
-            before.consult(&ask),
-            after.consult(&ask),
+            narrow.consult(&ask),
+            wide.consult(&ask),
+            narrow.consult(&ask),
+            wide.consult(&ask),
+            narrow.consult(&ask),
+            wide.consult(&ask),
         ])
         .await;
         assert!(answers.iter().all(Result::is_ok), "{answers:?}");
-        assert_eq!(
-            stub.max_in_flight.load(Ordering::SeqCst),
-            1,
-            "one permit, one request at a time, whichever snapshot asks"
-        );
-        assert_eq!(stub.requests().len(), 4);
-    }
-
-    #[tokio::test]
-    async fn a_narrowed_gate_reclaims_permits_as_consults_in_flight_let_go_of_them() {
-        let gate = Arc::new(LlmGate::new(2));
-        gate.resize(3);
-        assert_eq!(
-            gate.permits.available_permits(),
-            3,
-            "a wider bound is available at once"
-        );
-
-        let first = LlmPermit::acquire(&gate).await;
-        let second = LlmPermit::acquire(&gate).await;
-        gate.resize(1);
-        assert_eq!(
-            gate.permits.available_permits(),
-            0,
-            "the one permit not in flight is forgotten; the bound is owed one more"
-        );
-        // A consult cancelled mid-flight drops its permit the same way an answered one does.
-        drop(first);
-        assert_eq!(
-            gate.permits.available_permits(),
-            0,
-            "the first permit let go settles the debt"
-        );
-        drop(second);
-        assert_eq!(gate.permits.available_permits(), 1, "the pool is the new bound");
-
-        gate.resize(2);
-        assert_eq!(gate.permits.available_permits(), 2);
+        assert_eq!(narrow_stub.max_in_flight.load(Ordering::SeqCst), 1);
+        assert_eq!(wide_stub.max_in_flight.load(Ordering::SeqCst), 2);
     }
 }

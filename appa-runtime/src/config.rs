@@ -224,12 +224,6 @@ impl Externals {
             })
             .collect()
     }
-
-    /// How many `llm` consults this deployment lets run at once: `max_concurrent` of its
-    /// profile, none without one.
-    pub(crate) fn llm_bound(&self) -> usize {
-        self.llm.as_ref().map_or(0, |profile| profile.max_concurrent)
-    }
 }
 
 /// The audience sources a composed document declares, read from its `[externals.audience]`
@@ -990,10 +984,15 @@ impl Config {
     /// same terms and carried, never resolved: it names, for each child-credential variable
     /// a battery's helpers read, the key the host's store holds it under, and the host's own
     /// authorization over who may write that table is the boundary. Validation is otherwise
-    /// the file loader's, tokens included: a `token_env` this runtime resolves and sends
-    /// itself reads this process's environment, here as in a file.
-    pub fn hosted(text: &str, defaults: HostDefaults) -> Result<Config, ConfigError> {
-        Config::hosted_composed(text, &[], defaults)
+    /// the file loader's, except that a `token_env` this runtime resolves and sends itself is
+    /// read through the host's `lookup`, not this process's environment, so a host that
+    /// serves many documents answers each one's secrets itself.
+    pub fn hosted(
+        text: &str,
+        defaults: HostDefaults,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<Config, ConfigError> {
+        Config::hosted_composed(text, &[], defaults, lookup)
     }
 
     /// [`Config::hosted`] with batteries composed under the root document the way a
@@ -1007,9 +1006,10 @@ impl Config {
         root: &str,
         batteries: &[HostedBattery<'_>],
         defaults: HostDefaults,
+        lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<Config, ConfigError> {
         let document = hosted_root(root, IncludeAdmission::Refused)?;
-        Config::compose_hosted(document, batteries, defaults)
+        Config::compose_hosted(document, batteries, defaults, lookup)
     }
 
     /// [`Config::hosted_composed`] where the root document's own `include` list says which
@@ -1024,6 +1024,7 @@ impl Config {
         root: &str,
         defaults: HostDefaults,
         resolve: impl Fn(&str) -> Result<HostedBattery<'a>, IncludeResolution>,
+        lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<Config, ConfigError> {
         let mut document = hosted_root(root, IncludeAdmission::Consumed)?;
         let entries = take_include(&mut document)?;
@@ -1039,13 +1040,14 @@ impl Config {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Config::compose_hosted(document, &batteries, defaults)
+        Config::compose_hosted(document, &batteries, defaults, lookup)
     }
 
     fn compose_hosted(
         mut document: toml::Value,
         batteries: &[HostedBattery<'_>],
         defaults: HostDefaults,
+        lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<Config, ConfigError> {
         let document_table = document.as_table_mut().expect("a TOML document parses as a table");
         let root_policy = document_table.get("policy").ok_or(ConfigError::InvalidPolicyVersion)?;
@@ -1116,7 +1118,7 @@ impl Config {
             None,
             BTreeMap::new(),
             included_batteries.into_iter().collect(),
-            |var| std::env::var(var).ok(),
+            lookup,
         )
     }
 
@@ -2998,19 +3000,24 @@ mod tests {
         max_body_bytes: 65_536,
     };
 
+    /// The secrets the host of these tests holds.
+    fn host_secrets(var: &str) -> Option<String> {
+        (var == "APPA_HOSTED_TEST_BRIDGE_TOKEN").then(|| "bridge".to_string())
+    }
+
     fn hosted(text: &str) -> Result<Config, ConfigError> {
-        Config::hosted(text, HOST_DEFAULTS)
+        Config::hosted(text, HOST_DEFAULTS, host_secrets)
     }
 
     fn hosted_composed(root: &str, batteries: &[HostedBattery<'_>]) -> Result<Config, ConfigError> {
-        Config::hosted_composed(root, batteries, HOST_DEFAULTS)
+        Config::hosted_composed(root, batteries, HOST_DEFAULTS, host_secrets)
     }
 
     fn hosted_included<'a>(
         root: &str,
         resolve: impl Fn(&str) -> Result<HostedBattery<'a>, IncludeResolution>,
     ) -> Result<Config, ConfigError> {
-        Config::hosted_included(root, HOST_DEFAULTS, resolve)
+        Config::hosted_included(root, HOST_DEFAULTS, resolve, host_secrets)
     }
 
     /// Every battery the host of these tests holds, under the spelling its root
@@ -3078,8 +3085,6 @@ mod tests {
 
     #[test]
     fn hosted_batteries_compose_under_the_root_and_reload_as_one_document() {
-        // SAFETY: the test process sets its own variable and every reader is this test.
-        unsafe { std::env::set_var("APPA_HOSTED_TEST_BRIDGE_TOKEN", "bridge") };
         let config = hosted_composed(
             HOSTED_ROOT,
             &[HostedBattery {
@@ -3321,6 +3326,7 @@ mod tests {
                 "[reporting]\nagent_yell = true\n[credentials]\nGITHUB_TOKEN = \"k\"\ninclude = [\"/srv/notes.toml\"]\n[policy]\nversion = 2\n",
                 HOST_DEFAULTS,
                 unasked,
+                host_secrets,
             ),
             Err(ConfigError::HostedKey { key }) if key == "reporting"
         ));
@@ -3329,6 +3335,7 @@ mod tests {
                 "include = [\"/srv/notes.toml\"]\n[credentials]\nGITHUB_TOKEN = \"k\"\n[policy]\nversion = 2\n",
                 HOST_DEFAULTS,
                 unasked,
+                host_secrets,
             ),
             Err(ConfigError::CredentialVariable { var }) if var == "GITHUB_TOKEN"
         ));
@@ -3360,8 +3367,6 @@ mod tests {
 
     #[test]
     fn a_battery_reads_only_the_variables_its_host_granted() {
-        // SAFETY: the test process sets its own variable and every reader is this test.
-        unsafe { std::env::set_var("APPA_HOSTED_TEST_BRIDGE_TOKEN", "bridge") };
         let ungranted = hosted_composed(
             HOSTED_ROOT,
             &[HostedBattery {
@@ -3382,8 +3387,6 @@ mod tests {
 
     #[test]
     fn a_hosted_root_annotator_replaces_a_battery_default() {
-        // SAFETY: the test process sets its own variable and every reader is this test.
-        unsafe { std::env::set_var("APPA_HOSTED_TEST_BRIDGE_TOKEN", "bridge") };
         let root = "[policy]\nversion = 2\n[[policy.annotator]]\nname = \"github.visibility\"\nranks = [\"trusted\"]\naudiences = []\nmarks = []\n";
         let config = hosted_composed(
             root,
@@ -3552,23 +3555,26 @@ mod tests {
         assert_eq!(stated.externals.max_body_bytes, 1024);
     }
 
-    /// A hosted document names its secrets like a file does: the variable is persisted,
-    /// the value is resolved from the environment, and the same text read from a file
-    /// composes the same bytes.
+    /// A hosted document names its secrets like a file does: the variable is persisted and
+    /// the same text read from a file composes the same bytes. The value is the host's
+    /// answer, never this process's environment.
     #[test]
-    fn hosted_tokens_persist_as_variable_names_and_resolve_from_the_environment() {
+    fn hosted_tokens_persist_as_variable_names_and_resolve_through_the_host() {
         const VAR: &str = "APPA_CONFIG_TEST_HOSTED_TOKEN";
         let text = format!(
             "[policy]\nversion = 2\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n\
              [externals.authorities.desk]\nurl = \"https://desk.internal\"\ntoken_env = \"{VAR}\"\n\
              [externals.llm]\nprovider = \"anthropic\"\nmodel = \"claude-sonnet-4-5\"\ntoken_env = \"{VAR}\"\ntimeout_ms = 30000\nmax_concurrent = 2\n"
         );
+        let host = |var: &str| (var == VAR).then(|| "sekret".to_string());
 
-        unsafe { std::env::remove_var(VAR) };
-        assert!(matches!(hosted(&text), Err(ConfigError::MissingSecret { .. })));
-
-        unsafe { std::env::set_var(VAR, "sekret") };
-        let config = hosted(&text).expect("the hosted document validates against the environment");
+        // SAFETY: the test process sets its own variable and every reader is this test.
+        unsafe { std::env::set_var(VAR, "from-the-environment") };
+        assert!(matches!(
+            Config::hosted(&text, HOST_DEFAULTS, |_| None),
+            Err(ConfigError::MissingSecret { .. })
+        ));
+        let config = Config::hosted(&text, HOST_DEFAULTS, host).expect("the host answers the secret");
         let dir = tempfile::tempdir().expect("temp directory");
         let path = dir.path().join("appa.toml");
         std::fs::write(&path, &text).expect("write file config");
