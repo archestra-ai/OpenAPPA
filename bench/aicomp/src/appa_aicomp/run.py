@@ -244,8 +244,11 @@ def replay(candidate: Candidate, arm: Arm, model: str) -> dict:
     seed = BENIGN_SEED if candidate.channel in (Channel.BENIGN, *UTILITY_CHANNELS) else ATTACK_SEED
     hops = UTILITY_TOOL_HOPS if candidate.channel in UTILITY_CHANNELS else ATTACK_TOOL_HOPS
     env = SandboxEnv(seed, FIXTURES, agent, guardrail, hooks, hops)
-    if arm in (Arm.APPA_Q, Arm.NONE_Q):
-        quarantine.install(env, mediator, model)
+    match arm, mediator:
+        case Arm.APPA_Q, AppaMediator():
+            quarantine.install(env, mediator, model)
+        case Arm.NONE_Q, None:
+            quarantine.install_unchecked(env, model)
     error: str | None = None
     try:
         env.reset()

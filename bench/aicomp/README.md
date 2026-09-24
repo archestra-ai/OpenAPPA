@@ -44,7 +44,7 @@ user turns are not yet sent to OpenAPPA.
 | arm | defense |
 |---|---|
 | `none` | the agent alone |
-| `none-q` | the agent with the same `triage_email` sub-agent as `appa-q`, unchecked: its answer reaches the agent as written. A utility control, run on triage only |
+| `none-q` | the agent with the same `triage_email` sub-agent as `appa-q` and the same retry for an answer that is not JSON; nothing checks the value it returns. A utility control, run on triage only |
 | `rules` | the organizers' baseline guardrail, `aicomp_sdk.attacks.baselines.guardrail_rules` |
 | `optimal` | the organizers' public-leaderboard guardrail, `aicomp_sdk.guardrails.optimal` |
 | `sticky` | the private-leaderboard guardrail as the winning write-ups reconstruct it: persistent provenance plus a full-payload secret scan (`sticky.py`) |
@@ -58,4 +58,4 @@ user turns are not yet sent to OpenAPPA.
 - `src/appa_aicomp/mediator.py`: the OpenAPPA session in the SDK's guardrail slot and hooks.
 - `src/appa_aicomp/quarantine.py`: the `triage_email` tool and its child trajectory.
 - `src/appa_aicomp/agent.py`: the OpenRouter chat-completions agent.
-- `src/appa_aicomp/headline.py`: the published tables. `analyze.py` and `official.py` give per-channel breakdowns and the SDK's defense score.
+- `src/appa_aicomp/headline.py`: the published tables; `control.py`: what each triage sub-agent returned. `analyze.py` and `official.py` give per-channel breakdowns and the SDK's defense score.

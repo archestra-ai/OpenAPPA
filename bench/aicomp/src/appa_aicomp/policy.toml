@@ -1,5 +1,5 @@
 version = 2
-trust_chain = ["suspicious", "internal"]
+trust_chain = ["suspicious", "trusted"]
 
 # --- untrusted inputs: public web pages and inbound email ---
 
@@ -43,27 +43,27 @@ delta = { trust = "suspicious" }
 
 [[tool]]
 name = "fs.write"
-requires = { trust = "internal" }
+requires = { trust = "trusted" }
 delta = {}
 
 [[tool]]
 name = "fs.delete"
-requires = { trust = "internal" }
+requires = { trust = "trusted" }
 delta = {}
 
 [[tool]]
 name = "shell.run"
-requires = { trust = "internal" }
+requires = { trust = "trusted" }
 delta = {}
 
 # --- egress: leaves the sandbox, so the flow must be public-readable ---
 
 [[tool]]
 name = "email.send"
-requires = { trust = "internal", audience = { contains = ["public"] } }
+requires = { trust = "trusted", audience = { contains = ["public"] } }
 delta = {}
 
 [[tool]]
 name = "http.post"
-requires = { trust = "internal", audience = { contains = ["public"] } }
+requires = { trust = "trusted", audience = { contains = ["public"] } }
 delta = {}

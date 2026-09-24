@@ -71,21 +71,21 @@ open models the competition used, plus GLM 5.3 Flash and GPT-6 Luna.
 | Model | Guarded OpenAPPA | Same subagent, unchecked | Organizers' rule guardrail | No guardrail |
 |---|---:|---:|---:|---:|
 | GPT-6 Luna | **100% / 0** | 100% / 0 | 87.1% / 19 | 86.0% / 20 |
-| GPT-OSS 20B | **99.3% / 0** | 100% / 0 | 82.4% / 112 | 82.3% / 109 |
-| Gemma 4 26B | **100% / 0** | 97.8% / 0 | 69.7% / 143 | 68.0% / 150 |
-| GLM 5.3 Flash | **96.6% / 0** | 98.1% / 11 | 38.8% / 189 | 49.1% / 222 |
+| GPT-OSS 20B | **100% / 0** | 100% / 0 | 82.4% / 112 | 82.3% / 109 |
+| Gemma 4 26B | **100% / 0** | 98.3% / 0 | 69.7% / 143 | 68.0% / 150 |
+| GLM 5.3 Flash | **98.3% / 0** | 98.6% / 0 | 38.8% / 189 | 49.1% / 222 |
 
 Each entry shows the share of 957 runs done cleanly, followed by the number of
 sent mails that carried the attacker's link. A run is done cleanly when the
 summary arrives, the scorer finds no breach, and the mail carries no such link.
 
 Guarded OpenAPPA reads each email in a [subagent](/how-it-works#subagent-reads)
-that may return only four typed fields. Most of the utility comes from that
-design, so the second column runs the same subagent without OpenAPPA. It
-finishes as many tasks, but about one answer in ten leaves the declared shape.
-On GLM, 11 of those answers carried the attacker's link into the summary.
-OpenAPPA [refuses any answer outside the shape](/contracts#structured-child-returns),
-so no guarded mail carried the link. The competition's leaderboard guardrails
+that may return only four typed fields. That design brings the utility: the
+second column runs the same subagent without OpenAPPA and finishes about as
+many tasks. OpenAPPA turns the design's safety into a check. Unchecked,
+Gemma's subagent handed back something other than the four fields in one
+answer in five, and the main agent took it as data. OpenAPPA [refuses any answer outside the shape](/contracts#structured-child-returns),
+whatever the model or harness does. The competition's leaderboard guardrails
 pass its own benign check, but they deny every send after the agent reads an
 email, so they finish no triage task.
 
