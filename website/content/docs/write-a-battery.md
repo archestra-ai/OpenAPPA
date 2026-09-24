@@ -26,7 +26,7 @@ may require a GitHub API lookup.
 >
 > Inspect the MCP server in this repository.
 > Create a battery for it.
-> Add its documentation and catalogue card.
+> Add its documentation and catalog card.
 > Run every available check.
 > Do not guess when the server code does not answer a question.
 > Tell me what you created and what you verified.
@@ -36,7 +36,7 @@ may require a GitHub API lookup.
 ## What happens next
 
 1. **Read.** Your agent reads the server code and docs. It lists every tool, its inputs and results, and anything it can change.
-2. **Build.** It creates the battery, tests, documentation page, and catalogue card. It records the exact server version and links each rule to the source that supports it.
+2. **Build.** It creates the battery, tests, documentation page, and catalog card. It records the exact server version and links each rule to the source that supports it.
 3. **Review.** You open those links, check the rules, resolve any unanswered questions, and submit the pull request.
 
 :::battery-review-checklist:::
@@ -78,7 +78,7 @@ The test suite composes every battery into each host it declares to make sure th
 
 ### Unit tests
 
-Write tests for every annotator and audience source that need no credential: the consult envelope, the template check against `declaration.templates`, argument and selector handling, and every refusal path. An audience source must refuse a declaration that lists templates it does not serve, before it reads its token; test that refusal. Check the service against the real provider with a replay trace and a real token, as described below.
+For every annotator and audience source, write tests that need no credential: the consult envelope, the template check against `declaration.templates`, argument and selector handling, and every refusal path. An audience source must refuse a declaration that lists templates it does not serve, before it reads its token; test that refusal. Check the service against the real provider with a replay trace and a real token, as described below.
 
 For example, to test a Python battery:
 
@@ -233,4 +233,4 @@ The pull request is ready for review when:
 2. Every contract uses the canonical tool id (`mcp/<server>/<tool>`) and the exact arguments from that server version.
 3. Every script passes its tests and refuses invalid input.
 4. The test that loads all batteries passes.
-5. The catalogue card opens the battery documentation page.
+5. The catalog card opens the battery documentation page.
