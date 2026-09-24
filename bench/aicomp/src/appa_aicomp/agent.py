@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import random
 import time
 import uuid
 from collections.abc import Sequence
@@ -28,13 +29,17 @@ from aicomp_sdk.core.runtime_history import RuntimeHistory
 
 logger = logging.getLogger(__name__)
 
+# A hung request is retried by `_complete`, not waited out.
+REQUEST_TIMEOUT_S = 120
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 
 class OpenRouterAgent:
     def __init__(self, model: str, client: openai.OpenAI | None = None, max_retries: int = 4) -> None:
         self._model = model
-        self._client = client or openai.OpenAI(base_url=OPENROUTER_BASE_URL, api_key=os.environ["OPENROUTER_API_KEY"])
+        self._client = client or openai.OpenAI(
+            base_url=OPENROUTER_BASE_URL, api_key=os.environ["OPENROUTER_API_KEY"], timeout=REQUEST_TIMEOUT_S, max_retries=0
+        )
         self._max_retries = max_retries
         self.calls = 0
         self.invalid_outputs = 0
@@ -97,7 +102,7 @@ class OpenRouterAgent:
                 if attempt == self._max_retries:
                     raise
                 logger.exception("OpenRouter call failed, retrying")
-                time.sleep(2**attempt)
+                time.sleep(2**attempt * random.uniform(0.5, 1.5))
         raise AssertionError("unreachable")
 
     @staticmethod

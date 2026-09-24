@@ -14,6 +14,7 @@ from aicomp_sdk.agents.types import AgentToolSpec, FinalResponseDecision, ToolCa
 from aicomp_sdk.core.env.sandbox import SandboxEnv
 from aicomp_sdk.core.runtime_history import RuntimeHistory
 from aicomp_sdk.core.tools.models import RuntimeToolSpec, ToolScope, ToolSideEffect
+from appa_agent_python import AppaError, ChildSession
 
 from appa_aicomp.agent import OpenRouterAgent
 from appa_aicomp.mediator import AppaMediator, Decision, Verdict, delivered_content, resolve
@@ -138,4 +139,14 @@ def _triage(
         return False, "", "the triage sub-agent returned no structured result"
     except Exception as exc:
         logger.exception("triage child failed")
+        _end(child)
         return False, "", f"triage_error:{exc}"
+
+
+def _end(child: ChildSession) -> None:
+    """Settle a child a failure left open, so the parent session can still close."""
+    for settle in (child.abandon, lambda: child.finish(None)):
+        try:
+            settle()
+        except AppaError:
+            logger.exception("settling the failed triage child")

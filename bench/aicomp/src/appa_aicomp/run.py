@@ -9,7 +9,7 @@ import logging
 import os
 import sys
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from importlib.resources import files
@@ -355,7 +355,9 @@ def main() -> None:
     args.out.mkdir(parents=True, exist_ok=True)
     rows: list[dict] = []
     with ThreadPoolExecutor(args.workers) as pool, (args.out / "rows.jsonl").open("w") as sink:
-        for row in pool.map(lambda job: replay(job[0], job[1], args.model), jobs):
+        futures = [pool.submit(replay, candidate, arm, args.model) for candidate, arm in jobs]
+        for future in as_completed(futures):
+            row = future.result()
             rows.append(row)
             sink.write(json.dumps(row) + "\n")
             sink.flush()
