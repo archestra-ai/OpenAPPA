@@ -5,12 +5,20 @@ order: 8
 description: Test policy decisions before merging changes, without running your agent's tools.
 ---
 
-The APPA CLI provides two commands for validation:
+The [APPA CLI](https://openappa.com/install.sh) provides two commands for validation:
 
 - `appa describe --check` checks that your configuration loads.
 - `appa replay` checks scripted tool calls against the decisions you expect, without running your agent's tools.
 
 Run them locally or in continuous integration (CI) to catch configuration errors and unexpected policy decisions before deployment.
+
+Install the CLI on Linux or macOS:
+
+```sh
+curl -fsSL https://openappa.com/install.sh | sh
+```
+
+The installer places `appa` in `~/.local/bin`. Add that directory to your `PATH` if needed. No Claude Code plugin is required.
 
 ## Make policy tests a required CI check
 
