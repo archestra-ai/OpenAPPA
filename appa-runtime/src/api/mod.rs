@@ -844,6 +844,9 @@ pub struct Reloaded {
 /// serving deployment untouched. Cloning shares the loaded deployment.
 #[derive(Clone)]
 pub struct PreparedDeployment {
+    /// The runtime that prepared it, the one [`Runtime::install`] and [`Runtime::pinned`]
+    /// accept it from.
+    runtime: std::sync::Weak<Shared>,
     deployment: Arc<Deployment>,
 }
 
@@ -886,7 +889,6 @@ impl Prepared {
             crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
         let gates = ConsultGates::per_runtime();
         let deployment = Deployment::load(config, &modules, gates.clone(), naming)?;
-        gates.serve_llm(deployment.config.externals.llm_bound());
         Ok(Prepared {
             modules,
             gates,
@@ -1038,15 +1040,23 @@ impl Runtime {
     /// concurrent [`Runtime::install`] swaps in. A host that serves many policies from one
     /// runtime dispatches each through a view pinned to that policy's deployment. A
     /// trajectory opened under another policy decides under its stored policy, as it does
-    /// after a reload. The deployment is one this runtime prepared; [`Runtime::on`] and
-    /// [`Runtime::recording`] views of this one keep the pin.
+    /// after a reload. [`Runtime::on`] and [`Runtime::recording`] views of this one keep the
+    /// pin.
+    ///
+    /// The deployment's `llm` pool is its own, bounded by its profile's `max_concurrent`.
+    /// The `command` and `claude-code` permit pools are the runtime's, shared by every
+    /// deployment it serves or pins.
+    ///
+    /// # Panics
+    ///
+    /// On a deployment another runtime prepared.
     pub fn pinned(&self, deployment: &PreparedDeployment) -> Runtime {
         Runtime {
             inner: Arc::new(Inner {
                 shared: Arc::clone(&self.inner.shared),
                 store: Arc::clone(&self.inner.store),
                 recorder: self.inner.recorder.clone(),
-                pinned: Some(Arc::clone(&deployment.deployment)),
+                pinned: Some(self.own(deployment)),
             }),
         }
     }
@@ -1590,30 +1600,42 @@ impl Runtime {
             self.inner.shared.naming,
         )?;
         Ok(PreparedDeployment {
+            runtime: Arc::downgrade(&self.inner.shared),
             deployment: Arc::new(deployment),
         })
     }
 
+    /// The prepared deployment, which must be one this runtime prepared: another runtime's
+    /// modules, consult gates and tool naming are not this one's.
+    ///
+    /// # Panics
+    ///
+    /// On a deployment another runtime prepared, a host's programming error.
+    fn own(&self, prepared: &PreparedDeployment) -> Arc<Deployment> {
+        assert!(
+            std::ptr::eq(prepared.runtime.as_ptr(), Arc::as_ptr(&self.inner.shared)),
+            "the deployment was prepared by another runtime"
+        );
+        Arc::clone(&prepared.deployment)
+    }
+
     /// Swap a prepared deployment in as the serving one.
+    ///
+    /// # Panics
+    ///
+    /// On a deployment another runtime prepared.
     pub fn install(&self, prepared: PreparedDeployment) -> Reloaded {
-        let deployment = prepared.deployment;
+        let deployment = self.own(&prepared);
         let identity = deployment.resident().identity_hex();
-        // The gate's bound and the serving snapshot change as one transition under the
-        // deployment lock, so two reloads racing cannot leave the gate bound by the
-        // deployment that lost.
-        let previous = {
-            let mut serving = self
+        let previous = std::mem::replace(
+            &mut *self
                 .inner
                 .shared
                 .deployment
                 .write()
-                .expect("the deployment lock is never poisoned: no panic runs while it is held");
-            self.inner
-                .shared
-                .gates
-                .serve_llm(deployment.config.externals.llm_bound());
-            std::mem::replace(&mut *serving, Arc::clone(&deployment))
-        };
+                .expect("the deployment lock is never poisoned: no panic runs while it is held"),
+            Arc::clone(&deployment),
+        );
         // Every reload retires at most one more policy, so clearing here bounds the
         // cache by the reloads since the last one instead of by the life of the
         // process. A trajectory still replaying under a dropped entry recompiles it.
@@ -3612,8 +3634,14 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         ));
     }
 
+    fn llm_permits(deployment: &Deployment) -> Option<usize> {
+        deployment.externals.llm_permits()
+    }
+
+    /// Every deployment bounds its `llm` consults by its own profile: installing one or
+    /// pinning another resizes no other deployment's pool.
     #[test]
-    fn the_llm_gate_follows_the_serving_deployment_and_never_a_refused_one() {
+    fn each_deployment_bounds_its_llm_consults_by_its_own_profile() {
         let policy = r#"
             [policy]
             version = 2
@@ -3624,10 +3652,6 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             name = "lookup"
             description = "Looks one record up."
             annotator = "classifier"
-            [[policy.authority]]
-            name = "auditor"
-            [policy.authority.permits]
-            attention = ["irreversible"]
         "#;
         let with_pool = |max_concurrent: u32| {
             claude_config(&format!(
@@ -3636,49 +3660,38 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         };
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = Runtime::open(with_pool(2), dir.path().join("appa.db"), None).expect("the deployment opens");
-        assert_eq!(runtime.inner.shared.gates.llm_permits(), 2);
+        let narrow = runtime.prepare_deployment(with_pool(1)).expect("loads");
+        let wide = runtime.prepare_deployment(with_pool(3)).expect("loads");
 
-        // A candidate that validates but cannot build its externals declares a wider pool
-        // and never serves: the gate stays as the serving deployment declared it.
-        let mut refused = with_pool(5);
-        refused.externals.authorities.insert(
-            "auditor".to_string(),
-            crate::config::Implementation::Builtin("no-such".to_string()),
-        );
-        assert!(matches!(runtime.reload(refused), Err(OpenError::Modules(_))));
-        assert_eq!(runtime.inner.shared.gates.llm_permits(), 2);
+        runtime.install(narrow.clone());
+        let pinned = runtime.pinned(&wide);
+        assert_eq!(llm_permits(&runtime.inner.deployment()), Some(1));
+        assert_eq!(llm_permits(&pinned.inner.deployment()), Some(3));
+        assert_eq!(llm_permits(&narrow.deployment), Some(1));
+    }
 
-        assert!(runtime.reload(with_pool(3)).is_ok());
-        assert_eq!(runtime.inner.shared.gates.llm_permits(), 3);
-        assert!(
-            runtime.reload(claude_config(policy)).is_err(),
-            "no profile, no declared llm"
-        );
-        assert_eq!(runtime.inner.shared.gates.llm_permits(), 3);
+    fn minimal_policy() -> Config {
+        claude_config("[policy]\nversion = 2\n")
+    }
 
-        // Reloads racing from several threads: whichever deployment ends up serving, the
-        // gate is bound as that deployment declares.
-        std::thread::scope(|scope| {
-            for round in 0..8u32 {
-                let runtime = &runtime;
-                let with_pool = &with_pool;
-                scope.spawn(move || {
-                    runtime
-                        .reload(with_pool(2 + round % 4))
-                        .expect("every candidate is a complete deployment");
-                });
-            }
-        });
-        let serving = runtime
-            .inner
-            .shared
-            .deployment
-            .read()
-            .expect("the deployment lock is never poisoned")
-            .config
-            .externals
-            .llm_bound();
-        assert_eq!(runtime.inner.shared.gates.llm_permits(), serving);
+    #[test]
+    #[should_panic(expected = "the deployment was prepared by another runtime")]
+    fn a_runtime_refuses_to_pin_another_runtimes_deployment() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let one = Runtime::open(minimal_policy(), dir.path().join("one.db"), None).expect("opens");
+        let other = Runtime::open(minimal_policy(), dir.path().join("other.db"), None).expect("opens");
+        let prepared = one.prepare_deployment(minimal_policy()).expect("loads");
+        let _ = other.pinned(&prepared);
+    }
+
+    #[test]
+    #[should_panic(expected = "the deployment was prepared by another runtime")]
+    fn a_runtime_refuses_to_install_another_runtimes_deployment() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let one = Runtime::open(minimal_policy(), dir.path().join("one.db"), None).expect("opens");
+        let other = Runtime::open(minimal_policy(), dir.path().join("other.db"), None).expect("opens");
+        let prepared = one.prepare_deployment(minimal_policy()).expect("loads");
+        other.install(prepared);
     }
 
     /// Two policies that differ only in a tool's description, so a root opened

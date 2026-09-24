@@ -21,7 +21,7 @@ use crate::config::{
 use crate::consult::{AudienceSourceArtifact, Consult, ConsultBody, ConsultKind, ModelPrompt};
 use crate::elicit::Elicitation;
 use crate::jev::{JevBackend, JevClients, JevTiming};
-use crate::llm::{LlmBackend, LlmGate};
+use crate::llm::LlmBackend;
 use crate::recorder::ConsultBackend;
 use appa_engine::label::ReaderId;
 use appa_policy::AnnotatorBuiltin;
@@ -257,16 +257,15 @@ pub(crate) async fn settle_batch<F: std::future::Future>(consults: impl IntoIter
         .await
 }
 
-/// The per-runtime gates on consults that cost a process or a provider request, shared by
-/// every deployment snapshot the runtime serves: a reload's old and new snapshots contend
-/// on the same permits. The llm gate takes its bound from the `[externals.llm]` profile
-/// of the deployment serving — a refused reload leaves it untouched. The jev clients live
-/// here too, so a reload keeps the connections that answer promptly.
+/// The per-runtime gates on consults that cost a process, shared by every deployment the
+/// runtime serves or pins: a reload's old and new snapshots, and every pinned view, contend
+/// on the same permits. The jev clients live here too, keyed by endpoint, so a reload keeps
+/// the connections that answer promptly. The `llm` pool is each deployment's own; see
+/// [`LlmBackend`].
 #[derive(Clone)]
 pub(crate) struct ConsultGates {
     claude: Arc<tokio::sync::Semaphore>,
     command: Arc<tokio::sync::Semaphore>,
-    llm: Arc<LlmGate>,
     jev: Arc<JevClients>,
 }
 
@@ -279,20 +278,8 @@ impl ConsultGates {
         ConsultGates {
             claude: Arc::new(tokio::sync::Semaphore::new(claude)),
             command: Arc::new(tokio::sync::Semaphore::new(command)),
-            llm: Arc::new(LlmGate::new(0)),
             jev: Arc::new(JevClients::new(JEV_CONSULT_PERMITS)),
         }
-    }
-
-    /// Bound the llm pool as the deployment about to serve declares: `max_concurrent` of
-    /// its `[externals.llm]` profile, or nothing without one.
-    pub(crate) fn serve_llm(&self, max_concurrent: usize) {
-        self.llm.resize(max_concurrent);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn llm_permits(&self) -> usize {
-        self.llm.available()
     }
 }
 
@@ -300,6 +287,18 @@ impl ExternalServices {
     #[cfg(test)]
     pub(crate) fn claude_permits(&self) -> &Arc<tokio::sync::Semaphore> {
         &self.gates.claude
+    }
+
+    /// The permits the `llm` backend has free, `None` without one.
+    #[cfg(test)]
+    pub(crate) fn llm_permits(&self) -> Option<usize> {
+        self.backends
+            .values()
+            .flat_map(BTreeMap::values)
+            .find_map(|backend| match backend {
+                Backend::Llm(llm) => Some(llm.available_permits()),
+                _ => None,
+            })
     }
 
     /// Resolves every configured `builtin` reference against the stock
@@ -342,7 +341,7 @@ impl ExternalServices {
         let llm = config
             .llm
             .as_ref()
-            .map(|profile| LlmBackend::new(profile, config.timeout, config.max_body_bytes, gates.llm.clone()))
+            .map(|profile| LlmBackend::new(profile, config.timeout, config.max_body_bytes))
             .transpose()
             .map_err(|error| ModulesError::LlmClient(error.to_string()))?;
         let jev = config.jev.as_ref().map(|profile| {
@@ -1306,10 +1305,13 @@ mod tests {
         config: Externals,
         annotator_builtins: BTreeMap<String, AnnotatorBuiltin>,
     ) -> ExternalServices {
-        let gates = ConsultGates::of(4, 8);
-        gates.serve_llm(config.llm_bound());
-        ExternalServices::new(config, &ModuleRegistry::empty(), annotator_builtins, gates)
-            .expect("no builtin references are configured")
+        ExternalServices::new(
+            config,
+            &ModuleRegistry::empty(),
+            annotator_builtins,
+            ConsultGates::of(4, 8),
+        )
+        .expect("no builtin references are configured")
     }
 
     fn services(url: Option<String>, timeout_ms: u64, cap: usize) -> ExternalServices {

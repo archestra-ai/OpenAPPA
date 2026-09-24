@@ -224,12 +224,6 @@ impl Externals {
             })
             .collect()
     }
-
-    /// How many `llm` consults this deployment lets run at once: `max_concurrent` of its
-    /// profile, none without one.
-    pub(crate) fn llm_bound(&self) -> usize {
-        self.llm.as_ref().map_or(0, |profile| profile.max_concurrent)
-    }
 }
 
 /// The audience sources a composed document declares, read from its `[externals.audience]`
