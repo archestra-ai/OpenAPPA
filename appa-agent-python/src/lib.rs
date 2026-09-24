@@ -221,7 +221,10 @@ impl SessionInner {
             closed: false,
             _store: store,
         };
-        inner.event(HookEvent::SessionStart { root: trajectory })?;
+        inner.event(HookEvent::SessionStart {
+            root: trajectory,
+            principal: None,
+        })?;
         inner.event(HookEvent::Prompt {
             actor: inner.actor(None),
             text: user_prompt.to_string(),

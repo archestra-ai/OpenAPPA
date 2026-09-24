@@ -84,7 +84,14 @@ fn actor(root: &TrajectoryId) -> Actor {
 }
 
 async fn start(runtime: &Arc<Runtime>, root: &TrajectoryId) {
-    let started = hooks::handle(runtime, HookEvent::SessionStart { root: root.clone() }).await;
+    let started = hooks::handle(
+        runtime,
+        HookEvent::SessionStart {
+            root: root.clone(),
+            principal: None,
+        },
+    )
+    .await;
     assert_eq!(started, HookDecision::Ack);
 }
 

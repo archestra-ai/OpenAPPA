@@ -246,7 +246,7 @@ impl BlockContext {
         // A candidate an input hop derived may stand under another contract than the proposal;
         // the atoms that contract reads were pinned by the hop.
         evidence = evidence.inheriting(views.candidate_evidence(subject))?;
-        let expansions = registry.audience().expansions(&evidence)?;
+        let expansions = registry.audience().expansions(&evidence, views.principal())?;
 
         let stage = views.call_stage(subject);
         let role = views.call_role(subject);
@@ -1157,7 +1157,10 @@ mod tests {
             role: CallRole::Ordinary,
             floor: None,
             denied: views.denied_authorities(&call.digest()).cloned().unwrap_or_default(),
-            expansions: registry.audience().expansions(answers).expect("well-formed answers"),
+            expansions: registry
+                .audience()
+                .expansions(answers, None)
+                .expect("well-formed answers"),
             raw: raw_block(registry, &views, call),
         };
         search(registry, &views, &context, depth)

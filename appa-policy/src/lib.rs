@@ -587,7 +587,7 @@ impl Config {
         engine
             .registry()
             .audience()
-            .needed_primitives(&boundary_atoms)
+            .needed_primitives(&boundary_atoms, None)
             .map_err(|fault| ConfigError::BadAudience {
                 context: "boundary audience".to_string(),
                 reason: fault.to_string(),

@@ -503,7 +503,10 @@ impl WireEvent {
     pub fn from_event(adapter: AdapterName, event: &HookEvent) -> Result<Self, ParseRefusal> {
         let ids = |actor: &Actor| host_ids(adapter, actor);
         let wire = match event {
-            HookEvent::SessionStart { root } => {
+            HookEvent::SessionStart { principal: Some(_), .. } => {
+                return Err(malformed("a session principal is named in process, never on the wire"));
+            }
+            HookEvent::SessionStart { root, principal: None } => {
                 let (root_id, _) = ids(&Actor {
                     root: root.clone(),
                     child: None,
@@ -746,7 +749,10 @@ impl WireEvent {
         };
         match name {
             EventName::Ping => Ok(None),
-            EventName::SessionStart => accepted(HookEvent::SessionStart { root: root()? }),
+            EventName::SessionStart => accepted(HookEvent::SessionStart {
+                root: root()?,
+                principal: None,
+            }),
             EventName::Prompt => match text {
                 Some(text) => accepted(HookEvent::Prompt { actor: actor()?, text }),
                 None => Err(malformed("prompt without its text")),
@@ -1466,8 +1472,14 @@ mod tests {
         }
         let foreign = HookEvent::SessionStart {
             root: TrajectoryId("kagent:r1".to_string()),
+            principal: None,
         };
         assert!(WireEvent::from_event(AdapterName::ClaudeCode, &foreign).is_err());
+        let principal = HookEvent::SessionStart {
+            root: TrajectoryId("cc:s1".to_string()),
+            principal: Some("alice@corp.example".to_string()),
+        };
+        assert!(WireEvent::from_event(AdapterName::ClaudeCode, &principal).is_err());
     }
 
     /// A tool call's working directory rides the wire with it; no other event reads one.

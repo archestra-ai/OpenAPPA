@@ -110,7 +110,7 @@ mod tests {
     }
 
     async fn release(runtime: &Runtime, request: &Request) {
-        runtime.create_session(request.actor.root.clone()).unwrap();
+        runtime.create_session(request.actor.root.clone(), None).unwrap();
         let call = ProposedCall {
             tool: "yell".into(),
             arguments: serde_json::value::to_raw_value(

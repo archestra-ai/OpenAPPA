@@ -83,7 +83,14 @@ async fn narrowed_and_blocked(dir: &tempfile::TempDir) -> (Arc<Runtime>, OfferId
     let config = Config::load(&path).expect("the fixture validates");
     let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"));
     assert_eq!(
-        hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
+        hooks::handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: root(),
+                principal: None
+            }
+        )
+        .await,
         HookDecision::Ack
     );
 

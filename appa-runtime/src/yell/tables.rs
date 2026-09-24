@@ -428,6 +428,7 @@ static ROOT_FORK_ORIGIN: Table = Table {
     entries: &[
         ("parent_root", TRAJECTORY),
         ("parent", TRAJECTORY),
+        ("principal", Rule::Token(Class::Reader)),
         // The parent family's log position the fork froze.
         ("basis", NUMBER),
         ("label", Rule::Table(&LABEL)),
@@ -518,6 +519,8 @@ static TRAJECTORY_OPENED: Table = Table {
         ("policy_file_key", Rule::Fingerprint),
         ("open_vectors", Rule::Each(&Rule::Table(&OPEN_VECTOR))),
         ("forked_from", Rule::Table(&ROOT_FORK_ORIGIN)),
+        // The person the family acts for.
+        ("principal", Rule::Token(Class::Reader)),
     ],
 };
 

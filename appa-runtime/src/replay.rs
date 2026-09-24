@@ -406,7 +406,7 @@ async fn run_trace(runtime: &Runtime, trace: &Trace) -> TraceReport {
         unopened: None,
         steps: Vec::new(),
     };
-    match hooks::handle(runtime, HookEvent::SessionStart { root }).await {
+    match hooks::handle(runtime, HookEvent::SessionStart { root, principal: None }).await {
         HookDecision::Ack => {}
         HookDecision::Refuse { detail } => {
             report.unopened = Some(detail);

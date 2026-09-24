@@ -69,7 +69,14 @@ async fn runtime(dir: &tempfile::TempDir, extra: &str, source: Option<&str>) -> 
     std::fs::write(&path, format!("{text}\n{extra}")).unwrap();
     let runtime = Arc::new(Runtime::open(Config::load(&path).unwrap(), dir.path().join("runtime.db"), None).unwrap());
     assert_eq!(
-        hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
+        hooks::handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: root(),
+                principal: None
+            }
+        )
+        .await,
         HookDecision::Ack
     );
     runtime

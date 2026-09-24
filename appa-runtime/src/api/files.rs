@@ -621,7 +621,7 @@ max_body_bytes = 65536
             root: TrajectoryId("host-bound-stdio".into()),
             child: None,
         };
-        runtime.create_session(actor.root.clone()).unwrap();
+        runtime.create_session(actor.root.clone(), None).unwrap();
         let arguments = serde_json::json!({
             "file_path": "source.txt", "old_string": "absent", "new_string": "replacement"
         });
@@ -644,7 +644,7 @@ max_body_bytes = 65536
         drop(runtime);
         let runtime = open(dir.path(), false);
         assert!(matches!(
-            runtime.create_session(actor.root.clone()),
+            runtime.create_session(actor.root.clone(), None),
             Err(EventError::TrajectoryExists)
         ));
         assert_eq!(
@@ -682,7 +682,7 @@ max_body_bytes = 65536
         let runtime = open(dir.path(), true);
         for (index, old) in ["absent substring", "outside"].into_iter().enumerate() {
             let id = TrajectoryId(format!("host-probe-{index}"));
-            let session = runtime.create_session(id.clone()).unwrap();
+            let session = runtime.create_session(id.clone(), None).unwrap();
             let proposal = ProposedCall {
                 tool: format!("{PREFIX}appa_edit_file"),
                 arguments: super::super::session::raw(
@@ -760,7 +760,7 @@ else:
         let runtime = open(dir.path(), true).with_file_process_backend(backend).unwrap();
         for command in ["success", "absolute", "fail"] {
             let id = TrajectoryId(format!("process-{command}"));
-            runtime.create_session(id.clone()).unwrap();
+            runtime.create_session(id.clone(), None).unwrap();
             let input = if command == "absolute" {
                 dir.path().join("work/source.txt").to_str().unwrap().to_string()
             } else {
@@ -862,7 +862,7 @@ else:
             root: TrajectoryId("file-transfer-test".into()),
             child: None,
         };
-        runtime.create_session(actor.root.clone()).unwrap();
+        runtime.create_session(actor.root.clone(), None).unwrap();
         for (tool, source, destination) in [
             ("appa_copy_file", "source.txt", "copied.txt"),
             ("appa_move_file", "copied.txt", "moved.txt"),
@@ -957,7 +957,7 @@ else:
         let dir = fixture();
         let runtime = open(dir.path(), true);
         let id = TrajectoryId("host-owned-session".into());
-        runtime.create_session(id.clone()).unwrap();
+        runtime.create_session(id.clone(), None).unwrap();
         allow(&runtime, &id, call("Write", "clean.txt")).await;
         std::fs::write(dir.path().join("work/clean.txt"), "independent text").unwrap();
         success(&runtime, &id, call("Write", "clean.txt")).await;
@@ -1002,7 +1002,7 @@ else:
         let dir = fixture();
         let runtime = open(dir.path(), true);
         let id = TrajectoryId("host-owned-session".into());
-        runtime.create_session(id.clone()).unwrap();
+        runtime.create_session(id.clone(), None).unwrap();
         allow(&runtime, &id, call("Edit", "source.txt")).await;
         runtime
             .session(&id, &id)
@@ -1086,7 +1086,7 @@ else:
         let dir = fixture();
         let runtime = open(dir.path(), true);
         let id = TrajectoryId("host-owned-session".into());
-        let session = runtime.create_session(id.clone()).unwrap();
+        let session = runtime.create_session(id.clone(), None).unwrap();
         // The policy released this call and the harness never ran it — a declined prompt, an
         // interrupted turn. The turn end gives the reservation back instead of wedging the
         // workspace for every later file call.
@@ -1121,7 +1121,7 @@ else:
         let dir = fixture();
         let runtime = open(dir.path(), true);
         let id = TrajectoryId("host-owned-session".into());
-        let session = runtime.create_session(id.clone()).unwrap();
+        let session = runtime.create_session(id.clone(), None).unwrap();
         for proposal in [
             call("Bash", "source.txt"),
             call("Read", "../policy.toml"),

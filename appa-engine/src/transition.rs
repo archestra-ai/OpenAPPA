@@ -590,6 +590,11 @@ impl EngineView {
         &self.projection
     }
 
+    /// The reader this family acts for, as its opening pinned it.
+    pub fn principal(&self) -> Option<&crate::label::ReaderId> {
+        self.projection.principal()
+    }
+
     /// The validated views of one trajectory in this family, for the runtime's reads. `None` for a
     /// trajectory this family never opened — a root without its opening record, a child no fork
     /// bound — so a host-supplied id cannot read a fold nothing seeded.
@@ -678,6 +683,10 @@ pub enum OpeningTransitionRefusal {
     VectorMismatch,
     #[error("the opening record forks the root from its own family")]
     SelfFork,
+    #[error("the opening record's principal {found:?} is not an address")]
+    MalformedPrincipal { found: String },
+    #[error("the opening record's principal is not the one its fork origin carries")]
+    ForkPrincipalMismatch,
 }
 
 /// Why the transition validator refused a record. One vocabulary for both directions: a
@@ -2100,6 +2109,18 @@ impl<'a> Sequence<'a> {
         if opening.open_vectors != self.engine.open_vectors() {
             return Err(OpeningTransitionRefusal::VectorMismatch);
         }
+        if let Some(principal) = &opening.principal
+            && crate::audience::session_principal(principal.as_str()).as_ref() != Some(principal)
+        {
+            return Err(OpeningTransitionRefusal::MalformedPrincipal {
+                found: principal.as_str().to_string(),
+            });
+        }
+        if let Some(origin) = &opening.forked_from
+            && origin.principal != opening.principal
+        {
+            return Err(OpeningTransitionRefusal::ForkPrincipalMismatch);
+        }
         Ok(())
     }
 
@@ -2191,7 +2212,8 @@ impl<'a> Sequence<'a> {
             }
         }
         let mut working = std::borrow::Cow::Borrowed(&self.projection);
-        let act = crate::engine::ActEvidence::validated(evidence.clone(), expansions);
+        let act =
+            crate::engine::ActEvidence::validated(evidence.clone(), expansions, self.projection.principal().cloned());
         let composed = crate::engine::compose_batch(
             self.engine.registry(),
             &mut working,
@@ -2708,7 +2730,7 @@ impl<'a> Sequence<'a> {
             .engine
             .registry()
             .audience()
-            .expansions(evidence)
+            .expansions(evidence, self.projection.principal())
             .map_err(TransitionRefusal::from)?;
         self.audit.borrow_mut().pin(evidence).map_err(TransitionRefusal::from)?;
         Ok(expansions)
@@ -2737,7 +2759,7 @@ impl<'a> Sequence<'a> {
     fn settle_audit(&self) -> Result<(), TransitionRefusal> {
         let audit = std::mem::take(&mut *self.audit.borrow_mut());
         audit
-            .settle(self.engine.registry().audience())
+            .settle(self.engine.registry().audience(), self.projection.principal())
             .map_err(|refusal| match refusal {
                 crate::audience::EvidenceRefusal::UnrequestedEvidence { entry } => {
                     TransitionRefusal::UnrequestedEvidence { entry }
@@ -3322,7 +3344,7 @@ mod tests {
 
     fn opening(engine: &Engine, family: &TrajectoryId) -> Fact {
         engine
-            .open_trajectory(family, PolicyFileKey::of(b"policy"))
+            .open_trajectory(family, PolicyFileKey::of(b"policy"), None)
             .expect("the opening validates against the empty log")
             .into_unsealed()
             .remove(0)

@@ -53,7 +53,7 @@ async fn the_declared_dispatcher(runtime: &Runtime, adapter: &Adapter, event: Ho
 
 fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: ParseRefusal, outcome: ToolOutcome) {
     match event {
-        HookEvent::SessionStart { root } => {
+        HookEvent::SessionStart { root, .. } => {
             let _: TrajectoryId = root;
         }
         HookEvent::Prompt { actor, text } => {

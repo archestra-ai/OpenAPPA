@@ -175,6 +175,7 @@ pub struct Projection {
     /// at a time, so the flat copy stays the boring choice over an ancestry-cutoff walk.
     denials: BTreeMap<TrajectoryId, BTreeMap<CanonicalDigest, BTreeSet<AuthorityName>>>,
     opening: Option<(TrajectoryId, Label)>,
+    principal: Option<crate::label::ReaderId>,
     decided: BTreeMap<crate::transition::ProposalBatchId, DecidedBatch>,
     admissions: BTreeMap<crate::transition::ProposalBatchId, Vec<ValueId>>,
     offers: BTreeMap<crate::value::OfferId, RecordedOffer>,
@@ -232,6 +233,7 @@ impl Projection {
             candidates: BTreeMap::new(),
             denials: BTreeMap::new(),
             opening: None,
+            principal: None,
             decided: BTreeMap::new(),
             admissions: BTreeMap::new(),
             offers: BTreeMap::new(),
@@ -285,6 +287,7 @@ impl Projection {
             candidates,
             denials,
             opening,
+            principal,
             decided,
             admissions,
             offers,
@@ -297,6 +300,7 @@ impl Projection {
                     trajectory,
                     profile,
                     forked_from,
+                    principal: opened_for,
                     ..
                 }) => {
                     let mut starting = profile.starting_label().clone();
@@ -318,6 +322,7 @@ impl Projection {
                         "the validator admits one opening per family log, as its first record"
                     );
                     *opening = Some((trajectory.clone(), starting));
+                    *principal = opened_for.clone();
                 }
                 Fact::BasisAdvanced { advance, .. } => versions.advance(advance),
                 Fact::OfferOpened {
@@ -702,7 +707,13 @@ impl Projection {
             effects: EffectSet::distinct(&self.effects),
             reservations: EffectSet::distinct(reserved),
             denials: self.denials.get(trajectory).cloned().unwrap_or_default(),
+            principal: self.principal.clone(),
         })
+    }
+
+    /// The reader the family's opening says it acts for: the member `self` answers with.
+    pub(crate) fn principal(&self) -> Option<&crate::label::ReaderId> {
+        self.principal.as_ref()
     }
 
     /// The exposed provider-run results one batch identity admitted, in order: the
@@ -781,6 +792,11 @@ pub struct Views<'a> {
 }
 
 impl Views<'_> {
+    /// The reader the family acts for, as its opening pinned it.
+    pub(crate) fn principal(&self) -> Option<&crate::label::ReaderId> {
+        self.projection.principal()
+    }
+
     /// The annotation an Annotator pinned to this same canonical call, in a proposal this
     /// trajectory still has an act prepared on: an open offer that stands at its basis, or an
     /// approval it has not spent. The re-proposal that pursues the offer or spends the approval
