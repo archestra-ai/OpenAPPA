@@ -30,6 +30,7 @@ import { RemedyPlanFigure } from "@/components/figures/RemedyPlanFigure";
 import { RuntimeOverviewFigure } from "@/components/figures/RuntimeOverviewFigure";
 import { TwoEndingsFigure } from "@/components/figures/TwoEndingsFigure";
 import { MascotBoard } from "@/components/MascotBoard";
+import { IntegrationPaths, IntegrationCheckpoints } from "@/components/IntegrationPaths";
 import { ProposalBlock } from "@/components/ProposalBlock";
 import { SponsorNote } from "@/components/SponsorNote";
 import { Term } from "@/components/Term";
@@ -106,8 +107,52 @@ const DIRECTIVES: Record<string, () => ReactNode> = {
   "fig-policy-stack": () => <PolicyStackFigure />,
   "fig-remedy-plan": () => <RemedyPlanFigure />,
   "fig-runtime-overview": () => <RuntimeOverviewFigure />,
+  "fig-runtime-overview-v2": () => <RuntimeOverviewFigure overview />,
   "fig-two-endings": () => <TwoEndingsFigure />,
   "mascot-board": () => <MascotBoard />,
+  "integration-paths": () => <IntegrationPaths />,
+  "integration-checkpoints": () => <IntegrationCheckpoints />,
+  "integration-details": () => (
+    <div className="my-6 divide-y divide-[var(--border)] rounded-lg border border-[var(--border)] text-sm">
+      {[
+        ["Lifecycle events and concurrent calls", `The HTTP protocol carries one event per versioned JSON envelope. Embedded integrations submit typed events to the same runtime dispatcher.
+
+| Event | Your integration handles |
+|---|---|
+| \`session_start\` | Continue on \`ack\`; stop startup on \`refuse\`. |
+| \`prompt\` | Mark a turn boundary. This does not check prompt content. |
+| \`tool_call\` | Run on \`allow_call\`; withhold execution on \`deny_call\` and return feedback and remedy offers. |
+| \`tool_result\` | Deliver on \`ack\`; use \`deliver_value\` or \`replace_output\` instead of the original; withhold on \`block\`. |
+| \`turn_end\` | Settle the turn after its tools finish. |
+
+Keep a stable trajectory ID for the conversation and a distinct \`call_id\` for each call. Send the same call ID with its result so concurrent calls can finish in any order. Report failures as well as successes. A timeout or \`refuse\` must stop the pending flow.
+
+Use the [event and decision types](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-runtime-api) for exact payloads. The [Rust example](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-example-agent) uses \`appa_runtime::hooks::handle\`; disable the runtime's default features when embedding it without the daemon.`],
+        ["Remedy calls", `For a hook integration, expose APPA's control tool through \`/mcp\`. Submit its proposed call through \`tool_call\` first. A \`pass_control\` decision routes the call unchanged to APPA's remedy handler; it does not approve the blocked action by itself.`],
+        ["If your agent uses subagents", `A child agent has its own context, but delegation does not bypass policy. APPA checks the launch and the return to the parent. This lets a child read sensitive data and return a cleaned result without exposing the original to the parent, when the policy permits.
+
+Connect three additional events:
+
+- **\`child_start\`** links the child to its approved delegating call. Preserve the returned \`spawn_binding\`; apply any context APPA supplies and stop launch on \`refuse\`.
+- **\`child_end\`** submits the child's proposed answer before it leaves the child. Forward an admitted replacement instead of the original; withhold a blocked answer.
+- **\`spawn_result\`** checks delivery into the parent's context. Preserve the delegating \`call_id\` and child identity, and deliver only the result APPA admits.
+
+The adapter identifies which tools launch children. Keep each child's identity separate and route its tool calls through APPA too. Do not copy the parent's transcript into a child outside the checked path.
+
+See [Subagent returns](/contracts#subagent-returns) for return requirements and sanitization. If your agent never delegates, these events are not needed.`],
+        ["Runtime storage and operations", `The served runtime stores its trajectory event log in SQLite. Keep the database on durable storage if work must resume after a restart.
+
+Use \`GET /health\` for liveness. The local management endpoints include \`GET /status\` for runtime status and \`POST /reload\` to reload policy from disk. These management endpoints accept only loopback requests; they are not remote administration APIs.
+
+See [Observability · v2](/observability-v2) for current diagnostics and planned telemetry.`],
+      ].map(([title, content]) => (
+        <details key={title} className="px-4 py-3">
+          <summary className="cursor-pointer font-semibold text-[var(--text-strong)]">{title}</summary>
+          <Markdown content={content} />
+        </details>
+      ))}
+    </div>
+  ),
   "sponsor-note": () => <SponsorNote />,
   "details-7pc-leak": () => (
     <details className="leak-details my-6 rounded-lg border border-[var(--border)] bg-[var(--bg-weak)] p-4 text-sm text-[var(--text)]">

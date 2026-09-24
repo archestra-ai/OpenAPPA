@@ -1,114 +1,47 @@
 import { PixelMark } from "@/components/Logo";
 
-/* Static architecture figure for the integration guide. It follows the
-   site's native figure language: quiet panels, mono labels, restrained
-   accent color, and explicit rails for the two enforcement directions. */
-
-function PanelTitle({ x, title, subtitle }: { x: number; title: string; subtitle?: string }) {
-  return (
-    <>
-      <text x={x} y="76" className="rof-title">
-        {title}
-      </text>
-      {subtitle && (
-        <text x={x} y="99" className="rof-subtitle">
-          {subtitle}
-        </text>
-      )}
-    </>
-  );
-}
-
-function Card({
-  x,
-  y,
-  width,
-  title,
-  detail,
-}: {
-  x: number;
-  y: number;
-  width: number;
-  title: string;
-  detail: string[];
-}) {
-  return (
-    <g>
-      <rect x={x} y={y} width={width} height="92" rx="6" className="rof-card" />
-      <text x={x + 14} y={y + 23} className="rof-card-title">
-        {title}
-      </text>
-      <text x={x + 14} y={y + 47} className="rof-card-detail">
-        {detail.map((line, index) => (
-          <tspan key={line} x={x + 14} dy={index === 0 ? 0 : 18}>
-            {line}
-          </tspan>
-        ))}
-      </text>
-    </g>
-  );
-}
-
-export function RuntimeOverviewFigure() {
+export function RuntimeOverviewFigure({ overview = false }: { overview?: boolean }) {
   return (
     <div className="runtime-overview-figure">
       <svg
-        viewBox="0 0 900 390"
+        viewBox="0 0 900 360"
         role="img"
         aria-labelledby="runtime-overview-title runtime-overview-description"
       >
-        <title id="runtime-overview-title">OpenAPPA integration architecture</title>
+        <title id="runtime-overview-title">{overview ? "Your agent and the OpenAPPA runtime" : "Agent hooks and the OpenAPPA runtime"}</title>
         <desc id="runtime-overview-description">
-          The agent harness intercepts lifecycle events via middleware, callbacks, or plugins and sends them to the OpenAPPA runtime at POST /hook. Inside the runtime, an adapter decodes the event and the policy engine evaluates security rules to return a decision. Remediation runs through the runtime MCP service.
+          {overview
+            ? "Your agent submits calls and results through an in-process SDK or HTTP. The runtime returns decisions. Remedy execution uses the in-process API or the runtime's MCP endpoint."
+            : "The agent loop and hooks send POST /hook to the adapter and core, which return a decision. The agent calls the execute_remedy_plan tool through /mcp."}
         </desc>
         <defs>
-          <marker id="rof-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
-            <path d="M 0 0 L 8 4 L 0 8 z" fill="var(--icon)" />
-          </marker>
-          <marker id="rof-arrow-accent" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
-            <path d="M 0 0 L 8 4 L 0 8 z" fill="var(--accent)" />
+          <marker id="rof-arrow" viewBox="0 0 12 12" refX="12" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto">
+            <path d="M0 0H4V2H8V4H12V8H8V10H4V12H0Z" fill="context-stroke" />
           </marker>
         </defs>
 
-        {/* Two ownership boundaries: the agent harness and the OpenAPPA runtime. */}
-        <rect x="30" y="42" width="390" height="292" rx="9" className="rof-panel rof-panel-bridge" />
-        <rect x="480" y="42" width="390" height="292" rx="9" className="rof-panel" />
-
-        {/* The hooks sit on the harness boundary: agent loop -> hooks -> Appa. */}
-        <PanelTitle x={54} title="Agent harness" subtitle="agent loop · callbacks · plugins" />
-        <Card x={54} y={132} width={153} title="Agent loop" detail={["prompts the model", "proposes calls"]} />
-        <path d="M 207 178 L 235 178" className="rof-rail" markerEnd="url(#rof-arrow)" />
-        <Card x={238} y={132} width={182} title="Agent hooks" detail={["sends hook payloads", "applies decisions"]} />
-        <g className="rof-fail-closed">
-          <circle cx="65" cy="286" r="4" />
-          <text x="77" y="290">fail closed on any error</text>
+        <g aria-hidden="true">
+          <g transform="translate(58 36)"><PixelMark size={48} /></g>
+          <g transform="translate(758 20)"><PixelMark size={72} /></g>
+          <g transform="translate(838 62)"><PixelMark size={24} /></g>
+          <path d="M735 32V44M729 38H741M849 24V36M843 30H855" className="rof-spark" />
         </g>
 
-        {/* The adapter sits on the Appa boundary: hooks -> adapter -> core. */}
-        <g transform="translate(504 61)" aria-hidden="true">
-          <PixelMark size={24} />
-        </g>
-        <text x="538" y="76" className="rof-title">OpenAPPA runtime</text>
-        <text x="504" y="99" className="rof-subtitle">daemon · policy engine · adapters</text>
-        <Card x={480} y={132} width={184} title="Appa adapter" detail={["maps hook payloads", "to OpenAPPA events"]} />
-        <path d="M 664 178 L 692 178" className="rof-rail" markerEnd="url(#rof-arrow)" />
-        <Card x={695} y={132} width={151} title="Appa core" detail={["checks policy", "returns decisions"]} />
-        <g className="rof-fail-closed">
-          <circle cx="515" cy="286" r="4" />
-          <text x="527" y="290">deterministic policy rules</text>
-        </g>
+        <text x="152" y="116" className="rof-title" textAnchor="middle">Agent</text>
+        <text x="748" y="116" className="rof-title" textAnchor="middle">OpenAPPA</text>
+        <path d="M42 136H264V144H272V220H264V228H42V220H34V144H42Z" className="rof-panel" />
+        <path d="M636 136H858V144H866V220H858V228H636V220H628V144H636Z" className="rof-panel" />
+        <text x="152" y="189" className="rof-block-label" textAnchor="middle">{overview ? "Agent loop" : "Loop + Hooks"}</text>
+        <text x="748" y="189" className="rof-block-label" textAnchor="middle">Adapter + Core</text>
 
-        {/* Request and response rails between harness and runtime. */}
-        <path d="M 420 157 L 477 157" className="rof-rail rof-rail-accent" markerEnd="url(#rof-arrow-accent)" />
-        <text x="450" y="148" className="rof-rail-label" textAnchor="middle">POST /hook</text>
+        <text x="450" y="142" className="rof-rail-label" textAnchor="middle">{overview ? "SDK or HTTP" : "POST /hook"}</text>
+        <path d="M288 156H612" className="rof-rail rof-rail-accent" markerEnd="url(#rof-arrow)" />
+        <text x="450" y="192" className="rof-rail-label" textAnchor="middle">decision</text>
+        <path d="M612 206H288" className="rof-rail" markerEnd="url(#rof-arrow)" />
 
-        <path d="M 480 202 L 423 202" className="rof-rail" markerEnd="url(#rof-arrow)" />
-        <text x="450" y="193" className="rof-rail-label" textAnchor="middle">decision</text>
-
-        {/* Remedies use the runtime's MCP surface rather than the hook codec. */}
-        <path d="M 225 334 C 225 385, 675 385, 675 334" className="rof-remedy-rail" markerEnd="url(#rof-arrow)" />
-        <rect x="338" y="343" width="224" height="27" rx="13.5" className="rof-remedy-chip" />
-        <text x="450" y="361" className="rof-remedy-label" textAnchor="middle">/mcp · execute_remedy_plan</text>
+        <path d="M152 244V290H748V244" className="rof-rail rof-rail-accent" markerEnd="url(#rof-arrow)" />
+        <text x="450" y="278" className="rof-rail-label" textAnchor="middle">{overview ? "Remedy execution" : "/mcp"}</text>
+        <text x="450" y="324" className="rof-rail-label" textAnchor="middle">{overview ? "In-process API or /mcp" : "execute_remedy_plan tool"}</text>
       </svg>
     </div>
   );

@@ -2531,13 +2531,13 @@ samp {
   height: auto;
 }
 
-/* Runtime overview — host, fail-closed bridge, and policy runtime. */
+/* Runtime overview — hooks, decisions, and the MCP remedy call. */
 .runtime-overview-figure {
   width: 100%;
   margin: 1.5rem 0 2rem;
 }
 
-.runtime-overview-figure svg {
+.runtime-overview-figure > svg {
   display: block;
   width: 100%;
   height: auto;
@@ -2545,85 +2545,52 @@ samp {
 }
 
 .rof-panel {
-  fill: var(--bg);
-  stroke: var(--border);
-  stroke-width: 1.2;
-}
-
-.rof-panel-bridge {
   fill: var(--bg-weak);
   stroke: var(--accent-border);
+  stroke-width: 2;
+  shape-rendering: crispEdges;
 }
 
 .rof-title {
-  fill: var(--text-strong);
-  font-size: 15px;
-  font-weight: 600;
-}
-
-.rof-agent-title {
-  fill: var(--text-strong);
+  fill: var(--text-weak);
   font-size: 18px;
   font-weight: 600;
 }
 
-.rof-subtitle,
-.rof-card-detail,
-.rof-rail-label {
-  fill: var(--text-weak);
-  font-size: 12px;
-}
-
-.rof-card {
-  fill: var(--bg-weak);
-  stroke: var(--border-weak);
-  stroke-width: 1;
-}
-
-.rof-panel-bridge .rof-card {
-  fill: var(--bg);
-}
-
-.rof-card-title {
+.rof-block-label {
   fill: var(--text-strong);
-  font-size: 13.5px;
-  font-weight: 500;
+  font-size: 23px;
+  font-weight: 600;
 }
 
-.rof-fail-closed circle {
-  fill: var(--accent);
+.rof-rail-label {
+  fill: var(--text);
+  font-size: 18px;
 }
 
-.rof-fail-closed text {
-  fill: var(--accent);
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.rof-rail,
-.rof-remedy-rail {
+.rof-rail {
   fill: none;
   stroke: var(--icon);
-  stroke-width: 1.25;
+  stroke-width: 3;
+  shape-rendering: crispEdges;
 }
 
-.rof-rail-accent {
+.rof-rail-accent,
+.rof-spark {
   stroke: var(--accent);
 }
 
-.rof-remedy-rail {
-  stroke: var(--border);
+.rof-spark {
+  stroke-width: 4;
+  shape-rendering: crispEdges;
 }
 
-.rof-remedy-chip {
-  fill: var(--bg);
-  stroke: var(--border-weak);
-}
-
-.rof-remedy-label {
-  fill: var(--text);
-  font-size: 12px;
-  font-weight: 500;
+@media (max-width: 640px) {
+  .rof-title,
+  .rof-block-label,
+  .rof-rail-label {
+    font-size: 26px;
+  }
 }
 
 .psf-mascot {
