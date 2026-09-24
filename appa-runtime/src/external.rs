@@ -4,8 +4,8 @@
 //! binding posts it and reads `{"version": 1, "answer": <object>}` back; a `command`
 //! binding pipes it through stdin and reads the same envelope from stdout; a module
 //! receives it across the ABI and returns the bare answer object; the model builtins
-//! render it as a [`ModelPrompt`] and return the structured output; `hitl` shows it to a
-//! person. Every failure is [`ConsultOutcome::NoAnswer`] — never a denial.
+//! render it as a [`ModelPrompt`] and return the structured output; the `jev` builtin asks
+//! TypeSafe's classifier its own questions about the call; `hitl` shows it to a person. Every failure is [`ConsultOutcome::NoAnswer`] — never a denial.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -16,10 +16,11 @@ use serde::Deserialize;
 use crate::builtins::{ClaudeCodeBackend, LoadedModule, MODULE_OUTPUT_CEILING, ModuleRegistry, ModulesError, Stock};
 use crate::config::{
     AnnotatorImplementation, AudienceImplementation, CLAUDE_CODE_BUILTIN, Endpoint, EndpointHost, Externals,
-    Implementation, LLM_BUILTIN, ResolverCommand, Section,
+    Implementation, JEV_BUILTIN, LLM_BUILTIN, ResolverCommand, Section,
 };
 use crate::consult::{AudienceSourceArtifact, Consult, ConsultBody, ConsultKind, ModelPrompt};
 use crate::elicit::Elicitation;
+use crate::jev::{JevBackend, JevClients, JevTiming};
 use crate::llm::{LlmBackend, LlmGate};
 use crate::recorder::ConsultBackend;
 use appa_engine::label::ReaderId;
@@ -167,6 +168,7 @@ enum Backend {
     Hitl,
     ClaudeCode(ClaudeCodeBackend),
     Llm(LlmBackend),
+    Jev(JevBackend),
     /// An inline roster: answers a member lookup from the table, in process, and nothing
     /// else.
     Readers(BTreeMap<ReaderId, ReaderId>),
@@ -188,6 +190,7 @@ impl Backend {
             Backend::Hitl => Some(ConsultBackend::Hitl),
             Backend::ClaudeCode(_) => Some(ConsultBackend::ClaudeCode),
             Backend::Llm(_) => Some(ConsultBackend::Llm),
+            Backend::Jev(_) => Some(ConsultBackend::Jev),
             Backend::Stock(_) | Backend::Readers(_) | Backend::StandIn => None,
         }
     }
@@ -251,12 +254,14 @@ pub(crate) async fn settle_batch<F: std::future::Future>(consults: impl IntoIter
 /// The per-runtime gates on consults that cost a process or a provider request, shared by
 /// every deployment snapshot the runtime serves: a reload's old and new snapshots contend
 /// on the same permits. The llm gate takes its bound from the `[externals.llm]` profile
-/// of the deployment serving — a refused reload leaves it untouched.
+/// of the deployment serving — a refused reload leaves it untouched. The jev clients live
+/// here too, so a reload keeps the connections that answer promptly.
 #[derive(Clone)]
 pub(crate) struct ConsultGates {
     claude: Arc<tokio::sync::Semaphore>,
     command: Arc<tokio::sync::Semaphore>,
     llm: Arc<LlmGate>,
+    jev: Arc<JevClients>,
 }
 
 impl ConsultGates {
@@ -269,6 +274,7 @@ impl ConsultGates {
             claude: Arc::new(tokio::sync::Semaphore::new(claude)),
             command: Arc::new(tokio::sync::Semaphore::new(command)),
             llm: Arc::new(LlmGate::new(0)),
+            jev: Arc::new(JevClients::new()),
         }
     }
 
@@ -333,6 +339,15 @@ impl ExternalServices {
             .map(|profile| LlmBackend::new(profile, config.timeout, config.max_body_bytes, gates.llm.clone()))
             .transpose()
             .map_err(|error| ModulesError::LlmClient(error.to_string()))?;
+        let jev = config.jev.as_ref().map(|profile| {
+            JevBackend::new(
+                profile,
+                config.timeout,
+                config.max_body_bytes,
+                Arc::clone(&gates.jev),
+                JevTiming::STANDARD,
+            )
+        });
         let tables = [
             (Section::Authorities, config.authorities),
             (Section::Sanitizers, config.sanitizers),
@@ -345,7 +360,7 @@ impl ExternalServices {
                     Implementation::Resolver(endpoint) => Backend::Url(endpoint),
                     Implementation::Command(command) => Backend::Command(command),
                     Implementation::Builtin(builtin) => {
-                        builtin_backend(section, &name, builtin, registry, &claude, llm.as_ref())?
+                        builtin_backend(section, &name, builtin, registry, &claude, llm.as_ref(), jev.as_ref())?
                     }
                 };
                 resolved.insert(name, backend);
@@ -374,6 +389,7 @@ impl ExternalServices {
                 registry,
                 &claude,
                 llm.as_ref(),
+                jev.as_ref(),
             )?;
             annotators.insert(name, backend);
         }
@@ -500,6 +516,15 @@ impl ExternalServices {
                 Some(prompt) => llm.consult(&prompt).await,
                 None => Err(NoAnswerReason::Unregistered),
             },
+            Backend::Jev(jev) => {
+                let (answered, record) = Box::pin(jev.consult(consult)).await;
+                if let Some(seen) = seen {
+                    seen.raw_response = record.raw_response;
+                    seen.http_status = record.http_status;
+                    seen.diagnostics = Some(Diagnostics::head(&record.diagnostics));
+                }
+                answered
+            }
             Backend::StandIn => stand_in_answer(consult),
         };
         match answered {
@@ -690,7 +715,11 @@ impl ExternalServices {
 }
 
 /// Read a response body into `body` under the cap, stopping at the first chunk past it.
-async fn read_body(response: &mut reqwest::Response, cap: u64, body: &mut Vec<u8>) -> Result<(), NoAnswerReason> {
+pub(crate) async fn read_body(
+    response: &mut reqwest::Response,
+    cap: u64,
+    body: &mut Vec<u8>,
+) -> Result<(), NoAnswerReason> {
     loop {
         match response.chunk().await {
             Ok(Some(chunk)) => {
@@ -715,6 +744,7 @@ fn builtin_backend(
     registry: &ModuleRegistry,
     claude: &ClaudeCodeBackend,
     llm: Option<&LlmBackend>,
+    jev: Option<&JevBackend>,
 ) -> Result<Backend, ModulesError> {
     let module = match section {
         Section::Authorities => registry.authority(&builtin),
@@ -729,6 +759,7 @@ fn builtin_backend(
         (Section::Authorities | Section::Sanitizers | Section::Annotators, LLM_BUILTIN) => {
             llm.cloned().map(Backend::Llm)
         }
+        (Section::Annotators, JEV_BUILTIN) => jev.cloned().map(Backend::Jev),
         _ => Stock::for_section(section, &builtin)
             .map(Backend::Stock)
             .or_else(|| module.map(|module| Backend::Module(Arc::clone(module)))),
@@ -1256,6 +1287,7 @@ mod tests {
             inputs: BTreeMap::new(),
             claude_code: Default::default(),
             llm: None,
+            jev: None,
         }
     }
 
@@ -2061,6 +2093,33 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 .await,
             ConsultOutcome::Answer(_)
         ));
+    }
+
+    /// Jev classifies a call; it never rules on one or rewrites data.
+    #[tokio::test]
+    async fn the_jev_builtin_serves_annotators_only() {
+        for section in [Section::Authorities, Section::Sanitizers] {
+            let mut config = externals(None, 2000, 65_536);
+            config.jev = Some(crate::config::JevProfile {
+                url: "https://jev.invalid/v1/systemone".to_string(),
+                key: crate::config::JevKey::Set(Token::new("sekret".to_string())),
+            });
+            match section {
+                Section::Authorities => &mut config.authorities,
+                _ => &mut config.sanitizers,
+            }
+            .insert("judge".to_string(), Implementation::Builtin(JEV_BUILTIN.to_string()));
+            match ExternalServices::new(
+                config,
+                &ModuleRegistry::empty(),
+                declared("classify", AnnotatorBuiltin::Jev),
+                ConsultGates::of(4, 8),
+            ) {
+                Err(ModulesError::UnknownBuiltin { section: refused, .. }) => assert_eq!(refused, section.name()),
+                Err(other) => panic!("{} jev must refuse as unknown, got {other}", section.name()),
+                Ok(_) => panic!("{} jev must refuse", section.name()),
+            }
+        }
     }
 
     /// A roster answers a member lookup in process — the mapped reader, or `null` for a

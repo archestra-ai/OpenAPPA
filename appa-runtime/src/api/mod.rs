@@ -427,6 +427,12 @@ pub enum OpenError {
     BoundBuiltinAnnotator(String),
     #[error("annotator {0} names the builtin \"llm\", but the deployment declares no [externals.llm]")]
     LlmNotConfigured(String),
+    #[error("annotator {0} names the builtin \"jev\", but the deployment declares no [externals.jev]")]
+    JevNotConfigured(String),
+    #[error("annotator {0} names the builtin \"jev\", which judges the complete call and takes no inputs")]
+    JevInputs(String),
+    #[error("annotator {0} names the builtin \"jev\", whose mandate must admit at least two trust ranks")]
+    JevTrustRanks(String),
     #[error(
         "annotator {0} names the builtin \"claude-code\", which runs a local process this platform does not support"
     )]
@@ -2967,8 +2973,8 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
     // a misconfiguration to refuse at open, not a no-answer to discover under an agent.
     // Every other Annotator is bound exactly once.
     let mut bound_by_deployment = Vec::new();
-    for (name, binding) in policy.annotators() {
-        let name = name.as_str();
+    for (annotator, binding) in policy.annotators() {
+        let name = annotator.as_str();
         let Some(builtin) = binding.builtin else {
             bound_by_deployment.push(name);
             continue;
@@ -2983,7 +2989,24 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             appa_policy::AnnotatorBuiltin::ClaudeCode if !cfg!(unix) => {
                 return Err(OpenError::UnsupportedClaudeCodePlatform(name.to_string()));
             }
-            appa_policy::AnnotatorBuiltin::Llm | appa_policy::AnnotatorBuiltin::ClaudeCode => {}
+            appa_policy::AnnotatorBuiltin::Jev if externals.jev.is_none() => {
+                return Err(OpenError::JevNotConfigured(name.to_string()));
+            }
+            // Jev judges the complete call and answers the lowest or the highest rank.
+            appa_policy::AnnotatorBuiltin::Jev if !binding.inputs.is_empty() => {
+                return Err(OpenError::JevInputs(name.to_string()));
+            }
+            appa_policy::AnnotatorBuiltin::Jev
+                if policy
+                    .registry()
+                    .annotator_mandate(annotator)
+                    .is_none_or(|mandate| mandate.trust_ranks().count() < 2) =>
+            {
+                return Err(OpenError::JevTrustRanks(name.to_string()));
+            }
+            appa_policy::AnnotatorBuiltin::Llm
+            | appa_policy::AnnotatorBuiltin::ClaudeCode
+            | appa_policy::AnnotatorBuiltin::Jev => {}
         }
     }
     bound_exactly("annotator", bound_by_deployment.into_iter(), &externals.annotators)?;
@@ -3537,6 +3560,33 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert!(matches!(
             runtime.reload(claude_config(policy)),
             Err(OpenError::LlmNotConfigured(name)) if name == "classifier"
+        ));
+    }
+
+    /// A declared `jev` Annotator opens only over a deployment that declares its profile,
+    /// and only as a judge of the complete call under a mandate with two ends of the chain.
+    #[test]
+    fn a_declared_jev_annotator_needs_its_profile_the_complete_call_and_two_ranks() {
+        let policy = |mandate: &str, externals: &str| {
+            claude_config(&format!(
+                "[policy]\nversion = 2\n[[policy.annotator]]\nname = \"classifier\"\nbuiltin = \"jev\"\n{mandate}\n\
+                 [[policy.tool]]\nname = \"lookup\"\ndescription = \"Looks one record up.\"\nannotator = \"classifier\"\n\
+                 {externals}"
+            ))
+        };
+        const PROFILE: &str = "[externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n";
+        assert!(matches!(
+            load(policy("", "")),
+            Err(OpenError::JevNotConfigured(name)) if name == "classifier"
+        ));
+        assert!(load(policy("ranks = [\"suspicious\", \"trusted\"]", PROFILE)).is_ok());
+        assert!(matches!(
+            load(policy("ranks = [\"trusted\"]", PROFILE)),
+            Err(OpenError::JevTrustRanks(name)) if name == "classifier"
+        ));
+        assert!(matches!(
+            load(policy("inputs = { call = \"$tool_call\" }", PROFILE)),
+            Err(OpenError::JevInputs(name)) if name == "classifier"
         ));
     }
 

@@ -179,6 +179,8 @@ pub struct Externals {
     pub claude_code: ClaudeCode,
     /// The profile the stock `llm` builtin consults, where the deployment declares one.
     pub llm: Option<LlmProfile>,
+    /// The profile the stock `jev` annotator consults, where the deployment declares one.
+    pub jev: Option<JevProfile>,
 }
 
 impl Externals {
@@ -281,6 +283,35 @@ pub struct LlmProfile {
 
 const DEFAULT_LLM_CONCURRENCY: usize = 4;
 
+/// The `[externals.jev]` profile, validated. The key goes only to the TypeSafe API, or to
+/// the endpoint the operator's own environment names in [`JEV_URL_VARIABLE`]; no policy or
+/// battery text can move it elsewhere. That fixed destination is why `token_env` may name a
+/// `APPA_PROVIDER_*` variable here, which a `url` binding may not.
+#[derive(Debug, Clone)]
+pub struct JevProfile {
+    pub url: String,
+    pub key: JevKey,
+}
+
+/// The TypeSafe API key as the deployment read it at open. A battery installs before its key
+/// is exported, so an unset variable does not refuse the deployment: every consult of the
+/// profile is no answer until a reload reads the key.
+#[derive(Debug, Clone)]
+pub enum JevKey {
+    Set(Token),
+    Unset { var: String },
+}
+
+/// Where the `jev` annotator asks by default.
+pub(crate) const JEV_DEFAULT_URL: &str = "https://api.typesafe.ai/v1/systemone";
+
+/// The operator's override of [`JEV_DEFAULT_URL`], read from the runtime's own process
+/// environment and never from a document.
+pub(crate) const JEV_URL_VARIABLE: &str = "APPA_PROVIDER_JEV_API_URL";
+
+/// The `[externals]` table of the `jev` profile.
+const JEV_SECTION: &str = "jev";
+
 /// How one bound component is served — an HTTP endpoint, a local command, or a builtin
 /// name — a closed choice per entry, the same for every kind.
 #[derive(Debug, Clone)]
@@ -332,6 +363,7 @@ pub struct ResolverCommand {
 
 pub const CLAUDE_CODE_BUILTIN: &str = "claude-code";
 pub const LLM_BUILTIN: &str = "llm";
+pub const JEV_BUILTIN: &str = "jev";
 
 /// One external endpoint: a validated URL plus its bearer token, if
 /// the service needs one. `https` reaches anywhere; `http` only
@@ -427,6 +459,8 @@ pub enum ConfigError {
     SelectorDeclaration(Box<appa_policy::ConfigError>),
     #[error("included config {path} uses policy version {found}, but the root uses {root}")]
     IncludedVersion { path: String, root: i64, found: i64 },
+    #[error("included config {path} repeats [externals.jev], which a deployment declares once")]
+    DuplicateJevProfile { path: String },
     #[error("included config {path} repeats [externals.{section}] entry {name:?}")]
     DuplicateExternal {
         path: String,
@@ -711,6 +745,7 @@ struct RawExternals {
     inputs: BTreeMap<String, RawBinding>,
     claude_code: Option<RawClaudeCode>,
     llm: Option<RawLlm>,
+    jev: Option<RawJev>,
 }
 
 impl RawExternals {
@@ -763,6 +798,12 @@ struct RawLlm {
     token_env: Option<String>,
     timeout_ms: Option<u64>,
     max_concurrent: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawJev {
+    token_env: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1137,6 +1178,7 @@ impl Config {
             inputs,
             claude_code,
             llm,
+            jev,
         } = raw.externals;
         if timeout_ms == 0 {
             return Err(ConfigError::ZeroTimeout);
@@ -1148,6 +1190,9 @@ impl Config {
             return Err(ConfigError::ZeroByteCap);
         }
         let llm = llm.map(|raw| resolve_llm(raw, &lookup)).transpose()?;
+        let jev = jev
+            .map(|raw| resolve_jev(raw, &lookup, std::env::var(JEV_URL_VARIABLE).ok()))
+            .transpose()?;
         let resolve = |section: Section, entries: BTreeMap<String, RawBinding>| {
             resolve_bindings(section, entries, &origins, &lookup, llm.is_some())
         };
@@ -1175,6 +1220,7 @@ impl Config {
                     .collect(),
                 claude_code: resolve_claude_code(claude_code)?,
                 llm,
+                jev,
             },
         })
     }
@@ -1394,8 +1440,14 @@ fn refuse_ungranted_credentials(battery: &HostedBattery<'_>, included: &toml::Va
                 .filter_map(|(section, entries)| Some((section, entries.as_table()?)))
         });
     for (section, entries) in sections {
-        for (name, entry) in entries {
-            if let Some(var) = entry.get("token_env").and_then(toml::Value::as_str)
+        // A profile (`[externals.jev]`) names its credential on the section itself; a
+        // binding section names one per entry.
+        let profile = entries.get("token_env").map(|var| (section, var));
+        let bindings = entries
+            .iter()
+            .filter_map(|(name, entry)| Some((name, entry.get("token_env")?)));
+        for (name, var) in profile.into_iter().chain(bindings) {
+            if let Some(var) = var.as_str()
                 && !battery.token_env.contains(&var)
             {
                 return Err(ConfigError::UngrantedBatteryCredential {
@@ -1518,6 +1570,17 @@ fn compose_include(
             field: "externals".to_string(),
         })?;
     for (section_name, entries) in included_externals {
+        // The one profile a fragment may carry: the `jev` key reaches only the TypeSafe API,
+        // so a battery that routes tools to Jev can ship the profile its annotator reads.
+        if section_name == JEV_SECTION {
+            if root_externals.contains_key(JEV_SECTION) {
+                return Err(ConfigError::DuplicateJevProfile {
+                    path: include_path.display().to_string(),
+                });
+            }
+            root_externals.insert(JEV_SECTION.to_string(), entries.clone());
+            continue;
+        }
         let Some(section) = Section::parse(section_name) else {
             return Err(ConfigError::IncludedExternalsField {
                 path: include_path.display().to_string(),
@@ -1880,6 +1943,35 @@ fn resolve_claude_code(raw: Option<RawClaudeCode>) -> Result<ClaudeCode, ConfigE
             .timeout_ms
             .map_or(DEFAULT_CLAUDE_CODE_TIMEOUT, Duration::from_millis),
     })
+}
+
+fn resolve_jev(
+    raw: RawJev,
+    lookup: &impl Fn(&str) -> Option<String>,
+    operator_url: Option<String>,
+) -> Result<JevProfile, ConfigError> {
+    if !raw.token_env.starts_with(RUNTIME_VARIABLE_PREFIX) {
+        return Err(ConfigError::ForeignSecretVariable {
+            section: JEV_SECTION,
+            name: JEV_SECTION.to_string(),
+            var: raw.token_env,
+        });
+    }
+    let url = match operator_url {
+        Some(url) => validated_url(JEV_SECTION, JEV_URL_VARIABLE, url)?,
+        None => JEV_DEFAULT_URL.to_string(),
+    };
+    let key = match lookup(&raw.token_env) {
+        Some(value) if !value.is_empty() => JevKey::Set(Token::new(value)),
+        _ => {
+            tracing::warn!(
+                var = raw.token_env,
+                "the [externals.jev] key is not set: every jev consult is no answer until a reload reads it"
+            );
+            JevKey::Unset { var: raw.token_env }
+        }
+    };
+    Ok(JevProfile { url, key })
 }
 
 fn resolve_llm(raw: RawLlm, lookup: &impl Fn(&str) -> Option<String>) -> Result<LlmProfile, ConfigError> {
@@ -3744,5 +3836,101 @@ mod tests {
             ordered(["beta", "alpha"]).policy_file().bytes(),
             "declaration order is part of deployment identity"
         );
+    }
+
+    const JEV_KEY: &str = "APPA_PROVIDER_JEV_API_KEY";
+
+    fn jev_key(var: &str) -> Option<String> {
+        (var == JEV_KEY).then(|| "sekret".to_string())
+    }
+
+    /// The document names the variable the key is in and nothing else: the key goes to the
+    /// TypeSafe API, or to the endpoint the operator's own environment names.
+    #[test]
+    fn the_jev_profile_reads_its_key_and_takes_no_destination_from_the_document() {
+        let text = |token_env: &str| format!("{MINIMAL}\n[externals.jev]\ntoken_env = \"{token_env}\"\n");
+        let profile = |config: Config| config.externals.jev.expect("the profile is declared");
+
+        let set = profile(parse_with(&text(JEV_KEY), jev_key).expect("a provider variable is the jev key's own"));
+        assert!(matches!(&set.key, JevKey::Set(token) if token.reveal() == "sekret"));
+        let unset = profile(parse_with(&text(JEV_KEY), |_| None).expect("a deployment opens before its key is set"));
+        assert!(matches!(unset.key, JevKey::Unset { var } if var == JEV_KEY));
+        assert!(matches!(
+            parse_with(&text("TYPESAFE_KEY"), jev_key),
+            Err(ConfigError::ForeignSecretVariable { section: "jev", .. })
+        ));
+        for field in ["url = \"https://elsewhere.example\"", "model = \"jev-2\""] {
+            let widened = format!("{}{field}\n", text(JEV_KEY));
+            assert!(toml::from_str::<RawConfig>(&widened).is_err(), "{field}");
+        }
+
+        let raw = || RawJev {
+            token_env: JEV_KEY.to_string(),
+        };
+        assert_eq!(
+            resolve_jev(raw(), &jev_key, None).expect("resolves").url,
+            JEV_DEFAULT_URL
+        );
+        let local = "http://127.0.0.1:9/v1/systemone";
+        assert_eq!(
+            resolve_jev(raw(), &jev_key, Some(local.to_string()))
+                .expect("resolves")
+                .url,
+            local
+        );
+        assert!(matches!(
+            resolve_jev(raw(), &jev_key, Some("http://jev.example/v1".to_string())),
+            Err(ConfigError::CleartextEndpoint { section: "jev", .. })
+        ));
+    }
+
+    #[test]
+    fn a_fragment_ships_the_jev_profile_once() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let root = dir.path().join("appa.toml");
+        let write_root = |includes: &str, externals: &str| {
+            std::fs::write(
+                &root,
+                format!(
+                    "include = [{includes}]\n[policy]\nversion = 2\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n{externals}"
+                ),
+            )
+            .expect("write root config");
+        };
+        let profile = format!("[policy]\nversion = 2\n[externals.jev]\ntoken_env = \"{JEV_KEY}\"\n");
+        for file in ["jev.toml", "other.toml"] {
+            std::fs::write(dir.path().join(file), &profile).expect("write fragment");
+        }
+
+        write_root("\"jev.toml\"", "");
+        let config = Config::load(&root).expect("a fragment carries the jev profile");
+        assert!(config.externals.jev.is_some());
+
+        write_root("\"jev.toml\"", &format!("[externals.jev]\ntoken_env = \"{JEV_KEY}\"\n"));
+        assert!(matches!(
+            Config::load(&root),
+            Err(ConfigError::DuplicateJevProfile { .. })
+        ));
+        write_root("\"jev.toml\", \"other.toml\"", "");
+        assert!(matches!(
+            Config::load(&root),
+            Err(ConfigError::DuplicateJevProfile { .. })
+        ));
+    }
+
+    #[test]
+    fn a_hosted_battery_reads_the_jev_key_only_when_granted() {
+        let battery = |token_env: &'static [&'static str]| HostedBattery {
+            name: "jev",
+            policy: "[policy]\nversion = 2\n[externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n",
+            token_env,
+        };
+        assert!(matches!(
+            hosted_composed(HOSTED_ROOT, &[battery(&[])]),
+            Err(ConfigError::UngrantedBatteryCredential { battery, section, name, var })
+                if battery == "jev" && section == "jev" && name == "jev" && var == JEV_KEY
+        ));
+        let granted = hosted_composed(HOSTED_ROOT, &[battery(&[JEV_KEY])]).expect("the granted key composes");
+        assert!(granted.externals.jev.is_some());
     }
 }

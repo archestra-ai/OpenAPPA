@@ -69,7 +69,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time"
 # 0.13 is the version rig-core speaks: one reqwest in the graph rather than two
 # whole HTTP stacks. `rustls-no-provider` leaves the crypto provider to `rustls`
 # below and keeps the platform verifier, so roots still come from the OS store.
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "http2"] }
 # The one crypto provider behind every rustls client here. reqwest refuses to
 # build a client until a provider is installed, so an entry point installs this one
 # process-wide (appa-runtime/src/tls.rs) rather than each client naming it. aws-lc-rs

@@ -5,5 +5,5 @@ description = "An annotator that asks TypeSafe's Jev model for a tool call's lab
 [battery]
 policy = "appa.toml"
 hosts = ["claude-code", "kagent"]
-helpers = ["jev-annotator.py", "jev_questions.py"]
+helpers = []
 setup = "Set APPA_PROVIDER_JEV_API_KEY to a TypeSafe API key; every annotated call's name and arguments are sent to the TypeSafe API."

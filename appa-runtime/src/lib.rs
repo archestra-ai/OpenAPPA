@@ -53,6 +53,7 @@ mod elicit;
 mod engine;
 mod events;
 mod external;
+mod jev;
 mod llm;
 mod recorder;
 mod telemetry;
