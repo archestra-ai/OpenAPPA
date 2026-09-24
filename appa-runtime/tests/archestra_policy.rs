@@ -140,6 +140,10 @@ async fn a_share_runs_only_when_everyone_it_reaches_may_already_read() {
         // The organization and another team hold bob.
         archestra("set_project_share", serde_json::json!({ "visibility": "organization" })),
         archestra(
+            "create_knowledge_connector",
+            serde_json::json!({ "name": "c", "visibility": "auto-sync-permissions" }),
+        ),
+        archestra(
             "set_project_share",
             serde_json::json!({ "visibility": "team", "team_ids": ["t1", "t2"] }),
         ),

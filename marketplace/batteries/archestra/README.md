@@ -14,8 +14,8 @@ wins:
 | `publish_app` | `scope: org` / `team` | `internal` / `@archestra:team/$teams` |
 | `create_knowledge_base` | default `org-wide` / `team-scoped`, or `private` with a sent `teamIds` | `internal` / `@archestra:team/$teamIds` |
 | `update_knowledge_base` | `org-wide` / `team-scoped` or a sent `teamIds` | `internal` / `@archestra:team/$teamIds` |
-| `create_knowledge_connector` | default `org-wide` / `team-scoped` / `auto-sync-permissions` | `internal` / `@archestra:team/$team_ids` / `public` |
-| `update_knowledge_connector` | `org-wide` / `team-scoped` or a sent `team_ids` / `auto-sync-permissions` | `internal` / `@archestra:team/$team_ids` / `public` |
+| `create_knowledge_connector` | default `org-wide` / `team-scoped` / `auto-sync-permissions` | `internal` / `@archestra:team/$team_ids` / `internal` |
+| `update_knowledge_connector` | `org-wide` / `team-scoped` or a sent `team_ids` / `auto-sync-permissions` | `internal` / `@archestra:team/$team_ids` / `internal` |
 | `create_plugin`, `update_plugin` | `scope: org` / `team` or a sent `teamIds` / a sent `userIds` / both lists | `internal` / `@archestra:team/$teamIds` / `@archestra:user/$userIds` / `internal` |
 | `edit_agent`, `edit_mcp_gateway` | `scope: org` / `team` or a sent `teams` | `internal` / `@archestra:team/$teams` |
 | `add_team_member` | the added member | `@archestra:user/$user` |
@@ -33,7 +33,7 @@ must be sharable with anyone. Every rule of a tool declares its lists as
 arrays of strings, so a malformed list is refused rather than read as no
 list.
 
-A team list names one collection per team, and OpenAPPA reads at most 32
+A team list names one collection per team, and OpenAPPA reads at most 100
 of them per call.
 
 **`audience-source.py`** — answers these selectors through Archestra's

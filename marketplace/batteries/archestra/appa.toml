@@ -10,7 +10,7 @@
 #
 # A tool that takes a list of teams names one collection per team, so
 # sharing with teams A and B requires what A's members and B's members
-# may see. OpenAPPA reads at most 32 teams per call.
+# may see. OpenAPPA reads at most 100 teams per call.
 #
 # An update that sends a team or member list replaces who the resource is
 # shared with, whatever scope it already has, so a sent list is checked
@@ -128,7 +128,7 @@ requires = { trust = "trusted", audience = { contains = ["@archestra:team/$team_
 name = "mcp/archestra/create_knowledge_connector(visibility:auto-sync-permissions)"
 parameters = { type = "object", properties = { team_ids = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["public"] } }
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/archestra/create_knowledge_connector"
@@ -152,7 +152,7 @@ requires = { trust = "trusted", audience = { contains = ["@archestra:team/$team_
 name = "mcp/archestra/update_knowledge_connector(visibility:auto-sync-permissions)"
 parameters = { type = "object", properties = { team_ids = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["public"] } }
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/archestra/update_knowledge_connector(team_ids:*)"
