@@ -51,7 +51,7 @@
 //! message the runtime never checked at a stop is withheld from the
 //! parent. Every post-use hook of the spawn's tool is that spawn's
 //! result, whatever its response carries: which lifecycle a result runs
-//! is the runtime's derivation from the tool, so a response that names
+//! is the runtime's identification from the tool, so a response that names
 //! no child and carries no message is the same event with both fields
 //! empty, never another lifecycle the runtime would then contradict.
 //! Claude Code's own helper agents stop with an empty
@@ -160,7 +160,7 @@ impl WireEvent {
     /// the message it carries (`content`), each where the response has
     /// it: a launch acknowledgement names the child and carries no
     /// message, and a response with neither fills no spawn field. Which
-    /// lifecycle the runtime runs is its own derivation from the tool,
+    /// lifecycle the runtime runs is its own identification from the tool,
     /// never this shape, so an unrecognized response is the spawn's
     /// result with both fields empty rather than another lifecycle.
     fn spawn_return(&self) -> (Option<TrajectoryId>, Option<String>) {
@@ -883,7 +883,7 @@ mod tests {
         );
     }
 
-    /// The codec's reading of a post-use hook and the derivation that decides the
+    /// The codec's reading of a post-use hook and the identification that decides the
     /// lifecycle agree on every response shape: under the spawn's tools the event is the
     /// spawn's result, with the child and the returned message each present only where the
     /// response has one, and under any other tool it is never one.
@@ -898,7 +898,7 @@ mod tests {
             serde_json::Value::Null,
         ];
         for tool in ["Agent", "Task", "Bash"] {
-            let spawn = derived(tool).expect("derives").spawn;
+            let spawn = identified(tool).expect("identifies").spawn;
             for response in &responses {
                 let mut event = agent_post_tool_use(response.clone());
                 event["tool_name"] = serde_json::Value::String(tool.to_string());
@@ -906,7 +906,7 @@ mod tests {
                 assert_eq!(
                     matches!(parsed, Ok(Some(HookEvent::SpawnResult { .. }))),
                     spawn,
-                    "{tool} on {response}: the codec and the derivation disagree ({parsed:?})",
+                    "{tool} on {response}: the codec and the identification disagree ({parsed:?})",
                 );
             }
         }

@@ -6,10 +6,10 @@
 //! ADK plugin) and reads a [`WireDecision`] back. The wire carries the
 //! host's raw tool spelling and nothing the runtime would have to trust:
 //! whether a call is a spawn, which canonical tool it names, and whether
-//! it is the runtime's own control tool are all derived on the server
+//! it is the runtime's own control tool are all identified on the server
 //! from the configured adapter and the raw spelling
-//! ([`Adapter::derive`]). A result's lifecycle follows that same
-//! derivation and not the event name it arrived under, so `tool_result`
+//! ([`Adapter::identify_tool`]). A result's lifecycle follows that same
+//! identification and not the event name it arrived under, so `tool_result`
 //! and `spawn_result` differ only in the fields they may carry;
 //! whether a proposed call's arguments name a
 //! child's transcript is the same adapter's separate answer
@@ -53,45 +53,45 @@ use crate::{
 /// another number is refused; there is no negotiation.
 pub const PROTOCOL: u32 = 1;
 
-/// What the server derives from a configured adapter and the raw tool
-/// spelling of one call. The runtime keys every fact on `canonical`;
+/// What a configured adapter identifies from one raw tool spelling. The runtime
+/// keys every fact on `canonical`;
 /// the raw spelling never enters an engine fact.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Derived {
+pub struct IdentifiedTool {
     pub canonical: CanonicalTool,
     /// The call starts a child trajectory (Claude Code's `Agent`, a
     /// kagent agent called as a tool).
     pub spawn: bool,
 }
 
-/// The server-side derivation for one raw tool spelling: total over the
+/// The server-side identification for one raw tool spelling: total over the
 /// adapter's raw domain, a refusal outside it. The spelling is all it
 /// reads — who calls and with which arguments decides no identity, and
 /// the one argument-dependent question an adapter answers is
 /// [`NamesChildrenFn`]. A plain `fn` pointer — no state, no runtime
 /// access — for the same reason [`Codec`](crate::Codec) is.
-pub type DeriveFn = fn(&str) -> Result<Derived, ParseRefusal>;
+pub type IdentifyToolFn = fn(&str) -> Result<IdentifiedTool, ParseRefusal>;
 
 /// The family children one call's arguments name by the host's own
 /// on-disk spellings of a child's transcript or output file. A
 /// recognizer of the default spellings, not a guarantee that no other
 /// path reaches the file.
 ///
-/// A separate question from [`DeriveFn`] because only a tool call has an
+/// A separate question from [`IdentifyToolFn`] because only a tool call has an
 /// answer to it: an outcome is observed after the fact and names no
 /// child, so the scan over the arguments is never asked for there. A
-/// plain `fn` pointer for the same reason [`DeriveFn`] is.
+/// plain `fn` pointer for the same reason [`IdentifyToolFn`] is.
 pub type NamesChildrenFn = fn(&Actor, &ProposedCall) -> Vec<TrajectoryId>;
 
-/// The inverse of [`DeriveFn`]: the host's own spelling of one canonical
+/// The inverse of [`IdentifyToolFn`]: the host's own spelling of one canonical
 /// identity — the name this host's model can dispatch. Both identities
 /// are kept, the canonical one to key every fact and this one to address
 /// the model and the host.
 ///
-/// Total over the canonical ids the adapter's [`DeriveFn`] produces, and
-/// that derivation's inverse there. Any other canonical id — one no raw
+/// Total over the canonical ids the adapter's [`IdentifyToolFn`] produces, and
+/// that identification's inverse there. Any other canonical id — one no raw
 /// spelling of this host maps onto — has no host spelling and answers
-/// `None`. A plain `fn` pointer for the same reason [`DeriveFn`] is.
+/// `None`. A plain `fn` pointer for the same reason [`IdentifyToolFn`] is.
 pub type SpellFn = fn(&CanonicalTool) -> Option<String>;
 
 /// One adapter as the runtime runs under it: its name, which fixes the
@@ -101,7 +101,7 @@ pub type SpellFn = fn(&CanonicalTool) -> Option<String>;
 #[derive(Clone, Copy)]
 pub struct Adapter {
     pub name: AdapterName,
-    pub derive: DeriveFn,
+    pub identify_tool: IdentifyToolFn,
     pub names_children: NamesChildrenFn,
     pub spell: SpellFn,
     /// Whether the wildcard rule covers a spawn under this host. A host
@@ -427,7 +427,7 @@ pub struct WireEvent {
     pub cwd: Option<String>,
 }
 
-/// A parsed wire event with what the server derived from it.
+/// A parsed wire event with what the server identified from it.
 #[derive(Debug, Clone)]
 pub struct Accepted {
     pub event: HookEvent,
@@ -637,7 +637,7 @@ impl WireEvent {
     }
 
     /// The server's reading: the typed event with the configured
-    /// adapter's prefixes and derivation applied, or `None` for a ping.
+    /// adapter's prefixes and tool identification applied, or `None` for a ping.
     pub fn into_event(self, served: &Adapter) -> Result<Option<Accepted>, ParseRefusal> {
         if self.protocol != PROTOCOL {
             return Err(malformed(format!(
@@ -720,24 +720,25 @@ impl WireEvent {
             }
         };
         // The call as the host spelled it, beside the identity the
-        // adapter derives for it. Every event that carries a call reads
+        // adapter identifies for it. Every event that carries a call reads
         // both: the raw spelling is what a child scan and a diagnostic
         // need, and the canonical id is what the runtime keys on. The two
         // fields are handed in rather than read from the envelope, so the
         // arguments reach the call by moving.
-        let derived_call =
-            |tool: Option<String>, arguments: Option<Box<RawValue>>| -> Result<(ProposedCall, Derived), ParseRefusal> {
-                let raw = match (tool, arguments) {
-                    (Some(tool), Some(arguments)) => ProposedCall {
-                        tool,
-                        arguments,
-                        cwd: None,
-                    },
-                    _ => return Err(malformed(format!("{name:?} without its tool call"))),
-                };
-                let derived = (served.derive)(&raw.tool)?;
-                Ok((raw, derived))
+        let identified_call = |tool: Option<String>,
+                               arguments: Option<Box<RawValue>>|
+         -> Result<(ProposedCall, IdentifiedTool), ParseRefusal> {
+            let raw = match (tool, arguments) {
+                (Some(tool), Some(arguments)) => ProposedCall {
+                    tool,
+                    arguments,
+                    cwd: None,
+                },
+                _ => return Err(malformed(format!("{name:?} without its tool call"))),
             };
+            let identified = (served.identify_tool)(&raw.tool)?;
+            Ok((raw, identified))
+        };
         let value = value.filter(|value| !value.is_empty());
 
         let accepted = |event: HookEvent| {
@@ -760,8 +761,8 @@ impl WireEvent {
             EventName::TurnEnd => accepted(HookEvent::TurnEnd { actor: actor()? }),
             EventName::SpawnResume => {
                 let actor = actor()?;
-                let (raw, derived) = derived_call(tool, arguments)?;
-                if !derived.spawn {
+                let (raw, identified) = identified_call(tool, arguments)?;
+                if !identified.spawn {
                     return Err(malformed("spawn_resume requires an agent tool"));
                 }
                 let id = spawned_id
@@ -772,7 +773,7 @@ impl WireEvent {
                 accepted(HookEvent::SpawnResume {
                     actor,
                     call: ProposedCall {
-                        tool: derived.canonical.into_string(),
+                        tool: identified.canonical.into_string(),
                         arguments: raw.arguments,
                         cwd: None,
                     },
@@ -781,30 +782,30 @@ impl WireEvent {
             }
             EventName::ToolCall => {
                 let actor = actor()?;
-                let (raw, derived) = derived_call(tool, arguments)?;
+                let (raw, identified) = identified_call(tool, arguments)?;
                 // A ruling answers the review of the offer a control
                 // call quotes, and only the control call spends one.
                 // On any other call the runtime would judge the flow
                 // and drop the ruling unread, so an asserted denial is
                 // refused here rather than silently ignored.
-                let ruling = match (ruling, derived.canonical.is_control()) {
+                let ruling = match (ruling, identified.canonical.is_control()) {
                     (None, _) => None,
                     (Some(ruling), true) => Some(ruling),
                     (Some(_), false) => {
                         return Err(malformed(format!(
                             "a ruling on {}, which is not the runtime's control call",
-                            derived.canonical
+                            identified.canonical
                         )));
                     }
                 };
                 let names_children = (served.names_children)(&actor, &raw);
-                let spawn = derived.spawn;
+                let spawn = identified.spawn;
                 Ok(Some(Accepted {
                     inventory,
                     event: HookEvent::ToolCall {
                         actor,
                         call: ProposedCall {
-                            tool: derived.canonical.into_string(),
+                            tool: identified.canonical.into_string(),
                             arguments: raw.arguments,
                             cwd: cwd.filter(|cwd| !cwd.is_empty()),
                         },
@@ -815,19 +816,19 @@ impl WireEvent {
                     names_children,
                 }))
             }
-            // One result event, and the derivation alone says which
+            // One result event, and tool identification alone says which
             // lifecycle it is. The two names differ only in the fields
             // they may carry: an event name is a caller's claim, and a
             // caller that could pick the lifecycle could skip a child's
             // settlement or spend a spawn's metadata on an ordinary
             // call. The spawn-only fields are refused, not dropped,
-            // where the derivation gives no spawn to spend them on.
+            // where identification gives no spawn to spend them on.
             EventName::ToolResult | EventName::SpawnResult => {
                 let actor = actor()?;
-                let (raw, derived) = derived_call(tool, arguments)?;
-                let spawn = derived.spawn;
+                let (raw, identified) = identified_call(tool, arguments)?;
+                let spawn = identified.spawn;
                 let call = ProposedCall {
-                    tool: derived.canonical.into_string(),
+                    tool: identified.canonical.into_string(),
                     arguments: raw.arguments,
                     cwd: None,
                 };
@@ -850,11 +851,11 @@ impl WireEvent {
                     }),
                     false => match (child, value) {
                         (Some(_), _) => Err(malformed(format!(
-                            "a result carrying spawned_id for {}, which this adapter derives as an ordinary call",
+                            "a result carrying spawned_id for {}, which this adapter identifies as an ordinary call",
                             call.tool
                         ))),
                         (None, Some(_)) => Err(malformed(format!(
-                            "a result carrying value for {}, which this adapter derives as an ordinary call",
+                            "a result carrying value for {}, which this adapter identifies as an ordinary call",
                             call.tool
                         ))),
                         (None, None) => accepted(HookEvent::ToolResult {
@@ -1171,16 +1172,16 @@ mod tests {
     /// as every real adapter gives it one.
     const CONTROL_RAW: &str = "execute_remedy_plan";
 
-    fn derive(raw: &str) -> Result<Derived, ParseRefusal> {
+    fn identify_tool(raw: &str) -> Result<IdentifiedTool, ParseRefusal> {
         if raw == CONTROL_RAW {
-            return Ok(Derived {
+            return Ok(IdentifiedTool {
                 canonical: CanonicalTool::control(),
                 spawn: false,
             });
         }
         let canonical =
             CanonicalTool::parse(&format!("host/test/{raw}")).map_err(|error| malformed(error.to_string()))?;
-        Ok(Derived {
+        Ok(IdentifiedTool {
             canonical,
             spawn: matches!(raw, "spawn" | "Agent"),
         })
@@ -1205,7 +1206,7 @@ mod tests {
 
     const SERVED: Adapter = Adapter {
         name: AdapterName::Kagent,
-        derive,
+        identify_tool,
         names_children,
         spell,
         wildcard_covers_spawn: false,
@@ -1216,7 +1217,7 @@ mod tests {
     /// use for.
     const NEVER_SCANNED: Adapter = Adapter {
         name: AdapterName::Kagent,
-        derive,
+        identify_tool,
         names_children: unasked_children,
         spell,
         wildcard_covers_spawn: false,
@@ -1305,7 +1306,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_call_crosses_with_its_raw_spelling_and_returns_derived() {
+    fn a_tool_call_crosses_with_its_raw_spelling_and_returns_identified_fields() {
         let body = br#"{"protocol":1,"adapter":"kagent","event":"tool_call","root_id":"r1","tool":"spawn","arguments":{"a":1,"a":2}}"#;
         let accepted = WireEvent::read(body)
             .expect("reads")
@@ -1323,7 +1324,7 @@ mod tests {
                 assert_eq!(actor.root.0, "kagent:r1");
                 assert_eq!(call.tool, "host/test/spawn");
                 assert_eq!(call.arguments.get(), r#"{"a":1,"a":2}"#, "arguments cross unparsed");
-                assert!(spawn, "spawn is derived, never read from the wire");
+                assert!(spawn, "spawn is identified, never read from the wire");
                 assert_eq!(ruling, None);
                 assert_eq!(call_id, None);
             }
@@ -1333,7 +1334,7 @@ mod tests {
     }
 
     #[test]
-    fn a_wire_spawn_field_is_ignored_and_names_children_derives() {
+    fn a_wire_spawn_field_is_ignored_and_names_children_are_computed() {
         let body = br#"{"protocol":1,"adapter":"kagent","event":"tool_call","root_id":"r1","tool":"read","spawn":true,"arguments":{"path":"tasks/child-1.output"}}"#;
         let accepted = WireEvent::read(body)
             .expect("reads")
@@ -1370,7 +1371,7 @@ mod tests {
     }
 
     #[test]
-    fn spawn_resume_requires_a_derived_spawn_and_exact_fields() {
+    fn spawn_resume_requires_an_identified_spawn_and_exact_fields() {
         let body = serde_json::json!({"protocol":1,"adapter":"kagent","event":"spawn_resume",
             "root_id":"r1","tool":"spawn","arguments":{"request":"continue"},"spawned_id":"c1"});
         let accepted = WireEvent::read(&serde_json::to_vec(&body).unwrap())
@@ -1521,7 +1522,7 @@ mod tests {
 
     const CLAUDE_CODE: Adapter = Adapter {
         name: AdapterName::ClaudeCode,
-        derive,
+        identify_tool,
         names_children,
         spell,
         wildcard_covers_spawn: true,
@@ -1858,14 +1859,14 @@ mod tests {
         }
     }
 
-    /// The derivation alone says which lifecycle a result runs: the
+    /// Tool identification alone says which lifecycle a result runs: the
     /// event name it arrived under selects nothing, so no caller can
     /// skip a child's settlement by naming the ordinary result, or
-    /// spend a spawn's metadata on a tool the adapter derives as an
-    /// ordinary call. Where the derivation gives no spawn, `spawned_id`
+    /// spend a spawn's metadata on a tool the adapter identifies as an
+    /// ordinary call. Where identification gives no spawn, `spawned_id`
     /// and `value` are refused rather than dropped.
     #[test]
-    fn a_results_lifecycle_follows_the_derivation_and_never_the_event_name() {
+    fn a_results_lifecycle_follows_tool_identification_and_never_the_event_name() {
         #[derive(Debug)]
         enum Expected {
             Ordinary,
@@ -1883,9 +1884,9 @@ mod tests {
         let named = r#","spawned_id":"c1","value":"done""#;
         let table = [
             ("tool_result", "read", "", Expected::Ordinary),
-            // The name claims a spawn the derivation does not give.
+            // The name claims a spawn the identification does not give.
             ("spawn_result", "read", "", Expected::Ordinary),
-            // The name claims an ordinary call for the derived spawn:
+            // The name claims an ordinary call for the identified spawn:
             // the child's settlement still runs.
             (
                 "tool_result",

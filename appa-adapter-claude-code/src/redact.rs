@@ -4,7 +4,7 @@
 //! shape — otherwise it silently keeps the original. So the codec never
 //! answers with a bare placeholder: it restates the response it was
 //! handed with its leaves redacted. Which restatement one result gets
-//! follows the tool that produced it, as the runtime's own derivation
+//! follows the tool that produced it, as the runtime's own identification
 //! does, and never the event it arrived as. For the spawn's result the
 //! swap is the `content` text — the one field of the `Agent` response
 //! Claude Code shows the parent model; the rest stays for the transcript
@@ -49,7 +49,7 @@ pub(crate) struct Replacement {
 }
 
 /// Which restatement one result gets, keyed on the tool that produced it exactly as the
-/// runtime's own derivation is. The event a result arrived as decides nothing here: a
+/// runtime's own identification is. The event a result arrived as decides nothing here: a
 /// spawn's response is restated as one under the spawn's tools and by the ordinary
 /// redaction under every other, so the two readings of one result cannot disagree.
 enum Restatement {

@@ -6,16 +6,16 @@ pub mod inventory;
 mod wire;
 
 pub use wire::{
-    Accepted, Adapter, AsSpoken, DecisionName, DeriveFn, Derived, EventName, NamesChildrenFn, OutcomeStatus, PROTOCOL,
-    SpellFn, WireDecision, WireEvent, WireOffer, WireOutcome, WireReturn, WireReview,
+    Accepted, Adapter, AsSpoken, DecisionName, EventName, IdentifiedTool, IdentifyToolFn, NamesChildrenFn,
+    OutcomeStatus, PROTOCOL, SpellFn, WireDecision, WireEvent, WireOffer, WireOutcome, WireReturn, WireReview,
 };
 
 /// The hosts this runtime serves over the wire, plus the one that is
 /// no host of the wire at all. The one place harness names appear as a
 /// closed set: each served variant fixes a trajectory prefix and the
 /// channel a review reaches a person through
-/// ([`AdapterName::review_channel`]); what a host derives from a raw
-/// spelling and how its policy resolves names is the [`Adapter`] it
+/// ([`AdapterName::review_channel`]); how a host identifies a tool from
+/// its raw spelling and how its policy resolves names is the [`Adapter`] it
 /// supplies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -24,7 +24,7 @@ pub enum AdapterName {
     Kagent,
     /// A host that embeds the runtime in its own process. There is no
     /// served process and no wire: the host builds every event itself,
-    /// derives each call through the [`Adapter`] it opened the runtime
+    /// identifies each call through the [`Adapter`] it opened the runtime
     /// with, and reviews through its own surface. Never the answer to
     /// [`AdapterName::parse`], since nothing on the wire names it.
     Embedded,
@@ -306,7 +306,7 @@ impl<'de> serde::Deserialize<'de> for CanonicalTool {
     }
 }
 
-/// Identity of one trajectory (root or child). The adapter derives it
+/// Identity of one trajectory (root or child). The adapter constructs it
 /// from the harness's own ids with a harness prefix; there is no
 /// translation table.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -589,8 +589,8 @@ pub enum ParseRefusal {
 /// hook JSON. Plain `fn` pointers — no trait, no captured state —
 /// because an adapter that could hold state or reach the runtime would
 /// breach the boundary this crate declares. Nothing here is trusted by
-/// the runtime: what the runtime derives from a call, it derives itself
-/// ([`Adapter::derive`]).
+/// the runtime: the runtime identifies the tool itself
+/// ([`Adapter::identify_tool`]).
 #[derive(Clone, Copy)]
 pub struct Codec {
     pub parse: fn(&[u8]) -> Result<Option<HookEvent>, ParseRefusal>,

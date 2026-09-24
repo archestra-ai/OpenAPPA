@@ -257,7 +257,7 @@ fn the_declared_codec() {
     let _: fn(&HookEvent, &HookDecision) -> serde_json::Value = codec.render;
     let served: Adapter = appa_adapter_claude_code::adapter();
     let _: appa_runtime_api::AdapterName = served.name;
-    let _: appa_runtime_api::DeriveFn = served.derive;
+    let _: appa_runtime_api::IdentifyToolFn = served.identify_tool;
     let _: Adapter = appa_adapter_kagent::adapter();
 }
 

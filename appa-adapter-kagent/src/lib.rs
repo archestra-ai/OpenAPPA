@@ -1,4 +1,4 @@
-//! The kagent adapter: the server-side derivation the runtime applies
+//! The kagent adapter: the server-side identification the runtime applies
 //! to every call the kagent plugins send. Pure — no policy, no state,
 //! no runtime calls; the compiler enforces the boundary, since this
 //! crate depends only on `appa-runtime-api`.
@@ -6,8 +6,8 @@
 //! There is no client-side codec here. OpenAPPA owns both ends of the
 //! kagent wire, so the plugins (`integrations/kagent/`) speak the
 //! canonical hook wire of `appa-runtime-api` directly: one `WireEvent`
-//! per `POST /hook`, one `WireDecision` back. What the runtime derives
-//! from a call it derives itself, from the raw spelling alone
+//! per `POST /hook`, one `WireDecision` back. The runtime identifies each call
+//! from the raw spelling alone
 //! ([`adapter`]): the canonical identity and whether the call is the
 //! spawn. Nothing a plugin sends is trusted for either.
 //!
@@ -37,9 +37,11 @@
 //! parent spells. So no call names a child by its arguments and
 //! [`names_children`] is always empty.
 
-use appa_runtime_api::{Actor, Adapter, AdapterName, CanonicalTool, Derived, ParseRefusal, ProposedCall, TrajectoryId};
+use appa_runtime_api::{
+    Actor, Adapter, AdapterName, CanonicalTool, IdentifiedTool, ParseRefusal, ProposedCall, TrajectoryId,
+};
 
-/// The server-side derivation the runtime applies to every kagent call. kagent's spawns
+/// The server-side identification the runtime applies to every kagent call. kagent's spawns
 /// are other agents called as tools, which only a contract written for them may release.
 /// An unqualified authored name reaches every server; the one spelling that names its
 /// namespace itself is an agent's, `<namespace>__NS__<agent>`, which no `server`
@@ -47,7 +49,7 @@ use appa_runtime_api::{Actor, Adapter, AdapterName, CanonicalTool, Derived, Pars
 pub fn adapter() -> Adapter {
     Adapter {
         name: AdapterName::Kagent,
-        derive,
+        identify_tool,
         names_children,
         spell,
         wildcard_covers_spawn: false,
@@ -69,7 +71,7 @@ const CONTROL_TOOL_NAME: &str = "execute_remedy_plan";
 /// The control tool as the plugin's inventory spells it.
 const CONTROL_TOOL_RAW: &str = "appa:execute_remedy_plan";
 
-/// The inverse of [`derive`]'s mapping table over its range: the wire spelling the plugin's
+/// The inverse of [`identify_tool`]'s mapping table over its range: the wire spelling the plugin's
 /// inventory gives one canonical identity, which is what the runtime says where it names a
 /// tool to this host. `None` for a canonical id no kagent spelling maps onto — another
 /// host's namespace under the `host` family.
@@ -89,7 +91,7 @@ fn spell(canonical: &CanonicalTool) -> Option<String> {
 
 /// The crate-level mapping table. `CanonicalTool::of` refuses an empty segment, a
 /// character outside the grammar, and a namespace containing `__`.
-fn derive(raw: &str) -> Result<Derived, ParseRefusal> {
+fn identify_tool(raw: &str) -> Result<IdentifiedTool, ParseRefusal> {
     let refused = |detail: String| ParseRefusal::Malformed {
         detail: format!("tool {raw:?} is outside the kagent adapter's domain: {detail}"),
     };
@@ -101,7 +103,7 @@ fn derive(raw: &str) -> Result<Derived, ParseRefusal> {
     };
     let (family, namespace, tool, spawn) = match (prefix, rest.split_once('/')) {
         ("appa", _) if rest == CONTROL_TOOL_NAME => {
-            return Ok(Derived {
+            return Ok(IdentifiedTool {
                 canonical: CanonicalTool::control(),
                 spawn: false,
             });
@@ -120,7 +122,7 @@ fn derive(raw: &str) -> Result<Derived, ParseRefusal> {
         }
     };
     let canonical = CanonicalTool::of(family, namespace, tool).map_err(|error| refused(error.to_string()))?;
-    Ok(Derived { canonical, spawn })
+    Ok(IdentifiedTool { canonical, spawn })
 }
 
 #[cfg(test)]
@@ -142,8 +144,8 @@ mod tests {
         )
     }
 
-    fn derived(tool: &str) -> Result<Derived, ParseRefusal> {
-        (adapter().derive)(tool)
+    fn identified(tool: &str) -> Result<IdentifiedTool, ParseRefusal> {
+        (adapter().identify_tool)(tool)
     }
 
     /// A kagent child is bound at `child_start`, never named by a call's arguments, so a
@@ -170,19 +172,19 @@ mod tests {
             ("builtin:memory_persist", "host/kagent/memory_persist", false),
             ("gate:outer", "host/kagent-gate/outer", false),
         ] {
-            let derived = derived(raw).unwrap_or_else(|refusal| panic!("{raw} derives: {refusal:?}"));
-            assert_eq!(derived.canonical.as_str(), expected, "{raw}");
-            assert_eq!(derived.spawn, spawn, "{raw}");
-            assert_eq!(derived.canonical.is_control(), raw == CONTROL_TOOL_RAW, "{raw}");
+            let identified = identified(raw).unwrap_or_else(|refusal| panic!("{raw} identifies: {refusal:?}"));
+            assert_eq!(identified.canonical.as_str(), expected, "{raw}");
+            assert_eq!(identified.spawn, spawn, "{raw}");
+            assert_eq!(identified.canonical.is_control(), raw == CONTROL_TOOL_RAW, "{raw}");
             assert_eq!(
-                (adapter().spell)(&derived.canonical).as_deref(),
+                (adapter().spell)(&identified.canonical).as_deref(),
                 Some(raw),
                 "the inverse spells {expected} back as the spelling the plugin sent"
             );
         }
     }
 
-    /// A canonical id no kagent spelling derives to has no kagent spelling.
+    /// A canonical id outside the mapping's range has no kagent spelling.
     #[test]
     fn a_canonical_id_outside_the_range_has_no_host_spelling() {
         for name in ["host/claude-code/Bash", "host/other/x"] {
@@ -222,7 +224,7 @@ mod tests {
             "appa/execute_remedy_plan",
             "mcp__k8s__get_pods",
         ] {
-            match derived(raw) {
+            match identified(raw) {
                 Err(ParseRefusal::Malformed { detail }) => {
                     assert!(
                         detail.contains(&format!("{raw:?}")),
@@ -265,7 +267,7 @@ mod tests {
         }
 
         /// Every canonical identity a policy may declare, including the ones no kagent
-        /// spelling derives to and the control tool's own name under another family.
+        /// spelling maps to and the control tool's own name under another family.
         fn canonical_id() -> impl Strategy<Value = CanonicalTool> {
             let family = prop_oneof![Just("mcp"), Just("host"), Just("agent")];
             let namespace = prop_oneof![
@@ -280,30 +282,31 @@ mod tests {
                 (family, namespace, name).prop_filter_map("a canonical identity", |(family, namespace, name)| {
                     CanonicalTool::of(family, &namespace, &name).ok()
                 }),
-                raw_spelling().prop_filter_map("an accepted spelling", |raw| derived(&raw).ok().map(|d| d.canonical)),
+                raw_spelling()
+                    .prop_filter_map("an accepted spelling", |raw| identified(&raw).ok().map(|d| d.canonical)),
             ]
         }
 
         proptest! {
             #[test]
             fn an_accepted_spelling_parses_back_and_is_control_only_when_registered(raw in raw_spelling()) {
-                if let Ok(derived) = derived(&raw) {
-                    let canonical = derived.canonical;
+                if let Ok(identified) = identified(&raw) {
+                    let canonical = identified.canonical;
                     prop_assert_eq!(CanonicalTool::parse(canonical.as_str()), Ok(canonical.clone()));
                     prop_assert_eq!(canonical.is_control(), raw == CONTROL_TOOL_RAW);
-                    prop_assert_eq!(derived.spawn, canonical.as_str().starts_with("agent/"), "{}", canonical);
+                    prop_assert_eq!(identified.spawn, canonical.as_str().starts_with("agent/"), "{}", canonical);
                     if let Some(namespace) = canonical.as_str().split('/').nth(1) {
                         prop_assert!(!namespace.contains("__"), "{}", canonical);
                     }
                 }
             }
 
-            /// The inverse is total over the derivation's range and returns the exact
+            /// The inverse is total over the mapping's range and returns the exact
             /// spelling the plugin sent, so the runtime never has to keep one.
             #[test]
-            fn the_inverse_spells_every_derived_identity_back(raw in raw_spelling()) {
-                if let Ok(derived) = derived(&raw) {
-                    let spelled = (adapter().spell)(&derived.canonical);
+            fn the_inverse_spells_every_identified_tool_back(raw in raw_spelling()) {
+                if let Ok(identified) = identified(&raw) {
+                    let spelled = (adapter().spell)(&identified.canonical);
                     prop_assert_eq!(spelled.as_deref(), Some(raw.as_str()));
                 }
             }
@@ -314,15 +317,15 @@ mod tests {
             /// rendering here uses it, so no ordinary tool can be spelled as the control
             /// tool.
             #[test]
-            fn a_spelled_identity_is_the_one_its_spelling_derives_to(tool in canonical_id()) {
+            fn a_spelled_identity_is_the_one_its_spelling_maps_to(tool in canonical_id()) {
                 if let Some(spelled) = (adapter().spell)(&tool) {
-                    prop_assert_eq!(derived(&spelled).map(|derived| derived.canonical), Ok(tool));
+                    prop_assert_eq!(identified(&spelled).map(|identified| identified.canonical), Ok(tool));
                 }
             }
 
             #[test]
             fn the_map_is_injective(left in raw_spelling(), right in raw_spelling()) {
-                if let (Ok(a), Ok(b)) = (derived(&left), derived(&right)) {
+                if let (Ok(a), Ok(b)) = (identified(&left), identified(&right)) {
                     prop_assert_eq!(a.canonical == b.canonical, left == right, "{} vs {}", left, right);
                 }
             }

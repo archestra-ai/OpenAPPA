@@ -901,7 +901,7 @@ mod tests {
     /// Claude Code hook JSON these tests are written in is translated onto the wire,
     /// and the wire decision is rendered back into Claude Code's hook answer.
     /// The event the served runtime reads from one Claude Code hook body: parsed by the
-    /// codec and derived on the wire, exactly as [`answer`] does it, so a test can put the
+    /// codec and identified on the wire, exactly as [`answer`] does it, so a test can put the
     /// same event in front of the dispatcher and read what it recorded.
     fn through_the_codec(hook: &serde_json::Value) -> Option<HookEvent> {
         let body = serde_json::to_vec(hook).expect("the fixture serializes");
@@ -1540,9 +1540,9 @@ mod tests {
         );
     }
 
-    /// The wire carries the host's raw spelling; the served adapter derives which
+    /// The wire carries the host's raw spelling; the served adapter identifies which
     /// call is the control tool. A lookalike on another server, and the bare name
-    /// a host tool could take, both derive an ordinary tool nothing covers.
+    /// a host tool could take, both identify an ordinary tool nothing covers.
     #[tokio::test]
     async fn a_lookalike_control_tool_is_checked() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -1569,7 +1569,7 @@ mod tests {
                 answer["error"]
                     .as_str()
                     .is_some_and(|detail| detail.contains(canonical)),
-                "the refusal names the derived tool: {answer}"
+                "the refusal names the identified tool: {answer}"
             );
         }
     }
@@ -1601,11 +1601,11 @@ mod tests {
         assert!(runtime.status(&TrajectoryId("cc:s1".to_string())).is_some());
     }
 
-    /// Whether a call is a spawn is derived from the raw spelling, never read off the
+    /// Whether a call is a spawn comes from tool identification, never from the
     /// wire: a `spawn` claim on an ordinary tool releases it as an ordinary call, and
     /// the spawn tool is held on the return menu with no claim at all.
     #[tokio::test]
-    async fn a_wire_spawn_claim_is_ignored_and_the_spawn_is_derived() {
+    async fn a_wire_spawn_claim_is_ignored_and_the_spawn_is_identified() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
         let adapter = appa_adapter_claude_code::adapter();
@@ -1615,8 +1615,8 @@ mod tests {
         assert_eq!(reply["decision"], "allow_call", "{reply}");
         assert!(reply.get("spawn_binding").is_none(), "no fork was prepared: {reply}");
 
-        let derived = br#"{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"s2","tool":"Agent","spawn":false,"arguments":{"prompt":"go"}}"#;
-        let (status, reply) = answer(&runtime, &adapter, derived).await;
+        let identified = br#"{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"s2","tool":"Agent","spawn":false,"arguments":{"prompt":"go"}}"#;
+        let (status, reply) = answer(&runtime, &adapter, identified).await;
         assert_eq!(status, 200, "{reply}");
         assert_eq!(
             reply["decision"], "deny_call",
