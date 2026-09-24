@@ -1,0 +1,37 @@
+# Offline policy replay: a fictional audience and replay-simulated review.
+include = ["../../../marketplace/batteries/xmemory/appa.toml"]
+
+[policy]
+version = 2
+
+[policy.audience]
+internal = ["replay:members"]
+
+[[policy.authority]]
+name = "xmemory-operator"
+# Deliberately cannot widen an audience: internal reads must write back as-is.
+permits = { trust_below = "trusted", attention = ["xmemory-review"] }
+
+# This tool tests the trust change from an xmemory result.
+[[policy.tool]]
+name = "mcp/shell/run_command"
+requires = { trust = "trusted" }
+delta = {}
+
+# This tool tests who can receive an xmemory result.
+[[policy.tool]]
+name = "mcp/mail/send"
+requires = { audience = { contains = ["$to"] } }
+delta = {}
+
+[externals]
+timeout_ms = 30000
+max_body_bytes = 1048576
+
+[externals.authorities.xmemory-operator]
+builtin = "hitl"
+
+# This fixed roster is only a replay fixture, never an xmemory ACL resolver.
+[externals.audience.replay]
+command = ["python3", "-c", 'import json, sys; json.load(sys.stdin); print(json.dumps({"version": 1, "answer": {"members": ["alice@corp.example", "bob@corp.example"]}}))']
+selectors = [{ template = "members", feeds = "internal" }]

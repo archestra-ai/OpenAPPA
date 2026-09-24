@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -ne 1 ]; then
+  echo "usage: appa-amp-gcp-identity AUDIENCE" >&2
+  exit 2
+fi
+
+token="$(amp orb id-token --audience "$1")"
+AMP_ID_TOKEN="$token" python3 - <<'PY'
+import base64
+import json
+import os
+
+token = os.environ["AMP_ID_TOKEN"]
+payload = token.split(".")[1]
+payload += "=" * (-len(payload) % 4)
+expiration = json.loads(base64.urlsafe_b64decode(payload))["exp"]
+print(json.dumps({
+    "version": 1,
+    "success": True,
+    "token_type": "urn:ietf:params:oauth:token-type:id_token",
+    "id_token": token,
+    "expiration_time": expiration,
+}))
+PY
