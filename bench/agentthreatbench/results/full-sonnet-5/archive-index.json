@@ -1,0 +1,11 @@
+{
+  "format_version": 1,
+  "benchmark": "agentthreatbench",
+  "run_id": "full-sonnet-5",
+  "git_commit": "c79958dce63cf37ca4fc269c787eb54a8782e64b",
+  "archive": "full-sonnet-5-73df4cbcf8a51a63496e7d08ca0c7a08bb6f67621bf3e5ffb15a4d89bd4b8c08.tar.zst",
+  "sha256": "73df4cbcf8a51a63496e7d08ca0c7a08bb6f67621bf3e5ffb15a4d89bd4b8c08",
+  "archive_bytes": 1249152,
+  "file_count": 59,
+  "uncompressed_bytes": 2423879
+}

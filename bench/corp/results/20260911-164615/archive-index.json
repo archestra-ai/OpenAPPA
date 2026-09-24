@@ -1,0 +1,11 @@
+{
+  "format_version": 1,
+  "benchmark": "corp",
+  "run_id": "20260911-164615",
+  "git_commit": "c79958dce63cf37ca4fc269c787eb54a8782e64b",
+  "archive": "20260911-164615-42b11ebb14e55c32bd93cf337cfee094aa8f30be1997235e02720c1dfdd1d3e4.tar.zst",
+  "sha256": "42b11ebb14e55c32bd93cf337cfee094aa8f30be1997235e02720c1dfdd1d3e4",
+  "archive_bytes": 65781,
+  "file_count": 394,
+  "uncompressed_bytes": 722735
+}
