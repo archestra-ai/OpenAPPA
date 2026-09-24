@@ -4587,7 +4587,7 @@ confined_results = ["leak"]
         let url = stub(serde_json::json!({"body": "scrubbed"})).await;
         let runtime =
             Runtime::open(partly_cleared_config(&url), dir.path().join("appa.db"), None).expect("the deployment opens");
-        let mut session = runtime.create_session(root()).expect("a fresh id opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
         assert!(matches!(
             session
                 .on_tool_call(leak(), false)
