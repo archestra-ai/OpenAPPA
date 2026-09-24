@@ -2,8 +2,8 @@
 
 The guardrail slot runs `Session.check` (a block becomes the SDK's DENY with
 APPA's feedback as the reason the model reads); POST_TOOL_CALL runs
-`Session.report` and replaces the output the model sees with APPA's delivered
-content. Every APPA fault is a DENY or a withheld output (fail closed).
+`Session.report` and replaces a successful output the model sees with APPA's
+delivered content; a tool error reaches the model as the SDK reported it. Every APPA fault is a DENY or a withheld output (fail closed).
 """
 
 import json
