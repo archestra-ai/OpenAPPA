@@ -82,7 +82,7 @@ names what to read from an internal service does not. The Annotator's
 | call delivers data to nobody | no `requires.audience` |
 | call delivers data inside the organization | `requires.audience = { contains = ["internal"] }` |
 | call delivers data outside it | `requires.audience = { contains = "public" }` |
-| call sends what the trajectory holds to a person or outside the organization, or runs it | `requires.trust` = the mandate's highest rank |
+| call sends or writes what the trajectory holds where people or outside services read it, or runs it | `requires.trust` = the mandate's highest rank |
 
 When Jev's probability for a label is below 0.6, the builtin answers the
 safer of Jev's two likeliest options: the narrower result audience, the
