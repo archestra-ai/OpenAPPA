@@ -1,0 +1,10 @@
+schema = 1
+name = "xmemory"
+description = "Rules for the hosted xmemory instance and admin MCP servers' 32 tools, one namespace bound to both: internal reads, writes without trusted data, trusted admin and schema changes, reviewed schema migrations and instance deletion."
+
+[battery]
+policy = "appa.toml"
+hosts = ["claude-code", "kagent"]
+namespaces = ["xmemory"]
+helpers = []
+setup = "Bind each xmemory server you run: appa battery install xmemory --server <instance-server> --server <admin-server>. A deployment with one of them binds that one."
