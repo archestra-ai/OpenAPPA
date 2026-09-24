@@ -5,7 +5,7 @@ order: 8
 description: Test policy decisions before merging changes, without running your agent's tools.
 ---
 
-The APPA CLI provides two commands for validation:
+The [APPA CLI](/claude-code#install-the-claude-code-demo) provides two commands for validation:
 
 - `appa describe --check` checks that your configuration loads.
 - `appa replay` checks scripted tool calls against the decisions you expect, without running your agent's tools.
