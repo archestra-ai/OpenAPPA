@@ -315,11 +315,11 @@ def main() -> None:
     run.add_argument("--gk-repo", type=Path)
     run.add_argument("--limit", type=int, default=None, help="max candidates per set")
     run.add_argument(
-        "--max-concurrency", type=int, default=None, help="Optional ceiling for automatically tuned concurrency."
+        "--max-concurrency", type=int, default=16, help="Ceiling for automatically tuned concurrency."
     )
     run.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
-    if args.max_concurrency is not None and args.max_concurrency < 1:
+    if args.max_concurrency < 1:
         parser.error("--max-concurrency must be at least 1")
     dotenv = Path(__file__).resolve().parents[2] / ".env"
     if "OPENROUTER_API_KEY" not in os.environ and dotenv.exists():
@@ -360,7 +360,7 @@ def main() -> None:
     args.out.mkdir(parents=True, exist_ok=True)
     rows: list[dict] = []
     executor = AdaptiveThreadPoolExecutor(
-        max_workers=min(args.max_concurrency or len(jobs), len(jobs)),
+        max_workers=max(1, min(args.max_concurrency, len(jobs))),
         history_path=args.out / "concurrency.jsonl",
         clean_result=lambda row: row["error"] is None,
     )
