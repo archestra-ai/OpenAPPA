@@ -504,13 +504,13 @@ async fn annotate(args: Args, repeat: u32, concurrency: usize) -> ExitCode {
 }
 
 async fn serve(args: Args) -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level(args.verbose))),
-        )
-        .init();
+    let telemetry = crate::telemetry::Telemetry::init(log_level(args.verbose));
+    let result = serve_inner(args, telemetry.enabled()).await;
+    let _ = tokio::task::spawn_blocking(move || telemetry.shutdown()).await;
+    result
+}
 
+async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
     let config_path = args.config.unwrap_or_else(|| PathBuf::from("appa.toml"));
 
     match ensure_default_config(&config_path) {
@@ -668,14 +668,24 @@ async fn serve(args: Args) -> ExitCode {
         guide_listen = ?args.guide_listen,
         "appa-runtime serving /hook, /mcp, /health, and /batteries; management routes require loopback"
     );
-    let result = if let Some((address, guide_listener, guide_app)) = guide {
-        tracing::info!(listen = %address, "appa-runtime serving the vouched appa-guide MCP surface");
+    let serving = async move {
+        if let Some((address, guide_listener, guide_app)) = guide {
+            tracing::info!(listen = %address, "appa-runtime serving the vouched appa-guide MCP surface");
+            tokio::select! {
+                result = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()) => result,
+                result = axum::serve(guide_listener, guide_app.into_make_service()) => result,
+            }
+        } else {
+            axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await
+        }
+    };
+    let result = if telemetry_enabled {
         tokio::select! {
-            result = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()) => result,
-            result = axum::serve(guide_listener, guide_app.into_make_service()) => result,
+            result = serving => result,
+            _ = crate::telemetry::shutdown_signal() => Ok(()),
         }
     } else {
-        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await
+        serving.await
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

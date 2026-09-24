@@ -1094,6 +1094,7 @@ impl Inner {
     /// See [`Runtime::record`]. Lives here because a `Session` holds the `Inner`, not the
     /// `Runtime`, and the consults worth timing happen inside a session.
     pub(crate) fn record(&self, root: Option<&TrajectoryId>, event: crate::events::RuntimeEvent) {
+        crate::telemetry::runtime_event(root, &event);
         self.shared
             .events
             .lock()
@@ -2210,6 +2211,7 @@ impl Runtime {
         )
     }
 
+    #[tracing::instrument(target = "appa_telemetry", name = "appa.remedy", skip_all)]
     async fn execute_remedy_outcome(
         &self,
         args: ExecuteRemedyPlanArgs,
