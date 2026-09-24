@@ -1455,3 +1455,75 @@ async fn a_hosted_token_resolves_through_the_host_and_rides_the_consult() {
     );
     assert_eq!(annotator.authorizations(), [Some("Bearer tenant-secret".to_string())]);
 }
+
+/// A hosted `[externals.jev]` key is the host's answer, not this process's environment: the
+/// consult reaches the operator's endpoint carrying the key the host's lookup supplied.
+#[tokio::test]
+async fn a_hosted_jev_key_resolves_through_the_host() {
+    let authorizations = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+    let router = Router::new()
+        .route(
+            "/v1/systemone",
+            post(
+                |State(seen): State<Arc<Mutex<Vec<Option<String>>>>>, headers: axum::http::HeaderMap| async move {
+                    seen.lock().unwrap().push(
+                        headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string),
+                    );
+                    serde_json::json!({
+                        "answers": {
+                            "delta_audience": {"probabilities": {"self": 0.05, "internal": 0.4, "public": 0.55}},
+                            "delta_trust": {"probabilities": {"suspicious": 0.1, "trusted": 0.9}},
+                            "requires_audience": {"probabilities": {"public": 0.8, "internal": 0.1, "none": 0.1}},
+                            "requires_trusted": {"noul": 0.7},
+                        }
+                    })
+                    .to_string()
+                },
+            ),
+        )
+        .with_state(Arc::clone(&authorizations));
+    let url = format!("{}/v1/systemone", serve(router).await);
+    // SAFETY: only the jev consults of this test binary read these variables.
+    unsafe {
+        std::env::set_var("APPA_PROVIDER_JEV_API_URL", &url);
+        std::env::set_var("APPA_PROVIDER_JEV_API_KEY", "from-the-environment");
+    }
+    let document = r#"
+[policy]
+version = 2
+
+[[policy.annotator]]
+name = "classifier"
+builtin = "jev"
+ranks = ["suspicious", "trusted"]
+
+[[policy.tool]]
+name = "fetch"
+description = "Fetches one URL and returns its body."
+annotator = "classifier"
+
+[externals.jev]
+token_env = "APPA_PROVIDER_JEV_API_KEY"
+"#;
+    let config = Config::hosted(
+        document,
+        HostDefaults {
+            consult_timeout: Duration::from_secs(5),
+            max_body_bytes: 65_536,
+        },
+        |var| (var == "APPA_PROVIDER_JEV_API_KEY").then(|| "host-key".to_string()),
+    )
+    .expect("the hosted document validates");
+    let runtime = open_hosted(config).await;
+
+    propose(&runtime, fetch("https://a.example")).await;
+    let seen = authorizations.lock().unwrap().clone();
+    assert!(!seen.is_empty(), "the consult reached the operator's endpoint");
+    assert!(
+        seen.iter().all(|seen| seen.as_deref() == Some("Bearer host-key")),
+        "{seen:?}"
+    );
+}

@@ -1039,8 +1039,9 @@ impl Runtime {
     /// diagnostics and each root's last working directory are keyed by root id alone.
     ///
     /// The deployment's `llm` pool is its own, bounded by its profile's `max_concurrent`.
-    /// The `command` and `claude-code` permit pools are the runtime's, shared by every
-    /// deployment it serves or pins.
+    /// The `command` and `claude-code` permit pools and the `jev` connection pool are the
+    /// runtime's, shared by every deployment it serves or pins; the jev pool is keyed by
+    /// endpoint and each request carries its own deployment's key.
     ///
     /// # Panics
     ///
