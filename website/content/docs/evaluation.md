@@ -116,12 +116,12 @@ policy. Each decision is deterministic and traces to a policy rule.
 
 We ran guarded OpenAPPA against two Auto configurations:
 
-- **IFC-tuned Auto** is the direct rival: it tries to solve the same problem
-  with a classifier instead of a policy engine. Each scenario's auto-mode rules
-  restate the information-flow policy OpenAPPA enforces in plain language:
-  which sources are trusted, who may see each piece of data, where data may go,
-  and which narrowing is legitimate. It gets no attack markers or expected
-  answers.
+- **IFC-tuned Auto** is the like-for-like comparison: it tries to solve the same
+  problem with a classifier instead of a policy engine. Each scenario's
+  auto-mode rules restate the information-flow policy OpenAPPA enforces in plain
+  language: which sources are trusted, who may see each piece of data, where
+  data may go, and which narrowing is legitimate. It gets no attack markers or
+  expected answers.
 - **Stock Auto** is the out-of-the-box baseline. Its default rules target
   generic developer risks, such as destructive commands, actions beyond the
   user's request, and secrets sent to external endpoints. Unconfigured, it knows
