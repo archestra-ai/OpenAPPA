@@ -40,6 +40,9 @@ enum DispatchResponse {
         dispatched_tool: String,
         dispatched_arguments: serde_json::Value,
         disposition: DeliveryDisposition,
+        /// The remedies a staged result offers, such as accepting the
+        /// narrowing it still causes; empty when nothing waits.
+        offers: Vec<OfferView>,
     },
     Control {
         reply: String,
@@ -329,6 +332,21 @@ impl SessionInner {
         }
     }
 
+    /// [`Self::event`], with the remedies the decision's presentation offers.
+    fn event_offering(&self, event: HookEvent) -> Result<(HookDecision, Vec<OfferedRemedy>), String> {
+        let outcome = self.tokio.block_on(hooks::handle_embedded(&self.runtime, event));
+        match outcome.decision {
+            HookDecision::Refuse { detail } => Err(detail),
+            decision => Ok((
+                decision,
+                outcome
+                    .presentation
+                    .map(|presentation| presentation.offers)
+                    .unwrap_or_default(),
+            )),
+        }
+    }
+
     fn decide(
         &mut self,
         child: Option<&TrajectoryId>,
@@ -538,7 +556,7 @@ impl SessionInner {
             ToolOutcome::Failure { .. } => ("The tool call failed.".to_string(), false),
             ToolOutcome::Indeterminate => ("The tool's outcome is unknown; it may have run.".to_string(), false),
         };
-        let decision = self.event(HookEvent::ToolResult {
+        let (decision, offers) = self.event_offering(HookEvent::ToolResult {
             actor: self.actor(child),
             call: pending.call.clone(),
             call_id: call_id.map(str::to_string),
@@ -561,6 +579,7 @@ impl SessionInner {
             dispatched_tool: pending.call.tool.clone(),
             dispatched_arguments: arguments_value(&pending.call),
             disposition,
+            offers: OfferView::of(offers),
         })
     }
 
@@ -1766,6 +1785,105 @@ trust = { from = "suspicious", to = "trusted" }
         );
         assert!(session.children.is_empty(), "a refused spawn opens no branch");
         assert!(session.pending.is_none(), "a refused spawn owes no outcome");
+    }
+
+    /// A loopback endpoint answering every request with `body`: a tool
+    /// bridge, or a sanitizer service.
+    fn bridge(body: &'static str) -> String {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port binds");
+        let port = listener.local_addr().expect("a bound address").port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.expect("a connection");
+                let mut reader = BufReader::new(stream.try_clone().expect("a cloned stream"));
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).expect("a header line");
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().expect("a length");
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                let mut request = vec![0; length];
+                reader.read_exact(&mut request).expect("the request body");
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .expect("the answer writes");
+            }
+        });
+        format!("http://127.0.0.1:{port}/tools")
+    }
+
+    /// A result that narrows on two dimensions, and a sanitizer that clears one.
+    const PARTLY_CLEARED: &str = r#"
+version = 2
+
+[[tool]]
+name  = "leak"
+delta = { audience = ["insider"], trust = "suspicious" }
+
+[[sanitizer]]
+name = "scrub"
+on   = ["tool_output"]
+[sanitizer.permits]
+audience = { from = ["insider"], to = ["public"] }
+"#;
+
+    #[test]
+    fn a_sanitized_result_that_still_narrows_offers_its_acceptance() {
+        let tools = bridge("raw with pii");
+        let scrub = bridge(r#"{"version":1,"answer":{"body":"scrubbed"}}"#);
+        let externals = format!("timeout_ms = 2000\nmax_body_bytes = 65536\n[sanitizers.scrub]\nurl = \"{scrub}\"\n");
+        let mut session = SessionInner::open(
+            PARTLY_CLEARED,
+            r#"["leak"]"#,
+            "read it",
+            Some(&tools),
+            Some(&externals),
+            None,
+        )
+        .expect("the partly cleared policy opens a session");
+        let blocked = serde_json::from_str::<serde_json::Value>(&session.dispatch("leak", "{}").unwrap())
+            .expect("a JSON response");
+        let sanitize = blocked["offers"]
+            .as_array()
+            .expect("a block lists its offers")
+            .iter()
+            .find(|offer| offer["narrowing"] == false)
+            .expect("the block offers the sanitizer's plan")["offer_id"]
+            .as_str()
+            .expect("an offer names its id")
+            .to_string();
+        let taken = session
+            .root_check(
+                ADVERTISED_CONTROL_TOOL,
+                &format!(r#"{{"{OFFER_ARGUMENT}":"{sanitize}"}}"#),
+            )
+            .unwrap();
+        assert_eq!(kind(&taken), "control");
+
+        let delivered = session.dispatch("leak", "{}").unwrap();
+        let response = serde_json::from_str::<serde_json::Value>(&delivered).expect("a JSON response");
+        assert_eq!(response["kind"], "delivered", "{delivered}");
+        let accepting: Vec<_> = response["offers"]
+            .as_array()
+            .expect("a delivery lists what its stage offers")
+            .iter()
+            .filter(|offer| offer["narrowing"] == true)
+            .collect();
+        assert_eq!(
+            accepting.len(),
+            1,
+            "the stage offers its residual acceptance: {delivered}"
+        );
+        assert_eq!(accepting[0]["authorities"], serde_json::json!([]));
     }
 
     #[test]
