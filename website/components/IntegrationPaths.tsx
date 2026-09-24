@@ -1,7 +1,7 @@
 import { PixelMark } from "@/components/Logo";
 
 const paths = [
-  { href: "#embed-the-sdk-in-your-agent", method: "Your own agent", detail: "Any language. You own the agent loop and tool execution." },
+  { href: "#embed-the-appa-runtime-in-your-agents-code", method: "Your own agent", detail: "Any language. You own the agent loop and tool execution." },
   { href: "#connect-a-coding-agent-through-hooks", method: "Agents through hooks", detail: "Claude Code, or harnesses such as omp and Hermes with a custom adapter." },
   { href: "#use-appa-at-the-llm-proxy", method: "LLM proxy", detail: "Apply policies centrally through Archestra." },
 ];
@@ -29,22 +29,5 @@ export function IntegrationPaths() {
         </a>
       ))}
     </nav>
-  );
-}
-
-export function IntegrationCheckpoints() {
-  return (
-    <div className="not-prose my-6 divide-y divide-[var(--border)] rounded-lg border border-[var(--border)] text-sm">
-      {[
-        ["Before a tool runs", "Submit the proposed call and wait. Execute only on allow_call. On deny_call, return APPA’s feedback and remedy offers to the model without running the tool."],
-        ["Before a result reaches the model", "Submit the tool outcome before adding it to the transcript. Deliver only admitted content. Use APPA’s replacement when supplied; withhold a blocked result."],
-        ["When the agent requests a remedy", "Route the selected offer through APPA. A request is not approval: APPA checks the authority or runs the sanitizer before permitting the flow."],
-      ].map(([title, body]) => (
-        <details key={title} className="px-4 py-3">
-          <summary className="cursor-pointer font-semibold text-[var(--text-strong)] focus-visible:outline-2 focus-visible:outline-[var(--accent)]">{title}</summary>
-          <p className="mb-1 mt-3 leading-relaxed text-[var(--text)]">{body}</p>
-        </details>
-      ))}
-    </div>
   );
 }

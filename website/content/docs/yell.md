@@ -1,5 +1,5 @@
 ---
-title: Reporting (appa yell) · v2
+title: Reporting (appa yell)
 category: Operations
 order: 9.2
 description: Agents report confusing blocks and suspected policy misconfigurations through the yell tool, giving policy maintainers evidence for improvements.
@@ -7,7 +7,7 @@ description: Agents report confusing blocks and suspected policy misconfiguratio
 
 When APPA blocks work the agent expected to complete, or offers a confusing remedy, the agent can call the `yell` tool to report it. The report explains where the agent got stuck and includes policy diagnostics to help investigate the problem.
 
-These reports can feed a [policy-improvement workflow](/self-improving-policies-v2): a maintenance agent investigates suspected misconfigurations and proposes tested changes for review. A report does not change the policy or grant permission.
+These reports can feed a [policy-improvement workflow](/self-improving-policies): a maintenance agent investigates suspected misconfigurations and proposes tested changes for review. A report does not change the policy or grant permission.
 
 ## Enable agent reporting
 
@@ -63,13 +63,13 @@ The URL must accept APPA's report protocol. Remote receivers require HTTPS. This
 
 ### Send to OpenTelemetry
 
-The [Observability configuration](/observability-v2#configuration) defines a separate collector setting on the APPA process:
+The [Observability configuration](/observability#configuration) defines a separate collector setting on the APPA process:
 
 ```sh
 export OPENAPPA_OTEL_URL="http://localhost:4318"
 ```
 
-See that guide for exporter availability, authentication, and [Collector setup](/observability-v2#collector-setup). Use [trace correlation](/observability-v2#trace-correlation) to find the decisions related to a report. Do not point `APPA_YELL_ENDPOINT` at an OTEL collector.
+See that guide for exporter availability, authentication, and [Collector setup](/observability#collector-setup). Use [trace correlation](/observability#trace-correlation) to find the decisions related to a report. Do not point `APPA_YELL_ENDPOINT` at an OTEL collector.
 
 ### Keep a CLI report on disk
 
