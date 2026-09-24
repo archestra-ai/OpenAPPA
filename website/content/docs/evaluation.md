@@ -61,13 +61,16 @@ task completion followed by attack success rate (ASR).
 | Gemini 3.7 Flash | **90.0% / 0%** | 43.5% / 28.5% | 44.5% / 28.0% |
 
 In the [Kaggle replay](https://github.com/archestra-ai/OpenAPPA/blob/main/bench/aicomp/REPORT.md), the agent reads one of 319 support emails,
-63 of them malicious, and mails a triage summary. Guarded OpenAPPA finished
-98–100% of these tasks cleanly and never relayed the attacker's link. The
-competition's guardrails finished at most 87% and relayed the link in up to 189
-of 957 runs; its leaderboard guardrails finished none. Most of this utility
-comes from reading each email in a [subagent](/how-it-works#subagent-reads);
-OpenAPPA makes what the subagent returns a
-[checked shape](/contracts#structured-child-returns).
+63 of them malicious, and mails a triage summary. Guarded OpenAPPA delivered a
+summary with no scored breach and no relay of the attacker's planted URL in
+98–100% of runs per model, and 99.9% of those summaries named the right ticket.
+Most of this comes from reading each email in a
+[subagent](/how-it-works#subagent-reads) that returns typed fields: the same
+design without OpenAPPA scored 98–100% too. OpenAPPA makes what the subagent
+returns a [checked shape](/contracts#structured-child-returns) instead of a
+model's choice. As complete configurations, the competition's guardrails
+delivered at most 87% and relayed the URL in up to 189 of 957 runs; its
+leaderboard guardrails delivered none.
 
 In AgentThreatBench's adversarial tests, guarded OpenAPPA had the highest task
 completion for all three models. In the standard tests, it led with Luna and
@@ -140,4 +143,4 @@ OpenAPPA policy engine alone.
   and scorer: triage over all 319 organizer emails, and 40 attacks in which the
   user asks only for ordinary work. It ran GPT-OSS 20B and Gemma 4 26B, the
   small models the competition used, plus GLM 5.3 Flash and GPT-6 Luna, three
-  times each.
+  times each. The attacks are fixed; none was written against OpenAPPA.
