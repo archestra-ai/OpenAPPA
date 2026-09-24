@@ -96,7 +96,14 @@ selectors = [{{ template = "viewer", feeds = "self" }}, {{ template = "members",
     .unwrap();
     let runtime = Arc::new(Runtime::open(Config::load(&path).unwrap(), dir.path().join("runtime.db"), None).unwrap());
     assert_eq!(
-        hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
+        hooks::handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: root(),
+                principal: None
+            }
+        )
+        .await,
         HookDecision::Ack
     );
     runtime

@@ -24,8 +24,8 @@ const POD = { x: 24, y: 40, w: 230, h: 250 };
 const GATE = { x: 334, y: 40, w: 232, h: 250 };
 const RUNTIME = { x: 646, y: 40, w: 230, h: 250 };
 
-/* The eight hook events both plugins feed, numbered as
-   writing-an-integration.md numbers them. ChildEnd and SpawnResult are the
+/* The eight hook events both plugins feed, in the order shown in
+   add-to-agent.md. ChildEnd and SpawnResult are the
    return gate: a delegated child stops through the APPA-owned appa_return
    tool, which posts ChildEnd, and the parent's SpawnResult replays exactly
    the bytes that crossed. */

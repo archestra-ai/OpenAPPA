@@ -38,6 +38,12 @@ const BATTERIES = [
     logo: "/images/batteries/google-workspace.svg",
   },
   {
+    name: "Archestra",
+    description: "Checks shares of projects, apps, knowledge, plugins, and agents against their teams and members.",
+    href: "/battery-archestra",
+    logo: "/images/batteries/archestra.svg",
+  },
+  {
     name: "Sentry",
     description: "Rules for 9 listed and 55 catalog tools, internal reads, and reviewed writes.",
     href: "/battery-sentry",
@@ -96,6 +102,12 @@ const BATTERIES = [
     description: "Rules for the Genie One and Databricks SQL managed servers; internal reads, every SQL statement classified before it runs.",
     href: "/battery-databricks",
     logo: "/images/batteries/databricks.svg",
+  },
+  {
+    name: "xmemory",
+    description: "Rules for 32 instance and admin tools; internal reads, writes without trusted input, reviewed schema migrations and deletions.",
+    href: "/battery-xmemory",
+    logo: "/images/batteries/xmemory.svg",
   },
   {
     name: "Add your own",

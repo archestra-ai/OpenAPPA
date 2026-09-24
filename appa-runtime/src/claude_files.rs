@@ -83,7 +83,7 @@ pub fn serve(args: ServeArgs) -> ExitCode {
         runtime
             .bind_file_workspace(&actor.root, workspace.to_str().ok_or("workspace path must be UTF-8")?)
             .map_err(|error| error.to_string())?;
-        match runtime.create_session(actor.root.clone()) {
+        match runtime.create_session(actor.root.clone(), None) {
             Ok(_) | Err(crate::api::EventError::TrajectoryExists) => {}
             Err(error) => return Err(error.to_string()),
         }

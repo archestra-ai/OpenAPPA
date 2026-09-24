@@ -171,6 +171,14 @@ fn is_address(reader: &ReaderId) -> bool {
     reader.provider_prefix().is_none() && address_parts(reader.as_str()).is_some()
 }
 
+/// The one shape rule on a session principal a host names: an address, the spelling every
+/// source reports a member as, so the principal meets the members sources answer. A
+/// provider-qualified id would need a lookup the opening cannot pin.
+pub fn session_principal(spelling: &str) -> Option<ReaderId> {
+    let reader = ReaderId::new(spelling);
+    (reader.is_literal() && is_address(&reader)).then_some(reader)
+}
+
 /// Is this reader one a redirected provider must look up before it can seat it: a member
 /// reported as a qualified id rather than an address.
 fn needs_lookup(reader: &ReaderId) -> bool {
@@ -454,30 +462,44 @@ impl AudienceRegistry {
     }
 
     /// Every selector whose answer the extensional closure of `level` reads: its own `from`,
-    /// the groups asserted within it, and — for `internal` — the whole closure of `self`.
-    fn chain_selectors(&self, level: ChainAudience) -> BTreeSet<SelectorSpec> {
-        let mut selectors: BTreeSet<SelectorSpec> = self.chain_from(level).clone();
-        for group in self.groups_within(level) {
-            selectors.extend(group.from.iter().cloned());
-        }
-        if level == ChainAudience::Internal {
-            selectors.extend(self.chain_selectors(ChainAudience::Self_));
-        }
-        selectors
+    /// the groups asserted within it, and — for `internal` — the whole closure of `self`. A
+    /// session principal is the whole of `self`, so nothing asserted of `self` is read under
+    /// one; its groups still widen `internal`. `None` when the level has neither selectors nor
+    /// a principal to answer it.
+    fn chain_selectors(&self, level: ChainAudience, principal: Option<&ReaderId>) -> Option<BTreeSet<SelectorSpec>> {
+        let groups = |level| self.groups_within(level).flat_map(|group| group.from.iter().cloned());
+        let self_from = self.self_from.iter().filter(|_| principal.is_none()).cloned();
+        let selectors: BTreeSet<SelectorSpec> = match level {
+            ChainAudience::Self_ if principal.is_some() => BTreeSet::new(),
+            ChainAudience::Self_ => self_from.chain(groups(ChainAudience::Self_)).collect(),
+            ChainAudience::Internal => self
+                .internal_from
+                .iter()
+                .cloned()
+                .chain(groups(ChainAudience::Internal))
+                .chain(groups(ChainAudience::Self_))
+                .chain(self_from)
+                .collect(),
+        };
+        (!selectors.is_empty() || principal.is_some()).then_some(selectors)
     }
 
     /// Translate the atoms an evaluation still needs into the primitive requests that answer
-    /// them. Deterministic: a pure function of the atoms and this registry. An atom no
-    /// registered source can serve is an operational failure, never a policy state.
-    pub fn needed_primitives(&self, atoms: &[SymbolicAtom]) -> Result<NeededPrimitives, Unroutable> {
+    /// them. Deterministic: a pure function of the atoms, this registry, and the family's
+    /// session principal. An atom no registered source can serve is an operational failure,
+    /// never a policy state.
+    pub fn needed_primitives(
+        &self,
+        atoms: &[SymbolicAtom],
+        principal: Option<&ReaderId>,
+    ) -> Result<NeededPrimitives, Unroutable> {
         let mut needed = NeededPrimitives::default();
         for atom in atoms {
             match atom {
                 SymbolicAtom::Chain(level) => {
-                    let selectors = self.chain_selectors(*level);
-                    if selectors.is_empty() {
-                        return Err(Unroutable::UnmappedChain(*level));
-                    }
+                    let selectors = self
+                        .chain_selectors(*level, principal)
+                        .ok_or(Unroutable::UnmappedChain(*level))?;
                     needed.selectors.extend(selectors);
                 }
                 SymbolicAtom::Group(GroupRef::Named(name)) => {
@@ -513,8 +535,13 @@ impl AudienceRegistry {
     /// whose primitives are all present — a selector one of whose qualified members still
     /// owes a lookup stays unanswered, so a check that reads it re-raises its ask. Duplicate,
     /// malformed, and unroutable entries refuse the evidence — the live act and its replay
-    /// hold it to the same test.
-    pub fn expansions(&self, evidence: &AudienceEvidence) -> Result<Expansions, EvidenceRefusal> {
+    /// hold it to the same test. A session principal is a member of both chain levels
+    /// without any evidence: the family's opening pinned it.
+    pub fn expansions(
+        &self,
+        evidence: &AudienceEvidence,
+        principal: Option<&ReaderId>,
+    ) -> Result<Expansions, EvidenceRefusal> {
         for claims in &evidence.sources {
             self.route_selector(&claims.provider, &claims.selector).map_err(|_| {
                 EvidenceRefusal::UnroutableSelector {
@@ -639,10 +666,10 @@ impl AudienceRegistry {
 
         // Chain levels: the symmetric closure over the same selector answers.
         for level in [ChainAudience::Self_, ChainAudience::Internal] {
-            let specs = self.chain_selectors(level);
-            if !specs.is_empty()
-                && let Some(members) = union_of(&specs)
+            if let Some(specs) = self.chain_selectors(level, principal)
+                && let Some(mut members) = union_of(&specs)
             {
+                members.extend(principal.cloned());
                 answers.push((SymbolicAtom::Chain(level), members));
             }
         }
@@ -698,12 +725,13 @@ impl AudienceRegistry {
         evidence: &AudienceEvidence,
         inherited: &AudienceEvidence,
         reads: &[SymbolicAtom],
+        principal: Option<&ReaderId>,
     ) -> Result<(), EvidenceRefusal> {
         // Per-atom translation: a routable ask justifies its primitives; an unroutable ask
         // never answered, so it justifies nothing.
         let mut requested = NeededPrimitives::default();
         for atom in reads {
-            if let Ok(primitives) = self.needed_primitives(std::slice::from_ref(atom)) {
+            if let Ok(primitives) = self.needed_primitives(std::slice::from_ref(atom), principal) {
                 requested.selectors.extend(primitives.selectors);
                 requested.lookups.extend(primitives.lookups);
             }
@@ -780,9 +808,13 @@ impl ActLedger {
     }
 
     /// The operation-scope test over everything logged.
-    pub(crate) fn settle(&self, audience: &AudienceRegistry) -> Result<(), EvidenceRefusal> {
+    pub(crate) fn settle(
+        &self,
+        audience: &AudienceRegistry,
+        principal: Option<&ReaderId>,
+    ) -> Result<(), EvidenceRefusal> {
         let reads: Vec<SymbolicAtom> = self.reads.iter().cloned().collect();
-        audience.only_requested(&self.evidence, &self.inherited, &reads)
+        audience.only_requested(&self.evidence, &self.inherited, &reads, principal)
     }
 }
 
@@ -915,6 +947,7 @@ mod tests {
                 pins in prop::collection::btree_set(0usize..6, 0..5),
                 inherited in prop::collection::btree_set(0usize..6, 0..4),
                 reads in prop::collection::btree_set(0usize..4, 0..4),
+                principal in prop::option::of(Just(reader("alice@corp.com"))),
             ) {
                 let registry = registry(corp_config());
                 let mut live = ActLedger::of(evidence(pins.clone()), evidence(inherited.clone()));
@@ -932,9 +965,12 @@ mod tests {
                 }
                 // The verdict is the invariant; which unrequested entry a refusal names
                 // first follows pin order, which record-by-record replay reverses.
-                let live = live.settle(&registry);
-                let replay = replay.settle(&registry);
+                let live = live.settle(&registry, principal.as_ref());
+                let replay = replay.settle(&registry, principal.as_ref());
                 prop_assert_eq!(live.is_ok(), replay.is_ok());
+                // The justification oracle below reads what each atom requests without a
+                // principal; under one, `self` requests nothing.
+                prop_assume!(principal.is_none());
 
                 let requested: BTreeSet<usize> = reads.iter().flat_map(|index| atom(*index).1.iter().copied()).collect();
                 let justified = pins.iter().all(|pin| inherited.contains(pin) || requested.contains(pin));
@@ -1002,7 +1038,7 @@ mod tests {
     fn needed_primitives_follow_the_symmetric_closure() {
         let registry = registry(corp_config());
         let needed = registry
-            .needed_primitives(&[SymbolicAtom::Chain(ChainAudience::Internal)])
+            .needed_primitives(&[SymbolicAtom::Chain(ChainAudience::Internal)], None)
             .unwrap();
         // internal reads its own sources, self's (symmetric closure), and finance's
         // (within = internal).
@@ -1019,7 +1055,7 @@ mod tests {
 
         // A group's own atom reads only its selectors.
         let finance = registry
-            .needed_primitives(&[SymbolicAtom::Group(GroupRef::Named(GroupName::new("finance")))])
+            .needed_primitives(&[SymbolicAtom::Group(GroupRef::Named(GroupName::new("finance")))], None)
             .unwrap();
         assert_eq!(
             finance.selectors,
@@ -1035,26 +1071,157 @@ mod tests {
     fn unroutable_atoms_are_operational() {
         let registry = registry(corp_config());
         assert_eq!(
-            registry.needed_primitives(&[SymbolicAtom::Group(GroupRef::Named(GroupName::new("finacne")))]),
+            registry.needed_primitives(&[SymbolicAtom::Group(GroupRef::Named(GroupName::new("finacne")))], None),
             Err(Unroutable::UnknownGroup(GroupName::new("finacne")))
         );
         assert_eq!(
-            registry.needed_primitives(&[SymbolicAtom::Group(GroupRef::Source {
-                provider: "github".into(),
-                selector: "org/x/members".into()
-            })]),
+            registry.needed_primitives(
+                &[SymbolicAtom::Group(GroupRef::Source {
+                    provider: "github".into(),
+                    selector: "org/x/members".into()
+                })],
+                None
+            ),
             Err(Unroutable::UnknownProvider("github".into()))
         );
         assert_eq!(
-            registry.needed_primitives(&[SymbolicAtom::Group(GroupRef::Source {
-                provider: "slack".into(),
-                selector: "channels/eng".into()
-            })]),
+            registry.needed_primitives(
+                &[SymbolicAtom::Group(GroupRef::Source {
+                    provider: "slack".into(),
+                    selector: "channels/eng".into()
+                })],
+                None
+            ),
             Err(Unroutable::UnknownSelector {
                 provider: "slack".into(),
                 selector: "channels/eng".into()
             })
         );
+    }
+
+    /// A session principal is `self`: no `viewer` selector is asked or admitted, and
+    /// `internal` still reads its own sources and folds the principal in.
+    #[test]
+    fn a_session_principal_answers_self_in_place_of_its_sources() {
+        let registry = registry(corp_config());
+        let alice = reader("alice@corp.com");
+        let self_ = SymbolicAtom::Chain(ChainAudience::Self_);
+        let internal = SymbolicAtom::Chain(ChainAudience::Internal);
+
+        let needed = registry
+            .needed_primitives(std::slice::from_ref(&self_), Some(&alice))
+            .unwrap();
+        assert_eq!(needed, NeededPrimitives::default());
+        let needed = registry
+            .needed_primitives(std::slice::from_ref(&internal), Some(&alice))
+            .unwrap();
+        assert_eq!(
+            needed.selectors,
+            BTreeSet::from([
+                spec("google-workspace", "full-members"),
+                spec("slack", "full-members"),
+                spec("google-workspace", "group/finance@corp.com"),
+            ])
+        );
+
+        let expansions = registry.expansions(&AudienceEvidence::default(), Some(&alice)).unwrap();
+        assert_eq!(expansions.members(&self_), Some(&BTreeSet::from([alice.clone()])));
+        assert_eq!(
+            expansions.members(&internal),
+            None,
+            "internal's own sources are unanswered"
+        );
+
+        let google = |selector: &str, members: &[&str]| SourceClaims {
+            provider: "google-workspace".into(),
+            selector: selector.into(),
+            members: members.iter().map(|member| reader(member)).collect(),
+        };
+        let answered = sources(vec![
+            google("full-members", &["bob@corp.com"]),
+            slack("full-members", &[]),
+            google("group/finance@corp.com", &[]),
+        ]);
+        let expansions = registry.expansions(&answered, Some(&alice)).unwrap();
+        assert_eq!(
+            expansions.members(&internal),
+            Some(&BTreeSet::from([alice.clone(), reader("bob@corp.com")]))
+        );
+        assert_eq!(
+            registry.only_requested(&answered, &AudienceEvidence::default(), &[internal], Some(&alice)),
+            Ok(())
+        );
+
+        let viewer = sources(vec![slack("viewer", &["me@corp.com"])]);
+        assert!(matches!(
+            registry.only_requested(&viewer, &AudienceEvidence::default(), &[self_], Some(&alice)),
+            Err(EvidenceRefusal::UnrequestedEvidence { .. })
+        ));
+    }
+
+    /// A group asserted within `self` is not a member of `self` under a principal, but it still
+    /// widens `internal`, which contains `self`'s closure without a principal.
+    #[test]
+    fn under_a_principal_groups_within_self_widen_only_internal() {
+        let mut config = corp_config();
+        config.groups[0].within = Some(ChainAudience::Self_);
+        let registry = registry(config);
+        let alice = reader("alice@corp.com");
+        let finance = spec("google-workspace", "group/finance@corp.com");
+        let self_ = SymbolicAtom::Chain(ChainAudience::Self_);
+        let internal = SymbolicAtom::Chain(ChainAudience::Internal);
+
+        let needed = registry
+            .needed_primitives(std::slice::from_ref(&self_), Some(&alice))
+            .unwrap();
+        assert_eq!(needed, NeededPrimitives::default());
+        let needed = registry
+            .needed_primitives(std::slice::from_ref(&internal), Some(&alice))
+            .unwrap();
+        assert!(needed.selectors.contains(&finance));
+
+        let answered = sources(vec![
+            SourceClaims {
+                provider: "google-workspace".into(),
+                selector: "full-members".into(),
+                members: vec![],
+            },
+            slack("full-members", &[]),
+            SourceClaims {
+                provider: "google-workspace".into(),
+                selector: "group/finance@corp.com".into(),
+                members: vec![reader("cfo@corp.com")],
+            },
+        ]);
+        let expansions = registry.expansions(&answered, Some(&alice)).unwrap();
+        assert_eq!(expansions.members(&self_), Some(&BTreeSet::from([alice.clone()])));
+        assert_eq!(
+            expansions.members(&internal),
+            Some(&BTreeSet::from([alice, reader("cfo@corp.com")]))
+        );
+    }
+
+    /// Without a principal and without sources, `self` is a policy gap; a principal fills it.
+    #[test]
+    fn an_unsourced_self_is_routable_only_under_a_principal() {
+        let registry = registry(AudienceConfig::default());
+        let self_ = SymbolicAtom::Chain(ChainAudience::Self_);
+        assert_eq!(
+            registry.needed_primitives(std::slice::from_ref(&self_), None),
+            Err(Unroutable::UnmappedChain(ChainAudience::Self_))
+        );
+        assert_eq!(
+            registry.needed_primitives(&[self_], Some(&reader("alice@corp.com"))),
+            Ok(NeededPrimitives::default())
+        );
+    }
+
+    #[test]
+    fn a_session_principal_is_an_address() {
+        assert_eq!(session_principal("Alice@CORP.com"), Some(reader("Alice@corp.com")));
+        for refused in ["self", "public", "@team", "", "slack:U1", "alice"] {
+            assert_eq!(session_principal(refused), None, "{refused:?}");
+        }
     }
 
     #[test]
@@ -1074,7 +1241,7 @@ mod tests {
             // assertion, so this member is internal — no domain second-guessing.
             google("group/finance@corp.com", &["auditor@consulting.com"]),
         ]);
-        let expansions = registry.expansions(&evidence).unwrap();
+        let expansions = registry.expansions(&evidence, None).unwrap();
 
         // The two viewer accounts collapse to one reader: union dedups.
         assert_eq!(
@@ -1148,7 +1315,7 @@ mod tests {
             ),
         ];
         for (case, evidence, expected) in refused {
-            match registry.expansions(&evidence) {
+            match registry.expansions(&evidence, None) {
                 Err(refusal) => assert!(expected(&refusal), "{case}: {refusal:?}"),
                 Ok(_) => panic!("{case}: admitted"),
             }
@@ -1159,7 +1326,7 @@ mod tests {
             slack("viewer", &["Alice@CORP.com"]),
             slack("full-members", &["Alice@corp.com"]),
         ]);
-        let expansions = registry.expansions(&two_cases).unwrap();
+        let expansions = registry.expansions(&two_cases, None).unwrap();
         let slack_viewer = SymbolicAtom::Group(GroupRef::Source {
             provider: "slack".into(),
             selector: "viewer".into(),
@@ -1180,7 +1347,7 @@ mod tests {
             ],
             ..AudienceEvidence::default()
         };
-        let expansions = registry.expansions(&evidence).unwrap();
+        let expansions = registry.expansions(&evidence, None).unwrap();
         assert_eq!(
             expansions.principal(&reader("slack:U012345")),
             Some(&reader("alice@corp.com"))
@@ -1212,7 +1379,7 @@ mod tests {
                 member: "slack:U1".into()
             }])
         );
-        let expansions = redirected.expansions(&unmapped).unwrap();
+        let expansions = redirected.expansions(&unmapped, None).unwrap();
         assert_eq!(expansions.members(&viewer), None);
         assert_eq!(expansions.members(&SymbolicAtom::Chain(ChainAudience::Self_)), None);
 
@@ -1223,7 +1390,7 @@ mod tests {
         };
         assert!(redirected.member_lookups_owed(&mapped).is_empty());
         assert_eq!(
-            redirected.expansions(&mapped).unwrap().members(&viewer),
+            redirected.expansions(&mapped, None).unwrap().members(&viewer),
             Some(&BTreeSet::from([reader("alice@corp.com"), reader("bob@corp.com")]))
         );
         let unknown = AudienceEvidence {
@@ -1231,25 +1398,30 @@ mod tests {
             ..unmapped.clone()
         };
         assert_eq!(
-            redirected.expansions(&unknown).unwrap().members(&viewer),
+            redirected.expansions(&unknown, None).unwrap().members(&viewer),
             Some(&BTreeSet::from([reader("slack:U1"), reader("bob@corp.com")]))
         );
 
         // The owed lookup is justified by the pinned answer that reports the member, with
         // no atom naming it — and only under a redirected provider.
         redirected
-            .only_requested(&mapped, &AudienceEvidence::default(), std::slice::from_ref(&viewer))
+            .only_requested(
+                &mapped,
+                &AudienceEvidence::default(),
+                std::slice::from_ref(&viewer),
+                None,
+            )
             .expect("an owed lookup answers the answer that owes it");
         assert!(
             matches!(
-                redirected.only_requested(&mapped, &AudienceEvidence::default(), &[]),
+                redirected.only_requested(&mapped, &AudienceEvidence::default(), &[], None),
                 Err(EvidenceRefusal::UnrequestedEvidence { .. })
             ),
             "without the selector read, neither the answer nor its lookup is requested"
         );
         assert!(
             matches!(
-                registry(corp_config()).only_requested(&mapped, &AudienceEvidence::default(), &[viewer]),
+                registry(corp_config()).only_requested(&mapped, &AudienceEvidence::default(), &[viewer], None),
                 Err(EvidenceRefusal::UnrequestedEvidence { .. })
             ),
             "an unredirected provider's members owe nothing"

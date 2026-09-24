@@ -22,31 +22,26 @@ function BenchRow({ name, pct, label, isSubject }: BenchRowProps) {
 export function BenchmarkHighlight() {
   return (
     <section className="bench-panel" aria-label="Benchmark results">
-      <span className="bench-panel-eyebrow">Benchmarks</span>
-
       <div className="bench-charts">
         <figure className="bench-chart">
           <figcaption className="bench-chart-title">
-            Task completion <span className="bench-chart-hint">tasks completed</span>
+            Task completion
           </figcaption>
+          <BenchRow name="Claude Auto mode" pct={90} />
           <BenchRow name="OpenAPPA" pct={89} isSubject />
           <BenchRow name="FIDES (Microsoft)" pct={41} />
         </figure>
 
         <figure className="bench-chart">
           <figcaption className="bench-chart-title">
-            Attacks that succeeded <span className="bench-chart-hint">lower is better</span>
+            Attacks that succeeded
           </figcaption>
+          <BenchRow name="Claude Auto mode" pct={10} />
           <BenchRow name="OpenAPPA" pct={0} isSubject />
           <BenchRow name="FIDES (Microsoft)" pct={31} />
         </figure>
       </div>
 
-      <p className="bench-panel-foot">
-        Across 600 evaluated episodes with three language models in Bench-Corp, guarded OpenAPPA
-        retained 89% task completion without a single observed policy breach. Full model breakdown
-        and methodology are reported in the paper.
-      </p>
       <Link className="bench-panel-link" href="/evaluation">
         Read the full benchmark results →
       </Link>

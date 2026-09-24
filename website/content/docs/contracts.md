@@ -100,7 +100,7 @@ The agent keeps using its host's tool names. A plugin implements the host lifecy
 
 Claude Code names such as `Bash` and `mcp__github__create_issue` identify precise tools. An unqualified kagent rule such as `read_secret` applies to that native name across MCP servers and kagent's own tools. It does not cover remote-agent delegation. A newly discovered tool can use an existing rule without restarting the trajectory or changing its opening policy.
 
-A host that embeds the runtime brings its own mapping: the adapter it opens the runtime with derives every call's canonical id, and the runtime spells a tool back to that host's model through the same adapter. See [Writing an Integration](/writing-an-integration#the-adapter-and-the-hook-protocol).
+A host that embeds the runtime brings its own tool identification. The adapter identifies every call's canonical id. The runtime spells a tool back through the same adapter. See [Add to your agent](/add-to-agent#how-the-hooks-reach-appa).
 
 Use `server` when a rule should apply to one MCP connection:
 
@@ -117,7 +117,7 @@ kagent derives a default source ID from the exact configured endpoint URL. Nativ
 
 Native names also work in `confined_results`, `assumed_tools`, and `provider_run_tools`. Coverage reports distinguish a rule spanning servers from an observed concrete tool. Overlapping declarations with incompatible provider-run execution settings are rejected.
 
-Which calls start a child trajectory is the runtime's derivation from the adapter (Claude Code's `Agent`, a kagent agent called as a tool); a policy does not declare it.
+The adapter identifies which calls start a child trajectory (Claude Code's `Agent`, a kagent agent called as a tool). A policy does not declare it.
 
 ### Tags
 
@@ -150,9 +150,9 @@ name = "read_file"
 delta = { audience = ["internal"] }
 ```
 
-A selector checks top-level string arguments. Put it in parentheses after the tool name, with conditions written as `argument:pattern` and separated by commas. List each argument only once, in any order.
+A selector checks top-level string arguments and arrays of strings. Put it in parentheses after the tool name, with conditions written as `argument:pattern` and separated by commas. List each argument only once, in any order.
 
-Every condition must match the full value of its argument. If an argument is missing or is not a string, the selector does not match.
+Every condition must match the full value of its argument. An array argument matches when it is not empty and every element is a string that matches the pattern, so `edit_agent(teams:*)` selects a call that sends a list of teams. If an argument is missing, is an empty array, or is any other value, the selector does not match.
 
 ```toml
 [[policy.tool]]
@@ -323,9 +323,11 @@ selectors = [{ template = "viewer", feeds = "self" }, { template = "channel/<id>
 
 A selector placeholder MAY be the only entry of `delta.audience` or of `requires.audience.contains`. It MAY also be an entry of an annotator's `audiences` mandate; see [Permits and hint](#permits-and-hint). It MUST NOT appear under `within`, beside other entries in one list, or in an annotator's answer.
 
-Each `$<argument_name>` becomes a required top-level string argument of the tool, as under `contains`; see [Read an audience from a tool argument](#read-an-audience-from-a-tool-argument). The spelling, with each `$<argument_name>` read as a variable segment, MUST match one template the provider declares under `selectors`; see [Declare selector templates](#declare-selector-templates). A `$<argument_name>` segment matches only a `<variable>` segment of the template.
+Each `$<argument_name>` becomes a required top-level argument of the tool, as under `contains`, except that a selector placeholder also accepts an argument declared as an array of strings; see [Read an audience from a tool argument](#read-an-audience-from-a-tool-argument). The spelling, with each `$<argument_name>` read as a variable segment, MUST match one template the provider declares under `selectors`; see [Declare selector templates](#declare-selector-templates). A `$<argument_name>` segment matches only a `<variable>` segment of the template.
 
 At check time OpenAPPA replaces each `$<argument_name>` with the call's argument value. The result is an ordinary `@provider:selector` mention: OpenAPPA reads its members from the provider's service, records the answer with the decision, and checks the call exactly as for a static mention. In the example above, reading channel `C0123` restricts the result to the members of `C0123`, and posting to `C0123` requires that every member of `C0123` is already a reader.
+
+An array argument names one collection per element, and the placeholder stands for their union. Sharing a resource with teams `["t1", "t2"]` under `contains = ["@corp:team/$team_ids"]` requires that every member of `t1` and every member of `t2` is already a reader; under `delta.audience` it restricts the result to readers who belong to either team. At most one argument of a placeholder may be an array, and it may hold at most 100 elements, since each collection is a membership read. An empty array, a longer one, a second array, or an element that is not one selector segment fills no placeholder, and OpenAPPA refuses the call.
 
 Static mentions cannot contain segments starting with `$`. Dollar-sign prefixes are reserved for argument placeholders and cannot be escaped.
 
@@ -334,6 +336,12 @@ Static mentions cannot contain segments starting with `$`. Dollar-sign prefixes 
 Membership answers: who belongs to this audience? OpenAPPA asks an external membership service for the members. For example, that service can read the members of a Slack group.
 
 Under `[policy.audience]`, `self` and `internal` list the selectors that supply their members. `[policy.audience.group.<name>]` declares a named group with `within` and `from`.
+
+### Session principal
+
+A host that serves many people can name the person each session acts for. It passes that person's email address as the session's principal when the session starts. In that session, `self` is exactly that address. OpenAPPA does not ask the `self` selectors, and `internal` includes the principal beside its own sources. Children and root forks of the session act for the same principal. A session without a principal uses `[policy.audience] self` as usual.
+
+A host names the principal in process, through the embedded runtime API; the HTTP hook wire does not carry one. OpenAPPA takes the principal on the host's word; it does not authenticate it. Only a host that authenticated the person should name one, and the principal must be the address the membership services report for that person. A multi-user host usually leaves `[policy.audience] self` empty, so a session that names no principal cannot establish `self` and is denied as described below. A policy that names `self` in its boundary or starting label still needs a `self` source to load, because it is checked before any session names a principal.
 
 A policy can omit `self` or `internal`. A check that needs the members of an omitted level — for example, `contains = ["internal"]` after a `delta` narrowed the audience to `self` — cannot be established. OpenAPPA denies that call and names the missing key; proposing the call again does not change the answer.
 
@@ -701,7 +709,7 @@ An annotator's permits limit the values it can use in its answers. The following
 
 `public` is always allowed in an answer, so it is not listed in `audiences`. Setting `audiences = []` allows only public answers.
 
-An annotator can use a selector placeholder only when its own `audiences` lists it. A selector placeholder in `audiences`, such as `@github:repo/$owner/$repo/collaborators`, is instantiated for each call. Every `$<argument_name>` in it becomes a required top-level string argument of every tool that uses the annotator, so the wildcard `*` tool, whose arguments the policy does not describe, cannot use such an annotator. The consult request and the answer schema list the concrete spelling for that call, such as `@github:repo/acme/api/collaborators`, and the answer MAY use only that spelling. The annotator can answer about the resource the call names and about no other. See [Read a source collection from a tool argument](#read-a-source-collection-from-a-tool-argument) for the placeholder rules.
+An annotator can use a selector placeholder only when its own `audiences` lists it. A selector placeholder in `audiences`, such as `@github:repo/$owner/$repo/collaborators`, is instantiated for each call. Every `$<argument_name>` in it becomes a required top-level string (or array of strings) argument of every tool that uses the annotator, so the wildcard `*` tool, whose arguments the policy does not describe, cannot use such an annotator. The consult request and the answer schema list the concrete spellings for that call, such as `@github:repo/acme/api/collaborators`, one per element of an array argument, and the answer MAY use only those spellings. The annotator can answer about the resource the call names and about no other. See [Read a source collection from a tool argument](#read-a-source-collection-from-a-tool-argument) for the placeholder rules.
 
 An empty list and an omitted field have different meanings. For example, `marks = []` prevents the annotator from requiring attention. Omitting `marks` allows it to use any mark the policy declares, `blocked` included; a catch-all `["*"]` permit declares no mark of its own.
 
@@ -1193,7 +1201,7 @@ delta = { audience = ["internal"] }
 - Every tool in `confined_results` must have a policy contract. A wildcard contract also satisfies this requirement.
 - Some tools run inside the model provider's service. The integration cannot intercept their results before the model reads them. These tools can declare only static `delta` fields. They cannot declare requirements, annotators, or argument selectors, and cannot appear in `confined_results`.
 
-OpenAPPA rejects configurations that require controls the integration does not support. See [integration configuration](/writing-an-integration) for the integration's responsibilities.
+OpenAPPA rejects configurations that require controls the integration does not support. See [integration configuration](/add-to-agent) for the integration's responsibilities.
 
 ## Externals
 

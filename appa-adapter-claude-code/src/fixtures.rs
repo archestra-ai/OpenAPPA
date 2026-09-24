@@ -1,7 +1,9 @@
 //! The hook bodies and parsed events every module's tests are written against.
 //! One fixture per shape, so a shape that changes changes in one place.
 
-use appa_runtime_api::{Actor, Derived, HookEvent, OutcomeBody, ParseRefusal, ProposedCall, ToolOutcome, TrajectoryId};
+use appa_runtime_api::{
+    Actor, HookEvent, IdentifiedTool, OutcomeBody, ParseRefusal, ProposedCall, ToolOutcome, TrajectoryId,
+};
 
 use crate::adapter;
 use crate::parse::parse;
@@ -54,8 +56,8 @@ pub(crate) fn proposed(tool: &str, arguments: serde_json::Value) -> (Actor, Prop
     )
 }
 
-pub(crate) fn derived(tool: &str) -> Result<Derived, ParseRefusal> {
-    (adapter().derive)(tool)
+pub(crate) fn identified(tool: &str) -> Result<IdentifiedTool, ParseRefusal> {
+    (adapter().identify_tool)(tool)
 }
 
 pub(crate) fn named_children(tool: &str, arguments: serde_json::Value) -> Vec<TrajectoryId> {

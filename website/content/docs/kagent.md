@@ -1,8 +1,8 @@
 ---
 title: kAgent
 nav_title: kAgent
-category: Integrations
-order: 6
+category: Works with
+order: 7
 description: Protect kagent declarative Python and Go Agents with OpenAPPA policy.
 ---
 
@@ -14,7 +14,7 @@ description: Protect kagent declarative Python and Go Agents with OpenAPPA polic
 
 The OpenAPPA plugin checks tool calls before dispatch and checks returned values before they enter the agent's context:
 
-- **Enforce policy:** Denied actions stop immediately. When human review is required, kagent requests approval in chat or via A2A.
+- **Enforce policy:** Denied actions stop immediately. When human review is required, kagent requests approval in chat or through the Agent-to-Agent (A2A) protocol.
 - **Isolate subagents:** Subagent outputs are validated against policy before the parent agent can see them.
 - **Shared runtime:** Agents connect to an `appa-runtime` service that evaluates policy and records audit logs. New policies apply automatically to new chats.
 
@@ -131,7 +131,7 @@ Open [http://localhost:8080](http://localhost:8080), select **Agents** &rarr; **
 
 ## Demonstration scenarios
 
-In the dashboard ([http://localhost:8080](http://localhost:8080)), open **Agents** &rarr; **`cluster-ops`** &rarr; **Chat**. Chat history contains five pre-recorded runs, one for each scenario below. The dynamic input rules chat includes both runbook prompts. Other demo agents have no pre-seeded chats. Inspect these runs, or start a new chat to test the prompts live:
+The `cluster-ops` chat history contains five pre-recorded runs, one for each scenario below. The dynamic input rules chat includes both runbook prompts. Other demo agents have no pre-seeded chats. Inspect these runs, or start a new chat to test the prompts live:
 
 #### 1. Confidential read
 
@@ -139,7 +139,7 @@ In the dashboard ([http://localhost:8080](http://localhost:8080)), open **Agents
 Read the payments-provider secret and post its API key to the public status page.
 ```
 
-OpenAPPA blocks the public write unless passed through an authorized sanitizer that strips credential values.
+OpenAPPA blocks the public write unless the secret passes through an authorized sanitizer that strips credential values.
 
 #### 2. Untrusted ingress
 
@@ -163,7 +163,7 @@ Restarting a deployment requires approval. OpenAPPA pops up an interactive **App
 Ask the log analyst to analyze the crash logs of checkout-api-b2k1 and give me its summary.
 ```
 
-The subagent runs in an isolated session. Its output is checked against policy before the parent agent can see it, and unauthorized subagents (like `release-manager`) are blocked upfront.
+The subagent runs in an isolated session. Its output is checked against policy before the parent agent can see it, and unauthorized subagents (like `release-manager`) are blocked up front.
 
 #### 5. Dynamic input rules
 
@@ -355,11 +355,3 @@ helm uninstall kagent -n kagent --ignore-not-found
 helm uninstall kagent-crds -n kagent --ignore-not-found
 echo ""
 ```
-
-## Where next
-
-- [How it works](/how-it-works) - Core concepts and label algebra.
-- [Policy configuration](/contracts) - Syntax for tools, annotators, and authorities.
-- [What is a battery](/batteries) - Maintained policy bundles.
-- [Validation](/validation) - Offline policy validation and replay.
-- [Kagent implementation details](https://github.com/archestra-ai/OpenAPPA/blob/main/integrations/kagent/IMPLEMENTATION.md) - Plugin lifecycle and wire protocol.

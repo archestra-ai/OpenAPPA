@@ -125,7 +125,7 @@ const STARTER_PROMPTS = [
   {
     outcome: "A wire transfer happens only after a human approves it.",
     note: "Human in the loop",
-    text: "Check the open invoices and pay the overdue one by transfer.",
+    text: "Check the open invoices and pay the unpaid one with the earliest due date by transfer.",
     expectation:
       "In this example, OpenAPPA makes sure that the invoice data is not leaked, and that the wire transfer happens only after a human approves it.",
   },

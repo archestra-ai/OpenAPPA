@@ -2,6 +2,7 @@
 title: OpenAPPA vs Dogwood
 category: Comparison
 order: 10.6
+oversimplified: "Dogwood lets you describe what an agent may do, taking its previous actions into account; OpenAPPA is agent-agnostic: you describe the data, and the same config scales to millions of agents."
 ---
 
 [Dogwood](https://dogwood-policy.github.io/dogwood/guide/00-introduction.html) is a policy language for AI agents. It builds on Cedar and adds rules about earlier actions, such as requiring approval within the last hour or limiting how often a tool runs.
@@ -27,7 +28,7 @@ Both can use an agent's history to check its next action. The clearest practical
 | | Dogwood (open source) | Dogwood through AgentCore | OpenAPPA |
 |---|---|---|---|
 | Deployment | [Rust library and CLI](https://github.com/dogwood-policy/dogwood) for exploring policies | [AWS-managed service](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy-temporal.html) | Run alongside your agent process or deploy as a shared Kubernetes service |
-| Agent connection | Your code submits events and enforces decisions | Tool calls through AgentCore Gateway | Use supplied [Claude Code](/claude-code) and [kagent](/kagent) integrations, or [connect your existing agent](/writing-an-integration) |
+| Agent connection | Your code submits events and enforces decisions | Tool calls through AgentCore Gateway | Use supplied [Claude Code](/claude-code) and [kagent](/kagent) integrations, or [connect your existing agent](/add-to-agent) |
 
 With open-source Dogwood, you choose which events to submit and how to connect the decisions to your agent. With AgentCore, the gateway records the calls passing through it. Your application groups related calls into a [policy session](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy-session-based-temporal.html), so a rule can connect an earlier approval or read to a later action.
 

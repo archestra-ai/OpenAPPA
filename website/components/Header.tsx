@@ -8,10 +8,13 @@ import { Logo } from "@/components/Logo";
 import { MobileNavToggle } from "@/components/MobileNav";
 import { SearchIcon, useSearch } from "@/components/SearchProvider";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { useMascotDance } from "@/components/useMascotDance";
 
 export function Header({ fullBleed = false }: { fullBleed?: boolean }) {
   const search = useSearch();
   const headerRef = useRef<HTMLElement>(null);
+  const wordmarkRef = useRef<HTMLAnchorElement>(null);
+  useMascotDance(wordmarkRef);
 
   /* Everything that has to clear the sticky header — anchor landings, the
      sticky rails, the drawer — reads --header-h. Publishing the measured
@@ -36,7 +39,7 @@ export function Header({ fullBleed = false }: { fullBleed?: boolean }) {
           keeps edge padding to match. */}
       <header className={fullBleed ? "site-header site-header-full" : "site-header"} ref={headerRef}>
         <MobileNavToggle />
-        <Link href="/" className="wordmark">
+        <Link href="/" className="wordmark" ref={wordmarkRef}>
           <Logo height={15} />
         </Link>
         <nav>

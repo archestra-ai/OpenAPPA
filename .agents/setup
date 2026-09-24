@@ -20,11 +20,41 @@ fi
 EOF
 fi
 
+gcp_profile_marker="# OpenAPPA Amp GCP workload identity"
+gcp_credentials="$repo_root/.amp/gcp-external-account.json"
+if ! grep -Fqx "$gcp_profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >> "$HOME/.bash_profile" <<EOF
+
+$gcp_profile_marker
+export GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES=1
+export GOOGLE_APPLICATION_CREDENTIALS="$gcp_credentials"
+export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="$gcp_credentials"
+EOF
+fi
+
 "$mise_bin" trust "$repo_root/mise.toml"
 echo "==> Installing pinned toolchains"
 toolchain_start=$SECONDS
 "$mise_bin" install
 echo "==> Toolchains installed in $((SECONDS - toolchain_start))s"
+
+echo "==> Configuring keyless benchmark archive access"
+mkdir -p "$repo_root/.amp"
+"$mise_bin" exec -- gcloud iam workload-identity-pools create-cred-config \
+  "projects/354887056155/locations/global/workloadIdentityPools/appa-amp-orbs/providers/amp-orbs" \
+  --executable-command="$repo_root/scripts/appa-amp-gcp-identity urn:amp:gcp:friendly-path-465518-r6:appa-bench-archive" \
+  --subject-token-type=urn:ietf:params:oauth:token-type:id_token \
+  --output-file="$gcp_credentials"
+"$mise_bin" exec -- gcloud config set auth/credential_file_override "$gcp_credentials"
+gcloud_bin="$("$mise_bin" which gcloud)"
+cat > "$HOME/.local/bin/gcloud" <<EOF
+#!/usr/bin/env bash
+export GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES=1
+export GOOGLE_APPLICATION_CREDENTIALS="$gcp_credentials"
+export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="$gcp_credentials"
+exec "$gcloud_bin" "\$@"
+EOF
+chmod +x "$HOME/.local/bin/gcloud"
 
 echo "==> Installing locked dependencies"
 dependency_start=$SECONDS

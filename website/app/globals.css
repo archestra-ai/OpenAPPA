@@ -221,6 +221,16 @@ samp {
   animation-delay: var(--appa-blink-delay, 0s);
 }
 
+/* Dancing (the header mark while the song plays): the pose is set inline
+   every frame from the audio clock, and a running CSS animation would win
+   over that inline transform, so the float goes off for the duration. The
+   feet stay planted: the landing squash scales from the bottom edge. */
+.logo-mark.is-dancing .appa-mark-float {
+  animation: none;
+  transform-origin: 50% 100%;
+  will-change: transform;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .appa-mark-float,
   .appa-mark-eyes {
@@ -608,6 +618,14 @@ samp {
   font-weight: 600;
 }
 
+/* The mascot standing in for "OpenAPPA" in a rail link: sized to the text,
+   sat on the baseline like a glyph. */
+.sidebar-mark {
+  display: inline-flex;
+  vertical-align: -0.2em;
+  margin-right: 0.15em;
+}
+
 .sidebar-proposal {
   margin-left: 0.45em;
   font-size: 10px;
@@ -630,11 +648,6 @@ samp {
   .doc-main {
     padding: 1.5rem 1.5rem 4rem;
   }
-}
-
-.doc-description {
-  margin-top: 0.4rem;
-  color: var(--text-weak);
 }
 
 .doc-breadcrumb {
@@ -727,7 +740,10 @@ samp {
    Prose (rendered markdown)
    ———————————————————————————————————————————————— */
 .prose {
-  font-size: 15px;
+  /* 16.5px in the 40rem column puts about 70 characters on a line; the
+     body's 14px is for UI chrome, not reading. */
+  font-size: 16.5px;
+  line-height: 1.65;
 }
 
 /* Anchor targets stop below the sticky header instead of underneath it. */
@@ -745,8 +761,7 @@ samp {
 }
 
 .prose h2 {
-  font-family: var(--font-mono);
-  font-size: 22px;
+  font-size: 23px;
   font-weight: 600;
   color: var(--text-strong);
   margin: 2.5rem 0 0.75rem;
@@ -756,8 +771,7 @@ samp {
 }
 
 .prose h3 {
-  font-family: var(--font-mono);
-  font-size: 17px;
+  font-size: 18px;
   font-weight: 600;
   color: var(--text-strong);
   margin: 2rem 0 0.5rem;
@@ -765,8 +779,7 @@ samp {
 
 .prose h4,
 .prose h5 {
-  font-family: var(--font-mono);
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   color: var(--text-strong);
   margin: 1.5rem 0 0.5rem;
@@ -1288,12 +1301,6 @@ samp {
   letter-spacing: -0.01em;
 }
 
-.hero .tagline {
-  margin-top: 0.5rem;
-  color: var(--text-weak);
-  font-size: 15px;
-}
-
 /* ————————————————————————————————————————————————
    "How to spell it" — hero pronunciation button
    ———————————————————————————————————————————————— */
@@ -1324,6 +1331,7 @@ samp {
 }
 
 .spell-it:hover .spell-it-glyph,
+.spell-it[data-confirming] .spell-it-glyph,
 .spell-it[data-speaking] .spell-it-glyph {
   color: var(--accent);
 }
@@ -1334,6 +1342,7 @@ samp {
 }
 
 .spell-it:hover .spell-it-say,
+.spell-it[data-confirming] .spell-it-say,
 .spell-it[data-speaking] .spell-it-say {
   color: var(--text);
 }
@@ -1488,7 +1497,8 @@ samp {
   color: var(--accent);
 }
 
-.prose img[alt*="Claude Code session"] {
+.prose img[alt*="Claude Code session"],
+.prose img[alt*="Archestra sidebar"] {
   display: block;
   width: 100%;
   margin: 1.25rem 0 2rem;
@@ -1516,19 +1526,6 @@ samp {
    ———————————————————————————————————————————————— */
 .bench-panel {
   margin: 2rem 0 2.5rem;
-  padding: 22px 24px 20px;
-  border: 1px solid var(--border-weak);
-  border-radius: 10px;
-  background: var(--bg-weak);
-}
-
-.bench-panel-eyebrow {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--accent);
 }
 
 .bench-charts {
@@ -1548,11 +1545,6 @@ samp {
   font-size: 13px;
   font-weight: 500;
   color: var(--text-strong);
-}
-
-.bench-chart-hint {
-  font-weight: 400;
-  color: var(--text-weak);
 }
 
 /* name | bar | value. Both columns are fixed so the two charts share a
@@ -1614,23 +1606,9 @@ samp {
   font-weight: 600;
 }
 
-.bench-panel-foot {
-  margin: 22px 0 0;
-  font-size: 12.5px;
-  line-height: 1.6;
-  color: var(--text-weak);
-}
-
-.bench-panel-foot strong {
-  color: var(--text-strong);
-  font-weight: 600;
-}
-
 .bench-panel-link {
   display: inline-block;
   margin-top: 16px;
-  padding-top: 16px;
-  border-top: 1px solid var(--border-weak);
   width: 100%;
   font-size: 13px;
   font-weight: 500;
@@ -2298,8 +2276,71 @@ samp {
 }
 
 /* ————————————————————————————————————————————————
-   Under construction — filler for empty doc pages
+   Over-simplified — the one-sentence panel under a comparison title
    ———————————————————————————————————————————————— */
+.oversimplified {
+  min-width: 0;
+  margin: 1.5rem 0 2rem;
+  padding: 12px 22px 16px;
+  border: 1px solid var(--warn);
+  border-radius: 10px;
+  background: var(--warn-bg);
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+/* The legend sits across the top border and notches it. */
+.oversimplified-label {
+  margin-left: 6px;
+  padding: 0 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--warn);
+}
+
+/* ————————————————————————————————————————————————
+   Sponsor note — who pays for OpenAPPA
+   ———————————————————————————————————————————————— */
+.sponsor-note {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  margin: 1.5rem 0 2rem;
+  padding: 18px 22px;
+  border: 1px solid var(--warn);
+  border-radius: 10px;
+  background: var(--warn-bg);
+}
+
+.sponsor-note-mark {
+  flex: none;
+}
+
+.sponsor-note-text {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.sponsor-note-text a {
+  color: var(--warn);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+@media (max-width: 480px) {
+  .sponsor-note {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+}
+
 .under-construction {
   display: flex;
   flex-direction: column;
@@ -2525,13 +2566,13 @@ samp {
   height: auto;
 }
 
-/* Runtime overview — host, fail-closed bridge, and policy runtime. */
+/* Runtime overview — hooks, decisions, and the MCP remedy call. */
 .runtime-overview-figure {
   width: 100%;
   margin: 1.5rem 0 2rem;
 }
 
-.runtime-overview-figure svg {
+.runtime-overview-figure > svg {
   display: block;
   width: 100%;
   height: auto;
@@ -2539,85 +2580,52 @@ samp {
 }
 
 .rof-panel {
-  fill: var(--bg);
-  stroke: var(--border);
-  stroke-width: 1.2;
-}
-
-.rof-panel-bridge {
   fill: var(--bg-weak);
   stroke: var(--accent-border);
+  stroke-width: 2;
+  shape-rendering: crispEdges;
 }
 
 .rof-title {
-  fill: var(--text-strong);
-  font-size: 15px;
-  font-weight: 600;
-}
-
-.rof-agent-title {
-  fill: var(--text-strong);
+  fill: var(--text-weak);
   font-size: 18px;
   font-weight: 600;
 }
 
-.rof-subtitle,
-.rof-card-detail,
-.rof-rail-label {
-  fill: var(--text-weak);
-  font-size: 12px;
-}
-
-.rof-card {
-  fill: var(--bg-weak);
-  stroke: var(--border-weak);
-  stroke-width: 1;
-}
-
-.rof-panel-bridge .rof-card {
-  fill: var(--bg);
-}
-
-.rof-card-title {
+.rof-block-label {
   fill: var(--text-strong);
-  font-size: 13.5px;
-  font-weight: 500;
+  font-size: 23px;
+  font-weight: 600;
 }
 
-.rof-fail-closed circle {
-  fill: var(--accent);
+.rof-rail-label {
+  fill: var(--text);
+  font-size: 18px;
 }
 
-.rof-fail-closed text {
-  fill: var(--accent);
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.rof-rail,
-.rof-remedy-rail {
+.rof-rail {
   fill: none;
   stroke: var(--icon);
-  stroke-width: 1.25;
+  stroke-width: 3;
+  shape-rendering: crispEdges;
 }
 
-.rof-rail-accent {
+.rof-rail-accent,
+.rof-spark {
   stroke: var(--accent);
 }
 
-.rof-remedy-rail {
-  stroke: var(--border);
+.rof-spark {
+  stroke-width: 4;
+  shape-rendering: crispEdges;
 }
 
-.rof-remedy-chip {
-  fill: var(--bg);
-  stroke: var(--border-weak);
-}
-
-.rof-remedy-label {
-  fill: var(--text);
-  font-size: 12px;
-  font-weight: 500;
+@media (max-width: 640px) {
+  .rof-title,
+  .rof-block-label,
+  .rof-rail-label {
+    font-size: 26px;
+  }
 }
 
 .psf-mascot {

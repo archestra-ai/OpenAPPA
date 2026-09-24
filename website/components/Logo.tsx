@@ -25,6 +25,7 @@ const CAP_ROWS = 7;
 
 const MARK_COLS = 24;
 const MARK_ROWS = 22;
+const MARK_LEG_ROW = 20; // first of the two rows that are legs and paws
 
 function seg(...runs: [string, number][]): string {
   let s = "";
@@ -76,6 +77,10 @@ export function PixelMark({
   const height = Math.round((size * MARK_ROWS) / MARK_COLS);
   const body: ReactNode[] = [];
   const eyes: ReactNode[] = [];
+  // The two bottom rows are the legs; each side is its own group so the
+  // dancing mark can step with them in turn.
+  const legsLeft: ReactNode[] = [];
+  const legsRight: ReactNode[] = [];
   BEAST.forEach((row, y) => {
     for (let x = 0; x < MARK_COLS; x++) {
       const c = row[x];
@@ -86,7 +91,9 @@ export function PixelMark({
         body.push(<rect key={`b${x}-${y}`} x={x} y={y} width={1} height={1} fill={MARK_FILL["1"]} />);
       }
       const rect = <rect key={`${x}-${y}`} x={x} y={y} width={1} height={1} fill={MARK_FILL[c]} />;
-      (c === "4" ? eyes : body).push(rect);
+      if (c === "4") eyes.push(rect);
+      else if (y >= MARK_LEG_ROW) (x < MARK_COLS / 2 ? legsLeft : legsRight).push(rect);
+      else body.push(rect);
     }
   });
   return (
@@ -102,6 +109,8 @@ export function PixelMark({
     >
       <g className="appa-mark-float">
         {body}
+        <g className="appa-mark-legs-left">{legsLeft}</g>
+        <g className="appa-mark-legs-right">{legsRight}</g>
         <g className="appa-mark-eyes">{eyes}</g>
       </g>
     </svg>

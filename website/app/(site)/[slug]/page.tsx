@@ -4,6 +4,7 @@ import { notFound, redirect } from "next/navigation";
 
 import { DocContent } from "@/components/DocContent";
 import { DocShell } from "@/components/DocShell";
+import { Oversimplified } from "@/components/Oversimplified";
 import { UnderConstruction } from "@/components/UnderConstruction";
 import { generateTableOfContents, getAllDocs, getDocBySlug } from "@/lib/docs";
 
@@ -45,7 +46,7 @@ export default async function DocPage({ params }: Props) {
       <div className="prose">
         <h1>{doc.title}</h1>
       </div>
-      {doc.description && <p className="doc-description">{doc.description}</p>}
+      {doc.oversimplified && <Oversimplified text={doc.oversimplified} />}
       {doc.content.trim() === "" ? <UnderConstruction /> : <DocContent content={doc.content} />}
     </DocShell>
   );

@@ -1156,7 +1156,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp directory");
         let runtime = Runtime::open(config(), dir.path().join("appa.db"), None).expect("the runtime opens");
         let root = crate::api::TrajectoryId("kagent:s1".to_string());
-        runtime.create_session(root.clone()).expect("a fresh id opens");
+        runtime.create_session(root.clone(), None).expect("a fresh id opens");
         let actor = crate::api::Actor { root, child: None };
         let args = IncludeBatteryArgs {
             actor: "s1".to_string(),
@@ -1243,7 +1243,7 @@ mod tests {
         )
         .expect("the served deployment opens");
         let root = crate::api::TrajectoryId("cc:claimed".to_string());
-        let session = runtime.create_session(root.clone()).expect("a fresh id opens");
+        let session = runtime.create_session(root.clone(), None).expect("a fresh id opens");
         let denied = session
             .on_tool_call(
                 ProposedCall {
@@ -1329,7 +1329,7 @@ mod tests {
             .expect("the served deployment opens");
 
         let root = crate::api::TrajectoryId(root.to_string());
-        let session = runtime.create_session(root.clone()).expect("a fresh id opens");
+        let session = runtime.create_session(root.clone(), None).expect("a fresh id opens");
         let denied = session
             .on_tool_call(
                 ProposedCall {
@@ -1471,7 +1471,7 @@ mod tests {
             crate::api::Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
 
         let root = crate::api::TrajectoryId(root.to_string());
-        let session = runtime.create_session(root.clone()).expect("a fresh id opens");
+        let session = runtime.create_session(root.clone(), None).expect("a fresh id opens");
         let denied = session
             .on_tool_call(
                 ProposedCall {
@@ -1654,7 +1654,9 @@ max_body_bytes = 4096
         )
         .expect("open the runtime");
         let actor = acting("cc:embedded-fresh-offer");
-        let session = runtime.create_session(actor.root.clone()).expect("create the root");
+        let session = runtime
+            .create_session(actor.root.clone(), None)
+            .expect("create the root");
         assert!(matches!(
             session
                 .on_tool_call(

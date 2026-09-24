@@ -30,6 +30,7 @@ use crate::engine::{EngineRefusal, Liveness, PolicyEngine, RuntimeEngine};
 use crate::external::{ConsultGates, ExternalServices};
 #[cfg(feature = "daemon")]
 use crate::yell;
+use appa_engine::label::ReaderId;
 use appa_eventlog::{Backend, HostObservation, Log, LogStore};
 use appa_runtime_api::{Adapter, AdapterName};
 use host::{HostState, host_actor, inventory_at};
@@ -473,6 +474,10 @@ pub(crate) enum EventError {
     UnknownTrajectory,
     #[error("a trajectory with this id already exists")]
     TrajectoryExists,
+    #[error("the session principal {0:?} is not an address")]
+    MalformedPrincipal(String),
+    #[error("the session already acts for another principal")]
+    PrincipalMismatch,
     #[error("no open dispatch with this id exists")]
     UnknownDispatch,
     #[error("this outcome does not match the open dispatch; it is not reported")]
@@ -552,6 +557,8 @@ impl EventError {
             | EventError::ResolutionDiverged { .. }
             | EventError::AnnotationRefused { .. }
             | EventError::UndeclaredTool { .. }
+            | EventError::MalformedPrincipal(_)
+            | EventError::PrincipalMismatch
             | EventError::UnexpectedDecision => true,
             EventError::CallOutstanding
             | EventError::SpawnOutstanding
@@ -615,7 +622,7 @@ pub(crate) struct AnnotationConsult {
 /// addresses the model, and which contracts may release a spawn.
 ///
 /// A served deployment answers exactly one host, and carries that host's adapter: the
-/// adapter derives a canonical identity for every call, so the policy names tools that way,
+/// adapter identifies every call's canonical identity, so the policy names tools that way,
 /// and its inverse gives the host spelling the model can dispatch. A host that embeds the
 /// runtime, and `appa replay`, name tools their own way: what the runtime records is already
 /// the name their model calls.
@@ -738,7 +745,6 @@ impl Deployment {
         use crate::consult::{Consult, MembersAnswer};
         use crate::external::ConsultOutcome;
         use appa_engine::audience::{AudienceEvidence, SourceClaims};
-        use appa_engine::label::ReaderId;
 
         let refused = |reason: String| ProbeError::Selector {
             provider: spec.provider.clone(),
@@ -765,7 +771,7 @@ impl Deployment {
             lookups: Vec::new(),
         };
         audience
-            .expansions(&evidence)
+            .expansions(&evidence, None)
             .map_err(|refusal| refused(refusal.to_string()))?;
         Ok(claims)
     }
@@ -780,7 +786,6 @@ impl Deployment {
         use crate::consult::{Consult, LookupAnswer};
         use crate::external::ConsultOutcome;
         use appa_engine::audience::well_formed_reader;
-        use appa_engine::label::ReaderId;
 
         let refused = |reason: String| ProbeError::Lookup {
             provider: spec.provider.clone(),
@@ -811,9 +816,9 @@ impl Deployment {
         crate::engine::selector_templates(audience, provider).expect("the probe reads only registered providers")
     }
 
-    fn root_opening(&self, trajectory: &TrajectoryId) -> Vec<appa_engine::fact::Fact> {
+    fn root_opening(&self, trajectory: &TrajectoryId, principal: Option<ReaderId>) -> Vec<appa_engine::fact::Fact> {
         self.resident
-            .root_opening(trajectory, self.config.policy_file().bytes())
+            .root_opening(trajectory, self.config.policy_file().bytes(), principal)
     }
 }
 
@@ -973,7 +978,7 @@ impl Runtime {
     /// [`Runtime::open_with_store`] for a host that names tools through an adapter of its
     /// own, under [`AdapterName::Embedded`]: the policy is resolved the way a served
     /// deployment resolves it, so canonical rules, `server_aliases` and the adapter's
-    /// spelling of a tool to the model all apply. The host derives every call through the
+    /// spelling of a tool to the model all apply. The host identifies every call through the
     /// same adapter before it hands the event over.
     pub fn open_with_store_as(
         config: Config,
@@ -1089,6 +1094,7 @@ impl Inner {
     /// See [`Runtime::record`]. Lives here because a `Session` holds the `Inner`, not the
     /// `Runtime`, and the consults worth timing happen inside a session.
     pub(crate) fn record(&self, root: Option<&TrajectoryId>, event: crate::events::RuntimeEvent) {
+        crate::telemetry::runtime_event(root, &event);
         self.shared
             .events
             .lock()
@@ -1163,7 +1169,7 @@ impl Inner {
     /// "no panic runs while it is held" reading must keep holding — so a race can
     /// still compile twice, but only one result is ever cached and handed out.
     ///
-    /// A retired policy decides under the identities this deployment derives now, so it
+    /// A retired policy decides under the identities this deployment identifies now, so it
     /// meets the naming rule this deployment serves under or the trajectory does not
     /// reopen: a stored policy naming a tool the served host's raw way confines and
     /// excepts nothing, while a wildcard contract still permits the call.
@@ -1610,9 +1616,9 @@ impl Runtime {
     /// One transaction writes the opening
     /// record and stores the policy file it names, so the root is bound
     /// to that file durably or is not opened at all.
-    pub(crate) fn create_session(&self, id: TrajectoryId) -> Result<Session, EventError> {
+    pub(crate) fn create_session(&self, id: TrajectoryId, principal: Option<ReaderId>) -> Result<Session, EventError> {
         let deployment = self.inner.deployment();
-        self.create_session_under(id, deployment)
+        self.create_session_under(id, deployment, principal)
     }
 
     pub(crate) fn create_session_with_inventory(
@@ -1633,7 +1639,7 @@ impl Runtime {
             self.inner.shared.naming,
         )
         .map_err(|error| EventError::PolicyUnavailable(error.to_string()))?;
-        self.create_session_under(id, Arc::new(deployment))
+        self.create_session_under(id, Arc::new(deployment), None)
     }
 
     /// Reserve identities in the actor's own scope, independently of the immutable
@@ -1712,7 +1718,7 @@ impl Runtime {
                     accepted.iter().map(|(name, id, _)| (id, name.as_str())).collect();
                 let mut conflicts = std::collections::BTreeSet::new();
                 for observed in &inventory.tools {
-                    if let Ok(id) = (adapter.derive)(&observed.tool)
+                    if let Ok(id) = (adapter.identify_tool)(&observed.tool)
                         && (names
                             .get(observed.name.as_str())
                             .is_some_and(|previous| **previous != id.canonical)
@@ -1868,8 +1874,13 @@ impl Runtime {
         }
     }
 
-    fn create_session_under(&self, id: TrajectoryId, deployment: Arc<Deployment>) -> Result<Session, EventError> {
-        let opening = deployment.root_opening(&id);
+    fn create_session_under(
+        &self,
+        id: TrajectoryId,
+        deployment: Arc<Deployment>,
+        principal: Option<ReaderId>,
+    ) -> Result<Session, EventError> {
+        let opening = deployment.root_opening(&id, principal);
         let root = self
             .inner
             .store
@@ -2190,6 +2201,7 @@ impl Runtime {
         )
     }
 
+    #[tracing::instrument(target = "appa_telemetry", name = "appa.remedy", skip_all)]
     async fn execute_remedy_outcome(
         &self,
         args: ExecuteRemedyPlanArgs,
@@ -3608,7 +3620,14 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let view = runtime.on(Arc::clone(&other));
         let root = TrajectoryId("viewed".to_string());
         assert_eq!(
-            crate::hooks::handle(&view, appa_runtime_api::HookEvent::SessionStart { root: root.clone() }).await,
+            crate::hooks::handle(
+                &view,
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None
+                }
+            )
+            .await,
             appa_runtime_api::HookDecision::Ack
         );
         let id = crate::engine::engine_id(&root);
@@ -3622,7 +3641,14 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             .reload(versioned_policy("second"))
             .expect("the second deployment loads");
         let later = TrajectoryId("viewed-after-reload".to_string());
-        crate::hooks::handle(&view, appa_runtime_api::HookEvent::SessionStart { root: later.clone() }).await;
+        crate::hooks::handle(
+            &view,
+            appa_runtime_api::HookEvent::SessionStart {
+                root: later.clone(),
+                principal: None,
+            },
+        )
+        .await;
         let opened_under = other
             .log(&crate::engine::engine_id(&later))
             .expect("the later root reads");
@@ -3681,7 +3707,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert_eq!(
             crate::hooks::handle(
                 &runtime.on(Arc::clone(&lease)),
-                appa_runtime_api::HookEvent::SessionStart { root: root.clone() }
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None
+                }
             )
             .await,
             appa_runtime_api::HookDecision::Ack
@@ -3709,7 +3738,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert_eq!(
             crate::hooks::handle(
                 &runtime,
-                appa_runtime_api::HookEvent::SessionStart { root: root.clone() }
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None
+                }
             )
             .await,
             appa_runtime_api::HookDecision::Ack
@@ -3780,7 +3812,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
 
     #[cfg(feature = "daemon")]
     /// A trajectory recorded before the upgrade carries its own policy bytes, and reopening
-    /// it compiles them. A served deployment derives a canonical identity for every call, so
+    /// it compiles them. A served deployment identifies every call's canonical identity, so
     /// a stored policy naming a tool the host's raw way in a `[deployment]` field confines
     /// nothing while its contract still permits the call: the served runtime refuses that
     /// trajectory rather than deciding under it, and reopens a stored canonical policy.
@@ -3796,7 +3828,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             assert_eq!(
                 crate::hooks::handle(
                     &recorded,
-                    appa_runtime_api::HookEvent::SessionStart { root: root.clone() }
+                    appa_runtime_api::HookEvent::SessionStart {
+                        root: root.clone(),
+                        principal: None
+                    }
                 )
                 .await,
                 appa_runtime_api::HookDecision::Ack
@@ -3940,7 +3975,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             root: TrajectoryId("inventory-root".into()),
             child: None,
         };
-        runtime.create_session(actor.root.clone()).unwrap();
+        runtime.create_session(actor.root.clone(), None).unwrap();
         let before = runtime.inner.log(&actor.root).unwrap();
         let inventory = |server: &str| ToolInventory {
             tools: vec![ObservedTool {
@@ -3999,7 +4034,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             root: TrajectoryId("racing-inventory".into()),
             child: None,
         };
-        runtime.create_session(actor.root.clone()).unwrap();
+        runtime.create_session(actor.root.clone(), None).unwrap();
         let inventory = |server: &str| ToolInventory {
             tools: vec![ObservedTool {
                 name: "read".into(),
@@ -4066,7 +4101,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         );
         let root = adapter.name.root("preflight");
         assert!(matches!(runtime.inner.log(&root), Err(EventError::UnknownTrajectory)));
-        runtime.create_session(root.clone()).unwrap();
+        runtime.create_session(root.clone(), None).unwrap();
         let before = runtime.inner.log(&root).unwrap();
         runtime
             .reload(claude_config(
@@ -4411,7 +4446,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert_eq!(
             crate::hooks::handle(
                 &runtime,
-                appa_runtime_api::HookEvent::SessionStart { root: root.clone() }
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None
+                }
             )
             .await,
             appa_runtime_api::HookDecision::Ack
@@ -4461,7 +4499,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert_eq!(
             crate::hooks::handle(
                 &runtime,
-                appa_runtime_api::HookEvent::SessionStart { root: root.clone() }
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None
+                }
             )
             .await,
             appa_runtime_api::HookDecision::Ack
@@ -4503,7 +4544,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             let root = TrajectoryId(id.to_string());
             crate::hooks::handle(
                 &runtime,
-                appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None,
+                },
             )
             .await;
             actors.push(Actor { root, child: None });
@@ -4543,7 +4587,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             let root = TrajectoryId(id.to_string());
             crate::hooks::handle(
                 &runtime,
-                appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None,
+                },
             )
             .await;
             let actor = Actor { root, child: None };
@@ -4583,7 +4630,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         .ticket();
         crate::hooks::handle(
             &runtime,
-            appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+            appa_runtime_api::HookEvent::SessionStart {
+                root: root.clone(),
+                principal: None,
+            },
         )
         .await;
         runtime.vouch(&ticket, &actor, None);
@@ -4629,7 +4679,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             let root = TrajectoryId(id.to_string());
             crate::hooks::handle(
                 &runtime,
-                appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None,
+                },
             )
             .await;
             actors.push(Actor { root, child: None });
@@ -4691,7 +4744,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         };
         crate::hooks::handle(
             &runtime,
-            appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+            appa_runtime_api::HookEvent::SessionStart {
+                root: root.clone(),
+                principal: None,
+            },
         )
         .await;
         assert!(!runtime.prompted(&parent), "a family nothing prompted has no mark");
@@ -4739,7 +4795,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         .ticket();
         crate::hooks::handle(
             &runtime,
-            appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+            appa_runtime_api::HookEvent::SessionStart {
+                root: root.clone(),
+                principal: None,
+            },
         )
         .await;
         runtime.vouch(&ticket, &actor, None);
@@ -4771,7 +4830,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             let root = TrajectoryId(id.to_string());
             crate::hooks::handle(
                 &runtime,
-                appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None,
+                },
             )
             .await;
             runtime.vouch(&ticket, &Actor { root, child: None }, None);
@@ -4843,7 +4905,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             );
             crate::hooks::handle(
                 &runtime,
-                appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None,
+                },
             )
             .await;
             runtime.vouch(&ticket, &actor, None);
@@ -4940,7 +5005,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let root = TrajectoryId("management-vouch".to_string());
         crate::hooks::handle(
             &runtime,
-            appa_runtime_api::HookEvent::SessionStart { root: root.clone() },
+            appa_runtime_api::HookEvent::SessionStart {
+                root: root.clone(),
+                principal: None,
+            },
         )
         .await;
         let actor = Actor { root, child: None };
@@ -4992,7 +5060,10 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert_eq!(
             crate::hooks::handle(
                 &runtime,
-                appa_runtime_api::HookEvent::SessionStart { root: root.clone() }
+                appa_runtime_api::HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: None
+                }
             )
             .await,
             appa_runtime_api::HookDecision::Ack
@@ -5063,7 +5134,7 @@ mod spawn_coverage_tests {
         (format!("http://{addr}/annotate"), consults)
     }
 
-    /// One agent this deployment delegates to, by the canonical name both adapters derive,
+    /// One agent this deployment delegates to, by the canonical name both adapters identify,
     /// and a wildcard over everything else. Every name is canonical, so a served deployment
     /// of either host loads it.
     fn config(dir: &tempfile::TempDir, url: &str) -> Config {
@@ -5108,7 +5179,14 @@ url = "{url}"
             None => Runtime::open(config, db, None).expect("the embedded deployment opens"),
         };
         assert_eq!(
-            crate::hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
+            crate::hooks::handle(
+                &runtime,
+                HookEvent::SessionStart {
+                    root: root(),
+                    principal: None
+                }
+            )
+            .await,
             HookDecision::Ack
         );
         runtime

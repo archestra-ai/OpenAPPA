@@ -1,14 +1,19 @@
 name: Build and deploy appa-demo
 
-# Builds the chat-playground service image, pushes it to Artifact Registry
-# and rolls the appa-demo Cloud Run service to it. Runs only on manual
-# dispatch from main; the crate itself is gated by ci.yml's `--workspace`
-# jobs, which include it.
+# Dockerfile pins the demo runtime independently of main. Pull requests build
+# and test the image. Only a manual dispatch on main publishes and deploys it.
 #
 # Required repository secrets: APPA_GCP_SERVICE_ACCOUNT,
 # APPA_GCP_WORKLOAD_IDENTITY_PROVIDER.
 
 on:
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "website-chat-playground/terra.patch"
+      - "scripts/test_appa_demo_image.py"
+      - ".github/workflows/build-appa-demo-image.yml"
   workflow_dispatch:
 
 permissions: {}
@@ -38,9 +43,15 @@ jobs:
       - name: Build image
         run: docker build --tag "$IMAGE:sha-${GITHUB_SHA::12}" --tag "$IMAGE:latest" .
 
+      - name: Test image
+        run: |
+          docker run --detach --name appa-demo-test --publish 127.0.0.1:8787:8787 \
+            "$IMAGE:sha-${GITHUB_SHA::12}" --cors-origin https://www.openappa.com
+          trap 'docker logs appa-demo-test; docker rm --force appa-demo-test' EXIT
+          curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:8787/healthz
+          python3 scripts/test_appa_demo_image.py http://127.0.0.1:8787
+
       - name: Authenticate to Artifact Registry
-        # Publishing only ever comes from a dispatch on main — a
-        # workflow_dispatch on any other ref builds without publishing.
         if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
         uses: ./.github/actions/auth-to-gar
         with:

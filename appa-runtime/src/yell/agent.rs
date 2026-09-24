@@ -71,6 +71,7 @@ pub(crate) enum Outcome {
 /// question, and a deployment that turned agent reporting on has already answered it. What
 /// may leave is the same either way — the mode chooses only how the names are spelled.
 #[cfg(feature = "daemon")]
+#[tracing::instrument(target = "appa_telemetry", name = "appa.yell", skip_all)]
 pub(crate) async fn yell(runtime: &std::sync::Arc<Runtime>, harness: Harness, args: &YellArgs) -> Outcome {
     let acting = match runtime.take_vouched(&args.ticket()) {
         Ok((acting, _)) => acting,
@@ -91,6 +92,7 @@ pub(crate) async fn yell(runtime: &std::sync::Arc<Runtime>, harness: Harness, ar
     let Ok(finished) = runtime.report_off_thread(request).await else {
         return Outcome::Oversize;
     };
+    crate::telemetry::yell(&finished, &acting.root);
     let Some((receiver, _)) = client::Receiver::resolve() else {
         return Outcome::Undeliverable(SendFailure::NoReceiver);
     };

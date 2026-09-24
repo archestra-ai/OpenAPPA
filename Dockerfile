@@ -1,40 +1,26 @@
 # appa-demo: the chat-playground service behind openappa.com.
 #
-# Built from the repository root: `website-chat-playground` is a workspace member and
-# path-depends on the sibling crates (`appa-runtime`, `appa-policy`,
-# `appa-engine`, `appa-example-agent`).
+# The demo runs a pinned runtime independently of the current workspace.
+# The patch changes only the model allowlist. Keep its policy and dependencies pinned.
 #
 #   docker build -t appa-demo .
 #   docker run -p 8787:8787 -e APPA_DEMO_OPENROUTER_API_KEY=sk-or-… appa-demo
 
 FROM rust:1.96-bookworm AS builder
 WORKDIR /build
-# The path deps inherit from the root workspace (`edition.workspace = true`),
-# so the workspace manifest and every member must be present to build any of
-# them — cargo refuses a workspace with missing members.
-COPY Cargo.toml Cargo.lock ./
-COPY appa-example-agent appa-example-agent
-COPY appa-agent-python appa-agent-python
-COPY appa-engine appa-engine
-COPY appa-policy appa-policy
-COPY appa-runtime appa-runtime
-COPY appa-runtime-api appa-runtime-api
-COPY appa-adapter-claude-code appa-adapter-claude-code
-COPY appa-adapter-kagent appa-adapter-kagent
-COPY appa-builtin appa-builtin
-COPY appa-eventlog appa-eventlog
-COPY bench bench
-COPY website-chat-playground website-chat-playground
-RUN cargo build --release --locked --package website-chat-playground
+# Public source counterpart of the August 13 demo deployment.
+ADD https://github.com/archestra-ai/OpenAPPA.git#1742ed27f4b075f9b2eb8864d965cc70a3460fb1 /build
+COPY website-chat-playground/terra.patch /tmp/appa-demo-terra.patch
+RUN git apply /tmp/appa-demo-terra.patch \
+    && cargo build --release --locked --manifest-path demo/appa-demo/Cargo.toml
 
 FROM debian:bookworm-slim
-# TLS roots are compiled in (webpki-roots); the runtime needs only the binary,
-# the seed world, and somewhere writable for per-session worlds.
+# The pinned runtime uses bundled TLS roots.
 RUN useradd --system --create-home appa
 USER appa
 WORKDIR /home/appa
-COPY --from=builder /build/target/release/appa-demo /usr/local/bin/appa-demo
-COPY --chown=appa website-chat-playground/world world
+COPY --from=builder /build/demo/appa-demo/target/release/appa-demo /usr/local/bin/appa-demo
+COPY --from=builder --chown=appa /build/demo/appa-demo/world world
 ENV APPA_DEMO_WORLD=/home/appa/world
 EXPOSE 8787
 # CORS origins and the OpenRouter key arrive from the deployment, not the image.

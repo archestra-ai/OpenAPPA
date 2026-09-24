@@ -12,7 +12,7 @@ use appa_runtime::api::{OpenError, RemedyOutcome, Runtime};
 use appa_runtime::config::{Config, HostDefaults, HostedBattery};
 use appa_runtime::hooks;
 use appa_runtime_api::{
-    Actor, Adapter, AdapterName, CanonicalTool, Derived, HookDecision, HookEvent, ParseRefusal, ProposedCall,
+    Actor, Adapter, AdapterName, CanonicalTool, HookDecision, HookEvent, IdentifiedTool, ParseRefusal, ProposedCall,
     TrajectoryId,
 };
 
@@ -39,7 +39,7 @@ const CONTROL_SPELLING: &str = "run_remedy";
 
 /// The host spells an MCP server's tool `<server>.<tool>` and anything else by its bare
 /// name; the mapping is a bijection over the spellings it accepts.
-fn derive(raw: &str) -> Result<Derived, ParseRefusal> {
+fn identify_tool(raw: &str) -> Result<IdentifiedTool, ParseRefusal> {
     let canonical = match raw {
         CONTROL_SPELLING => CanonicalTool::control(),
         spelled => match spelled.split_once('.') {
@@ -50,7 +50,7 @@ fn derive(raw: &str) -> Result<Derived, ParseRefusal> {
             detail: error.to_string(),
         })?,
     };
-    Ok(Derived {
+    Ok(IdentifiedTool {
         canonical,
         spawn: false,
     })
@@ -75,7 +75,7 @@ fn names_children(_: &Actor, _: &ProposedCall) -> Vec<TrajectoryId> {
 fn adapter() -> Adapter {
     Adapter {
         name: AdapterName::Embedded,
-        derive,
+        identify_tool,
         names_children,
         spell,
         wildcard_covers_spawn: true,
@@ -116,19 +116,19 @@ fn an_adapter_that_spells_no_control_tool_is_refused() {
     assert!(matches!(open_under(unspelled), Err(OpenError::UnspelledControlTool)));
 }
 
-/// A call as the host hands it over: derived through the adapter first, the way the wire
-/// derives a served host's calls.
+/// A call as the host hands it over: identified through the adapter first, the way the wire
+/// identifies a served host's calls.
 fn call(actor: &Actor, raw: &str) -> HookEvent {
-    let derived = derive(raw).expect("the spelling is in the domain");
+    let identified = identify_tool(raw).expect("the spelling is in the domain");
     HookEvent::ToolCall {
         call_id: None,
         actor: actor.clone(),
         call: ProposedCall {
-            tool: derived.canonical.into_string(),
+            tool: identified.canonical.into_string(),
             arguments: serde_json::value::RawValue::from_string("{}".into()).expect("an object"),
             cwd: None,
         },
-        spawn: derived.spawn,
+        spawn: identified.spawn,
         ruling: None,
     }
 }
@@ -144,7 +144,8 @@ async fn a_battery_rule_reaches_the_server_the_host_aliased_and_speaks_its_spell
         hooks::handle(
             &runtime,
             HookEvent::SessionStart {
-                root: actor.root.clone()
+                root: actor.root.clone(),
+                principal: None,
             }
         )
         .await,

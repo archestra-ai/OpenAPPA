@@ -46,7 +46,14 @@ async fn a_remedy_naming_an_unbound_authority_gives_no_answer_and_the_offer_stan
     let config = Config::load(&path).expect("the fixture validates");
     let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"));
     assert_eq!(
-        hooks::handle(&runtime, HookEvent::SessionStart { root: root() }).await,
+        hooks::handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: root(),
+                principal: None
+            }
+        )
+        .await,
         HookDecision::Ack
     );
 

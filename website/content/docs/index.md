@@ -5,42 +5,44 @@ order: 1
 description: OpenAPPA is an open-source, deterministic security engine for real-world agentic applications.
 ---
 
-The more tools and data sources an agent is connected to, the more it can do. Capability, however, arrives together with risk — the risk of data exfiltration. Put plainly, an agent can pick up something sensitive and publish it, whether through a hallucination or an outright prompt injection.
+OpenAPPA is a frontier deterministic AI guardrail that is 100% resistant to data exfiltration caused by prompt injection or model hallucination, and the first of its kind that doesn't break agents.
 
-The problem has reached epidemic scale. A partial list of published exfiltration attacks against production assistants: [ChatGPT](https://simonwillison.net/2023/Apr/14/new-prompt-injection-attack-on-chatgpt-web-version-markdown-imag/) (Apr 2023), [Google Bard](https://simonwillison.net/2023/Nov/4/hacking-google-bard-from-prompt-injection-to-data-exfiltration/) (Nov 2023), [GitHub Copilot Chat](https://simonwillison.net/2024/Jun/16/github-copilot-chat-prompt-injection/) (Jun 2024), [Microsoft Copilot](https://simonwillison.net/2024/Aug/14/living-off-microsoft-copilot/) (Aug 2024), [Slack AI](https://simonwillison.net/2024/Aug/20/data-exfiltration-from-slack-ai/) (Aug 2024), [ChatGPT Operator](https://simonwillison.net/2025/Feb/17/chatgpt-operator-prompt-injection/) (Feb 2025), [Microsoft 365 Copilot "EchoLeak"](https://www.hackthebox.com/blog/cve-2025-32711-echoleak-copilot-vulnerability) (Jun 2025), [ChatGPT Deep Research "ShadowLeak"](https://thehackernews.com/2025/09/shadowleak-zero-click-flaw-leaks-gmail.html) (Sep 2025), [Notion AI and Claude Cowork](https://breached.company/the-lethal-trifecta-strikes-four-major-ai-agent-vulnerabilities-in-five-days/) (Jan 2026).
+It is open, vendor-agnostic, and MIT-licensed.
 
-By now there is plenty of research on how to build agents that cannot leak sensitive data even in principle — not "cannot with 99.99% probability," but deterministically constrained. Simon Willison's excellent posts come to mind — the [Dual LLM pattern](https://simonwillison.net/2023/Apr/25/dual-llm-pattern/), the [lethal trifecta](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/) framing, and his coverage of [CaMeL](https://simonwillison.net/2025/Apr/11/camel/) — as does Microsoft's [FIDES](https://www.microsoft.com/en-us/research/publication/securing-ai-agents-with-information-flow-control/).
-
-And yet a gap remains between these ideas on paper and the ability to apply them in a concrete environment, in a concrete product or company:
-
-- How do I describe security rules in plain language?
-- How do blocked agents recover instead of failing?
-- How do I deploy, monitor, and scale across my platform?
-
-OpenAPPA answers all three.
+And yes, it outperforms competitors on benchmarks:
 
 :::benchmark-highlight:::
 
-## OpenAPPA tracks data flows deterministically instead of classifying data
+## Non-deterministic guardrails miss the problem
 
-Plenty of PII detectors and prompt-injection classifiers exist today — OpenAI's [moderation models](https://platform.openai.com/docs/guides/moderation), Meta's [Llama Prompt Guard](https://www.llama.com/docs/model-cards-and-prompt-formats/prompt-guard/), Microsoft's [Prompt Shields](https://learn.microsoft.com/en-us/azure/ai-services/content-safety/concepts/jailbreak-detection), and [Lakera Guard](https://www.lakera.ai/lakera-guard) among them. We believe real agent security is deterministic: it holds on every run, not on 99% of them. Only then can you genuinely trust agents in real applications — say, around medical or financial data.
+The industry's answer to approval fatigue is a second model that judges each tool call: Claude Code's auto mode, Codex's auto-review, and other [auto-modes](/openappa-vs-auto-mode).
 
-The foundation of OpenAPPA is data-flow tracking. In other words, it answers one simple question before every tool call: *is this data allowed to go to this destination?* 
+By design, they cannot track data flow across tool calls. Because classifiers are prompt-injectable themselves, harnesses hide tool outputs from them, so the judge never sees the data at all.
 
-And where it is genuinely unavoidable, OpenAPPA also lets you plug in non-deterministic agent-security tools.
+Because of their probabilistic design, even the best top out at [99.3%](https://openai.github.io/openai-guardrails-python/ref/checks/prompt_injection_detection/): at millions of calls, 0.7% is a lot of breaches.
 
-### Threat Model: What OpenAPPA Protects Against
+## Other deterministic guardrails either break agents or don't work
 
-OpenAPPA is designed for real-world enterprise agent workflows:
+Blacklisting commands against an LLM is a dead end. Block `rm -rf /` and the model writes a Python one-liner; block `curl` and it pushes to an external git remote. A list of regexes also gives zero visibility into coverage: nobody can verify that it closes every path, or that three mundane tools chained together don't leak.
 
-- **What it protects against:** Prompt injections, poisoned external data, confused agent actions, and accidental data leaks across multi-step workflows.
-- **How it stops attacks:** At the deterministic runtime boundary. Even if the LLM is completely tricked by an attacker, unauthorized tool calls physically cannot dispatch.
-- **System boundaries:** Pre-vetted internal data is trusted by configuration. Custom authorities (like human review queues) are trusted within their declared permissions.
-- **Auditability:** Every check, dispatch, and remedy decision is recorded in an append-only, tamper-evident log for post-hoc audit and deterministic replay.
+Rule sets end up either so tight they break the agent or so intricate nobody can audit what they permit.
 
-## Where next
+## OpenAPPA tracks flows instead of matching patterns
 
-- [How OpenAPPA works](/how-it-works) — the whole model in one sitting.
-- [Reading a policy](/contracts) — what each declaration means, and what a wrong one looks like.
-- [Benchmarks](/evaluation) — empirical paper results and running bench-corp.
-- [Discord](https://discord.gg/B5fmSxHKZ7) — questions, feedback, and RFC discussion with the people building it.
+OpenAPPA is a cross-platform, pluggable engine driven by a [single configuration](/contracts). It runs outside the agent's prompt and execution loop, so the model cannot see, negotiate with, or manipulate it, and it [plugs into an existing agent loop](/add-to-agent) in one place.
+
+:::fig-policy-stack:::
+
+Instead of allowed and blocked tools, the configuration describes data sources, [audiences](/contracts#audiences), [trust levels](/contracts#trust), and [authorities](/contracts#authorities). Every trajectory carries a security label, `audience × trust`: reading a private repo narrows the audience, reading an unvetted web page lowers trust. The label only ever gets more restrictive, and the engine derives each decision from it algebraically.
+
+An injected prompt telling the agent to leak secrets is irrelevant: you cannot prompt-inject an algebra. Because the configuration is declarative, you can [validate in CI/CD](/validation) that your whole tool graph is covered. The configuration is data-specific, so you can scale to millions of agents without changing it.
+
+## It's full of tricks to help agents accomplish their tasks
+
+Strict enforcement is where utility usually dies: a bare "forbidden" makes an agent stall, retry, and fail. OpenAPPA instead returns a machine-readable [remedy plan](/how-it-works#keeping-agents-useful-under-restrictions) with the ways the agent may legally proceed:
+
+- **Sanitizers** transform the payload, masking secrets or redacting PII, so it can flow to a wider audience. Stock sanitizers ship in the box; custom ones, including model-based ones, plug in with a clear blast radius.
+- **Authorities** approve one specific action, through a human or an internal API, without lifting the session's restrictions for later calls.
+- **Subagents** isolate an untrusted read in a disposable branch, so the parent trajectory continues unpoisoned.
+
+This is what lifts task completion from 37% to 90% on our [benchmarks](/evaluation) and makes deterministic security practical.

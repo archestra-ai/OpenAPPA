@@ -1,0 +1,98 @@
+# Offline policy decisions only: these calls never execute at xmemory.
+
+# Schema decisions from a trusted session run; the result echoes them.
+mcp/xmemory/decide_suggestions {
+  proposal_version: "v1"
+  decisions: [{"item_fingerprint": "f1", "decision": "accept"}]
+}
+expect allow
+
+# Creating an instance needs trusted data and returns the whole instance,
+# which enters suspicious, so it always asks the authority.
+mcp/xmemory/admin_create_instance {
+  cluster_id: "00000000-0000-0000-0000-00000000c001"
+  name: "team-memory"
+  description: "Who does what on the team"
+  schema_yaml: "xmd_version: v1\ntitle: Team memory\nobjects:\n  Person:\n    description: A teammate.\n    fields:\n      name:\n        type: str\n        required: true\n        description: Full name.\n      role:\n        type: str\n        required: false\n        description: Current role on the team.\n    primary_key:\n    - name\nrelations: {}\n"
+}
+expect authority xmemory-operator
+
+# A text write needs no trusted data.
+mcp/xmemory/write {
+  text: "Alice owns the Q3 launch plan."
+}
+expect allow
+
+# A structured write gets the same contract as a text write.
+mcp/xmemory/write {
+  text: ""
+  structured_mutations: [{"object_mutation": {"object_type": "Person", "update": {"key": {"name": "Alice"}, "values": {"role": "Launch owner"}}}}]
+}
+expect allow
+
+# A read narrows the trajectory to internal and marks it suspicious.
+mcp/xmemory/read {
+  query: "Who owns the Q3 launch plan?"
+}
+expect allow
+
+# Memory content enters a tool that requires trusted input only with review.
+mcp/shell/run_command {
+  command: "deploy"
+}
+expect authority xmemory-operator
+
+# Memory content cannot go to a public destination.
+mcp/mail/send {
+  to: "public"
+}
+expect deny
+
+# The organisation's members can receive it.
+mcp/mail/send {
+  to: "alice@corp.example"
+}
+expect allow
+
+# Writes after a read still run: nothing a later read returns is trusted.
+mcp/xmemory/write_async {
+  text: "Bob reviews the Q3 launch plan."
+}
+expect allow
+
+mcp/xmemory/write {
+  text: ""
+  structured_mutations: [{"object_mutation": {"object_type": "Person", "delete": {"key": {"name": "Bob"}}}}]
+}
+expect allow
+
+mcp/xmemory/write_async {
+  structured_mutations: [{"object_mutation": {"object_type": "Person", "update": {"key": {"name": "Alice"}, "values": {"role": "Launch owner"}}}}]
+}
+expect allow
+
+# Schema decisions after a read need trusted data.
+mcp/xmemory/decide_suggestions {
+  proposal_version: "v2"
+  decisions: [{"item_fingerprint": "f2", "decision": "reject"}]
+}
+expect authority xmemory-operator
+
+# Owner instructions reach every agent on the instance.
+mcp/xmemory/admin_patch_instance_metadata_by_id {
+  instance_id: "00000000-0000-0000-0000-000000000000"
+  agent_owner_instructions: "Answer in English."
+}
+expect authority xmemory-operator
+
+# Applying a schema migration is reviewed.
+mcp/xmemory/update_instance_schema {
+  schema_yml: "xmd_version: v1\ntitle: Team memory\nobjects:\n  Person:\n    description: A teammate.\n    fields:\n      name:\n        type: str\n        required: true\n        description: Full name.\n      role:\n        type: str\n        required: false\n        description: Current role on the team.\n      email:\n        type: str\n        required: false\n        description: Work email address.\n    primary_key:\n    - name\nrelations: {}\n"
+}
+expect authority xmemory-operator
+
+# Instance deletion on the admin server is reviewed.
+mcp/xmemory/admin_delete_instance_by_id {
+  instance_id: "00000000-0000-0000-0000-000000000000"
+}
+expect authority xmemory-operator

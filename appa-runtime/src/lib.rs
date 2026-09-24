@@ -53,4 +53,5 @@ mod events;
 mod external;
 mod llm;
 mod recorder;
+mod telemetry;
 pub mod yell;

@@ -304,8 +304,8 @@ fn resolve_recipients(spec: &RecipientSpec, reads: CallReads<'_>) -> Option<Decl
             })
         }
         (RecipientSpec::Selector(placeholder), CallReads::Resolved(call)) => {
-            placeholder.instantiate(call.arguments()).ok().map(|group| {
-                DeclaredAudience::Union(Clause::new([], [group], []).expect("a group clause names no reader"))
+            placeholder.instantiate(call.arguments()).ok().map(|groups| {
+                DeclaredAudience::Union(Clause::new([], groups, []).expect("a group clause names no reader"))
             })
         }
     }

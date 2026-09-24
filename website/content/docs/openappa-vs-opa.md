@@ -2,6 +2,7 @@
 title: OpenAPPA vs OPA
 category: Comparison
 order: 10.7
+oversimplified: "Like Cedar and Dogwood, OPA gives you if-else rules to allow or block tool calls for a specific use case; OpenAPPA's configuration is data-specific and use-case-agnostic: its engine derives decisions from the data flow."
 ---
 
 [Open Policy Agent (OPA)](https://www.openpolicyagent.org/docs) is a general-purpose policy engine used across applications and infrastructure. For AI agents, OPA can check which tools an agent may call and which arguments are allowed (see the [AI Tool Calling example on OPA’s homepage](https://www.openpolicyagent.org/)). But OPA does not automatically know what the agent has read or done earlier. Those actions affect a decision only if your application makes that history available and your policies use it. Your application then allows or blocks the tool call based on the decision.
@@ -20,7 +21,7 @@ OpenAPPA is an agentic security framework with a language for defining security 
 | | OPA | OpenAPPA |
 |---|---|---|
 | Deployment | [HTTP service, embedded Go library, or compiled WebAssembly policies](https://www.openpolicyagent.org/docs/integration) | Run alongside your agent process or deploy as a shared Kubernetes service |
-| Agent connection | Your application or an integration requests and enforces decisions | Use supplied [Claude Code](/claude-code) and [kagent](/kagent) integrations, or [connect your existing agent](/writing-an-integration) |
+| Agent connection | Your application or an integration requests and enforces decisions | Use supplied [Claude Code](/claude-code) and [kagent](/kagent) integrations, or [connect your existing agent](/add-to-agent) |
 
 OPA can [use external data to make policy decisions](https://www.openpolicyagent.org/docs/external-data), but your application must supply the agent's history and keep it up to date. Your integration then enforces the decision.
 

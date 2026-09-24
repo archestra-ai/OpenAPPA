@@ -188,6 +188,6 @@ The agent can still finish useful work with private data, but sharing it outside
 ## Next steps
 
 - [Policy configuration](/contracts): Syntax and requirements for policy declarations and component services.
-- [How to add it to your agent](/writing-an-integration): Integration guide, deployment models, and existing integrations.
+- [How to add it to your agent](/add-to-agent): Integration guide, deployment models, and existing integrations.
 - [Benchmarks](/evaluation): Empirical paper results on multi-step workflows and bench-corp.
 - [OpenAPPA Paper](/paper): Formal information-flow model, theorems, and experimental methodology.

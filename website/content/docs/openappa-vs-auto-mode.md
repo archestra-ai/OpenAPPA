@@ -3,6 +3,7 @@ title: OpenAPPA vs Agent Auto-Modes
 category: Comparison
 order: 10.8
 description: Comparing OpenAPPA's deterministic information-flow control with Claude Code's auto mode and Codex's auto-review.
+oversimplified: "Auto-modes ask a second model to guess whether a call is safe with some probability; OpenAPPA computes it from where the data came from, so there is 100% confidence in no data leaks."
 ---
 
 [Claude Code's auto mode](https://code.claude.com/docs/en/permission-modes#eliminate-prompts-with-auto-mode) and [Codex's auto-review](https://learn.chatgpt.com/docs/sandboxing/auto-review) are designed to reduce prompt fatigue by delegating boundary checks to a secondary model. In Claude Code, a background classifier evaluates shell commands and tool calls against heuristics and conversation boundaries. In Codex, an `auto_review` agent evaluates sandbox escalation requests against a Markdown policy prompt (`policy.md`).

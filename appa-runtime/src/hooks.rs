@@ -1,6 +1,7 @@
 //! The hook dispatcher: one canonical wire event in, one wire decision
 //! out; between them, one typed `HookEvent` and one `HookDecision`.
 
+use appa_engine::label::ReaderId;
 use appa_engine::value::DispatchId as EngineDispatchId;
 use appa_runtime_api::{
     Accepted, Actor, Adapter, HookDecision, HookEvent, ParseRefusal, ProposedCall, Ruling, SpawnRef, ToolOutcome,
@@ -24,6 +25,7 @@ type Answered = (u16, serde_json::Value);
 /// One hook call: validate the canonical wire, take in what the event observed, check what
 /// it names, dispatch, and record its outcome. Each step either hands the next one an event
 /// or answers the hook itself.
+#[tracing::instrument(target = "appa_telemetry", name = "appa.hook", skip_all)]
 pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> Answered {
     let Accepted {
         event,
@@ -106,7 +108,7 @@ fn observed(
         }
     }
     let actor = match event {
-        HookEvent::SessionStart { root } => Actor {
+        HookEvent::SessionStart { root, .. } => Actor {
             root: root.clone(),
             child: None,
         },
@@ -198,7 +200,7 @@ fn bare_hook(
 /// leave `recent_root` naming something no log can be read for.
 fn hook_root(event: &HookEvent) -> &TrajectoryId {
     match event {
-        HookEvent::SessionStart { root } => root,
+        HookEvent::SessionStart { root, .. } => root,
         HookEvent::ChildStart { root, .. } | HookEvent::ChildEnd { root, .. } => root,
         HookEvent::Prompt { actor, .. }
         | HookEvent::TurnEnd { actor }
@@ -340,7 +342,7 @@ async fn dispatch_event(
         options: presentation_options,
     };
     match event {
-        HookEvent::SessionStart { root } => dispatcher.session_start(root),
+        HookEvent::SessionStart { root, principal } => dispatcher.session_start(root, principal),
         HookEvent::Prompt { actor, .. } => dispatcher.prompt(actor),
         HookEvent::TurnEnd { actor } => dispatcher.turn_end(actor).await,
         HookEvent::ToolCall {
@@ -387,9 +389,11 @@ struct Dispatcher<'a> {
 }
 
 impl Dispatcher<'_> {
-    fn session_start(&mut self, root: TrajectoryId) -> HookDecision {
+    fn session_start(&mut self, root: TrajectoryId, principal: Option<String>) -> HookDecision {
         let runtime = self.runtime;
-        match open_or_reopen(runtime, &root) {
+        let opened = session_principal(principal.as_deref())
+            .and_then(|principal| open_or_reopen(runtime, &root, principal, self.options.clone()));
+        match opened {
             Ok(_) => match runtime.live(&root, &root) {
                 Ok(()) if runtime.file_tracking_enabled() => HookDecision::Context {
                     text: "APPA file-only mode: use appa_read_file(file_path), appa_write_file(file_path, content), \
@@ -604,7 +608,7 @@ impl Dispatcher<'_> {
     /// The child is told what its return must look like where the fork's policy shapes it;
     /// a return that crosses as spoken needs no word.
     fn child_start(&mut self, root: TrajectoryId, child: TrajectoryId, spawn: SpawnRef) -> HookDecision {
-        let root = match open_or_reopen_with_presentation(self.runtime, &root, self.options.clone()) {
+        let root = match open_or_reopen(self.runtime, &root, None, self.options.clone()) {
             Ok(session) => session,
             Err(error) => return refuse(error.to_string()),
         };
@@ -700,23 +704,40 @@ fn return_decision(said: Option<String>, decision: ChildReturnDecision) -> HookD
     }
 }
 
-fn open_or_reopen(runtime: &Runtime, root: &appa_runtime_api::TrajectoryId) -> Result<Session, EventError> {
-    open_or_reopen_with_presentation(runtime, root, EmbeddedPresentationOptions::default())
+/// The host's named principal, held to the one shape a principal takes.
+fn session_principal(spelling: Option<&str>) -> Result<Option<ReaderId>, EventError> {
+    spelling
+        .map(|spelling| {
+            appa_engine::audience::session_principal(spelling)
+                .ok_or_else(|| EventError::MalformedPrincipal(spelling.to_string()))
+        })
+        .transpose()
 }
 
-fn open_or_reopen_with_presentation(
+/// Open the root for `principal`, or reopen it when the principal it opened for is the one
+/// named. A reopen that names none continues under the principal the opening pinned.
+fn open_or_reopen(
     runtime: &Runtime,
     root: &appa_runtime_api::TrajectoryId,
+    principal: Option<ReaderId>,
     presentation: EmbeddedPresentationOptions,
 ) -> Result<Session, EventError> {
-    match runtime.session_with_presentation(root, root, presentation.clone()) {
-        Ok(session) => Ok(session),
-        Err(EventError::UnknownTrajectory) => match runtime.create_session(root.clone()) {
-            Ok(_) => runtime.session_with_presentation(root, root, presentation),
-            Err(EventError::TrajectoryExists) => runtime.session_with_presentation(root, root, presentation),
-            Err(error) => Err(error),
+    let session = match runtime.session_with_presentation(root, root, presentation.clone()) {
+        Err(EventError::UnknownTrajectory) => match runtime.create_session(root.clone(), principal.clone()) {
+            Ok(_) | Err(EventError::TrajectoryExists) => runtime.session_with_presentation(root, root, presentation)?,
+            Err(error) => return Err(error),
         },
-        Err(error) => Err(error),
+        reopened => reopened?,
+    };
+    continues_for(&session, principal.as_ref())?;
+    Ok(session)
+}
+
+/// A start that names a principal continues a session only when that session opened for it.
+fn continues_for(session: &Session, principal: Option<&ReaderId>) -> Result<(), EventError> {
+    match principal {
+        Some(named) if session.principal()?.as_ref() != Some(named) => Err(EventError::PrincipalMismatch),
+        _ => Ok(()),
     }
 }
 
@@ -796,14 +817,7 @@ where
 {
     match &actor.child {
         Some(child) => on_child(runtime, &actor.root, child, missing_start, presentation, event).await,
-        None => {
-            event(open_or_reopen_with_presentation(
-                runtime,
-                &actor.root,
-                presentation.clone(),
-            )?)
-            .await
-        }
+        None => event(open_or_reopen(runtime, &actor.root, None, presentation.clone())?).await,
     }
 }
 
@@ -818,7 +832,7 @@ async fn on_child<T, Run>(
 where
     Run: Future<Output = Result<T, EventError>>,
 {
-    let root_session = open_or_reopen_with_presentation(runtime, root, presentation.clone())?;
+    let root_session = open_or_reopen(runtime, root, None, presentation.clone())?;
     match (
         event(runtime.session_with_presentation(root, child, presentation.clone())?).await,
         missing_start,
@@ -889,7 +903,7 @@ mod tests {
     /// Claude Code hook JSON these tests are written in is translated onto the wire,
     /// and the wire decision is rendered back into Claude Code's hook answer.
     /// The event the served runtime reads from one Claude Code hook body: parsed by the
-    /// codec and derived on the wire, exactly as [`answer`] does it, so a test can put the
+    /// codec and identified on the wire, exactly as [`answer`] does it, so a test can put the
     /// same event in front of the dispatcher and read what it recorded.
     fn through_the_codec(hook: &serde_json::Value) -> Option<HookEvent> {
         let body = serde_json::to_vec(hook).expect("the fixture serializes");
@@ -1528,9 +1542,9 @@ mod tests {
         );
     }
 
-    /// The wire carries the host's raw spelling; the served adapter derives which
+    /// The wire carries the host's raw spelling; the served adapter identifies which
     /// call is the control tool. A lookalike on another server, and the bare name
-    /// a host tool could take, both derive an ordinary tool nothing covers.
+    /// a host tool could take, both identify an ordinary tool nothing covers.
     #[tokio::test]
     async fn a_lookalike_control_tool_is_checked() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -1557,7 +1571,7 @@ mod tests {
                 answer["error"]
                     .as_str()
                     .is_some_and(|detail| detail.contains(canonical)),
-                "the refusal names the derived tool: {answer}"
+                "the refusal names the identified tool: {answer}"
             );
         }
     }
@@ -1589,11 +1603,11 @@ mod tests {
         assert!(runtime.status(&TrajectoryId("cc:s1".to_string())).is_some());
     }
 
-    /// Whether a call is a spawn is derived from the raw spelling, never read off the
+    /// Whether a call is a spawn comes from tool identification, never from the
     /// wire: a `spawn` claim on an ordinary tool releases it as an ordinary call, and
     /// the spawn tool is held on the return menu with no claim at all.
     #[tokio::test]
-    async fn a_wire_spawn_claim_is_ignored_and_the_spawn_is_derived() {
+    async fn a_wire_spawn_claim_is_ignored_and_the_spawn_is_identified() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
         let adapter = appa_adapter_claude_code::adapter();
@@ -1603,8 +1617,8 @@ mod tests {
         assert_eq!(reply["decision"], "allow_call", "{reply}");
         assert!(reply.get("spawn_binding").is_none(), "no fork was prepared: {reply}");
 
-        let derived = br#"{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"s2","tool":"Agent","spawn":false,"arguments":{"prompt":"go"}}"#;
-        let (status, reply) = answer(&runtime, &adapter, derived).await;
+        let identified = br#"{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"s2","tool":"Agent","spawn":false,"arguments":{"prompt":"go"}}"#;
+        let (status, reply) = answer(&runtime, &adapter, identified).await;
         assert_eq!(status, 200, "{reply}");
         assert_eq!(
             reply["decision"], "deny_call",
@@ -1927,7 +1941,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
         let root = TrajectoryId("cc:s1".to_string());
-        handle(&runtime, HookEvent::SessionStart { root: root.clone() }).await;
+        handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: root.clone(),
+                principal: None,
+            },
+        )
+        .await;
         let binding = declared_spawn(&runtime, &root).await;
         let child = TrajectoryId("cc:s1:c1".to_string());
         handle(

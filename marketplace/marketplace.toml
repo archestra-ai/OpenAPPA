@@ -2,6 +2,10 @@
 schema = 1
 name = "appa"
 
+[packages.battery.archestra]
+path = "batteries/archestra"
+digest = "sha256:9f03eb7072dfdf97221494830ffd7dae3647b74086e99a1ce44455f07821be2c"
+
 [packages.battery.claude-code]
 path = "batteries/claude-code"
 digest = "sha256:41a83fe13a7b23303d3fbb0394142d43997cf0df4f70be06176fe08eb9edc90e"
@@ -69,6 +73,10 @@ digest = "sha256:44cbcd7b944b742b8e4f8f9d986797aa3250676d6a68d722c922994da88e931
 [packages.battery.slack]
 path = "batteries/slack"
 digest = "sha256:05683c96e66f8e8afcb66e9bfa0535bed1a226467241399aec082b687a947ede"
+
+[packages.battery.xmemory]
+path = "batteries/xmemory"
+digest = "sha256:8482c69c4a0471de2d46aea0da25d5d7a61ef5aa51e9c5097538136a1456a355"
 
 [packages.plugin.claude-code]
 path = "plugins/claude-code"

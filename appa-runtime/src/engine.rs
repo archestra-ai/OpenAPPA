@@ -495,6 +495,12 @@ impl From<&appa_engine::transition::OpeningTransitionRefusal> for ReplayRefusalC
                 ReplayRefusalClass("opening_vector_mismatch")
             }
             appa_engine::transition::OpeningTransitionRefusal::SelfFork => ReplayRefusalClass("opening_self_fork"),
+            appa_engine::transition::OpeningTransitionRefusal::MalformedPrincipal { .. } => {
+                ReplayRefusalClass("opening_malformed_principal")
+            }
+            appa_engine::transition::OpeningTransitionRefusal::ForkPrincipalMismatch => {
+                ReplayRefusalClass("opening_fork_principal_mismatch")
+            }
         }
     }
 }
@@ -816,9 +822,14 @@ impl RuntimeEngine {
     /// the bytes, not a key, because the key on the opening record is the
     /// engine's own type and is derived here — at the one boundary that names
     /// the engine crate.
-    pub fn root_opening(&self, trajectory: &TrajectoryId, policy_file: &[u8]) -> Vec<Fact> {
+    pub fn root_opening(
+        &self,
+        trajectory: &TrajectoryId,
+        policy_file: &[u8],
+        principal: Option<ReaderId>,
+    ) -> Vec<Fact> {
         self.engine
-            .open_trajectory(&engine_id(trajectory), EnginePolicyFileKey::of(policy_file))
+            .open_trajectory(&engine_id(trajectory), EnginePolicyFileKey::of(policy_file), principal)
             .expect("the engine's own opening batch validates against the empty log")
             .into_unsealed()
     }
@@ -1302,8 +1313,11 @@ impl RuntimeEngine {
         // A deployment that does not control context releases the marked call
         // unmarked, so the batch may be decided twice. The mark is all that
         // differs between the two attempts.
-        let judged =
-            self.judge_under_audience(evidence, UnresolvedAudience::Denied { tool: &call.tool }, |audience| {
+        let judged = self.judge_under_audience(
+            view.principal(),
+            evidence,
+            UnresolvedAudience::Denied { tool: &call.tool },
+            |audience| {
                 let decide = |marked: bool| {
                     let batch = ProposalBatch {
                         id: batch_id(entropy),
@@ -1330,7 +1344,8 @@ impl RuntimeEngine {
                     Err(TransitionError::SpawnUncontrolled) if spawn => decide(false),
                     decided => decided,
                 }
-            })?;
+            },
+        )?;
         let decision = match judged {
             AudienceRound::Judged(decision) => decision,
             AudienceRound::Presented(decision) => return Ok(decision),
@@ -1406,6 +1421,26 @@ impl RuntimeEngine {
         bounds: &ReturnBounds,
         presentation: &EmbeddedPresentationOptions,
     ) -> (String, Vec<OfferId>, Vec<PendingReview>, Option<RemedyDisplay>) {
+        // Export gap classes, never recipient sets, review text, or call values.
+        let gaps: BTreeSet<&str> = block
+            .block
+            .raw
+            .requirement_gaps
+            .iter()
+            .map(|gap| {
+                use appa_engine::check::Gap;
+                match gap {
+                    Gap::TrustFloor { .. } => "trust_floor",
+                    Gap::Includes { .. } => "includes",
+                    Gap::Cap { .. } => "cap",
+                    Gap::Prior(_) => "prior",
+                    Gap::NoPrior(_) => "no_prior",
+                    Gap::Attention(_) => "attention",
+                }
+            })
+            .collect();
+        tracing::Span::current().record("appa.policy.gaps", tracing::field::debug(&gaps));
+        tracing::Span::current().record("appa.policy.narrowing", block.block.raw.narrowing.is_some());
         let offers: Vec<(OfferId, PlanId)> = block
             .offers
             .iter()
@@ -1535,6 +1570,7 @@ impl RuntimeEngine {
         presentation: &EmbeddedPresentationOptions,
     ) -> Result<EngineDecision, EngineRefusal> {
         let judged = self.judge_under_audience(
+            view.principal(),
             evidence,
             UnresolvedAudience::Withheld { subject: "result" },
             |audience| {
@@ -1696,17 +1732,22 @@ impl RuntimeEngine {
                 }
             }
         };
-        let judged = self.judge_under_audience(evidence, UnresolvedAudience::OfferStands, |audience| {
-            let execution = OfferExecution {
-                trajectory: engine_id(trajectory),
-                offer: engine_offer,
-                outcome,
-                return_policy,
-                offer_nonce: engine_nonce(entropy),
-                audience: audience.clone(),
-            };
-            self.engine.handle(view, CoreEvent::ExecuteOffer(execution))
-        })?;
+        let judged = self.judge_under_audience(
+            view.principal(),
+            evidence,
+            UnresolvedAudience::OfferStands,
+            |audience| {
+                let execution = OfferExecution {
+                    trajectory: engine_id(trajectory),
+                    offer: engine_offer,
+                    outcome,
+                    return_policy,
+                    offer_nonce: engine_nonce(entropy),
+                    audience: audience.clone(),
+                };
+                self.engine.handle(view, CoreEvent::ExecuteOffer(execution))
+            },
+        )?;
         let decision = match judged {
             AudienceRound::Judged(decision) => decision,
             AudienceRound::Presented(decision) => return Ok(decision),
@@ -2055,7 +2096,7 @@ impl RuntimeEngine {
                 display: None,
             })))
         };
-        let judged = self.judge_under_audience(evidence, withheld, |audience| {
+        let judged = self.judge_under_audience(view.principal(), evidence, withheld, |audience| {
             let report = ChildReport {
                 child: engine_id(child),
                 fork: fork.clone(),
@@ -2442,11 +2483,12 @@ impl RuntimeEngine {
     /// the way `unresolved` names.
     fn judge_under_audience<T>(
         &self,
+        principal: Option<&ReaderId>,
         evidence: &[ExternalEvidence],
         unresolved: UnresolvedAudience<'_>,
         judge: impl FnOnce(&AudienceEvidence) -> Result<T, TransitionError>,
     ) -> Result<AudienceRound<T>, EngineRefusal> {
-        let act = match self.act_audience(evidence) {
+        let act = match self.act_audience(evidence, principal) {
             Ok(act) => act,
             Err(AudienceFailure::Consult(requests)) => {
                 return Ok(AudienceRound::Presented(EngineDecision::deliver(
@@ -2459,17 +2501,19 @@ impl RuntimeEngine {
         };
         match judge(&act.payload) {
             Ok(judged) => Ok(AudienceRound::Judged(judged)),
-            Err(TransitionError::MembershipNeeded { needed }) => match self.audience_consult(&act, needed)? {
-                AudienceConsult::Requests(requests) => Ok(AudienceRound::Presented(EngineDecision::deliver(
-                    Next::ResolveExternal(requests),
-                ))),
-                AudienceConsult::Unresolved(detail) => {
-                    Ok(AudienceRound::Presented(unresolved.present(&detail, self.naming)))
+            Err(TransitionError::MembershipNeeded { needed }) => {
+                match self.audience_consult(&act, needed, principal)? {
+                    AudienceConsult::Requests(requests) => Ok(AudienceRound::Presented(EngineDecision::deliver(
+                        Next::ResolveExternal(requests),
+                    ))),
+                    AudienceConsult::Unresolved(detail) => {
+                        Ok(AudienceRound::Presented(unresolved.present(&detail, self.naming)))
+                    }
+                    AudienceConsult::Unconfigured(level) => Ok(AudienceRound::Presented(
+                        unresolved.present_unconfigured(level, self.naming),
+                    )),
                 }
-                AudienceConsult::Unconfigured(level) => Ok(AudienceRound::Presented(
-                    unresolved.present_unconfigured(level, self.naming),
-                )),
-            },
+            }
             Err(error) => Ok(AudienceRound::Failed(error)),
         }
     }
@@ -2483,7 +2527,11 @@ impl RuntimeEngine {
     /// error. Under a redirected provider every qualified member a source reports seats
     /// through its lookup; the lookups still owed are this round's consults, asked before
     /// the act is judged.
-    fn act_audience(&self, evidence: &[ExternalEvidence]) -> Result<ActAudience, AudienceFailure> {
+    fn act_audience(
+        &self,
+        evidence: &[ExternalEvidence],
+        principal: Option<&ReaderId>,
+    ) -> Result<ActAudience, AudienceFailure> {
         let audience = self.engine.registry().audience();
         let mut payload = AudienceEvidence::default();
         let mut unanswered = Unanswered::default();
@@ -2536,7 +2584,7 @@ impl RuntimeEngine {
                 _ => {}
             }
         }
-        if let Err(refusal) = audience.expansions(&payload) {
+        if let Err(refusal) = audience.expansions(&payload, principal) {
             // The refusal's own Display can carry directory data (member ids, principals)
             // the model has not seen; the model-visible detail names only the failure class
             // and its provider/selector.
@@ -2576,9 +2624,14 @@ impl RuntimeEngine {
 
     /// The consults that answer the symbolic atoms an act still needs, or the operational
     /// refusal where a needed answer already failed or no registered source serves an atom.
-    fn audience_consult(&self, act: &ActAudience, needed: Vec<SymbolicAtom>) -> Result<AudienceConsult, EngineRefusal> {
+    fn audience_consult(
+        &self,
+        act: &ActAudience,
+        needed: Vec<SymbolicAtom>,
+        principal: Option<&ReaderId>,
+    ) -> Result<AudienceConsult, EngineRefusal> {
         let audience = self.engine.registry().audience();
-        let primitives = match audience.needed_primitives(&needed) {
+        let primitives = match audience.needed_primitives(&needed, principal) {
             Ok(primitives) => primitives,
             // A built-in level the policy maps to no sources is a static gap the policy
             // loads with: the check needs its members and can never obtain them.
@@ -3939,7 +3992,7 @@ mod tests {
     }
 
     fn opened_view(engine: &RuntimeEngine, trajectory: &TrajectoryId) -> EngineView {
-        let opening = engine.root_opening(trajectory, b"policy");
+        let opening = engine.root_opening(trajectory, b"policy", None);
         engine.validated(opening, trajectory, 1).expect("the opening validates")
     }
 
@@ -3975,7 +4028,7 @@ mod tests {
         let policy = annotator_policy();
         let engine = annotator_engine(&policy);
         let trajectory = TrajectoryId("t".to_string());
-        let opening = engine.root_opening(&trajectory, b"policy");
+        let opening = engine.root_opening(&trajectory, b"policy", None);
         let view = engine
             .validated(opening.clone(), &trajectory, 1)
             .expect("the opening validates");

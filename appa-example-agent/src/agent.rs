@@ -197,7 +197,13 @@ impl Agent {
         };
         let task = task.into();
 
-        if let Err(stop) = run.expect_ack(HookEvent::SessionStart { root: root.clone() }).await {
+        if let Err(stop) = run
+            .expect_ack(HookEvent::SessionStart {
+                root: root.clone(),
+                principal: None,
+            })
+            .await
+        {
             return Outcome::Stopped(stop);
         }
         let prompt = HookEvent::Prompt {

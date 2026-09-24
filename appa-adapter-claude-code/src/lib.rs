@@ -11,10 +11,10 @@
 //!    renders every `HookDecision` in the hook wire format Claude Code
 //!    expects.
 //! 2. [`adapter`] runs on the server side. From the raw spelling of one
-//!    call the runtime derives the call's canonical identity and whether
+//!    call the runtime identifies its canonical identity and whether
 //!    it is the spawn, and from a proposed call's arguments which family
 //!    children they name; the wire carries none of these, so nothing a
-//!    client sends is trusted for them. It also carries the derivation's
+//!    client sends is trusted for them. It also carries the identification's
 //!    inverse, so the runtime can say a tool's Claude Code spelling —
 //!    the name this model can dispatch — where it addresses the model.
 //!
@@ -41,13 +41,13 @@ pub fn codec() -> Codec {
     }
 }
 
-/// The server-side derivation the runtime applies to every Claude Code call. Claude
+/// The server-side identification the runtime applies to every Claude Code call. Claude
 /// Code's `Task` is its own delegation, which the wildcard covers, and `mcp__` opens the
 /// spelling of an MCP server's tool.
 pub fn adapter() -> Adapter {
     Adapter {
         name: AdapterName::ClaudeCode,
-        derive: identity::derive,
+        identify_tool: identity::identify_tool,
         names_children: children::names_children,
         spell: identity::spell,
         wildcard_covers_spawn: true,

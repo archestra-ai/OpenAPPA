@@ -38,7 +38,7 @@ pub(crate) fn render(event: &HookEvent, decision: &HookDecision) -> serde_json::
         },
         // What stands in for the body the model asked for: an admitted value, or the
         // runtime's own words about the result. Claude Code dispatches the spellings this
-        // adapter derives from, so nothing here is spelled back and both render alike.
+        // adapter identifies from, so nothing here is spelled back and both render alike.
         HookDecision::ReplaceOutput { output } | HookDecision::DeliverValue { value: output } => {
             match replacement(event, output) {
                 Some(replacement) => replaced(replacement, None),
@@ -429,7 +429,10 @@ mod tests {
     fn session_start_context_reaches_the_root_actor() {
         assert_eq!(
             render(
-                &HookEvent::SessionStart { root: root() },
+                &HookEvent::SessionStart {
+                    root: root(),
+                    principal: None
+                },
                 &HookDecision::Context {
                     text: "available file tools".into()
                 },
@@ -590,7 +593,10 @@ mod tests {
         let table: [(&str, HookEvent, [&str; 10]); 9] = [
             (
                 "session start",
-                HookEvent::SessionStart { root: root() },
+                HookEvent::SessionStart {
+                    root: root(),
+                    principal: None,
+                },
                 [
                     "empty", "allow", "allow", "deny", "block", "block", "block", "block", "context", "error",
                 ],
