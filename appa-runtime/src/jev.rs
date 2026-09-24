@@ -266,8 +266,8 @@ impl JevBackend {
             }
         };
         // What is still in flight lost the race or ran out the budget. A connection that
-        // has gone unanswered past its hedge delay is slow, and is forgotten before the
-        // winner's is adopted.
+        // has gone unanswered past its hedge delay, or to the end of the budget, is slow,
+        // and is forgotten before the winner's is adopted.
         let unsettled = match &settled {
             Err((_, NoAnswerReason::Timeout)) => AttemptOutcome::Timeout,
             _ => AttemptOutcome::Hedged,
@@ -275,7 +275,7 @@ impl JevBackend {
         for (outcome, (slot, at, patience)) in exchange.attempts.iter_mut().zip(&launched) {
             if outcome.is_none() {
                 *outcome = Some(unsettled);
-                if at.elapsed() > *patience {
+                if unsettled == AttemptOutcome::Timeout || at.elapsed() > *patience {
                     pool.evict(slot);
                 }
             }
@@ -1602,6 +1602,21 @@ mod tests {
             "{elapsed:?}"
         );
         assert_eq!(attempts(&record), json!(["timeout", "timeout"]));
+    }
+
+    /// A new connection that hangs past a budget shorter than the cold hedge delay is
+    /// never hedged, and never kept either: the next consult opens its own.
+    #[tokio::test]
+    async fn a_connection_unanswered_at_the_deadline_is_not_kept() {
+        let (url, stub) = serve(vec![Scripted::Late(Duration::from_secs(30)), Scripted::Answers], vec![]).await;
+        let jev = backend(&url, FAST.cold_hedge_delay, FAST);
+        let (answered, record) = jev.consult(&call()).await;
+        assert_eq!(answered, Err(NoAnswerReason::Timeout));
+        assert_eq!(attempts(&record), json!(["timeout"]));
+        let (answered, record) = jev.consult(&call()).await;
+        assert_eq!(answered, Ok(jev_annotation()));
+        assert_eq!(attempts(&record), json!(["ok"]));
+        assert_eq!(stub.per_connection(), [1, 1]);
     }
 
     /// A warm connection answers, but only after the hedge delay; the hedge's connection is

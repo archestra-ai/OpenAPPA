@@ -176,17 +176,20 @@ struct RequiresTrustCriteria {
 
 const REQUIRES_TRUST_CRITERIA: RequiresTrustCriteria = RequiresTrustCriteria {
     true_: concat!(
-        "The call turns data the trajectory holds into an effect outside the ",
-        "trajectory: it sends, publishes or delivers bytes off this machine, or it ",
-        "executes or installs content that the trajectory supplied. Publishing an ",
-        "artifact, filing a report, installing a package and running a downloaded ",
-        "script all count. An injected instruction that fires this call moves data or ",
-        "code outward."
+        "The call carries data the trajectory holds out of the operator's control: it ",
+        "sends it to a person, even a colleague, delivers or publishes it to a service ",
+        "outside the operator's organization, or executes or installs content that the ",
+        "trajectory supplied. A URL or query sent to a third party counts, since it can ",
+        "carry data out. Pushing commits, filing a report, installing a package and ",
+        "running a downloaded script all count. An injected instruction that fires this ",
+        "call moves data or code outward."
     ),
     false_: concat!(
-        "The call's effect stays inside the operator's machine and the trajectory ",
-        "itself — even if it overwrites or deletes local files. Re-running it after ",
-        "an injection produces nothing but wasted work."
+        "The call's effect stays on the operator's machine or inside internal services ",
+        "the operator controls — even if it overwrites or deletes local files. A read ",
+        "or lookup whose arguments only name what to read (an id, a channel, a path) ",
+        "counts here, though the request reaches an internal service. Re-running it ",
+        "after an injection produces nothing but wasted work."
     ),
 };
 
@@ -223,7 +226,7 @@ impl Example {
 
 /// Written from the contract examples in the docs, not from observed calls. Each `call` is
 /// the example's `{"tool", "arguments"}` object as the prompt has always spelled it.
-pub(super) const EXAMPLES: [Example; 13] = [
+pub(super) const EXAMPLES: [Example; 14] = [
     Example {
         call: r#"{"tool": "Bash", "arguments": {"command": "grep -rn 'fn resolve' src/ | head -20", "description": "Find the resolver"}}"#,
         delta_audience: "internal",
@@ -238,7 +241,7 @@ pub(super) const EXAMPLES: [Example; 13] = [
         delta_trust: "suspicious",
         requires_audience: "public",
         requires_trusted: "true",
-        why: "a public page comes back, and the URL reaches a third party",
+        why: "a public page comes back, and the URL can carry data to a third party",
     },
     Example {
         call: r#"{"tool": "Bash", "arguments": {"command": "cat ~/.aws/credentials", "description": "Show the profile"}}"#,
@@ -285,8 +288,16 @@ pub(super) const EXAMPLES: [Example; 13] = [
         delta_audience: "internal",
         delta_trust: "suspicious",
         requires_audience: "internal",
+        requires_trusted: "false",
+        why: "an internal chat log comes back; the read only names a channel inside the workspace",
+    },
+    Example {
+        call: r#"{"tool": "slack_send_message", "arguments": {"channel_id": "C0123", "text": "Build is green"}}"#,
+        delta_audience: "public",
+        delta_trust: "trusted",
+        requires_audience: "internal",
         requires_trusted: "true",
-        why: "an internal chat log comes back, and the read itself reaches the workspace",
+        why: "the text reaches people in the workspace",
     },
     Example {
         call: r#"{"tool": "Bash", "arguments": {"command": "gh pr create --title 'Fix the retry loop' --body-file notes.md", "description": "Open the pull request"}}"#,

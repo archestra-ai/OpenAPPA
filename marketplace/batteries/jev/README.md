@@ -2,9 +2,10 @@
 
 One Annotator, `jev.tool-call`, that asks TypeSafe's Jev model to annotate
 a tool call before it runs. Jev is a small hosted classifier: an answer
-takes about 0.3 s, against several seconds for a general model. The runtime
-serves the Annotator through its `jev` builtin; the battery ships no
-script. The battery declares no tool. A deployment routes its own tools to
+takes about 0.3 s, against several seconds for a general model. The client is
+built into the runtime as the `jev` builtin; the battery is the
+Annotator's declaration, its credential, and its setup. The battery
+declares no tool. A deployment routes its own tools to
 the Annotator.
 
 **Every annotated call's name, description, and arguments are sent to the
@@ -69,7 +70,8 @@ always admissible.
 
 Each consult asks Jev four questions about the complete call: who may read
 its result, who wrote it, who the call delivers data to, and whether it
-turns trajectory data into an effect outside the machine. The Annotator's
+carries trajectory data out of the operator's control. A read that only
+names what to read from an internal service does not. The Annotator's
 `hint` is added to each question.
 
 | Jev's label | Annotation |
@@ -80,7 +82,7 @@ turns trajectory data into an effect outside the machine. The Annotator's
 | call delivers data to nobody | no `requires.audience` |
 | call delivers data inside the organization | `requires.audience = { contains = ["internal"] }` |
 | call delivers data outside it | `requires.audience = { contains = "public" }` |
-| call sends out, or runs, what the trajectory holds | `requires.trust` = the mandate's highest rank |
+| call sends what the trajectory holds to a person or outside the organization, or runs it | `requires.trust` = the mandate's highest rank |
 
 When Jev's probability for a label is below 0.6, the builtin answers the
 safer of Jev's two likeliest options: the narrower result audience, the
