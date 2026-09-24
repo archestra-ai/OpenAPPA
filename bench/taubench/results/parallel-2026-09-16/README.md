@@ -54,7 +54,7 @@ OpenRouter spending limits interrupted both runs. Exact resume retained valid sc
 
 [summary.json](summary.json) contains matched outcomes, sequential-to-parallel transitions, aggregate metrics, and parallel-call diagnostics. The [guarded](guarded-run-summary.json) and [permissive](permissive-run-summary.json) run summaries retain the authoritative per-arm figures. The [guarded](guarded-config.json) and [permissive](permissive-config.json) configurations retain the exact experiment identities.
 
-The [archive index](archive-index.json) specifies the complete evidence bundle. It contains final runs, pre-resume snapshots, retry logs, audits, and these committed result artifacts. Both component archives and the combined bundle were rebuilt twice with identical bytes.
+The [archive index](archive-index.json) specifies the complete evidence bundle. Its 11 outer payload files include two component archives. Their manifests cover 3,545 guarded files and 5,390 permissive files: final runs, pre-resume snapshots, retry logs, audits, and these committed result artifacts. Both component archives and the combined bundle were rebuilt twice with identical bytes.
 
 - **Size:** 504,615,088 bytes
 - **SHA-256:** `5d141d1b4789bb2d4a60eaea1a1d22d2a720493f858bfc91fbba92926910c1d1`
@@ -71,7 +71,12 @@ Authenticated project contributors can retrieve and verify the bundle:
 prefix=gs://archestra-appa-bench-archive/bench/taubench/e6ed6ba5a66cff0c6ebc9883425df06f98ee6ce2/tau-knowledge-parallel-2026-09-16
 archive=tau-knowledge-parallel-2026-09-16-5d141d1b4789bb2d4a60eaea1a1d22d2a720493f858bfc91fbba92926910c1d1.tar.zst
 
-gcloud storage cp "$prefix/$archive" .
+gcloud storage cp "$prefix/$archive" "$prefix/index.json" .
 echo "5d141d1b4789bb2d4a60eaea1a1d22d2a720493f858bfc91fbba92926910c1d1  $archive" \
   | sha256sum --check --strict
+echo "5e4b567ea27d7dc4d58534a9af258223ea730c2fc6e32520710ab7006456d247  index.json" \
+  | sha256sum --check --strict
+
+tar --zstd -tf "$archive"
+tar --zstd -xf "$archive"
 ```

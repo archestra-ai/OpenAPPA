@@ -13,10 +13,14 @@ The original guarded run exceeded 10 GiB of memory at peak. A smaller machine ca
 
 ## 1. Install the pinned environment
 
-From the repository root:
+Create a clean worktree at the recorded producer commit. Do not run the experiment from the current default branch because later implementation changes produce a different identity.
+
+From an OpenAPPA repository root:
 
 ```sh
-cd bench/taubench
+git worktree add ../OpenAPPA-taubench-parallel \
+  e6ed6ba5a66cff0c6ebc9883425df06f98ee6ce2
+cd ../OpenAPPA-taubench-parallel/bench/taubench
 
 npm install -g @anthropic-ai/sandbox-runtime@0.0.23
 
