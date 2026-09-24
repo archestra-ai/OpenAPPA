@@ -42,6 +42,32 @@ checksum = "sha256:741120655b10b0134bc3189fb1d8ca9d899e55931182a3df309b8f3dd0a3f
 url = "https://github.com/anthropics/claude-code/releases/download/v2.1.266/claude-win32-x64.zip"
 url_api = "https://api.github.com/repos/anthropics/claude-code/releases/assets/551525641"
 
+[[tools.gcloud]]
+version = "586.0.0"
+backend = "vfox:mise-plugins/vfox-gcloud"
+specifiers = ["586.0.0"]
+
+[tools.gcloud."platforms.linux-arm64"]
+url = "https://storage.googleapis.com/cloud-sdk-release/google-cloud-sdk-586.0.0-linux-arm.tar.gz"
+
+[tools.gcloud."platforms.linux-arm64-musl"]
+url = "https://storage.googleapis.com/cloud-sdk-release/google-cloud-sdk-586.0.0-linux-arm.tar.gz"
+
+[tools.gcloud."platforms.linux-x64"]
+url = "https://storage.googleapis.com/cloud-sdk-release/google-cloud-sdk-586.0.0-linux-x86_64.tar.gz"
+
+[tools.gcloud."platforms.linux-x64-musl"]
+url = "https://storage.googleapis.com/cloud-sdk-release/google-cloud-sdk-586.0.0-linux-x86_64.tar.gz"
+
+[tools.gcloud."platforms.macos-arm64"]
+url = "https://storage.googleapis.com/cloud-sdk-release/google-cloud-sdk-586.0.0-darwin-arm.tar.gz"
+
+[tools.gcloud."platforms.macos-x64"]
+url = "https://storage.googleapis.com/cloud-sdk-release/google-cloud-sdk-586.0.0-darwin-x86_64.tar.gz"
+
+[tools.gcloud."platforms.windows-x64"]
+url = "https://storage.googleapis.com/cloud-sdk-release/google-cloud-sdk-586.0.0-windows-x86_64-bundled-python.zip"
+
 [[tools.go]]
 version = "1.26.8"
 backend = "core:go"
