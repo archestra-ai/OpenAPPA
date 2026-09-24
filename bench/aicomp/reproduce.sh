@@ -30,4 +30,4 @@ if [ "$failed" -ne 0 ]; then
   exit 1
 fi
 
-uv run python -m appa_aicomp.headline --corpus "$OUT"/corpus-* --triage "$OUT"/triage-*
+uv run python -m appa_aicomp.headline --corpus "$OUT"/corpus-*/ --triage "$OUT"/triage-*/
