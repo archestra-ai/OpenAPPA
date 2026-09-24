@@ -600,7 +600,9 @@ mod tests {
         let artifacts = installation.state.join("artifacts");
         fs::create_dir(&artifacts).unwrap();
         fs::write(artifacts.join(ArtifactDigest::of_bytes(b"artifact").hex()), b"artifact").unwrap();
-        installation.commit_config(None, text.as_bytes(), &selection).unwrap();
+        installation
+            .commit_installation(None, text.as_bytes(), &selection)
+            .unwrap();
         installation
     }
 
@@ -654,7 +656,7 @@ mod tests {
         replica_install.retain(&imported).unwrap();
         let (selected, imported_text) = imported.imported().unwrap().configuration(&replica_install).unwrap();
         replica_install
-            .commit_config(None, imported_text.as_bytes(), &selected)
+            .commit_installation(None, imported_text.as_bytes(), &selected)
             .unwrap();
         assert!(imported_text.contains("# authored comment"));
         let retained = replica_install.selected_files(&selected).unwrap().unwrap();
@@ -683,7 +685,9 @@ mod tests {
             .unwrap()
             .configuration(&third_install)
             .unwrap();
-        third_install.commit_config(None, text.as_bytes(), &selected).unwrap();
+        third_install
+            .commit_installation(None, text.as_bytes(), &selected)
+            .unwrap();
         execute_helpers(third_install.config_path());
         let member = retained.manifest.declared["root.sh"].clone();
         fs::write(retained.root.join(member), "changed").unwrap();

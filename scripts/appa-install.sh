@@ -23,9 +23,17 @@ fail() {
 }
 
 command -v curl >/dev/null 2>&1 || fail "curl is required"
+# The digest comes from the same host as the archive, so the transport must be
+# HTTPS, redirects included. Only appa-install-test.sh's loopback release is
+# served over plain HTTP.
+case $repository in
+  http://127.0.0.1:*) protocols=http,https ;;
+  *) protocols=https ;;
+esac
 # A stalled release host fails the install instead of holding the shell.
 fetch() {
-  curl -fsS --connect-timeout 15 --speed-limit 1024 --speed-time 30 "$@"
+  curl -fsS --proto "=$protocols" --proto-redir "=$protocols" \
+    --connect-timeout 15 --speed-limit 1024 --speed-time 30 "$@"
 }
 
 if command -v sha256sum >/dev/null 2>&1; then
