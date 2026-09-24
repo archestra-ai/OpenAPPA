@@ -5,7 +5,6 @@
   "implementation_sha256": "521484361e16585f611f89358622c1339a76794c040e451309e6d98cfca7bf5a",
   "run_id": "tau-knowledge-parallel-2026-09-16",
   "archive": "tau-knowledge-parallel-2026-09-16-5d141d1b4789bb2d4a60eaea1a1d22d2a720493f858bfc91fbba92926910c1d1.tar.zst",
-  "local_archive_path": "bench/taubench/runs/publication-bundles/tau-knowledge-parallel-2026-09-16/tau-knowledge-parallel-2026-09-16-5d141d1b4789bb2d4a60eaea1a1d22d2a720493f858bfc91fbba92926910c1d1.tar.zst",
   "sha256": "5d141d1b4789bb2d4a60eaea1a1d22d2a720493f858bfc91fbba92926910c1d1",
   "archive_bytes": 504615088,
   "source_file_count": 11,
@@ -37,5 +36,10 @@
     "combined_archive_rebuilt_identically_twice": true,
     "credential_and_local_path_scan": "passed after full component extraction"
   },
-  "published": false
+  "published": true,
+  "publication": {
+    "gcs_prefix": "gs://archestra-appa-bench-archive/bench/taubench/e6ed6ba5a66cff0c6ebc9883425df06f98ee6ce2/tau-knowledge-parallel-2026-09-16/",
+    "relay_index_sha256": "5e4b567ea27d7dc4d58534a9af258223ea730c2fc6e32520710ab7006456d247",
+    "verified_workflow": "https://github.com/archestra-ai/OpenAPPA/actions/runs/36029310446"
+  }
 }

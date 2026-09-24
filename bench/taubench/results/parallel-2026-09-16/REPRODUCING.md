@@ -153,4 +153,6 @@ The generated summary requires identical task, trial, and seed identities across
 
 ## Evidence boundary
 
-The committed summaries and configurations identify and rerun the experiment. The original complete evidence bundle contains trajectories, audits, retry logs, and snapshots. [`archive-index.json`](archive-index.json) identifies it, but the bundle remains local and unpublished. It is not required for replication. A new run produces its own `results.json`, `appa-audit/`, `evaluator-audit/`, `run-config.json`, and `run-summary.json`.
+The original evidence bundle is not required for replication. The committed summaries and configurations identify the experiment and reproduce its setup. A new run produces its own `results.json`, `appa-audit/`, `evaluator-audit/`, `run-config.json`, and `run-summary.json`.
+
+The original bundle retains the trajectories, audits, retry logs, and snapshots for independent review. [`archive-index.json`](archive-index.json) records its private GCP location and checksum. Authenticated project contributors can retrieve it with the commands in [`README.md`](README.md).

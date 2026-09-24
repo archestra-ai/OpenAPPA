@@ -54,4 +54,24 @@ OpenRouter spending limits interrupted both runs. Exact resume retained valid sc
 
 [summary.json](summary.json) contains matched outcomes, sequential-to-parallel transitions, aggregate metrics, and parallel-call diagnostics. The [guarded](guarded-run-summary.json) and [permissive](permissive-run-summary.json) run summaries retain the authoritative per-arm figures. The [guarded](guarded-config.json) and [permissive](permissive-config.json) configurations retain the exact experiment identities.
 
-The [archive index](archive-index.json) identifies the deterministic complete evidence bundle. The bundle contains final runs, pre-resume snapshots, retry logs, audits, and these committed result artifacts. Both component archives and the combined bundle rebuilt byte-for-byte. The bundle remains local and has not been published.
+The [archive index](archive-index.json) specifies the complete evidence bundle. It contains final runs, pre-resume snapshots, retry logs, audits, and these committed result artifacts. Both component archives and the combined bundle were rebuilt twice with identical bytes.
+
+- **Size:** 504,615,088 bytes
+- **SHA-256:** `5d141d1b4789bb2d4a60eaea1a1d22d2a720493f858bfc91fbba92926910c1d1`
+- **Verification:** [GitHub Actions run 36029310446](https://github.com/archestra-ai/OpenAPPA/actions/runs/36029310446) downloaded the GCP object, verified its SHA-256, compared the uploaded index byte-for-byte, and then deleted the draft relay release.
+- **Private storage:**
+
+```text
+gs://archestra-appa-bench-archive/bench/taubench/e6ed6ba5a66cff0c6ebc9883425df06f98ee6ce2/tau-knowledge-parallel-2026-09-16/
+```
+
+Authenticated project contributors can retrieve and verify the bundle:
+
+```sh
+prefix=gs://archestra-appa-bench-archive/bench/taubench/e6ed6ba5a66cff0c6ebc9883425df06f98ee6ce2/tau-knowledge-parallel-2026-09-16
+archive=tau-knowledge-parallel-2026-09-16-5d141d1b4789bb2d4a60eaea1a1d22d2a720493f858bfc91fbba92926910c1d1.tar.zst
+
+gcloud storage cp "$prefix/$archive" .
+echo "5d141d1b4789bb2d4a60eaea1a1d22d2a720493f858bfc91fbba92926910c1d1  $archive" \
+  | sha256sum --check --strict
+```
