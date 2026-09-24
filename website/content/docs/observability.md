@@ -2,31 +2,23 @@
 title: Observability
 category: Operations
 order: 9
-description: Investigate agent activity in your existing observability tools and use the evidence to improve appa.toml policies.
+description: Export bounded runtime telemetry to your existing observability tools and use it to investigate agent activity.
 ---
 
-> **In progress:** The exporter is under development. The names, settings, and examples below define a proposed interface. They are not available in the current runtime.
+OpenAPPA exports traces, logs, and metrics through OpenTelemetry (OTEL). You can send this telemetry to an OTEL-compatible collector or provider.
 
-OpenAPPA sends metrics, logs, and analytics to observability providers that accept OpenTelemetry (OTEL), including Grafana Cloud, Datadog, and New Relic. Use your existing dashboards and alerts to investigate agent activity, measure policy-check time, and find restrictions that interrupt legitimate work.
+The export covers tool proposal checks, external calls, store failures, remedies, hooks, and agent reports. Policy-check time includes external and storage time. It excludes agent model inference and tool execution. An Annotator's model call counts as external-call time.
 
-- **Tool calls:** what APPA allowed or blocked, and why.
-- **Trajectories:** the decisions and tool calls associated with a trace ID.
-- **Information flows:** which sources contributed to a value and where the agent tried to send it.
-- **Audiences and trust:** who may receive the data, how APPA labels it, and which restriction prevents a flow.
-- **Remedies:** which plans APPA offered, which the agent tried, and whether they succeeded.
-- **Policy checks:** time spent evaluating policy or waiting for external services, including failures.
-- **[`appa yell` reports](/yell):** feedback linked to the decisions that prompted it.
-
-`appa yell` sends feedback and filtered policy records to your observability provider. Use the trace ID to find the related decisions and tool calls. The attached records exclude raw prompts, arguments, and tool results. The report message is sent as written.
+The runtime exports only events with the `appa_telemetry` target. The `-v` and `-vv` options change stderr detail independently. The exporter does not capture function arguments.
 
 ## OpenTelemetry export
 
 ### Configuration
 
-Set these variables on the process that runs APPA, then restart that process:
+Set the collector base URL on the process that runs APPA. Then restart that process.
 
 ```sh
-export OPENAPPA_OTEL_URL="http://localhost:4318"
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"
 export OTEL_SERVICE_NAME="appa-runtime"
 export OTEL_RESOURCE_ATTRIBUTES=\
 "deployment.environment.name=staging"
@@ -34,16 +26,21 @@ export OTEL_RESOURCE_ATTRIBUTES=\
 
 | Variable | Purpose |
 |---|---|
-| `OPENAPPA_OTEL_URL` | Collector base URL. Unset disables export. |
-| `OTEL_SERVICE_NAME` | Service name shown in your backend. Defaults to `appa-runtime`. |
-| `OTEL_RESOURCE_ATTRIBUTES` | Comma-separated attributes attached to exported records, such as deployment environment and version. |
-| `OTEL_EXPORTER_OTLP_HEADERS` | Optional collector authentication headers. Supply through your secret manager. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Required collector base URL. If unset or empty, APPA does not start the exporter. |
+| `OTEL_SERVICE_NAME` | Service name shown in your backend. The default is `appa-runtime`. |
+| `OTEL_RESOURCE_ATTRIBUTES` | Comma-separated resource attributes, such as the deployment environment. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Optional collector authentication headers. Supply them through your secret manager. |
+| `OTEL_SDK_DISABLED` | Set to `true` to disable export, even when an endpoint is set. |
 
-APPA uses the OpenTelemetry Protocol (OTLP) over HTTP with protobuf encoding. It appends `/v1/logs` and `/v1/metrics` to `OPENAPPA_OTEL_URL`. Use a collector address reachable from the runtime. Inside a container, `localhost` refers to that container.
+APPA exports OTLP over HTTP with protobuf encoding. It uses `/v1/traces`, `/v1/logs`, and `/v1/metrics` under the base URL. Inside a container, `localhost` refers to that container.
+
+Every record includes `service.name`. APPA also sets `service.version` to the runtime package version. The OTEL SDK adds configured resource attributes.
+
+Enabling export is operator consent to send this bounded telemetry. Names, identifiers, and agent report messages can still contain sensitive information. Restrict access and retention in your collector and provider.
 
 ### Collector setup
 
-Enable an OTLP HTTP receiver and both log and metric pipelines in your OpenTelemetry Collector. For a local test, this configuration prints received telemetry to the Collector's output:
+Enable an OTLP HTTP receiver and trace, log, and metric pipelines. This local configuration prints received telemetry to the collector output:
 
 ```yaml
 receivers:
@@ -58,6 +55,9 @@ exporters:
 
 service:
   pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [debug]
     logs:
       receivers: [otlp]
       exporters: [debug]
@@ -66,47 +66,42 @@ service:
       exporters: [debug]
 ```
 
-The example accepts connections from the same host only. If APPA runs elsewhere, change the receiver address and allow connections only from APPA.
+This example accepts connections from the same host only. If APPA runs elsewhere, change the receiver address. Permit connections only from APPA.
 
-To send data to your provider, replace `debug` in both pipelines with its exporter and configure its credentials.
+To send data to a provider, replace `debug` in each pipeline with the provider exporter. Then configure its credentials.
 
-Run an agent tool call, then search your provider for `appa.policy.decision` under `appa-runtime`, or the service name you set.
-
-Restrict who can read the telemetry and how long your provider keeps it. Tool names, audience identifiers, and report messages can contain sensitive information.
-
-## Let your agent improve appa.toml
-
-Your observability tools or an agent can flag unusual patterns, such as repeated attempts to send restricted data to new recipients. These patterns warrant investigation but do not, by themselves, prove an attack.
-
-Your agent can periodically review decisions and [`appa yell` reports](/yell) in a “dream” cycle. For a task that repeatedly gets blocked, it can [propose a change to `appa.toml`](/self-improving-policies#improve-policies-from-yell-reports) and test it against allowed and prohibited calls.
-
-Compare interruptions, successful remedies, and policy-check time before and after a change. This tells your team whether the change makes agents more useful. Tests of prohibited calls check that the policy still enforces the restrictions you intend to keep.
+Run an agent tool proposal. Search the provider for `appa.policy.decision` under the configured service name.
 
 ## Metrics
 
-APPA exports the following metrics. Names below use the Prometheus format, including `_total` for counters and `_seconds` for durations.
+The table shows Prometheus mappings. OTLP uses the dotted names without Prometheus counter and unit suffixes.
 
-| Metric | Type | Labels |
-|---|---|---|
-| `appa_policy_decisions_total` | Counter | `tool_name`, `outcome` |
-| `appa_policy_check_duration_seconds` | Histogram | `outcome` |
-| `appa_external_calls_total` | Counter | `external_name`, `role`, `outcome` |
-| `appa_external_call_duration_seconds` | Histogram | `external_name`, `role`, `outcome` |
-| `appa_remedy_attempts_total` | Counter | `outcome` |
-| `appa_remedy_duration_seconds` | Histogram | `outcome` |
-| `appa_yell_reports_total` | Counter | `source` |
-| `appa_runtime_failures_total` | Counter | `component`, `error_type` |
+| Prometheus mapping | OTLP name | Type | Labels |
+|---|---|---|---|
+| `appa_policy_decisions_total` | `appa.policy.decisions` | Counter | `outcome` |
+| `appa_policy_check_duration_seconds` | `appa.policy.check.duration` | Histogram, seconds | `outcome` |
+| `appa_external_calls_total` | `appa.external.calls` | Counter | `role`, `outcome` |
+| `appa_external_call_duration_seconds` | `appa.external.call.duration` | Histogram, seconds | `role`, `outcome` |
+| `appa_remedy_attempts_total` | `appa.remedy.attempts` | Counter | `outcome` |
+| `appa_remedy_duration_seconds` | `appa.remedy.duration` | Histogram, seconds | `outcome` |
+| `appa_yell_reports_total` | `appa.yell.reports` | Counter | `source` |
+| `appa_runtime_failures_total` | `appa.runtime.failures` | Counter | `component`, `error_type` |
+| `appa_runtime_uptime_seconds` | `appa.runtime.uptime` | Gauge, seconds | none |
 
-Policy decisions use `outcome="allowed"` or `outcome="denied"`. Failed checks, such as an unreachable service, count as runtime failures rather than policy denials. Policy-check durations exclude model inference and agent tool execution. External-call and remedy durations include time spent waiting for their responses.
+The policy metrics measure tool proposal checks only. The decision counter uses `allowed` and `denied`. The duration histogram also uses `error` for failed checks. External outcomes are `answered` or `no_answer`. Remedy outcomes are `executed`, `declined`, `no_answer`, or `refused`. Agent reports use `source="agent"`.
 
-Individual trace, trajectory, call, and audience-member IDs stay in logs to avoid creating a metric series for every identifier.
+Remedy metrics cover attempts with a valid, released offer. Requests refused before APPA identifies that offer do not count as remedy attempts.
+
+The metrics do not use tool names, external names, or identifiers as labels. This design bounds metric cardinality.
+
+A runtime refusal is not a policy denial. The runtime records it as an error or a hook outcome. A store failure can also cause a policy failure. Thus, the sum of failure metrics does not identify a unique count of failed calls.
 
 ### Example queries
 
-Denied tool calls per second, grouped by tool, over the last five minutes:
+Denied tool proposal checks per second over the last five minutes:
 
 ```promql
-sum by (tool_name) (
+sum(
   rate(appa_policy_decisions_total{outcome="denied"}[5m])
 )
 ```
@@ -122,75 +117,51 @@ histogram_quantile(
 )
 ```
 
-These queries run in a Prometheus-compatible backend that receives the exported metrics.
+These queries require a Prometheus-compatible backend that receives the exported metrics.
 
 ## Logs
 
-Use `appa.event.name` to filter structured log records:
+Filter structured logs with `appa.event.name`:
 
-| Event | Fields specific to the event |
+| Event | Exported event fields |
 |---|---|
-| `appa.policy.decision` | Tool name, outcome, reason, audience and trust restrictions |
-| `appa.remedy.completed` | Offer ID, outcome, duration |
-| `appa.external.completed` | Service name, role, outcome, duration, error category when a call fails |
-| `appa.yell.report` | Report ID, source, message, related tool-call ID |
-| `appa.runtime.failure` | Component and error category |
+| `appa.policy.decision` | `appa.tool.name`, `appa.outcome`, `appa.offer.ids`, `appa.duration.seconds` |
+| `appa.external.completed` | `appa.trajectory.root`, `appa.external.name`, `appa.external.role`, `appa.outcome`, `appa.error.type`, `appa.duration.ms` |
+| `appa.remedy.completed` | `appa.trajectory.root`, `appa.offer.id`, `appa.outcome`, `appa.duration.ms` |
+| `appa.hook.completed` | `appa.trajectory.root`, `appa.hook.event`, `appa.outcome` |
+| `appa.runtime.failure` | `appa.component`, `appa.error.type`, plus `appa.trajectory.root` and `appa.operation` for store failures |
+| `appa.yell.report` | `appa.trajectory.root`, `appa.report.source`, `appa.report.id`, `appa.report.message` |
 
-Records include a timestamp, `service.name`, and the relevant trace, trajectory, tool-call, and policy identifiers. The examples below show decoded records, not the OTLP wire format.
+The exporter does not send raw prompts, tool arguments, tool results, provenance, audience sets, or trust claims. It also does not export policy feedback, review text, or remedy display text.
 
-### Blocked tool call
+APPA bounds caller-controlled exported identifiers and names to 256 UTF-8 bytes. A policy decision exports at most 32 offer IDs.
 
-```json
-{
-  "timestamp": "2026-09-24T10:15:30Z",
-  "severity_text": "INFO",
-  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
-  "resource": {
-    "service.name": "appa-runtime"
-  },
-  "attributes": {
-    "appa.event.name": "appa.policy.decision",
-    "appa.trajectory.id": "trajectory-42",
-    "appa.tool.call.id": "call-7",
-    "appa.policy.id": "policy-12",
-    "appa.tool.name": "slack.send_message",
-    "appa.outcome": "denied",
-    "appa.reason": "destination_outside_audience",
-    "appa.audience": ["internal"],
-    "appa.destination.audience": "public",
-    "appa.trust": "trusted"
-  }
-}
-```
+## Traces and correlation
 
-### Related appa yell report
+OTEL logs correlate with spans through their native `trace_id` and `span_id`. The `appa.policy.check` span carries `appa.trajectory.root`, `appa.trajectory.id`, `appa.tool.call.id`, the tool name, and outcome. `appa.policy.id` identifies the trajectory's pinned policy when the check reaches policy evaluation. A host that supplies no call ID leaves that field empty.
 
-The report carries the same trace and tool-call IDs as the decision it concerns.
+A blocked check records `appa.policy.gaps` and `appa.policy.narrowing` on its span. Gap classes are `trust_floor`, `includes`, `cap`, `prior`, `no_prior`, and `attention`. These explain the restriction without exporting audience members or call values. A marked spawn can need a return declaration without a gap or narrowing.
 
-```json
-{
-  "timestamp": "2026-09-24T10:16:00Z",
-  "severity_text": "INFO",
-  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
-  "resource": {
-    "service.name": "appa-runtime"
-  },
-  "attributes": {
-    "appa.event.name": "appa.yell.report",
-    "appa.trajectory.id": "trajectory-42",
-    "appa.tool.call.id": "call-7",
-    "appa.report.id": "report-3",
-    "appa.report.source": "agent",
-    "appa.report.message":
-      "Public summary still contains customer data."
-  }
-}
-```
+Each served hook, remedy, and report starts its own trace. External calls create child spans within the operation that invokes them. APPA does not extract an incoming `traceparent`, and it does not create one trace for a full trajectory.
 
-## Trace correlation
+Correlate separate events with `appa.trajectory.root` or `appa.offer.id`. Use native trace correlation for events within one hook, remedy, or report operation.
 
-Search for a call or report's trace ID to find related APPA records and application telemetry. Use the trajectory and tool-call IDs to locate the specific agent activity within those results.
+The standalone `appa runtime` process owns this exporter. An embedding host owns its tracing subscriber and metric provider. The library emits instrumentation but does not configure an exporter from environment variables.
 
-## Start with one agent
+Export runs on background workers with bounded queues. A failed export cannot change a policy decision. Queue overflow, process termination, or collector failure can lose telemetry. With export enabled, SIGINT and SIGTERM flush completed records before exit. In-flight operations are not guaranteed to finish. Telemetry is not a durable audit log.
 
-Connect one agent's APPA runtime to the observability provider your team already uses. Measure blocked calls, successful remedies, and policy-check time before changing `appa.toml`. Use those results to choose a restriction to review, then test the proposed change against allowed and prohibited calls.
+## Agent reports
+
+An approved agent report exports `appa.yell.report` after APPA prepares the filtered report. The event contains the message, report ID, source, and root trajectory ID. APPA exports this event even if delivery to the report receiver later fails.
+
+The full filtered report goes only to the receiver configured by `APPA_YELL_ENDPOINT`. APPA does not send the report body through OTLP. CLI report previews and CLI reports do not enter OTLP export.
+
+OpenTelemetry does not change report approval or delivery rules. It does not bypass the agent-reporting opt-in or add a confirmation bypass. See [`appa yell`](/yell) for report controls.
+
+## Improve policies from evidence
+
+Observability tools can flag repeated denials, slow external calls, or unsuccessful remedies. These patterns need investigation. They do not prove an attack or a policy defect.
+
+An agent can review decisions and [`appa yell` reports](/yell) in a maintenance cycle. It can then [propose a tested `appa.toml` change](/self-improving-policies#improve-policies-from-yell-reports).
+
+Compare denials, remedy outcomes, runtime failures, and policy-check time before and after a change. Tests of prohibited calls make sure the policy keeps the intended restrictions.

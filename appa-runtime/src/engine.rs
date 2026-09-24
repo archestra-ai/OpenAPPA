@@ -1421,6 +1421,26 @@ impl RuntimeEngine {
         bounds: &ReturnBounds,
         presentation: &EmbeddedPresentationOptions,
     ) -> (String, Vec<OfferId>, Vec<PendingReview>, Option<RemedyDisplay>) {
+        // Export gap classes, never recipient sets, review text, or call values.
+        let gaps: BTreeSet<&str> = block
+            .block
+            .raw
+            .requirement_gaps
+            .iter()
+            .map(|gap| {
+                use appa_engine::check::Gap;
+                match gap {
+                    Gap::TrustFloor { .. } => "trust_floor",
+                    Gap::Includes { .. } => "includes",
+                    Gap::Cap { .. } => "cap",
+                    Gap::Prior(_) => "prior",
+                    Gap::NoPrior(_) => "no_prior",
+                    Gap::Attention(_) => "attention",
+                }
+            })
+            .collect();
+        tracing::Span::current().record("appa.policy.gaps", tracing::field::debug(&gaps));
+        tracing::Span::current().record("appa.policy.narrowing", block.block.raw.narrowing.is_some());
         let offers: Vec<(OfferId, PlanId)> = block
             .offers
             .iter()

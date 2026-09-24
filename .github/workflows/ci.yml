@@ -106,6 +106,7 @@ jobs:
               - '**/Cargo.toml'
               - '**/Cargo.lock'
               - 'rustfmt.toml'
+              - 'scripts/verify-runtime-telemetry.py'
               - '.github/workflows/ci.yml'
               - 'appa-runtime/**'
               - 'appa-runtime-api/**'
@@ -299,6 +300,12 @@ jobs:
 
       - name: Build the runtime binary
         run: cargo build --package appa --locked
+
+      - name: Setup uv for OTLP verification
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+
+      - name: Verify value-safe OTLP export with a real runtime
+        run: uv run scripts/verify-runtime-telemetry.py target/debug/appa
 
       # Every directory under examples/tests is one policy and one trace file.
       # The test suite pins them too; this runs the command line end to end,

@@ -23,6 +23,7 @@ pub struct Request {
 /// Send a report using the same field classification, size limits, signature,
 /// and transport as the standalone runtime. Requires a released yell call from
 /// this actor's hook and the deployment's explicit reporting opt-in.
+#[tracing::instrument(target = "appa_telemetry", name = "appa.yell", skip_all)]
 pub async fn send(runtime: &Arc<Runtime>, request: Request) -> Result<String, String> {
     if !runtime.agent_yell() {
         return Err("Agent reporting is disabled".into());
@@ -54,7 +55,7 @@ pub async fn send(runtime: &Arc<Runtime>, request: Request) -> Result<String, St
         author: Author::Agent,
         mode: Mode::Baseline,
         selection: if args.with_trajectory {
-            Selection::Vouched(acting.root)
+            Selection::Vouched(acting.root.clone())
         } else {
             Selection::RulesOnly
         },
@@ -65,6 +66,7 @@ pub async fn send(runtime: &Arc<Runtime>, request: Request) -> Result<String, St
         .report_off_thread(report)
         .await
         .map_err(|_| "The report is too large to send".to_string())?;
+    crate::telemetry::yell(&finished, &acting.root);
     let receipt = client::send(&finished, &receiver)
         .await
         .map_err(|error| error.to_string())?;

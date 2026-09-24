@@ -25,6 +25,7 @@ type Answered = (u16, serde_json::Value);
 /// One hook call: validate the canonical wire, take in what the event observed, check what
 /// it names, dispatch, and record its outcome. Each step either hands the next one an event
 /// or answers the hook itself.
+#[tracing::instrument(target = "appa_telemetry", name = "appa.hook", skip_all)]
 pub async fn answer(runtime: &Runtime, adapter: &Adapter, body: &[u8]) -> Answered {
     let Accepted {
         event,

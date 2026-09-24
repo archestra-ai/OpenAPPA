@@ -416,7 +416,30 @@ impl Session {
         self.on_tool_call_identified(call, None, spawn).await
     }
 
+    #[tracing::instrument(target = "appa_telemetry", name = "appa.policy.check", skip_all, fields(
+        appa.trajectory.root = crate::telemetry::name(&self.root.0),
+        appa.trajectory.id = crate::telemetry::name(&self.trajectory.0),
+        appa.tool.name = crate::telemetry::name(&call.tool),
+        appa.tool.call.id = call_id.as_deref().map(crate::telemetry::name).unwrap_or_default(),
+        appa.outcome = tracing::field::Empty,
+        appa.policy.id = tracing::field::Empty,
+        appa.policy.gaps = tracing::field::Empty,
+        appa.policy.narrowing = tracing::field::Empty,
+    ))]
     pub async fn on_tool_call_identified(
+        &self,
+        call: ProposedCall,
+        call_id: Option<String>,
+        spawn: bool,
+    ) -> Result<ToolCallDecision, EventError> {
+        let started = std::time::Instant::now();
+        let tool = call.tool.clone();
+        let result = self.check_tool_call(call, call_id, spawn).await;
+        crate::telemetry::policy(&result, &tool, started.elapsed().as_secs_f64());
+        result
+    }
+
+    async fn check_tool_call(
         &self,
         call: ProposedCall,
         call_id: Option<String>,
@@ -1210,6 +1233,7 @@ impl Session {
         };
         let opened = self.inner.log(&self.root)?;
         let policy = self.policy(&opened)?;
+        tracing::Span::current().record("appa.policy.id", crate::engine::policy_file_key(opened.policy_file()));
         let mut opened = Some(opened);
         // External answers carry the exact call or group they answered for, and the
         // engine matches them only while that is still the one in front of it — a
@@ -1385,6 +1409,11 @@ impl Session {
     ///
     /// With a recorder attached, the consult is also transcribed and its record handed over
     /// once the outcome is known. `call` is the canonical call an annotation consult judges.
+    #[tracing::instrument(target = "appa_telemetry", name = "appa.external.call", skip_all, fields(
+        appa.trajectory.root = crate::telemetry::name(&self.root.0),
+        appa.trajectory.id = crate::telemetry::name(&self.trajectory.0),
+        appa.external.name = crate::telemetry::name(&consult.name),
+    ))]
     async fn timed_consult(
         &self,
         consult: &Consult,

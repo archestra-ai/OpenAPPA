@@ -25,7 +25,7 @@ required-features = ["daemon"]
 default = ["daemon"]
 # The server stack: the MCP endpoint, the HTTP surface, the CLI and its log
 # setup. An in-process host links the library without any of it.
-daemon = ["dep:rmcp", "dep:axum", "dep:clap", "dep:tracing-subscriber"]
+daemon = ["dep:rmcp", "dep:axum", "dep:clap", "dep:tracing-subscriber", "dep:opentelemetry-appender-tracing", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk", "dep:tracing-opentelemetry", "tokio/signal"]
 # PostgreSQL storage for an embedding host whose migrations install the schema.
 postgres = ["appa-eventlog/postgres"]
 
@@ -90,6 +90,11 @@ toml_edit = "0.25"
 zip = { version = "6", default-features = false, features = ["deflate-flate2"] }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+opentelemetry = { version = "0.32", default-features = false, features = ["metrics"] }
+opentelemetry-appender-tracing = { version = "0.32", optional = true }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "logs", "metrics", "reqwest-blocking-client", "trace"], optional = true }
+opentelemetry_sdk = { version = "0.32", features = ["logs", "metrics", "trace"], optional = true }
+tracing-opentelemetry = { version = "0.33", default-features = false, optional = true }
 url = "2"
 # The report id: a v4 UUID the receiver stores one object under. A consult record's id is
 # a v7, so a host's dataset sorts by time.
