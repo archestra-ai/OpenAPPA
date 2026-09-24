@@ -6791,7 +6791,7 @@ delta = {}
         let recorder = Arc::new(Collected::default());
         let session = runtime
             .recording(recorder.clone())
-            .create_session(root())
+            .create_session(root(), None)
             .expect("a fresh id opens");
 
         let decision = session
@@ -6873,7 +6873,7 @@ delta = {}
         let recorder = Arc::new(Collected::default());
         let session = runtime
             .recording(recorder.clone())
-            .create_session(root())
+            .create_session(root(), None)
             .expect("a fresh id opens");
 
         assert!(matches!(
@@ -6909,7 +6909,7 @@ delta = {}
         let recorder = Arc::new(Collected::default());
         let session = runtime
             .recording(recorder.clone())
-            .create_session(root())
+            .create_session(root(), None)
             .expect("a fresh id opens");
         assert!(matches!(
             session
@@ -6958,7 +6958,7 @@ delta = {}
                 Some(recorder) => runtime.recording(recorder),
                 None => runtime,
             };
-            let session = runtime.create_session(root()).expect("a fresh id opens");
+            let session = runtime.create_session(root(), None).expect("a fresh id opens");
             assert!(matches!(
                 session
                     .on_tool_call(wire(500), false)
