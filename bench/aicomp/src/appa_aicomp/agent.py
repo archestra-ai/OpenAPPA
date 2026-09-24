@@ -43,6 +43,7 @@ class OpenRouterAgent:
         self._max_retries = max_retries
         self.calls = 0
         self.invalid_outputs = 0
+        self.throttled = 0
 
     def next_action(self, *, history: RuntimeHistory, tools: Sequence[AgentToolSpec]) -> AgentDecision:
         to_alias, from_alias = build_openai_tool_name_maps(tools)
@@ -98,7 +99,8 @@ class OpenRouterAgent:
                 if not response.choices:
                     raise InvalidModelOutputError("empty choices")
                 return response.choices[0].message
-            except (openai.APIConnectionError, openai.RateLimitError, openai.InternalServerError, InvalidModelOutputError):
+            except (openai.APIConnectionError, openai.RateLimitError, openai.InternalServerError, InvalidModelOutputError) as error:
+                self.throttled += isinstance(error, openai.RateLimitError)
                 if attempt == self._max_retries:
                     raise
                 logger.exception("OpenRouter call failed, retrying")

@@ -1,6 +1,6 @@
 """Replay attack candidates across guard arms and score them with the SDK predicates.
 
-    uv run appa-aicomp run --model openai/gpt-oss-20b --arms none,optimal,appa --out runs/x
+    uv run appa-aicomp run --model openai/gpt-oss-20b --arms none,rules,appa-q --out runs/x
 """
 
 import argparse
@@ -277,6 +277,7 @@ def replay(candidate: Candidate, arm: Arm, model: str) -> dict:
         ),
         "llm_calls": agent.calls,
         "invalid_model_outputs": agent.invalid_outputs,
+        "throttled": agent.throttled,
         "appa": [asdict(d) for d in mediator.decisions] if mediator else None,
         "trace": trace,
     }
@@ -310,9 +311,11 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run")
     run.add_argument("--model", default="openai/gpt-oss-20b")
-    run.add_argument("--arms", default="none,optimal,appa")
-    run.add_argument("--sets", default="benign,indirect,direct")
-    run.add_argument("--gk-repo", type=Path)
+    run.add_argument("--arms", default="none,rules,appa-q")
+    run.add_argument("--sets", default="benign,corpus,washout")
+    run.add_argument(
+        "--gk-repo", type=Path, help="the `direct` set imports and runs this repo's attack.py in-process: trust it first"
+    )
     run.add_argument("--limit", type=int, default=None, help="max candidates per set")
     run.add_argument(
         "--max-concurrency", type=int, default=16, help="Ceiling for automatically tuned concurrency."
@@ -363,13 +366,14 @@ def main() -> None:
         max_workers=max(1, min(args.max_concurrency, len(jobs))),
         history_path=args.out / "concurrency.jsonl",
         clean_result=lambda row: row["error"] is None,
+        throttled_result=lambda row: row["throttled"] > 0,
     )
     with executor as pool, (args.out / "rows.jsonl").open("w") as sink:
         futures = [pool.submit(replay, candidate, arm, args.model) for candidate, arm in jobs]
         for future in as_completed(futures):
             row = future.result()
-            rows.append(row)
             sink.write(json.dumps(row) + "\n")
+            rows.append({key: value for key, value in row.items() if key != "trace"})
             sink.flush()
             logger.info(
                 "%s %s breach=%s preds=%s blocked=%d tools=%s",

@@ -26,16 +26,25 @@ def load(dirs: list[Path]) -> list[dict]:
     return [row for rows in cells.values() for row in rows]
 
 
+def scored(rows: list[dict]) -> list[dict]:
+    """A run that ended in a harness or API error shows neither a breach nor a defense, so no rate counts it."""
+    return [row for row in rows if row["error"] is None]
+
+
 def rate(hits: int, n: int) -> str:
     return f"{hits}/{n}" if n else "-"
 
 
 def main() -> None:
     rows = load([Path(p) for p in sys.argv[1:]])
+    errors: dict[tuple[str, str], int] = defaultdict(int)
+    for r in rows:
+        errors[(r["model"], r["arm"])] += r["error"] is not None
+    rows = scored(rows)
     by: dict[tuple, list[dict]] = defaultdict(list)
     for r in rows:
         by[(r["model"], r["arm"], r["channel"])].append(r)
-    models = sorted({r["model"] for r in rows})
+    models = sorted({model for model, _ in errors})
 
     print("## breaches by attack channel (n breached / n)")
     for model in models:
@@ -43,7 +52,7 @@ def main() -> None:
         print("| arm | " + " | ".join(ATTACK_CHANNELS) + " | indirect+mixed+washout | faults | errors |")
         print("|---" * (len(ATTACK_CHANNELS) + 4) + "|")
         for arm in ARMS:
-            cells, flow_hits, flow_n, faults, errors = [], 0, 0, 0, 0
+            cells, flow_hits, flow_n, faults = [], 0, 0, 0
             for ch in ATTACK_CHANNELS:
                 subset = by[(model, arm, ch)]
                 hits = sum(r["breach"] for r in subset)
@@ -53,8 +62,7 @@ def main() -> None:
             for ch in (*ATTACK_CHANNELS, *UTILITY_CHANNELS, "benign"):
                 for r in by[(model, arm, ch)]:
                     faults += sum(d["verdict"] == "fault" for d in r["appa"] or [])
-                    errors += bool(r["error"])
-            print(f"| {arm} | " + " | ".join(cells) + f" | {rate(flow_hits, flow_n)} | {faults} | {errors} |")
+            print(f"| {arm} | " + " | ".join(cells) + f" | {rate(flow_hits, flow_n)} | {faults} | {errors[(model, arm)]} |")
 
     print("\n## utility: task delivered (email.send to the requested recipient)")
     print("| model | " + " | ".join(f"{a} {c}" for a in ARMS for c in ("u", "u-mal", "u-amb")) + " |")

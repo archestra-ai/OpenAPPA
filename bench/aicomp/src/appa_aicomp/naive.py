@@ -14,7 +14,7 @@ from collections import defaultdict
 from enum import StrEnum
 from pathlib import Path
 
-from appa_aicomp.analyze import ARMS, load
+from appa_aicomp.analyze import ARMS, load, scored
 
 CORPUS = Path(__file__).parents[2] / "attacks" / "corpus.jsonl"
 FLOW_CHANNELS = ("indirect", "mixed", "washout")
@@ -45,7 +45,7 @@ def main() -> None:
         for r in map(json.loads, CORPUS.read_text().splitlines())
         if r["channel"] in FLOW_CHANNELS
     }
-    rows = [r for r in load([Path(p) for p in sys.argv[1:]]) if r["channel"] in FLOW_CHANNELS]
+    rows = [r for r in scored(load([Path(p) for p in sys.argv[1:]])) if r["channel"] in FLOW_CHANNELS]
     for r in rows:
         r["user"] = kinds.get(r["candidate"], User.NAIVE)
     by: dict[tuple, list[dict]] = defaultdict(list)
