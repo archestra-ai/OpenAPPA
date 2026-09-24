@@ -112,6 +112,7 @@ here only when its policy needs none of them.
 The builtin judges the complete call. A deployment is refused when a `jev`
 Annotator declares `inputs` or its mandate admits fewer than two trust
 ranks.
+A consult larger than 64 KiB is no answer; nothing is sent.
 
 The questions treat a read-only query to a remote service as data delivered
 to that service. A web search therefore requires trajectory data that

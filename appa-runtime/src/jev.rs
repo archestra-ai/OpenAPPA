@@ -43,6 +43,8 @@ const CONFIDENCE_FLOOR: f64 = 0.6;
 /// At or above this probability the call requires the highest trust rank.
 const REQUIRES_TRUSTED_CUTOFF: f64 = 0.5;
 
+/// A consult larger than this, as a command annotator would read it, is no answer.
+const MAX_CONSULT_BYTES: usize = 64 * 1024;
 /// The most attempts one consult starts, hedges and retries together.
 const MAX_ATTEMPTS: usize = 3;
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -140,6 +142,11 @@ impl JevBackend {
         started: Instant,
         exchange: &mut Exchange,
     ) -> Result<serde_json::Value, (JevFailure, NoAnswerReason)> {
+        let consult_bytes =
+            serde_json::to_vec(consult).map_err(|_| (JevFailure::UnsupportedConsult, NoAnswerReason::Malformed))?;
+        if consult_bytes.len() > MAX_CONSULT_BYTES {
+            return Err((JevFailure::ConsultTooLarge, NoAnswerReason::Oversized));
+        }
         let unsupported = (JevFailure::UnsupportedConsult, NoAnswerReason::Unregistered);
         let ConsultBody::Annotation { declaration, artifact } = &consult.body else {
             return Err(unsupported);
@@ -181,7 +188,7 @@ impl JevBackend {
         macro_rules! launch {
             ($slot:expr) => {{
                 let slot: Arc<ClientSlot> = $slot;
-                let patience = match slot.warm.load(Ordering::Relaxed) {
+                let patience = match slot.warm() {
                     true => self.timing.hedge_delay,
                     false => self.timing.cold_hedge_delay,
                 };
@@ -266,7 +273,7 @@ impl JevBackend {
     async fn attempt(&self, index: usize, slot: Arc<ClientSlot>, body: Vec<u8>, key: &str) -> Attempted {
         let reply = self.exchange(&slot.client, body, key).await;
         if !matches!(reply, Reply::Connection) {
-            slot.warm.store(true, Ordering::Relaxed);
+            *slot.answered.lock().expect("the slot mutex is never poisoned") = Some(Instant::now());
         }
         Attempted { index, reply }
     }
@@ -286,14 +293,14 @@ impl JevBackend {
         let mut body = Vec::new();
         let read = crate::external::read_body(&mut response, self.max_body_bytes as u64, &mut body).await;
         match (read, response.status().is_success()) {
+            (_, false) => Reply::Status { status, body },
             (Err(NoAnswerReason::Oversized), true) => Reply::Invalid {
                 trace: LabelTrace::default(),
                 status,
                 body,
                 reason: NoAnswerReason::Oversized,
             },
-            (Err(_), _) => Reply::Connection,
-            (Ok(()), false) => Reply::Status { status, body },
+            (Err(_), true) => Reply::Connection,
             (Ok(()), true) => {
                 let mut trace = LabelTrace::default();
                 match labels_of(&body, &mut trace) {
@@ -394,6 +401,7 @@ impl Serialize for AttemptOutcome {
 enum JevFailure {
     /// Not an annotation of the complete call.
     UnsupportedConsult,
+    ConsultTooLarge,
     MissingKey,
     /// The API did not answer: a status, a timeout, or a connection failure.
     NoAnswer,
@@ -733,8 +741,21 @@ struct Pool {
 pub(crate) struct ClientSlot {
     id: u64,
     client: reqwest::Client,
-    /// Some response has come back through this client, so its connection is open.
-    warm: AtomicBool,
+    /// When a response last came back through this client.
+    answered: Mutex<Option<Instant>>,
+    /// Evicted: never the pool's current client again.
+    condemned: AtomicBool,
+}
+
+impl ClientSlot {
+    /// Whether this client's connection is open: it has answered, and recently enough that
+    /// the pool has not closed the connection as idle.
+    fn warm(&self) -> bool {
+        self.answered
+            .lock()
+            .expect("the slot mutex is never poisoned")
+            .is_some_and(|at| at.elapsed() < POOL_IDLE_TIMEOUT)
+    }
 }
 
 impl JevClients {
@@ -771,10 +792,11 @@ impl JevClients {
         self.pool().mint(url)
     }
 
-    /// Adopt a client whose connection answered promptly, where the pool holds none.
+    /// Adopt a client whose connection answered promptly, where the pool holds none and no
+    /// consult has evicted it meanwhile.
     fn keep(&self, url: &str, slot: &Arc<ClientSlot>) {
         let mut pool = self.pool();
-        if pool.url.as_deref() == Some(url) && pool.current.is_none() {
+        if pool.url.as_deref() == Some(url) && pool.current.is_none() && !slot.condemned.load(Ordering::Relaxed) {
             pool.current = Some(Arc::clone(slot));
         }
     }
@@ -782,6 +804,7 @@ impl JevClients {
     /// Never hand this client out again.
     fn evict(&self, slot: &ClientSlot) {
         let mut pool = self.pool();
+        slot.condemned.store(true, Ordering::Relaxed);
         if pool.current.as_ref().is_some_and(|current| current.id == slot.id) {
             pool.current = None;
         }
@@ -805,7 +828,8 @@ impl Pool {
             client: builder
                 .build()
                 .expect("the reqwest client builds: the crypto provider is installed above"),
-            warm: AtomicBool::new(false),
+            answered: Mutex::new(None),
+            condemned: AtomicBool::new(false),
         })
     }
 }
@@ -909,6 +933,8 @@ mod tests {
     enum Scripted {
         Answers,
         Late(Duration),
+        /// A status whose body is larger than any consult reads.
+        Flood(u16),
         Status(u16),
         Body(&'static str),
     }
@@ -975,6 +1001,7 @@ mod tests {
                         let reply = stub.replies.get(index).or(stub.replies.last()).copied();
                         match reply.expect("the stub is scripted") {
                             Scripted::Answers => (StatusCode::OK, json!({"answers": jev_answers()}).to_string()),
+                            Scripted::Flood(status) => (StatusCode::from_u16(status).unwrap(), "x".repeat(200_000)),
                             Scripted::Late(delay) => {
                                 tokio::time::sleep(delay).await;
                                 (StatusCode::OK, json!({"answers": jev_answers()}).to_string())
@@ -1333,6 +1360,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_error_status_with_a_body_past_the_cap_is_still_that_status() {
+        let (url, stub) = serve(vec![Scripted::Flood(400), Scripted::Answers], vec![]).await;
+        let (answered, record) = backend(&url, Duration::from_secs(2), FAST).consult(&call()).await;
+        assert_eq!(
+            answered,
+            Err(NoAnswerReason::NonSuccess {
+                status: 400,
+                detail: None
+            })
+        );
+        assert_eq!(attempts(&record), json!(["http_400"]));
+        assert_eq!(record.http_status, Some(400));
+        assert_eq!(stub.requests().len(), 1);
+
+        let (url, _stub) = serve(vec![Scripted::Flood(503), Scripted::Answers], vec![]).await;
+        let (answered, record) = backend(&url, Duration::from_secs(2), FAST).consult(&call()).await;
+        assert_eq!(answered, Ok(jev_annotation()));
+        assert_eq!(attempts(&record), json!(["http_503", "ok"]));
+    }
+
+    #[tokio::test]
+    async fn a_consult_past_the_input_bound_is_refused_before_it_leaves() {
+        let sized = |command: String| consult_of(json!({"name": "Bash", "arguments": {"command": command}}));
+        let base = serde_json::to_vec(&sized(String::new())).unwrap().len();
+        let (url, stub) = serve(vec![Scripted::Answers], vec![]).await;
+        let jev = backend(&url, Duration::from_secs(2), FAST);
+
+        let (answered, _) = jev.consult(&sized("x".repeat(MAX_CONSULT_BYTES - base))).await;
+        assert_eq!(answered, Ok(jev_annotation()));
+        assert_eq!(stub.requests().len(), 1);
+
+        let (answered, record) = jev.consult(&sized("x".repeat(MAX_CONSULT_BYTES - base + 1))).await;
+        assert_eq!(answered, Err(NoAnswerReason::Oversized));
+        assert_eq!(diagnostics(&record)["error"], "consult_too_large");
+        assert_eq!(attempts(&record), json!([]));
+        assert_eq!(stub.requests().len(), 1);
+    }
+
+    #[tokio::test]
     async fn an_invalid_body_is_not_retried() {
         for body in ["not json", r#"{"answers": {}}"#, r#"{"labels": {}}"#] {
             let (url, stub) = serve(vec![Scripted::Body(body), Scripted::Answers], vec![]).await;
@@ -1461,6 +1527,67 @@ mod tests {
             assert_eq!(attempts(&record), json!(["ok"]));
         }
         assert_eq!(stub.per_connection(), [2, 1, 3]);
+    }
+
+    /// Consult A's warm attempt is slow, so A evicts its client while B, launched on that
+    /// client just before, is still waiting for a prompt answer. B's answer does not bring
+    /// the evicted client back: the next consult opens a connection of its own.
+    #[tokio::test]
+    async fn a_client_one_consult_evicts_is_not_adopted_by_another() {
+        let timing = JevTiming {
+            hedge_delay: Duration::from_millis(200),
+            cold_hedge_delay: Duration::from_millis(600),
+            ..FAST
+        };
+        let (url, stub) = serve(
+            vec![
+                Scripted::Answers,
+                Scripted::Late(Duration::from_millis(500)),
+                Scripted::Late(Duration::from_secs(2)),
+                Scripted::Late(Duration::from_millis(150)),
+                Scripted::Answers,
+            ],
+            vec![],
+        )
+        .await;
+        let jev = backend(&url, Duration::from_secs(3), timing);
+        let (_, record) = jev.consult(&call()).await;
+        assert_eq!(attempts(&record), json!(["ok"]));
+        let consult = call();
+        let a = jev.consult(&consult);
+        let b = async {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            jev.consult(&consult).await
+        };
+        let ((_, a), (_, b)) = tokio::join!(a, b);
+        assert_eq!(attempts(&a), json!(["ok", "hedged"]));
+        assert_eq!(attempts(&b), json!(["ok"]));
+        let (_, record) = jev.consult(&call()).await;
+        assert_eq!(attempts(&record), json!(["ok"]));
+        assert_eq!(stub.per_connection(), [2, 1, 1, 1]);
+    }
+
+    /// A client idle past the pool's idle timeout has lost its connection, so its next
+    /// attempt waits the cold delay before it is hedged.
+    #[tokio::test]
+    async fn a_client_idle_past_the_pool_timeout_is_cold_again() {
+        let (url, stub) = serve(
+            vec![Scripted::Answers, Scripted::Late(Duration::from_millis(200))],
+            vec![],
+        )
+        .await;
+        let jev = backend(&url, Duration::from_secs(2), FAST);
+        let (_, record) = jev.consult(&call()).await;
+        assert_eq!(attempts(&record), json!(["ok"]));
+        let current = jev.clients.current(&url);
+        let long_ago = Instant::now()
+            .checked_sub(POOL_IDLE_TIMEOUT + Duration::from_secs(1))
+            .expect("the clock has run past the idle timeout");
+        *current.answered.lock().unwrap() = Some(long_ago);
+        let (answered, record) = jev.consult(&call()).await;
+        assert_eq!(answered, Ok(jev_annotation()));
+        assert_eq!(attempts(&record), json!(["ok"]));
+        assert_eq!(stub.per_connection(), [2]);
     }
 
     #[tokio::test]
